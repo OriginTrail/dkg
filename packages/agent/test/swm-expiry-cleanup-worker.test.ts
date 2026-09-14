@@ -25,10 +25,10 @@ it('automatically schedules cleanup when TTL is enabled and cancels it when disa
   worker.start();
   await vi.advanceTimersByTimeAsync(20);
   expect(pass).not.toHaveBeenCalled();
-  ttlMs = 100; worker.onTtlChanged();
+  ttlMs = 100; await worker.onTtlChanged();
   await vi.advanceTimersByTimeAsync(0);
   expect(pass).toHaveBeenCalledOnce();
-  ttlMs = 0; worker.onTtlChanged();
+  ttlMs = 0; await worker.onTtlChanged();
   await vi.advanceTimersByTimeAsync(100);
   expect(pass).toHaveBeenCalledOnce();
   await worker.stop();
@@ -48,23 +48,24 @@ it('joins manual and timer calls, then resumes periodic maintenance with the lat
   expect(worker.runNow()).toBe(first);
   await vi.advanceTimersByTimeAsync(30);
   expect(pass).toHaveBeenCalledTimes(1);
-  ttlMs = 200; worker.onTtlChanged();
+  ttlMs = 200; const changingTtl = worker.onTtlChanged();
   blocked.resolve({ triplesDeleted: 5 });
+  await changingTtl;
   expect(await first).toBe(12);
   expect(pass).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(10);
   expect(pass).toHaveBeenLastCalledWith({ cutoffMs: Date.now() - 200, continuation: undefined }, expect.any(Function));
   expect(pass).toHaveBeenCalledTimes(3);
-  ttlMs = 0; worker.onTtlChanged();
+  ttlMs = 0; await worker.onTtlChanged();
   expect(worker.running).toBe(false);
   expect(await worker.runNow()).toBe(0);
   await vi.advanceTimersByTimeAsync(50);
   expect(pass).toHaveBeenCalledTimes(3);
-  ttlMs = 300; worker.onTtlChanged();
+  ttlMs = 300; await worker.onTtlChanged();
   await worker.runNow();
   expect(pass).toHaveBeenLastCalledWith({ cutoffMs: Date.now() - 300, continuation: undefined }, expect.any(Function));
   await worker.stop();
-  ttlMs = 400; worker.onTtlChanged();
+  ttlMs = 400; await worker.onTtlChanged();
   await vi.advanceTimersByTimeAsync(100);
   expect(pass).toHaveBeenCalledTimes(4);
 });
@@ -133,7 +134,7 @@ it('starts disabled and safely retires failures from scheduled and stopping work
   expect(worker.running).toBe(false);
   await vi.advanceTimersByTimeAsync(20);
   expect(pass).not.toHaveBeenCalled();
-  ttlMs = 100; worker.onTtlChanged();
+  ttlMs = 100; await worker.onTtlChanged();
   await expect(worker.runNow()).rejects.toThrow('startup failure');
   await vi.advanceTimersByTimeAsync(10);
   expect(pass).toHaveBeenCalledTimes(2);
@@ -175,7 +176,7 @@ it.each(['disable', 'stop'])('cancels a pending backlog continuation on %s', asy
   const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   worker.start();
   await vi.advanceTimersByTimeAsync(0);
-  if (action === 'disable') { ttlMs = 0; worker.onTtlChanged(); }
+  if (action === 'disable') { ttlMs = 0; await worker.onTtlChanged(); }
   else await worker.stop();
   await vi.advanceTimersByTimeAsync(100);
   expect(pass).toHaveBeenCalledOnce();
@@ -190,9 +191,9 @@ it('does not rearm a continuation when TTL is disabled during physical work', as
   const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs, 900_000);
   const running = worker.runNow();
   await Promise.resolve();
-  ttlMs = 0; worker.onTtlChanged();
+  ttlMs = 0; const disabling = worker.onTtlChanged();
   blocked.resolve({ triplesDeleted: 1000, continuation });
-  await running;
+  await Promise.all([running, disabling]);
   await vi.advanceTimersByTimeAsync(100);
   expect(pass).toHaveBeenCalledOnce();
   await worker.stop();
@@ -252,12 +253,13 @@ it('runs a fresh manual sweep when TTL shortens during an active manual drain', 
   const worker = new SwmExpiryCleanupWorker(pass, () => ttlMs);
   const first = worker.runNow();
   await Promise.resolve();
-  ttlMs = 60 * 60 * 1000; worker.onTtlChanged();
+  ttlMs = 60 * 60 * 1000; const changingTtl = worker.onTtlChanged();
   const newerCutoff = Date.now() - 60 * 60 * 1000;
   const second = worker.runNow();
   expect(second).toBe(first);
 
   blocked.resolve({ triplesDeleted: 3 });
+  await changingTtl;
 
   expect(await second).toBe(10);
   expect(pass).toHaveBeenCalledTimes(2);
@@ -312,18 +314,24 @@ it.each(['manual', 'periodic'] as const)('fences TTL changes even when the value
   else { worker.start(); await vi.advanceTimersByTimeAsync(0); }
   try {
     expect(closed()).toBe(false);
-    ttlMs = 200; worker.onTtlChanged();
-    const conservativeCutoff = Date.now() - ttlMs;
-    ttlMs = 100; worker.onTtlChanged();
+    ttlMs = 200; const firstChange = worker.onTtlChanged();
+    ttlMs = 100; const secondChange = worker.onTtlChanged();
+    const latestCutoff = Date.now() - ttlMs;
     expect(closed()).toBe(true);
     // Neither the changed configuration nor repeated starts admit a second
     // physical pass while the cancelled storage work remains in flight.
     expect(pass).toHaveBeenCalledOnce();
+    let changesRetired = false;
+    void Promise.all([firstChange, secondChange]).then(() => { changesRetired = true; });
+    await Promise.resolve();
+    expect(changesRetired).toBe(false);
     blocked.resolve({ triplesDeleted: 1, continuation });
+    await Promise.all([firstChange, secondChange]);
+    if (mode === 'periodic') await vi.advanceTimersByTimeAsync(0);
     await restarted.promise;
     if (completion) expect(await completion).toBe(3);
     expect(pass).toHaveBeenCalledTimes(2);
-    expect(pass.mock.calls[1]![0]).toEqual({ continuation: undefined, cutoffMs: mode === 'manual' ? conservativeCutoff : Date.now() - ttlMs });
+    expect(pass.mock.calls[1]![0]).toEqual({ continuation: undefined, cutoffMs: latestCutoff });
   } finally { blocked.resolve({ triplesDeleted: 0 }); await worker.stop(); }
 });
 

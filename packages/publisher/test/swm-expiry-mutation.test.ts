@@ -247,4 +247,29 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     expect(harness.deleteByPattern).toHaveBeenCalledTimes(1);
     expect(harness.deleteByPattern).toHaveBeenCalledWith({ graph: META_GRAPH, subject: OPERATION });
   });
+
+  it('retains the operation retry marker when owner cleanup fails', async () => {
+    const harness = makeStore([{
+      type: 'bindings',
+      bindings: [{ op: OPERATION, re: ROOT_A }],
+    }]);
+    harness.deleteByPattern.mockImplementation(async pattern => {
+      if (pattern.predicate === 'http://dkg.io/ontology/workspaceOwner') {
+        throw new Error('owner cleanup unavailable');
+      }
+      return 1;
+    });
+
+    await expect(coordinator(harness.store).expire({
+      target,
+      candidate: { uri: OPERATION, roots: [ROOT_A], scope: { kind: 'legacy' } },
+      cutoff: '2026-01-01T00:00:00.000Z',
+      isClosed: () => false,
+    })).rejects.toThrow('owner cleanup unavailable');
+
+    expect(harness.deleteByPattern).not.toHaveBeenCalledWith({
+      graph: META_GRAPH,
+      subject: OPERATION,
+    });
+  });
 });

@@ -8,6 +8,9 @@ import {
   isCancelled,
   scheduleAttachJob,
 } from '../local-agent-attach-jobs.js';
+import type { HermesSetupResult } from '@origintrail-official/dkg-adapter-hermes';
+import type { ImmutableDkgConfig } from '../../config-snapshot.js';
+import type { HermesChannelHealthReport } from '../hermes.js';
 import type {
   LocalAgentConnectorStrategy,
 } from './types.js';
@@ -21,8 +24,23 @@ function stringMetadataValue(metadata: Record<string, unknown>, key: string): st
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-export const hermesConnector: LocalAgentConnectorStrategy = {
-  async prepareBody(config, body, deps) {
+export interface HermesConnectorDeps {
+  probeHermesHealth?: (
+    config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
+    bridgeAuthToken: string | undefined,
+    opts?: { timeoutMs?: number },
+  ) => Promise<HermesChannelHealthReport>;
+  resolveHermesProfile?: (options?: { profileName?: string; hermesHome?: string }) => {
+    profileName?: string;
+    hermesHome: string;
+    memoryMode?: string;
+  };
+  runHermesSetup?: (signal?: AbortSignal) => Promise<HermesSetupResult>;
+  onAttachScheduled?: (id: string, job: Promise<void>) => void;
+}
+
+export function createHermesConnector(deps: HermesConnectorDeps = {}): LocalAgentConnectorStrategy {
+  const prepareBody: NonNullable<LocalAgentConnectorStrategy['prepareBody']> = async (config, body) => {
     const metadata = isPlainRecord(body.metadata) ? { ...body.metadata } : {};
     const existingMetadata = isPlainRecord(config.localAgentIntegrations?.hermes?.metadata)
       ? config.localAgentIntegrations.hermes.metadata
@@ -64,14 +82,13 @@ export const hermesConnector: LocalAgentConnectorStrategy = {
         ...(profile.memoryMode ? { memoryMode: profile.memoryMode } : {}),
       },
     };
-  },
+  };
 
-  async createPlan(context) {
+  const createPlan: LocalAgentConnectorStrategy['createPlan'] = async (context) => {
     const {
       config,
       requested,
       bridgeAuthToken,
-      deps,
       existingBeforeConnect,
       hadStoredTransportBeforeConnect,
     } = context;
@@ -159,5 +176,6 @@ export const hermesConnector: LocalAgentConnectorStrategy = {
           : 'Hermes setup is already in progress. This chat tab will come online automatically once Hermes finishes setting up.';
       },
     };
-  },
-};
+  };
+  return { prepareBody, createPlan };
+}

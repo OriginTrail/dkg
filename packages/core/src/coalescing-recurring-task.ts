@@ -2,7 +2,10 @@
 
 /** Shared restart-safe scheduler for periodic and coalesced workloads. */
 
-export type CoalescingRecurringTaskPassResult = 'rearm' | 'idle';
+export type CoalescingRecurringTaskPassResult =
+  | 'rearm'
+  | 'idle'
+  | { readonly rearmAfterMs: number };
 
 export interface CoalescingRecurringTaskOptions {
   readonly retryIntervalMs?: number;
@@ -27,6 +30,8 @@ export class CoalescingRecurringTask {
   #abortController: AbortController | null = null;
   #run: Promise<void> | null = null;
   #closeAbortReason: Error | null = null;
+  #drainAbortReason: Error | null = null;
+  #suppressRearm = false;
 
   constructor(options: CoalescingRecurringTaskOptions) {
     this.#options = options;
@@ -58,6 +63,16 @@ export class CoalescingRecurringTask {
     return true;
   }
 
+  /** Run immediately, replacing an armed deadline with this explicit request. */
+  requestNow(): boolean {
+    if (this.#closed) return false;
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    return this.request();
+  }
+
   /** Schedule one initial or externally delayed request through the same timer owner. */
   schedule(delayMs = 0): boolean {
     if (this.#closed || this.#timer !== null || this.#run !== null) return false;
@@ -79,6 +94,26 @@ export class CoalescingRecurringTask {
     }
     this.#abortController?.abort(new Error(reason));
     this.#launch();
+    return true;
+  }
+
+  /** Abort stale logical work and wait until its physical pass has retired. */
+  async cancelAndDrain(reason: string): Promise<boolean> {
+    if (this.#closed) return false;
+    this.#requested = false;
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    const active = this.#run;
+    if (active !== null) {
+      const drainAbortReason = new Error(reason);
+      drainAbortReason.name = 'AbortError';
+      this.#drainAbortReason = drainAbortReason;
+      this.#suppressRearm = true;
+      this.#abortController?.abort(drainAbortReason);
+      await active;
+    }
     return true;
   }
 
@@ -118,11 +153,17 @@ export class CoalescingRecurringTask {
       // resulting rejection as a workload failure would create a misleading
       // warning during ordinary shutdown.
       .catch((error) => {
-        if (error !== this.#closeAbortReason) this.#options.onError(error);
+        if (error !== this.#closeAbortReason && error !== this.#drainAbortReason) {
+          this.#options.onError(error);
+        }
       })
       .finally(() => {
         if (this.#run === run) this.#run = null;
+        const suppressRearm = this.#suppressRearm;
+        this.#suppressRearm = false;
+        this.#drainAbortReason = null;
         if (this.#closed) return;
+        if (suppressRearm) return;
         if (this.#requested) {
           this.#launch();
           return;
@@ -130,6 +171,8 @@ export class CoalescingRecurringTask {
         this.#requested = false;
         if (passResult === 'rearm') {
           this.#schedulePeriodicPass();
+        } else if (typeof passResult === 'object') {
+          this.#schedulePeriodicPass(passResult.rearmAfterMs);
         } else if (this.#timer !== null) {
           // `idle` suppresses every periodic wake-up, including one retained
           // while an explicit pass ran ahead of its existing deadline.
@@ -141,10 +184,9 @@ export class CoalescingRecurringTask {
   }
 
   /** Arm one post-completion periodic deadline without postponing it for live work. */
-  #schedulePeriodicPass(): void {
-    const retryIntervalMs = this.#options.retryIntervalMs ?? 0;
+  #schedulePeriodicPass(delayMs = this.#options.retryIntervalMs ?? 0): void {
     if (
-      retryIntervalMs <= 0
+      delayMs <= 0
       || this.#timer !== null
       || this.#closed
     ) return;
@@ -152,7 +194,7 @@ export class CoalescingRecurringTask {
       this.#timer = null;
       this.#options.beforePeriodicPass?.();
       this.request();
-    }, retryIntervalMs);
+    }, delayMs);
     this.#timer.unref?.();
   }
 

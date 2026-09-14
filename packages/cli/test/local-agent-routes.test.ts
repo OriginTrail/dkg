@@ -293,6 +293,61 @@ describe('generic local-agent routes', () => {
     }
   });
 
+  it('keeps a newer disconnect when connect preparation started from an already disabled entry', async () => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: false,
+          metadata: { userDisabled: true },
+          runtime: { status: 'disconnected', ready: false },
+          updatedAt: '2026-09-01T00:00:00.000Z',
+        },
+      },
+    }));
+    const entered = deferred();
+    const released = deferred();
+    const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
+      id: 'hermes', metadata: { source: 'node-ui' },
+    });
+    const res = makeJsonResponse();
+    const running = handleLocalAgentsRoutes({
+      req, res, configStore, path: '/api/local-agent-integrations/connect',
+    } as any, {
+      connectFromUi: async (_config, body) => {
+        entered.resolve();
+        await released.promise;
+        return { ok: true, state: extractLocalAgentIntegrationPatch(body) };
+      },
+    });
+    try {
+      await entered.promise;
+      await configStore.update(current => {
+        const next = structuredClone(current) as DkgConfig;
+        updateLocalAgentIntegration(
+          next,
+          'hermes',
+          { enabled: false, runtime: { status: 'disconnected' } },
+          new Date('2026-09-02T00:00:00.000Z'),
+        );
+        return next;
+      }, 'configuration-only');
+      released.resolve();
+      await running;
+      expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
+        enabled: false,
+        updatedAt: '2026-09-02T00:00:00.000Z',
+        metadata: { userDisabled: true },
+        runtime: { status: 'disconnected', ready: false },
+      });
+    } finally {
+      released.resolve();
+      await running;
+      await configStore.close();
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
   it('publishes the legacy register-adapter route through the canonical store', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());

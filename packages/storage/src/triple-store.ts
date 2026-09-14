@@ -337,6 +337,57 @@ export async function deleteByPatternWithoutCount<Pattern>(
   await store.deleteByPattern(pattern, options);
 }
 
+const countedMutationLocks = new WeakMap<object, Map<string, Promise<void>>>();
+
+function countedMutationOwner(store: TripleStore): object {
+  let owner: object = store;
+  let candidate: unknown = store;
+  const seen = new Set<unknown>();
+  for (let depth = 0; candidate && depth < 16; depth += 1) {
+    if (typeof candidate !== 'object' || seen.has(candidate)) break;
+    seen.add(candidate);
+    owner = candidate;
+    if (!('innerStore' in candidate)) break;
+    candidate = (candidate as { innerStore?: unknown }).innerStore;
+  }
+  return owner;
+}
+
+/**
+ * Serialize a group of exact-count mutations against the physical store.
+ *
+ * Remote adapters calculate exact delete counts with count-before / update /
+ * count-after sequences. A maintenance operation that combines several such
+ * deletes must keep the complete sequence exclusive per scope or concurrent
+ * callers can charge the same graph delta to the wrong operation. Keeping the
+ * lock registry here gives every caller and decorator chain one storage-owned
+ * coordination domain without adding lifecycle state to feature coordinators.
+ */
+export async function withCountedStoreMutation<T>(
+  store: TripleStore,
+  scope: string,
+  mutation: () => Promise<T>,
+): Promise<T> {
+  const owner = countedMutationOwner(store);
+  let locks = countedMutationLocks.get(owner);
+  if (!locks) {
+    locks = new Map();
+    countedMutationLocks.set(owner, locks);
+  }
+  const predecessor = locks.get(scope) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  locks.set(scope, gate);
+  await predecessor;
+  try {
+    return await mutation();
+  } finally {
+    release();
+    if (locks.get(scope) === gate) locks.delete(scope);
+    if (locks.size === 0) countedMutationLocks.delete(owner);
+  }
+}
+
 /**
  * Run a server-side update whose affected named graphs are known by the caller.
  * Returns `false` when the store does not support `update()` directly, or when

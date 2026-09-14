@@ -32,6 +32,7 @@ export {
   registerTripleStoreAdapter,
   findTripleStoreCapability,
   deleteByPatternWithoutCount,
+  withCountedStoreMutation,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,

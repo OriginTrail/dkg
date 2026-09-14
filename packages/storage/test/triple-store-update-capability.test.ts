@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   deleteByPatternWithoutCount,
+  withCountedStoreMutation,
   UnsupportedTripleStoreCapabilityError,
   tryUpdateWithTouchedGraphs,
   type TripleStore,
@@ -45,6 +46,33 @@ describe('deleteByPatternWithoutCount', () => {
 
     expect(noCountCalls).toBe(1);
     expect(countedCalls).toBe(0);
+  });
+});
+
+describe('withCountedStoreMutation', () => {
+  it('shares one count-sensitive lock through separate decorator chains', async () => {
+    const inner = {} as TripleStore;
+    const firstStore = { innerStore: inner } as TripleStore;
+    const secondStore = { innerStore: inner } as TripleStore;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const order: string[] = [];
+
+    const first = withCountedStoreMutation(firstStore, 'urn:graph', async () => {
+      order.push('first:start');
+      await blocked;
+      order.push('first:end');
+    });
+    await Promise.resolve();
+    const second = withCountedStoreMutation(secondStore, 'urn:graph', async () => {
+      order.push('second');
+    });
+    await Promise.resolve();
+
+    expect(order).toEqual(['first:start']);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(['first:start', 'first:end', 'second']);
   });
 });
 

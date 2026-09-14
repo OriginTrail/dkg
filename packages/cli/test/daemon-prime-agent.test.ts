@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { DkgConfig } from '../src/config.js';
+import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
+import { DkgConfigStore } from '../src/daemon-config-store.js';
 import {
   commitLocalAgentConnectPlanForTest,
   commitLocalAgentRefreshPatchForTest,
@@ -28,9 +29,10 @@ import {
 
 // The setup entry pulls in the adapter's runtime; the daemon only ever calls it
 // on disconnect, and none of these tests exercise that path.
+const restorePrimeAgentProfileMock = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
 vi.mock('@origintrail-official/dkg-adapter-prime-agent', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@origintrail-official/dkg-adapter-prime-agent')>()),
-  restorePrimeAgentProfile: vi.fn(async () => ({ ok: true })),
+  restorePrimeAgentProfile: restorePrimeAgentProfileMock,
 }));
 
 let agentDir: string;
@@ -38,6 +40,7 @@ let sessionsDir: string;
 let bridges: Server[] = [];
 
 beforeEach(() => {
+  restorePrimeAgentProfileMock.mockClear();
   agentDir = mkdtempSync(join(tmpdir(), 'dkg-prime-agent-test-'));
   sessionsDir = join(agentDir, '.dkg-adapter-prime-agent', 'sessions');
   mkdirSync(sessionsDir, { recursive: true });
@@ -107,6 +110,13 @@ function makeJsonResponse() {
     res.writableEnded = true;
   };
   return res;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 
 function makeMemoryManager() {
@@ -714,6 +724,67 @@ describe('connect from the Node UI', () => {
     expect(JSON.parse(res.body)).toEqual({ error: 'config publication failed' });
     expect(configStore.update).toHaveBeenCalledOnce();
     expect(runPrimeAgentSetup).not.toHaveBeenCalled();
+  });
+
+  it('drains a cancelled setup before restoring the Prime Agent profile', async () => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-prime-agent-config-'));
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
+    const setupEntered = deferred<void>();
+    const releaseSetup = deferred<void>();
+    const order: string[] = [];
+    const runPrimeAgentSetup = vi.fn(async () => {
+      order.push('setup:start');
+      setupEntered.resolve();
+      await releaseSetup.promise;
+      order.push('setup:end');
+      return { ok: true, errors: [], warnings: [] };
+    });
+    restorePrimeAgentProfileMock.mockImplementationOnce(async () => {
+      order.push('restore');
+      return { ok: true };
+    });
+    try {
+      const connectRes = makeJsonResponse();
+      await handleLocalAgentsRoutes({
+        req: makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
+          id: 'prime-agent', metadata: { source: 'node-ui' },
+        }),
+        res: connectRes,
+        configStore,
+        path: '/api/local-agent-integrations/connect',
+        bridgeAuthToken: 'bridge-token',
+      } as any, {
+        connectFromUi: (candidate, body, token) => connectLocalAgentIntegrationFromUi(
+          candidate, body, token, { runPrimeAgentSetup },
+        ),
+      });
+      await setupEntered.promise;
+
+      const disconnectRes = makeJsonResponse();
+      const disconnecting = handleLocalAgentsRoutes({
+        req: makeJsonRequest('PUT', '/api/local-agent-integrations/prime-agent', {
+          enabled: false,
+          runtime: { status: 'disconnected' },
+        }),
+        res: disconnectRes,
+        configStore,
+        path: '/api/local-agent-integrations/prime-agent',
+      } as any);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(restorePrimeAgentProfileMock).not.toHaveBeenCalled();
+
+      releaseSetup.resolve();
+      await disconnecting;
+      expect(order).toEqual(['setup:start', 'setup:end', 'restore']);
+      expect(configStore.current.localAgentIntegrations?.['prime-agent']).toMatchObject({
+        enabled: false,
+        runtime: { status: 'disconnected', ready: false },
+      });
+    } finally {
+      releaseSetup.resolve();
+      await configStore.close();
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
   });
 });
 

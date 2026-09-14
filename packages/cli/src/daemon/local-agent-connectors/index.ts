@@ -1,16 +1,20 @@
-import { hermesConnector } from './hermes.js';
-import { openClawConnector } from './openclaw.js';
-import { primeAgentConnector } from './prime-agent.js';
+import { createHermesConnector, type HermesConnectorDeps } from './hermes.js';
+import { createOpenClawConnector, type OpenClawConnectorDeps } from './openclaw.js';
+import { createPrimeAgentConnector, type PrimeAgentConnectorDeps } from './prime-agent.js';
 import type { LocalAgentConnectorStrategy } from './types.js';
 
-const CONNECTORS: Readonly<Record<string, LocalAgentConnectorStrategy>> = {
-  hermes: hermesConnector,
-  openclaw: openClawConnector,
-  'prime-agent': primeAgentConnector,
-};
+export type LocalAgentUiAttachDeps = OpenClawConnectorDeps
+  & HermesConnectorDeps
+  & PrimeAgentConnectorDeps;
 
-export function localAgentConnectorFor(id: string): LocalAgentConnectorStrategy | undefined {
-  return CONNECTORS[id];
+export function localAgentConnectorFor(
+  id: string,
+  deps: LocalAgentUiAttachDeps = {},
+): LocalAgentConnectorStrategy | undefined {
+  if (id === 'hermes') return createHermesConnector(deps);
+  if (id === 'openclaw') return createOpenClawConnector(deps);
+  if (id === 'prime-agent') return createPrimeAgentConnector(deps);
+  return undefined;
 }
 
 export type {
@@ -18,5 +22,4 @@ export type {
   LocalAgentConnectPlan,
   LocalAgentConnectorContext,
   LocalAgentConnectorStrategy,
-  LocalAgentUiAttachDeps,
 } from './types.js';

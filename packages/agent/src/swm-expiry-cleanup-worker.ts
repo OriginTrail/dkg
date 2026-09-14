@@ -1,166 +1,212 @@
 import { setImmediate } from 'node:timers/promises';
+import { CoalescingRecurringTask } from '@origintrail-official/dkg-core';
 import { SWM_CLEANUP_INTERVAL_MS } from './dkg-agent-constants.js';
-import type { SwmExpiryCleanupContinuation, SwmExpiryCleanupRequest, SwmExpiryCleanupResult } from './swm-expiry-cleanup.js';
+import type {
+  SwmExpiryCleanupContinuation,
+  SwmExpiryCleanupRequest,
+  SwmExpiryCleanupResult,
+} from './swm-expiry-cleanup.js';
 
-type MaintenanceMode = 'manual' | 'periodic';
-type CleanupRequest = { readonly kind: 'periodic' } | { readonly kind: 'manual'; readonly cutoffMs: number };
-interface CleanupFlight {
-  request: CleanupRequest;
+interface ManualFlight {
+  cutoffMs: number;
+  triplesDeleted: number;
   readonly completion: Promise<number>;
-  continuation?: SwmExpiryCleanupContinuation;
+  readonly resolve: (deleted: number) => void;
+  readonly reject: (error: unknown) => void;
 }
-type WorkerState =
-  | { readonly kind: 'idle'; readonly mode: MaintenanceMode }
-  | { readonly kind: 'scheduled'; readonly timer: ReturnType<typeof setTimeout>; readonly continuation?: SwmExpiryCleanupContinuation }
-  | { readonly kind: 'running'; readonly mode: MaintenanceMode; readonly flight: CleanupFlight }
-  | { readonly kind: 'stopping'; readonly completion: Promise<void> }
-  | { readonly kind: 'stopped' };
 
-/** Each lifecycle state owns its timer or physical flight. The agent owns configuration. */
+/** SWM-specific request/result adapter over the canonical recurring-task owner. */
 export class SwmExpiryCleanupWorker {
-  private state: WorkerState = { kind: 'idle', mode: 'manual' };
+  private task: CoalescingRecurringTask;
+  private periodicEnabled = false;
+  private available = true;
   private retentionGeneration = 0;
+  private continuation?: SwmExpiryCleanupContinuation;
+  private manualFlight?: ManualFlight;
+  private activeMode?: 'manual' | 'periodic';
+  private activePeriodicJoin?: ManualFlight;
+  private stopping?: Promise<void>;
+  private ttlChangeTail = Promise.resolve();
 
   constructor(
-    private readonly processPass: (request: SwmExpiryCleanupRequest, isClosed: () => boolean) => Promise<SwmExpiryCleanupResult>,
+    private readonly processPass: (
+      request: SwmExpiryCleanupRequest,
+      isClosed: () => boolean,
+    ) => Promise<SwmExpiryCleanupResult>,
     private readonly getSharedMemoryTtlMs: () => number,
     private readonly intervalMs = SWM_CLEANUP_INTERVAL_MS,
-  ) {}
+  ) {
+    this.task = this.createTask();
+  }
 
   get running(): boolean {
-    return this.getSharedMemoryTtlMs() > 0 && (this.state.kind === 'scheduled'
-      || ((this.state.kind === 'idle' || this.state.kind === 'running') && this.state.mode === 'periodic'));
+    return this.periodicEnabled
+      && this.available
+      && this.getSharedMemoryTtlMs() > 0
+      && (this.task.running || this.task.scheduled);
   }
 
   start(): void {
-    const state = this.state;
-    if (state.kind === 'stopping') throw new Error('SWM expiry cleanup is still stopping');
-    if (state.kind === 'scheduled') return;
-    if (state.kind === 'running') { this.state = { ...state, mode: 'periodic' }; return; }
-    this.state = { kind: 'idle', mode: 'periodic' };
-    this.schedule(0);
-  }
-
-  onTtlChanged(): void {
-    // An in-flight query may already have selected rows using the previous
-    // retention boundary. Invalidate that pass, including its lock-protected
-    // revalidation, before another operation can begin mutation.
-    this.retentionGeneration++;
-    const ttlMs = this.getSharedMemoryTtlMs();
-    if (this.state.kind === 'running') {
-      const flight = this.state.flight;
-      flight.continuation = undefined;
-      if (ttlMs > 0 && flight.request.kind === 'manual') {
-        flight.request = { kind: 'manual', cutoffMs: Math.min(flight.request.cutoffMs, Date.now() - ttlMs) };
-      }
+    if (this.stopping) throw new Error('SWM expiry cleanup is still stopping');
+    if (!this.available) {
+      this.task = this.createTask();
+      this.available = true;
     }
-    this.cancelScheduled();
-    if (ttlMs > 0) this.schedule(0);
+    this.periodicEnabled = true;
+    if (this.getSharedMemoryTtlMs() > 0) this.task.schedule(0);
   }
 
-  /** Join one owned flight; newer manual cutoffs are drained before it resolves. */
+  /** Fence the old policy and do not return until its physical mutation retires. */
+  onTtlChanged(): Promise<void> {
+    const generation = ++this.retentionGeneration;
+    const ttlMs = this.getSharedMemoryTtlMs();
+    this.continuation = undefined;
+    if (this.manualFlight && ttlMs > 0) {
+      this.manualFlight.cutoffMs = Date.now() - ttlMs;
+    }
+    const previous = this.ttlChangeTail;
+    const change = previous.catch(() => undefined).then(async () => {
+      if (!this.available) return;
+      await this.task.cancelAndDrain('SWM retention policy changed');
+      if (!this.available || generation !== this.retentionGeneration) return;
+      if (ttlMs === 0) {
+        this.resolveManualFlight();
+        return;
+      }
+      if (this.manualFlight) this.task.requestNow();
+      else if (this.periodicEnabled) this.task.schedule(0);
+    });
+    this.ttlChangeTail = change;
+    return change;
+  }
+
+  /** Join one owned manual drain; newer calls refresh its cutoff. */
   runNow(): Promise<number> {
     const ttlMs = this.getSharedMemoryTtlMs();
-    if (this.state.kind === 'stopping' || this.state.kind === 'stopped' || ttlMs === 0) return Promise.resolve(0);
+    if (!this.available || this.stopping || ttlMs === 0) return Promise.resolve(0);
     const cutoffMs = Date.now() - ttlMs;
-    if (this.state.kind === 'running') {
-      const flight = this.state.flight;
-      const activeCutoff = flight.request.kind === 'manual'
-        ? flight.request.cutoffMs
-        : Number.NEGATIVE_INFINITY;
-      if (cutoffMs > activeCutoff) {
-        flight.request = { kind: 'manual', cutoffMs };
-        flight.continuation = undefined;
+    if (this.manualFlight) {
+      if (cutoffMs !== this.manualFlight.cutoffMs) {
+        this.manualFlight.cutoffMs = cutoffMs;
+        this.continuation = undefined;
+        this.task.requestNow();
       }
-      return flight.completion;
+      return this.manualFlight.completion;
     }
-    this.cancelScheduled();
-    return this.launch({ kind: 'manual', cutoffMs });
-  }
-
-  stop(): Promise<void> {
-    const state = this.state;
-    if (state.kind === 'stopping') return state.completion;
-    if (state.kind !== 'running') {
-      this.cancelScheduled();
-      this.state = { kind: 'stopped' };
-      return Promise.resolve();
-    }
-    const completion = state.flight.completion.catch(() => undefined).then(() => {
-      this.state = { kind: 'stopped' };
-    });
-    this.state = { kind: 'stopping', completion };
+    let resolve!: (deleted: number) => void;
+    let reject!: (error: unknown) => void;
+    const completion = new Promise<number>((yes, no) => { resolve = yes; reject = no; });
+    const flight: ManualFlight = { cutoffMs, triplesDeleted: 0, completion, resolve, reject };
+    this.manualFlight = flight;
+    this.continuation = undefined;
+    if (this.task.running && this.activeMode === 'periodic') this.activePeriodicJoin = flight;
+    this.task.requestNow();
     return completion;
   }
 
-  private launch(request: CleanupRequest, continuation?: SwmExpiryCleanupContinuation): Promise<number> {
-    if (this.state.kind !== 'idle') throw new Error('SWM expiry cleanup requires an idle worker');
-    const flight: CleanupFlight = {
-      request,
-      continuation,
-      completion: Promise.resolve().then(() => this.execute(flight)),
-    };
-    this.state = { kind: 'running', mode: this.state.mode, flight };
-    return flight.completion;
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    this.periodicEnabled = false;
+    this.available = false;
+    this.retentionGeneration++;
+    this.continuation = undefined;
+    const stopping = this.task.close().then(() => {
+      this.resolveManualFlight();
+      if (this.stopping === stopping) this.stopping = undefined;
+    });
+    this.stopping = stopping;
+    return stopping;
   }
 
-  private owns(flight: CleanupFlight): boolean {
-    return this.state.kind === 'running' && this.state.flight === flight;
+  private createTask(): CoalescingRecurringTask {
+    return new CoalescingRecurringTask({
+      retryIntervalMs: this.intervalMs,
+      runPass: signal => this.runPass(signal),
+      onError: () => undefined,
+      closingMessage: 'SWM expiry cleanup is stopping',
+    });
   }
 
-  private async execute(flight: CleanupFlight): Promise<number> {
-    let deleted = 0;
+  private async runPass(signal: AbortSignal) {
+    // Preserve a cancellable admission boundary: runNow() followed immediately
+    // by stop() must retire before any storage request is dispatched.
+    await Promise.resolve();
+    if (!this.available || this.getSharedMemoryTtlMs() === 0) return 'idle' as const;
+    const generation = this.retentionGeneration;
+    const manual = this.manualFlight;
+    const mode = manual ? 'manual' : 'periodic';
+    this.activeMode = mode;
     try {
-      while (this.owns(flight) && this.getSharedMemoryTtlMs() > 0) {
-        const generation = this.retentionGeneration;
-        const request = flight.request;
-        const continuation = flight.continuation;
-        flight.continuation = undefined;
-        const result = await this.processPass(
-          { cutoffMs: request.kind === 'manual' ? request.cutoffMs : Date.now() - this.getSharedMemoryTtlMs(), continuation },
-          () => !this.owns(flight) || this.getSharedMemoryTtlMs() === 0 || generation !== this.retentionGeneration,
-        );
-        deleted += result.triplesDeleted;
-        if (!this.owns(flight) || this.getSharedMemoryTtlMs() === 0) break;
-        if (flight.request !== request || generation !== this.retentionGeneration) {
-          await setImmediate();
-          continue;
-        }
-        flight.continuation = result.continuation;
-        if (request.kind === 'periodic') {
-          break;
-        }
-        if (!flight.continuation) break;
-        await setImmediate();
+      if (manual) {
+        await this.runManualPasses(manual, signal, generation);
+      } else {
+        await this.runPeriodicPass(signal, generation);
       }
-      return deleted;
+    } catch (error) {
+      if (manual && this.manualFlight === manual && this.task.owns(signal)) {
+        this.manualFlight = undefined;
+        manual.reject(error);
+      }
+      throw error;
     } finally {
-      // Retire before resolving completion: a late manual caller cannot join a
-      // finished periodic flight that can no longer honor its newer cutoff.
-      if (this.state.kind === 'running' && this.state.flight === flight) {
-        this.state = { kind: 'idle', mode: this.state.mode };
-        this.schedule(flight.continuation ? 10 : this.intervalMs, flight.continuation);
+      if (this.activeMode === mode) this.activeMode = undefined;
+      if (mode === 'periodic') this.activePeriodicJoin = undefined;
+    }
+    if (!this.available || this.getSharedMemoryTtlMs() === 0 || signal.aborted) {
+      return 'idle' as const;
+    }
+    if (this.manualFlight) return 'idle' as const;
+    if (!this.periodicEnabled) return 'idle' as const;
+    return { rearmAfterMs: this.continuation ? 10 : this.intervalMs };
+  }
+
+  private async runManualPasses(
+    flight: ManualFlight,
+    signal: AbortSignal,
+    generation: number,
+  ): Promise<void> {
+    while (this.owns(signal, generation) && this.manualFlight === flight) {
+      const cutoffMs = flight.cutoffMs;
+      const continuation = this.continuation;
+      this.continuation = undefined;
+      const result = await this.processPass(
+        { cutoffMs, continuation },
+        () => !this.owns(signal, generation),
+      );
+      flight.triplesDeleted += result.triplesDeleted;
+      if (!this.owns(signal, generation) || this.manualFlight !== flight) return;
+      if (flight.cutoffMs !== cutoffMs) continue;
+      this.continuation = result.continuation;
+      if (!this.continuation) {
+        this.resolveManualFlight(flight);
+        return;
       }
+      await setImmediate();
     }
   }
 
-  private schedule(delayMs: number, continuation?: SwmExpiryCleanupContinuation): void {
-    if (this.state.kind !== 'idle' || this.state.mode !== 'periodic' || this.getSharedMemoryTtlMs() === 0) return;
-    const scheduled: Extract<WorkerState, { kind: 'scheduled' }> = {
-      kind: 'scheduled', continuation,
-      timer: setTimeout(() => {
-        if (this.state !== scheduled) return;
-        this.state = { kind: 'idle', mode: 'periodic' };
-        void this.launch({ kind: 'periodic' }, scheduled.continuation).catch(() => undefined);
-      }, delayMs),
-    };
-    this.state = scheduled;
-    scheduled.timer.unref?.();
+  private async runPeriodicPass(signal: AbortSignal, generation: number): Promise<void> {
+    const continuation = this.continuation;
+    this.continuation = undefined;
+    const result = await this.processPass(
+      { cutoffMs: Date.now() - this.getSharedMemoryTtlMs(), continuation },
+      () => !this.owns(signal, generation),
+    );
+    const joined = this.activePeriodicJoin;
+    if (joined && this.manualFlight === joined) joined.triplesDeleted += result.triplesDeleted;
+    if (this.owns(signal, generation)) this.continuation = result.continuation;
   }
 
-  private cancelScheduled(): void {
-    if (this.state.kind !== 'scheduled') return;
-    clearTimeout(this.state.timer);
-    this.state = { kind: 'idle', mode: 'periodic' };
+  private owns(signal: AbortSignal, generation: number): boolean {
+    return this.available
+      && this.getSharedMemoryTtlMs() > 0
+      && generation === this.retentionGeneration
+      && this.task.owns(signal);
+  }
+
+  private resolveManualFlight(expected = this.manualFlight): void {
+    if (!expected || this.manualFlight !== expected) return;
+    this.manualFlight = undefined;
+    expected.resolve(expected.triplesDeleted);
   }
 }

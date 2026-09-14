@@ -10547,16 +10547,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * Update the shared memory TTL at runtime. Takes effect immediately for queries
    * and invalidates an active cleanup cutoff without requiring a restart.
    */
-  setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
+  async setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): Promise<void> {
     validateSharedMemoryTtlMs(ttlMs);
     const previous = this.config.sharedMemoryTtlMs;
     this.config.sharedMemoryTtlMs = ttlMs;
     try {
-      this.swmExpiryCleanupWorker.onTtlChanged();
+      await this.swmExpiryCleanupWorker.onTtlChanged();
     } catch (error) {
-      // Activation is synchronous: restore the policy before a scheduled
-      // cleanup or an in-flight pass can resume with the rejected cutoff.
+      // Restore the policy before a scheduled cleanup or in-flight pass can
+      // resume with the rejected cutoff.
       this.config.sharedMemoryTtlMs = previous;
+      await this.swmExpiryCleanupWorker.onTtlChanged().catch(() => undefined);
       throw error;
     }
   }

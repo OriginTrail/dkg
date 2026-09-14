@@ -496,9 +496,9 @@ export async function connectLocalAgentIntegrationFromUi(
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
   const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
-  const connector = localAgentConnectorFor(requestedId);
+  const connector = localAgentConnectorFor(requestedId, deps);
   const connectBody = connector?.prepareBody
-    ? await connector.prepareBody(config, body, deps)
+    ? await connector.prepareBody(config, body)
     : body;
   const registration = extractLocalAgentIntegrationPatch({
     ...connectBody,
@@ -526,7 +526,6 @@ export async function connectLocalAgentIntegrationFromUi(
       config,
       body: connectBody,
       bridgeAuthToken,
-      deps,
       requested,
       existingBeforeConnect,
       hadStoredTransportBeforeConnect,

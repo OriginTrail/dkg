@@ -83,6 +83,18 @@ export function cancelPending(integrationId: string): void {
   pendingAttachJobs.delete(integrationId);
 }
 
+/** Cancel one attach and wait for its physical setup work to settle. */
+export async function cancelPendingAndDrain(integrationId: string): Promise<void> {
+  const job = pendingAttachJobs.get(integrationId);
+  if (!job) return;
+  job.cancelled = true;
+  job.controller.abort();
+  await job.job.catch(() => undefined);
+  if (pendingAttachJobs.get(integrationId) === job) {
+    pendingAttachJobs.delete(integrationId);
+  }
+}
+
 /**
  * `true` when the job's `cancelled` flag was set OR its `AbortController`
  * has been aborted from any side. Used by long-running attach tasks to

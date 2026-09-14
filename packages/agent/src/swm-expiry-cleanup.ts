@@ -1,15 +1,15 @@
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION,
+  createOperationContext,
   type Logger,
 } from '@origintrail-official/dkg-core';
-import type {
-  DKGPublisher,
-  SharedMemoryExpiredOperation,
-  SharedMemoryExpiryMutationOutcome,
+import {
+  decodeSharedMemoryExpiredOperations,
+  type DKGPublisher,
+  type SharedMemoryExpiredOperation,
+  type SharedMemoryExpiryMutationOutcome,
 } from '@origintrail-official/dkg-publisher';
 import { mapWithConcurrencySettled } from './map-with-concurrency.js';
-import { stripLiteral } from './dkg-agent-utils.js';
 import {
   describeSharedMemoryGraphs,
   parseSharedMemoryMetaGraph,
@@ -147,36 +147,7 @@ async function loadExpiredOperations(
       }
     }
   }`, { source: 'agent.swmCleanup.expiredOperations' });
-  return decodeExpiredOperations(result);
-}
-
-function decodeExpiredOperations(
-  result: Awaited<ReturnType<TripleStore['query']>>,
-): SharedMemoryExpiredOperation[] {
-  const operations = new Map<string, {
-    operation: SharedMemoryExpiredOperation;
-    roots: Set<string>;
-  }>();
-  if (result.type !== 'bindings') return [];
-  for (const row of result.bindings) {
-    if (!row.op) continue;
-    let entry = operations.get(row.op);
-    if (!entry) {
-      const version = row.scopeVersion === undefined ? NaN : Number(stripLiteral(row.scopeVersion));
-      entry = {
-        operation: {
-          uri: row.op, roots: [],
-          scope: version === GRAPH_KA_CONTENT_SCOPE_VERSION
-            ? { kind: 'graph-v2', kaUal: row.kaUal, snapshotGraph: row.snapshotGraph }
-            : { kind: 'legacy' },
-        },
-        roots: new Set(),
-      };
-      operations.set(row.op, entry);
-    }
-    if (row.re) entry.roots.add(row.re);
-  }
-  return [...operations.values()].map(({ operation, roots }) => ({ ...operation, roots: [...roots] }));
+  return decodeSharedMemoryExpiredOperations(result);
 }
 
 async function cleanupExpiredBatch(

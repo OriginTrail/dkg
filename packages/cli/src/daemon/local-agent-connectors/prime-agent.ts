@@ -9,11 +9,15 @@ import {
 } from '../local-agent-attach-jobs.js';
 import type {
   LocalAgentConnectorStrategy,
-  LocalAgentUiAttachDeps,
 } from './types.js';
 
+export interface PrimeAgentConnectorDeps {
+  runPrimeAgentSetup?: () => Promise<{ ok: boolean; errors: string[]; warnings: string[] }>;
+  onAttachScheduled?: (id: string, job: Promise<void>) => void;
+}
+
 async function runPrimeAgentUiSetup(
-  deps: LocalAgentUiAttachDeps,
+  deps: PrimeAgentConnectorDeps,
 ): Promise<{ ok: boolean; errors: string[]; warnings: string[] }> {
   if (deps.runPrimeAgentSetup) return deps.runPrimeAgentSetup();
   try {
@@ -26,8 +30,8 @@ async function runPrimeAgentUiSetup(
   }
 }
 
-export const primeAgentConnector: LocalAgentConnectorStrategy = {
-  async createPlan({ requested, bridgeAuthToken, deps }) {
+export function createPrimeAgentConnector(deps: PrimeAgentConnectorDeps = {}): LocalAgentConnectorStrategy {
+  const createPlan: LocalAgentConnectorStrategy['createPlan'] = async ({ requested, bridgeAuthToken }) => {
     // Setup is deferred: the registration's `connecting` runtime stands until
     // the attach job persists its result.
     return {
@@ -89,5 +93,6 @@ export const primeAgentConnector: LocalAgentConnectorStrategy = {
           : 'Prime Agent setup is already in progress. This chat tab will come online automatically once Prime Agent finishes setting up.';
       },
     };
-  },
-};
+  };
+  return { createPlan };
+}

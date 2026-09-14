@@ -169,6 +169,58 @@ describe('CoalescingRecurringTask', () => {
     expect(runner.invalidateAndRequest('too late')).toBe(false);
   });
 
+  it('cancels a pass, drains its physical work, and leaves the task idle', async () => {
+    let release!: () => void;
+    let signal!: AbortSignal;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async (activeSignal) => {
+        signal = activeSignal;
+        await blocked;
+        return 'rearm';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    let retired = false;
+    const draining = runner.cancelAndDrain('policy changed').then(() => { retired = true; });
+    expect(signal.aborted).toBe(true);
+    await Promise.resolve();
+    expect(retired).toBe(false);
+    release();
+    await draining;
+    expect(runner.running).toBe(false);
+    expect(runner.scheduled).toBe(false);
+    await runner.close();
+  });
+
+  it('supports a pass-specific periodic delay', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        passes += 1;
+        return passes === 1 ? { rearmAfterMs: 10 } : 'idle';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await runner.whenIdle();
+    await vi.advanceTimersByTimeAsync(9);
+    expect(passes).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await runner.whenIdle();
+    expect(passes).toBe(2);
+    await runner.close();
+  });
+
   it('drains close-triggered cancellation without reporting a workload failure', async () => {
     const onError = vi.fn();
     let markStarted!: () => void;

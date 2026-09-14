@@ -1,9 +1,9 @@
 import {
   resolveSharedMemoryScopeGraphs,
   type TripleStore,
+  withCountedStoreMutation,
 } from '@origintrail-official/dkg-storage';
 import {
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
   isSafeIri,
 } from '@origintrail-official/dkg-core';
 import {
@@ -11,6 +11,12 @@ import {
   swmKaWriteLockKey,
   withKeyedLocks,
 } from './keyed-lock.js';
+import {
+  decodeSharedMemoryExpiredOperations,
+  type SharedMemoryExpiredOperation,
+} from './swm-expiry-operation.js';
+
+export type { SharedMemoryExpiredOperation } from './swm-expiry-operation.js';
 
 export interface SharedMemoryExpiryTarget {
   readonly contextGraphId: string;
@@ -18,18 +24,6 @@ export interface SharedMemoryExpiryTarget {
   readonly dataGraph: string;
   readonly metaGraph: string;
   readonly ownershipKey: string;
-}
-
-export interface SharedMemoryExpiredOperation {
-  readonly uri: string;
-  readonly roots: readonly string[];
-  readonly scope:
-    | { readonly kind: 'legacy' }
-    | {
-        readonly kind: 'graph-v2';
-        readonly kaUal?: string;
-        readonly snapshotGraph?: string;
-      };
 }
 
 export interface SharedMemoryExpiryMutationRequest {
@@ -61,7 +55,6 @@ export class SharedMemoryExpiryMutationCoordinator {
   readonly #store: TripleStore;
   readonly #ownedEntities: Map<string, Map<string, string>>;
   readonly #writeLocks: Map<string, Promise<void>>;
-  readonly #countedMutationLocks = new Map<string, Promise<void>>();
 
   constructor(options: SharedMemoryExpiryMutationCoordinatorOptions) {
     this.#store = options.store;
@@ -86,7 +79,7 @@ export class SharedMemoryExpiryMutationCoordinator {
       // Remote counted-delete APIs measure graph-wide before/after counts.
       // Serialize those sequences per metadata graph after entity/KA locks so
       // an unrelated writer is never held behind an entire cleanup page.
-      return withKeyedLocks(this.#countedMutationLocks, [target.metaGraph], async () => {
+      return withCountedStoreMutation(this.#store, target.metaGraph, async () => {
         if (isClosed()) return undefined;
         return this.#deleteCurrentOperation(target, graphs, current);
       });
@@ -133,7 +126,7 @@ export class SharedMemoryExpiryMutationCoordinator {
         }
       }
     }`, { source: 'publisher.swmExpiry.revalidateOperation' });
-    return decodeExpiredOperations(result)[0];
+    return decodeSharedMemoryExpiredOperations(result)[0];
   }
 
   async #deleteCurrentOperation(
@@ -149,6 +142,16 @@ export class SharedMemoryExpiryMutationCoordinator {
         operation.scope,
       );
     }
+    for (const root of operation.roots) {
+      triplesDeleted += await this.#store.deleteByPattern({
+        graph: target.metaGraph,
+        subject: root,
+        predicate: 'http://dkg.io/ontology/workspaceOwner',
+      });
+      this.#ownedEntities.get(target.ownershipKey)?.delete(root);
+    }
+    // The operation marker is the persistent retry cursor. Remove it only
+    // after every owner triple and cache entry has been retired successfully.
     triplesDeleted += await this.#store.deleteByPattern({
       graph: target.metaGraph,
       subject: operation.uri,
@@ -158,14 +161,6 @@ export class SharedMemoryExpiryMutationCoordinator {
       { source: 'publisher.swmExpiry.verifyOperationDeletion' },
     );
     const operationRemoved = remaining.type === 'boolean' && remaining.value === false;
-    for (const root of operation.roots) {
-      triplesDeleted += await this.#store.deleteByPattern({
-        graph: target.metaGraph,
-        subject: root,
-        predicate: 'http://dkg.io/ontology/workspaceOwner',
-      });
-      this.#ownedEntities.get(target.ownershipKey)?.delete(root);
-    }
     return { triplesDeleted, operationRemoved };
   }
 
@@ -214,39 +209,6 @@ export class SharedMemoryExpiryMutationCoordinator {
   }
 }
 
-function decodeExpiredOperations(
-  result: Awaited<ReturnType<TripleStore['query']>>,
-): SharedMemoryExpiredOperation[] {
-  const operations = new Map<string, {
-    operation: SharedMemoryExpiredOperation;
-    roots: Set<string>;
-  }>();
-  if (result.type !== 'bindings') return [];
-  for (const row of result.bindings) {
-    if (!row.op) continue;
-    let entry = operations.get(row.op);
-    if (!entry) {
-      const version = row.scopeVersion === undefined ? NaN : Number(stripLiteral(row.scopeVersion));
-      entry = {
-        operation: {
-          uri: row.op,
-          roots: [],
-          scope: version === GRAPH_KA_CONTENT_SCOPE_VERSION
-            ? { kind: 'graph-v2', kaUal: row.kaUal, snapshotGraph: row.snapshotGraph }
-            : { kind: 'legacy' },
-        },
-        roots: new Set(),
-      };
-      operations.set(row.op, entry);
-    }
-    if (row.re) entry.roots.add(row.re);
-  }
-  return [...operations.values()].map(({ operation, roots }) => ({
-    ...operation,
-    roots: [...roots],
-  }));
-}
-
 function sameExpiredOperation(
   left: SharedMemoryExpiredOperation,
   right: SharedMemoryExpiredOperation,
@@ -261,10 +223,4 @@ function sameExpiredOperation(
     && left.scope.kaUal === right.scope.kaUal
     && left.scope.snapshotGraph === right.scope.snapshotGraph
   );
-}
-
-function stripLiteral(value: string): string {
-  if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
-  const match = /^"(.*)"(?:\^\^.*|@.*)?$/.exec(value);
-  return match?.[1] ?? value;
 }

@@ -10,15 +10,17 @@ import {
   transportPatchFromOpenClawTarget,
   waitForOpenClawChatReady,
 } from '../openclaw.js';
+import type { OpenClawUiAttachDeps } from '../openclaw.js';
 import type { LocalAgentConnectorStrategy } from './types.js';
 
-export const openClawConnector: LocalAgentConnectorStrategy = {
-  async createPlan(context) {
+export type OpenClawConnectorDeps = OpenClawUiAttachDeps;
+
+export function createOpenClawConnector(deps: OpenClawConnectorDeps = {}): LocalAgentConnectorStrategy {
+  const createPlan: LocalAgentConnectorStrategy['createPlan'] = async (context) => {
     const {
       config,
       requested,
       bridgeAuthToken,
-      deps,
       existingBeforeConnect,
       hadStoredTransportBeforeConnect,
     } = context;
@@ -108,5 +110,6 @@ export const openClawConnector: LocalAgentConnectorStrategy = {
           : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.';
       },
     };
-  },
-};
+  };
+  return { createPlan };
+}

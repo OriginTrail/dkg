@@ -317,6 +317,7 @@ import {
   primeAgentDkgSessionId,
   readPrimeAgentSessions,
 } from '../prime-agent.js';
+import { cancelPendingAndDrain } from '../local-agent-attach-jobs.js';
 
 import {
   updateDaemonConfig,
@@ -408,20 +409,21 @@ export async function persistLocalAgentAttachPatch(
 async function commitPreparedLocalAgentPatch(
   ctx: Pick<RequestContext, 'configStore'>,
   id: string,
-  wasExplicitlyDisabled: boolean,
+  preparedEntryRevision: string,
   reduce: (draft: DkgConfig, normalizedId: string) => void,
-): Promise<LocalAgentIntegrationRecord> {
+): Promise<{ integration: LocalAgentIntegrationRecord; committed: boolean }> {
   const normalizedId = normalizeIntegrationId(id);
   if (!normalizedId) throw new Error(`Unknown integration: ${id}`);
+  let committed = false;
   await ctx.configStore.update((current): DkgConfig | ImmutableDkgConfig => {
     const currentEntry = getStoredLocalAgentIntegrations(current)[normalizedId];
-    if (!wasExplicitlyDisabled && currentEntry?.enabled === false
-      && isLocalAgentExplicitlyUserDisabled(currentEntry)) return current;
+    if (JSON.stringify(currentEntry ?? null) !== preparedEntryRevision) return current;
     const next = mutableConfigSnapshot(current);
     reduce(next, normalizedId);
+    committed = true;
     return next;
   }, 'configuration-only');
-  return getLocalAgentIntegration(ctx.configStore.current, normalizedId)!;
+  return { integration: getLocalAgentIntegration(ctx.configStore.current, normalizedId)!, committed };
 }
 
 export interface LocalAgentRoutesDeps {
@@ -505,27 +507,29 @@ export async function handleLocalAgentsRoutes(
       }
 
       const id = String(parsed.id ?? '');
-      const wasExplicitlyDisabled = isLocalAgentExplicitlyUserDisabled(
-        getStoredLocalAgentIntegrations(config)[normalizeIntegrationId(id)],
+      const preparedEntryRevision = JSON.stringify(
+        getStoredLocalAgentIntegrations(config)[normalizeIntegrationId(id)] ?? null,
       );
       const plan = await (deps.connectFromUi ?? connectLocalAgentIntegrationFromUi)(
         config,
         parsed,
         bridgeAuthToken,
       );
-      const integration = await commitPreparedLocalAgentPatch(
+      const { integration, committed } = await commitPreparedLocalAgentPatch(
         ctx,
         id,
-        wasExplicitlyDisabled,
+        preparedEntryRevision,
         (draft, normalizedId) => connectLocalAgentIntegration(draft, { ...plan.state, id: normalizedId }),
       );
       if (!plan.ok) {
         return jsonResponse(res, 400, { error: plan.error });
       }
-      const afterCommitNotice = plan.afterCommit?.({
-        current: () => ctx.configStore.current,
-        persist: (patch) => persistLocalAgentAttachPatch(ctx, id, patch),
-      });
+      const afterCommitNotice = committed
+        ? plan.afterCommit?.({
+            current: () => ctx.configStore.current,
+            persist: (patch) => persistLocalAgentAttachPatch(ctx, id, patch),
+          })
+        : undefined;
       return jsonResponse(res, 200, {
         ok: true,
         integration: withPrimeAgentSessionCount(integration),
@@ -553,14 +557,14 @@ export async function handleLocalAgentsRoutes(
       return jsonResponse(res, 404, { error: 'Unknown integration' });
     }
     try {
-      const wasExplicitlyDisabled = isLocalAgentExplicitlyUserDisabled(
-        getStoredLocalAgentIntegrations(config)[normalizedId],
+      const preparedEntryRevision = JSON.stringify(
+        getStoredLocalAgentIntegrations(config)[normalizedId] ?? null,
       );
       const prepared = await (deps.refreshFromUi ?? refreshLocalAgentIntegrationFromUi)(
         config, normalizedId, bridgeAuthToken,
       );
-      const integration = await commitPreparedLocalAgentPatch(
-        ctx, normalizedId, wasExplicitlyDisabled,
+      const { integration } = await commitPreparedLocalAgentPatch(
+        ctx, normalizedId, preparedEntryRevision,
         draft => updateLocalAgentIntegration(draft, normalizedId, prepared.patch),
       );
       return jsonResponse(res, 200, { ok: true, integration: withPrimeAgentSessionCount(integration) });
@@ -589,7 +593,8 @@ export async function handleLocalAgentsRoutes(
         && isPlainRecord(normalizedPatch.runtime)
         && normalizedPatch.runtime.status === 'disconnected';
       if (explicitDisconnect && normalizedId) {
-        cancelPendingLocalAgentAttachJob(normalizedId);
+        if (normalizedId === 'prime-agent') await cancelPendingAndDrain(normalizedId);
+        else cancelPendingLocalAgentAttachJob(normalizedId);
       }
 
       if (explicitDisconnect && normalizedId === 'openclaw') {
