@@ -4836,7 +4836,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
     if (this.vmReconcileRotationClosed) return;
-    this.vmRecoverySlots.recordPhysicalAttempt(target, peerId, expectedCandidatePeerIds, slotHandle,
+    this.vmRecoverySlots.recordPeerVisit(target, peerId, expectedCandidatePeerIds, slotHandle,
       this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
   }
 
@@ -4861,7 +4861,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     unavailablePeerIds: ReadonlySet<string>,
   ): void {
     if (this.vmReconcileRotationClosed) return;
-    this.vmRecoverySlots.recordUnavailablePeer(target, peerId, expectedCandidatePeerIds, slotHandle,
+    this.vmRecoverySlots.recordPeerVisit(target, peerId, expectedCandidatePeerIds, slotHandle,
       this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
   }
 

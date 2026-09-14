@@ -12,10 +12,7 @@ import {
 } from './chain-event-lane-runner.js';
 import type { CursorPersistence as RunnerCursorPersistence } from './chain-event-lane-cursor-store.js';
 
-export {
-  CHAIN_EVENT_POLLER_LANES,
-  type ChainEventPollerLane,
-} from './chain-event-lane-runner.js';
+export type { ChainEventPollerLane } from './chain-event-lane-runner.js';
 export type {
   CursorPersistence,
   LaneCursorPersistence,

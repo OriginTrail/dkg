@@ -35,7 +35,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 import { DashboardDB, SqliteChainEventCursorStore } from '@origintrail-official/dkg-node-ui';
-import { CHAIN_EVENT_POLLER_LANES } from '@origintrail-official/dkg-publisher';
+import { seedChainEventPollerCursors } from '@origintrail-official/dkg-publisher/test-support';
 import { createProvider, getSharedContext } from '../../chain/test/evm-test-context.js';
 import {
   startLiveDaemon,
@@ -72,9 +72,7 @@ describe('memory_graph_changed -- real daemon SSE emissions', () => {
               hubAddress,
             }),
           });
-          for (const lane of CHAIN_EVENT_POLLER_LANES) {
-            await cursors.saveLane(lane, currentBlock);
-          }
+          await seedChainEventPollerCursors(cursors, currentBlock);
         } finally {
           db.close();
         }

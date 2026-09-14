@@ -253,7 +253,8 @@ function updateCompletedBackoff(
   }
 }
 
-function recordRotationPeerVisit(
+/** Record one selected peer visit, whether transport started or admission failed. */
+export function recordRotationPeerVisit(
   target: VmRecoverySlotLocator,
   record: VmRecoveryRotationRecord,
   peerId: string,
@@ -271,34 +272,6 @@ function recordRotationPeerVisit(
   record.collectionDeadlineAt = policy.now + policy.maxBackoffMs;
   updateCompletedBackoff(target, record, policy, unavailablePeerIds);
   return true;
-}
-
-/** Record one entered transport attempt, without claiming that the asset was absent. */
-export function recordRotationPhysicalAttempt(
-  target: VmRecoverySlotLocator,
-  record: VmRecoveryRotationRecord,
-  peerId: string,
-  expectedCandidatePeerIds: readonly string[],
-  policy: VmRecoveryRotationPolicy,
-  unavailablePeerIds: ReadonlySet<string>,
-): boolean {
-  return recordRotationPeerVisit(
-    target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
-  );
-}
-
-/** Record a selected peer that could not cross readiness/admission into transport. */
-export function recordRotationUnavailablePeer(
-  target: VmRecoverySlotLocator,
-  record: VmRecoveryRotationRecord,
-  peerId: string,
-  expectedCandidatePeerIds: readonly string[],
-  policy: VmRecoveryRotationPolicy,
-  unavailablePeerIds: ReadonlySet<string>,
-): boolean {
-  return recordRotationPeerVisit(
-    target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
-  );
 }
 
 /** Credit absence only after revalidation has proved it for an already-recorded attempt. */

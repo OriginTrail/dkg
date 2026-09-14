@@ -7,8 +7,7 @@ import {
   createRotationRecord,
   hasUnconfirmedAbsence,
   membershipMatches,
-  recordRotationPhysicalAttempt,
-  recordRotationUnavailablePeer,
+  recordRotationPeerVisit,
   reviseRotationRoster,
   rotationSnapshot,
   settleRotationUnavailablePeers,
@@ -355,7 +354,7 @@ export class VmRecoverySlotRegistry {
     return { kind: this.slots.has(vmRecoverySlotKey(target)) ? 'invalidated' : 'evidence-free' };
   }
 
-  recordPhysicalAttempt(
+  recordPeerVisit(
     target: Target,
     peerId: string,
     expectedCandidatePeerIds: readonly string[],
@@ -365,26 +364,11 @@ export class VmRecoverySlotRegistry {
   ): void {
     const record = this.currentState(target, handle);
     if (!record) return;
-    if (recordRotationPhysicalAttempt(
+    if (recordRotationPeerVisit(
       target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
     )) {
       this.touch(target, record.handle);
     }
-  }
-
-  recordUnavailablePeer(
-    target: Target,
-    peerId: string,
-    expectedCandidatePeerIds: readonly string[],
-    handle: VmRecoverySlotHandle,
-    policy: VmRecoveryRotationPolicy,
-    unavailablePeerIds: ReadonlySet<string>,
-  ): void {
-    const record = this.currentState(target, handle);
-    if (!record) return;
-    if (recordRotationUnavailablePeer(
-      target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
-    )) this.touch(target, record.handle);
   }
 
   settleUnavailablePeers(

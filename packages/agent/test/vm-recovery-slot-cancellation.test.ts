@@ -98,7 +98,7 @@ describe('exact VM recovery slot cancellation', () => {
       const donor = harness.targets[0]!;
       const waiting = harness.targets[1]!;
       const original = ownedSlot(host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()));
-      host.vmRecoverySlots.recordPhysicalAttempt(donor, peer, [peer], original.handle, {
+      host.vmRecoverySlots.recordPeerVisit(donor, peer, [peer], original.handle, {
         now: 0, getLocalPeerId: () => 'test-host', baseBackoffMs: 1, maxBackoffMs: 1,
       });
       let discoverySignal: AbortSignal | undefined;

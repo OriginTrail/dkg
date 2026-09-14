@@ -189,7 +189,7 @@ describe('VM recovery batch transaction', () => {
     const policy = {
       now: 1, getLocalPeerId: () => 'local', baseBackoffMs: 100, maxBackoffMs: 100,
     };
-    registry.recordPhysicalAttempt(suppressed, 'old-peer', ['old-peer'], handle, policy);
+    registry.recordPeerVisit(suppressed, 'old-peer', ['old-peer'], handle, policy);
     registry.creditCleanAbsence(suppressed, 'old-peer', ['old-peer'], handle, policy);
     const transaction = registry.beginBatch();
     const plan = transaction.reserveBatch({
@@ -219,7 +219,7 @@ describe('VM recovery batch transaction', () => {
       const policy = {
         now: 1, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100,
       };
-      registry.recordPhysicalAttempt(selected, 'old-peer', ['old-peer'], handle, policy);
+      registry.recordPeerVisit(selected, 'old-peer', ['old-peer'], handle, policy);
       registry.creditCleanAbsence(selected, 'old-peer', ['old-peer'], handle, policy);
     }
     const transaction = registry.beginBatch();
