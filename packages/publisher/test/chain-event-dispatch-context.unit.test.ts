@@ -44,12 +44,13 @@ const cases = [
 ] as const;
 
 describe('chain event callback dispatch context', () => {
-  it('keeps one-argument callback invocation and context-aware implementations source-compatible', async () => {
+  it('keeps one-argument implementations source-compatible while requiring dispatch context at invocation', async () => {
     const seen: string[] = [];
     const legacy: OnContextGraphCreated = async info => { seen.push(info.contextGraphId); };
+    const dispatch = {} as ChainEventDispatchContext;
     const invokeLegacy = (callback: OnContextGraphCreated) => callback({
       contextGraphId: 'legacy', creator: 'creator', accessPolicy: 0, blockNumber: 1,
-    });
+    }, dispatch);
     await invokeLegacy(legacy);
     const contextAware: OnContextGraphCreated = async (
       info,

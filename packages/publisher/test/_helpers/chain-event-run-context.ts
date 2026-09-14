@@ -38,5 +38,8 @@ const awareCallback: NonNullable<ChainEventPollerConfig['onContextGraphCreated']
   const owningSignal: AbortSignal = run.signal;
   void owningSignal;
 };
+declare const createdInfo: Parameters<typeof awareCallback>[0];
+// @ts-expect-error Every callback invocation must carry its generation context.
+void awareCallback(createdInfo);
 void legacyCallbacks;
 void awareCallback;

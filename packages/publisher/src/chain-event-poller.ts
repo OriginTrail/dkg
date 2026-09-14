@@ -20,17 +20,7 @@ export type {
   LegacyCursorPersistence,
 } from './chain-event-lane-cursor-store.js';
 
-type ChainEventCallback<T, R> = {
-  bivarianceHack(info: T, context?: ChainEventDispatchContext): R;
-}['bivarianceHack'];
-
-function invokeChainEventCallback<T, R>(
-  callback: ChainEventCallback<T, R>,
-  info: T,
-  context: ChainEventDispatchContext,
-): R {
-  return (callback as (value: T, dispatch: ChainEventDispatchContext) => R)(info, context);
-}
+type ChainEventCallback<T, R> = (info: T, context: ChainEventDispatchContext) => R;
 
 /** Callback invoked when a ContextGraphCreated event is detected. */
 export type OnContextGraphCreated = ChainEventCallback<{
@@ -410,7 +400,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await invokeChainEventCallback(this.onContextGraphCreated, {
+      await this.onContextGraphCreated({
         contextGraphId,
         creator,
         accessPolicy,
@@ -437,9 +427,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await invokeChainEventCallback(
-        this.onCollectionUpdated, { merkleRoot, batchId, blockNumber: event.blockNumber }, context,
-      );
+      await this.onCollectionUpdated({ merkleRoot, batchId, blockNumber: event.blockNumber }, context);
     } catch (err) {
       this.log.warn(ctx, `onCollectionUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -458,9 +446,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await invokeChainEventCallback(
-        this.onAllowListUpdated, { contextGraphId, agent, added, blockNumber: event.blockNumber }, context,
-      );
+      await this.onAllowListUpdated({ contextGraphId, agent, added, blockNumber: event.blockNumber }, context);
     } catch (err) {
       this.log.warn(ctx, `onAllowListUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -477,9 +463,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await invokeChainEventCallback(
-        this.onProfileEvent, { identityId, blockNumber: event.blockNumber }, context,
-      );
+      await this.onProfileEvent({ identityId, blockNumber: event.blockNumber }, context);
     } catch (err) {
       this.log.warn(ctx, `onProfileEvent callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -504,7 +488,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await invokeChainEventCallback(this.onKARegisteredToContextGraph, {
+      await this.onKARegisteredToContextGraph({
         contextGraphId,
         kaId,
         txHash,
@@ -538,7 +522,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await invokeChainEventCallback(this.onKnowledgeAssetCreated, {
+      await this.onKnowledgeAssetCreated({
         kaId,
         author,
         number,
