@@ -430,7 +430,8 @@ export class NetworkAdmissionCoordinator {
       this.admission.markVerifiedSameNetwork(remotePeer, verdict.authenticatedAgentAddress);
       return true;
     }
-    await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
+    // `verdict` narrows to the rejected member here, so the reason is always present.
+    await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason}`);
     return false;
   }
 

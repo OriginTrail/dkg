@@ -44,11 +44,15 @@ export interface VerifyNetworkIdentityResponseInput {
   requesterPeerId: string;
 }
 
-export interface VerifyNetworkIdentityResponseResult {
-  ok: boolean;
-  reason?: string;
-  authenticatedAgentAddress?: string;
-}
+/**
+ * Verification outcome as a discriminated union, so only the states this
+ * boundary can actually produce are representable: a rejection always carries
+ * its reason, and only an accepted peer can carry wallet evidence. A legacy
+ * peer without the optional binding still verifies as `{ ok: true }`.
+ */
+export type VerifyNetworkIdentityResponseResult =
+  | { readonly ok: false; readonly reason: string }
+  | { readonly ok: true; readonly authenticatedAgentAddress?: string };
 
 /** Fresh, network-scoped delegation scope used by the optional wallet binding. */
 export function networkPeerBindingScope(input: {
