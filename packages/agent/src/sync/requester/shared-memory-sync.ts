@@ -1457,10 +1457,27 @@ export interface PublicSnapshotSyncResult extends Omit<PublicSnapshotRecoveryRes
   readonly localYieldFailedPhases: number;
 }
 
-type PublicSnapshotSyncOutcome =
+/**
+ * Settled shared-memory walk: the same progress the throwing helper returns,
+ * paired with the failure when one occurred.
+ *
+ * A walk that materialized 120 of 250 Knowledge Assets and then failed has real
+ * progress to report, and a continuation caller that cannot read it treats a
+ * converging peer as stalled or replays completed work. The throwing helper
+ * cannot carry that out — annotating the throwable is exactly the side channel
+ * this module removed — so the settled outcome is where progress and error
+ * identity travel together.
+ */
+export type PublicSnapshotSyncOutcome =
   | { readonly kind: 'result'; readonly result: PublicSnapshotSyncResult }
   | { readonly kind: 'failure'; readonly result: PublicSnapshotSyncResult; readonly error: unknown };
 
+/**
+ * Legacy throwing walk. Kept byte-for-byte compatible: it rethrows the original
+ * error with its identity, class and stack intact and attaches nothing to it.
+ * Callers that need the progress behind a failure use
+ * {@link settlePublicSnapshotsForMeta} instead.
+ */
 export async function syncPublicSnapshotsForMeta(params: {
   ctx: OperationContext;
   remotePeerId: string;
@@ -1491,7 +1508,13 @@ export async function syncPublicSnapshotsForMeta(params: {
   return outcome.result;
 }
 
-async function settlePublicSnapshotsForMeta(
+/**
+ * Walk one manifest and settle, never throw: every admitted operation is
+ * accounted in manifest order before the outcome is returned, so a failed walk
+ * still reports `readySnapshots`, `missingCount` and its bounded
+ * `missingSample` alongside the triggering error.
+ */
+export async function settlePublicSnapshotsForMeta(
   params: Parameters<typeof syncPublicSnapshotsForMeta>[0],
 ): Promise<PublicSnapshotSyncOutcome> {
   const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({

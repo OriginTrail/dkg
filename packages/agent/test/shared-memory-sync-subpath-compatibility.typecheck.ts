@@ -2,13 +2,25 @@ import {
   selectSwmSnapshotCoverage,
   type SharedMemorySyncSummary,
 } from '../src/sync/requester/shared-memory-sync.js';
-import { syncPublicSnapshotsForMeta } from '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js';
+import {
+  settlePublicSnapshotsForMeta,
+  syncPublicSnapshotsForMeta,
+} from '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 declare const legacySnapshotParams: Omit<Parameters<typeof syncPublicSnapshotsForMeta>[0], 'workAdmission' | 'snapshotWalk'> & {
   metaQuads: Quad[];
 };
 void syncPublicSnapshotsForMeta(legacySnapshotParams);
+
+// The published settled API accepts the same parameters and reports the walk's
+// progress on BOTH branches, so a failed walk still has a readable denominator.
+void settlePublicSnapshotsForMeta(legacySnapshotParams);
+declare const settledSnapshotWalk: Awaited<ReturnType<typeof settlePublicSnapshotsForMeta>>;
+const settledProgress: number = settledSnapshotWalk.kind === 'failure'
+  ? settledSnapshotWalk.result.readySnapshots
+  : settledSnapshotWalk.result.totalSnapshots;
+void settledProgress;
 
 const summary: SharedMemorySyncSummary = {
   snapshotPlaneIncomplete: 0,
