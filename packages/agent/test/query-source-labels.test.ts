@@ -129,7 +129,13 @@ function runtimePrivateQueryAgent(options: {
     log: { info() {}, warn() {}, debug() {}, error() {} },
     queryEngine,
     store,
-    contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+    contextGraphMetaProjection: {
+      readAuthorityFactsRevision: 0,
+      prepareReadAuthorityFactsSnapshot: vi.fn(async () => ({
+        assertCurrent: () => true,
+        isAbsent: () => true,
+      })),
+    },
     prepareContextGraphRegistrationReadPlan: vi.fn(async () => null),
     subscribedContextGraphs: options.subscribed === false
       ? new Map()

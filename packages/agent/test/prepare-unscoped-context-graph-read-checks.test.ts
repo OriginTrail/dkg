@@ -8,7 +8,8 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { LOCAL_ID, NAME_HASH, selectedFixture } from './context-graph-registration-binding.fixture.js';
-import { createContextGraphRegistrationReadPlan } from '../src/dkg-agent-cg-registry.js';
+import { createContextGraphRegistrationReadPlan } from
+  '../src/context-graph-registration-read-plan.js';
 import {
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -192,7 +193,9 @@ describe('prepared unscoped Context Graph read checks', () => {
       signal,
     });
     expect(plan?.contextGraphIds).toEqual(['cold-name']);
-    const prepared = await plan!.prepare(signal);
+    const preparation = await plan!.prepare(signal);
+    expect(preparation.kind).toBe('ready');
+    const { prepared } = preparation;
     expect(resolveBatch.mock.calls[0][0]).toEqual([commitment('cold-name')]);
     const live = vi.fn(async () => ({ kind: 'unregistered' as const }));
     for (const id of [SYSTEM_CONTEXT_GRAPHS.AGENTS, LOCAL_ID, NAME_HASH, '42']) {
@@ -216,14 +219,41 @@ describe('prepared unscoped Context Graph read checks', () => {
     expect(live).toHaveBeenCalledTimes(5);
   });
 
-  it('preserves the existing resolver when the adapter has no bulk capability', async () => {
+  it('keeps scalar registration and restrictive metadata when bulk reads are unavailable', async () => {
     const deps = dependencies();
     deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+    deps.findContextGraphIdsWithReadAuthorityFacts.mockResolvedValue(new Set(['a']));
     const signal = new AbortController().signal;
     const check = await prepareUnscopedContextGraphReadChecks(deps, ['a'], signal);
     expect(await check('a', signal)).toBe(false);
-    expect(deps.findContextGraphIdsWithReadAuthorityFacts).not.toHaveBeenCalled();
+    expect(deps.findContextGraphIdsWithReadAuthorityFacts).toHaveBeenCalledOnce();
     expect(deps.getRegisteredAuthority).toHaveBeenCalledOnce();
+    expect(deps.isPrivateLocalGraph).toHaveBeenCalledOnce();
+  });
+
+  it('prepares more than 1,000 scalar-only public candidates concurrently', async () => {
+    const ids = Array.from({ length: 1_025 }, (_, index) => `public/scalar/${index}`);
+    const deps = dependencies();
+    deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+    let active = 0;
+    let peak = 0;
+    deps.getRegisteredAuthority.mockImplementation(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active -= 1;
+      return { kind: 'unregistered' };
+    });
+    deps.isPrivateLocalGraph.mockResolvedValue(false);
+    const signal = new AbortController().signal;
+
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ids, signal);
+    expect(await Promise.all(ids.map((id) => check(id, signal)))).toEqual(ids.map(() => true));
+    expect(deps.getRegisteredAuthority).toHaveBeenCalledTimes(ids.length);
+    expect(peak).toBeGreaterThan(4);
+    expect(peak).toBeLessThanOrEqual(32);
+    expect(deps.findContextGraphIdsWithReadAuthorityFacts).toHaveBeenCalledOnce();
+    expect(deps.isPrivateLocalGraph).not.toHaveBeenCalled();
   });
 
   const canonicalCases: Array<{
@@ -422,6 +452,25 @@ describe('prepared unscoped Context Graph read checks', () => {
     expect(metadataSignal.aborted).toBe(true);
     expect(await check('a', signal)).toBe(false);
     expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
+  });
+
+  it('models an unavailable bulk provider as an explicit prepared result', async () => {
+    const deps = dependencies();
+    deps.resolveContextGraphIdsByNameHashes.mockRejectedValue(new Error('RPC unavailable'));
+    const signal = new AbortController().signal;
+    const plan = await deps.prepareRegistrationReadPlan(['a'], signal);
+
+    const preparation = await plan!.prepare(signal);
+
+    expect(preparation.kind).toBe('unavailable');
+    await expect(preparation.prepared.resolve(
+      'a',
+      async () => ({ kind: 'unregistered' }),
+      signal,
+    )).resolves.toEqual({
+      authority: { kind: 'unavailable', reason: 'chain-name-binding-unavailable' },
+      metadataAbsenceEligible: false,
+    });
   });
 
   it('cancels four active metadata batches and never starts queued batches after registration failure', async () => {
