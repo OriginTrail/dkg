@@ -16,7 +16,7 @@ export interface EvmEventScan {
     contract: Contract,
     label: string,
     filter: ethers.ContractEventName,
-  ): Promise<AsyncIterable<ethers.Log | ethers.EventLog>>;
+  ): AsyncIterable<ethers.Log | ethers.EventLog>;
 }
 
 /** One supported EVM event: its aliases, the Hub binding it reads and the scan that parses it. */
@@ -43,7 +43,7 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['RelayCapabilityUpdated'],
     binding: 'profileStorage',
     async *scan(profileStorage: Contract, scan: EvmEventScan) {
-      for await (const log of await scan.query(
+      for await (const log of scan.query(
         profileStorage, 'profileStorage.queryFilter(RelayCapabilityUpdated)', profileStorage.filters.RelayCapabilityUpdated(),
       )) {
         const parsed = parseLog(profileStorage, log);
@@ -87,7 +87,7 @@ export const EVM_EVENT_DESCRIPTORS = [
         : 'KnowledgeAssetCreated';
 
       const kcFilter = kaStorage.filters[createEventName]();
-      const kcLogs = await scan.query(kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter);
+      const kcLogs = scan.query(kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter);
       // Legacy mint range. `KnowledgeAssetsMinted` is still declared on the
       // greenfield ABI but never emitted by `createKnowledgeAsset`, so
       // this map stays empty there and the per-log fallback below derives
@@ -95,7 +95,7 @@ export const EVM_EVENT_DESCRIPTORS = [
       const mintByTx = new Map<string, { publisherAddress: string; startKAId: string; endKAId: string }>();
       if (hasEvent('KnowledgeAssetsMinted')) {
         const mintFilter = kaStorage.filters.KnowledgeAssetsMinted();
-        for await (const ml of await scan.query(
+        for await (const ml of scan.query(
           kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter,
         )) {
           const mp = parseLog(kaStorage, ml);
@@ -118,7 +118,7 @@ export const EVM_EVENT_DESCRIPTORS = [
       if (isGreenfield) {
         try {
           const transferFilter = kaStorage.filters.Transfer(ethers.ZeroAddress);
-          for await (const tl of await scan.query(kaStorage, 'kas.queryFilter(Transfer)', transferFilter)) {
+          for await (const tl of scan.query(kaStorage, 'kas.queryFilter(Transfer)', transferFilter)) {
             const tp = parseLog(kaStorage, tl);
             if (tp && tp.args.tokenId != null) {
               ownerByTokenId.set(tp.args.tokenId.toString(), String(tp.args.to));
@@ -179,7 +179,7 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['KnowledgeBatchCreated'],
     binding: 'knowledgeAssetsStorage',
     async *scan(storage: Contract, scan: EvmEventScan) {
-      for await (const log of await scan.query(
+      for await (const log of scan.query(
         storage, 'kasV9.queryFilter(KnowledgeBatchCreated)', storage.filters.KnowledgeBatchCreated(),
       )) {
         const parsed = parseLog(storage, log);
@@ -206,7 +206,7 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['NameClaimed', 'ContextGraphNameClaimed'],
     binding: 'contextGraphNameRegistry',
     async *scan(registry: Contract, scan: EvmEventScan) {
-      for await (const log of await scan.query(
+      for await (const log of scan.query(
         registry, 'cgNameRegistry.queryFilter(NameClaimed)', registry.filters.NameClaimed(),
       )) {
         const parsed = parseLog(registry, log);
@@ -229,7 +229,7 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['ContextGraphExpanded'],
     binding: 'contextGraphStorage',
     async *scan(cgStorage: Contract, scan: EvmEventScan) {
-      for await (const log of await scan.query(
+      for await (const log of scan.query(
         cgStorage, 'cgStorage.queryFilter(ContextGraphExpanded)', cgStorage.filters.ContextGraphExpanded(),
       )) {
         const parsed = parseLog(cgStorage, log);
@@ -256,7 +256,7 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['KnowledgeAssetRegisteredToContextGraph'],
     binding: 'contextGraphStorage',
     async *scan(cgStorage: Contract, scan: EvmEventScan) {
-      for await (const log of await scan.query(
+      for await (const log of scan.query(
         cgStorage, 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)', cgStorage.filters.KnowledgeAssetRegisteredToContextGraph(),
       )) {
         const parsed = parseLog(cgStorage, log);
@@ -279,7 +279,7 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['ContextGraphCreated'],
     binding: 'contextGraphStorage',
     async *scan(cgStorage: Contract, scan: EvmEventScan) {
-      for await (const log of await scan.query(
+      for await (const log of scan.query(
         cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)', cgStorage.filters.ContextGraphCreated(),
       )) {
         const parsed = parseLog(cgStorage, log);

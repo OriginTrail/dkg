@@ -188,7 +188,6 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'readProvider',
   'readTipProvider',
   'readProviderRetryingNull',
-  'queryFilterWithFailover',
   'rebindContract',
   'populateAndSignAcrossProviders',
   'sendSignedTransactionAndWait',

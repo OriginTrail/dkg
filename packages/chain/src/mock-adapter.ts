@@ -1543,6 +1543,10 @@ export class MockChainAdapter implements ChainAdapter {
     return true;
   }
 
+  async resolveV10FinalizationReadiness(): Promise<boolean> {
+    return true;
+  }
+
   isRandomSamplingReady(): boolean {
     return true;
   }

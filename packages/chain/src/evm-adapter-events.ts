@@ -22,58 +22,30 @@ export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
 
   /**
-   * A WIDE `eth_getLogs` scan with read-failover, baking in the `wideLogScan`
-   * policy so the wide-log multi-RPC timeout (`RPC_LOG_SCAN_TIMEOUT_MS`, vs the 4s
-   * point-read cap; single-RPC stays uncapped, #894) is owned HERE once, not by
-   * per-call-site discipline. Used by every event scan in the descriptor table.
-   *
-   * TIP-SENSITIVE → `skipPreferred: true` (endpoint stickiness carve-out). The
-   * event-lane cursor is advanced against a head read canonical-fresh via
-   * `getBlockNumber()` (also `skipPreferred`); if this `[fromBlock, head]` scan
-   * were pinned to a lagging sticky backup whose tip is BELOW `head`, a provider
-   * that silently clamps `toBlock` to its own tip would return fewer logs, the
-   * runner would still persist `lastBlock = head`, and the events in
-   * `(backendTip, head]` would be skipped forever. Scanning canonical-order keeps
-   * the scan's tip coverage aligned with the head that advances the cursor
-   * (mirrors the hub-rotation poller's `skipPreferred` wide-log carve-out).
+   * Querying and cancellable iteration are one wide `eth_getLogs` operation.
+   * `skipPreferred` keeps the scan's tip coverage aligned with the fresh head
+   * that advances the event cursor.
    */
-  private async queryFilterWithFailover(
-    contract: ethers.Contract,
-    label: string,
-    eventFilter: ethers.ContractEventName,
-    fromBlock: ethers.BlockTag,
-    toBlock?: ethers.BlockTag,
-    signal?: AbortSignal,
-  ): Promise<(ethers.Log | ethers.EventLog)[]> {
-    signal?.throwIfAborted();
-    const logs = await this.readContractWith(
-      contract,
-      label,
-      (c) => c.queryFilter(eventFilter, fromBlock, toBlock),
-      { policy: 'wideLogScan', skipPreferred: true, signal },
-    );
-    signal?.throwIfAborted();
-    return logs;
-  }
-
-  /** Querying and per-log cancellation are one intrinsic scan operation. */
-  private async queryEventLogs(
+  private async *queryEventLogs(
     contract: ethers.Contract,
     label: string,
     eventFilter: ethers.ContractEventName,
     filter: EventFilter,
-  ): Promise<AsyncIterable<ethers.Log | ethers.EventLog>> {
+  ): AsyncIterable<ethers.Log | ethers.EventLog> {
     const { signal } = filter;
-    const logs = await this.queryFilterWithFailover(
-      contract, label, eventFilter, filter.fromBlock ?? 0, filter.toBlock, signal,
+    signal?.throwIfAborted();
+    const logs = await this.readContractWith(
+      contract,
+      label,
+      (candidate) => candidate.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock),
+      { policy: 'wideLogScan', skipPreferred: true, signal },
     );
-    return (async function* cancellableLogs() {
-      for (const log of logs) {
-        signal?.throwIfAborted();
-        yield log;
-      }
+    signal?.throwIfAborted();
+    for (const log of logs) {
       signal?.throwIfAborted();
-    }());
+      yield log;
+    }
+    signal?.throwIfAborted();
   }
 
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {

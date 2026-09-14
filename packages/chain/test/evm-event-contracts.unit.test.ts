@@ -318,7 +318,7 @@ describe('EVM event descriptor registry', () => {
     const contract = new Contract(address, EVENT_ABI);
     const queried: string[] = [];
     const scan: EvmEventScan = {
-      query: async (queriedContract, label) => {
+      query: (queriedContract, label) => {
         expect(queriedContract).toBe(contract);
         queried.push(label);
         return asyncLogs(scenario.logs[label] ?? []);
@@ -397,13 +397,13 @@ describe('EVM event descriptor registry', () => {
     const reason = new Error('scan cancelled during Transfer enumeration');
     const scanWith = (signal?: AbortSignal): EvmEventScan => ({
       signal,
-      query: async (_contract, label) => {
+      query: (_contract, label) => (async function* queryLogs() {
         if (label === 'kas.queryFilter(Transfer)') {
           if (signal) controller.abort(reason);
           throw new Error('Transfer enumeration unavailable');
         }
-        return asyncLogs(label === 'kas.queryFilter(KnowledgeAssetCreated)' ? created : []);
-      },
+        yield* asyncLogs(label === 'kas.queryFilter(KnowledgeAssetCreated)' ? created : []);
+      }()),
     });
     expect(await collectAll(descriptor.scan(contract, scanWith()))).toEqual([
       { type: 'KCCreated', blockNumber: 13, data: { kaId: '6', merkleRoot: ROOT, merkleRootBytes: ROOT, byteSize: '2048', txHash: 'tx-greenfield', txIndex: 2, publisherAddress: AUTHOR, author: AUTHOR, startKAId: '6', endKAId: '6' } },
