@@ -236,7 +236,7 @@ function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any
  * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
  * publish path, which never down-classified them).
  */
-function respondAssertionError(res: RequestContext["res"], e: any): void {
+export function respondAssertionError(res: RequestContext["res"], e: any): void {
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
     return;
