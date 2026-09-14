@@ -4,7 +4,7 @@ import type { DKGAgentConfig, Rfc64CatalogBootstrapConfigV1, Rfc64PublicCatalogB
 import type { ResolvedRfc64CatalogAuthoringPolicyV1 } from './rfc64/public-catalog-activation-config-v1.js';
 import type { StartupResourcePolicy, resolveStartupResourcePolicy } from './resource-policy.js';
 import type { SyncAdmissionConfig } from './sync/policy.js';
-import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
+import { resolveSyncReconcilerTiming, type SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { SyncResponderSnapshotLimitsConfig } from './sync/responder/snapshot-policy.js';
 
 /** Resource inputs are derived from the resolver, not from a second omission list.
@@ -62,50 +62,100 @@ export type ResolvedDKGAgentConfig =
  * Internal code sees {@link ResolvedDKGAgentConfig}, which omits them.
  */
 export interface LegacyResolvedConfigProjection {
-  /** @deprecated Read `resourcePolicy.reconcilerTiming`. */
-  syncReconcilerTiming: SyncReconcilerTiming;
-  /** @deprecated Read `resourcePolicy.admission.limit`; this is the effective limit. */
-  syncGlobalMaxInflight?: number;
-  /** @deprecated Read `resourcePolicy.admission.limit`; this is the effective limit. */
-  syncGlobalLimit?: number;
-  /** @deprecated Read `resourcePolicy.admission.queueLimit`; this is the effective limit. */
-  syncGlobalQueueLimit?: number;
-  /** @deprecated Read `resourcePolicy.admission`; this is the effective admission policy. */
-  syncAdmission?: SyncAdmissionConfig;
-  /** @deprecated Read `resourcePolicy.snapshot.budget`; this is the effective budget. */
-  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  /** @deprecated Read `resourcePolicy.reconcilerTiming` for the effective policy. */
+  readonly syncReconcilerTiming: SyncReconcilerTiming;
+  /** @deprecated Historical caller input; read `resourcePolicy.admission.limit` for the effective limit. */
+  readonly syncGlobalMaxInflight?: number;
+  /** @deprecated Historical caller input; read `resourcePolicy.admission.limit` for the effective limit. */
+  readonly syncGlobalLimit?: number;
+  /** @deprecated Historical caller input; read `resourcePolicy.admission.queueLimit` for the effective limit. */
+  readonly syncGlobalQueueLimit?: number;
+  /** @deprecated Historical caller input; read `resourcePolicy.admission` for the effective policy. */
+  readonly syncAdmission?: SyncAdmissionConfig;
+  /** @deprecated Historical caller input; read `resourcePolicy.snapshot.budget` for the effective budget. */
+  readonly syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
 }
 
 /** The historical resolved-config contract: the canonical model plus deprecated projections. */
 export type LegacyResolvedDKGAgentConfig = ResolvedDKGAgentConfig & LegacyResolvedConfigProjection;
 
-/** Every deprecated alias derives from the policy, so the runtime keeps one owner. */
+/** Preserve exactly what the pre-policy resolved config exposed to callers. */
 export function projectLegacyResolvedConfig(
-  policy: StartupResourcePolicy,
+  config: StorageAckNormalizedDKGAgentConfig,
 ): LegacyResolvedConfigProjection {
-  const { reconcilerTiming, admission, snapshot: { budget } } = policy;
-  const effectiveLimit = admission.limit ?? 0;
-  const effectiveQueueLimit = admission.queueLimit ?? 0;
   return {
-    syncReconcilerTiming: { ...reconcilerTiming },
-    syncGlobalMaxInflight: effectiveLimit,
-    syncGlobalLimit: effectiveLimit,
-    syncGlobalQueueLimit: effectiveQueueLimit,
+    syncReconcilerTiming: resolveSyncReconcilerTiming(config),
+    syncGlobalMaxInflight: config.syncGlobalMaxInflight,
+    syncGlobalLimit: config.syncGlobalLimit,
+    syncGlobalQueueLimit: config.syncGlobalQueueLimit,
+    syncAdmission: cloneSyncAdmission(config.syncAdmission),
+    syncResponderSnapshotLimits: cloneSnapshotLimits(config.syncResponderSnapshotLimits),
+  };
+}
+
+function cloneSyncAdmission(config: SyncAdmissionConfig | undefined): SyncAdmissionConfig | undefined {
+  if (config === undefined) return undefined;
+  return {
+    ...config,
+    ...(config.fast === undefined ? {} : { fast: { ...config.fast } }),
+    ...(config.slow === undefined ? {} : { slow: { ...config.slow } }),
+  };
+}
+
+function cloneSnapshotLimits(
+  config: SyncResponderSnapshotLimitsConfig | undefined,
+): SyncResponderSnapshotLimitsConfig | undefined {
+  if (config === undefined) return undefined;
+  return {
+    ...(config.global === undefined ? {} : { global: { ...config.global } }),
+    ...(config.local === undefined ? {} : { local: { ...config.local } }),
+  };
+}
+
+/**
+ * The historical fields remain readable through an isolated prototype facade,
+ * but are neither own properties nor writable copies on the canonical runtime
+ * object. Object enumeration/serialization therefore sees only canonical
+ * fields, and every structured compatibility read receives a fresh snapshot.
+ */
+function attachLegacyResolvedConfigView(
+  runtime: ResolvedDKGAgentConfig,
+  projection: LegacyResolvedConfigProjection,
+): LegacyResolvedDKGAgentConfig {
+  const compatibilityPrototype = Object.create(Object.prototype) as object;
+  Object.defineProperties(compatibilityPrototype, {
+    syncReconcilerTiming: {
+      configurable: false,
+      enumerable: false,
+      get: () => ({ ...projection.syncReconcilerTiming }),
+    },
+    syncGlobalMaxInflight: {
+      configurable: false,
+      enumerable: false,
+      get: () => projection.syncGlobalMaxInflight,
+    },
+    syncGlobalLimit: {
+      configurable: false,
+      enumerable: false,
+      get: () => projection.syncGlobalLimit,
+    },
+    syncGlobalQueueLimit: {
+      configurable: false,
+      enumerable: false,
+      get: () => projection.syncGlobalQueueLimit,
+    },
     syncAdmission: {
-      mode: admission.mode,
-      globalMaxInflight: effectiveLimit,
-      ...(admission.partitions === undefined
-        ? {}
-        : {
-          fast: { ...admission.partitions.fast },
-          slow: { ...admission.partitions.slow },
-        }),
+      configurable: false,
+      enumerable: false,
+      get: () => cloneSyncAdmission(projection.syncAdmission),
     },
     syncResponderSnapshotLimits: {
-      global: { rows: budget.maxRows, bytesEstimate: budget.maxBytesEstimate },
-      local: { rows: budget.maxSnapshotRows, bytesEstimate: budget.maxSnapshotBytesEstimate },
+      configurable: false,
+      enumerable: false,
+      get: () => cloneSnapshotLimits(projection.syncResponderSnapshotLimits),
     },
-  };
+  });
+  return Object.assign(Object.create(compatibilityPrototype), runtime) as LegacyResolvedDKGAgentConfig;
 }
 
 /** Values resolved by startup after ACK normalization and protocol admission. */
@@ -119,13 +169,15 @@ export type AgentConfigResolvedValues = Pick<ResolvedDKGAgentConfig,
 
 /**
  * One checked boundary between normalized construction inputs and runtime
- * configuration. The result also carries the deprecated compatibility
- * projections; internal consumers receive it through the canonical type.
+ * configuration. Deprecated reads are supplied by a non-enumerable,
+ * read-only compatibility facade; internal consumers receive the result
+ * through the canonical type and the runtime object owns no duplicate fields.
  */
 export function resolveAgentConfig(
   config: StorageAckNormalizedDKGAgentConfig,
   resolved: AgentConfigResolvedValues,
 ): LegacyResolvedDKGAgentConfig {
+  const legacyProjection = projectLegacyResolvedConfig(config);
   const {
     syncReconcilerIntervalMs: _syncReconcilerIntervalMs,
     syncStalenessThresholdMs: _syncStalenessThresholdMs,
@@ -152,5 +204,5 @@ export function resolveAgentConfig(
     Omit<StorageAckNormalizedDKGAgentConfig, AgentConfigResolutionInputKey>
     & Partial<Record<AgentConfigResolutionInputKey, never>>;
   const runtime: ResolvedDKGAgentConfig = { ...runtimeInput, ...resolved };
-  return { ...runtime, ...projectLegacyResolvedConfig(resolved.resourcePolicy) };
+  return attachLegacyResolvedConfigView(runtime, legacyProjection);
 }

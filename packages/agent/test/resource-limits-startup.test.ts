@@ -64,9 +64,10 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     expect(runtimeConfig.onReplicationEvent).toBe(onReplicationEvent);
     expect(runtimeConfig.store).toBe(store);
     const effective = (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy;
-    // Raw timing inputs never reach the runtime object. The fields the
-    // pre-policy declaration exposed survive only as projections of the
-    // resolved policy: the rejected local row limit reports its effective value.
+    // Raw timing inputs never reach the canonical runtime object. The fields
+    // the pre-policy declaration exposed survive through a read-only facade
+    // with their historical caller-input semantics; effective values live only
+    // in resourcePolicy.
     const runtime = (agent as unknown as { config: LegacyResolvedDKGAgentConfig }).config;
     for (const input of [
       'syncReconcilerIntervalMs', 'syncStalenessThresholdMs',
@@ -77,14 +78,28 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     expect(runtime.syncReconcilerTiming).toEqual(effective.reconcilerTiming);
     expect(runtime.syncReconcilerTiming).not.toBe(effective.reconcilerTiming);
     expect(runtime.syncGlobalMaxInflight).toBe(3);
-    expect(runtime.syncGlobalLimit).toBe(3);
+    expect(runtime.syncGlobalLimit).toBeUndefined();
     expect(runtime.syncGlobalQueueLimit).toBe(6);
-    expect(runtime.syncAdmission).toEqual({ mode: 'shared', globalMaxInflight: 3 });
+    expect(runtime.syncAdmission).toBeUndefined();
     expect(effective.snapshot.budget.maxSnapshotRows).toBe(1234);
     expect(runtime.syncResponderSnapshotLimits).toEqual({
-      global: { rows: 1234, bytesEstimate: effective.snapshot.budget.maxBytesEstimate },
-      local: { rows: 1234, bytesEstimate: effective.snapshot.budget.maxSnapshotBytesEstimate },
+      global: { rows: 1234 },
+      local: { rows: 0 },
     });
+    for (const alias of [
+      'syncReconcilerTiming', 'syncGlobalMaxInflight', 'syncGlobalLimit',
+      'syncGlobalQueueLimit', 'syncAdmission', 'syncResponderSnapshotLimits',
+    ]) {
+      expect(Object.hasOwn(runtime, alias)).toBe(false);
+      expect(Object.keys(runtime)).not.toContain(alias);
+    }
+    expect(() => {
+      (runtime as unknown as { syncGlobalLimit: number }).syncGlobalLimit = 999;
+    }).toThrow(TypeError);
+    const compatibilitySnapshot = runtime.syncResponderSnapshotLimits!;
+    compatibilitySnapshot.local!.rows = 999;
+    expect(runtime.syncResponderSnapshotLimits?.local?.rows).toBe(0);
+    expect(effective.snapshot.budget.maxSnapshotRows).toBe(1234);
     // Construction owns numeric resolution. Later environment edits cannot
     // make execution disagree with the policy that startup will report.
     vi.stubEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT', '7');
