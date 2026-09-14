@@ -10,6 +10,73 @@ import {
 } from './context-graph-registration-binding.fixture.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it('keeps an explicitly local-created unregistered graph independent of chain RPC', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
+    fixture.query.mockResolvedValueOnce({
+      type: 'bindings',
+      bindings: [{ status: '"unregistered"' }],
+    });
+    fixture.resolveContextGraphIdByNameHash.mockRejectedValueOnce(
+      new Error('chain RPC is unavailable'),
+    );
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({ kind: 'unregistered' });
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a durable pending registration against chain authority', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
+    fixture.query.mockResolvedValueOnce({
+      type: 'bindings',
+      bindings: [{ status: '"pending"' }],
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({
+        kind: 'registered',
+        onChainId: 42n,
+        provenance: 'reverse-name-hash',
+      });
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
+  });
+
+  it('rejects local-first proof when a numeric chain binding exists', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
+    fixture.subscription.onChainId = '42';
+    fixture.query.mockResolvedValue({
+      type: 'bindings',
+      bindings: [{ status: '"unregistered"' }],
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toMatchObject({
+        kind: 'registered',
+        onChainId: 42n,
+      });
+
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+    expect(fixture.query.mock.calls.some(([, options]) =>
+      options?.source === 'agent.contextGraph.registrationStatus'
+    )).toBe(false);
+  });
+
+  it('does not infer unregistered when the durable local marker is missing', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({
+        kind: 'registered',
+        onChainId: 42n,
+        provenance: 'reverse-name-hash',
+      });
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
+  });
+
   it('uses the cold deadline by default for a local graph with no binding candidate', async () => {
     vi.useFakeTimers();
     try {

@@ -229,4 +229,32 @@ describe('peer sync session lifecycle', () => {
     } finally { await f.close(); }
   });
 
+  it('admits one authority-scope catch-up despite freshness, cooldown, and backoff', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      vi.spyOn(f.agent, 'getSyncReconcilerProbe').mockResolvedValue(PROBE);
+      vi.spyOn(f.agent, 'trySyncFromPeer').mockResolvedValue('synced');
+      const now = Date.now();
+      f.state.session.recordFreshness(f.peerId, {
+        successfulAt: now,
+        progressAt: now,
+      });
+      f.state.session.recordQueued(f.peerId, now);
+      f.state.session.recordBackoff(
+        f.peerId,
+        { failures: 3, nextRetryAt: now + 60_000, ...PROBE },
+      );
+
+      expect(f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 0)).toBe(false);
+      expect(f.agent.queueSyncFromPeerOnConnect(
+        f.peerId,
+        () => {},
+        0,
+        { authorityScopeChanged: true },
+      )).toBe(true);
+      expect(f.state.session.snapshot(f.peerId).backoff).toBeUndefined();
+    } finally { await f.close(); }
+  });
+
 });

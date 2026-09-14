@@ -260,6 +260,7 @@ const blockedRfc64Modules = [
   'catalog-authority-refresh-loop-v1.js',
   'catalog-authority-revision-projection-v1.js',
   'authority-rpc-circuit-breaker-v1.js',
+  'finalized-authority-snapshot-batch-runtime-v1.js',
   'public-catalog-workload-owner-v1.js',
   'catalog-responsibility-registry-v1.js',
   'release-native-catalog-authority-v1.js',

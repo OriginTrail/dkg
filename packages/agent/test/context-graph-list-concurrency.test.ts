@@ -86,6 +86,10 @@ describe('context graph list row concurrency', () => {
         }),
         listGraphsByPrefix: async () => [],
       },
+      resolveFinalizedContextGraphAuthorityTargetsV1: async () => ({
+        kind: 'legacy-current' as const,
+      }),
+      readLocalContextGraphRegistrationStatus: async () => probe.run('registered'),
       getContextGraphOnChainId: async () => probe.run(undefined),
       getCgMeta: async (id: string) => probe.run(projectedMeta(id)),
       getContextGraphCurator: async () => probe.run(undefined),

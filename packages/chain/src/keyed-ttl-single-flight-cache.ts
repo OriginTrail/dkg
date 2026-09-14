@@ -7,6 +7,23 @@ export interface TtlValueCacheOptions<V> {
 
 export type CacheValue<V> = undefined extends V ? never : V;
 
+export const SINGLE_FLIGHT_INVALIDATED_CODE = 'SINGLE_FLIGHT_INVALIDATED' as const;
+
+/** Stable invalidation signal; diagnostic wording never controls retry policy. */
+export class SingleFlightInvalidatedError extends Error {
+  readonly code = SINGLE_FLIGHT_INVALIDATED_CODE;
+  readonly retryable: boolean;
+
+  constructor(
+    message = 'Shared request was invalidated',
+    options: { readonly retryable?: boolean } = {},
+  ) {
+    super(message);
+    this.name = 'SingleFlightInvalidatedError';
+    this.retryable = options.retryable === true;
+  }
+}
+
 /**
  * Small process-local TTL value cache.
  *
@@ -151,7 +168,7 @@ interface AbortableSingleFlightState<V> {
   promise: Promise<V>;
   waiters: number;
   settled: boolean;
-  invalidated: Error | undefined;
+  invalidated: SingleFlightInvalidatedError | undefined;
 }
 
 /**
@@ -219,20 +236,26 @@ export class AbortableKeyedSingleFlight<K, V> {
     }
   }
 
-  invalidate(key: K, reason = 'Shared request was invalidated'): void {
+  invalidate(
+    key: K,
+    reason = 'Shared request was invalidated',
+    options: { readonly retryable?: boolean } = {},
+  ): void {
     const state = this.inflight.get(key);
     this.inflight.delete(key);
     if (state !== undefined) {
-      const invalidated = new Error(reason);
-      invalidated.name = 'AbortError';
+      const invalidated = new SingleFlightInvalidatedError(reason, options);
       state.invalidated = invalidated;
       if (!state.settled) state.controller.abort(invalidated);
     }
   }
 
-  invalidateAll(reason = 'Shared requests were invalidated'): void {
+  invalidateAll(
+    reason = 'Shared requests were invalidated',
+    options: { readonly retryable?: boolean } = {},
+  ): void {
     const keys = [...this.inflight.keys()];
-    for (const key of keys) this.invalidate(key, reason);
+    for (const key of keys) this.invalidate(key, reason, options);
   }
 }
 

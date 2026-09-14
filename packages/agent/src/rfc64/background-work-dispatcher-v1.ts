@@ -105,8 +105,15 @@ export class Rfc64BackgroundWorkDispatcherV1 {
   }
 
   async whenIdle(): Promise<void> {
-    while (this.#inFlight.size > 0) {
-      await Promise.allSettled(this.#inFlight);
+    for (;;) {
+      const owned = new Set<Promise<unknown>>([
+        ...this.#inFlight,
+        ...[...this.#keyed.values()].map(({ run }) => run),
+      ]);
+      if (owned.size === 0) return;
+      await Promise.allSettled(owned);
+      // A keyed settlement may hand an accepted notification to a successor.
+      // Re-snapshot both owners until cleanup has released every key.
     }
   }
 
@@ -121,7 +128,7 @@ export class Rfc64BackgroundWorkDispatcherV1 {
 
   reopen(): void {
     if (!this.#closed) return;
-    if (this.#inFlight.size > 0) {
+    if (this.#inFlight.size > 0 || this.#keyed.size > 0) {
       throw new Error('RFC-64 background dispatcher cannot reopen before drain');
     }
     this.#lifecycle = new AbortController();

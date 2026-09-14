@@ -24,11 +24,13 @@ function fakeService(overrides: Partial<Readonly<{
 
 function authorityOwner(overrides: Partial<Readonly<{
   start: () => void;
+  trigger: () => void;
   whenIdle: () => Promise<void>;
   close: () => Promise<void>;
 }>> = {}) {
   return {
     start: vi.fn(),
+    trigger: vi.fn(),
     whenIdle: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
     ...overrides,
@@ -78,6 +80,7 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     const ctx = createOperationContext('system');
 
     owner.start(ctx);
+    owner.requestAuthorityRefresh();
     await owner.whenIdle();
 
     expect(owner.service).toBe(service);
@@ -88,6 +91,7 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     ]);
     expect(calls).toContain('service.whenIdle');
     expect(calls).toContain('authority.whenIdle');
+    expect(authorityRefresh.trigger).toHaveBeenCalledOnce();
     await owner.close();
   });
 

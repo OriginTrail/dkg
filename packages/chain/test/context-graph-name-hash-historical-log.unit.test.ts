@@ -278,7 +278,7 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     expect(scenario.getNameHash).toHaveBeenCalledWith(42n);
   });
 
-  it('discards a historical result when the adapter binding rotates mid-scan', async () => {
+  it('discards and retries a historical result when the adapter binding rotates mid-scan', async () => {
     const fixture = historicalFixture([[42n]]);
     fixture.queryEventLogsPage.mockImplementationOnce(async () => {
       fixture.adapter.invalidatePublishPreflightCache();
@@ -288,10 +288,10 @@ describe('historical Context Graph name-hash reverse resolution', () => {
       };
     });
 
-    await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /binding changed during (?:historical scan|current-slot resolution)/i,
-    );
-    expect(fixture.getNameHash).not.toHaveBeenCalled();
+    await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(42n);
+    expect(fixture.queryEventLogsPage).toHaveBeenCalledTimes(2);
+    expect(fixture.getNameHash).toHaveBeenCalledTimes(1);
+    expect(fixture.getNameHash).toHaveBeenCalledWith(42n);
   });
 
   it('discards a historical result when its canonical head changes mid-scan', async () => {
