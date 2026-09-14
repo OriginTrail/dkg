@@ -11,6 +11,18 @@ export interface LocalAgentAttachStateSink {
   persist: (patch: LocalAgentAttachStatePatch) => Promise<void>;
 }
 
+/** Uniform handle returned by every connector-owned background attach. */
+export interface LocalAgentAttachJobHandle {
+  readonly started: boolean;
+  readonly job: Promise<void>;
+  readonly controller: AbortController;
+}
+
+export interface LocalAgentAfterCommitResult {
+  readonly notice?: string;
+  readonly attachJob?: LocalAgentAttachJobHandle;
+}
+
 interface LocalAgentConnectPlanBase<State> {
   /**
    * Desired initial integration state for this connect. Connectors return only
@@ -21,7 +33,7 @@ interface LocalAgentConnectPlanBase<State> {
   state: State;
   notice?: string;
   /** Deferred setup work that runs only after `state` is committed. */
-  afterCommit?: (sink: LocalAgentAttachStateSink) => string | undefined;
+  afterCommit?: (sink: LocalAgentAttachStateSink) => LocalAgentAfterCommitResult;
 }
 
 export type LocalAgentConnectPlan =
@@ -42,10 +54,24 @@ export interface LocalAgentConnectorContext {
   hadStoredTransportBeforeConnect: boolean;
 }
 
+export interface LocalAgentDisconnectContext {
+  config: ImmutableDkgConfig;
+  id: string;
+  state: Record<string, unknown>;
+}
+
+export interface LocalAgentDisconnectPlan {
+  state: Record<string, unknown>;
+}
+
 export interface LocalAgentConnectorStrategy {
   prepareBody?: (
     config: ImmutableDkgConfig,
     body: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
   createPlan: (context: LocalAgentConnectorContext) => Promise<LocalAgentConnectorPlan>;
+  cancelPending: (id: string) => void | Promise<void>;
+  createDisconnectPlan: (
+    context: LocalAgentDisconnectContext,
+  ) => Promise<LocalAgentDisconnectPlan>;
 }

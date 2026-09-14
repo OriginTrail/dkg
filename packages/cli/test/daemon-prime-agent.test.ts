@@ -697,7 +697,8 @@ describe('connect from the Node UI', () => {
     const config = makeConfig();
     const configStore = {
       current: config,
-      update: vi.fn(async () => { throw new Error('config publication failed'); }),
+      captureRevision: vi.fn(() => ({})),
+      updateIfRevision: vi.fn(async () => { throw new Error('config publication failed'); }),
     };
     const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
       id: 'prime-agent',
@@ -722,7 +723,7 @@ describe('connect from the Node UI', () => {
 
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body)).toEqual({ error: 'config publication failed' });
-    expect(configStore.update).toHaveBeenCalledOnce();
+    expect(configStore.updateIfRevision).toHaveBeenCalledOnce();
     expect(runPrimeAgentSetup).not.toHaveBeenCalled();
   });
 

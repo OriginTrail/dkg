@@ -16,6 +16,7 @@ import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 
 const disconnectHermesProfileMock = vi.hoisted(() => vi.fn());
+const restoreHermesProfileMock = vi.hoisted(() => vi.fn());
 const resolveHermesProfileMock = vi.hoisted(() => vi.fn<NonNullable<LocalAgentUiAttachDeps['resolveHermesProfile']>>(() => ({
   profileName: undefined,
   hermesHome: 'C:\\Hermes\\default',
@@ -23,6 +24,7 @@ const resolveHermesProfileMock = vi.hoisted(() => vi.fn<NonNullable<LocalAgentUi
 })));
 vi.mock('@origintrail-official/dkg-adapter-hermes', () => ({
   disconnectHermesProfile: disconnectHermesProfileMock,
+  restoreHermesProfile: restoreHermesProfileMock,
   resolveHermesProfile: resolveHermesProfileMock,
 }));
 
@@ -82,6 +84,8 @@ function deferred<T = void>() {
 afterEach(() => {
   vi.unstubAllGlobals();
   disconnectHermesProfileMock.mockReset();
+  restoreHermesProfileMock.mockReset();
+  restoreHermesProfileMock.mockResolvedValue({ ok: true, path: 'noop' });
   resolveHermesProfileMock.mockReset();
   resolveHermesProfileMock.mockReturnValue({
     profileName: undefined,
@@ -91,6 +95,56 @@ afterEach(() => {
 });
 
 describe('generic local-agent routes', () => {
+  it('commits connector-owned disconnect warnings without route ID branches', async () => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: { profileName: 'research', hermesHome: 'C:\\Hermes\\research' },
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    }));
+    disconnectHermesProfileMock.mockResolvedValue(undefined);
+    restoreHermesProfileMock.mockResolvedValue({
+      ok: false,
+      path: 'failed',
+      restoreError: 'provider backup missing',
+    });
+    const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
+      enabled: false,
+      runtime: { status: 'disconnected' },
+    });
+    const res = makeJsonResponse();
+
+    try {
+      await handleLocalAgentsRoutes({
+        req,
+        res,
+        configStore,
+        path: '/api/local-agent-integrations/hermes',
+      } as any);
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).integration).toMatchObject({
+        enabled: false,
+        runtime: {
+          status: 'disconnected',
+          ready: false,
+          lastError: 'provider backup missing',
+        },
+      });
+      expect(disconnectHermesProfileMock).toHaveBeenCalledWith({
+        profileName: 'research',
+        hermesHome: 'C:\\Hermes\\research',
+      });
+    } finally {
+      await configStore.close();
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
   it('rebases deferred route attach patches and lets a newer disconnect win', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
@@ -106,7 +160,7 @@ describe('generic local-agent routes', () => {
         notice: 'attach scheduled',
         afterCommit: (sink) => {
           finishAttach = sink.persist;
-          return 'attach scheduled';
+          return { notice: 'attach scheduled' };
         },
       };
     };

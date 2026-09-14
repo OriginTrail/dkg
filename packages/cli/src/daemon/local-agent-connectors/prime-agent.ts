@@ -4,6 +4,7 @@ import {
   transportPatchFromPrimeAgentTarget,
 } from '../prime-agent.js';
 import {
+  cancelPendingAndDrain,
   isCancelled,
   scheduleAttachJob,
 } from '../local-agent-attach-jobs.js';
@@ -38,7 +39,7 @@ export function createPrimeAgentConnector(deps: PrimeAgentConnectorDeps = {}): L
       ok: true,
       state: {},
       afterCommit: (sink) => {
-        const { started } = scheduleAttachJob(requested.id, async (attachJob) => {
+        const attachJob = scheduleAttachJob(requested.id, async (attachJob) => {
           try {
             const setup = await runPrimeAgentUiSetup(deps);
             if (isCancelled(attachJob)) return;
@@ -88,11 +89,33 @@ export function createPrimeAgentConnector(deps: PrimeAgentConnectorDeps = {}): L
             });
           }
         }, deps.onAttachScheduled);
-        return started
-          ? 'Prime Agent setup started. This chat tab will come online automatically once Prime Agent finishes setting up.'
-          : 'Prime Agent setup is already in progress. This chat tab will come online automatically once Prime Agent finishes setting up.';
+        return {
+          attachJob,
+          notice: attachJob.started
+            ? 'Prime Agent setup started. This chat tab will come online automatically once Prime Agent finishes setting up.'
+            : 'Prime Agent setup is already in progress. This chat tab will come online automatically once Prime Agent finishes setting up.',
+        };
       },
     };
   };
-  return { createPlan };
+  const createDisconnectPlan: LocalAgentConnectorStrategy['createDisconnectPlan'] = async () => {
+    let restoreError: string | undefined;
+    try {
+      const { restorePrimeAgentProfile } = await import('@origintrail-official/dkg-adapter-prime-agent');
+      const result = await restorePrimeAgentProfile({});
+      if (!result?.ok) restoreError = result?.restoreError ?? 'restore reported failure';
+    } catch (err: unknown) {
+      restoreError = `Prime Agent restore failed: ${err instanceof Error ? err.message : 'unknown error'}`;
+    }
+    return {
+      state: {
+        runtime: {
+          status: 'disconnected',
+          ready: false,
+          lastError: restoreError ?? null,
+        },
+      },
+    };
+  };
+  return { createPlan, cancelPending: cancelPendingAndDrain, createDisconnectPlan };
 }

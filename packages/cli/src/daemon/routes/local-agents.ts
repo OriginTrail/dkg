@@ -257,7 +257,6 @@ import {
   type OpenClawUiAttachDeps,
   formatOpenClawUiAttachFailure,
   scheduleOpenClawUiAttachJob,
-  cancelPendingLocalAgentAttachJob,
   isOpenClawUiAttachCancelled,
   shouldTryNextOpenClawTarget,
   buildOpenClawChannelHeaders,
@@ -307,8 +306,6 @@ import {
   hasStoredLocalAgentTransportConfig,
   connectLocalAgentIntegrationFromUi,
   type ReverseLocalAgentSetupDeps,
-  reverseHermesSetupForUi,
-  reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
   type LocalAgentAttachStatePatch,
 } from '../local-agents.js';
@@ -317,7 +314,7 @@ import {
   primeAgentDkgSessionId,
   readPrimeAgentSessions,
 } from '../prime-agent.js';
-import { cancelPendingAndDrain } from '../local-agent-attach-jobs.js';
+import { localAgentConnectorFor } from '../local-agent-connectors/index.js';
 
 import {
   updateDaemonConfig,
@@ -542,14 +539,14 @@ export async function handleLocalAgentsRoutes(
       if (!plan.ok) {
         return jsonResponse(res, 400, { error: plan.error });
       }
-      const afterCommitNotice = plan.afterCommit?.({
+      const afterCommit = plan.afterCommit?.({
         current: () => ctx.configStore.current,
         persist: (patch) => persistLocalAgentAttachPatch(ctx, id, patch),
       });
       return jsonResponse(res, 200, {
         ok: true,
         integration: withPrimeAgentSessionCount(integration),
-        notice: afterCommitNotice ?? plan.notice,
+        notice: afterCommit?.notice ?? plan.notice,
       });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
@@ -610,94 +607,18 @@ export async function handleLocalAgentsRoutes(
         && isPlainRecord(normalizedPatch.runtime)
         && normalizedPatch.runtime.status === 'disconnected';
       if (explicitDisconnect && normalizedId) {
-        if (normalizedId === 'prime-agent') await cancelPendingAndDrain(normalizedId);
-        else cancelPendingLocalAgentAttachJob(normalizedId);
-      }
-
-      if (explicitDisconnect && normalizedId === 'openclaw') {
-        try {
-          await reverseLocalAgentSetupForUi(config);
-        } catch (err: any) {
-          const integration = await updateDaemonConfig(ctx, draft => (
-            updateLocalAgentIntegration(draft, id, {
-              runtime: {
-                status: 'error',
-                ready: false,
-                lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
-              },
-            })
-          ));
-          return jsonResponse(res, 200, { ok: true, integration });
-        }
-      }
-
-      if (explicitDisconnect && normalizedId === 'prime-agent') {
-        // Reverse setup removes our entry from settings.json.extensions. A
-        // restore failure must NOT be reported as a failed disconnect: the
-        // integration really is disconnected either way, and surfacing it as
-        // `error` would leave the operator unable to clear the state. Same
-        // posture as the Hermes branch below — warn, do not fail.
-        let restoreError: string | undefined;
-        try {
-          const { restorePrimeAgentProfile } = await import('@origintrail-official/dkg-adapter-prime-agent');
-          const result = await restorePrimeAgentProfile({});
-          if (!result?.ok) restoreError = result?.restoreError ?? 'restore reported failure';
-        } catch (err: any) {
-          restoreError = `Prime Agent restore failed: ${err?.message ?? 'unknown error'}`;
-        }
-        const integration = await updateDaemonConfig(ctx, draft => (
-          updateLocalAgentIntegration(draft, id, {
-            runtime: {
-              status: 'disconnected',
-              ready: false,
-              lastError: restoreError ?? null,
-            },
-          })
-        ));
+        const connector = localAgentConnectorFor(normalizedId);
+        await connector.cancelPending(normalizedId);
+        const plan = await connector.createDisconnectPlan({
+          config,
+          id: normalizedId,
+          state: normalizedPatch,
+        });
+        const integration = await updateDaemonConfig(
+          ctx,
+          draft => updateLocalAgentIntegration(draft, id, plan.state),
+        );
         return jsonResponse(res, 200, { ok: true, integration });
-      }
-
-      if (explicitDisconnect && normalizedId === 'hermes') {
-        let hermesRestoreError: string | undefined;
-        try {
-          const result = await reverseHermesSetupForUi(config);
-          hermesRestoreError = result.restoreError;
-        } catch (err: any) {
-          // Disconnect proper failed (not restore) — surface as error,
-          // matching today's behavior. Restore-only failures fall through
-          // to the disconnected-with-warning patch below.
-          const integration = await updateDaemonConfig(ctx, draft => (
-            updateLocalAgentIntegration(draft, id, {
-              runtime: {
-                status: 'error',
-                ready: false,
-                lastError: `Hermes disconnect failed: ${err?.message ?? 'unknown error'}`,
-              },
-            })
-          ));
-          return jsonResponse(res, 200, { ok: true, integration });
-        }
-
-        // Per setup-entrypoint-contract.md §6: restore failure does NOT roll
-        // back the disconnect. Integration stays `disconnected`; the failure
-        // surfaces as a warning via `runtime.lastError` while the rest of the
-        // patch (enabled:false, runtime.status:'disconnected', ready:false)
-        // proceeds normally. The UI's disconnected pill + warning chip
-        // (PanelRight.tsx, S3 step 5) renders this combination as warning-not-error.
-        if (hermesRestoreError) {
-          const integration = await updateDaemonConfig(ctx, draft => (
-            updateLocalAgentIntegration(draft, id, {
-              ...normalizedPatch,
-              runtime: {
-                ...(isPlainRecord(normalizedPatch.runtime) ? normalizedPatch.runtime : {}),
-                status: 'disconnected',
-                ready: false,
-                lastError: hermesRestoreError,
-              },
-            })
-          ));
-          return jsonResponse(res, 200, { ok: true, integration });
-        }
       }
 
       const integration = await updateDaemonConfig(

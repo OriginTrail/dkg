@@ -63,6 +63,7 @@ import {
 } from './local-agent-connectors/index.js';
 
 export type {
+  LocalAgentAttachJobHandle,
   LocalAgentAttachStatePatch,
   LocalAgentAttachStateSink,
   LocalAgentConnectPlan,
@@ -448,7 +449,12 @@ export function updateLocalAgentIntegration(
   const next = mergeLocalAgentIntegrationConfig(existing, patch, { mergeTransport: normalizedId === 'hermes' });
   if (isExplicitLocalAgentDisconnectPatch(patch)) {
     next.enabled = false;
-    next.runtime = { ...(next.runtime ?? {}), status: 'disconnected', ready: false, lastError: null };
+    next.runtime = {
+      ...(next.runtime ?? {}),
+      status: 'disconnected',
+      ready: false,
+      lastError: patch.runtime?.lastError ?? null,
+    };
     next.metadata = { ...(next.metadata ?? {}), userDisabled: true };
   } else if (patch.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
     next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
@@ -498,7 +504,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
   const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
   const connector = localAgentConnectorFor(requestedId, deps);
-  const connectBody = connector?.prepareBody
+  const connectBody = connector.prepareBody
     ? await connector.prepareBody(config, body)
     : body;
   const registration = extractLocalAgentIntegrationPatch({
@@ -516,13 +522,6 @@ export async function connectLocalAgentIntegrationFromUi(
   const withRegistration = (state: LocalAgentAttachStatePatch): LocalAgentIntegrationConfig =>
     mergeLocalAgentIntegrationConfig(registration, state, { mergeTransport: requestedId === 'hermes' });
   try {
-    if (!connector) {
-      return {
-        ok: true,
-        state: registration,
-        notice: `${requested.name} was registered. Chat will appear here once its framework bridge is available.`,
-      };
-    }
     const plan = await connector.createPlan({
       config,
       body: connectBody,

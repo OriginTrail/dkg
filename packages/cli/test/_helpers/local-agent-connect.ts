@@ -3,6 +3,7 @@ import {
   connectLocalAgentIntegration,
   getLocalAgentIntegration,
   type LocalAgentConnectPlan,
+  type LocalAgentAttachJobHandle,
   type LocalAgentIntegrationRecord,
   updateLocalAgentIntegration,
 } from '../../src/daemon/local-agents.js';
@@ -12,15 +13,20 @@ export function commitLocalAgentConnectPlanForTest(
   config: DkgConfig,
   id: string,
   plan: LocalAgentConnectPlan,
-): { integration: LocalAgentIntegrationRecord; notice?: string } {
+): {
+  integration: LocalAgentIntegrationRecord;
+  notice?: string;
+  attachJob?: LocalAgentAttachJobHandle;
+} {
   connectLocalAgentIntegration(config, { ...plan.state, id });
-  const afterCommitNotice = plan.ok ? plan.afterCommit?.({
+  const afterCommit = plan.ok ? plan.afterCommit?.({
     current: () => config,
     persist: async (patch) => { updateLocalAgentIntegration(config, id, patch); },
   }) : undefined;
   return {
     integration: getLocalAgentIntegration(config, id)!,
-    notice: afterCommitNotice ?? plan.notice,
+    notice: afterCommit?.notice ?? plan.notice,
+    attachJob: afterCommit?.attachJob,
   };
 }
 

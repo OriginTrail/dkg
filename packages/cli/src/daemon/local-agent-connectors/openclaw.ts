@@ -11,6 +11,7 @@ import {
   waitForOpenClawChatReady,
 } from '../openclaw.js';
 import type { OpenClawUiAttachDeps } from '../openclaw.js';
+import { cancelPending } from '../local-agent-attach-jobs.js';
 import type { LocalAgentConnectorStrategy } from './types.js';
 
 export type OpenClawConnectorDeps = OpenClawUiAttachDeps;
@@ -48,7 +49,7 @@ export function createOpenClawConnector(deps: OpenClawConnectorDeps = {}): Local
       ok: true,
       state: {},
       afterCommit: (sink) => {
-        const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
+        const attachJob = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
           try {
             daemonState.openClawBridgeHealth = null;
             await runSetup(attachJob.controller.signal);
@@ -105,11 +106,31 @@ export function createOpenClawConnector(deps: OpenClawConnectorDeps = {}): Local
             daemonState.openClawBridgeHealth = null;
           }
         }, deps.onAttachScheduled);
-        return started
-          ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
-          : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.';
+        return {
+          attachJob,
+          notice: attachJob.started
+            ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
+            : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
+        };
       },
     };
   };
-  return { createPlan };
+  const createDisconnectPlan: LocalAgentConnectorStrategy['createDisconnectPlan'] = async ({ config, state }) => {
+    try {
+      const { reverseLocalAgentSetupForUi } = await import('../local-agents.js');
+      await reverseLocalAgentSetupForUi(config);
+      return { state };
+    } catch (err: unknown) {
+      return {
+        state: {
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: `OpenClaw disconnect failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+          },
+        },
+      };
+    }
+  };
+  return { createPlan, cancelPending, createDisconnectPlan };
 }

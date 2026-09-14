@@ -5,6 +5,7 @@ import {
   transportPatchFromHermesTarget,
 } from '../hermes.js';
 import {
+  cancelPending,
   isCancelled,
   scheduleAttachJob,
 } from '../local-agent-attach-jobs.js';
@@ -117,7 +118,7 @@ export function createHermesConnector(deps: HermesConnectorDeps = {}): LocalAgen
       ok: true,
       state: {},
       afterCommit: (sink) => {
-        const { started } = scheduleAttachJob(requested.id, async (attachJob) => {
+        const attachJob = scheduleAttachJob(requested.id, async (attachJob) => {
           try {
             const result = await runSetup(attachJob.controller.signal);
             if (isCancelled(attachJob)) return;
@@ -171,11 +172,43 @@ export function createHermesConnector(deps: HermesConnectorDeps = {}): LocalAgen
             });
           }
         }, deps.onAttachScheduled);
-        return started
-          ? 'Hermes setup started. This chat tab will come online automatically once Hermes finishes setting up.'
-          : 'Hermes setup is already in progress. This chat tab will come online automatically once Hermes finishes setting up.';
+        return {
+          attachJob,
+          notice: attachJob.started
+            ? 'Hermes setup started. This chat tab will come online automatically once Hermes finishes setting up.'
+            : 'Hermes setup is already in progress. This chat tab will come online automatically once Hermes finishes setting up.',
+        };
       },
     };
   };
-  return { prepareBody, createPlan };
+  const createDisconnectPlan: LocalAgentConnectorStrategy['createDisconnectPlan'] = async ({ config, state }) => {
+    try {
+      const { reverseHermesSetupForUi } = await import('../local-agents.js');
+      const result = await reverseHermesSetupForUi(config);
+      if (!result.restoreError) return { state };
+      const runtime = isPlainRecord(state.runtime) ? state.runtime : {};
+      return {
+        state: {
+          ...state,
+          runtime: {
+            ...runtime,
+            status: 'disconnected',
+            ready: false,
+            lastError: result.restoreError,
+          },
+        },
+      };
+    } catch (err: unknown) {
+      return {
+        state: {
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: `Hermes disconnect failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+          },
+        },
+      };
+    }
+  };
+  return { prepareBody, createPlan, cancelPending, createDisconnectPlan };
 }

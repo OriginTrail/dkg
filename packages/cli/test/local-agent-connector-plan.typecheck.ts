@@ -8,6 +8,19 @@ const connectorPlan = {
   state: { runtime: { status: 'ready', ready: true } },
 } satisfies LocalAgentConnectorPlan;
 
+const connectorWithAttachHandle = {
+  ok: true,
+  state: {},
+  afterCommit: () => ({
+    notice: 'scheduled',
+    attachJob: {
+      started: true,
+      job: Promise.resolve(),
+      controller: new AbortController(),
+    },
+  }),
+} satisfies LocalAgentConnectorPlan;
+
 const preparedPlan = {
   ok: true,
   state: {
@@ -43,6 +56,7 @@ const connectorCannotReplaceManifest: LocalAgentConnectorPlan = {
 
 void [
   connectorPlan,
+  connectorWithAttachHandle,
   preparedPlan,
   connectorCannotReplaceRegistration,
   connectorCannotReplaceCapabilities,

@@ -1,6 +1,7 @@
 import { createHermesConnector, type HermesConnectorDeps } from './hermes.js';
 import { createOpenClawConnector, type OpenClawConnectorDeps } from './openclaw.js';
 import { createPrimeAgentConnector, type PrimeAgentConnectorDeps } from './prime-agent.js';
+import { createGenericConnector } from './generic.js';
 import type { LocalAgentConnectorStrategy } from './types.js';
 
 export type LocalAgentUiAttachDeps = OpenClawConnectorDeps
@@ -10,18 +11,22 @@ export type LocalAgentUiAttachDeps = OpenClawConnectorDeps
 export function localAgentConnectorFor(
   id: string,
   deps: LocalAgentUiAttachDeps = {},
-): LocalAgentConnectorStrategy | undefined {
+): LocalAgentConnectorStrategy {
   if (id === 'hermes') return createHermesConnector(deps);
   if (id === 'openclaw') return createOpenClawConnector(deps);
   if (id === 'prime-agent') return createPrimeAgentConnector(deps);
-  return undefined;
+  return createGenericConnector();
 }
 
 export type {
   LocalAgentAttachStateSink,
   LocalAgentAttachStatePatch,
+  LocalAgentAttachJobHandle,
+  LocalAgentAfterCommitResult,
   LocalAgentConnectPlan,
   LocalAgentConnectorPlan,
   LocalAgentConnectorContext,
+  LocalAgentDisconnectContext,
+  LocalAgentDisconnectPlan,
   LocalAgentConnectorStrategy,
 } from './types.js';
