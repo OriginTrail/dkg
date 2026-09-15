@@ -435,7 +435,15 @@ function verifyArtifactLock(root, manifest) {
     || lock.componentSha256 !== manifest.files?.['component/runtime.component.wasm']?.sha256
     || lock.witSha256 !== manifest.files?.['component/wit/semantic-runtime.wit']?.sha256
   ) {
-    throw new Error('semantic-runtime: generated artifacts differ from the checked-in artifact lock');
+    throw new Error('semantic-runtime: generated artifacts differ from the checked-in artifact lock\n'
+      + JSON.stringify({
+        expectedIntegritySha256: lock.integritySha256,
+        actualIntegritySha256: integritySha256,
+        expectedComponentSha256: lock.componentSha256,
+        actualComponentSha256: manifest.files?.['component/runtime.component.wasm']?.sha256,
+        expectedWitSha256: lock.witSha256,
+        actualWitSha256: manifest.files?.['component/wit/semantic-runtime.wit']?.sha256,
+      }, null, 2));
   }
 }
 
