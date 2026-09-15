@@ -41,6 +41,10 @@ import {
 import { verify as verifyInventoryContract } from './src/verify.ts';
 import { canonicalDocument, type CanonicalValue } from './src/canonical.ts';
 import {
+  assertRuntimeProcessIdentityV1,
+  type RuntimeProcessIdentityV1,
+} from '../rfc64-runtime-process-evidence.mts';
+import {
   buildGate2RuntimeProvenanceV1,
   consumeGate2RuntimeLaunchReceiptV1,
   type Gate2ExecutedRuntimeManifestV1,
@@ -526,10 +530,12 @@ async function execute(): Promise<void> {
       [
         {
           id: 'author',
+          identity: requiredProcessIdentity(authorBoundary.event, 'author stop'),
           loaded: requiredExecutedRuntimeManifest(authorBoundary.event, 'author stop'),
         },
         {
           id: 'receiverBeforeCrash',
+          identity: requiredProcessIdentity(receiverCrashBoundary.event, 'receiver pre-SIGKILL'),
           loaded: requiredExecutedRuntimeManifest(
             receiverCrashBoundary.event,
             'receiver pre-SIGKILL',
@@ -537,6 +543,10 @@ async function execute(): Promise<void> {
         },
         {
           id: 'receiverAfterRestart',
+          identity: requiredProcessIdentity(
+            restartedReceiverBoundary.event,
+            'restarted receiver stop',
+          ),
           loaded: requiredExecutedRuntimeManifest(
             restartedReceiverBoundary.event,
             'restarted receiver stop',
@@ -1069,11 +1079,23 @@ function selectReady(event: Gate2AgentEvent): Record<string, unknown> {
   return {
     adapterId: event.adapterId,
     peerId: event.peerId,
+    processIdentity: requiredProcessIdentity(event, `${event.role} ready`),
     protocolVersion: event.protocolVersion,
     role: event.role,
     runtimeBuildManifestDigest: event.runtimeBuildManifestDigest,
     startupRepair: event.startupRepair,
   };
+}
+
+function requiredProcessIdentity(
+  event: Gate2AgentEvent,
+  label: string,
+): Readonly<RuntimeProcessIdentityV1> {
+  assertRuntimeProcessIdentityV1(event.processIdentity, `${label} process identity`);
+  return Object.freeze({
+    hostIdentity: event.processIdentity.hostIdentity,
+    pid: event.processIdentity.pid,
+  });
 }
 
 function requiredExecutedRuntimeManifest(

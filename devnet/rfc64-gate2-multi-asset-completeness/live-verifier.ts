@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { stableJson } from '../rfc64-persistence-lifecycle/evidence.js';
+import { assertRuntimeProcessIdentityV1 } from '../rfc64-runtime-process-evidence.mts';
 import {
   GATE2_ADAPTER_PROTOCOL_VERSION,
   GATE2_RAW_SCHEMA_VERSION,
@@ -566,6 +567,7 @@ function verifyReadyEvent(
   const ready = closedRecord(value, path, [
     'adapterId',
     'peerId',
+    'processIdentity',
     'protocolVersion',
     'role',
     'runtimeBuildManifestDigest',
@@ -576,6 +578,11 @@ function verifyReadyEvent(
   exact(ready.role, role, `${path}.role`);
   exact(ready.runtimeBuildManifestDigest, runtimeManifestDigest, `${path}.runtimeBuildManifestDigest`);
   exact(ready.startupRepair, null, `${path}.startupRepair`);
+  try {
+    assertRuntimeProcessIdentityV1(ready.processIdentity, `${path}.processIdentity`);
+  } catch (cause) {
+    fail(path, cause instanceof Error ? cause.message : String(cause));
+  }
   return boundedString(ready.peerId, `${path}.peerId`);
 }
 

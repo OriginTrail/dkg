@@ -36,35 +36,50 @@ program
   .description('DKG V10 node CLI')
   .version(getCliVersion());
 
-registerInitCommand(program);
-registerAgentCommand(program);
-registerAuthCommand(program);
-registerLifecycleCommands(program);
-registerNetworkCommands(program);
-registerKnowledgeCommands(program);
-registerKnowledgeAssetCommand(program);
-registerSyncCommand(program);
-registerContextGraphCommand(program);
-registerAssertionCommand(program);
-registerOpenclawCommand(program);
-registerMcpCommand(program);
-registerHermesCommand(program);
-registerPrimeAgentCommand(program);
-registerCclCommand(program);
-registerIndexCommand(program);
-registerSourceWorkerCommand(program);
-registerPcaCommand(program);
-registerPublisherCommand(program);
-registerEpcisCommand(program);
-registerNodeOpsCommands(program);
-registerQueryCatalogCommand(program);
-registerMaintenanceCommands(program);
-registerRandomSamplingCommand(program);
-registerOkfCommand(program);
-registerLlmCommand(program);
+if (process.argv[2] === 'rfc64-gate2-adapter') {
+  // Testnet evidence must enter through the same built CLI module as a
+  // release daemon. The adapter remains a harness-only protocol behind this
+  // explicit command and is never registered in the public command tree.
+  const role = process.argv[3];
+  if (role !== 'author' && role !== 'receiver') {
+    throw new Error('rfc64-gate2-adapter requires an author or receiver role');
+  }
+  process.argv.splice(2, 2, role);
+  await import(new URL(
+    '../../../devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts',
+    import.meta.url,
+  ).href);
+} else {
+  registerInitCommand(program);
+  registerAgentCommand(program);
+  registerAuthCommand(program);
+  registerLifecycleCommands(program);
+  registerNetworkCommands(program);
+  registerKnowledgeCommands(program);
+  registerKnowledgeAssetCommand(program);
+  registerSyncCommand(program);
+  registerContextGraphCommand(program);
+  registerAssertionCommand(program);
+  registerOpenclawCommand(program);
+  registerMcpCommand(program);
+  registerHermesCommand(program);
+  registerPrimeAgentCommand(program);
+  registerCclCommand(program);
+  registerIndexCommand(program);
+  registerSourceWorkerCommand(program);
+  registerPcaCommand(program);
+  registerPublisherCommand(program);
+  registerEpcisCommand(program);
+  registerNodeOpsCommands(program);
+  registerQueryCatalogCommand(program);
+  registerMaintenanceCommands(program);
+  registerRandomSamplingCommand(program);
+  registerOkfCommand(program);
+  registerLlmCommand(program);
 
-// ─── dkg integration ─────────────────────────────────────────────────
+  // ─── dkg integration ─────────────────────────────────────────────────
 
-registerIntegrationCommands(program);
+  registerIntegrationCommands(program);
 
-program.parse();
+  program.parse();
+}
