@@ -41,6 +41,19 @@ describe.sequential('knowledge-asset CLI smoke', () => {
         '',
       ].join('\n'),
     );
+    await writeFile(join(dkgHome, 'named.jsonld'), JSON.stringify({
+      '@context': { name: 'http://schema.org/name' },
+      '@id': 'urn:graph:named',
+      '@graph': [{ '@id': 'urn:company:named', name: 'Named' }],
+    }));
+    await writeFile(join(dkgHome, 'mixed.jsonld'), JSON.stringify([
+      { '@id': 'urn:company:default', 'http://schema.org/name': 'Default' },
+      { '@id': 'urn:graph:named', '@graph': [{ '@id': 'urn:company:named', 'http://schema.org/name': 'Named' }] },
+    ]));
+    await writeFile(join(dkgHome, 'legacy.jsonld'), JSON.stringify([{
+      subject: 'urn:company:legacy', predicate: 'http://schema.org/name',
+      object: '"Legacy"', graph: 'urn:graph:legacy',
+    }]));
     await writeFile(
       join(dkgHome, 'attestation.json'),
       JSON.stringify(PRE_SIGNED_AUTHOR_ATTESTATION),
@@ -343,6 +356,62 @@ describe.sequential('knowledge-asset CLI smoke', () => {
         graph: '',
       }),
     ]);
+  }, 30000);
+
+  it('rejects finalizing named-graph JSON-LD before any daemon request', async () => {
+    calls = [];
+    await expect(runCli([
+      'ka', 'create', 'named', '-c', 'research', '-f', join(dkgHome, 'named.jsonld'),
+    ], testEnv(dkgHome, smokeApiPort))).rejects.toMatchObject({
+      stderr: expect.stringContaining('--no-finalize'),
+    });
+    expect(calls).toEqual([]);
+  }, 30000);
+
+  it('rejects a mixed default/named JSON-LD dataset before any daemon request', async () => {
+    calls = [];
+    await expect(runCli([
+      'ka', 'create', 'mixed', '-c', 'research', '-f', join(dkgHome, 'mixed.jsonld'),
+    ], testEnv(dkgHome, smokeApiPort))).rejects.toMatchObject({ stderr: expect.stringContaining('--no-finalize') });
+    expect(calls).toEqual([]);
+  }, 30000);
+
+  it.each([null, [{ subject: 'urn:invalid', object: '"missing predicate"' }]])('uses the same legacy validation for JSON files and --triples: %j', async (input) => {
+    calls = [];
+    const raw = JSON.stringify(input);
+    const path = join(dkgHome, 'invalid-quads.json');
+    await writeFile(path, raw);
+    for (const inputArgs of [['--file', path], ['--triples', raw]]) {
+      await expect(runCli(['ka', 'write', 'invalid', '-c', 'research', ...inputArgs], testEnv(dkgHome, smokeApiPort)))
+        .rejects.toMatchObject({ stderr: expect.stringContaining('JSON input must contain an array of subject/predicate/object quads') });
+    }
+    expect(calls).toEqual([]);
+  }, 30000);
+
+  it('preserves named-graph JSON-LD in a WM-only create', async () => {
+    calls = [];
+    await runCli([
+      'ka', 'create', 'named', '-c', 'research', '-f', join(dkgHome, 'named.jsonld'),
+      '--no-finalize',
+    ], testEnv(dkgHome, smokeApiPort));
+    expect(calls.find((call) => call.url === '/api/knowledge-assets')?.body).toMatchObject({
+      finalize: false,
+      quads: [{ subject: 'urn:company:named', predicate: 'http://schema.org/name',
+        object: '"Named"', graph: 'urn:graph:named' }],
+    });
+  }, 30000);
+
+  it('still submits legacy JSON-LD named-graph quad arrays for default-finalizing create', async () => {
+    calls = [];
+    await runCli([
+      'ka', 'create', 'legacy', '-c', 'research', '-f', join(dkgHome, 'legacy.jsonld'),
+    ], testEnv(dkgHome, smokeApiPort));
+    const body = calls.find((call) => call.url === '/api/knowledge-assets')?.body;
+    expect(body?.finalize).toBeUndefined();
+    expect(body?.quads).toEqual([{
+      subject: 'urn:company:legacy', predicate: 'http://schema.org/name',
+      object: '"Legacy"', graph: 'urn:graph:legacy',
+    }]);
   }, 30000);
 
   it('preserves named graph metadata when the first parsed quad is default graph', async () => {
