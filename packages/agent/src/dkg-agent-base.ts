@@ -958,6 +958,9 @@ export class DKGAgentBase {
    */
   static readonly SWM_ACK_QUORUM_TICK_MS = 5_000;
 
+  /** Maximum expired SWM operations selected in one cleanup batch. */
+  static readonly SWM_CLEANUP_BATCH_SIZE = 250;
+
   /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
    * is the safety net behind the live `KnowledgeAssetRegisteredToContextGraph`
@@ -1081,6 +1084,8 @@ export class DKGAgentBase {
   /** Owns peer-event admission for the current node lifetime. */
   protected peerSyncSession = PeerSyncSession.stopped();
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Single-flight guard for SWM expiry cleanup. */
+  protected swmCleanupInFlight: Promise<number> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** One host-owned runtime for foreground dispatch and retained sweep admission. */
