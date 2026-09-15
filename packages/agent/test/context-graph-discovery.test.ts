@@ -1672,11 +1672,11 @@ describe('listContextGraphs merge', () => {
     const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
     const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
     Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
-      value: 1,
+      value: 50,
       configurable: true,
     });
     Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
-      value: 1,
+      value: 50,
       configurable: true,
     });
     try {
@@ -1688,7 +1688,10 @@ describe('listContextGraphs merge', () => {
       let sawAbort = false;
       let scanSettled: Promise<void> | undefined;
       const delayedScan = async (options?: any) => {
-        scanSettled = new Promise(resolve => setTimeout(resolve, 20));
+        // Leave a generous gap between the budget and the delayed work. A
+        // one-millisecond budget and a 20 ms delay can resolve in the wrong
+        // order on a loaded sharded runner, turning this into a timing race.
+        scanSettled = new Promise(resolve => setTimeout(resolve, 250));
         await scanSettled;
         sawAbort = options?.signal?.aborted === true;
         return [];
