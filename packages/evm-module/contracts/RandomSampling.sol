@@ -53,7 +53,13 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     // 10.6.0 — Sampling reads/keeper retargeted to ContextGraphStorage's
     //          `_samplingKAList` (getSamplingKaCount/At) so pruning no longer
     //          mutates the append-only registration ordinal the reconciler reads.
-    string private constant _VERSION = "10.6.0";
+    // 10.6.1 — reject contract callers at challenge creation. A smart-wallet
+    //          caller can preview the deterministic draw and revert until it
+    //          receives a favorable challenge, biasing proof-of-storage
+    //          selection. The EOA boundary is deliberate and scoped to this
+    //          one-shot entropy-consuming entry point; submitProof remains
+    //          callable by the registered identity's configured signer.
+    string private constant _VERSION = "10.6.1";
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Maximum number of in-CG resamples when the picker hits an
@@ -103,6 +109,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     ///         unlocks at deploy, fresh ledger); only held during an upgrade-in-place that seeds
     ///         existing CGs into the tree. While locked, the node retries on a later proof period.
     error ChallengeDrawPaused();
+    /// @notice RandomSampling challenges must be created by an EOA. A contract
+    /// caller can inspect the draw during the same transaction and revert on an
+    /// unfavorable result, grinding the challenge distribution.
+    error ContractCallerNotAllowed(address caller);
 
     /// @notice Emitted when {createChallenge} produces a new challenge for a
     ///         node. Off-chain consumers (node UI, indexers) use the indexed
@@ -138,6 +148,15 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      */
     modifier nodeExistsInShardingTable(uint72 identityId) {
         _checkNodeExistsInShardingTable(identityId);
+        _;
+    }
+
+    /// @dev `tx.origin` is used only as a caller-type check here. It is not
+    /// used for identity or authorization; those remain keyed to `msg.sender`.
+    modifier externallyOwnedCaller() {
+        if (msg.sender != tx.origin) {
+            revert ContractCallerNotAllowed(msg.sender);
+        }
         _;
     }
 
@@ -229,6 +248,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     // slither-disable-next-line incorrect-equality,reentrancy-events
     function createChallenge()
         external
+        externallyOwnedCaller
         profileExists(identityStorage.getIdentityId(msg.sender))
         nodeExistsInShardingTable(identityStorage.getIdentityId(msg.sender))
     {
