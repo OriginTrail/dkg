@@ -464,6 +464,7 @@ async function execute(): Promise<void> {
       'operation-completed',
       { catalogHeadDigest: forgedHeadDigest },
     ), 'forged terminal failure');
+    const failureCode = terminalFailure.errorCode;
     requiredString(terminalFailure.errorName, 'terminalFailure.errorName');
     exact(
       requiredDigest(terminalFailure.catalogHeadDigest, 'terminalFailure.catalogHeadDigest'),
