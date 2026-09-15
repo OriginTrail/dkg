@@ -16,6 +16,17 @@ gitignored local artifacts, validates their WIT world and bounded memories, and
 requires them to match `artifact-lock.json`. Generated Wasm and JavaScript glue
 are packaged in npm but are not stored in Git.
 
+Executing or admitting Programs requires a Node.js runtime with native
+WebAssembly JavaScript Promise Integration (JSPI); use **Node.js 26.8.2 or newer**,
+which is also the version exercised by the semantic runtime CI lanes.
+The default DKG installation
+and artifact build still support the repository's Node.js 22 baseline; opt-in
+semantic runtime deployments must use the newer Node.js executable. Node.js 22
+does not expose the required `WebAssembly.Suspending` and `WebAssembly.promising`
+APIs, even with its experimental JSPI flag. Startup checks these APIs before
+creating a runtime partition, and direct admission checks them before creating
+a component Worker. No V8 flags are enabled automatically.
+
 The packaged component owns bounded S-expression parsing, deterministic plan
 compilation, and canonical-plan re-admission. Compilation uses a disposable
 component Worker. Each active execution then has its own component instance and

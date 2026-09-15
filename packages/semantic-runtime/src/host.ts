@@ -26,6 +26,7 @@ import type {
   ComponentToolDispatcher,
   ExecutionCapabilityDescriptor,
 } from './component-types.js';
+import { assertSemanticRuntimeSupport } from './runtime-support.js';
 import {
   WorkerRequestTimeoutError,
   WorkerSupervisor,
@@ -107,6 +108,7 @@ export class SemanticRuntimeHost {
 
   async start(): Promise<void> {
     if (this.handle !== null) return;
+    assertSemanticRuntimeSupport();
     await this.supervisor.start();
     const requestId = this.nextAbiRequestId();
     const restoring = this.initialSnapshot !== null;

@@ -23,6 +23,7 @@ import type {
   ComponentWorkerRequest,
 } from './component-worker-protocol.js';
 import { verifyRuntimeArtifacts } from './integrity.js';
+import { assertSemanticRuntimeSupport } from './runtime-support.js';
 
 interface ComponentDiagnostic {
   code: string;
@@ -64,6 +65,7 @@ class ExecutionCapability {
 }
 
 if (!parentPort) throw new Error('semantic component Worker requires parentPort');
+assertSemanticRuntimeSupport();
 const port = parentPort;
 const bootstrap = workerData as ComponentWorkerBootstrap;
 const artifacts = verifyRuntimeArtifacts(bootstrap.artifactRoot);
@@ -73,14 +75,6 @@ if (
 ) {
   throw new Error('semantic component artifact identity differs from parent verification');
 }
-const jspi = WebAssembly as typeof WebAssembly & {
-  Suspending?: unknown;
-  promising?: unknown;
-};
-if (typeof jspi.Suspending !== 'function' || typeof jspi.promising !== 'function') {
-  throw new Error('semantic component host requires Node WebAssembly JSPI support');
-}
-
 const instanceId = randomUUID();
 const componentRoot = artifacts.componentRoot;
 const componentModule = await import(pathToFileURL(artifacts.componentJsPath).href) as ComponentModule;

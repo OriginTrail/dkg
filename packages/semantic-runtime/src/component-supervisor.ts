@@ -18,6 +18,7 @@ import type {
   ComponentWorkerToolCall,
 } from './component-worker-protocol.js';
 import { verifyRuntimeArtifacts } from './integrity.js';
+import { assertSemanticRuntimeSupport } from './runtime-support.js';
 
 const EXPECTED_COMBINED_ABI = (ABI_VERSION << 16) | SCHEMA_VERSION;
 
@@ -81,6 +82,7 @@ export class ComponentWorkerClient {
   async start(): Promise<void> {
     if (this.ready) return;
     if (this.stopped) throw new ComponentUnavailableError('component Worker is stopped');
+    assertSemanticRuntimeSupport();
     const artifacts = verifyRuntimeArtifacts(this.options.artifactRoot);
     const bootstrap: ComponentWorkerBootstrap = {
       artifactRoot: artifacts.root,
