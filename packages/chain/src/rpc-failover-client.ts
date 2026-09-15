@@ -105,14 +105,43 @@ export type ReadPolicy =
   | 'watchdogWideLogScan'
   | 'failOpenFundingRead';
 
-/** Per-read options: timeout/failover behavior plus an explicit low-cardinality
- *  telemetry consumer key for raw-read attribution (`eth_call` and
- *  `eth_getLogs`). `label` remains a human failover/span label and is not
- *  implicitly part of the daemon log contract. */
+/**
+ * The human-facing label and the low-cardinality telemetry owner for one RPC
+ * read. Keeping them together prevents a read from accidentally changing its
+ * diagnostic label while silently retaining (or losing) its usage bucket.
+ * `consumer: null` is an explicit opt-out for reads that must remain
+ * unattributed.
+ */
+export interface RpcReadDescriptor {
+  readonly label: string;
+  readonly consumer: string | null;
+}
+
+/** Construct an immutable, validated RPC read descriptor. */
+export function createRpcReadDescriptor(
+  label: string,
+  consumer: string | null = label,
+): RpcReadDescriptor {
+  if (typeof label !== 'string' || label.trim().length === 0) {
+    throw new TypeError('RPC read label must be a non-empty string');
+  }
+  if (consumer !== null && (typeof consumer !== 'string' || consumer.trim().length === 0)) {
+    throw new TypeError('RPC read consumer must be a non-empty string or null');
+  }
+  return Object.freeze({ label, consumer });
+}
+
+export type RpcReadDescriptorInput = string | RpcReadDescriptor;
+
+/** Per-read options: timeout/failover behavior plus a compatibility escape
+ *  hatch for callers that have not migrated to {@link RpcReadDescriptor} yet.
+ *  New code should put the consumer owner beside the human label in a
+ *  descriptor. `null` deliberately suppresses raw-read attribution. */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
-  rpcUsageConsumer?: string;
+  /** @deprecated Use `RpcReadDescriptor.consumer`; retained for compatibility. */
+  rpcUsageConsumer?: string | null;
   /**
    * Opt this read OUT of endpoint stickiness — it always uses the canonical
    * (configured) endpoint order AND never mutates the preferred pointer
@@ -316,6 +345,25 @@ export class RpcFailoverClient {
     return `${this.chainId()}|read-bucket|${policy}|${preference}`;
   }
 
+  private resolveReadDescriptor(
+    input: RpcReadDescriptorInput,
+    opts?: ReadOpts,
+  ): RpcReadDescriptor {
+    if (typeof input === 'string') {
+      return createRpcReadDescriptor(
+        input,
+        opts?.rpcUsageConsumer === undefined ? input : opts.rpcUsageConsumer,
+      );
+    }
+    const descriptor = createRpcReadDescriptor(input.label, input.consumer);
+    if (opts?.rpcUsageConsumer !== undefined && opts.rpcUsageConsumer !== descriptor.consumer) {
+      throw new TypeError(
+        `RPC read descriptor consumer conflict for "${descriptor.label}"`,
+      );
+    }
+    return descriptor;
+  }
+
   /**
    * Single chain-RPC outcome boundary: records `dkg.chain.rpc.total` (and the
    * `dkg.chain.rpc.failover.total` exhaustion counter) with ONE identical,
@@ -352,10 +400,12 @@ export class RpcFailoverClient {
    * more than one provider.
    */
   read<T>(
-    label: string,
+    descriptorInput: RpcReadDescriptorInput,
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
+    const descriptor = this.resolveReadDescriptor(descriptorInput, opts);
+    const { label } = descriptor;
     const policy = opts?.policy ?? 'pointRead';
     const skipPreferred = opts?.skipPreferred ?? false;
     const runPass = () => this.runAcrossProviders(
@@ -379,8 +429,8 @@ export class RpcFailoverClient {
     const runWithAbort = () => opts?.signal
       ? withRpcRequestContext({ signal: opts.signal }, run)
       : run();
-    return opts?.rpcUsageConsumer
-      ? withRpcUsageConsumer(opts.rpcUsageConsumer, runWithAbort)
+    return descriptor.consumer !== null
+      ? withRpcUsageConsumer(descriptor.consumer, runWithAbort)
       : runWithAbort();
   }
 
@@ -394,11 +444,13 @@ export class RpcFailoverClient {
    * `opts.isRetryable`.
    */
   readContract<T>(
-    label: string,
+    descriptorInput: RpcReadDescriptorInput,
     contract: Contract,
     fn: (c: Contract) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
+    const descriptor = this.resolveReadDescriptor(descriptorInput, opts);
+    const { label } = descriptor;
     const chainId = this.chainId();
     const policy = opts?.policy ?? 'pointRead';
     const skipPreferred = opts?.skipPreferred ?? false;
@@ -449,8 +501,8 @@ export class RpcFailoverClient {
     const runWithAbort = () => opts?.signal
       ? withRpcRequestContext({ signal: opts.signal }, run)
       : run();
-    return opts?.rpcUsageConsumer
-      ? withRpcUsageConsumer(opts.rpcUsageConsumer, runWithAbort)
+    return descriptor.consumer !== null
+      ? withRpcUsageConsumer(descriptor.consumer, runWithAbort)
       : runWithAbort();
   }
 

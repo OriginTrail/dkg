@@ -198,6 +198,11 @@ export {
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
+  createRpcReadDescriptor,
+  type RpcReadDescriptor,
+  type RpcReadDescriptorInput,
+} from './rpc-failover-client.js';
+export {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
   isChainRpcTransportError,
