@@ -43,7 +43,10 @@ describe('DKGAgent RFC-64 authority RPC circuit status boundary', () => {
     ]);
 
     now = 1_100;
-    await expect(coordinator.run(undefined, async () => 'recovered')).resolves.toBe('recovered');
+    await expect(coordinator.run(undefined, async (_signal, evidence) => {
+      evidence.markRpcAttempt();
+      return 'recovered';
+    })).resolves.toBe('recovered');
     expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1()).toEqual({
       state: 'closed',
       consecutiveExhaustions: 0,
