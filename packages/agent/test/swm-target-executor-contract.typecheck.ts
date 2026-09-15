@@ -23,8 +23,14 @@ const selected: PublicSwmTargetV1 = {
   mode: { kind: 'selected-recovery', recoveryGuard },
 };
 
+const selectedLegacyLayout: PublicSwmTargetV1 = {
+  ...base,
+  mode: { kind: 'selected-recovery', recoveryGuard, metadataFetcher },
+};
+
 void ordinary;
 void selected;
+void selectedLegacyLayout;
 
 const selectedWithoutGuard: PublicSwmTargetV1 = {
   ...base,
@@ -104,7 +110,6 @@ const ordinaryModeWithMetadata: SharedMemorySyncContext['mode'] = {
 const selectedModeWithMetadata: SharedMemorySyncContext['mode'] = {
   kind: 'selected-recovery',
   recoveryGuard,
-  // @ts-expect-error Selected recovery does not change the retrieval dependency boundary.
   metadataFetcher,
 };
 

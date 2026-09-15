@@ -7418,16 +7418,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         run: async (): Promise<SharedMemorySyncResult> => {
           const recoveryLease = recoveryLeaseFor(contextGraphId);
           try {
-            const recovered = await recoverContextGraphSwmWithProgressRetries({
-              recover: () => recoverPrivateContextGraph(contextGraphId, recoveryLease),
-              onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+            const recovered = await recoverPrivateContextGraph(
+              contextGraphId,
+              recoveryLease,
+              ({ completedRound, readySnapshots, totalSnapshots }) => {
                 this.log.info(
                   ctx,
                   `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
                   + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
                 );
               },
-            });
+            );
             const result = emptySharedMemorySyncResult();
             result.insertedDataTriples = recovered.insertedDataQuads;
             result.insertedMetaTriples = recovered.insertedMetaQuads;
@@ -7594,109 +7595,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? {
             contextGraphId: target.contextGraphId,
             lane: 'shared_memory',
-            operationId: `shared-memory:${contextGraphId}:${remotePeerId.slice(-8)}`,
+            operationId: `shared-memory:${target.contextGraphId}:${remotePeerId.slice(-8)}`,
             run: (remainingContextGraphs: number) => syncPublicContextGraph(
-              contextGraphId,
+              target.contextGraphId,
               remainingContextGraphs,
             ),
-          });
-          continue;
-        }
-        work.push({
-          contextGraphId,
-          lane: 'swm_recovery',
-          operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-          run: async (): Promise<SharedMemorySyncResult> => {
-            const recoveryLease = recoveryLeaseFor(contextGraphId);
-            try {
-              const recovered = await recoverPrivateContextGraph(
-                contextGraphId, recoveryLease,
-                ({ completedRound, readySnapshots, totalSnapshots }) => {
-                  this.log.info(
-                    ctx,
-                    `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
-                    + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
-                  );
-                },
-              );
-              const result = emptySharedMemorySyncResult();
-              result.insertedDataTriples = recovered.insertedDataQuads;
-              result.insertedMetaTriples = recovered.insertedMetaQuads;
-              result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
-              result.droppedDataTriples = recovered.droppedDataTriples;
-              // An incomplete recovery can retain whole verified KAs, but must
-              // remain retryable. A local admission yield is not a peer failure.
-              if (recovered.completed) {
-                result.completedPhases = 1;
-                completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
-              } else {
-                recordSharedMemoryPhaseFailure(
-                  result,
-                  recovered.phaseFailureCause,
-                );
-                if (!recovered.localYield) {
-                  result.backoffWorthyFailures = 1;
-                }
-              }
-              return result;
-            } catch (error) {
-              if (getSyncBackpressureBusyError(error)) throw error;
-              this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${error instanceof Error ? error.message : String(error)}`);
-              return {
-                ...emptySharedMemorySyncResult(),
-                failedPeers: 1,
-                backoffWorthyFailures: 1,
-              };
-            }
-          },
-        });
-      }
-
-      const initialSummary = await runOrderedContextGraphSyncs({
-        work,
-        priorities: this.config.syncContextGraphPriorities,
-        emptyResult: emptySharedMemorySyncResult,
-        runWithAdmission: (item, run) => {
-          const selectedPublicWork = selectedSwmEnabled
-            && item.lane === 'shared_memory';
-          return this.runContextGraphSyncWithBackpressure(
-            ctx,
-            item.contextGraphId,
-            item.lane,
-            item.operationId,
-            run,
-            {
-              priorityOverride: selectedPublicWork ? options?.priority : undefined,
-              source: options?.source,
-              selectedSwmPriority: selectedPublicWork,
-            },
-          );
-        },
-        merge: mergeSharedMemorySyncResults,
-        onResult: (item, result) => {
-          if (
-            selectedSwmEnabled
-            && item.lane === 'shared_memory'
-            && recoveryLeaseFor(item.contextGraphId)?.isCurrent() !== false
-          ) {
-            const metadataContinuation = metaFetcher!.continuation(
-              item.contextGraphId,
-            );
-            selectedContinuationUnits.push({
-              work: {
-                ...item,
-                run: async (remainingContextGraphs) => {
-                  const nextResult = await item.run(remainingContextGraphs);
-                  return {
-                    result: nextResult,
-                    metadataContinuation: metaFetcher!.continuation(
-                      item.contextGraphId,
-                    ),
-                  };
-                },
-              },
-              initialRound: { result, metadataContinuation },
-            });
           }
           : privateWork(target)
       ));
