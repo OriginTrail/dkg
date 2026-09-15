@@ -74,13 +74,16 @@ export function finalizationRecoveryRowToEntry(
       JSON.parse(String(row.verified_evidence_json)),
     );
   const evidenceState = state === 'VERIFIED' || state === 'SETTLED';
-  if (evidenceState !== Boolean(verifiedEvidence)) {
+  if (evidenceState && !verifiedEvidence) {
     throw new Error(
-      evidenceState
-        ? 'Finalization inbox verified row has no evidence'
-        : 'Finalization inbox unverified row has verified evidence',
+      'Finalization inbox verified row has no evidence',
     );
   }
+  if (
+    !evidenceState
+    && (state === 'RECEIVED' || state === 'REORGED' || state === 'UNSUPPORTED')
+    && verifiedEvidence
+  ) throw new Error('Finalization inbox unverified row has verified evidence');
   const evidenceColumns = [
     row.block_number,
     row.block_hash,
@@ -155,7 +158,19 @@ export function finalizationRecoveryRowToEntry(
     createdAt: asSafeInteger(row.created_at, 'created_at'),
     updatedAt: asSafeInteger(row.updated_at, 'updated_at'),
   };
-  return verifiedEvidence
-    ? { ...base, state: state as 'VERIFIED' | 'SETTLED', verifiedEvidence }
-    : { ...base, state: state as Exclude<FinalizationRecoveryState, 'VERIFIED' | 'SETTLED'> };
+  if (evidenceState) {
+    return {
+      ...base,
+      state: state as 'VERIFIED' | 'SETTLED',
+      verifiedEvidence: verifiedEvidence!,
+    };
+  }
+  if (state === 'SUPERSEDED' || state === 'REJECTED') {
+    return {
+      ...base,
+      state,
+      ...(verifiedEvidence ? { verifiedEvidence } : {}),
+    };
+  }
+  return { ...base, state };
 }

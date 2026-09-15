@@ -1,5 +1,6 @@
 import type {
   FinalizationRecoveryEntry,
+  HistoricalFinalizationRecoveryEntry,
   UnverifiedFinalizationRecoveryEntry,
   VerifiedFinalizationRecoveryEntry,
 } from '@origintrail-official/dkg-agent';
@@ -26,6 +27,10 @@ const settled: FinalizationRecoveryEntry = {
   state: 'SETTLED',
   verifiedEvidence,
 };
+const historical: HistoricalFinalizationRecoveryEntry = {
+  ...fields,
+  state: 'SUPERSEDED',
+};
 
 // Evidence-bearing states cannot be constructed without evidence.
 // @ts-expect-error VERIFIED entries require verifiedEvidence.
@@ -46,6 +51,7 @@ export declare const pinned: [
   typeof received,
   typeof verified,
   typeof settled,
+  typeof historical,
   typeof missingEvidence,
   typeof prematureEvidence,
 ];

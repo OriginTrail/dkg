@@ -601,7 +601,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       }
       const entry = finalizationRecoveryRowToEntry(updated);
       if (
-        entry.generation === fields.generation
+        (entry.state === 'VERIFIED' || entry.state === 'SETTLED')
+        && entry.generation === fields.generation
         && entry.verifiedEvidence
         && VerifiedGraphScopedFinalizationEvidenceCodec.same(
           entry.verifiedEvidence,

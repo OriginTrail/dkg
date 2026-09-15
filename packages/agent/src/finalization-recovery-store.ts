@@ -42,7 +42,7 @@ interface FinalizationRecoveryEntryFields {
 
 /** Entries that have not acquired chain-verified finalization evidence. */
 export type UnverifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
-  state: Exclude<FinalizationRecoveryState, 'VERIFIED' | 'SETTLED'>;
+  state: 'RECEIVED' | 'REORGED' | 'UNSUPPORTED';
   verifiedEvidence?: never;
 };
 
@@ -52,9 +52,16 @@ export type VerifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields 
   verifiedEvidence: VerifiedGraphScopedFinalizationEvidence;
 };
 
+/** Terminal rows retain optional evidence for bounded diagnostics and audit. */
+export type HistoricalFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
+  state: 'SUPERSEDED' | 'REJECTED';
+  verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
+};
+
 export type FinalizationRecoveryEntry =
   | UnverifiedFinalizationRecoveryEntry
-  | VerifiedFinalizationRecoveryEntry;
+  | VerifiedFinalizationRecoveryEntry
+  | HistoricalFinalizationRecoveryEntry;
 
 export interface FinalizationRecoveryReceiveInput {
   key: string;
@@ -125,7 +132,7 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
 ): FinalizationRecoveryVerifiedEvidenceTransitionPlan {
   const { evidence } = commit;
   if (current.generation !== generation) return { status: 'conflict' };
-  if (current.verifiedEvidence) {
+  if (current.state === 'VERIFIED' || current.state === 'SETTLED') {
     return VerifiedGraphScopedFinalizationEvidenceCodec.same(
       current.verifiedEvidence,
       evidence,
@@ -133,6 +140,7 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
       ? { status: 'existing', entry: current }
       : { status: 'conflict' };
   }
+  if (current.verifiedEvidence) return { status: 'conflict' };
   if (
     (current.state !== 'RECEIVED' && current.state !== 'REORGED')
     || (

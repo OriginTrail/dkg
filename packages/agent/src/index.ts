@@ -376,6 +376,7 @@ export {
 export type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryStore,
+  HistoricalFinalizationRecoveryEntry,
   UnverifiedFinalizationRecoveryEntry,
   VerifiedFinalizationRecoveryEntry,
 } from './finalization-recovery-store.js';
