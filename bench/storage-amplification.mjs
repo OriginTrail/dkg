@@ -35,7 +35,7 @@ function uri(value) {
 }
 
 function quadText({ subject, predicate, object, graph }) {
-  return `<${subject}> <${predicate}> <${object}> <${graph}> .\n`;
+  return `<${subject}> <${predicate}> ${object} <${graph}> .\n`;
 }
 
 function makeStageQuads(stage, cardinality, retainedAssets) {
@@ -48,7 +48,7 @@ function makeStageQuads(stage, cardinality, retainedAssets) {
       quads.push({
         subject,
         predicate: uri(`predicate/${suffix}`),
-        object: uri(`object/${suffix}`),
+        object: `"value-${suffix}"`,
         graph,
       });
     }
