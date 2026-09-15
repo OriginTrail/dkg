@@ -53,6 +53,7 @@ import {
   RpcFailoverClient,
   createRpcReadDescriptor,
   type ReadOpts,
+  type RpcReadDescriptor,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
@@ -107,6 +108,18 @@ type SerializedSignerWriteContext = {
   /** Refresh the lane-health clock after a meaningful write-stage boundary. */
   markProgress: () => void;
 };
+
+/**
+ * Bind an adapter read's human label and telemetry owner together.
+ *
+ * Kept as a module helper so it does not become part of the concrete adapter's
+ * prototype API (the mock-adapter parity test intentionally enumerates that
+ * surface).
+ */
+function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
+  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
+  return createRpcReadDescriptor(label, consumer);
+}
 
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
@@ -1483,7 +1496,7 @@ export class EVMChainAdapterBase {
     opts?: ReadOpts,
   ): Promise<T> {
     return this.rpcFailover.readContract(
-      this.rpcReadDescriptor(label, opts),
+      rpcReadDescriptor(label, opts),
       contract,
       (c) => c[method](...args),
       opts,
@@ -1519,7 +1532,7 @@ export class EVMChainAdapterBase {
     opts?: ReadOpts,
   ): Promise<T> {
     return this.rpcFailover.readContract(
-      this.rpcReadDescriptor(label, opts),
+      rpcReadDescriptor(label, opts),
       contract,
       fn,
       opts,
@@ -1538,17 +1551,7 @@ export class EVMChainAdapterBase {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.read(this.rpcReadDescriptor(label, opts), fn, opts);
-  }
-
-  /**
-   * Adapter-owned reads bind their human label and telemetry owner together.
-   * The legacy `ReadOpts.rpcUsageConsumer` field remains accepted at the
-   * helper boundary, including `null` for a deliberate unattributed read.
-   */
-  private rpcReadDescriptor(label: string, opts?: ReadOpts) {
-    const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
-    return createRpcReadDescriptor(label, consumer);
+    return this.rpcFailover.read(rpcReadDescriptor(label, opts), fn, opts);
   }
 
   /**
