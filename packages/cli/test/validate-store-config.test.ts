@@ -29,7 +29,13 @@ function mk(overrides: Partial<DkgConfig> = {}): DkgConfig {
 describe('validateStoreConfig', () => {
   it.each(['linux', 'darwin', 'win32'] as const)('shares memory support policy between preflight and launch on %s', (platform) => {
     const diagnostics = validateStoreConfig({ store: { backend: 'oxigraph-server', options: { memoryMaxMiB: 1024 } } }, platform);
-    const launch = () => createOxigraphLaunchStrategy({ memoryLimits: { maxMiB: 1024 }, platform, parentPid: 42, uid: 1000 });
+    const launch = () => createOxigraphLaunchStrategy({
+      memoryLimits: { maxMiB: 1024 },
+      platform,
+      parentPid: 42,
+      parentIdentity: 'pid-42',
+      uid: 1000,
+    });
     if (platform === 'linux') {
       expect(diagnostics).toEqual([]);
       expect(launch().mode).toBe('systemd-scope');
@@ -38,7 +44,8 @@ describe('validateStoreConfig', () => {
       expect(launch).toThrow(diagnostics[0].message);
     }
     expect(validateStoreConfig({ store: { backend: 'oxigraph-server' } }, platform)).toEqual([]);
-    expect(createOxigraphLaunchStrategy({ platform, parentPid: 42, uid: 1000 }).mode).toBe('direct');
+    expect(createOxigraphLaunchStrategy({ platform, parentPid: 42, uid: 1000 }).mode)
+      .toBe(platform === 'win32' ? 'parent-watchdog' : 'direct');
   });
   it('validates raw operator JSON without assuming a complete typed config', () => {
     const raw: Record<string, unknown> = {
