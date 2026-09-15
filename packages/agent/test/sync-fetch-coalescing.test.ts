@@ -606,6 +606,44 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('evicts an aborted shared lane before starting its replacement fetch', async () => {
+    const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
+    const identity = createSyncFetchSharingIdentity();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
+    const abort = new AbortController();
+    const workAdmission = () => createSyncWorkAdmission(() => 1_000, {
+      fetchSharingIdentity: identity,
+    });
+
+    try {
+      const first = fetchPages(agent, {
+        signal: abort.signal,
+        workAdmission: workAdmission(),
+      });
+      await flushMicrotasks();
+      expect(sends).toBe(1);
+
+      abort.abort(new Error('first waiter aborted'));
+      await expect(first).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'first waiter aborted',
+      });
+
+      const replacement = fetchPages(agent, { workAdmission: workAdmission() });
+      await flushMicrotasks();
+      expect(sends).toBe(2);
+
+      responses[1]!.resolve(new Uint8Array());
+      await expect(replacement).resolves.toMatchObject({ quads: [] });
+      responses[0]!.resolve(new Uint8Array());
+      await flushMicrotasks();
+    } finally {
+      for (const response of responses) response.resolve(new Uint8Array());
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('joins concurrent direct durable syncs and clears the entry after settle', async () => {
     const firstMetaFetch = deferred<SyncPageResult>();
     let fetchCalls = 0;
