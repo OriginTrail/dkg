@@ -27,6 +27,22 @@
 const PROMOTE_STEP_TAG_PREFIX = '[promote:';
 
 /**
+ * Producer-owned promote stages that may cross the async diagnostic boundary.
+ * Keep this tuple next to the tagger so the CLI cannot silently drift when a
+ * stage is added or renamed in the publisher.
+ */
+export const PROMOTE_STEP_NAMES = [
+  'ensureSubGraphRegistered',
+  'assertGraphScopedLifecycleWritable',
+  'knowledgeAssetPrivateQuads',
+  'assertionScopedQuads',
+  'assertTrustedCatalogTriplesAllowed',
+  'encodeWorkspaceGossipPayload',
+] as const;
+
+export type PromoteStepName = (typeof PROMOTE_STEP_NAMES)[number];
+
+/**
  * Return `err` re-labelled with the promote step that produced it. Idempotent:
  * an error already carrying a `[promote:…]` prefix (the innermost, most specific
  * step) is returned untouched, so nesting a tagged op inside another tagged op
@@ -64,7 +80,7 @@ export function tagPromoteError(step: string, err: unknown): unknown {
  * {@link tagPromoteError}. Resolved values pass through unchanged. The `op` is
  * a thunk so it is invoked inside the try — a synchronous throw is tagged too.
  */
-export async function tagPromoteStep<T>(step: string, op: () => Promise<T>): Promise<T> {
+export async function tagPromoteStep<T>(step: PromoteStepName, op: () => Promise<T>): Promise<T> {
   try {
     return await op();
   } catch (err) {
