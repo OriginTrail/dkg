@@ -1,7 +1,7 @@
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import {
-  emitSwmHead, emitSwmPublicSlice, emitGraphSwmSnapshotFragment, SWM_PREDICATES,
+  emitSwmHead, emitSwmPublicSlice, emitGraphSwmSnapshotFragment,
 } from './swm-metadata-schema.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { SYSTEM_CONTEXT_GRAPHS, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runDurableSync,
@@ -14,8 +14,6 @@ import {
 } from '../src/sync/requester/ordered-sync.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
-import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { SwmMetaTransferCoordinator } from '../src/sync/swm-meta-transfer-coordinator.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {

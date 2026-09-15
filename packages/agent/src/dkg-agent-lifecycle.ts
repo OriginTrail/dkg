@@ -347,7 +347,6 @@ import {
   emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,
-  recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
   createSwmMetaFetcher,
