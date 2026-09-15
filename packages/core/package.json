@@ -40,6 +40,11 @@
       "import": "./dist/sparql-safe.js",
       "default": "./dist/sparql-safe.js"
     },
+    "./sparql-lexer": {
+      "types": "./dist/sparql-lexer.d.ts",
+      "import": "./dist/sparql-lexer.js",
+      "default": "./dist/sparql-lexer.js"
+    },
     "./closed-data-snapshot": {
       "types": "./dist/sync-wire-objects.d.ts",
       "import": "./dist/sync-wire-objects.js",
