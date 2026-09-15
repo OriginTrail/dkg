@@ -148,6 +148,7 @@ const requiredCatalogMethods = [
   'recordConfirmedRfc64PublicCatalogAssetV1',
   'synchronizeRfc64PublicCatalogFromProviderV1',
   'readRfc64PublicCatalogBootstrapStatusV1',
+  'readRfc64CatalogStatusSnapshotV1',
   'whenRfc64PublicCatalogBootstrapIdleV1',
 ];
 for (const method of requiredCatalogMethods) {
@@ -338,6 +339,7 @@ const blockedRfc64Modules = [
   'background-work-dispatcher-v1.js',
   'supervisor-status-v1.js',
   'catalog-shadow-observability-v1.js',
+  'catalog-status-snapshot-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
 const emittedRfc64Modules = await listEmittedRfc64Modules();

@@ -84,6 +84,10 @@ import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-pr
 import type { Rfc64CatalogShadowExecutionStatusV1 } from
   './rfc64/catalog-shadow-observability-v1.js';
 import {
+  buildRfc64CatalogStatusSnapshotV1,
+  type Rfc64CatalogStatusSnapshotV1,
+} from './rfc64/catalog-status-snapshot-v1.js';
+import {
   RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1,
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
@@ -1424,6 +1428,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       projectionSupervisor: this.readRfc64SwmCatalogProjectionSupervisorStatusV1(),
       bootstrap: this.readRfc64PublicCatalogBootstrapStatusV1(),
       inFlightInventoryObservers: this.inFlightRfc64SwmInventoryObserverCountV1(),
+    });
+  }
+
+  /**
+   * One versioned, privacy-safe operator snapshot. HTTP consumers must not
+   * reconstruct this state from the individual RFC-64 subsystem readers.
+   */
+  async readRfc64CatalogStatusSnapshotV1(
+    this: DKGAgent,
+  ): Promise<Rfc64CatalogStatusSnapshotV1> {
+    const activations = this.config.rfc64CatalogActivations;
+    const enabled = activations.catalog.enabled;
+    return buildRfc64CatalogStatusSnapshotV1({
+      activations,
+      runtime: {
+        service: enabled ? this.rfc64PublicCatalogStatsV1() : null,
+        bootstrap: enabled ? this.readRfc64PublicCatalogBootstrapStatusV1() : null,
+        runtimeSelection: this.readRfc64CatalogRuntimeSelectionV1(),
+        responsibilities: this.readRfc64CatalogResponsibilitiesV1(),
+        authorityRpcCircuit: this.readRfc64AuthorityRpcCircuitSnapshotV1(),
+        contextGraphs: await this.readRfc64CatalogOperationalStatusV1(),
+        shadowExecution: enabled ? this.readRfc64CatalogShadowExecutionStatusV1() : null,
+      },
     });
   }
 

@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { buildRfc64CatalogStatusSnapshotV1 } from '@origintrail-official/dkg-agent';
 import {
   resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -24,9 +25,33 @@ const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
   enabled: false,
   selectedContextGraphs: [],
 };
-const EPHEMERAL_RFC64_ACTIVATION_STATE = resolveRfc64CatalogActivationsV1({
+const EPHEMERAL_RFC64_ACTIVATIONS = resolveRfc64CatalogActivationsV1({
   persistenceAvailable: false,
-}, resolveRfc64PublicCatalogActivationChainIdentityV1(undefined)).activationState;
+}, resolveRfc64PublicCatalogActivationChainIdentityV1(undefined));
+const EPHEMERAL_RFC64_ACTIVATION_STATE = EPHEMERAL_RFC64_ACTIVATIONS.activationState;
+
+function readDisabledRfc64CatalogStatusSnapshotV1() {
+  return buildRfc64CatalogStatusSnapshotV1({
+    activations: EPHEMERAL_RFC64_ACTIVATIONS,
+    runtime: {
+      service: null,
+      bootstrap: null,
+      runtimeSelection: {
+        subscriptionDriven: false,
+        eligibleContextGraphs: [],
+        selectedContextGraphs: [],
+      },
+      responsibilities: [],
+      authorityRpcCircuit: {
+        state: 'closed',
+        consecutiveExhaustions: 0,
+        retryAtMs: null,
+      },
+      contextGraphs: [],
+      shadowExecution: null,
+    },
+  });
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -79,6 +104,7 @@ async function startStatusServer(query: () => Promise<unknown>): Promise<{
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
+        readRfc64CatalogStatusSnapshotV1: readDisabledRfc64CatalogStatusSnapshotV1,
       },
       nodeVersion: '0.0.0-test',
       nodeCommit: '',

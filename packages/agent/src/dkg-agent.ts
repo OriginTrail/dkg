@@ -1515,6 +1515,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogBootstrap,
       rfc64CatalogAuthoringPolicy,
       rfc64CatalogExecutionPlan,
+      rfc64CatalogActivations: activations,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),
