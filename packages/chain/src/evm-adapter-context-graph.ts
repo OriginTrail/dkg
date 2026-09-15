@@ -39,47 +39,18 @@ import { contextGraphAuthorityIndexIdFromBigInt } from
 import { readEvmContextGraphAuthorityStateV1 } from
   './evm-context-graph-authority-index-reader.js';
 
-type ContextGraphRegistryLiveScanPlan =
-  | {
-      mode: 'explicitFromBlock' | 'listAll';
-      resumeFromWatermark: false;
-      persistProgress: false;
-      allowPartialFailure: false;
-      seedAtEnd: false;
-      pageBudget?: undefined;
-    }
-  | {
-      mode: 'incremental';
-      resumeFromWatermark: true;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: false;
-      pageBudget?: number;
-    }
-  | {
-      mode: 'seedFull';
-      resumeFromWatermark: false;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: undefined;
-    }
-  | {
-      mode: 'seedFromCursor';
-      resumeFromWatermark: true;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: number;
-    }
-  | {
-      mode: 'seedLiveTail';
-      resumeFromWatermark: false;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: number;
-    };
+type ContextGraphRegistryLiveScanMode =
+  | 'explicitFromBlock'
+  | 'listAll'
+  | 'incremental'
+  | 'seedFull'
+  | 'seedFromCursor'
+  | 'seedLiveTail';
+
+type ContextGraphRegistryLiveScanPlan = {
+  mode: ContextGraphRegistryLiveScanMode;
+  pageBudget?: number;
+};
 
 type ContextGraphRegistryRepairScanPlan = {
   mode: 'repair';
@@ -99,6 +70,27 @@ function normalizePageBudget(value: number | undefined): number | undefined {
     : undefined;
 }
 
+/**
+ * Mode-specific scan policy. Keeping these decisions behind named helpers
+ * prevents the page loop from growing another matrix of loosely-related
+ * booleans as new registry scan modes are added.
+ */
+function resumesFromWatermark(mode: ContextGraphRegistryLiveScanMode): boolean {
+  return mode === 'incremental' || mode === 'seedFromCursor';
+}
+
+function persistsWatermark(mode: ContextGraphRegistryLiveScanMode): boolean {
+  return mode !== 'explicitFromBlock' && mode !== 'listAll';
+}
+
+function seedsWatermarkAtEnd(mode: ContextGraphRegistryLiveScanMode): boolean {
+  return mode === 'seedFull' || mode === 'seedFromCursor' || mode === 'seedLiveTail';
+}
+
+function allowsPartialFailure(mode: ContextGraphRegistryLiveScanMode): boolean {
+  return mode !== 'explicitFromBlock' && mode !== 'listAll';
+}
+
 function buildPublicContextGraphRegistryScanPlan(
   fromBlock: number | undefined,
   options: ContextGraphChainScanOptions | undefined,
@@ -109,24 +101,11 @@ function buildPublicContextGraphRegistryScanPlan(
   const mode = runtimeOptions?.mode;
 
   if (fromBlock !== undefined) {
-    return {
-      mode: 'explicitFromBlock',
-      resumeFromWatermark: false,
-      persistProgress: false,
-      allowPartialFailure: false,
-      seedAtEnd: false,
-    };
+    return { mode: 'explicitFromBlock' };
   }
 
   if (runtimeOptions && 'incremental' in runtimeOptions && runtimeOptions.incremental === true) {
-    return {
-      mode: 'incremental',
-      resumeFromWatermark: true,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: false,
-      pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
-    };
+    return { mode: 'incremental', pageBudget: normalizePageBudget(runtimeOptions.pageBudget) };
   }
 
   if (
@@ -137,20 +116,10 @@ function buildPublicContextGraphRegistryScanPlan(
     if (runtimeOptions.resumeFromCursor === true) {
       return {
         mode: 'seedFromCursor',
-        resumeFromWatermark: true,
-        persistProgress: true,
-        allowPartialFailure: true,
-        seedAtEnd: true,
         pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
       };
     }
-    return {
-      mode: 'seedFull',
-      resumeFromWatermark: false,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-    };
+    return { mode: 'seedFull' };
   }
 
   if (mode !== undefined && mode !== 'listAll') {
@@ -160,59 +129,26 @@ function buildPublicContextGraphRegistryScanPlan(
     );
   }
 
-  return {
-    mode: 'listAll',
-    resumeFromWatermark: false,
-    persistProgress: false,
-    allowPartialFailure: false,
-    seedAtEnd: false,
-  };
+  return { mode: 'listAll' };
 }
 
 function buildCursorContextGraphRegistryScanPlan(
   options: ContextGraphRegistryScanOptions,
 ): ContextGraphRegistryScanPlan {
   if (options.mode === 'incremental') {
-    return {
-      mode: 'incremental',
-      resumeFromWatermark: true,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: false,
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
+    return { mode: 'incremental', pageBudget: normalizePageBudget(options.pageBudget) };
   }
 
   if (options?.mode === 'seedFull') {
-    return {
-      mode: 'seedFull',
-      resumeFromWatermark: false,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-    };
+    return { mode: 'seedFull' };
   }
 
   if (options?.mode === 'seedFromCursor') {
-    return {
-      mode: 'seedFromCursor',
-      resumeFromWatermark: true,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
+    return { mode: 'seedFromCursor', pageBudget: normalizePageBudget(options.pageBudget) };
   }
 
   if (options?.mode === 'seedLiveTail') {
-    return {
-      mode: 'seedLiveTail',
-      resumeFromWatermark: false,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
+    return { mode: 'seedLiveTail', pageBudget: normalizePageBudget(options.pageBudget) };
   }
 
   if (options?.mode === 'repair') {
@@ -392,18 +328,18 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     scanPlan: ContextGraphRegistryLiveScanPlan,
     signal?: AbortSignal,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
-    const watermarkOwner = scanPlan.persistProgress
+    const watermarkOwner = persistsWatermark(scanPlan.mode)
       ? this.contextGraphRegistryScanCursor.beginWatermarkScan(registryAddress)
       : undefined;
-    if (scanPlan.persistProgress && watermarkOwner === undefined) {
+    if (persistsWatermark(scanPlan.mode) && watermarkOwner === undefined) {
       throw new Error('ContextGraphNameRegistry live scan already has an active cursor owner');
     }
     try {
       signal?.throwIfAborted();
-      const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
+      const persistedWatermark = (resumesFromWatermark(scanPlan.mode) || seedsWatermarkAtEnd(scanPlan.mode))
         ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
         : undefined;
-      const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
+      const canResumeFromWatermark = resumesFromWatermark(scanPlan.mode) && persistedWatermark !== undefined;
       const scan = fromBlock === undefined
         ? scanPlan.mode === 'seedLiveTail'
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
@@ -432,7 +368,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
 
       if (start > head) {
-        if (scanPlan.seedAtEnd) {
+        if (seedsWatermarkAtEnd(scanPlan.mode)) {
           await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1, {
             owner: watermarkOwner,
             replace: replaceAheadWatermark,
@@ -483,12 +419,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         scanProviders,
         mode: scanPlan.mode === 'explicitFromBlock' ? 'listAll' : scanPlan.mode,
         pageBudget: scanPlan.pageBudget,
-        allowPartialFailure: scanPlan.allowPartialFailure,
+        allowPartialFailure: allowsPartialFailure(scanPlan.mode),
         rpcUsageConsumer: 'listContextGraphsFromChain',
         targetBlock: head,
         completesGeneration: () => false,
         signal,
-        acknowledge: scanPlan.persistProgress
+        acknowledge: persistsWatermark(scanPlan.mode)
           ? (() => {
               let replace = replaceAheadWatermark;
               return async (_fromBlock: number, toBlock: number) => {
