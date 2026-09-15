@@ -5,6 +5,44 @@ import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
 import { makeChain, makeHandler, markPending } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller lifecycle', () => {
+  it('aborts an in-flight event callback without advancing its durable cursor', async () => {
+    let callbackSignal: AbortSignal | undefined;
+    let markCallbackStarted: () => void = () => undefined;
+    const callbackStarted = new Promise<void>((resolve) => { markCallbackStarted = resolve; });
+    const event = {
+      type: 'KnowledgeAssetRegisteredToContextGraph',
+      blockNumber: 100,
+      data: { contextGraphId: '42', kaId: '7', txHash: '0xabc', txIndex: 0 },
+    } as const;
+    const { adapter } = makeChain({ head: 100, events: [event] });
+    const saved: Array<{ lane: ChainEventPollerLane; block: number }> = [];
+    const cursor: LaneCursorPersistence = {
+      async loadLane() { return undefined; },
+      async saveLane(lane, block) { saved.push({ lane, block }); },
+    };
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+      onKARegisteredToContextGraph: async (_info, signal) => {
+        callbackSignal = signal;
+        markCallbackStarted();
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        signal?.throwIfAborted();
+      },
+    });
+
+    await poller.start();
+    await callbackStarted;
+    await poller.stop();
+
+    expect(callbackSignal?.aborted).toBe(true);
+    expect(saved).toEqual([]);
+  });
+
   it('aborts a queued background chain request before awaiting poll retirement', async () => {
     let physicalSignal: AbortSignal | undefined;
     let markStarted: () => void = () => undefined;
