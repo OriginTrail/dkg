@@ -1141,10 +1141,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         localTarget.localId,
         localTarget.subscription,
       );
-    // Existing authoritative/reverse bindings are hot revalidation reads and
-    // must fail promptly. A graph with no candidate needs the bounded cold
-    // name-hash index path; under the process RPC governor that work can
-    // legitimately outlive the policy-read deadline without being unhealthy.
+    // Reverse local binding candidates need hot, bounded revalidation and must
+    // fail promptly. A valid authoritative binding takes the zero-RPC fast path
+    // below. A graph with no candidate (including an invalid durable value)
+    // needs the bounded cold name-hash index path; under the process RPC
+    // governor that work can legitimately outlive the policy-read deadline
+    // without being unhealthy.
     const registrationResolutionTimeoutMs = options.registrationTimeoutMs
       ?? (hasBindingCandidate
         ? CHAIN_POLICY_READ_TIMEOUT_MS
