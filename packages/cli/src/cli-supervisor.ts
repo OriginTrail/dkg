@@ -361,7 +361,7 @@ async function runForegroundSupervisor(
       if (!finalizedExit.cleanupSucceeded) {
         process.exit(1);
       }
-      const { rawExitCode, forced, originalExitCode } = finalizedExit;
+      const { originalExitCode } = finalizedExit;
 
       if (relay.signalled()) process.exit(originalExitCode ?? 0);
 
