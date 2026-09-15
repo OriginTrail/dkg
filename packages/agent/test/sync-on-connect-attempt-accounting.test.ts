@@ -5,7 +5,10 @@ import {
   captureSyncOnConnectAttempt,
   executeSyncOnConnectAttempt,
 } from '../src/sync/on-connect/attempt-accounting.js';
-import { SyncOnConnectPostSyncError } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  SyncOnConnectBackpressureError,
+  SyncOnConnectPostSyncError,
+} from '../src/sync/on-connect/sync-on-connect.js';
 
 describe('sync-on-connect structured attempt accounting', () => {
   it('turns callback-free success into one explicit retry result', async () => {
@@ -42,18 +45,39 @@ describe('sync-on-connect structured attempt accounting', () => {
     });
   });
 
-  it('normalizes local backpressure without inventing retry accounting', async () => {
+  it('normalizes typed local backpressure without inventing retry accounting', async () => {
     const recordAccounting = vi.fn();
     const onBackpressure = vi.fn();
 
     await expect(executeSyncOnConnectAttempt(async () => {
-      throw new SyncBackpressureBusyError('sync queue full');
+      throw new SyncOnConnectBackpressureError(
+        new SyncBackpressureBusyError('sync queue full', 'queue_full'),
+      );
     }, {
       recordAccounting,
       onBackpressure,
     })).resolves.toBe('deferred-backpressure');
     expect(recordAccounting).not.toHaveBeenCalled();
     expect(onBackpressure).toHaveBeenCalledWith('sync queue full');
+  });
+
+  it('does not infer local backpressure from a generic error cause', async () => {
+    const recordAccounting = vi.fn();
+    const onBackpressure = vi.fn();
+    const wrapped = new SyncOnConnectPostSyncError(
+      'peer-a',
+      new SyncBackpressureBusyError('sync queue full'),
+      { backoffEligible: false },
+    );
+
+    await expect(executeSyncOnConnectAttempt(async () => {
+      throw wrapped;
+    }, {
+      recordAccounting,
+      onBackpressure,
+    })).rejects.toBe(wrapped);
+    expect(recordAccounting).not.toHaveBeenCalled();
+    expect(onBackpressure).not.toHaveBeenCalled();
   });
 
   it('keeps thrown post-sync retry eligibility in the structured policy', async () => {
