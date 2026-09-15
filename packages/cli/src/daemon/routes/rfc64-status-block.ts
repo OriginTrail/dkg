@@ -180,7 +180,9 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
       'RFC-64 status snapshot capability is unavailable; agent and CLI versions must match',
     );
   }
-  const snapshot = sanitizeRfc64CatalogStatusSnapshotV1(await readSnapshot());
+  const snapshot = sanitizeRfc64CatalogStatusSnapshotV1(
+    await readSnapshot.call(input.agent),
+  );
   if (snapshot === null) {
     throw new Error('RFC-64 status snapshot schema is unsupported or malformed');
   }

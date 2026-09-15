@@ -415,6 +415,20 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     })).rejects.toThrow(/schema is unsupported or malformed/u);
   });
 
+  it('invokes the aggregate snapshot capability with the agent receiver', async () => {
+    const agent = {
+      async readRfc64CatalogStatusSnapshotV1() {
+        expect(this).toBe(agent);
+        return readDisabledRfc64CatalogStatusSnapshotV1();
+      },
+    };
+
+    await expect(buildRfc64StatusBlocksV1({ agent })).resolves.toMatchObject({
+      rfc64Catalog: { enabled: true },
+      rfc64PublicCatalog: { enabled: false },
+    });
+  });
+
   it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {
     const readCircuit = vi.fn(() => ({
       state: 'open' as const,
