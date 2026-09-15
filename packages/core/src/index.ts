@@ -7,6 +7,7 @@ export * from './agents-list-wire.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';
+export * from './publish-tail-grace.js';
 export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';

@@ -103,6 +103,8 @@ import {
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
+  awaitTailWithGrace,
+  resolvePublishTailGraceMs,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   formatPublishAuthorNotCustodialMessage,
@@ -6261,6 +6263,9 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    // GH #1572: the confirmed metadata work below is eventual bookkeeping. A
+    // congested store queue must not hold the publish response hostage.
+    const metaTail = (async () => {
     // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN
     // whenever the publish/update is confirmed. (For the mint path this is the
     // first VM pointer; for the update path the DELETE/INSERT above already set
@@ -6401,6 +6406,22 @@ export class PublishMethods extends DKGAgentBase {
           `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ` +
             (err instanceof Error ? err.message : String(err)),
         );
+      }
+    }
+
+    })();
+    {
+      const tailCtx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
+      const graceMs = resolvePublishTailGraceMs();
+      const outcome = await awaitTailWithGrace(graceMs, metaTail, (err) => {
+        if (err !== undefined) {
+          this.log.warn(tailCtx, `Detached publish metadata tail failed for <${lifecycleUri}> (GH #1572): ${err instanceof Error ? err.message : String(err)}`);
+        } else {
+          this.log.info(tailCtx, `Detached publish metadata tail completed for <${lifecycleUri}> (GH #1572)`);
+        }
+      });
+      if (outcome === 'detached') {
+        this.log.info(tailCtx, `Publish metadata tail still running after ${graceMs}ms grace for <${lifecycleUri}> — responding now, tail continues detached (GH #1572)`);
       }
     }
 
