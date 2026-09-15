@@ -205,6 +205,53 @@ describe('exact VM recovery lifecycle', () => {
     }
   });
 
+  it.each(['configured-store', 'storeless'] as const)(
+    'awaits strict membership reconciliation and propagates failure with a %s',
+    async (storeCase) => {
+      const membershipUpsert = vi.fn(async () => undefined);
+      const agent = await createAgentWithSend(
+        async () => new Uint8Array(0),
+        undefined,
+        storeCase === 'configured-store'
+          ? {
+              loadAll: async () => [],
+              upsert: membershipUpsert,
+              delete: async () => undefined,
+            }
+          : undefined,
+      );
+      const reconciliation = deferred<void>();
+      const reconciliationFailure = new Error('responsibility reconciliation failed');
+      const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1')
+        .mockReturnValue(reconciliation.promise);
+      try {
+        let settled = false;
+        const strictWrite = agent.upsertContextGraphMember({
+          contextGraphId: `strict-membership-${storeCase}`,
+          principalType: 'node',
+          principalId: PEER_A,
+          status: 'active',
+        }, { strict: true });
+        const failure = strictWrite.then(
+          () => { settled = true; return undefined; },
+          (error: unknown) => { settled = true; return error; },
+        );
+
+        await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
+        expect(membershipUpsert).toHaveBeenCalledTimes(
+          storeCase === 'configured-store' ? 1 : 0,
+        );
+        expect(settled).toBe(false);
+
+        reconciliation.reject(reconciliationFailure);
+        expect(await failure).toBe(reconciliationFailure);
+      } finally {
+        reconciliation.resolve();
+        await agent.stop().catch(() => {});
+      }
+    },
+  );
+
   it('quarantines a physically active reconcile until shutdown is retried', async () => {
     const timeoutDescriptor = Object.getOwnPropertyDescriptor(
       DKGAgentBase,

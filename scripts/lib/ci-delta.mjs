@@ -308,6 +308,11 @@ function isBlazegraphArm64Path(filePath) {
 const NODE_LANES = NODE_EVM_LANES.filter((lane) => lane !== 'bura_blazegraph_arm64');
 const MAX_REPORTED_FILES = 200;
 
+function isIdentityWalletEvmPath(filePath) {
+  return /^packages\/node-ui\/(?:src\/ui\/(?:web3\/(?:identityWalletActions|browserWalletTransaction)\.[cm]?[jt]sx?|pages\/identity-wallets\/)|integration\/identity-wallet-actions-v10\.test\.ts$)/
+    .test(filePath);
+}
+
 function emptyLanes() {
   return Object.fromEntries(CI_LANES.map((lane) => [lane, false]));
 }
@@ -548,6 +553,10 @@ export function planCi({
 
     for (const lane of rule.lanes) lanes[lane] = true;
     for (const scope of rule.evmScopes) evmScopes.add(scope);
+    if (isIdentityWalletEvmPath(filePath)) {
+      evmScopes.add('chain');
+      reasons.push('identity-wallet browser actions require real EVM coverage');
+    }
     reasons.push(`${workspace} and its downstream consumers`);
   }
 
