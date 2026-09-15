@@ -394,6 +394,19 @@ jobs:
       - name: Run Rust, Wasm artifact, Worker, and differential gates
         run: pnpm run check:semantic-runtime
 
+      - name: Retain failed semantic artifact diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semantic-runtime-failure-diagnostics
+          path: |
+            packages/semantic-runtime/generated/
+            packages/semantic-runtime/artifact-lock.json
+            rust/target/wasm32-unknown-unknown/release/dkg_runtime_wasm.wasm
+            rust/target/wasm32-wasip2/release/dkg_runtime_component.wasm
+          retention-days: 3
+          if-no-files-found: ignore
+
   # ------------------------------------------------------------------
   # Compile each EVM flavor ONCE, in parallel with the shared Node build.
   # Several downstream jobs previously repeated the same 65-90 second
