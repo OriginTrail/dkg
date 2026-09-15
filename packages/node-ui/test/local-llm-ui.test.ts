@@ -40,6 +40,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          hasEnvironmentOverrides: true,
           configured: true,
           ready: false,
           reachable: false,
@@ -78,6 +79,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          hasEnvironmentOverrides: false,
           configured: false,
           ready: false,
           reachable: false,
@@ -101,6 +103,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          hasEnvironmentOverrides: false,
           configured: false,
           ready: false,
           reachable: true,
@@ -124,6 +127,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: true,
+          hasEnvironmentOverrides: false,
           configured: false,
           ready: true,
           reachable: true,
@@ -152,6 +156,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          hasEnvironmentOverrides: false,
           configured: false,
           ready: false,
           reachable: true,
