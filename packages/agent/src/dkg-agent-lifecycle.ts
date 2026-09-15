@@ -3195,9 +3195,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // Gate conditions (all must hold):
           //   1. Curator opted into the hash commitment (nameHash != null
           //      — opt-out CGs run through the beacon path only).
-          //   2. CG is curated (accessPolicy == 1). Public CGs don't have
-          //      curated SWM substrate to host; LU-6 only applies to
-          //      curated.
+          //   2. CG is curated (accessPolicy == 1), or it is fully public and
+          //      open-publish (accessPolicy == 0, publishPolicy == 1) with
+          //      `swmHostMode.hostPublic` enabled. The latter is the explicit
+          //      GH #1611 fallback for subscribers that cannot reach a member.
           //   3. Local node has `nodeRole === 'core'` AND swmHostMode is
           //      enabled. The reconciler below applies the same checks
           //      so this branch is purely an optimisation (eliminates
@@ -3212,7 +3213,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // disabled, off-sharding-table, etc.), so the call below
           // doesn't need any of those gates beyond the event-side hash
           // presence and the curated flag.
-          if (nameHash && accessPolicy === 1 && eventLocalId !== null) {
+          const publicHostEnabled = this.config.swmHostMode?.hostPublic === true;
+          const autoHostEligible = accessPolicy === 1
+            || (publicHostEnabled && accessPolicy === 0 && publishPolicy === 1);
+          if (nameHash && autoHostEligible && eventLocalId !== null) {
             // Register the wire id → numeric id mapping so the receive
             // path's chain fallback resolver (Scope A) can take a hash
             // input and find the on-chain participant agents without an
