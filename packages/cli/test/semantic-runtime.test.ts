@@ -227,6 +227,31 @@ describe('semantic runtime daemon configuration', () => {
     expect(() => validateSemanticRuntimeConfig({ maxOperationsPerExecution: 0 })).toThrow(/maxOperationsPerExecution/);
     expect(() => validateSemanticRuntimeConfig({ partitionId: 'not-a-hash' })).toThrow(/partitionId/);
     expect(() => validateSemanticRuntimeConfig({ maxAccumulator: '-1' })).toThrow(/maxAccumulator/);
+    expect(() => validateSemanticRuntimeConfig({ maxAccumulator: 'not-an-integer' })).toThrow(/maxAccumulator/);
+    expect(() => validateSemanticRuntimeConfig({ operatorPolicyIri: 'urn:policy> <urn:injected' })).toThrow(/operatorPolicyIri/);
+  });
+
+  it('stops the started host and preserves the journal-open error if durable storage cannot open', async () => {
+    const journalError = new Error('journal unavailable');
+    const host = { stop: vi.fn(async () => undefined) } as any;
+    const log = vi.fn();
+    await expect(startConfiguredSemanticRuntime({ enabled: true }, {
+      start: vi.fn(async () => host), log,
+      openStore: () => { throw journalError; },
+    })).rejects.toBe(journalError);
+    expect(host.stop).toHaveBeenCalledOnce();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['', 'urn:program:one', 'vm', 'INVALID_CONTEXT_GRAPH'],
+    ['devnet-test', 'urn:program> <urn:injected', 'vm', 'INVALID_PROGRAM_IRI'],
+    ['devnet-test', 'urn:program:one', 'outside', 'INVALID_MEMORY_LAYER'],
+  ])('rejects invalid Program selectors before querying the graph', async (graph, program, layer, code) => {
+    const agent = { query: vi.fn() } as any;
+    await expect(loadStoredSemanticProgram(agent, graph, program, layer as any))
+      .rejects.toMatchObject({ code, status: 400 });
+    expect(agent.query).not.toHaveBeenCalled();
   });
 
   it.each([
