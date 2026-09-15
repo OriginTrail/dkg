@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { stableJson } from '../rfc64-persistence-lifecycle/evidence.js';
+import { assertRuntimeProcessIdentityV1 } from '../rfc64-runtime-process-evidence.mts';
 import {
   GATE2_ADAPTER_PROTOCOL_VERSION,
   GATE2_RAW_SCHEMA_VERSION,
@@ -354,7 +355,16 @@ function verifyWireSynchronization(
   expectedApplied: unknown,
   peers: { author: string; receiver: string },
 ): { semantic: unknown; verifiedControlObjectCount: number } {
-  exact(negative.expectedFailureCode, 'catalog-native-receiver-authorization', `${path}.failureCode`);
+  // Scoped provider closures intentionally collapse an unauthorized or
+  // missing object into the indistinguishable not-found result. Preserve the
+  // stronger authorization code when the receiver reaches that check, while
+  // accepting the generic terminal record produced by a fail-closed not-found.
+  if (
+    negative.expectedFailureCode !== 'catalog-native-receiver-authorization'
+    && negative.expectedFailureCode !== null
+  ) {
+    fail(`${path}.failureCode`, 'must be authorization or null for a fail-closed rejection');
+  }
   digest(negative.attemptedCatalogHeadDigest, `${path}.attemptedCatalogHeadDigest`);
   const author = address(negative.catalogAuthorAddress, `${path}.catalogAuthorAddress`);
   exact(author, inventories.authored.catalogScope.authorAddress, `${path}.catalogAuthorAddress`);
@@ -397,7 +407,18 @@ function verifyPositiveWireInventory(
     'inventoryRowCount',
     'rows',
     'verifiedControlObjectCount',
-  ]);
+  ], ['finalizedSwmRetirementLifecycleReceipts']);
+  if (wire.finalizedSwmRetirementLifecycleReceipts !== undefined) {
+    if (
+      !Array.isArray(wire.finalizedSwmRetirementLifecycleReceipts)
+      || wire.finalizedSwmRetirementLifecycleReceipts.length > 1024
+    ) {
+      fail(
+        `${path}.finalizedSwmRetirementLifecycleReceipts`,
+        'must be a bounded Array',
+      );
+    }
+  }
   exact(wire.appliedHeadStatus, 'applied', `${path}.appliedHeadStatus`);
   exact(wire.catalogHeadDigest, inventories.authored.catalogHeadDigest, `${path}.catalogHeadDigest`);
   exact(wire.inventoryDigest, inventories.received.declaredInventoryDigest, `${path}.inventoryDigest`);
@@ -566,6 +587,7 @@ function verifyReadyEvent(
   const ready = closedRecord(value, path, [
     'adapterId',
     'peerId',
+    'processIdentity',
     'protocolVersion',
     'role',
     'runtimeBuildManifestDigest',
@@ -576,6 +598,11 @@ function verifyReadyEvent(
   exact(ready.role, role, `${path}.role`);
   exact(ready.runtimeBuildManifestDigest, runtimeManifestDigest, `${path}.runtimeBuildManifestDigest`);
   exact(ready.startupRepair, null, `${path}.startupRepair`);
+  try {
+    assertRuntimeProcessIdentityV1(ready.processIdentity, `${path}.processIdentity`);
+  } catch (cause) {
+    fail(path, cause instanceof Error ? cause.message : String(cause));
+  }
   return boundedString(ready.peerId, `${path}.peerId`);
 }
 
@@ -636,6 +663,7 @@ function closedRecord(
   value: unknown,
   path: string,
   expectedKeys: readonly string[],
+  optionalKeys: readonly string[] = [],
 ): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     fail(path, 'must be a plain object');
@@ -644,8 +672,15 @@ function closedRecord(
   if (prototype !== Object.prototype && prototype !== null) fail(path, 'must be plain');
   const keys = Object.keys(value).sort();
   const expected = [...expectedKeys].sort();
-  if (stableJson(keys) !== stableJson(expected)) {
-    fail(path, `must contain exactly keys ${expected.join(', ')}`);
+  const optional = new Set(optionalKeys);
+  const required = expectedKeys.filter((key) => !optional.has(key));
+  const allowed = new Set([...expectedKeys, ...optionalKeys]);
+  if (
+    required.some((key) => !keys.includes(key))
+    || keys.some((key) => !allowed.has(key))
+  ) {
+    fail(path, `must contain exactly keys ${expected.join(', ')}`
+      + (optionalKeys.length === 0 ? '' : ` (optional: ${optionalKeys.join(', ')})`));
   }
   return value as Record<string, unknown>;
 }

@@ -32,6 +32,7 @@ const PROJECTIONS = [
 ];
 const KA_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n';
 const RUNTIME_FILES = [
+  { path: 'packages/cli/dist/cli.js', byteLength: 5, sha256: `0x${'5'.repeat(64)}` },
   { path: 'packages/agent/dist/index.js', byteLength: 1, sha256: `0x${'1'.repeat(64)}` },
   { path: 'packages/chain/dist/index.js', byteLength: 2, sha256: `0x${'2'.repeat(64)}` },
   { path: 'packages/core/dist/index.js', byteLength: 3, sha256: `0x${'3'.repeat(64)}` },
@@ -40,9 +41,17 @@ const RUNTIME_FILES = [
 const RUNTIME_MANIFEST = buildGate2RuntimeManifestFromEntriesV1(SOURCE_COMMIT, RUNTIME_FILES);
 const EXECUTED_RUNTIME = buildGate2ExecutedRuntimeManifestV1(SOURCE_COMMIT, RUNTIME_FILES);
 const RUNTIME_PROVENANCE = buildGate2RuntimeProvenanceV1(RUNTIME_MANIFEST, [
-  { id: 'author', loaded: EXECUTED_RUNTIME },
-  { id: 'receiverBeforeCrash', loaded: EXECUTED_RUNTIME },
-  { id: 'receiverAfterRestart', loaded: EXECUTED_RUNTIME },
+  { id: 'author', identity: { hostIdentity: 'host-a', pid: 101 }, loaded: EXECUTED_RUNTIME },
+  {
+    id: 'receiverBeforeCrash',
+    identity: { hostIdentity: 'host-b', pid: 101 },
+    loaded: EXECUTED_RUNTIME,
+  },
+  {
+    id: 'receiverAfterRestart',
+    identity: { hostIdentity: 'host-c', pid: 102 },
+    loaded: EXECUTED_RUNTIME,
+  },
 ]);
 
 function sample(): any {
@@ -86,9 +95,13 @@ function sample(): any {
       swmGraph: row.swmGraph,
     },
   }));
-  const ready = (role: 'author' | 'receiver', peerId: string) => ({
+const ready = (role: 'author' | 'receiver', peerId: string) => ({
     adapterId: GATE2_REAL_DKG_AGENT_ADAPTER_ID,
     peerId,
+    processIdentity: {
+      hostIdentity: role === 'author' ? 'host-a' : 'host-b',
+      pid: role === 'author' ? 101 : 102,
+    },
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
     role,
     runtimeBuildManifestDigest: RUNTIME_MANIFEST.manifestDigest,
