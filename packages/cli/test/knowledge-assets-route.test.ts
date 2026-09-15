@@ -343,6 +343,24 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(JSON.stringify(body.quads)).toContain('ex:new');
       expect(JSON.stringify(body.quads)).not.toContain('ex:old');
     });
+
+    it('returns a typed conflict when discarding a shared KA without an active WM draft', async () => {
+      const name = 'shared-discard-guard';
+      await createKa(REG, name);
+      await write(REG, name, [{ subject: 'ex:shared', predicate: 'ex:p', object: '"x"' }]);
+      const finalized = await postJson(daemon, `/api/knowledge-assets/${name}/wm/finalize`, { contextGraphId: REG });
+      expect(finalized.status, `finalize: ${JSON.stringify(finalized.body)}`).toBe(200);
+      const shared = await postJson(daemon, `/api/knowledge-assets/${name}/swm/share`, { contextGraphId: REG });
+      expect(shared.status, `share: ${JSON.stringify(shared.body)}`).toBe(200);
+
+      const discarded = await postJson(daemon, `/api/knowledge-assets/${name}/wm/discard`, { contextGraphId: REG });
+      expect(discarded.status, `discard: ${JSON.stringify(discarded.body)}`).toBe(409);
+      expect(discarded.body.code).toBe('KA_WM_LIFECYCLE_REQUIRED');
+      expect(String(discarded.body.error)).toMatch(/active Working Memory draft/i);
+
+      const descriptor = await getJson(daemon, `/api/knowledge-assets/${name}?contextGraphId=${REG}`);
+      expect(descriptor.status).toBe(200);
+    });
   });
 
   // ── wm/quads ──────────────────────────────────────────────────────
