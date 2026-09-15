@@ -92,9 +92,15 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
+import {
+  normalizeContextGraphDiscoveryScan,
+  legacyChainListScanOptions,
+  type DiscoverContextGraphsFromChainOptions,
+} from './context-graph-discovery-options.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -581,25 +587,6 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   publishedUal?: string;
 }
 
-export type DiscoverContextGraphsFromChainOptions = {
-  signal?: AbortSignal;
-  throwOnChainScanFailure?: boolean;
-  pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'seedLiveTail' | 'repair';
-  minimumIntervalMs?: number;
-  incremental?: boolean;
-  seedIncrementalWatermark?: boolean;
-  resumeFromCursor?: boolean;
-};
-
-type NormalizedContextGraphDiscoveryScan =
-  | { mode: 'listAll' }
-  | { mode: 'incremental'; pageBudget?: number }
-  | { mode: 'seedFull' }
-  | { mode: 'seedFromCursor'; pageBudget?: number }
-  | { mode: 'seedLiveTail'; pageBudget?: number }
-  | { mode: 'repair'; pageBudget: number; minimumIntervalMs?: number };
-
 type ContextGraphRegistryRepairProgress = {
   readonly pageBudget: number;
   readonly startedAt: number;
@@ -610,82 +597,6 @@ type ContextGraphRegistryRepairProgress = {
   targetBlock?: number;
   completed: boolean;
 };
-
-function normalizeContextGraphDiscoveryScan(
-  options: DiscoverContextGraphsFromChainOptions,
-): NormalizedContextGraphDiscoveryScan {
-  if (options.mode !== undefined) {
-    if (options.mode === 'incremental') {
-      return {
-        mode: 'incremental',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'seedFull') return { mode: 'seedFull' };
-    if (options.mode === 'seedFromCursor') {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'seedLiveTail') {
-      return {
-        mode: 'seedLiveTail',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'repair') {
-      return {
-        mode: 'repair',
-        pageBudget: options.pageBudget ?? 1,
-        ...(options.minimumIntervalMs !== undefined
-          ? { minimumIntervalMs: options.minimumIntervalMs }
-          : {}),
-      };
-    }
-    if (options.mode === 'listAll') return { mode: 'listAll' };
-    throw new Error(`Unsupported context graph chain discovery scan mode: ${String(options.mode)}`);
-  }
-
-  if (options.incremental === true) {
-    return {
-      mode: 'incremental',
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-
-  if (options.seedIncrementalWatermark === true) {
-    if (options.resumeFromCursor === true) {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    return { mode: 'seedFull' };
-  }
-
-  return { mode: 'listAll' };
-}
-
-function legacyChainListScanOptions(
-  options: DiscoverContextGraphsFromChainOptions,
-): ContextGraphChainScanOptions | undefined {
-  if (options.mode !== undefined) return undefined;
-  if (options.incremental === true) {
-    return {
-      incremental: true,
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  if (options.seedIncrementalWatermark === true) {
-    return {
-      seedIncrementalWatermark: true,
-      ...(options.resumeFromCursor !== undefined ? { resumeFromCursor: options.resumeFromCursor } : {}),
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  return undefined;
-}
 
 function assertLegacyStorageAckAlias(
   value: unknown,
@@ -2272,7 +2183,7 @@ export class DKGAgent extends DKGAgentBase {
     const scanFailureLabel = scanFailureLane === 'repair'
       ? 'Chain context graph repair scan'
       : 'Chain context graph scan';
-    const legacyListOptions = legacyChainListScanOptions(options);
+    const legacyListOptions = legacyChainListScanOptions(scanMode);
     const useLegacyListFallback =
       scanMode.mode !== 'listAll' &&
       legacyListOptions !== undefined &&
