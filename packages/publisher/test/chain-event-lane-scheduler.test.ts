@@ -244,7 +244,7 @@ describe('ChainEventPoller scheduler', () => {
       name: 'contextGraphDiscovery',
       enabled: () => true,
       eventTypes: () => ['ContextGraphCreated'],
-      requiresFullHistory: () => false,
+      cursorStrategy: () => ({ kind: 'live-tail' }),
       cadenceMs: 20,
       dispatch: async () => { /* sink */ },
     };
