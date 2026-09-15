@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // Cargo includes the native compiler host in proc-macro-dependent crate metadata
-// (rust-lang/cargo#8140). Keep Cargo's cache filenames, but make the metadata
-// embedded in our two portable Wasm targets describe their source and ABI only.
+// (rust-lang/cargo#8140). Keep Cargo's cache filenames, but make embedded metadata
+// and rlib object names (used to order fat LTO inputs) independent of the host.
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -121,6 +121,149 @@ export function portableRustcArguments(args, {
   return rewritten;
 }
 
+function codegenOption(args, name) {
+  const values = options(args, '-C');
+  values.push(...args.filter((arg) => arg.startsWith('-C') && arg !== '-C').map((arg) => arg.slice(2)));
+  return values.filter((value) => value.startsWith(`${name}=`)).map((value) => value.slice(name.length + 1));
+}
+
+function rlibAssert(condition, message) {
+  if (!condition) throw new Error(`invalid portable rlib: ${message}`);
+}
+
+function rlibLeb(bytes, start, end) {
+  let value = 0;
+  let shift = 0;
+  let offset = start;
+  while (offset < end && shift <= 28) {
+    const byte = bytes[offset++];
+    rlibAssert(shift < 28 || byte <= 15, 'integer exceeds u32');
+    value += (byte & 127) * (2 ** shift);
+    if (byte < 128) return { value, next: offset };
+    shift += 7;
+  }
+  throw new Error('invalid portable rlib: truncated integer');
+}
+
+// This is the GNU archive + Wasm .rmeta-link format emitted by the pinned Rust
+// compiler on both supported build hosts. Keep every member's size and offset,
+// the symbol table, crate metadata, and all object/bitcode payloads unchanged.
+export function portableRlibBytes(bytes, { crateName, extraFilename, metadata }) {
+  rlibAssert(/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(crateName), 'invalid crate name');
+  rlibAssert(/^-[a-f0-9]{16}$/.test(extraFilename), 'unexpected Cargo filename suffix');
+  rlibAssert(/^[a-f0-9]{64}$/.test(metadata), 'invalid portable metadata');
+  rlibAssert(bytes.subarray(0, 8).equals(Buffer.from('!<arch>\n')), 'unsupported archive format');
+  const members = [];
+  let offset = 8;
+  while (offset < bytes.length) {
+    rlibAssert(offset + 60 <= bytes.length, 'truncated archive header');
+    const header = bytes.subarray(offset, offset + 60);
+    rlibAssert(header.subarray(58).equals(Buffer.from('`\n')), 'invalid archive header');
+    const sizeText = header.subarray(48, 58).toString('ascii').trim();
+    rlibAssert(/^\d+$/.test(sizeText), 'invalid archive member size');
+    const size = Number(sizeText);
+    const start = offset + 60;
+    const end = start + size;
+    rlibAssert(Number.isSafeInteger(size) && end <= bytes.length, 'truncated archive member');
+    members.push({ rawName: header.subarray(0, 16).toString('ascii').trim(), start, end });
+    offset = end + (size % 2);
+    rlibAssert(offset <= bytes.length && (size % 2 === 0 || bytes[end] === 10), 'invalid archive padding');
+  }
+  const tables = members.filter((member) => member.rawName === '//');
+  rlibAssert(tables.length <= 1, 'duplicate archive filename table');
+  const table = tables[0];
+  const byName = new Map();
+  for (const member of members) {
+    if (['/', '//', '/SYM64/'].includes(member.rawName)) continue;
+    if (/^\/\d+$/.test(member.rawName)) {
+      rlibAssert(table !== undefined, 'missing archive filename table');
+      member.nameStart = table.start + Number(member.rawName.slice(1));
+      rlibAssert(member.nameStart >= table.start && member.nameStart < table.end
+        && (member.nameStart === table.start || bytes[member.nameStart - 1] === 10), 'invalid filename table offset');
+      const end = bytes.indexOf(Buffer.from('/\n'), member.nameStart);
+      rlibAssert(end >= member.nameStart && end + 2 <= table.end, 'unterminated archive filename');
+      member.name = bytes.subarray(member.nameStart, end).toString('utf8');
+    } else {
+      rlibAssert(member.rawName.endsWith('/') && !member.rawName.startsWith('/'), 'unsupported archive filename format');
+      member.name = member.rawName.slice(0, -1);
+    }
+    rlibAssert(!byName.has(member.name), 'duplicate archive filename');
+    byName.set(member.name, member);
+  }
+  const linkIndex = byName.get('lib.rmeta-link');
+  rlibAssert(linkIndex !== undefined, 'missing Rust LTO filename index');
+  rlibAssert(bytes.subarray(linkIndex.start, linkIndex.start + 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])), 'unsupported LTO index object');
+  let indexSection;
+  offset = linkIndex.start + 8;
+  while (offset < linkIndex.end) {
+    const kind = bytes[offset++];
+    const size = rlibLeb(bytes, offset, linkIndex.end);
+    const end = size.next + size.value;
+    rlibAssert(end <= linkIndex.end, 'truncated LTO index section');
+    if (kind === 0) {
+      const name = rlibLeb(bytes, size.next, end);
+      rlibAssert(name.next + name.value <= end, 'truncated LTO index section name');
+      if (bytes.subarray(name.next, name.next + name.value).toString('utf8') === '.rmeta-link') {
+        rlibAssert(indexSection === undefined, 'duplicate Rust LTO filename index');
+        indexSection = { start: name.next + name.value, end };
+      }
+    }
+    offset = end;
+  }
+  const magic = Buffer.from('rust-end-file');
+  rlibAssert(indexSection !== undefined && bytes.subarray(indexSection.end - magic.length, indexSection.end).equals(magic), 'unsupported Rust LTO index encoding');
+  const indexEnd = indexSection.end - magic.length;
+  const count = rlibLeb(bytes, indexSection.start, indexEnd);
+  offset = count.next;
+  const edits = [];
+  const indexed = new Set();
+  const normalizedNames = new Set();
+  const oldPrefix = `${crateName}${extraFilename}.`;
+  const newPrefix = `${crateName}-${metadata.slice(0, 16)}.`;
+  for (let item = 0; item < count.value; item++) {
+    // rustc_serialize writes Vec<String> as length-prefixed UTF-8 strings,
+    // each terminated by its invalid-UTF-8 0xC1 sentinel.
+    const length = rlibLeb(bytes, offset, indexEnd);
+    const end = length.next + length.value;
+    rlibAssert(end < indexEnd && bytes[end] === 0xc1, 'invalid Rust LTO index filename');
+    const name = bytes.subarray(length.next, end).toString('utf8');
+    const member = byName.get(name);
+    rlibAssert(member !== undefined && member.nameStart !== undefined && !indexed.has(name), 'Rust LTO index disagrees with archive members');
+    rlibAssert((name.startsWith(oldPrefix) || name.startsWith(newPrefix)) && /^[a-zA-Z0-9_.-]+\.rcgu\.o$/.test(name), 'unexpected Rust object filename');
+    const normalizedName = newPrefix + name.slice(oldPrefix.length);
+    rlibAssert(!normalizedNames.has(normalizedName), 'duplicate normalized Rust object filename');
+    indexed.add(name);
+    normalizedNames.add(normalizedName);
+    edits.push(member.nameStart, length.next);
+    offset = end + 1;
+  }
+  for (const name of byName.keys()) {
+    rlibAssert(!name.endsWith('.rcgu.o') || indexed.has(name), 'unindexed Rust object member');
+  }
+  const result = Buffer.from(bytes);
+  for (const start of edits) result.write(newPrefix, start, 'utf8');
+  return result;
+}
+
+export function normalizePortableRustcArchives(args, { cwd = process.cwd() } = {}) {
+  const targets = options(args, '--target');
+  if (targets.length !== 1 || !TARGETS.has(targets[0]) || args.some((arg) => arg === '--print' || arg.startsWith('--print='))) return;
+  if (!options(args, '--crate-type').some((value) => value.split(',').some((type) => ['lib', 'rlib'].includes(type)))) return;
+  const emits = options(args, '--emit').flatMap((value) => value.split(','));
+  if (emits.length > 0 && !emits.some((value) => value === 'link' || value.startsWith('link='))) return;
+  const suffixes = codegenOption(args, 'extra-filename');
+  if (suffixes.length === 0 || (suffixes.length === 1 && suffixes[0] === '')) return; // Unsuffixed crate names are already portable.
+  const names = options(args, '--crate-name');
+  const metadata = codegenOption(args, 'metadata');
+  const directories = options(args, '--out-dir');
+  rlibAssert(suffixes.length === 1 && names.length === 1 && metadata.length === 1 && directories.length === 1
+    && !args.includes('-o') && !emits.some((value) => value.startsWith('link=')), 'unsupported Cargo output arguments');
+  const archive = path.resolve(cwd, directories[0], `lib${names[0]}${suffixes[0]}.rlib`);
+  const original = fs.readFileSync(archive);
+  const normalized = portableRlibBytes(original, { crateName: names[0], extraFilename: suffixes[0], metadata: metadata[0] });
+  if (!original.equals(normalized)) fs.writeFileSync(archive, normalized);
+}
+
 export function rustcStdio(env = process.env, validateDescriptor = (fd) => fs.fstatSync(fd)) {
   const descriptors = new Set();
   for (const match of (env.CARGO_MAKEFLAGS ?? '').matchAll(/(?:^|\s)--jobserver-(?:fds|auth)=(\d+),(\d+)(?=\s|$)/g)) {
@@ -149,10 +292,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
       const compilerLib = path.resolve(path.dirname(fs.realpathSync(compiler)), '../lib');
       compilerEnv.DYLD_LIBRARY_PATH = [compilerLib, compilerEnv.DYLD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
     }
-    const result = spawnSync(compiler, portableRustcArguments(args), { stdio: rustcStdio(compilerEnv), env: compilerEnv });
+    const portableArgs = portableRustcArguments(args);
+    const result = spawnSync(compiler, portableArgs, { stdio: rustcStdio(compilerEnv), env: compilerEnv });
     if (result.error) throw result.error;
     if (result.signal) process.kill(process.pid, result.signal);
-    else process.exitCode = result.status ?? 1;
+    else {
+      if (result.status === 0) normalizePortableRustcArchives(portableArgs);
+      process.exitCode = result.status ?? 1;
+    }
   } catch (error) {
     console.error(`semantic-runtime rustc: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

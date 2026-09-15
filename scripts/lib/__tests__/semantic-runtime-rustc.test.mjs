@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { portableRustcArguments, rustcStdio } from '../../semantic-runtime-rustc.mjs';
+import { normalizePortableRustcArchives, portableRlibBytes, portableRustcArguments, rustcStdio } from '../../semantic-runtime-rustc.mjs';
 import { assertPortableBuildEnvironment, portableBuildRecipe } from '../../build-semantic-runtime.mjs';
 
 function fixture(t, registry = false) {
@@ -124,4 +124,118 @@ test('the Cargo cache recipe changes for both wrapper implementation and full lo
   assert.equal(portableBuildRecipe(Buffer.from('wrapper-v1'), Buffer.from('lock-v1')), baseline);
   assert.notEqual(portableBuildRecipe(Buffer.from('wrapper-v2'), Buffer.from('lock-v1')), baseline);
   assert.notEqual(portableBuildRecipe(Buffer.from('wrapper-v1'), Buffer.from('lock-v2')), baseline);
+});
+
+function archiveFixture(suffix = '-1111111111111111', names = [0, 1].map((index) => `fixture${suffix}.fixture.1234567890abcdef-cgu.${index}.rcgu.o`)) {
+  const leb = (value) => {
+    const bytes = [];
+    do { const low = value % 128; value = Math.floor(value / 128); bytes.push(low | (value ? 128 : 0)); } while (value);
+    return Buffer.from(bytes);
+  };
+  const strings = names.map((name) => Buffer.concat([leb(name.length), Buffer.from(name), Buffer.from([0xc1])]));
+  const sectionName = Buffer.from('.rmeta-link');
+  const index = Buffer.concat([leb(sectionName.length), sectionName, leb(names.length), ...strings, Buffer.from([0]), Buffer.from('rust-end-file')]);
+  const indexObject = Buffer.concat([Buffer.from([0, 97, 115, 109, 1, 0, 0, 0, 0]), leb(index.length), index]);
+  const chunks = [Buffer.from('!<arch>\n')];
+  const members = [];
+  let size = 8;
+  const member = (name, data) => {
+    const header = `${name.padEnd(16)}${'0'.padEnd(12)}${'0'.padEnd(6)}${'0'.padEnd(6)}${'644'.padEnd(8)}${String(data.length).padEnd(10)}\x60\n`;
+    members.push({ name, start: size + 60, end: size + 60 + data.length });
+    chunks.push(Buffer.from(header), data);
+    size += 60 + data.length;
+    if (data.length % 2) { chunks.push(Buffer.from('\n')); size++; }
+  };
+  member('/', Buffer.from('symbol-table-payload'));
+  member('//', Buffer.from(`${names.join('/\n')}/\n`));
+  member('lib.rmeta/', Buffer.from('metadata payload must stay intact'));
+  member('lib.rmeta-link/', indexObject);
+  for (const [index, name] of names.entries()) {
+    const tableOffset = names.slice(0, index).reduce((sum, entry) => sum + entry.length + 2, 0);
+    // A matching-looking name in object bytes must never be rewritten.
+    member(`/${tableOffset}`, Buffer.from(`opaque bitcode ${index}: fixture-1111111111111111.fixture.1234567890abcdef-cgu.0.rcgu.o`));
+    assert.ok(name.endsWith('.rcgu.o'));
+  }
+  member('native-helper.o/', Buffer.from('bundled native object'));
+  return { bytes: Buffer.concat(chunks), members, names };
+}
+
+const archiveOptions = { crateName: 'fixture', extraFilename: '-1111111111111111', metadata: 'abcdef0123456789'.repeat(4) };
+
+test('canonical rlib names remove host LTO ordering differences without changing object or metadata payloads', () => {
+  const first = archiveFixture();
+  const second = archiveFixture('-2222222222222222');
+  const canonical = portableRlibBytes(first.bytes, archiveOptions);
+  assert.deepEqual(canonical, portableRlibBytes(second.bytes, { ...archiveOptions, extraFilename: '-2222222222222222' }));
+  assert.equal(canonical.length, first.bytes.length);
+  const editable = first.members.filter(({ name }) => ['//', 'lib.rmeta-link/'].includes(name));
+  for (let index = 0; index < canonical.length; index++) {
+    if (canonical[index] !== first.bytes[index]) {
+      assert.ok(editable.some(({ start, end }) => index >= start && index < end), `unexpected payload edit at ${index}`);
+    }
+  }
+  for (const { name, start, end } of first.members) {
+    if (!['//', 'lib.rmeta-link/'].includes(name)) assert.deepEqual(canonical.subarray(start, end), first.bytes.subarray(start, end), name);
+  }
+  assert.deepEqual(portableRlibBytes(canonical, archiveOptions), canonical);
+});
+
+test('rlib normalization rejects corrupt archives and inconsistent LTO indexes before producing output', () => {
+  const { bytes, members, names } = archiveFixture();
+  assert.throws(() => portableRlibBytes(bytes.subarray(0, 7), archiveOptions), /archive format/);
+  assert.throws(() => portableRlibBytes(bytes.subarray(0, bytes.length - 4), archiveOptions), /truncated archive/);
+  assert.throws(() => portableRlibBytes(bytes, { ...archiveOptions, extraFilename: '-unknown' }), /filename suffix/);
+  assert.throws(() => portableRlibBytes(bytes, { ...archiveOptions, metadata: 'bad' }), /portable metadata/);
+  const invalidHeader = Buffer.from(bytes); invalidHeader[66] = 0;
+  assert.throws(() => portableRlibBytes(invalidHeader, archiveOptions), /archive header/);
+  const index = members.find(({ name }) => name === 'lib.rmeta-link/');
+  const missingIndex = Buffer.from(bytes); missingIndex.write('xib.rmeta-link/', index.start - 60);
+  assert.throws(() => portableRlibBytes(missingIndex, archiveOptions), /missing Rust LTO/);
+  const mismatch = Buffer.from(bytes); mismatch[bytes.indexOf(names[0], index.start)] = 'x'.charCodeAt(0);
+  assert.throws(() => portableRlibBytes(mismatch, archiveOptions), /disagrees with archive/);
+  const invalidSentinel = Buffer.from(bytes); invalidSentinel[bytes.indexOf(names[0], index.start) + names[0].length] = 0;
+  assert.throws(() => portableRlibBytes(invalidSentinel, archiveOptions), /index filename/);
+  const invalidTableOffset = Buffer.from(bytes);
+  const object = members.find(({ name }) => name === '/0');
+  invalidTableOffset.write('/1 ', object.start - 60);
+  assert.throws(() => portableRlibBytes(invalidTableOffset, archiveOptions), /table offset/);
+  const table = members.find(({ name }) => name === '//');
+  const terminatorInPadding = Buffer.from(bytes);
+  terminatorInPadding.write(String(table.end - table.start - 1).padEnd(10), table.start - 12);
+  assert.throws(() => portableRlibBytes(terminatorInPadding, archiveOptions), /unterminated archive filename/);
+  const collision = archiveFixture(undefined, [names[0], names[0].replace(archiveOptions.extraFilename, `-${archiveOptions.metadata.slice(0, 16)}`)]);
+  assert.throws(() => portableRlibBytes(collision.bytes, archiveOptions), /duplicate normalized Rust object filename/);
+  assert.deepEqual(bytes, archiveFixture().bytes, 'validation must not mutate its input');
+});
+
+test('post-compile normalization preserves Cargo output filenames and dep-info for both Wasm targets', (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'semantic-rlib-test-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const directory = path.join(temporary, 'out');
+  fs.mkdirSync(directory);
+  const filename = `libfixture${archiveOptions.extraFilename}.rlib`;
+  const depInfo = 'fixture.d: source.rs\n';
+  fs.writeFileSync(path.join(directory, 'fixture.d'), depInfo);
+  for (const target of ['wasm32-unknown-unknown', 'wasm32-wasip2']) {
+    const { bytes } = archiveFixture();
+    fs.writeFileSync(path.join(directory, filename), bytes);
+    normalizePortableRustcArchives([
+      '--target', target, '--crate-name=fixture', '--crate-type', 'cdylib,rlib',
+      '--emit=dep-info,metadata,link', '--out-dir', 'out',
+      '-C', `extra-filename=${archiveOptions.extraFilename}`, `-Cmetadata=${archiveOptions.metadata}`,
+    ], { cwd: temporary });
+    assert.deepEqual(fs.readFileSync(path.join(directory, filename)), portableRlibBytes(bytes, archiveOptions));
+    assert.equal(fs.readFileSync(path.join(directory, 'fixture.d'), 'utf8'), depInfo);
+    assert.deepEqual(fs.readdirSync(directory).sort(), ['fixture.d', filename].sort());
+  }
+});
+
+test('native compilations, probes, non-link emits and unsuffixed outputs need no archive postprocessing', () => {
+  const common = ['--target', 'wasm32-wasip2', '--crate-type=rlib'];
+  for (const args of [
+    [], ['--target', 'aarch64-apple-darwin', '--crate-type=rlib'],
+    [...common, '--print=file-names'], [...common, '--emit=dep-info,metadata'],
+    ['--target', 'wasm32-wasip2', '--crate-type=cdylib'],
+    common, [...common, '-Cextra-filename='],
+  ]) assert.doesNotThrow(() => normalizePortableRustcArchives(args, { cwd: '/not-present' }));
 });
