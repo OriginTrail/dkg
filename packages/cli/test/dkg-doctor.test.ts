@@ -190,6 +190,10 @@ describe('collectStateSummary (§4.7.0)', () => {
     });
     const s = await collectStateSummary(deps);
 
+    expect(s.runtime).toHaveProperty('nodeVersion');
+    expect(s.runtime).toHaveProperty('nodeSqliteAvailable');
+    expect(s.runtime).toHaveProperty('probe');
+
     // daemon.* — 9 fields including unreachableReason
     expect(s.daemon).toHaveProperty('pid');
     expect(s.daemon).toHaveProperty('entryPoint');

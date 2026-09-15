@@ -1624,6 +1624,17 @@ describe('performNpmUpdate', () => {
     )).toBe(true);
   });
 
+  it('refuses slot activation when the runtime cannot provide node:sqlite', async () => {
+    (_autoUpdateIo as any).runtime = { version: 'v22.12.0' };
+    const logCalls: string[] = [];
+    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', (message) => {
+      logCalls.push(message);
+    });
+    expect(result).toBe('failed');
+    expect(swapSlotCalls).toEqual([]);
+    expect(logCalls.join('\n')).toContain('node:sqlite');
+  });
+
   it('returns failed when npm install throws', async () => {
     execImpl = async () => { throw new Error('npm ERR! 404'); };
     const result = await performNpmUpdate('9.99.0', () => {});
