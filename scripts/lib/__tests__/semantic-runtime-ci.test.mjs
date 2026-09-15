@@ -35,7 +35,9 @@ test('component execution lanes use a JSPI-capable runtime while ordinary builds
 test('native WSL fixture compiles real CLI modules without starting or building a semantic engine', () => {
   const { steps } = yaml('workflows/mcp-config-native.yml').jobs.metadata;
   const prepare = steps.find((step) => step.name === 'Prepare native WSL fixture').run;
-  assert.match(prepare, /pnpm exec tsc --build packages\/cli/);
+  const prerequisites = prepare.indexOf('pnpm exec tsc --build packages/random-sampling packages/adapter-hermes packages/adapter-prime-agent');
+  const cliBuild = prepare.indexOf('pnpm exec tsc --build packages/cli');
+  assert.ok(prerequisites >= 0 && cliBuild > prerequisites, 'compile dependencies omitted from tsconfig references before the CLI');
   assert.match(prepare, /node scripts\/copy-cli-runtime-assets.mjs/);
   assert.doesNotMatch(prepare, /build-runtime-packages|build:runtime/);
   const fixture = readFileSync(new URL('../../../packages/cli/test/fixtures/mcp-config-wsl.fixture.ts', import.meta.url), 'utf8');
