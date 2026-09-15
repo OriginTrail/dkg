@@ -213,11 +213,6 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId,
         uint256 epoch
     ) public view profileExists(identityId) returns (uint256) {
-        // D3+D13 — post-V10 these flags live on ConvictionStakingStorage.
-        if (convictionStakingStorage.isOperatorFeeClaimedForEpoch(identityId, epoch)) {
-            return convictionStakingStorage.netNodeEpochRewards(identityId, epoch);
-        }
-
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(epoch, identityId);
         if (nodeScore18 == 0) return 0;
 
