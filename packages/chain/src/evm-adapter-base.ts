@@ -42,9 +42,11 @@ import {
 import {
   createRpcRequestProvider,
   activeRpcRequestAbortSignal,
+  activeRpcRequestContext,
   withOwnedRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
+import type { RpcRequestClass } from './rpc-request-transport.js';
 import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -865,8 +867,17 @@ export class EVMChainAdapterBase {
     { value: bigint; cachedAt: number }
   >();
 
-  protected readonly configuredStaticChainIdValidationsByProvider =
-    new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>();
+  /**
+   * Keep shared validation work inside the caller's admission class. A
+   * background validation must not borrow the foreground reserve, while a
+   * foreground caller must not wait behind lower-priority physical work.
+   */
+  protected readonly configuredStaticChainIdValidationsByProvider: Readonly<
+    Record<RpcRequestClass, AbortableKeyedSingleFlight<JsonRpcProvider, bigint>>
+  > = Object.freeze({
+    foreground: new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>(),
+    background: new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>(),
+  });
 
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
@@ -970,9 +981,11 @@ export class EVMChainAdapterBase {
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
     this.configuredStaticChainIdsByProvider.clear();
-    this.configuredStaticChainIdValidationsByProvider.invalidateAll(
-      'Configured chainId validation was invalidated',
-    );
+    for (const validation of Object.values(
+      this.configuredStaticChainIdValidationsByProvider,
+    )) {
+      validation.invalidateAll('Configured chainId validation was invalidated');
+    }
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
@@ -3636,11 +3649,12 @@ export class EVMChainAdapterBase {
       return cached!.value;
     }
 
-    return this.configuredStaticChainIdValidationsByProvider.run(
+    const requestClass = activeRpcRequestContext().requestClass;
+    return this.configuredStaticChainIdValidationsByProvider[requestClass].run(
       provider,
       (sharedSignal) => withOwnedRpcRequestContext(
         {
-          requestClass: 'foreground',
+          requestClass,
           signal: sharedSignal,
         },
         () => withRpcRequestTimeout(
