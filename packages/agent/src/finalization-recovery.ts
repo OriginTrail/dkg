@@ -899,7 +899,7 @@ export class FinalizationRecovery<
         ? {
             kind: 'persisted',
             evidence: entry.verifiedEvidence,
-            placement: entry.state === 'REORGED' ? 'canonical-moved' : 'original',
+            placement: 'original',
           }
         : entry.state === 'REORGED'
           ? { kind: 'reorg-recovery' }
