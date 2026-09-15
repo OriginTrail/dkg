@@ -14,9 +14,8 @@ export type FinalizationRecoveryState =
   | 'REJECTED'
   | 'UNSUPPORTED';
 
-export interface FinalizationRecoveryEntry {
+interface FinalizationRecoveryEntryFields {
   key: string;
-  state: FinalizationRecoveryState;
   chainId: string;
   contextGraphId: string;
   sourcePeerId?: string;
@@ -31,7 +30,6 @@ export interface FinalizationRecoveryEntry {
   targetContextGraphId?: string;
   envelopeSha256: string;
   rawMessage: Uint8Array;
-  verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
   generation: number;
   attemptCount: number;
   failureSignature?: string;
@@ -41,6 +39,22 @@ export interface FinalizationRecoveryEntry {
   createdAt: number;
   updatedAt: number;
 }
+
+/** Entries that have not acquired chain-verified finalization evidence. */
+export type UnverifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
+  state: Exclude<FinalizationRecoveryState, 'VERIFIED' | 'SETTLED'>;
+  verifiedEvidence?: never;
+};
+
+/** Entries whose state is evidence-bearing by construction. */
+export type VerifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
+  state: 'VERIFIED' | 'SETTLED';
+  verifiedEvidence: VerifiedGraphScopedFinalizationEvidence;
+};
+
+export type FinalizationRecoveryEntry =
+  | UnverifiedFinalizationRecoveryEntry
+  | VerifiedFinalizationRecoveryEntry;
 
 export interface FinalizationRecoveryReceiveInput {
   key: string;
@@ -66,8 +80,8 @@ export type FinalizationRecoveryReceiveResult =
   | { status: 'closed' };
 
 export type FinalizationRecoveryVerifyResult =
-  | { status: 'verified'; entry: FinalizationRecoveryEntry }
-  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'verified'; entry: VerifiedFinalizationRecoveryEntry }
+  | { status: 'existing'; entry: VerifiedFinalizationRecoveryEntry }
   | { status: 'conflict' }
   | { status: 'missing' }
   | { status: 'closed' };
@@ -96,7 +110,7 @@ export interface FinalizationRecoveryVerifiedEvidenceUpdate {
 
 export type FinalizationRecoveryVerifiedEvidenceTransitionPlan =
   | { status: 'update'; fields: FinalizationRecoveryVerifiedEvidenceUpdate }
-  | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'existing'; entry: VerifiedFinalizationRecoveryEntry }
   | { status: 'conflict' };
 
 /**
@@ -157,7 +171,7 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
 }
 
 export type FinalizationRecoverySettledPublisherUpgradeResult =
-  | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'recorded' | 'existing'; entry: VerifiedFinalizationRecoveryEntry }
   | { status: 'conflict' | 'missing' | 'closed' };
 
 export type FinalizationRecoveryFailureCode =
