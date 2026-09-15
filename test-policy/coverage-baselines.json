@@ -383,21 +383,21 @@
       }
     },
     "semantic-runtime": {
-      "sourceRevision": "a3cb87ec9561b6753aebcad82f65f20a6bd1703b",
+      "sourceRevision": "d21eaa04434f4a9cfa9d7ee442e8507bc4b3ceb0",
       "measuredAt": "2026-09-15",
-      "node": "25.2.1",
+      "node": "26.8.2",
       "platform": "darwin-arm64",
       "measured": {
-        "lines": 63.69,
-        "functions": 70.58,
-        "branches": 54.01,
-        "statements": 60.48
+        "lines": 87.79,
+        "functions": 90.78,
+        "branches": 76.05,
+        "statements": 84.07
       },
       "thresholds": {
-        "lines": 62,
-        "functions": 69,
-        "branches": 53,
-        "statements": 59
+        "lines": 86,
+        "functions": 89,
+        "branches": 75,
+        "statements": 83
       }
     },
     "storage": {

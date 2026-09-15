@@ -39,6 +39,8 @@ export default defineConfig({
           'test/config.test.ts',
           'test/semantic-runtime.test.ts',
           'test/semantic-runtime-inbox.test.ts',
+          'test/semantic-runtime-query-adapter.test.ts',
+          'test/semantic-runtime-routes.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
