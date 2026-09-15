@@ -1137,7 +1137,13 @@ export class DKGAgent extends DKGAgentBase {
           // authority reads inherit foreground priority and cancellation.
           withRpcRequestContext(
             { requestClass: 'background', signal },
-            () => this.rfc64AuthorityReadCoordinatorV1.run(signal, read),
+            () => this.rfc64AuthorityReadCoordinatorV1.run(
+              signal,
+              (readSignal, evidence) => {
+                evidence.markRpcAttempt();
+                return read(readSignal);
+              },
+            ),
           )
         ),
       },
