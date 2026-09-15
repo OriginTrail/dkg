@@ -1316,10 +1316,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reannounce: (replayPeerId) =>
           this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId),
         replay: (contextGraphId, replayDemand) =>
-          this.requestRfc64CatalogHeadReplayForConnectionDemandV1(
-            contextGraphId,
+          this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
+            kind: 'connection-demand',
             replayDemand,
-          ),
+          }),
         warn: (message) => this.log.warn(createOperationContext('system'), message),
       });
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
@@ -3452,6 +3452,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
       rfc64CatalogReplayRuntimesV1.delete(this);
+      rfc64CatalogReplaySnapshotRuntimesV1.delete(this);
       rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
       rfc64CatalogReplayRecoveryRuntimesV1.delete(this);
       rfc64CatalogReplayConnectionRuntimesV1.get(this)?.reset();
@@ -3749,34 +3750,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
-  /** Continue only already-owned recovery demand without reseeding peers. */
-  async continueRfc64CatalogHeadReplayRecoveryV1(
-    this: DKGAgent,
-    contextGraphId: string,
-  ): Promise<Readonly<{ requested: number; failed: number }>> {
-    return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-      kind: 'pending-recovery',
-    });
-  }
-
-  /** Consume one admission-owned connection demand without a full peer scan. */
-  async requestRfc64CatalogHeadReplayForConnectionDemandV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    replayDemand: Rfc64CatalogReplayPeerDemandV1,
-  ): Promise<Readonly<{ requested: number; failed: number }>> {
-    return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-      kind: 'connection-demand',
-      replayDemand,
-    });
-  }
-
   private async requestRfc64CatalogHeadReplayV1(
     this: DKGAgent,
     contextGraphId: string,
     request: Readonly<
       | { kind: 'connected-peers' }
-      | { kind: 'pending-recovery' }
       | {
           kind: 'connection-demand';
           replayDemand: Rfc64CatalogReplayPeerDemandV1;
@@ -3812,11 +3790,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ...scope,
           kind: 'full-connected-peers',
           connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
-        });
-      case 'pending-recovery':
-        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
-          ...scope,
-          kind: 'pending-recovery',
         });
       case 'connection-demand':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({

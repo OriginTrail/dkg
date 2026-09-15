@@ -8,6 +8,9 @@ import type {
   ContextGraphSubscriptionStore,
 } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
+
+const MAX_CONCURRENT_DEFERRED_AUTHORITY_DISCOVERIES = 4;
 
 export interface PersistedContextGraphSubscriptionActivationPorts {
   install(
@@ -113,29 +116,57 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
     .filter(([, reason]) => reason === 'authorityUnavailable')
     .map(([id]) => id)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  const loadRow = async (contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null> => (
-    ports.store.load
-      ? ports.store.load(contextGraphId)
-      : ports.store.loadAll().then((rows) => rows.find((row) => row.id === contextGraphId) ?? null)
+  const snapshotRows = async (): Promise<ReadonlyMap<string, ContextGraphSubscriptionRecord>> => (
+    new Map((await ports.store.loadAll()).map((row) => [row.id, row]))
   );
+  const discoverySnapshot = ports.store.load === undefined
+    ? await snapshotRows()
+    : null;
+  if (!ports.isCurrent()) return;
 
-  for (const contextGraphId of candidates) {
-    if (!ports.isCurrent()) return;
-    if (ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable') continue;
-    const revision = ports.persistRevisions.get(contextGraphId) ?? 0;
-    const candidate = await loadRow(contextGraphId);
-    if (!ports.isCurrent()) return;
+  // Remote authority reads are independent. Discover them with a finite pool,
+  // then serialize activation so cap accounting and durable commits remain
+  // deterministic. A loadAll-only compatibility store is scanned once here,
+  // rather than once per candidate.
+  const discoveries = await mapWithConcurrency(
+    candidates,
+    MAX_CONCURRENT_DEFERRED_AUTHORITY_DISCOVERIES,
+    async (contextGraphId) => {
+      if (
+        !ports.isCurrent()
+        || ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
+      ) return null;
+      const revision = ports.persistRevisions.get(contextGraphId) ?? 0;
+      const candidate = ports.store.load === undefined
+        ? discoverySnapshot!.get(contextGraphId) ?? null
+        : await ports.store.load(contextGraphId);
+      if (!ports.isCurrent()) return null;
+      if (candidate === null) {
+        return Object.freeze({ contextGraphId, revision, candidate, authority: null });
+      }
+      const authority = await ports.resolveAuthority(contextGraphId, signal);
+      return Object.freeze({ contextGraphId, revision, candidate, authority });
+    },
+  );
+  if (!ports.isCurrent()) return;
+
+  const needsCommitSnapshot = ports.store.load === undefined
+    && discoveries.some((discovery) => discovery?.authority?.outcome === 'allowed');
+  const commitSnapshot = needsCommitSnapshot ? await snapshotRows() : null;
+  if (!ports.isCurrent()) return;
+
+  for (const discovery of discoveries) {
+    if (discovery === null) continue;
+    const { contextGraphId, revision, candidate, authority } = discovery;
     if (candidate === null) {
       ports.clearStatus(contextGraphId);
       continue;
     }
-
-    const authority = await ports.resolveAuthority(contextGraphId, signal);
-    if (!ports.isCurrent()) return;
     if (
       ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
     ) continue;
+    if (authority === null) continue;
     if (authority.outcome !== 'allowed') {
       if (authority.outcome === 'denied') {
         ports.dormancyById.set(contextGraphId, 'authorityDenied');
@@ -144,7 +175,9 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       continue;
     }
 
-    const currentRow = await loadRow(contextGraphId);
+    const currentRow = ports.store.load === undefined
+      ? commitSnapshot!.get(contextGraphId) ?? null
+      : await ports.store.load(contextGraphId);
     if (!ports.isCurrent()) return;
     if (
       currentRow === null
