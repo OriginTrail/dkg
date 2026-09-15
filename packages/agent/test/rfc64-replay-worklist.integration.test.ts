@@ -133,7 +133,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(newer).not.toBeNull();
     older!.release();
 
-    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestReplay).toHaveBeenCalledOnce();
@@ -174,7 +174,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(newer).not.toBeNull();
     older!.release();
 
-    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestReplay).toHaveBeenCalledOnce();
