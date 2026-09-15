@@ -831,51 +831,62 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     requestOffset: number,
     selectPageSize: () => number,
     onRetry: (attempt: number, delay: number, error: unknown) => void,
-  ): Promise<Uint8Array> => sendSyncRequest({
-    remotePeerId,
-    // Leave part of this round for a fresh request after a stalled attempt.
-    // Recompute after authentication on every retry; transport admission then
-    // applies the remaining monotonic private-job allowance.
-    timeoutMs: syncPageTimeoutMs,
-    attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
-      syncPageTimeoutMs,
-      Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
-    ),
-    workAdmission,
-    retryAttempts: syncPageRetryAttempts,
-    signal,
-    contextGraphId,
-    offset: requestOffset,
-    protocolId: protocolSync,
-    plane: syncPlaneFor(includeSharedMemory),
-    phase,
-    requestFactory: async () => {
-      throwIfAborted(signal);
-      successfulPageSize = selectPageSize();
-      const request = await buildSyncRequest(
-        contextGraphId,
-        requestOffset,
-        successfulPageSize,
-        includeSharedMemory,
-        remotePeerId,
-        phase,
-        snapshotRef,
-        sinceBatchId,
-        syncSessionId,
-        recovery,
-        assetUals,
-      );
-      throwIfAborted(signal);
-      return request;
-    },
-    send,
-    validateResponse: (responseBytes) => {
-      if (decodeSyncResponse(responseBytes) === LEGACY_SYNC_BUSY_RESPONSE) {
-        throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
-      }
-    },
-    onRetry,
-  });
+  ): Promise<{ bytes: Uint8Array; body: string }> => {
+    // Validation and parsing share this one decoded body. Keep it scoped to a
+    // single page request so a rejected retry can never leak its sentinel or
+    // payload into a later accepted attempt.
+    let decodedBody: string | undefined;
+    const bytes = await sendSyncRequest({
+      remotePeerId,
+      // Leave part of this round for a fresh request after a stalled attempt.
+      // Recompute after authentication on every retry; transport admission then
+      // applies the remaining monotonic private-job allowance.
+      timeoutMs: syncPageTimeoutMs,
+      attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
+        syncPageTimeoutMs,
+        Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
+      ),
+      workAdmission,
+      retryAttempts: syncPageRetryAttempts,
+      signal,
+      contextGraphId,
+      offset: requestOffset,
+      protocolId: protocolSync,
+      plane: syncPlaneFor(includeSharedMemory),
+      phase,
+      requestFactory: async () => {
+        throwIfAborted(signal);
+        successfulPageSize = selectPageSize();
+        const request = await buildSyncRequest(
+          contextGraphId,
+          requestOffset,
+          successfulPageSize,
+          includeSharedMemory,
+          remotePeerId,
+          phase,
+          snapshotRef,
+          sinceBatchId,
+          syncSessionId,
+          recovery,
+          assetUals,
+        );
+        throwIfAborted(signal);
+        return request;
+      },
+      send,
+      validateResponse: (responseBytes) => {
+        decodedBody = decodeSyncResponse(responseBytes);
+        if (decodedBody === LEGACY_SYNC_BUSY_RESPONSE) {
+          throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
+        }
+      },
+      onRetry,
+    });
+    if (decodedBody === undefined) {
+      throw new Error('Sync response validator did not decode the accepted page');
+    }
+    return { bytes, body: decodedBody };
+  };
 
   try {
     if (
@@ -892,7 +903,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
         syncPageSize,
         Math.max(adaptivePageSizer.current(), SYNC_PAGE_SIZE + 1),
       );
-      const primeBytes = await requestPage(
+      const primePage = await requestPage(
         0,
         () => primePageSize,
         (attempt, delay, err) => {
@@ -903,8 +914,9 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           );
         },
       );
+      const primeBytes = primePage.bytes;
       throwIfAborted(signal);
-      const primeBody = decodeSyncResponse(primeBytes);
+      const primeBody = primePage.body;
       if (
         primeBody === syncDeniedResponse
         || (extraDeniedResponses && extraDeniedResponses.includes(primeBody))
@@ -947,7 +959,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // The shared request helper rebuilds auth material on every attempt and
       // is also used by generation priming, so both modes keep identical
       // transport/replay semantics.
-      const responseBytes = await requestPage(
+      const responsePage = await requestPage(
         curOffset,
         () => adaptivePageSizer.current(),
         (attempt, delay, err) => {
@@ -958,6 +970,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
       );
+      const responseBytes = responsePage.bytes;
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
       responsePages += 1;
@@ -978,7 +991,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       let parseDurationMs = 0;
       try {
         const decodeStartedAt = Date.now();
-        const nquadsText = decodeSyncResponse(responseBytes);
+        const nquadsText = responsePage.body;
         decodeDurationMs = Date.now() - decodeStartedAt;
         bytesReceived = nextBytesReceived;
         if (
