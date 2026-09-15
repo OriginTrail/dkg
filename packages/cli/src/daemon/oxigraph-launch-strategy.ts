@@ -1,6 +1,7 @@
 import { spawnSync, type ChildProcess, type StdioOptions } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
+import { oxigraphMemorySupportError } from '../oxigraph-memory-limits.js';
 import {
   OXIGRAPH_WATCHDOG_OOM_MARKER,
   readLinuxProcessIdentity,
@@ -182,7 +183,7 @@ export function createOxigraphLaunchStrategy(opts: {
 
   const limits = normalizeOxigraphMemoryLimits(opts.memoryLimits)!;
   if (opts.platform !== 'linux') {
-    throw new Error('Managed Oxigraph memory limits require Linux with a running systemd user manager');
+    throw new Error(oxigraphMemorySupportError(opts.memoryLimits, opts.platform));
   }
   if (!Number.isInteger(opts.uid) || opts.uid < 0) {
     throw new Error('Managed Oxigraph memory limits require a numeric service user id');
