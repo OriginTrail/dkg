@@ -366,11 +366,11 @@ export function verifyAuthorCatalogDirectoryPathV1(
     );
   }
 
-  const nodes: NormalizedAuthorCatalogDirectoryPathNode[] = new Array(path.length);
+  const nodes: NormalizedAuthorCatalogDirectoryPathNode[] = [];
   const seenDigests = new Set<string>();
   for (let pathIndex = 0; pathIndex < path.length; pathIndex += 1) {
     const node = normalizeAuthorCatalogDirectoryPathNode(path[pathIndex], scope);
-    nodes[pathIndex] = node;
+    nodes.push(node);
     const expectedLevel = expectedHeight - BigInt(pathIndex);
     if (node.level !== expectedLevel) {
       fail(
