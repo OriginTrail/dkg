@@ -22,6 +22,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   generateEd25519Keypair,
+  decodeReliableEnvelope,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
   type Ed25519Keypair,
@@ -29,7 +30,7 @@ import {
   type DKGStreamHandler,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
-import { MessageHandler, ed25519ToX25519Private, type ChatHandler, type ChatAclCheck } from '../src/index.js';
+import { DKGAgent, MessageHandler, ed25519ToX25519Private, type ChatHandler, type ChatAclCheck, type SkillHandler } from '../src/index.js';
 import { Messenger } from '../src/p2p/messenger.js';
 
 // Hand-rolled recorder: a plain function that records every call's
@@ -86,6 +87,8 @@ interface TestPair {
   /** The bound `handleIncoming` for peer B (what A's messenger calls). */
   bIncoming: DKGStreamHandler;
   aIncoming: DKGStreamHandler;
+  routerA: ProtocolRouter;
+  messengerA: Messenger;
 }
 
 async function buildPair(): Promise<TestPair> {
@@ -142,7 +145,7 @@ async function buildPair(): Promise<TestPair> {
   if (!aIncoming || !bIncoming) {
     throw new Error('handlers not captured');
   }
-  return { a, b, keyA, keyB, aIncoming, bIncoming };
+  return { a, b, keyA, keyB, aIncoming, bIncoming, routerA, messengerA };
 }
 
 describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
@@ -394,5 +397,82 @@ describe('MessageHandler — skill_request ACL (GH #462)', () => {
     const res = await a.sendSkillRequest(PEER_B, { skillUri: SKILL, inputData: new Uint8Array([4]) });
     expect(res.success).toBe(true);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('DKGAgent public skill registration', () => {
+  const SKILL = 'did:dkg:skill:test/registry-echo';
+  // Exercise the composed public API with the real encrypted messaging pair,
+  // without starting unrelated node listeners or background discovery jobs.
+  const facade = (messageHandler?: MessageHandler): DKGAgent =>
+    Object.assign(Object.create(DKGAgent.prototype), { messageHandler });
+
+  it('rejects registration and invocation before messaging has started', async () => {
+    const agent = facade();
+    const handler = vi.fn<SkillHandler>(async () => ({ success: true }));
+    expect(() => agent.registerSkill(SKILL, handler)).toThrow('Agent not started');
+    await expect(agent.invokeSkill(PEER_B, SKILL, new Uint8Array())).rejects.toThrow('Agent not started');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('dispatches registered skills through the authenticated peer ACL and returns their output', async () => {
+    const { a, b, routerA } = await buildPair();
+    const sender = facade(a);
+    const receiver = facade(b);
+    const input = new Uint8Array([11, 22, 33]);
+    const handler = vi.fn<SkillHandler>(async request => ({ success: true, outputData: request.inputData }));
+    receiver.registerSkill(SKILL, handler);
+    receiver.setSkillAcl(() => ({ accept: false, reason: 'unauthorized: registry policy' }));
+
+    await expect(sender.invokeSkill(PEER_B, SKILL, input)).resolves.toMatchObject({
+      success: false, error: 'unauthorized: registry policy',
+    });
+    expect(handler).not.toHaveBeenCalled();
+
+    const acl = vi.fn((peerId: string, skillUri: string) => ({ accept: peerId === PEER_A && skillUri === SKILL }));
+    receiver.setSkillAcl(acl);
+    const send = vi.spyOn(routerA, 'send');
+    await expect(sender.invokeSkill(PEER_B, SKILL, input, {
+      requestOwned: true, messageId: 'registry-owned-request', timeoutMs: 1234,
+    })).resolves.toMatchObject({ success: true, outputData: input });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(decodeReliableEnvelope(send.mock.calls[0][2]).messageId).toBe('registry-owned-request');
+    expect(send.mock.calls[0][3]).toBe(1234);
+    expect(acl).toHaveBeenCalledExactlyOnceWith(PEER_A, SKILL);
+    expect(handler).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ skillUri: SKILL, inputData: input, callback: 'inline', timeoutMs: 1234 }), PEER_A);
+  });
+
+  it('rejects an overlapping request-owned skill call without queuing or duplicating execution', async () => {
+    const { a, b, routerA, messengerA } = await buildPair();
+    const sender = facade(a);
+    const receiver = facade(b);
+    const handler = vi.fn<SkillHandler>(async () => ({ success: true }));
+    receiver.registerSkill(SKILL, handler);
+    const send = routerA.send.bind(routerA);
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredTransport = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const wire = vi.spyOn(routerA, 'send').mockImplementationOnce(async (...args) => {
+      entered();
+      await blocked;
+      return send(...args);
+    });
+    const options = { requestOwned: true, messageId: 'overlapping-registry-request', timeoutMs: 1234 };
+    const pending = sender.invokeSkill(PEER_B, SKILL, new Uint8Array([1]), options);
+    try {
+      await enteredTransport;
+      await expect(sender.invokeSkill(PEER_B, SKILL, new Uint8Array([1]), options)).resolves.toEqual({
+        success: false, error: 'Skill request not delivered: send already in flight for this messageId',
+      });
+      expect(handler).not.toHaveBeenCalled();
+      expect(wire).toHaveBeenCalledTimes(1);
+      expect(messengerA.listOutboxMetadata()).toEqual([]);
+    } finally {
+      release();
+    }
+    await expect(pending).resolves.toMatchObject({ success: true });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(messengerA.listOutboxMetadata()).toEqual([]);
   });
 });
