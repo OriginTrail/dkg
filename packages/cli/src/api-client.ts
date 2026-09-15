@@ -349,6 +349,11 @@ export interface RandomSamplingStatusResponse {
     submittedCount: number;
     lastSubmittedTxHash: string | null;
     lastSubmittedAt: string | null;
+    /** Optional for older daemons; trailing process-local 24-hour health window. */
+    challengesReceived24h?: number;
+    proofsSubmitted24h?: number;
+    lastFailureClassification?: string | null;
+    lastFailureAt?: string | null;
   };
 }
 
