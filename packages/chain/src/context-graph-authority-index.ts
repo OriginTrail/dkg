@@ -82,6 +82,8 @@ export interface ContextGraphAuthorityIndexNameHashesInput
 export class ContextGraphAuthorityIndex {
   readonly #repository: ContextGraphAuthorityIndexRepository;
   readonly #singleFlight = new KeyedSingleFlight<string, object>();
+  readonly #activeScans = new Set<Promise<unknown>>();
+  #activityRevision = 0;
   #lifecycleAbort = new AbortController();
 
   constructor(readonly localStore: ContextGraphAuthorityIndexStore) {
@@ -96,6 +98,18 @@ export class ContextGraphAuthorityIndex {
     this.#lifecycleAbort = new AbortController();
     this.#repository.clear();
     this.#singleFlight.invalidateAll();
+  }
+
+  /** Wait until every lifecycle-owned physical scan has settled. */
+  async whenIdle(): Promise<void> {
+    for (;;) {
+      const activityRevision = this.#activityRevision;
+      await Promise.allSettled(this.#activeScans);
+      if (
+        activityRevision === this.#activityRevision
+        && this.#activeScans.size === 0
+      ) return;
+    }
   }
 
   async resolve(
@@ -207,10 +221,16 @@ export class ContextGraphAuthorityIndex {
     const scanKey = [scope, input.finalized.number, finalizedHash].join('\u0000');
     const pending = this.#singleFlight.run(scanKey, input.readScope, () => {
       const lifecycleSignal = this.#lifecycleAbort.signal;
-      return this.#scan({ ...input, scope, finalized: {
+      const scan = this.#scan({ ...input, scope, finalized: {
         number: input.finalized.number,
         hash: finalizedHash,
       } }, lifecycleSignal);
+      this.#activityRevision += 1;
+      this.#activeScans.add(scan);
+      void scan.finally(() => {
+        this.#activeScans.delete(scan);
+      }).catch(() => undefined);
+      return scan;
     });
     return waitForSharedAuthorityIndexScan(pending, input.signal);
   }

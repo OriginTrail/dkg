@@ -59,6 +59,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       recoveryConfig,
     );
     const deleteProvider = vi.fn();
+    const resolveDynamicallyAcceptedPolicy = vi.fn(() => null);
     const runtime = new Rfc64SwmRecoveryRuntimeV1({
       authority: {
         resolveRuntimeSelection: () => selection,
@@ -75,6 +76,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
           reconciliationLane: 'catalog-apply',
         }),
         resolveRecoveryConfig: () => normalizedRecoveryConfig,
+        resolveDynamicallyAcceptedPolicy,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider },
@@ -82,6 +84,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
 
     expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
       .toMatchObject({ active: true, lane: 'selected-public' });
+    expect(resolveDynamicallyAcceptedPolicy).not.toHaveBeenCalled();
     expect(runtime.resolveConfiguredCompleteProviderPeerIds(
       RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
     )).toEqual([PEER_A]);
@@ -117,6 +120,101 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       recoveryChanged: true,
       nextReceiverActive: true,
     });
+  });
+
+  it.each([
+    ['public', 0, 'selected-public'],
+    ['private', 1, 'ordinary-private'],
+  ] as const)(
+    'resolves a dynamically accepted owner-signed %s policy without static bootstrap',
+    (_label, accessPolicy, lane) => {
+      let selected = true;
+      let killSwitchActive = false;
+      const runtime = new Rfc64SwmRecoveryRuntimeV1({
+        authority: {
+          resolveRuntimeSelection: () => ({
+            selectedContextGraphs: selected ? [RFC64_ROLLOUT_CONTEXT_GRAPH_ID] : [],
+            eligibleContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+            subscriptionDriven: true,
+          }),
+          resolveConfigured: (contextGraphId) => ({
+            contextGraphId,
+            selected: true,
+            eligible: true,
+            active: !killSwitchActive,
+            mode: 'catalog',
+            killSwitchActive,
+            legacySyncAllowed: false,
+            track2Enabled: !killSwitchActive,
+            authoringAllowed: !killSwitchActive,
+            reconciliationLane: killSwitchActive ? 'disabled' : 'catalog-apply',
+          } as const),
+          resolveRecoveryConfig: () => undefined,
+          resolveDynamicallyAcceptedPolicy: () => ({
+            accessPolicy,
+            source: {
+              kind: 'owner-signed-unregistered',
+              ownerAddress: '0x1111111111111111111111111111111111111111',
+              ownerAuthorityEra: '0',
+            },
+          }),
+        },
+        admission: { invalidateContextGraph: () => [] },
+        cooldown: { deleteProvider: vi.fn() },
+      });
+
+      expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+        .toMatchObject({ active: true, lane });
+
+      selected = false;
+      expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+        .toMatchObject({ active: false, lane });
+
+      selected = true;
+      killSwitchActive = true;
+      expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+        .toMatchObject({ active: false, lane });
+    },
+  );
+
+  it('resolves a finalized release-native policy without static bootstrap', () => {
+    const runtime = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => ({
+          selectedContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+          eligibleContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+          subscriptionDriven: true,
+        }),
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: true,
+          eligible: true,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: false,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => undefined,
+        resolveDynamicallyAcceptedPolicy: () => ({
+          accessPolicy: 0,
+          source: {
+            kind: 'finalized-chain',
+            chainId: '20430',
+            contractAddress: '0x2222222222222222222222222222222222222222',
+            blockNumber: '1',
+            blockHash: `0x${'33'.repeat(32)}`,
+          },
+        }),
+      },
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider: vi.fn() },
+    });
+
+    expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: true, lane: 'selected-public' });
   });
 
   it('projects every subscription lifecycle effect from one transition snapshot', () => {

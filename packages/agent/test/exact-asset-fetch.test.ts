@@ -4,6 +4,7 @@ import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { QueryMethods } from '../src/dkg-agent-query.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import {
   ContextGraphAssetFetchConflictError,
   ContextGraphAssetFetchValidationError,
@@ -14,6 +15,7 @@ import {
 
 const CONTEXT_GRAPH = 'sports';
 const ON_CHAIN_ID = '9';
+const NAME_HASH = `0x${'ab'.repeat(32)}`;
 const PEER = '12D3KooWExactFetchPeer';
 const MEMBER = '0x0000000000000000000000000000000000000001';
 const UALS = [
@@ -139,21 +141,54 @@ describe('exact Context Graph asset fetch', () => {
 
   it('fetches up to ten named assets without using the background reconciler', async () => {
     const { host, exactFetch, inspect, flush, subscription } = createFetchHost({ present: [UALS[0]] });
+    delete subscription.onChainId;
     const scalarRoot = vi.fn(async () => new Uint8Array(32).fill(0xff));
     const scalarPublisher = vi.fn(async () => '0x00000000000000000000000000000000000000ff');
     const scalarBlock = vi.fn(async () => 999);
     const chainRoster = vi.fn(async () => [MEMBER]);
+    const legacyLookup = vi.fn(async () => {
+      throw new Error('exact asset fetch must not use legacy name enumeration');
+    });
+    const whenIdle = vi.fn(async () => undefined);
+    const resolveFinalized = vi.fn(async () => new Map([[NAME_HASH, {
+      chainId: 'base:8453',
+      governanceContract: `0x${'11'.repeat(20)}`,
+      contextGraphId: ON_CHAIN_ID,
+      owner: `0x${'22'.repeat(20)}`,
+      active: true,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      participantAgents: [MEMBER],
+      nameHash: NAME_HASH,
+      ownershipEra: '1',
+      policyVersion: '1',
+      rosterVersion: '1',
+      sourceBlockNumber: '42',
+      sourceBlockHash: `0x${'33'.repeat(32)}`,
+    }]]));
     Object.assign(host, {
       config: { syncReconcilerEnabled: false },
       vmReconcileEnabled: () => false,
       localAgents: new Map([[MEMBER, { agentAddress: MEMBER }]]),
       defaultAgentAddress: MEMBER,
       getContextGraphAllowedPeers: vi.fn(async () => null),
-      resolveContextGraphRegistrationBinding: vi.fn(async () => ({
-        kind: 'registered' as const,
-        onChainId: BigInt(ON_CHAIN_ID),
-        provenance: 'numeric-id' as const,
-      })),
+      contextGraphBindingState: new ContextGraphBindingState(),
+      contextGraphRegistrationsInFlight: new Set<string>(),
+      localContextGraphProvenance: { hasLocalCreate: () => false },
+      wireIdToLocalCgId: new Map<string, string>(),
+      contextGraphWireId: (value: string) => value.toLowerCase(),
+      contextGraphNameCommitment: () => NAME_HASH,
+      localCgIdForWireId: DKGAgent.prototype.localCgIdForWireId,
+      resolveContextGraphNameHashBindingTarget:
+        DKGAgent.prototype.resolveContextGraphNameHashBindingTarget,
+      resolveFinalizedContextGraphAuthorityTargetsV1:
+        DKGAgent.prototype.resolveFinalizedContextGraphAuthorityTargetsV1,
+      resolveContextGraphRegistrationBinding:
+        DKGAgent.prototype.resolveContextGraphRegistrationBinding,
+      hasAcceptedRfc64UnregisteredAuthorityV1: vi.fn(() => false),
+      hasAcceptedRfc64PublicUnregisteredAuthorityV1: vi.fn(() => false),
       resolveRegisteredContextGraphAuthority:
         DKGAgent.prototype.resolveRegisteredContextGraphAuthority,
       onChainParticipantAgentsCache: new Map<string, string[]>(),
@@ -169,6 +204,12 @@ describe('exact Context Graph asset fetch', () => {
       canReadContextGraph: QueryMethods.prototype.canReadContextGraph,
     });
     Object.assign(host.chain, {
+      resolveContextGraphIdByNameHash: legacyLookup,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle,
+      },
       getLatestMerkleRoot: scalarRoot,
       getLatestMerkleRootPublisher: scalarPublisher,
       getBlockNumber: scalarBlock,
@@ -212,6 +253,12 @@ describe('exact Context Graph asset fetch', () => {
     expect(scalarPublisher).not.toHaveBeenCalled();
     expect(scalarBlock).not.toHaveBeenCalled();
     expect(chainRoster).toHaveBeenCalledWith(BigInt(ON_CHAIN_ID));
+    expect(resolveFinalized).toHaveBeenCalledWith(
+      [NAME_HASH],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(whenIdle).toHaveBeenCalledTimes(2);
+    expect(legacyLookup).not.toHaveBeenCalled();
     expect(flush).toHaveBeenCalledTimes(1);
     expect(subscription.lastReconciledOrdinal).toBe(77);
   });
@@ -307,6 +354,45 @@ describe('exact Context Graph asset fetch', () => {
       CONTEXT_GRAPH,
       [UALS[0]],
     )).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+  });
+
+  it('drains a cancelled preauthorization read before releasing lifecycle ownership', async () => {
+    const { host, exactFetch } = createFetchHost();
+    let releaseIdle!: () => void;
+    const idle = new Promise<void>((resolve) => { releaseIdle = resolve; });
+    const whenIdle = vi.fn(async () => idle);
+    Object.assign(host.chain, {
+      contextGraphAuthorityIndexRevisionReader: { whenIdle },
+    });
+    host.canReadContextGraph = vi.fn(async (
+      _contextGraphId: string,
+      options: { signal?: AbortSignal },
+    ) => await new Promise<boolean>((_resolve, reject) => {
+      const signal = options.signal;
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+
+    const running = SwmHostModeMethods.prototype.fetchContextGraphAssets.call(
+      host as never,
+      CONTEXT_GRAPH,
+      [UALS[0]],
+      { peerIds: [PEER] },
+    );
+    await vi.waitFor(() => expect(host.canReadContextGraph).toHaveBeenCalledOnce());
+    expect(host.vmReconcilePhysicalRuns.size).toBe(1);
+
+    host.vmReconcileLifecycleController.abort();
+    await expect(running).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(host.vmReconcilePhysicalRuns.size).toBe(1);
+    releaseIdle();
+    await vi.waitFor(() => expect(host.vmReconcilePhysicalRuns.size).toBe(0));
+
+    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(exactFetch).not.toHaveBeenCalled();
   });
 
   it('retires an in-flight physical fetch on shutdown without later inspection or flush', async () => {
