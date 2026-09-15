@@ -1915,6 +1915,9 @@ export type ResolvedDKGAgentConfig =
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
     rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
       .Rfc64CatalogExecutionPlanV1;
+    /** Canonical resolved source for the agent-owned operator status snapshot. */
+    rfc64CatalogActivations: import('./rfc64/public-catalog-activation-config-v1.js')
+      .ResolvedRfc64CatalogActivationsV1;
     rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };
