@@ -9113,7 +9113,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // the rolling slot occupied until that new recovery cycle is safe.
         this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
       }
-    } else if (this.contextGraphSubscriptionRehydrationSlotIds.delete(contextGraphId)) {
+    } else if (this.contextGraphSubscriptionRehydrationSlotIds?.delete(contextGraphId)) {
       // An unsubscribe/deactivation also frees a slot, even though it does not
       // satisfy the normal synced readiness signal.
       this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
