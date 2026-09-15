@@ -52,7 +52,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          node scripts/build-runtime-packages.mjs
+          # This fixture exercises config setup/uninstall with daemon startup
+          # forbidden. Compile its CLI module graph without building an unused
+          # optional Rust/Wasm execution engine on the Windows host.
+          pnpm exec tsc --build packages/cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/copy-cli-runtime-assets.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --platform=node --format=esm --target=node22 --outfile=dist/fixtures/mcp-config-wsl.fixture.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -96,7 +96,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.evm_matrix != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -110,6 +110,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Set up semantic runtime build tools
+        uses: ./.github/actions/setup-semantic-runtime
 
       - name: Cache matching Hardhat compiler outputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -133,6 +136,9 @@ jobs:
           test "${#OUTPUTS[@]}" -gt 0
           test -d packages/evm-module/artifacts
           test -d packages/evm-module/cache
+          if test -d packages/semantic-runtime/generated; then
+            OUTPUTS+=(packages/semantic-runtime/generated)
+          fi
           tar -czf /tmp/evm-integration-build.tgz "${OUTPUTS[@]}" \
             packages/evm-module/artifacts packages/evm-module/cache
 
