@@ -269,6 +269,17 @@ test('leaf and shared package snapshots include conservative downstream consumer
   ]);
   assert.deepEqual(localLlm.evmScopes, []);
 
+  const identityWallet = pullRequestPlan([
+    change('packages/node-ui/src/ui/web3/identityWalletActions.ts'),
+  ]);
+  assert.deepEqual(identityWallet.evmScopes, ['chain']);
+  assert.match(identityWallet.reasons.join('\n'), /identity-wallet browser actions/);
+
+  const unrelatedNodeUi = pullRequestPlan([
+    change('packages/node-ui/src/ui/pages/Dashboard.tsx'),
+  ]);
+  assert.deepEqual(unrelatedNodeUi.evmScopes, []);
+
   const core = pullRequestPlan([change('packages/core/src/index.ts')]);
   assert.deepEqual(selectedLanes(core), [
     'tornado_core',
