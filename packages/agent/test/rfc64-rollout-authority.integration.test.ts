@@ -82,6 +82,15 @@ import {
 
 const MEMBER = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const NONMEMBER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const AUTHOR_CHAIN_CONFIG = Object.freeze({
+  rpcUrl: 'http://127.0.0.1:1',
+  hubAddress: '0x3333333333333333333333333333333333333333',
+  operationalKeys: Object.freeze([AUTHOR_WALLET.privateKey]),
+});
+
+function custodialAuthorConfig(chainAdapter: ChainAdapter = new NoChainAdapter()) {
+  return { chainAdapter, chainConfig: AUTHOR_CHAIN_CONFIG };
+}
 
 const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
   Object.freeze({
@@ -1510,6 +1519,7 @@ describe('RFC-64 rollout authority integration', () => {
     const edge = await startAgent({
       name: 'profile-only-accepted-swm-authority',
       config: {
+        ...custodialAuthorConfig(),
         rfc64CatalogDeploymentProfile: DEPLOYMENT,
         rfc64CatalogAccessPolicyAuthority: {
           localAgentAddress: AUTHOR,
@@ -1553,7 +1563,10 @@ describe('RFC-64 rollout authority integration', () => {
     const remotePeerId = '12D3KooWAuthorityCatchupPeer';
     const edge = await startAgent({
       name: 'authority-accepted-peer-catchup',
-      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+      config: {
+        ...custodialAuthorConfig(),
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+      },
     });
     (edge as any).defaultAgentAddress = AUTHOR;
     vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
@@ -1601,7 +1614,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
 
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
-      .rejects.toThrow(/no canonical owner address/u);
+      .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
     expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
       NETWORK_ID,
       contextGraphId,
@@ -2133,7 +2146,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
 
-    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
         active: true,
@@ -2146,7 +2159,8 @@ describe('RFC-64 rollout authority integration', () => {
         mode: 'legacy',
         selectionSource: 'operator-override',
       }),
-    ]);
+    ]));
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toHaveLength(2);
     expect(edge.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)).toMatchObject({
       mode: 'shadow',
       legacySyncAllowed: true,
@@ -2212,7 +2226,7 @@ describe('RFC-64 rollout authority integration', () => {
     const edge = await startAgent({
       name: 'authority-refresh-lifecycle',
       config: {
-        chainAdapter,
+        ...custodialAuthorConfig(chainAdapter),
         rfc64CatalogActivation: {
           deploymentProfile: DEPLOYMENT,
           rollout: { contextGraphModes: { [legacyContextGraphId]: 'legacy' } },
@@ -5229,6 +5243,7 @@ describe('RFC-64 rollout authority integration', () => {
     const shadow = await startAgent({
       name: 'lifecycle-shadow-receiver',
       config: {
+        ...custodialAuthorConfig(),
         rfc64CatalogActivation: {
           deploymentProfile: DEPLOYMENT,
           rollout: {

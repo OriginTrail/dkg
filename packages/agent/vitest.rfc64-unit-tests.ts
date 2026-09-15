@@ -67,6 +67,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-private-catalog-activation-config-v1.test.ts",
   "test/rfc64-private-sender-key-roster.test.ts",
   "test/rfc64-rollout-authority.integration.test.ts",
+  "test/rfc64-unregistered-replica-authority.integration.test.ts",
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",

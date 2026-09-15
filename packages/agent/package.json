@@ -46,6 +46,7 @@
     "./dist/rfc64/catalog-shadow-observability-v1.js": null,
     "./dist/rfc64/serialized-scope-runtime-v1.js": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
+    "./dist/rfc64/unregistered-replica-authority-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,
     "./dist/rfc64/control-object-store-v1.js": null,
