@@ -18,6 +18,7 @@ const harness = vi.hoisted(() => ({
   imports: {} as Record<string, Record<string, (...args: unknown[]) => unknown>>,
   loadCore: undefined as ((path: string) => Promise<WebAssembly.Module>) | undefined,
   resource: undefined as unknown,
+  toolResult: undefined as unknown,
   instantiate: vi.fn(),
   executor: { abiVersion: vi.fn(), compile: vi.fn(), admit: vi.fn(), start: vi.fn() },
   execution: { advance: vi.fn(), inspect: vi.fn(), [Symbol.dispose]: vi.fn() },
@@ -49,6 +50,7 @@ beforeEach(() => {
   harness.listener = undefined;
   harness.onToolCall = undefined;
   harness.resource = undefined;
+  harness.toolResult = undefined;
   requestId = 0n;
   Object.assign(harness.bootstrap, { componentHash: 'component', witHash: 'wit', expectedAbi: 1, allowTestOperations: false, maxOperations: 2 });
   harness.componentPath = fileURLToPath(new URL('../generated/component/runtime.js', import.meta.url));
@@ -83,18 +85,21 @@ function capability(): ExecutionCapabilityDescriptor {
   return { ...defaultExecutionCapability(hashHex), tools: [
     { operation: 'agent/investigate', version: '1', witInterface: 'origintrail:semantic-runtime/investigator@0.1.0' },
     { operation: 'dkg/query', version: '1', witInterface: 'origintrail:semantic-runtime/query-catalog@0.1.0' },
+    { operation: 'llm/safe', version: '1', witInterface: 'origintrail:semantic-runtime/safe-llm@0.1.0' },
+    { operation: 'remote-execute', version: '1', witInterface: 'origintrail:semantic-runtime/remote-execute@0.1.0' },
   ] };
 }
 async function start(descriptor = capability()) {
   return send('start', { plan: plan.canonicalPlan, capability: descriptor, logicalTime: 5n });
 }
-function importedTool(kind: 'investigator' | 'query-catalog') {
+type ToolKind = 'investigator' | 'query-catalog' | 'safe-llm' | 'remote-execute';
+function importedTool(kind: ToolKind) {
   const api = harness.imports[`origintrail:semantic-runtime/${kind}@0.1.0`];
-  return kind === 'investigator' ? api.investigate : api.query;
+  return api[{ investigator: 'investigate', 'query-catalog': 'query', 'safe-llm': 'run', 'remote-execute': 'execute' }[kind]];
 }
-function invokeDuringAdvance(kind: 'investigator' | 'query-catalog', argument: unknown, resource?: unknown) {
+function invokeDuringAdvance(kind: ToolKind, argument: unknown, resource?: unknown) {
   harness.execution.advance.mockImplementation(async () => {
-    await importedTool(kind)(resource ?? harness.resource, argument);
+    harness.toolResult = await importedTool(kind)(resource ?? harness.resource, argument);
     return completion;
   });
 }
@@ -140,7 +145,7 @@ describe('component worker trust boundary', () => {
     const resource = harness.resource as { descriptor: ExecutionCapabilityDescriptor };
     descriptor.tools.length = 0;
     descriptor.policy.epoch = 99n;
-    expect(resource.descriptor.tools).toHaveLength(2);
+    expect(resource.descriptor.tools).toHaveLength(4);
     expect(resource.descriptor.policy.epoch).toBe(0n);
     expect(Object.isFrozen(resource.descriptor)).toBe(true);
     expect(Object.isFrozen(resource.descriptor.budgets)).toBe(true);
@@ -182,19 +187,36 @@ describe('component worker trust boundary', () => {
     expect(harness.execution.advance).toHaveBeenCalledTimes(kind === 'budget' ? 1 : 0);
   });
 
-  it.each(['investigator', 'query-catalog'] as const)('correlates %s requests and returns the matching host result', async (kind) => {
+  it.each(['investigator', 'query-catalog', 'safe-llm', 'remote-execute'] as const)('correlates %s requests and returns the matching host result', async (kind) => {
     await boot(); await start();
-    const argument = kind === 'investigator' ? { effectId: 1n, prompt: 'investigate' } : { effectId: 1n, queryId: 'catalog/items', parameters: [{ name: 'limit', value: '2' }] };
+    const argument = kind === 'query-catalog'
+      ? { effectId: 1n, queryId: 'catalog/items', parameters: [{ name: 'limit', value: '2' }] }
+      : kind === 'remote-execute'
+        ? { effectId: 1n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' }
+        : { effectId: 1n, prompt: 'investigate' };
+    const result = kind === 'query-catalog' ? { kind, json: '[]' }
+      : kind === 'remote-execute' ? { kind, executionIri: 'urn:sr:execution:child', executionUal: 'did:dkg:child' }
+        : { kind, output: 'done' };
     invokeDuringAdvance(kind, argument);
     harness.onToolCall = (message) => {
       expect(message.call).toEqual({ kind, ...argument });
-      harness.listener!({ type: 'tool-result', toolCallId: message.toolCallId, ok: true, result: kind === 'investigator' ? { kind, output: 'done' } : { kind, json: '[]' } });
+      harness.listener!({ type: 'tool-result', toolCallId: message.toolCallId, ok: true, result });
     };
     expect(await send('advance')).toMatchObject({ ok: true, result: { kind: 'completed' } });
     expect(harness.messages.filter((message) => message.type === 'tool-call')).toHaveLength(1);
+    expect(harness.toolResult).toEqual(kind === 'query-catalog' ? { json: '[]' }
+      : kind === 'remote-execute' ? { executionIri: 'urn:sr:execution:child', executionUal: 'did:dkg:child' }
+        : 'done');
   });
 
   it.each([
+    ['safe-llm', { effectId: 0n, prompt: 'x' }, 'INVALID_SAFE_LLM_EFFECT_ID'],
+    ['safe-llm', { effectId: 1n, prompt: 9 }, 'INVALID_SAFE_LLM_ARGUMENT'],
+    ['remote-execute', { effectId: 0n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' }, 'INVALID_REMOTE_EXECUTE_EFFECT_ID'],
+    ['remote-execute', { effectId: 1n, nodeId: '', programIri: 'urn:sr:program:child' }, 'INVALID_REMOTE_EXECUTE_ARGUMENT'],
+    ['remote-execute', { effectId: 1n, nodeId: 'λ'.repeat(257), programIri: 'urn:sr:program:child' }, 'INVALID_REMOTE_EXECUTE_ARGUMENT'],
+    ['remote-execute', { effectId: 1n, nodeId: 'peer-b', programIri: '' }, 'INVALID_REMOTE_EXECUTE_ARGUMENT'],
+    ['remote-execute', { effectId: 1n, nodeId: 'peer-b', programIri: 'λ'.repeat(1025) }, 'INVALID_REMOTE_EXECUTE_ARGUMENT'],
     ['investigator', { effectId: 0n, prompt: 'x' }, 'INVALID_LLM_EFFECT_ID'],
     ['investigator', { effectId: 1n, prompt: 9 }, 'INVALID_LLM_ARGUMENT'],
     ['query-catalog', { effectId: 0n, queryId: 'q', parameters: [] }, 'INVALID_QUERY_EFFECT_ID'],
@@ -218,6 +240,41 @@ describe('component worker trust boundary', () => {
     await boot(); await start(); invokeDuringAdvance('investigator', { effectId: 1n, prompt: 'x' });
     harness.onToolCall = (message) => harness.listener!({ type: 'tool-result', toolCallId: message.toolCallId, ...(kind === 'host failure' ? { ok: false, code: 'DENIED', message: 'host denied', retryable: true } : { ok: true, result: { kind: 'query-catalog', json: '[]' } }) });
     expect(await send('advance')).toMatchObject({ ok: false, code: kind === 'host failure' ? 'DENIED' : 'COMPONENT_TOOL_RESULT_MISMATCH', retryable: kind === 'host failure' });
+  });
+
+  it.each(['safe-llm', 'remote-execute'] as const)('requires the exact %s authority and result kind', async (kind) => {
+    await boot();
+    const descriptor = capability();
+    descriptor.tools = descriptor.tools.filter((tool) => !tool.witInterface.includes(kind));
+    await start(descriptor);
+    const argument = kind === 'safe-llm' ? { effectId: 1n, prompt: 'x' }
+      : { effectId: 1n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' };
+    invokeDuringAdvance(kind, argument);
+    expect(await send('advance')).toMatchObject({ ok: false, code: 'COMPONENT_TOOL_NOT_AUTHORIZED' });
+    expect(harness.messages.filter((message) => message.type === 'tool-call')).toEqual([]);
+    await send('drop'); await start();
+    harness.onToolCall = (message) => harness.listener!({ type: 'tool-result', toolCallId: message.toolCallId, ok: true, result: { kind: 'investigator', output: 'wrong tool' } });
+    expect(await send('advance')).toMatchObject({ ok: false, code: 'COMPONENT_TOOL_RESULT_MISMATCH' });
+  });
+
+  it.each([
+    { kind: 'remote-execute', executionIri: '' },
+    { kind: 'remote-execute', executionIri: 123 },
+    { kind: 'remote-execute', executionIri: 'urn:sr:execution:child', executionUal: 123 },
+  ])('rejects malformed remote execution receipts: %j', async (result) => {
+    await boot(); await start();
+    invokeDuringAdvance('remote-execute', { effectId: 1n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' });
+    harness.onToolCall = (message) => harness.listener!({ type: 'tool-result', toolCallId: message.toolCallId, ok: true, result });
+    expect(await send('advance')).toMatchObject({ ok: false, code: 'COMPONENT_TOOL_RESULT_MISMATCH' });
+    expect(harness.toolResult).toBeUndefined();
+  });
+
+  it('accepts a remote execution receipt without inventing an optional UAL', async () => {
+    await boot(); await start();
+    invokeDuringAdvance('remote-execute', { effectId: 1n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' });
+    harness.onToolCall = (message) => harness.listener!({ type: 'tool-result', toolCallId: message.toolCallId, ok: true, result: { kind: 'remote-execute', executionIri: 'urn:sr:execution:child' } });
+    expect(await send('advance')).toMatchObject({ ok: true });
+    expect(harness.toolResult).toEqual({ executionIri: 'urn:sr:execution:child' });
   });
 
   it('rejects imported tools outside an active request and unknown tool-result ids', async () => {
