@@ -349,9 +349,8 @@ describe('daemon lifecycle control-plane files', () => {
     expect(existsSync(join(defaultHome, 'daemon.pid'))).toBe(false);
   });
 
-  it.runIf(process.platform !== 'win32')(
-    'reaps a SIGKILLed worker descendant and releases the managed-store port before respawn',
-    async () => {
+  it('reaps a SIGKILLed worker descendant and releases the managed-store port before respawn', async () => {
+      if (process.platform === 'win32') return;
       const managedPort = await freePort();
       const fixture = await createSupervisorFixture({
         prefix: 'dkg-supervised-reap-',
@@ -410,12 +409,10 @@ describe('daemon lifecycle control-plane files', () => {
       expect(readFileSync(replacementBound, 'utf8')).toBe('bound');
       const orphanPid = Number(readFileSync(listenerReady, 'utf8'));
       expect(() => process.kill(orphanPid, 0)).toThrow();
-    },
-  );
+  });
 
-  it.runIf(process.platform !== 'win32')(
-    'SIGHUP to the foreground supervisor reaps the worker and its managed store',
-    async () => {
+  it('SIGHUP to the foreground supervisor reaps the worker and its managed store', async () => {
+      if (process.platform === 'win32') return;
       const managedPort = await freePort();
       const fixture = await createSupervisorFixture({
         prefix: 'dkg-foreground-hup-',
@@ -505,12 +502,10 @@ describe('daemon lifecycle control-plane files', () => {
         }
         await killAndWait(supervisor.pid);
       }
-    },
-  );
+  });
 
-  it.runIf(process.platform !== 'win32')(
-    'Ctrl-Z stops the whole foreground job, and resuming brings it back',
-    async () => {
+  it('Ctrl-Z stops the whole foreground job, and resuming brings it back', async () => {
+      if (process.platform === 'win32') return;
       const managedPort = await freePort();
       const fixture = await createSupervisorFixture({
         prefix: 'dkg-foreground-tstp-',
@@ -602,12 +597,10 @@ describe('daemon lifecycle control-plane files', () => {
           await killAndWait(Number(readFileSync(file, 'utf8')));
         }
       }
-    },
-  );
+  });
 
-  it.runIf(process.platform !== 'win32')(
-    'fails closed instead of respawning while an external managed-store listener survives',
-    async () => {
+  it('fails closed instead of respawning while an external managed-store listener survives', async () => {
+      if (process.platform === 'win32') return;
       const managedPort = await freePort();
       const fixture = await createSupervisorFixture({
         prefix: 'dkg-supervised-fail-closed-',
@@ -682,6 +675,5 @@ describe('daemon lifecycle control-plane files', () => {
           }
         }
       }
-    },
-  );
+  });
 });

@@ -88,9 +88,8 @@ describe('worker process-group cleanup', () => {
     expect(signals).toContain('SIGKILL');
   });
 
-  it.runIf(process.platform !== 'win32')(
-    'reaps a real descendant left behind by a SIGKILLed worker',
-    async () => {
+  it('reaps a real descendant left behind by a SIGKILLed worker', async () => {
+    if (process.platform === 'win32') return;
       const worker = spawn(
         process.execPath,
         [
@@ -130,8 +129,7 @@ describe('worker process-group cleanup', () => {
       } finally {
         try { process.kill(-pgid, 'SIGKILL'); } catch { /* already gone */ }
       }
-    },
-  );
+  });
 });
 
 describe('managed store port cleanup barrier', () => {

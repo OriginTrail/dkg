@@ -268,9 +268,8 @@ describe('foreground signal relay', () => {
   // the kernel DELIVERS it to a setsid'd worker is the part that actually broke:
   // an orphaned process group silently discards SIGTSTP. This exercises a real
   // detached child so a stop signal that no-ops cannot pass as a green test.
-  it.runIf(process.platform !== 'win32')(
-    'really suspends a setsid worker group, and resumes it',
-    async () => {
+  it('really suspends a setsid worker group, and resumes it', async () => {
+    if (process.platform === 'win32') return;
       const child = spawn(
         process.execPath,
         // Mirrors the daemon worker: handlers for SIGINT/SIGTERM only, so its
@@ -317,8 +316,7 @@ describe('foreground signal relay', () => {
           /* already gone */
         }
       }
-    },
-  );
+  });
 
   it('removes its process listeners on dispose', () => {
     const h = harness();

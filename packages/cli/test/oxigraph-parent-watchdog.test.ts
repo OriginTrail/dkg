@@ -32,7 +32,8 @@ describe('Oxigraph parent watchdog', () => {
       .toThrow(/Usage/);
   });
 
-  it.runIf(process.platform === 'linux')('reads a PID-reuse-safe parent identity', () => {
+  it('reads a PID-reuse-safe parent identity', () => {
+    if (process.platform !== 'linux') return;
     expect(readLinuxProcessIdentity(process.pid)).toMatch(new RegExp(`^${process.pid}:\\d+$`));
   });
 
@@ -115,9 +116,8 @@ describe('Oxigraph parent watchdog', () => {
     expect(result.signal).toBe('SIGKILL');
   });
 
-  it.runIf(process.platform !== 'win32')(
-    'keeps forwarding repeated signals until a TERM-ignoring child is reaped',
-    async () => {
+  it('keeps forwarding repeated signals until a TERM-ignoring child is reaped', async () => {
+    if (process.platform === 'win32') return;
       const watchdogPath = fileURLToPath(new URL(
         '../src/daemon/oxigraph-parent-watchdog.ts',
         import.meta.url,
@@ -173,8 +173,7 @@ describe('Oxigraph parent watchdog', () => {
           try { process.kill(supervisedPid, 'SIGKILL'); } catch { /* already gone */ }
         }
       }
-    },
-  );
+  });
 
   it('reports an externally SIGTERM-killed child as a non-zero wrapper exit', async () => {
     const handle = startOxigraphParentWatchdog({
