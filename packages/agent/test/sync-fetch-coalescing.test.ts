@@ -1919,6 +1919,12 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(sharedCalls).toBe(2);
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.cleanSharedMemoryPeerIds).toEqual([]);
+      if (_failureKind === 'backpressure deferral') {
+        // Continuation pressure is retained for observability, but it must not
+        // demote a pass-one job that already made progress into a deferred job.
+        expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
+        expect(result.deferredBackpressure).toBe(0);
+      }
     } finally {
       await agent.stop().catch(() => {});
     }
