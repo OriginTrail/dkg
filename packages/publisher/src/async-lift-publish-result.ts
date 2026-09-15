@@ -179,43 +179,71 @@ export function isPermanentAuthorCapabilityFailure(error: unknown): boolean {
     || messageIndicatesPublishAuthorNotCustodial(lowerMessage);
 }
 
+type PublishFailureRuleFacts = Readonly<{
+  error: unknown;
+  failedFromState: AsyncLiftPublishFailureInput['failedFromState'];
+  errorCode: unknown;
+  lowerMessage: string;
+}>;
+
+type PublishFailureRule = (
+  facts: PublishFailureRuleFacts,
+) => LiftJobFailureMetadata['code'] | undefined;
+
+function mapAuthorCapabilityFailure(
+  facts: PublishFailureRuleFacts,
+): LiftJobFailureMetadata['code'] | undefined {
+  if (facts.failedFromState !== 'broadcast') return undefined;
+  return facts.errorCode === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+    || messageIndicatesPublishAuthorNotCustodial(facts.lowerMessage)
+    ? 'authority_forbidden'
+    : undefined;
+}
+
+function mapUnfundedWalletFailure(
+  facts: PublishFailureRuleFacts,
+): LiftJobFailureMetadata['code'] | undefined {
+  if (facts.failedFromState !== 'broadcast') return undefined;
+  return facts.errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
+    || messageIndicatesNoFundedPublisherWallet(facts.lowerMessage)
+    ? 'insufficient_funds'
+    : undefined;
+}
+
+function mapQuorumFailure(
+  facts: PublishFailureRuleFacts,
+): LiftJobFailureMetadata['code'] | undefined {
+  if (facts.failedFromState !== 'broadcast') return undefined;
+  return isQuorumUnmetError(facts.error) || facts.lowerMessage.includes('quorumunmeterror')
+    ? 'quorum_unmet'
+    : undefined;
+}
+
+/**
+ * Broadcast failure policy in precedence order. Keep the list ordered: an
+ * error may carry both a structured marker and an incidental message marker,
+ * and the first matching rule owns the durable failure code.
+ */
+const BROADCAST_FAILURE_RULES: readonly PublishFailureRule[] = [
+  mapAuthorCapabilityFailure,
+  mapUnfundedWalletFailure,
+  mapQuorumFailure,
+];
+
 export function mapPublishExceptionToLiftJobFailure(
   input: AsyncLiftPublishFailureInput,
 ): LiftJobFailureMetadata {
-  const { code: errorCode, message, lowerMessage: lower } = readPublishErrorFacts(input.error);
-
-  // The funded-wallet-selection error (dkg-chain `InsufficientPublisherFundsError`,
-  // code `NO_FUNDED_PUBLISHER_WALLET`) carries a friendly "no operational wallet
-  // has enough funds" message that does NOT contain the literal "insufficient
-  // funds" substring `classifyPublishFailureCode` matches — so recognize it by
-  // its structured code (with a message-marker fallback, mirroring the daemon +
-  // node-ui, in case an intermediate re-wrap drops `.code`). Otherwise an
-  // unfundable publish would fall through to the retryable `rpc_unavailable`
-  // default and the queue would reset/retry a job that can never finalize (the
-  // same forever-retry trap #1013/#1121 fixed). `insufficient_funds` is only
-  // valid from the 'broadcast' state, so only force it there — funded selection
-  // is a broadcast-phase concern; any other state falls back to the classifier.
-  // GH#1786 — the same trap, one class over. The node cannot re-sign this author's
-  // UpdateAuthorAttestation (no custodial key on file, and the author is not the publisher
-  // EOA). That is PERMANENT, so without recognising it here it falls through to the
-  // retryable `rpc_unavailable` default and the queue keeps resetting a job that can never
-  // finalize. Classified as an AUTHORITY failure rather than a transport one; only forced
-  // from 'broadcast', which is where the executor raises it — mid-publish, before any
-  // transaction is sent. Message fallback mirrors the funded-wallet handling above, for
-  // re-wrapped errors that lost `.code` — via the SHARED core matcher, so the agent's
-  // message formatter and this classifier cannot drift apart.
-  const isAuthorNotCustodial = isPermanentAuthorCapabilityFailure(input.error);
-  const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
-    || messageIndicatesNoFundedPublisherWallet(lower);
-  const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'
-    ? 'authority_forbidden'
-    : isNoFundedWallet && input.failedFromState === 'broadcast'
-    ? 'insufficient_funds'
-    : input.failedFromState === 'broadcast' && (
-      isQuorumUnmetError(input.error) || lower.includes('quorumunmeterror')
-    )
-      ? 'quorum_unmet'
-      : classifyPublishFailureCode(lower, input.failedFromState);
+  const { code: errorCode, message, lowerMessage } = readPublishErrorFacts(input.error);
+  const facts: PublishFailureRuleFacts = {
+    error: input.error,
+    failedFromState: input.failedFromState,
+    errorCode,
+    lowerMessage,
+  };
+  const code = BROADCAST_FAILURE_RULES
+    .map((rule) => rule(facts))
+    .find((candidate): candidate is LiftJobFailureMetadata['code'] => candidate !== undefined)
+    ?? classifyPublishFailureCode(lowerMessage, input.failedFromState);
 
   return createLiftJobFailureMetadata({
     failedFromState: input.failedFromState,
