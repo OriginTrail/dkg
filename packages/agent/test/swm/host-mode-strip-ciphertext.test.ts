@@ -70,6 +70,7 @@ interface StripInternals {
   }>;
   handleSwmHostCatchup(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
   handleGetCiphertextChunk(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
+  initializeSwmHostModeStore(): Promise<void>;
 }
 
 /** A curated CG: any `onChainHash` makes the three-source curation probe in
@@ -205,6 +206,64 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(g.swmHostModeHandlers.size).toBe(0);
   });
 
+  it('restart restore re-evaluates a persisted public subscription under hostPublic policy', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-public-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestorePublicCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, hostPublic: true, stripCiphertext: true },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-public-restore';
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    await store.markHostModeSubscribed(cgId);
+    g.subscribedContextGraphs.set(cgId, { subscribed: false, synced: false, onChainId: '2' });
+    g.onChainAccessPolicyCache.set('2', 0);
+    g.isPrivateContextGraph = async () => false;
+    g.isConfirmedPublicForHostMode = async () => true;
+    (g as any).maybeMarkRegisteredForHostMode = async () => {};
+    const wired: Array<{ id: string; curated?: boolean }> = [];
+    g.wireSwmHostModeHandler = (id: string, _source?: SubscriptionSource, curated?: boolean) => {
+      wired.push({ id, curated });
+    };
+
+    await g.initializeSwmHostModeStore();
+
+    expect(wired).toEqual([{ id: cgId, curated: false }]);
+  });
+
+  it('restart restore contains a failing policy re-evaluation to keep startup alive', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-policy-error-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestorePolicyErrorCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, hostPublic: true, stripCiphertext: true },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-public-restore-error';
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    await store.markHostModeSubscribed(cgId);
+    g.reconcileSwmHostModeSubscription = async () => {
+      throw new Error('simulated policy probe failure');
+    };
+
+    await expect(g.initializeSwmHostModeStore()).resolves.toBeUndefined();
+  });
+
   it('strip OFF (baseline) WIRES host-mode subscribe for a curated CG', async () => {
     const core = await makeCore(false);
     const g = core as unknown as StripInternals;
@@ -216,6 +275,60 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     await g.reconcileSwmHostModeSubscription(cgId);
 
     expect(wired).toEqual([cgId]);
+  });
+
+  it('restart restore wires persisted subscriptions when private-ciphertext strip is OFF', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-legacy-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestoreLegacyCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, stripCiphertext: false },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-curated-restore';
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    await store.markHostModeSubscribed(cgId);
+    (g as any).maybeMarkRegisteredForHostMode = async () => {};
+    const wired: string[] = [];
+    g.wireSwmHostModeHandler = (id: string) => {
+      wired.push(id);
+    };
+
+    await g.initializeSwmHostModeStore();
+
+    expect(wired).toEqual([cgId]);
+  });
+
+  it('restart restore contains a failing legacy re-wire to keep startup alive', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-legacy-error-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestoreLegacyErrorCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, stripCiphertext: false },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-curated-restore-error';
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    await store.markHostModeSubscribed(cgId);
+    g.wireSwmHostModeHandler = () => {
+      throw new Error('simulated re-wire failure');
+    };
+
+    await expect(g.initializeSwmHostModeStore()).resolves.toBeUndefined();
   });
 
   // ── 2. operator override hatch CLOSED (WS-A divergence from rung-1) ───────
