@@ -1256,6 +1256,8 @@ describe('DKGAgent sync fetch coalescing', () => {
       );
 
       expect(result.deferredBackpressure).toBe(0);
+      expect(result.diagnostics.durable.deferredBackpressure).toBe(1);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
       expect(order).toEqual(['durable-1', 'durable-2', 'shared-1', 'shared-2']);
       expect(priorities).toEqual([
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
