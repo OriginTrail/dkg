@@ -65,7 +65,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type EvmAddressV1, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type EvmAddressV1, type ContextGraphIdV1, type NetworkIdV1, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -1000,6 +1000,20 @@ export class DKGAgent extends DKGAgentBase {
           this.config.rfc64CatalogBootstrap,
           this.config.rfc64PublicCatalogBootstrap,
         ),
+        resolveDynamicallyAcceptedPolicy: (contextGraphId) => {
+          const service = this.rfc64PublicCatalogServiceV1;
+          const networkId = (
+            this.config.rfc64CatalogDeploymentProfile?.networkId
+            ?? this.config.networkIdentity?.chainId
+          ) as NetworkIdV1 | undefined;
+          if (service === undefined || networkId === undefined || networkId === 'none') {
+            return null;
+          }
+          return service.acceptedPolicySnapshot(
+            networkId,
+            contextGraphId as ContextGraphIdV1,
+          )?.policy ?? null;
+        },
       },
       admission: {
         invalidateContextGraph: (contextGraphId) => (

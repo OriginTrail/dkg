@@ -29,6 +29,21 @@ import {
   withRpcRequestContext,
 } from './rpc-request-transport.js';
 
+/**
+ * Keep authority-index eth_getLogs requests inside the strictest production
+ * provider limit currently supported. The configured registry page size can
+ * still be smaller, while stricter providers remain covered by the adaptive
+ * range reader below.
+ */
+const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
+
+function boundedAuthorityIndexPageSizeV1(pageSize: number): number {
+  return Number.isSafeInteger(pageSize)
+    && pageSize > CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1
+    ? CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1
+    : pageSize;
+}
+
 interface EvmContextGraphAuthorityIndexReadV1<T> {
   readonly value: T;
   /** Final fence shared by state and revision projections. */
@@ -57,7 +72,9 @@ function authorityIndexScanInputV1(
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
     finalized: input.finalized,
-    pageSize: input.pageSize,
+    // Preserve invalid values for ContextGraphAuthorityIndex's fail-closed
+    // bounds validation; only a valid oversized configured page is clamped.
+    pageSize: boundedAuthorityIndexPageSizeV1(input.pageSize),
     signal: input.signal,
     readBlockHash: async (blockNumber, lifecycleSignal) => (
       (await withRpcRequestContext(

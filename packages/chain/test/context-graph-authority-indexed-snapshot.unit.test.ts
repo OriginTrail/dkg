@@ -35,6 +35,8 @@ interface IndexedAuthorityEvidence {
     isRetryable?: (error: unknown) => boolean;
   }>>;
   readonly indexRanges: Array<readonly [number, number]>;
+  readonly rejectedIndexRanges: Array<readonly [number, number]>;
+  readonly transientFailedIndexRanges: Array<readonly [number, number]>;
   readonly indexTopicSets: string[][];
   readonly indexAddresses: string[];
   readonly indexInvalidations: number[];
@@ -70,6 +72,10 @@ function makeIndexedAuthorityAdapter(
     secondContextGraph?: boolean;
     zeroHashContextGraphs?: number;
     lateContextGraphNameHash?: string;
+    finalizedNumber?: number;
+    authorityIndexPageSize?: number;
+    maxLogRangeBlocks?: number;
+    transientFailIndexRangeOnce?: readonly [number, number];
   }> = {},
 ): IndexedAuthorityHarness {
   const scenario = createAuthorityScenario(options);
@@ -84,7 +90,7 @@ function makeIndexedAuthorityAdapter(
   });
   adapter.initialized = true;
   adapter.init = async () => {};
-  adapter.cgRegistryScanPageSize = 10;
+  adapter.cgRegistryScanPageSize = options.authorityIndexPageSize ?? 10;
 
   const evidence: IndexedAuthorityEvidence = {
     blockReads: [],
@@ -92,6 +98,8 @@ function makeIndexedAuthorityAdapter(
     staticCalls: [],
     readOptions: [],
     indexRanges: [],
+    rejectedIndexRanges: [],
+    transientFailedIndexRanges: [],
     indexTopicSets: [],
     indexAddresses: [],
     indexInvalidations: authorityIndexStore.invalidations,
@@ -100,6 +108,8 @@ function makeIndexedAuthorityAdapter(
     entered: PromiseWithResolvers<void>;
     release: PromiseWithResolvers<void>;
   }> | undefined;
+  const transientFailIndexRange = options.transientFailIndexRangeOnce;
+  let transientIndexFailurePending = transientFailIndexRange !== undefined;
 
   const contract = {
     interface: {
@@ -144,6 +154,34 @@ function makeIndexedAuthorityAdapter(
       evidence.indexAddresses.push(filter.address);
       evidence.indexRanges.push([filter.fromBlock, filter.toBlock]);
       evidence.indexTopicSets.push(filter.topics[0] ?? []);
+      if (
+        transientIndexFailurePending
+        && filter.fromBlock === transientFailIndexRange?.[0]
+        && filter.toBlock === transientFailIndexRange?.[1]
+      ) {
+        transientIndexFailurePending = false;
+        evidence.transientFailedIndexRanges.push([filter.fromBlock, filter.toBlock]);
+        throw new Error('temporary authority-index provider failure');
+      }
+      if (
+        options.maxLogRangeBlocks !== undefined
+        && filter.toBlock - filter.fromBlock + 1 > options.maxLogRangeBlocks
+      ) {
+        evidence.rejectedIndexRanges.push([filter.fromBlock, filter.toBlock]);
+        throw Object.assign(new Error('server response 400 Bad Request'), {
+          code: 'SERVER_ERROR',
+          info: {
+            responseBody: JSON.stringify({
+              jsonrpc: '2.0',
+              error: {
+                message: `ranges over ${options.maxLogRangeBlocks} blocks are not supported on free plan`,
+                code: 35,
+              },
+            }),
+            responseStatus: '400 Bad Request',
+          },
+        });
+      }
       const gate = indexPageReadGate;
       if (gate !== undefined) {
         indexPageReadGate = undefined;
@@ -195,6 +233,89 @@ function bindAbortableTipReader(harness: IndexedAuthorityHarness): void {
 }
 
 describe('RFC-64 indexed Context Graph authority snapshots', () => {
+  it('plans authority-index pages within a 10,000-block provider cap', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      finalizedNumber: 20_020,
+      authorityIndexPageSize: 25_000,
+      maxLogRangeBlocks: 10_000,
+    });
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .resolves.toEqual(new Map([[
+        '9',
+        expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      ]]));
+
+    expect(evidence.indexRanges).toEqual([
+      [7, 10_006],
+      [10_007, 20_006],
+      [20_007, 20_020],
+    ]);
+    expect(evidence.rejectedIndexRanges).toEqual([]);
+    expect(evidence.blockReads).toEqual(['finalized', 10_006, 20_006, 20_020]);
+  });
+
+  it('does not turn an invalid authority page size into a valid bounded page', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      authorityIndexPageSize: Number.POSITIVE_INFINITY,
+    });
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .rejects.toThrow('scan bounds are invalid');
+    expect(evidence.indexRanges).toEqual([]);
+  });
+
+  it('adaptively splits a bounded authority page when a provider rejects a stricter cap', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      finalizedNumber: 10_020,
+      authorityIndexPageSize: 25_000,
+      maxLogRangeBlocks: 5_000,
+    });
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .resolves.toEqual(new Map([[
+        '9',
+        expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      ]]));
+
+    expect(evidence.indexRanges).toEqual([
+      [7, 10_006],
+      [7, 5_006],
+      [5_007, 10_006],
+      [10_007, 10_020],
+    ]);
+    expect(evidence.rejectedIndexRanges).toEqual([[7, 10_006]]);
+    expect(evidence.blockReads).toEqual(['finalized', 10_006, 10_020]);
+  });
+
+  it('resumes from the last atomic checkpoint when a later bounded page fails', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      finalizedNumber: 20_020,
+      authorityIndexPageSize: 25_000,
+      transientFailIndexRangeOnce: [10_007, 20_006],
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .rejects.toThrow('temporary authority-index provider failure');
+    await expect(reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .resolves.toEqual(new Map([[
+        '9',
+        expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      ]]));
+
+    expect(evidence.indexRanges).toEqual([
+      [7, 10_006],
+      [10_007, 20_006],
+      [10_007, 20_006],
+      [20_007, 20_020],
+    ]);
+    expect(evidence.transientFailedIndexRanges).toEqual([[10_007, 20_006]]);
+  });
+
   it('uses one combined contract-wide log request per page when the durable index is wired', async () => {
     const { adapter, evidence } = makeIndexedAuthorityAdapter();
 
