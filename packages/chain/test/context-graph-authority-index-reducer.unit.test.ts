@@ -14,10 +14,11 @@ import {
 } from '../src/context-graph-authority-index-checkpoint.js';
 import {
   reduceContextGraphAuthorityIndexPage,
-  type ContextGraphAuthorityIndexEvent,
+  type RawContextGraphAuthorityIndexEvent as ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
 import {
   applyContextGraphAuthorityStateEvent,
+  normalizeContextGraphAuthorityIndexEvent,
   normalizeContextGraphAuthorityPublishReference,
   type ContextGraphAuthorityIndexState,
 } from '../src/context-graph-authority-state.js';
@@ -604,7 +605,12 @@ describe('contract-wide Context Graph authority index reducer', () => {
       [field]: Number.MAX_SAFE_INTEGER,
     } as ContextGraphAuthorityIndexState;
 
-    expect(() => applyContextGraphAuthorityStateEvent(overflowing, transition))
+    const canonicalTransition = normalizeContextGraphAuthorityIndexEvent(transition, {
+      fromBlockNumber: 21,
+      throughBlockNumber: 22,
+      throughBlockHash: blockHash(22),
+    });
+    expect(() => applyContextGraphAuthorityStateEvent(overflowing, canonicalTransition))
       .toThrow('safe integer range');
   });
 });
