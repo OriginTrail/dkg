@@ -1,10 +1,61 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 
 const yaml = (name) => parse(readFileSync(new URL(`../../../.github/${name}`, import.meta.url), 'utf8'));
 const setup = './.github/actions/setup-semantic-runtime';
+
+test('shared Linux build artifacts restore the executable safe-LLM runner for CLI tests', () => {
+  const { jobs } = yaml('workflows/ci.yml');
+  const steps = jobs.build.steps;
+  const nativeBuild = steps.findIndex((step) => step.name === 'Build native safe-LLM runner for downstream CLI tests');
+  assert.ok(nativeBuild > steps.findIndex((step) => step.uses === setup));
+  assert.ok(nativeBuild < steps.findIndex((step) => step.name === 'Test repository scripts'));
+  assert.ok(nativeBuild < steps.findIndex((step) => step.name === 'Package build outputs'));
+  assert.equal(steps[nativeBuild].if, undefined, 'native output must also be built after a Turbo cache hit');
+  assert.match(steps[nativeBuild].run, /cargo \+nightly-2026-08-18 build --manifest-path rust\/Cargo.toml --package dkg-safe-llm-runner --release --locked/);
+  const packageOutputs = jobs.build.steps.find((step) => step.name === 'Package build outputs').run;
+  const runner = 'rust/target/release/dkg-safe-llm-runner';
+  const explicitPaths = [...packageOutputs.matchAll(/PATHS\+=\(([^)]*)\)/g)]
+    .flatMap((match) => match[1].trim().split(/\s+/));
+  assert.ok(explicitPaths.includes(runner), 'CLI artifacts must contain the native runner');
+  assert.ok(packageOutputs.includes(`test -x ${runner}`), 'producer must require an executable');
+  assert.deepEqual(jobs['bura-cli']['runs-on'], jobs.build['runs-on'], 'native runner consumers must use the producer OS');
+  const restore = jobs['bura-cli'].steps.find((step) => step.name === 'Restore build outputs');
+  assert.match(restore.run, /tar -xzf \/tmp\/build-outputs.tgz/);
+
+  const root = fileURLToPath(new URL('../../../', import.meta.url));
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'semantic-ci-runner-artifact-'));
+  try {
+    const produced = path.join(fixture, 'produced');
+    const restored = path.join(fixture, 'restored');
+    mkdirSync(path.join(produced, path.dirname(runner)), { recursive: true });
+    mkdirSync(path.join(produced, 'packages/semantic-runtime/generated'), { recursive: true });
+    writeFileSync(path.join(produced, 'packages/semantic-runtime/generated/fixture.txt'), 'portable');
+    copyFileSync(path.join(root, runner), path.join(produced, runner));
+    mkdirSync(restored);
+    const archive = path.join(fixture, 'build-outputs.tgz');
+    execFileSync('tar', ['-czf', archive, ...explicitPaths], { cwd: produced });
+    execFileSync('tar', ['-xzf', archive], { cwd: restored });
+    assert.notEqual(statSync(path.join(restored, runner)).mode & 0o111, 0, 'tar must preserve executable mode');
+    assert.deepEqual(readFileSync(path.join(restored, runner)), readFileSync(path.join(root, runner)));
+    // Invalid startup input exercises the restored native executable without
+    // sending a model request or depending on external provider credentials.
+    const result = spawnSync(path.join(restored, runner), [], {
+      input: '{}\n', encoding: 'utf8', timeout: 10_000, env: {},
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(JSON.parse(result.stdout).type, 'error');
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
 
 test('CI build producers install the pinned semantic toolchain before compiling', () => {
   const ci = yaml('workflows/ci.yml');
