@@ -54,6 +54,8 @@ export class DaemonLocalLlmError extends Error {
 export interface DaemonLocalLlmHealth {
   ok: boolean;
   /** True when the operator supplied at least one local-LLM environment override. */
+  hasEnvironmentOverrides: boolean;
+  /** @deprecated Use hasEnvironmentOverrides. Retained for API compatibility. */
   configured: boolean;
   ready: boolean;
   reachable: boolean;
@@ -220,6 +222,7 @@ export function createDaemonLocalLlmService(
       const ready = availability.status === 'ready' && !initFailure && !closed;
       return {
         ok: ready,
+        hasEnvironmentOverrides: settings.configured,
         configured: settings.configured,
         ready,
         reachable,

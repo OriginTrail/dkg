@@ -94,6 +94,7 @@ describe('daemon local LLM service', () => {
 
     expect(await service.health()).toEqual(expect.objectContaining({
       ok: false,
+      hasEnvironmentOverrides: true,
       configured: true,
       ready: false,
       reachable: false,
@@ -332,7 +333,11 @@ describe('daemon local LLM service', () => {
       createSession,
     });
     expect(await offline.health()).toEqual(expect.objectContaining({
-      ok: false, configured: false, reachable: false, offline: true,
+      ok: false,
+      hasEnvironmentOverrides: false,
+      configured: false,
+      reachable: false,
+      offline: true,
     }));
     await expect(offline.chat({ message: 'hello' })).rejects.toMatchObject({
       code: 'LOCAL_LLM_OFFLINE', status: 503,
