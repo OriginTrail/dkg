@@ -101,6 +101,7 @@ async function runScenario(size, cardinality) {
       allQuads.push(...quads);
       await store.insert(quads);
       await store.flush();
+      await assertSettledDirectory(workDir, persistPath);
 
       const currentFileBytes = await fileBytes(persistPath);
       const currentDirectoryBytes = await directoryBytes(workDir);
@@ -151,11 +152,6 @@ async function runScenario(size, cardinality) {
     await reopened.close();
     await assertSettledDirectory(workDir, persistPath);
 
-    for (const measurement of measurements) {
-      measurement.steadyStateBytes = steadyStateBytes;
-      measurement.reopenedTripleCount = reopenedTripleCount;
-      measurement.reconciliation = 'disabled';
-    }
     return {
       size,
       cardinality,
@@ -174,7 +170,14 @@ async function runScenario(size, cardinality) {
 }
 
 function buildGuidance(results) {
-  const values = results.flatMap((result) => result.measurements.map((measurement) => measurement.bytesPerRetainedAsset));
+  const terminalStage = STAGES.at(-1)?.name;
+  const values = results.map((result) => {
+    const measurement = result.measurements.find(({ stage }) => stage === terminalStage);
+    if (measurement === undefined) {
+      throw new Error(`${result.cardinality}/${result.size}: terminal lifecycle measurement is missing`);
+    }
+    return measurement.bytesPerRetainedAsset;
+  });
   return {
     basis: 'Observed local Oxigraph persisted snapshots; reconciliation disabled',
     bytesPerRetainedAsset: {

@@ -16,7 +16,9 @@ The default matrix uses 100, 1,000, and 5,000 retained assets. Use
 (maximum 100,000 per scenario). The command emits JSON containing logical
 triples, unique terms, persisted bytes, transient snapshot overlap, cumulative
 flush bytes, write amplification, restart recovery, and bytes per retained
-asset. Each scenario also reports `compactionRecovery` for the verified
+asset. The capacity range uses the terminal lifecycle measurement from each
+scenario, so partial WM/SWM stages cannot understate the retained-asset floor.
+Each scenario also reports `compactionRecovery` for the verified final
 close/reopen canonical snapshot rewrite. Set
 `DKG_BENCH_AMPLIFICATION_SETTLE_MS` to change the post-reopen settle period
 (default 100 ms, maximum 60 s).
@@ -24,8 +26,9 @@ close/reopen canonical snapshot rewrite. Set
 The benchmark uses a disposable directory and never starts the agent,
 reconciliation workers, or a network peer. It asserts that the only file left
 after each flush is the persisted `store.nq`, so reconciliation cannot
-contaminate the measurements. `steadyStateBytes` is the post-close, reopen,
-flush, and settle snapshot. This close/reopen flush is the adapter's canonical
+contaminate the measurements. The scenario-level `steadyStateBytes` is the
+post-close, reopen, flush, and settle snapshot after every lifecycle stage.
+This close/reopen flush is the adapter's canonical
 snapshot rewrite; the embedded adapter has no separate storage-engine compactor.
 `transientPeakBytes` accounts for the old and new snapshots coexisting during
 the adapter's atomic replacement; directory metadata is not included.
