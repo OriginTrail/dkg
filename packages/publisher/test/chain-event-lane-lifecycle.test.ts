@@ -122,4 +122,59 @@ describe('ChainEventPoller lifecycle', () => {
     expect(callbackAborted).toBe(true);
     expect(saved).toEqual([]);
   });
+
+  it('passes the lifecycle signal through every optional event callback', async () => {
+    const seen = new Set<string>();
+    const fail = (name: string) => async ({ signal }: { signal?: AbortSignal }) => {
+      if (!signal) throw new Error(`${name}: missing lifecycle signal`);
+      seen.add(name);
+      throw new Error(`${name}: callback failure`);
+    };
+    const { adapter } = makeChain({
+      head: 1,
+      events: [
+        {
+          type: 'KnowledgeAssetUpdated',
+          blockNumber: 1,
+          data: { merkleRoot: `0x${'11'.repeat(32)}`, batchId: '1' },
+        },
+        {
+          type: 'AllowListUpdated',
+          blockNumber: 1,
+          data: { contextGraphId: 'cg', agent: '0xagent', added: true },
+        },
+        {
+          type: 'ProfileCreated',
+          blockNumber: 1,
+          data: { identityId: '1' },
+        },
+        {
+          type: 'KnowledgeAssetRegisteredToContextGraph',
+          blockNumber: 1,
+          data: { contextGraphId: 'cg', kaId: '1', txHash: '0xtx', txIndex: 0 },
+        },
+        {
+          type: 'KCCreated',
+          blockNumber: 1,
+          data: { kaId: '1', author: '0xauthor', txHash: '0xtx', txIndex: 0 },
+        },
+      ],
+    });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onCollectionUpdated: fail('collection'),
+      onAllowListUpdated: fail('allow-list'),
+      onProfileEvent: fail('profile'),
+      onKARegisteredToContextGraph: fail('registered'),
+      onKnowledgeAssetCreated: fail('created'),
+    });
+
+    await poller.start();
+    await vi.waitFor(() => expect(seen).toEqual(new Set([
+      'collection', 'allow-list', 'profile', 'registered', 'created',
+    ])));
+    await poller.stop();
+  });
 });
