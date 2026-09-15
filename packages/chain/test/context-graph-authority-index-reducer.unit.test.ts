@@ -438,6 +438,31 @@ describe('contract-wide Context Graph authority index reducer', () => {
     })).toThrow('invalid address');
   });
 
+  it.each([
+    ['context graph id', creation(0n, 12, 0, NAME_9), 'invalid context graph id'],
+    ['creation authority', { ...creation(9n, 12, 0, NAME_9), owner: ZERO }, 'invalid authority state'],
+    ['publish policy', event('PublishPolicyUpdated', 9n, 12, 0, {
+      publishPolicy: 2,
+    }), 'invalid authority state'],
+    ['publish authority', event('PublishAuthorityUpdated', 9n, 12, 0, {
+      publishAuthority: 'bad',
+    }), 'invalid authority state'],
+    ['roster agent', event('AgentParticipantAdded', 9n, 12, 0, {
+      agent: ZERO,
+    }), 'invalid agent'],
+    ['event name', { ...event('ContextGraphDeactivated', 9n, 12, 0), name: 'Unknown' },
+      'unsupported name'],
+  ] as const)('rejects malformed decoded %s events', (_label, malformed, message) => {
+    expect(() => normalizeContextGraphAuthorityIndexEvent(
+      malformed as ContextGraphAuthorityIndexEvent,
+      {
+        fromBlockNumber: 10,
+        throughBlockNumber: 20,
+        throughBlockHash: blockHash(20),
+      },
+    )).toThrow(message);
+  });
+
   it('normalizes durable checkpoints and rejects id, hash, and source corruption', () => {
     const valid = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,
