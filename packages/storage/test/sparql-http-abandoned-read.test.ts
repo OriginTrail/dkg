@@ -19,14 +19,20 @@ function harness(managed = true) {
   }) as typeof fetch;
   const recovery = { recovering: false, generation: 0 };
   const recover = vi.fn();
+  const activity: number[] = [];
   const options = {
     queryEndpoint: 'http://127.0.0.1:7878/query',
     timeout: 1_000,
     now: () => performance.now(),
+  };
+  const hooks = {
     getRecoveryState: () => ({ ...recovery }),
     onClientTimeout: recover,
+    onActivityChange: (activeOperations: number) => activity.push(activeOperations),
   };
-  const store = managed ? createManagedOxigraphSparqlStoreV1(options) : new SparqlHttpStore(options);
+  const store = managed
+    ? createManagedOxigraphSparqlStoreV1(options, hooks)
+    : new SparqlHttpStore(options);
   async function abandon(sparql = 'SELECT ?s WHERE { ?s ?p ?o }') {
     started = new Promise<void>((resolve) => { dispatched = resolve; });
     const caller = new AbortController();
@@ -38,7 +44,7 @@ function harness(managed = true) {
     caller.abort(reason);
     await rejected;
   }
-  return { store, recovery, recover, abandon };
+  return { store, recovery, recover, activity, abandon };
 }
 
 describe('managed abandoned read recovery', () => {
@@ -67,6 +73,21 @@ describe('managed abandoned read recovery', () => {
       expect(recover).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(2_000);
       expect(recover).toHaveBeenCalledTimes(1);
+    } finally { await store.close(); }
+  });
+
+  it('keeps cancelled server work active until its retained deadline is handled', async () => {
+    const { store, recover, activity, abandon } = harness();
+    try {
+      await abandon();
+      expect(activity.at(-1)).toBe(1);
+      await vi.advanceTimersByTimeAsync(899);
+      expect(activity.at(-1)).toBe(1);
+      expect(recover).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recover).toHaveBeenCalledOnce();
+      expect(activity.at(-1)).toBe(0);
     } finally { await store.close(); }
   });
 

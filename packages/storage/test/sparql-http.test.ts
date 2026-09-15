@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   SparqlHttpStore,
+  StorePriorityScheduler,
   asGraphWriteRevisionSource,
   createManagedOxigraphRuntimeStoreConfigV1,
   createManagedOxigraphSparqlStoreV1,
@@ -496,6 +497,7 @@ describe('SparqlHttpStore (test server)', () => {
       const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
         timeout: 5,
+      }, {
         onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
       await expect(store.hasGraph('urn:timed-out-graph')).rejects.toMatchObject({
@@ -511,10 +513,69 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('preserves the generic timeout callback without managed authority', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://example.test/query',
+        timeout: 5,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+      await expect(store.hasGraph('urn:generic-timeout-graph')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'sparql-http',
+        operation: 'query',
+        storeOperation: 'hasGraph',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual(['query']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('preserves legacy one-argument managed hook placement', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        timeout: 5,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+      await expect(store.hasGraph('urn:legacy-timeout-graph')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+        storeOperation: 'hasGraph',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual(['query']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('does not relabel a late managed-server response as a timeout', async () => {
     const originalFetch = globalThis.fetch;
     let now = 0;
-    const timedOutOperations: string[] = [];
     globalThis.fetch = (async () => {
       now = 60_000;
       return new Response('request timed out', { status: 500 });
@@ -526,14 +587,12 @@ describe('SparqlHttpStore (test server)', () => {
         timeout: 125_000,
         slowQueryThresholdMs: 0,
         now: () => now,
-        onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
 
       await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
         code: 'SPARQL_HTTP_RESPONSE',
         operation: 'query',
       });
-      expect(timedOutOperations).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -542,7 +601,6 @@ describe('SparqlHttpStore (test server)', () => {
   it('preserves a caller abort after the former server-timeout threshold', async () => {
     const originalFetch = globalThis.fetch;
     let now = 0;
-    const timedOutOperations: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
@@ -555,7 +613,6 @@ describe('SparqlHttpStore (test server)', () => {
         timeout: 125_000,
         slowQueryThresholdMs: 0,
         now: () => now,
-        onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
       const query = store.query(
         'SELECT ?s WHERE { ?s ?p ?o }',
@@ -566,7 +623,6 @@ describe('SparqlHttpStore (test server)', () => {
       caller.abort(new Error('caller aborted after 56 seconds'));
 
       await expect(query).rejects.toThrow('caller aborted after 56 seconds');
-      expect(timedOutOperations).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -609,6 +665,7 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
         timeout: 100,
+      }, {
         getRecoveryState: () => recovery,
         onClientTimeout: (operation) => {
           if (operation !== 'query') return;
@@ -675,6 +732,7 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
         timeout: 5_000,
+      }, {
         getRecoveryState: () => recovery,
       });
       const writeFailure = managed.insert([{
@@ -712,6 +770,7 @@ describe('SparqlHttpStore (test server)', () => {
     try {
       const managed = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
+      }, {
         onClientTimeout,
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
@@ -1645,6 +1704,7 @@ describe('SparqlHttpStore (test server)', () => {
       const recoveringStore = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
+      }, {
         getRecoveryState: () => ({ recovering: true, generation: 1 }),
       });
       const before = recoveringStore.getWriteRevision(graph);
@@ -1652,6 +1712,163 @@ describe('SparqlHttpStore (test server)', () => {
         .toMatchObject({ outcome: 'not_started' });
       expect(recoveringStore.getWriteRevision(graph)).toEqual(before);
       expect(fetchCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('reports concurrent store activity without letting the observer affect results', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    const activity: number[] = [];
+    globalThis.fetch = (async () => await new Promise<Response>((resolve) => {
+      releases.push(() => resolve(new Response(
+        JSON.stringify({ head: {}, boolean: true }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )));
+    })) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      }, {
+        onActivityChange: (activeOperations) => {
+          activity.push(activeOperations);
+          if (activeOperations === 2) throw new Error('observer failure');
+        },
+      });
+      const first = store.query('ASK { ?s ?p ?o }');
+      const second = store.query('ASK { ?s ?p ?o }');
+      while (releases.length < 2) await Promise.resolve();
+      expect(activity).toEqual([1, 2]);
+
+      releases[0]!();
+      await first;
+      expect(activity).toEqual([1, 2, 1]);
+      releases[1]!();
+      await second;
+      expect(activity).toEqual([1, 2, 1, 0]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('aggregates activity independently for two stores sharing one runtime', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    const activeByStore = new Map<symbol, number>();
+    const aggregateActivity: number[] = [];
+    const registerActivity = () => {
+      const key = Symbol('store');
+      activeByStore.set(key, 0);
+      return {
+        report(active: number) {
+          activeByStore.set(key, active);
+          aggregateActivity.push([...activeByStore.values()].reduce((sum, value) => sum + value, 0));
+        },
+        dispose() {
+          activeByStore.delete(key);
+        },
+      };
+    };
+    globalThis.fetch = (async () => await new Promise<Response>((resolve) => {
+      releases.push(() => resolve(new Response(
+        JSON.stringify({ head: {}, boolean: true }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )));
+    })) as typeof fetch;
+    try {
+      const options = { queryEndpoint: 'http://127.0.0.1:7878/query' };
+      const firstStore = createManagedOxigraphSparqlStoreV1(options, { registerActivity });
+      const secondStore = createManagedOxigraphSparqlStoreV1(options, { registerActivity });
+      const first = firstStore.query('ASK { ?s ?p ?o }');
+      const second = secondStore.query('ASK { ?s ?p ?o }');
+      while (releases.length < 2) await Promise.resolve();
+      expect(aggregateActivity).toContain(2);
+
+      releases[0]!();
+      await first;
+      expect(aggregateActivity.at(-1)).toBe(1);
+      releases[1]!();
+      await second;
+      expect(aggregateActivity.at(-1)).toBe(0);
+      await firstStore.close();
+      await secondStore.close();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps the managed activity fence busy during an in-flight mutation', async () => {
+    const originalFetch = globalThis.fetch;
+    let release!: () => void;
+    const response = new Promise<Response>((resolve) => {
+      release = () => resolve(new Response('', { status: 200 }));
+    });
+    const activity: number[] = [];
+    globalThis.fetch = (async () => response) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+      }, {
+        onActivityChange: (activeOperations) => activity.push(activeOperations),
+      });
+      const updating = store.update('INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "o" } }');
+      while (activity.at(-1) !== 1) await Promise.resolve();
+      expect(activity.at(-1)).toBe(1);
+      release();
+      await updating;
+      expect(activity.at(-1)).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('counts queued work before dispatch and removes it when the caller aborts', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return await new Promise<Response>((resolve) => {
+        releases.push(() => resolve(new Response(
+          JSON.stringify({ head: {}, boolean: true }),
+          { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+        )));
+      });
+    }) as typeof fetch;
+    try {
+      const activity: number[] = [];
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+      });
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        scheduler,
+      }, {
+        onActivityChange: (activeOperations) => activity.push(activeOperations),
+      });
+      const first = store.query('ASK { ?s ?p ?o }');
+      await waitForCondition(() => fetchCalls === 1, 'first query was not dispatched');
+      const queuedController = new AbortController();
+      const queued = store.query(
+        'ASK { ?queued ?p ?o }',
+        { signal: queuedController.signal },
+      );
+      await waitForCondition(() => activity.at(-1) === 2, 'queued work was not counted');
+      expect(fetchCalls).toBe(1);
+
+      queuedController.abort(new Error('queued caller stopped'));
+      await expect(queued).rejects.toThrow('queued caller stopped');
+      expect(activity).toEqual([1, 2, 1]);
+      expect(fetchCalls).toBe(1);
+
+      releases[0]!();
+      await first;
+      expect(activity).toEqual([1, 2, 1, 0]);
     } finally {
       globalThis.fetch = originalFetch;
     }

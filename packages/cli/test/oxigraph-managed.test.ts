@@ -11,7 +11,7 @@
  * rewritten sparql-http endpoints answer a REAL SPARQL ASK, and stop()
  * really releases the port.
  */
-import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -121,6 +121,7 @@ describe('planManagedOxigraph', () => {
     });
     expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(30_000);
+    expect(plan!.walRestartThresholdBytes).toBe(4 * 1024 ** 3);
   });
 
   it('honours operator overrides for port, location and cacheDir', () => {
@@ -128,7 +129,12 @@ describe('planManagedOxigraph', () => {
       {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { port: 9999, location: '/mnt/oxi', cacheDir: '/mnt/oxi-bin' },
+          options: {
+            port: 9999,
+            location: '/mnt/oxi',
+            cacheDir: '/mnt/oxi-bin',
+            walRestartThresholdBytes: 1_234,
+          },
         },
       },
       '/data',
@@ -136,7 +142,24 @@ describe('planManagedOxigraph', () => {
     expect(plan!.port).toBe(9999);
     expect(plan!.location).toBe('/mnt/oxi');
     expect(plan!.cacheDir).toBe('/mnt/oxi-bin');
+    expect(plan!.walRestartThresholdBytes).toBe(1_234);
   });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'normalizes invalid WAL threshold %s before it enters the launch plan',
+    (walRestartThresholdBytes) => {
+      const plan = planManagedOxigraph(
+        {
+          store: {
+            backend: MANAGED_OXIGRAPH_BACKEND,
+            options: { walRestartThresholdBytes },
+          },
+        },
+        '/data',
+      );
+      expect(plan!.walRestartThresholdBytes).toBe(4 * 1024 ** 3);
+    },
+  );
 
   it('omits the unsafe native query timeout for bundled Oxigraph 0.5.x on macOS', () => {
     const plan = planManagedOxigraph(
@@ -374,6 +397,17 @@ describe('planManagedOxigraph', () => {
   it('resolveManagedOxigraphPort rejects out-of-range values', () => {
     expect(resolveManagedOxigraphPort({ port: 70000 })).toBe(DEFAULT_OXIGRAPH_PORT);
     expect(resolveManagedOxigraphPort({ port: 7878 })).toBe(7878);
+  });
+
+  it('keeps the operator WAL threshold in the managed launch plan', () => {
+    const plan = planManagedOxigraph({
+      store: {
+        backend: MANAGED_OXIGRAPH_BACKEND,
+        options: { walRestartThresholdBytes: 1_234 },
+      },
+    }, '/data')!;
+
+    expect(plan.walRestartThresholdBytes).toBe(1_234);
   });
 
   it('rejects an out-of-range port and falls back to the default', () => {
@@ -622,30 +656,49 @@ describe('startManagedOxigraph (real download + real server)', () => {
       config: {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { port, readyTimeoutMs: 5_000 },
+          options: { port, readyTimeoutMs: 5_000, clientTimeoutMs: 50 },
         },
       },
       dataDir,
       platform: 'freebsd',
       log: () => {},
     });
+    const originalFetch = globalThis.fetch;
+    const endpointPrefix = `http://127.0.0.1:${port}/`;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).startsWith(endpointPrefix) && init?.method === 'POST') {
+        return await new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal;
+          const onAbort = () => reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error('managed store request aborted'),
+          );
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    let store: Awaited<ReturnType<typeof createTripleStore>> | undefined;
     try {
-      const onClientTimeout = result!.storeConfig.options.onClientTimeout as (operation: string) => void;
-      const getRecoveryState = result!.storeConfig.options.getRecoveryState as () => {
-        recovering: boolean;
-        generation: number;
-      };
+      store = await createTripleStore(result!.storeConfig);
       const pid1 = await fetchManagedPid(port);
 
-      onClientTimeout('insert');
+      await expect(store.update(
+        'INSERT DATA { <urn:mutation> <urn:does-not-restart> "true" }',
+      )).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(await fetchManagedPid(port)).toBe(pid1);
-      expect(getRecoveryState().generation).toBe(0);
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
 
-      onClientTimeout('query');
-      // Ownership verification is asynchronous; an unverified request is not
-      // yet a recovery generation and must not be exposed as one.
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      await expect(store.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+      });
+      // Close store admission while ownership verification is in flight. The
+      // generation advances only after the verified listener is signalled.
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -658,12 +711,16 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid2).toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
-      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+      for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
 
-      onClientTimeout('construct');
+      await expect(store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+        .rejects.toMatchObject({
+          code: 'STORE_OPERATION_TIMEOUT',
+          operation: 'construct',
+        });
       let pid3 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -676,11 +733,13 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid3).toBeGreaterThan(0);
       expect(pid3).not.toBe(pid2);
-      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+      for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 2 });
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 2 });
     } finally {
+      globalThis.fetch = originalFetch;
+      await store?.close();
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -758,13 +817,32 @@ describe('startManagedOxigraph (real download + real server)', () => {
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
-            getRecoveryState: expect.any(Function),
-            onClientTimeout: expect.any(Function),
           },
         });
+        const activityReports: number[] = [];
+        const originalRegisterStoreActivity = result!.handle.registerStoreActivity.bind(result!.handle);
+        const registerStoreActivity = vi
+          .spyOn(result!.handle, 'registerStoreActivity')
+          .mockImplementation(() => {
+            const lease = originalRegisterStoreActivity();
+            return {
+              report: (activeOperations: number) => {
+                activityReports.push(activeOperations);
+                lease.report(activeOperations);
+              },
+              dispose: () => lease.dispose(),
+            };
+          });
         const runtimeStore = await createTripleStore(result!.storeConfig);
         try {
           expect(() => new SyncSharedProjectionStoreV1(runtimeStore)).not.toThrow();
+          await expect(runtimeStore.query('ASK { ?s ?p ?o }')).resolves.toMatchObject({
+            type: 'boolean',
+            value: false,
+          });
+          expect(registerStoreActivity).toHaveBeenCalledOnce();
+          expect(activityReports).toContain(1);
+          expect(activityReports.at(-1)).toBe(0);
         } finally {
           await runtimeStore.close();
         }

@@ -83,8 +83,12 @@ import type {
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
   getManagedOxigraphRuntimeConstructionAuthorityV1,
+  getManagedOxigraphRuntimeHooksV1,
   isManagedOxigraphRuntimeConstructionAuthorityV1,
   snapshotManagedOxigraphRuntimeOptionsV1,
+  type ManagedOxigraphRuntimeActivityLeaseV1,
+  type ManagedOxigraphRuntimeHooksV1,
+  type ManagedOxigraphRuntimeStateV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
@@ -193,11 +197,6 @@ export interface SparqlHttpSlowQueryEvent {
   queryBytes: number;
 }
 
-export interface SparqlHttpRecoveryState {
-  recovering: boolean;
-  generation: number;
-}
-
 export type SparqlHttpConsistencyProfile =
   | 'best-effort'
   | 'atomic-update'
@@ -229,11 +228,16 @@ export interface SparqlHttpStoreOptions {
    * closed instead of failing boot; it never grants managed guarantees.
    */
   managedOxigraph?: boolean;
-  /** Runtime-only recovery hook for a client deadline, including a cancelled
-   * managed read reaching its retained deadline with server work unconfirmed. */
+  /**
+   * @deprecated Pass managed hooks as the second argument to
+   * createManagedOxigraphSparqlStoreV1. Retained for one-argument factory
+   * compatibility; the generic SparqlHttpStore constructor ignores it.
+   */
   onClientTimeout?: (operation: string) => void;
-  /** Runtime-only managed-server state used to classify restart collateral. */
-  getRecoveryState?: () => SparqlHttpRecoveryState;
+  /** @deprecated See onClientTimeout. */
+  getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
+  /** @deprecated See onClientTimeout. */
+  onActivityChange?: (activeOperations: number) => void;
   /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
@@ -285,7 +289,8 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedByDkg: boolean;
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
-  private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
+  private readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
+  private managedActivityLease: ManagedOxigraphRuntimeActivityLeaseV1 | null = null;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
@@ -293,8 +298,10 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQueryThresholdMs: number;
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
-  private readonly workLifecycle = new AbortableStoreWorkLifecycle();
+  private readonly workLifecycle: AbortableStoreWorkLifecycle;
   private readonly managedReadRecovery: ManagedReadRecoveryCoordinatorV1;
+  private activeStoreOperations = 0;
+  private retainedManagedReads = 0;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -318,11 +325,23 @@ export class SparqlHttpStore implements TripleStore {
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
+    const managedRuntimeHooks = getManagedOxigraphRuntimeHooksV1(constructionAuthority);
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
-    this.onClientTimeout = options.onClientTimeout;
-    this.getRecoveryState = options.getRecoveryState;
+    // Preserve the long-standing generic timeout observer. Managed runtime
+    // hooks take precedence only when authenticated authority was supplied;
+    // the ordinary adapter must not lose its callback merely because daemon
+    // hooks now travel through the opaque construction context.
+    this.onClientTimeout = managedRuntimeHooks?.onClientTimeout ?? options.onClientTimeout;
+    this.getRecoveryState = managedRuntimeHooks?.getRecoveryState;
+    this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
+    this.workLifecycle = new AbortableStoreWorkLifecycle({
+      onActivityChange: (activeOperations) => {
+        this.activeStoreOperations = activeOperations;
+        this.reportManagedRuntimeActivity(managedRuntimeHooks);
+      },
+    });
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
       : resolveConsistencyProfile(options);
@@ -342,6 +361,10 @@ export class SparqlHttpStore implements TripleStore {
       now: this.now,
       readRecoveryState: () => this.readRecoveryState(),
       recover: (operation) => this.notifyClientTimeout(operation),
+      onPendingChange: (pending) => {
+        this.retainedManagedReads = pending ? 1 : 0;
+        this.reportManagedRuntimeActivity(managedRuntimeHooks);
+      },
     });
     // Content-Type is set per-request by the query/mutation transports (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
@@ -359,6 +382,33 @@ export class SparqlHttpStore implements TripleStore {
           excerpt,
         ),
       }, RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
+    }
+  }
+
+  private reportManagedRuntimeActivity(
+    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
+  ): void {
+    try {
+      const activeOperations = this.activeStoreOperations + this.retainedManagedReads;
+      if (hooks?.registerActivity) {
+        this.managedActivityLease ??= this.openManagedActivityLease(hooks);
+        this.managedActivityLease?.report(activeOperations);
+      } else {
+        hooks?.onActivityChange?.(activeOperations);
+      }
+    } catch {
+      // Runtime observation cannot alter store operation semantics.
+    }
+  }
+
+  private openManagedActivityLease(
+    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
+  ): ManagedOxigraphRuntimeActivityLeaseV1 | null {
+    if (!hooks?.registerActivity) return null;
+    try {
+      return hooks.registerActivity();
+    } catch {
+      return null;
     }
   }
 
@@ -437,7 +487,7 @@ export class SparqlHttpStore implements TripleStore {
     );
   }
 
-  private readRecoveryState(): SparqlHttpRecoveryState | null {
+  private readRecoveryState(): ManagedOxigraphRuntimeStateV1 | null {
     if (!this.managedOxigraph || !this.getRecoveryState) return null;
     try {
       const state = this.getRecoveryState();
@@ -469,7 +519,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   private recoveryInterrupted(
-    started: SparqlHttpRecoveryState | null,
+    started: ManagedOxigraphRuntimeStateV1 | null,
   ): boolean {
     const current = this.readRecoveryState();
     return current !== null && (
@@ -1265,6 +1315,12 @@ export class SparqlHttpStore implements TripleStore {
     // operation admitted before close while rejecting work attempted during
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
+    try {
+      this.managedActivityLease?.dispose();
+    } catch {
+      // Runtime observation cannot alter store close semantics.
+    }
+    this.managedActivityLease = null;
   }
 }
 
@@ -1274,15 +1330,43 @@ export class SparqlHttpStore implements TripleStore {
  */
 export function createManagedOxigraphSparqlStoreV1(
   options: SparqlHttpStoreOptions,
+  hooks: ManagedOxigraphRuntimeHooksV1 = {},
 ): SparqlHttpStore {
+  const legacyHooks = extractLegacyManagedOxigraphRuntimeHooksV1(options);
   const config = createManagedOxigraphRuntimeStoreConfigV1({
     backend: 'sparql-http',
-    options: snapshotManagedOxigraphRuntimeOptionsV1(options, true),
-  });
+    options: snapshotManagedOxigraphRuntimeOptionsV1(
+      options,
+      true,
+      ['onClientTimeout', 'getRecoveryState', 'onActivityChange'],
+    ),
+  }, { ...legacyHooks, ...hooks });
   return new SparqlHttpStore(
     config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
+}
+
+function extractLegacyManagedOxigraphRuntimeHooksV1(
+  options: SparqlHttpStoreOptions,
+): ManagedOxigraphRuntimeHooksV1 {
+  const hooks: {
+    -readonly [K in keyof ManagedOxigraphRuntimeHooksV1]?: ManagedOxigraphRuntimeHooksV1[K];
+  } = {};
+  for (const key of ['onClientTimeout', 'getRecoveryState', 'onActivityChange'] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (descriptor === undefined) continue;
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new Error(`managed Oxigraph option ${key} must be a data property`);
+    }
+    const value = descriptor.value;
+    if (value === undefined) continue;
+    if (typeof value !== 'function') {
+      throw new Error(`managed Oxigraph option ${key} must be a function`);
+    }
+    hooks[key] = value;
+  }
+  return hooks;
 }
 
 function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {

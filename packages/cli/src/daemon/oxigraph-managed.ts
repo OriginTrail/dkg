@@ -39,6 +39,7 @@ import {
   type OxigraphServerHandle,
   type OxigraphServerIo,
 } from './oxigraph-server.js';
+import { resolveWalRestartThresholdBytes } from './oxigraph-wal-maintenance.js';
 import {
   normalizeOxigraphMemoryLimits,
   type OxigraphMemoryLimits,
@@ -248,6 +249,8 @@ export interface ManagedOxigraphPlan {
   clientTimeoutMs: number;
   /** Finite limits applied to an isolated systemd user scope. */
   memoryLimits?: OxigraphMemoryLimits;
+  /** Retained WAL size that schedules an idle supervised reopen. */
+  walRestartThresholdBytes: number;
   /**
    * sharedMemoryPublicSnapshotStorage with a defaulted `directory`, set
    * only when the operator enabled it. Same rewrite hazard as
@@ -274,6 +277,9 @@ export function planManagedOxigraph(
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
   const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
+  const walRestartThresholdBytes = resolveWalRestartThresholdBytes(
+    options.walRestartThresholdBytes,
+  );
   // Oxigraph 0.5.x implements `--timeout-s` with one sleeping OS thread per
   // query. Under sustained load those timer threads can exhaust the process
   // before they expire. Keep the native deadline opt-in; the HTTP adapter's
@@ -344,6 +350,7 @@ export function planManagedOxigraph(
     queryTimeoutS,
     clientTimeoutMs,
     memoryLimits,
+    walRestartThresholdBytes,
     sharedMemoryPublicSnapshotStorage,
   };
 }
@@ -408,6 +415,7 @@ export async function startManagedOxigraph(
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
     queryTimeoutS: plan.queryTimeoutS,
     memoryLimits: plan.memoryLimits,
+    walRestartThresholdBytes: plan.walRestartThresholdBytes,
     platform: opts.platform,
     io: opts.serverIo,
   });
@@ -418,17 +426,19 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
-      getRecoveryState: () => handle.getRecoveryState(),
-      onClientTimeout: (operation: string) => {
-        if (operation !== 'query' && operation !== 'construct') return;
-        handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
-      },
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
     runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
-  const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig);
+  const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
+    getRecoveryState: () => handle.getRecoveryState(),
+    registerActivity: () => handle.registerStoreActivity(),
+    onClientTimeout: (operation: string) => {
+      if (operation !== 'query' && operation !== 'construct') return;
+      handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
+    },
+  });
 
   return {
     handle,
