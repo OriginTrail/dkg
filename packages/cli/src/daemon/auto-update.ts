@@ -69,6 +69,7 @@ import {
   nodeUiStaticIndexPath,
   runtimeBuildCommandFromPackageJson,
 } from '../node-ui-static.js';
+import { assertNodeRuntimeSupported, type NodeRuntimeProbe } from '../node-runtime-preflight.js';
 import {
   fetchNpmDistTags,
 } from '../update/npm-registry.js';
@@ -498,6 +499,11 @@ async function _performNpmUpdateInner(
         );
       }
     }
+  }
+
+  if (!assertNodeRuntimeSupported(log, (_autoUpdateIo as typeof _autoUpdateIo & { runtime?: NodeRuntimeProbe }).runtime)) {
+    log('Auto-update (npm): refusing slot activation because the current Node runtime cannot run node:sqlite.');
+    return "failed";
   }
 
   await writePendingUpdateState({
@@ -1338,6 +1344,11 @@ async function _performUpdateInner(
     log(
       `Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`,
     );
+    return "failed";
+  }
+
+  if (!assertNodeRuntimeSupported(log, (_autoUpdateIo as typeof _autoUpdateIo & { runtime?: NodeRuntimeProbe }).runtime)) {
+    log('Auto-update (git): refusing slot activation because the current Node runtime cannot run node:sqlite.');
     return "failed";
   }
 

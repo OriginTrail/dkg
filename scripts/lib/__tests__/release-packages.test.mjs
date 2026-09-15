@@ -11,6 +11,7 @@ import ts from 'typescript';
 import {
   buildInfoPayload,
   discoverPublishablePackages,
+  findNodeSqliteEngineViolations,
   findMissingCliPackAssets,
   findReleaseVersionMismatches,
   verifyReleaseTag,
@@ -158,6 +159,22 @@ test('discovers public OriginTrail packages only', () => withFixture((root) => {
     discoverPublishablePackages(root).map((pkg) => pkg.name),
     ['@origintrail-official/dkg', '@origintrail-official/dkg-query'],
   );
+}));
+
+test('requires the declared Node.js range for publishable node:sqlite consumers', () => withFixture((root) => {
+  const queryDir = path.join(root, 'packages/query');
+  fs.mkdirSync(path.join(queryDir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(queryDir, 'src/index.js'), "import 'node:sqlite';\n");
+  assert.deepEqual(findNodeSqliteEngineViolations(root).map((violation) => violation.name), [
+    '@origintrail-official/dkg-query',
+  ]);
+
+  writePackage(root, 'packages/query', {
+    name: '@origintrail-official/dkg-query',
+    version: '1.2.3',
+    engines: { node: '>=22.13.0 <23.0.0 || >=23.4.0' },
+  });
+  assert.deepEqual(findNodeSqliteEngineViolations(root), []);
 }));
 
 test('finds every release package version mismatch, including private packages and the root', () => withFixture((root) => {

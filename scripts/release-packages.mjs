@@ -8,6 +8,7 @@ import { cliRuntimeAssetManifest } from './copy-cli-runtime-assets.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
+export const NODE_SQLITE_SUPPORTED_RANGE = '>=22.13.0 <23.0.0 || >=23.4.0';
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -44,6 +45,47 @@ export function discoverPublishablePackages(rootDir = ROOT_DIR) {
       packageJsonPath,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function sourceFilesUnder(packageDir) {
+  const files = [];
+  const ignored = new Set(['node_modules', '.git', 'dist', 'test', 'tests', '__tests__']);
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!ignored.has(entry.name)) visit(path.join(directory, entry.name));
+        continue;
+      }
+      if (/\.(?:cjs|js|mjs|ts|tsx)$/.test(entry.name)) files.push(path.join(directory, entry.name));
+    }
+  };
+  visit(packageDir);
+  return files;
+}
+
+/**
+ * Every publishable package that imports node:sqlite must publish the same
+ * runtime floor as the shared loader. This prevents a new SQLite consumer
+ * from silently widening the install contract while engines remain advisory.
+ */
+export function findNodeSqliteEngineViolations(rootDir = ROOT_DIR) {
+  const violations = [];
+  for (const pkg of discoverPublishablePackages(rootDir)) {
+    const packageDir = path.dirname(pkg.packageJsonPath);
+    const importsNodeSqlite = sourceFilesUnder(packageDir).some((filePath) =>
+      fs.readFileSync(filePath, 'utf8').includes('node:sqlite'));
+    if (!importsNodeSqlite) continue;
+    const packageJson = readJson(pkg.packageJsonPath);
+    if (packageJson.engines?.node !== NODE_SQLITE_SUPPORTED_RANGE) {
+      violations.push({
+        path: path.relative(rootDir, pkg.packageJsonPath),
+        name: pkg.name,
+        actual: packageJson.engines?.node,
+        expected: NODE_SQLITE_SUPPORTED_RANGE,
+      });
+    }
+  }
+  return violations;
 }
 
 export function findReleaseVersionMismatches(version, rootDir = ROOT_DIR) {
@@ -338,6 +380,15 @@ export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture
 }
 
 function commandVerifyPack() {
+  const runtimeViolations = findNodeSqliteEngineViolations(ROOT_DIR);
+  if (runtimeViolations.length > 0) {
+    console.error('Release pack check failed — publishable node:sqlite consumers must declare the supported Node.js range:');
+    for (const violation of runtimeViolations) {
+      console.error(`- ${violation.path}: ${violation.actual ?? '<missing>'} (${violation.name})`);
+    }
+    process.exitCode = 1;
+    return;
+  }
   const missing = findMissingCliPackAssets(ROOT_DIR);
   if (missing.length > 0) {
     console.error('Release pack check failed — @origintrail-official/dkg tarball is missing runtime assets:');
@@ -346,7 +397,7 @@ function commandVerifyPack() {
     process.exitCode = 1;
     return;
   }
-  console.log('Release pack check passed: @origintrail-official/dkg tarball includes project/build metadata, the Blazegraph runtime contract, and all network overlays.');
+  console.log('Release pack check passed: package runtime floors and @origintrail-official/dkg tarball assets are valid.');
 }
 
 function usage() {
