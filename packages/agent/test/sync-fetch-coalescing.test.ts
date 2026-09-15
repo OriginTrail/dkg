@@ -611,34 +611,56 @@ describe('DKGAgent sync fetch coalescing', () => {
     const identity = createSyncFetchSharingIdentity();
     let sends = 0;
     const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
-    const abort = new AbortController();
+    const stop = new AbortController();
+    const node = (agent as any).node;
+    const originalStopSignal = Object.getOwnPropertyDescriptor(node, 'stopSignal');
+    Object.defineProperty(node, 'stopSignal', {
+      configurable: true,
+      get: () => stop.signal,
+    });
     const workAdmission = () => createSyncWorkAdmission(() => 1_000, {
       fetchSharingIdentity: identity,
     });
 
     try {
-      const first = fetchPages(agent, {
-        signal: abort.signal,
-        workAdmission: workAdmission(),
-      });
+      const first = fetchPages(agent, { workAdmission: workAdmission() });
+      const firstOutcome = first.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
       await flushMicrotasks();
       expect(sends).toBe(1);
 
-      abort.abort(new Error('first waiter aborted'));
-      await expect(first).rejects.toMatchObject({
-        name: 'AbortError',
-        message: 'first waiter aborted',
-      });
-
+      // Node shutdown synchronously aborts the shared fetch controller while
+      // this deliberately non-cooperative transport keeps its promise pending.
+      // The stale entry therefore remains visible long enough for the next
+      // caller to prove that it is evicted instead of joined.
+      stop.abort(new Error('node stopping'));
       const replacement = fetchPages(agent, { workAdmission: workAdmission() });
+      const replacementOutcome = replacement.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
       await flushMicrotasks();
-      expect(sends).toBe(2);
+      // The new fetch observes the already-aborted node signal before transport.
+      // If it had joined the stale entry, it would remain blocked on response 0.
+      expect(await replacementOutcome).toMatchObject({
+        status: 'rejected',
+        reason: { name: 'AbortError', message: 'node stopping' },
+      });
+      expect(sends).toBe(1);
 
-      responses[1]!.resolve(new Uint8Array());
-      await expect(replacement).resolves.toMatchObject({ quads: [] });
       responses[0]!.resolve(new Uint8Array());
-      await flushMicrotasks();
+      expect(await firstOutcome).toMatchObject({
+        status: 'rejected',
+        reason: { name: 'AbortError', message: 'node stopping' },
+      });
     } finally {
+      if (originalStopSignal) {
+        Object.defineProperty(node, 'stopSignal', originalStopSignal);
+      } else {
+        delete node.stopSignal;
+      }
       for (const response of responses) response.resolve(new Uint8Array());
       await agent.stop().catch(() => {});
     }
