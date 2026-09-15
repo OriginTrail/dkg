@@ -2,18 +2,13 @@ import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-officia
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   createLaneCursorStore,
+  seedLaneCursorStore,
   type CursorPersistence,
   type LaneCursorStore,
 } from './chain-event-lane-cursor-store.js';
+import { CHAIN_EVENT_POLLER_LANES, type ChainEventPollerLane } from './chain-event-lanes.js';
 
-export type ChainEventPollerLane =
-  | 'publish'
-  | 'allocatorReconcile'
-  | 'contextGraphDiscovery'
-  | 'vmReconcile'
-  | 'collectionUpdates'
-  | 'allowListUpdates'
-  | 'profileEvents';
+export type { ChainEventPollerLane } from './chain-event-lanes.js';
 
 interface ChainEventPollerLaneState {
   lastBlock: number;
@@ -37,6 +32,22 @@ export interface ChainEventPollerLaneSpec {
   cadenceMs: number;
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
+}
+
+/**
+ * One lane's behaviour, declared under its lane name so the lane union stays
+ * the only list of lane names.
+ */
+export type ChainEventPollerLaneBehavior = Omit<ChainEventPollerLaneSpec, 'name'>;
+
+/** Every poller lane's behaviour, exhaustive by construction. */
+export type ChainEventPollerLaneDeclarations = Record<ChainEventPollerLane, ChainEventPollerLaneBehavior>;
+
+/** Ordered runtime specifications derived from the canonical lane order. */
+export function chainEventPollerLaneSpecs(
+  declarations: ChainEventPollerLaneDeclarations,
+): ChainEventPollerLaneSpec[] {
+  return CHAIN_EVENT_POLLER_LANES.map((name) => ({ name, ...declarations[name] }));
 }
 
 interface ChainEventPollerLaneRuntime {
@@ -93,6 +104,22 @@ export class ChainEventLaneRunner {
 
   async restoreCurrentlyActive(ctx: OperationContext): Promise<void> {
     await this.restoreLaneCursors(this.activeLaneSpecs(), ctx);
+  }
+
+  /** Seed every configured runtime lane through the same specifications used by polling. */
+  async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
+    const lanes = [...new Set(this.lanes.map(({ name }) => name))];
+    await seedLaneCursorStore(this.cursorStore, lanes, blockNumber);
+    // A legacy aggregate store cannot represent lanes that deliberately ignore
+    // migration cursors. An explicit seed still applies to every lane owned by
+    // this runner, including currently disabled full-history lanes that become
+    // active later in the same lifetime.
+    for (const lane of lanes) {
+      const state = this.stateFor(lane);
+      state.lastBlock = blockNumber;
+      state.headKnown = true;
+      this.restoredLanes.add(lane);
+    }
   }
 
   async poll(signal?: AbortSignal): Promise<void> {

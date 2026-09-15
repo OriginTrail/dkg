@@ -2285,6 +2285,24 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     expect(await reopened.loadLane('legacyLane')).toBe(2468);
   });
 
+  it('commits a bulk lane seed atomically', async () => {
+    const store = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
+    await store.saveLane('publish', 10);
+    await store.saveLane('vmReconcile', 20);
+
+    await store.saveLanes(['publish', 'vmReconcile', 'profileEvents'], 50);
+    expect(await store.loadLane('publish')).toBe(50);
+    expect(await store.loadLane('vmReconcile')).toBe(50);
+    expect(await store.loadLane('profileEvents')).toBe(50);
+
+    // A mid-seed failure leaves every lane cursor at its prior value.
+    await expect(store.saveLanes(['publish', null as unknown as string, 'vmReconcile'], 999))
+      .rejects.toThrow();
+    expect(await store.loadLane('publish')).toBe(50);
+    expect(await store.loadLane('vmReconcile')).toBe(50);
+    expect(await store.loadLane('profileEvents')).toBe(50);
+  });
+
   it('persists registry scan cursors by deployment key and ignores corrupt values', async () => {
     const store = new SqliteContextGraphRegistryScanCursorStore(db);
     const key = {

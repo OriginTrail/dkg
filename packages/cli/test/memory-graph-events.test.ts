@@ -42,6 +42,7 @@ import {
   type LiveDaemon,
   type EventStream,
 } from './helpers/live-daemon.js';
+import { prepareChainEventCursorsAtCurrentHead } from './helpers/chain-event-cursors.js';
 
 const QUADS = [{ subject: 'urn:root', predicate: 'http://schema.org/name', object: '"v1"' }];
 
@@ -51,7 +52,14 @@ describe('memory_graph_changed -- real daemon SSE emissions', () => {
   let cgCounter = 0;
 
   beforeAll(async () => {
-    daemon = await startLiveDaemon({ authEnabled: false });
+    daemon = await startLiveDaemon({
+      authEnabled: false,
+      // This suite verifies API-driven SSE emissions, not historical chain
+      // discovery. The CLI shard shares one Hardhat chain across files, so a
+      // fresh daemon must not replay every event created by earlier suites
+      // while these foreground registration requests are running.
+      prepareHome: prepareChainEventCursorsAtCurrentHead,
+    });
     stream = await openEventStream(daemon);
   }, 90_000);
 
