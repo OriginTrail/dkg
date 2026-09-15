@@ -14,9 +14,9 @@ import {
   PublisherNotAuthorizedForContextGraphError,
 } from '@origintrail-official/dkg-chain';
 import { QuorumUnmetError } from '../src/ack-errors.js';
-import { isOccupyingLifecycleJob } from '../src/async-lift-publisher-utils.js';
+import { isOccupyingLifecycleJob } from '../src/async-lift-retry-disposition.js';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
-import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
+import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 describe('async lift publish result mapping', () => {
   it('maps tentative canonical publish into included LiftJob state', () => {
