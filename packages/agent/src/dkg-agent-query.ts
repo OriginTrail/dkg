@@ -775,7 +775,7 @@ export class QueryMethods extends DKGAgentBase {
         contextGraphId,
         opts,
         CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)
+        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
           ? true
           : undefined,
       ),
@@ -825,7 +825,7 @@ export class QueryMethods extends DKGAgentBase {
             registrationTimeoutMs,
             signal: opts.signal,
             allowAcceptedRfc64FinalizedAbsence:
-              this.hasAcceptedRfc64UnregisteredAuthorityV1(contextGraphId),
+              this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
           },
         )
       ),
@@ -835,7 +835,7 @@ export class QueryMethods extends DKGAgentBase {
       rfc64LocalAgentAddress: this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress,
       defaultAgentAddress: this.defaultAgentAddress,
       hasAcceptedRfc64PublicPolicy: hasAcceptedRfc64PublicPolicy ?? (
-        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)
+        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
         || acceptedPublicPolicies.some(({ policyEnvelope }) => (
           policyEnvelope.payload.contextGraphId === contextGraphId
           && policyEnvelope.payload.accessPolicy === 0
