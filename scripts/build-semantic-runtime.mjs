@@ -131,6 +131,11 @@ function verifyToolchain() {
   }
 }
 
+export function portableBuildRecipe(wrapperBytes, lockBytes) {
+  return createHash('sha256').update('dkg-semantic-runtime-build-v1\0')
+    .update(wrapperBytes).update('\0').update(lockBytes).digest('hex');
+}
+
 export function assertPortableBuildEnvironment(env = process.env) {
   if (env.RUSTC_WRAPPER || env.RUSTC_WORKSPACE_WRAPPER) {
     throw new Error('semantic-runtime: external Rust wrappers are incompatible with the pinned portable Wasm build');
@@ -146,8 +151,10 @@ function buildInto(outputRoot) {
   const rustcWrapper = path.join(REPO_ROOT, 'scripts', 'semantic-runtime-rustc.mjs');
   const rustFlags = [
     // Cargo fingerprints RUSTFLAGS, unlike a general wrapper's source. Bind the
-    // cache and crate metadata to every change in the portable compiler recipe.
-    '--cfg', `dkg_semantic_runtime_build_recipe="${sha256File(rustcWrapper)}"`,
+    // cache and crate metadata to every wrapper or full lock graph change.
+    '--cfg', `dkg_semantic_runtime_build_recipe="${portableBuildRecipe(
+      fs.readFileSync(rustcWrapper), fs.readFileSync(path.join(RUST_ROOT, 'Cargo.lock')),
+    )}"`,
     '-C', `link-arg=--initial-memory=${INITIAL_MEMORY_PAGES * 65_536}`,
     '-C', `link-arg=--max-memory=${MAXIMUM_MEMORY_PAGES * 65_536}`,
     '-C', 'link-arg=--export-memory',

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { portableRustcArguments, rustcStdio } from '../../semantic-runtime-rustc.mjs';
-import { assertPortableBuildEnvironment } from '../../build-semantic-runtime.mjs';
+import { assertPortableBuildEnvironment, portableBuildRecipe } from '../../build-semantic-runtime.mjs';
 
 function fixture(t, registry = false) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'semantic-rustc-test-'));
@@ -116,4 +116,12 @@ test('forwards Cargo jobserver descriptors while leaving FIFO transport unchange
   assert.equal(rustcStdio({ CARGO_MAKEFLAGS: '--jobserver-auth=fifo:/tmp/cargo-jobserver' }), 'inherit');
   assert.throws(() => rustcStdio({ CARGO_MAKEFLAGS: '--jobserver-auth=3,5' }, () => { throw new Error('closed descriptor'); }), /closed descriptor/);
   assert.throws(() => rustcStdio({ CARGO_MAKEFLAGS: '--jobserver-auth=999999,5' }), /unsupported Cargo jobserver descriptor/);
+});
+
+
+test('the Cargo cache recipe changes for both wrapper implementation and full lock graph', () => {
+  const baseline = portableBuildRecipe(Buffer.from('wrapper-v1'), Buffer.from('lock-v1'));
+  assert.equal(portableBuildRecipe(Buffer.from('wrapper-v1'), Buffer.from('lock-v1')), baseline);
+  assert.notEqual(portableBuildRecipe(Buffer.from('wrapper-v2'), Buffer.from('lock-v1')), baseline);
+  assert.notEqual(portableBuildRecipe(Buffer.from('wrapper-v1'), Buffer.from('lock-v2')), baseline);
 });
