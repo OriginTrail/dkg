@@ -1,11 +1,10 @@
-import { Contract, ethers, type JsonRpcProvider } from 'ethers';
-import type { ReadOpts } from './rpc-failover-client.js';
+import { Contract, ethers } from 'ethers';
+import {
+  RawLogScanner,
+  type RawLogScanReadProvider,
+} from './raw-log-scanner.js';
 
-export type HubRotationReadProvider = <T>(
-  label: string,
-  fn: (provider: JsonRpcProvider) => Promise<T>,
-  opts?: ReadOpts,
-) => Promise<T>;
+export type HubRotationReadProvider = RawLogScanReadProvider;
 
 export interface HubRotationPollerConfig {
   readProvider: HubRotationReadProvider;
@@ -20,31 +19,24 @@ interface HubRotationBinding {
   topics: string[];
 }
 
-type HubRotationLogWithIdentity = ethers.Log & {
-  blockHash?: unknown;
-  transactionHash?: unknown;
-  index?: unknown;
-  logIndex?: unknown;
-};
-
 export class HubRotationPoller {
-  private readonly readProvider: HubRotationReadProvider;
   private readonly intervalMs: number;
-  private readonly reorgBufferBlocks: number;
   private readonly onContractName: (name: string) => void;
+  private readonly scanner: RawLogScanner;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
-  private lastScannedBlock: number | undefined;
   private binding: HubRotationBinding | undefined;
-  private readonly seenLogIds = new Map<string, number>();
   private started = false;
   private generation = 0;
 
   constructor(config: HubRotationPollerConfig) {
-    this.readProvider = config.readProvider;
     this.intervalMs = config.intervalMs;
-    this.reorgBufferBlocks = config.reorgBufferBlocks;
     this.onContractName = config.onContractName;
+    this.scanner = new RawLogScanner({
+      label: 'Hub rotation poll',
+      readProvider: config.readProvider,
+      reorgBufferBlocks: config.reorgBufferBlocks,
+    });
   }
 
   get isStarted(): boolean {
@@ -95,80 +87,29 @@ export class HubRotationPoller {
     };
   }
 
-  /**
-   * Every poller read is a background TIP probe at the ~stickiness-TTL cadence:
-   * preference-TRANSPARENT so a poll tick never re-probes/clears the preferred
-   * backend the read/write paths rely on, and so head/logs stay canonical-fresh
-   * (not a lagging sticky backend's lower tip). Owns the transport-internal
-   * `skipPreferred` opt-out ONCE so the call sites below read by INTENT (tip
-   * probe), not by the double-negative flag. Mirrors the adapter's `readTipProvider`.
-   */
-  private readTip<T>(
-    label: string,
-    fn: (provider: JsonRpcProvider) => Promise<T>,
-    opts?: ReadOpts,
-  ): Promise<T> {
-    return this.readProvider(label, fn, { ...opts, skipPreferred: true });
-  }
-
   async pollOnce(generation = this.generation): Promise<void> {
     const binding = this.binding;
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
-    const previousLastScannedBlock = this.lastScannedBlock;
-    const head = await this.readTip(
-      'Hub rotation poll getBlockNumber',
-      (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
-    );
-    if (!this.started || generation !== this.generation) return;
-    const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
-    const logs = await this.readTip<ethers.Log[]>(
-      'Hub rotation poll getLogs',
-      (provider) => provider.getLogs({
-        address: binding.hubAddress,
-        fromBlock,
-        toBlock: head,
-        topics: [binding.topics],
-      }),
-      { policy: 'watchdogWideLogScan' },
-    );
+    const batch = await this.scanner.read({
+      address: binding.hubAddress,
+      topics: binding.topics,
+    });
     if (!this.started || generation !== this.generation) return;
 
-    this.dispatchLogs(binding.hub, logs);
-    this.lastScannedBlock = previousLastScannedBlock == null
-      ? head
-      : Math.max(previousLastScannedBlock, head);
-    this.pruneSeenLogs(head);
+    this.dispatchLogs(binding.hub, batch.logs);
+    this.scanner.commit(batch);
   }
 
   private async recordInitialHead(generation: number): Promise<void> {
     if (!this.started || generation !== this.generation) return;
-    const head = await this.readTip(
-      'Hub rotation poll initial getBlockNumber',
-      (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
-    );
+    const head = await this.scanner.readInitialHead();
     if (!this.started || generation !== this.generation) return;
-    this.lastScannedBlock = this.lastScannedBlock == null
-      ? head
-      : Math.max(this.lastScannedBlock, head);
+    this.scanner.commitInitialHead(head);
   }
 
-  private scanFromBlock(previousLastScannedBlock: number | undefined, head: number): number {
-    if (previousLastScannedBlock == null) {
-      return Math.max(0, head - this.reorgBufferBlocks);
-    }
-    const candidateFromBlock = previousLastScannedBlock + 1 - this.reorgBufferBlocks;
-    const recentFromBlock = head - this.reorgBufferBlocks;
-    return Math.max(0, Math.min(candidateFromBlock, recentFromBlock));
-  }
-
-  private dispatchLogs(hub: Contract, logs: ethers.Log[]): void {
+  private dispatchLogs(hub: Contract, logs: readonly ethers.Log[]): void {
     for (const log of logs) {
-      const identity = this.logIdentity(log);
-      if (this.seenLogIds.has(identity)) continue;
-      this.rememberLog(identity, log);
       const contractName = this.contractNameFromLog(hub, log);
       if (contractName) this.onContractName(contractName);
     }
@@ -199,36 +140,5 @@ export class HubRotationPoller {
       }
       return event.topicHash;
     });
-  }
-
-  private logIdentity(log: ethers.Log): string {
-    const maybe = log as HubRotationLogWithIdentity;
-    const blockHash = typeof maybe.blockHash === 'string' ? maybe.blockHash : undefined;
-    const transactionHash = typeof maybe.transactionHash === 'string' ? maybe.transactionHash : undefined;
-    const index = typeof maybe.index === 'number'
-      ? maybe.index
-      : typeof maybe.logIndex === 'number'
-        ? maybe.logIndex
-        : undefined;
-    if (blockHash && transactionHash && index != null) {
-      return `${blockHash}:${transactionHash}:${index}`;
-    }
-    return [
-      log.blockNumber,
-      index ?? 'unknown',
-      log.topics.join(','),
-      log.data,
-    ].join(':');
-  }
-
-  private rememberLog(identity: string, log: ethers.Log): void {
-    this.seenLogIds.set(identity, log.blockNumber);
-  }
-
-  private pruneSeenLogs(head: number): void {
-    const earliestBufferedBlock = Math.max(0, head - this.reorgBufferBlocks);
-    for (const [identity, blockNumber] of this.seenLogIds) {
-      if (blockNumber < earliestBufferedBlock) this.seenLogIds.delete(identity);
-    }
   }
 }
