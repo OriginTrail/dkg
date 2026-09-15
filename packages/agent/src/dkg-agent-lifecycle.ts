@@ -682,7 +682,6 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import {
   createLocalContextGraphOriginMembershipRecord,
-  normalizeLocalContextGraphOriginPersistence,
 } from
   './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -9866,7 +9865,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
     const store = this.config.contextGraphMembershipStore;
     if (store === undefined) return;
-    const originPersistence = normalizeLocalContextGraphOriginPersistence(store);
+    const originPersistence = store.localOrigins;
     try {
       if (originPersistence !== undefined) {
         await this.enqueueContextGraphMembershipPersistWrite(
@@ -10106,7 +10105,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async rehydrateContextGraphsFromDurableState(this: DKGAgent): Promise<void> {
     const ctx = createOperationContext('init');
     const membershipStore = this.config.contextGraphMembershipStore;
-    const originPersistence = normalizeLocalContextGraphOriginPersistence(membershipStore);
+    const originPersistence = membershipStore?.localOrigins;
     let membershipRows: ContextGraphMembershipSnapshot | null = null;
     if (membershipStore?.loadAll === undefined) {
       this.log.warn(
@@ -10121,8 +10120,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         membershipRows = await membershipStore.loadAll();
         if (originPersistence === undefined) {
           // Compatibility path for custom stores predating the independent
-          // graph-keyed journal, including one-sided implementations of that
-          // paired capability. New built-in stores never derive provenance
+          // graph-keyed journal. New built-in stores never derive provenance
           // from mutable membership rows.
           this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
         }

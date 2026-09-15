@@ -34,6 +34,8 @@ import {
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
+import { markContextGraphRegistrationNotSubmitted } from
+  './context-graph-registration-error.js';
 import { contextGraphAuthorityIndexIdFromBigInt } from
   './context-graph-authority-index-id.js';
 import { readEvmContextGraphAuthorityStateV1 } from
@@ -773,21 +775,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           // the approval receipt itself is ambiguous, it cannot have created
           // the Context Graph. Preserve that distinction for the agent's
           // durable registration state machine.
-          const failure = approvalError instanceof Error
-            ? approvalError
-            : new Error(String(approvalError));
-          if (Object.isExtensible(failure)) {
-            Object.defineProperty(failure, 'contextGraphRegistrationSubmitted', {
-              configurable: true,
-              enumerable: false,
-              value: false,
-            });
-            throw failure;
-          }
-          throw Object.assign(
-            new Error(failure.message, { cause: approvalError }),
-            { contextGraphRegistrationSubmitted: false as const },
-          );
+          throw markContextGraphRegistrationNotSubmitted(approvalError);
         }
         return submitCreate();
       }

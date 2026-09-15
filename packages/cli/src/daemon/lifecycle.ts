@@ -2024,17 +2024,19 @@ async function runDaemonInnerWithStartupOwnership(
           updatedAt: row.updated_at,
         };
       }),
-      loadLocalOrigins: async () => dashDb.listLocalContextGraphOrigins().map((row) => ({
-        contextGraphId: row.context_graph_id,
-        source: row.source,
-        createdAt: row.created_at,
-      })),
-      recordLocalOrigin: async (record) => {
-        dashDb.recordLocalContextGraphOrigin({
-          context_graph_id: record.contextGraphId,
-          source: record.source,
-          created_at: record.createdAt,
-        });
+      localOrigins: {
+        loadLocalOrigins: async () => dashDb.listLocalContextGraphOrigins().map((row) => ({
+          contextGraphId: row.context_graph_id,
+          source: row.source,
+          createdAt: row.created_at,
+        })),
+        recordLocalOrigin: async (record) => {
+          dashDb.recordLocalContextGraphOrigin({
+            context_graph_id: record.contextGraphId,
+            source: record.source,
+            created_at: record.createdAt,
+          });
+        },
       },
       upsert: async (record) => {
         dashDb.upsertContextGraphMember({
