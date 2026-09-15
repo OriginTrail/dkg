@@ -16,10 +16,13 @@ gitignored local artifacts, validates their WIT world and bounded memories, and
 requires them to match `artifact-lock.json`. Generated Wasm and JavaScript glue
 are packaged in npm but are not stored in Git.
 
-The Wasm build normalizes source paths and compiler metadata so the pinned
-artifacts can be reproduced on different hosts. The compiler wrapper works
-around [Cargo's host-dependent metadata issue](https://github.com/rust-lang/cargo/issues/8140)
-and preserves the artifact hash checks. Custom `RUSTFLAGS`,
+The Wasm build normalizes source paths, compiler metadata, and Rust archive
+member names so the pinned artifacts can be reproduced on different hosts.
+The compiler wrapper works around
+[Cargo's host-dependent metadata issue](https://github.com/rust-lang/cargo/issues/8140)
+and the resulting archive names, which Rust uses to order link-time optimization
+inputs. Cargo's outer cache filenames and compiled object contents are preserved,
+as are the artifact hash checks. Custom `RUSTFLAGS`,
 `CARGO_ENCODED_RUSTFLAGS`, `RUSTC_WRAPPER`, and `RUSTC_WORKSPACE_WRAPPER` values
 are rejected; clear them before running this pinned build.
 
