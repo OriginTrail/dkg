@@ -294,6 +294,12 @@ jobs:
           TURBO_TOKEN: ${{ github.event_name == 'push' && secrets.TURBO_TOKEN || '' }}
           TURBO_TEAM: ${{ github.event_name == 'push' && secrets.TURBO_TEAM || '' }}
 
+      # Turbo restores package outputs but does not carry native rust/target
+      # binaries. Ensure this executable exists even with a warm Turbo cache
+      # and an empty Rust cache before the packaging regression runs.
+      - name: Build native safe-LLM runner for downstream CLI tests
+        run: cargo +nightly-2026-08-18 build --manifest-path rust/Cargo.toml --package dkg-safe-llm-runner --release --locked
+
       - name: Verify the publishable CLI tarball
         run: |
           pnpm release:build-info --dist-tag ci --commit "${GITHUB_SHA}" --ci-run "${GITHUB_RUN_ID}"
@@ -344,8 +350,11 @@ jobs:
           set -euo pipefail
           # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
           # the nested Prime extension/dist, locally built semantic-runtime
-          # Wasm, and the generated network/ dir the CLI copies during build.
+          # Wasm, the native Linux safe-LLM runner, and the generated network/
+          # dir the CLI copies during build. Keep the native executable outside
+          # the portable Wasm artifact lock; CLI consumers use this runner OS.
           test -d packages/semantic-runtime/generated
+          test -x rust/target/release/dkg-safe-llm-runner
           mapfile -t PATHS < <(
             find packages -maxdepth 3 -type d \
               \( -name dist -o -name dist-ui -o -name network \) \
@@ -353,7 +362,8 @@ jobs:
           )
           test -d packages/adapter-prime-agent/extension/dist
           PATHS+=(packages/semantic-runtime/generated)
-          echo "Packing ${#PATHS[@]} output dirs…"
+          PATHS+=(rust/target/release/dkg-safe-llm-runner)
+          echo "Packing ${#PATHS[@]} build outputs…"
           tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
           ls -lh /tmp/build-outputs.tgz
 
