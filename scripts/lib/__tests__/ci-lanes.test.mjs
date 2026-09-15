@@ -68,7 +68,7 @@ test('bounded supporting execution finishes every lane after failures and except
   } });
   assert.equal(status, 1);
   assert.equal(peak, 3);
-  assert.deepEqual(finished.sort(), Object.keys(COVERAGE_JOBS['kosava-supporting']).sort());
+  assert.deepEqual(finished.sort(), [...ciJobRow('kosava-supporting', 0).packages].sort());
   assert.equal(await runVitestLanes('bura-supporting', 3, { execute: async () => 0 }), 0);
   await assert.rejects(runVitestLanes('tornado-agent'), /unsharded/);
   await assert.rejects(runVitestLanes('kosava-supporting', 0), /concurrency/);

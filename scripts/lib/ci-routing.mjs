@@ -142,10 +142,10 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: ['chain', 'agent'],
   },
   'packages/semantic-runtime': {
-    // The package's Rust/Wasm gate is a dedicated workflow job. Selecting the
-    // CLI owner also rebuilds and tests its TypeScript consumer. The
-    // Blazegraph storage conformance suite loads it through the CLI launcher.
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_hardhat_plugins'],
+    // Supporting owns package coverage; the dedicated Rust/Wasm gate also
+    // runs whenever Node work is selected. Keep the CLI consumers covered,
+    // including the Blazegraph suite that loads the CLI launcher.
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/cli': {
@@ -244,7 +244,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/publisher': ['tornado_publisher'],
   'packages/random-sampling': ['kosava_hardhat_plugins'],
   'packages/agent': ['tornado_agent'],
-  'packages/semantic-runtime': ['bura_cli'],
+  'packages/semantic-runtime': ['kosava_supporting'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
   'packages/graph-viz': ['kosava_supporting'],
