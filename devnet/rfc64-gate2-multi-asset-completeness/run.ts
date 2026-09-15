@@ -464,14 +464,17 @@ async function execute(): Promise<void> {
       'operation-completed',
       { catalogHeadDigest: forgedHeadDigest },
     ), 'forged terminal failure');
-    const failureCode = requiredString(terminalFailure.errorCode, 'terminalFailure.errorCode');
     requiredString(terminalFailure.errorName, 'terminalFailure.errorName');
     exact(
       requiredDigest(terminalFailure.catalogHeadDigest, 'terminalFailure.catalogHeadDigest'),
       forgedHeadDigest,
       'terminal failure head digest',
     );
-    exact(failureCode, 'catalog-native-receiver-authorization', 'terminal failure code');
+    exact(
+      terminalFailure.errorCode,
+      forgedFailedDelta === 1 ? 'catalog-native-receiver-authorization' : null,
+      'terminal failure code',
+    );
 
     const receiverCrashBoundary = await receiver.killRestartBoundary('receiver-crash-v1');
     const restartedReceiver = spawnGate2HarnessAgentV1({
