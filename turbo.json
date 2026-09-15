@@ -15,6 +15,13 @@
     },
     "@origintrail-official/dkg-semantic-runtime#build": {
       "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/rust/**",
+        "!$TURBO_ROOT$/rust/target/**",
+        "$TURBO_ROOT$/scripts/build-semantic-runtime.mjs",
+        "$TURBO_ROOT$/scripts/semantic-runtime-rustc.mjs"
+      ],
       "outputs": ["dist/**", "generated/**"]
     },
     "build:ui": {
