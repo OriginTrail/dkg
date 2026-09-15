@@ -251,12 +251,6 @@ function harness(overrides: HarnessOverrides = {}) {
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
           void winnerShareOperationId;
         },
-        preserveStoredIdentityForSkippedAsset: async () => {
-          throw new Error('Skipped-asset identity rewrites are outside this decision fixture');
-        },
-        replaceMetaForGraphAssets: async () => {
-          throw new Error('Bulk metadata replacement is outside this decision fixture');
-        },
       },
       reconcileFinalizedTwin: async () => {
         events.push('finalized-twin-reconciled');
