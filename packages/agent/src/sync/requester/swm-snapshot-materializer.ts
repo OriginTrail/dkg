@@ -61,13 +61,12 @@ function storedWinnerIsDecodable(
 }
 
 /**
- * The VM-publish preflight requires the LIVE head's accessPolicy to be
- * DEFINED (`liveHead.accessPolicy === undefined` fails the queued intent as
- * stale). The identity KEY deliberately treats an absent row as the effective
- * default for equality, but preserving a policy-less winner would park the KA
- * on an operation queued publishes cannot use — descriptor-wins instead
- * converges to the peer's explicit-policy operation. Key equality and
- * envelope USABILITY are separate concerns.
+ * The VM-publish preflight requires a persisted LIVE access envelope. The
+ * identity key deliberately treats an absent legacy row as the effective
+ * default for equality, but preserving a legacy-default winner would park the
+ * KA on an operation queued publishes cannot use. Descriptor-wins instead
+ * converges to the peer's persisted-policy operation. Key equality and
+ * envelope usability are separate concerns.
  */
 function storedWinnerHasUsableAccessEnvelope(storedRows: readonly Quad[]): boolean {
   return storedRows.some((row) => row.predicate === `${DKG}accessPolicy`);
@@ -303,8 +302,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   /**
    * Snapshot LOCATOR coherence — outside both the identity key (the
-   * graph-form locator embeds the operation id) and the head decoder (which
-   * never consumes snapshot pointers). Count is only the cheap pre-gate: a
+   * graph-form locator embeds the operation id) and this stored-row repair
+   * comparison (canonical head reads model locators separately). Count is only
+   * the cheap pre-gate: a
    * stale same-size graph passes it, so the CONTENT digest must equal the
    * committed public digest — the same count-then-digest ladder
    * `isGraphAssetMaterialized` uses for the assertion graph.

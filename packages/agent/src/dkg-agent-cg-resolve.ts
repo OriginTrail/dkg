@@ -253,21 +253,6 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
-type ListContextGraphsRow = {
-  id: string;
-  uri: string;
-  name: string;
-  description?: string;
-  creator?: string;
-  curator?: string;
-  accessPolicy?: string;
-  createdAt?: string;
-  isSystem: boolean;
-  subscribed: boolean;
-  synced: boolean;
-  onChainId?: string;
-  callerInvolved?: boolean;
-};
 type ListContextGraphsUncachedResult = {
   rows: ListContextGraphsRow[];
   cacheable: boolean;
@@ -427,6 +412,10 @@ import {
   runCuratorMetaRefresh,
   type CuratorMetaRefreshOptions,
 } from './curator-meta-refresh.js';
+import {
+  enrichContextGraphListAuthorityV1,
+  type ListContextGraphsRow,
+} from './context-graph-list-authority-enrichment.js';
 
 function syncAuthAbortError(reason: unknown): Error {
   return createAbortError(reason);
@@ -1953,6 +1942,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   ) | undefined> {
     const target = this.resolveContextGraphNameHashBindingTarget(requestedId);
     if (target === null) return undefined;
+    if (this.contextGraphRegistrationsInFlight?.has(target.localId)) {
+      throw new Error(
+        `Context Graph "${target.localId}" registration is in flight; chain binding discovery is suspended`,
+      );
+    }
 
     const currentBinding = this.contextGraphBindingState.currentBindingFor(
       target.localId,
@@ -2511,10 +2505,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
-        const onChainId = sub?.onChainId ?? (await optional(
-          (signal) => this.getContextGraphOnChainId(id, { signal }),
-          `on-chain id lookup for ${id}`,
-        )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
         rememberRow({
           id,
@@ -2537,7 +2527,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           // subscription state set by the catchup runner (see
           // `markContextGraphSubscriptionState` at routes/context-graph.ts:1301).
           synced: sub?.synced ?? false,
-          ...(onChainId ? { onChainId } : {}),
+          ...(sub?.onChainId ? { onChainId: sub.onChainId } : {}),
         }, policyPrivacy(row['access']));
       });
       for (const entry of definitionSettled) {
@@ -2575,10 +2565,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
       if (metaResult?.type === 'bindings' && metaResult.bindings.length > 0) {
         const row = metaResult.bindings[0] as Record<string, string>;
-        const onChainId = sub.onChainId ?? (await optional(
-          (signal) => this.getContextGraphOnChainId(id, { signal }),
-          `on-chain id lookup for ${id}`,
-        )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
         rememberRow({
           id,
@@ -2592,7 +2578,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           isSystem: false,
           subscribed: sub.subscribed,
           synced: sub.synced,
-          ...(onChainId ? { onChainId } : {}),
+          ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
         }, policyPrivacy(row['access']));
         continue;
       }
@@ -2695,10 +2681,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (contentRead.ok && !contentRead.value) continue;
 
       const sub = this.subscribedContextGraphs.get(id);
-      const onChainId = sub?.onChainId ?? (await optional(
-        (signal) => this.getContextGraphOnChainId(id, { signal }),
-        `on-chain id lookup for ${id}`,
-      )) ?? undefined;
       const policyRead = await withBudget(
         (signal) => this.getExplicitAccessPolicy(id, { signal }),
         `access policy lookup for storage row ${id}`,
@@ -2713,7 +2695,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
         ...(accessPolicy ? { accessPolicy } : {}),
-        ...(onChainId ? { onChainId } : {}),
+        ...(sub?.onChainId ? { onChainId: sub.onChainId } : {}),
       }, accessPolicy ?? 'unknown');
     }
 
@@ -2762,6 +2744,33 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
     });
+
+    // Discovery establishes row identity; this collaborator owns the complete
+    // finalized/legacy/degraded authority-enrichment state machine.
+    const authorityEnrichment = await enrichContextGraphListAuthorityV1({
+      rows,
+      readFinalizedTargets: (contextGraphIds) => withBudget(
+        (signal) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+          contextGraphIds,
+          { signal },
+        ),
+        'batched finalized on-chain id enrichment',
+        scanBudgetMs,
+      ),
+      readRegistrationStatus: (contextGraphId) => withBudget(
+        () => this.readLocalContextGraphRegistrationStatus(contextGraphId),
+        `local registration status lookup for ${contextGraphId}`,
+      ),
+      readCurrentOnChainId: (contextGraphId) => withBudget(
+        (signal) => this.getContextGraphOnChainId(contextGraphId, {
+          signal,
+          source: 'agent.contextGraph.list.onChainId',
+        }),
+        `on-chain id lookup for ${contextGraphId}`,
+      ),
+    });
+    rows = authorityEnrichment.rows;
+    if (!authorityEnrichment.cacheable) cacheable = false;
 
     const curatorBackfills = await mapContextGraphListRowsSettled(rows, async (r) => {
       if (r.curator?.trim()) return r;

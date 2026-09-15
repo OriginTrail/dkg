@@ -8,10 +8,14 @@
  * historical lookup ordering, consensus, and revalidation end to end.
  */
 
-import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
+import {
+  ContextGraphNameHashResolver,
+  normalizeContextGraphNameHashBatch,
+} from './context-graph-name-hash-resolver.js';
 import {
   activeRpcRequestContext,
   withOwnedRpcRequestContext,
+  withRpcRequestContext,
 } from './rpc-request-transport.js';
 import {
   type EvmContextGraphNameHashSource,
@@ -39,6 +43,26 @@ export class EvmContextGraphNameHashResolver {
       signal,
       requestClass: activeRpcRequestContext().requestClass,
     });
+  }
+
+  /** One fresh proof for all names; supersede older scalar evidence before return. */
+  async resolveMany(nameHashes: readonly string[], signal?: AbortSignal): Promise<ReadonlyMap<string, bigint | null>> {
+    signal?.throwIfAborted();
+    const normalized = normalizeContextGraphNameHashBatch(nameHashes);
+    if (normalized.length === 0) return new Map();
+    try {
+      return await withRpcRequestContext({ signal }, async () => {
+        const bindings = await this.source.resolveMany(normalized);
+        activeRpcRequestContext().signal?.throwIfAborted();
+        // Historical proofs do not advance the current-slot generation. A
+        // subsequent scalar policy check must not reuse an older cached miss.
+        this.resolutionCache.invalidateNames(normalized);
+        return bindings;
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    }
   }
 
   invalidateAll(): void {

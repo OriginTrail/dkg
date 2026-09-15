@@ -4,6 +4,7 @@
  * Loopback RPC servers prove whether a request physically reached the provider.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { Network } from 'ethers';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -16,6 +17,7 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { rpcUsageWindowTotal } from '../src/rpc-usage.js';
 import {
   activeRpcRequestContext,
+  createBatchedRpcRequestProvider,
   createRpcRequestProvider,
   withOwnedRpcRequestContext,
   withRpcRequestContext,
@@ -24,7 +26,13 @@ import {
 } from '../src/rpc-request-transport.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
-import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
+import {
+  CHAIN_ID_HEX,
+  createLoopbackJsonRpcTestHarness,
+  sendJsonRpcResult,
+  startLoopbackRpc,
+  type LoopbackRpc,
+} from './loopback-rpc-harness.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
@@ -84,6 +92,144 @@ describe('RPC request transport', () => {
     expect(owned.signal?.aborted).toBe(false);
     owner.abort(new Error('owner stopped'));
     expect(owned.signal?.aborted).toBe(true);
+  });
+
+  it('keeps a concurrent caller alive when a request queued beside it is cancelled', async () => {
+    // Two callers issue a request in the SAME scheduling turn, so both payloads
+    // share one provider dispatch window. Cancelling the first must not reach
+    // the second: an abort landing on the peer's live HTTP attempt surfaces as
+    // a transport fault and is reported as exhaustion carrying the FOREIGN
+    // cancellation reason.
+    const rpc = await startLoopbackRpc({ hang: ['eth_blockNumber'] });
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const abandoned = new AbortController();
+    const peer = new AbortController();
+    const abandonment = Object.assign(
+      new Error('Shared request has no active waiters'),
+      { name: 'AbortError' },
+    );
+
+    const abandonedRead = withOwnedRpcRequestContext(
+      { signal: abandoned.signal },
+      () => provider.send('eth_blockNumber', []),
+    );
+    // Settle the abandoned read into a value so its rejection is owned from the
+    // start; it fails before the peer assertion below can attach a handler.
+    const abandonedOutcome = abandonedRead.then(() => undefined, (error: unknown) => error);
+    const peerRead = withOwnedRpcRequestContext(
+      { signal: peer.signal },
+      () => provider.send('eth_chainId', []),
+    );
+    abandoned.abort(abandonment);
+
+    try {
+      await expect(peerRead).resolves.toBe(CHAIN_ID_HEX);
+      expect(rpc.aborted('eth_chainId')).toBe(0);
+      await expect(provider.getNetwork()).resolves.toMatchObject({ chainId: 31_337n });
+      // The abandoning caller still loses its own physical request.
+      expect(await abandonedOutcome).toMatchObject({ name: 'AbortError' });
+    } finally {
+      if (!peer.signal.aborted) peer.abort(new Error('test teardown'));
+      await Promise.allSettled([abandonedOutcome, peerRead]);
+      provider.destroy();
+    }
+  });
+
+  it('preserves ethers startup, debug events, network detection, and high-level reads', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const debugActions: string[] = [];
+    await provider.on('debug', (event) => {
+      if ('action' in event) debugActions.push(event.action);
+    });
+
+    try {
+      await expect(provider.send('eth_blockNumber', [])).resolves.toBe('0x10');
+      expect(provider.ready).toBe(true);
+      await expect(provider.getNetwork()).resolves.toMatchObject({ chainId: 31_337n });
+      await expect(provider.getBlockNumber()).resolves.toBe(16);
+      expect(debugActions).toContain('sendRpcPayload');
+      expect(debugActions).toContain('receiveRpcResult');
+    } finally {
+      provider.destroy();
+    }
+  });
+
+  it('rejects an in-flight response after destruction through ethers lifecycle handling', async () => {
+    const harness = createLoopbackJsonRpcTestHarness();
+    let markBlockNumberSeen!: () => void;
+    const blockNumberSeen = new Promise<void>((resolve) => { markBlockNumberSeen = resolve; });
+    let releaseBlockNumber!: () => void;
+    const blockNumberReleased = new Promise<void>((resolve) => { releaseBlockNumber = resolve; });
+    const rpc = await harness.start(async (request, response) => {
+      if (request.method === 'eth_chainId') {
+        sendJsonRpcResult(response, request, CHAIN_ID_HEX);
+        return;
+      }
+      if (request.method === 'eth_blockNumber') {
+        markBlockNumberSeen();
+        await blockNumberReleased;
+        sendJsonRpcResult(response, request, '0x10');
+        return;
+      }
+      sendJsonRpcResult(response, request, '0x');
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const pending = provider.send('eth_blockNumber', []);
+
+    try {
+      await blockNumberSeen;
+      provider.destroy();
+      releaseBlockNumber();
+      await expect(pending).rejects.toMatchObject({
+        code: 'UNSUPPORTED_OPERATION',
+        operation: 'eth_blockNumber',
+      });
+    } finally {
+      releaseBlockNumber();
+      await pending.catch(() => {});
+      provider.destroy();
+      await harness.stopAll();
+    }
+  });
+
+  it('emits ethers missing-response errors for malformed RPC replies', async () => {
+    const harness = createLoopbackJsonRpcTestHarness();
+    const rpc = await harness.start((request, response) => {
+      if (request.method === 'eth_chainId') {
+        sendJsonRpcResult(response, request, CHAIN_ID_HEX);
+        return;
+      }
+      sendJsonRpcResult(response, { ...request, id: request.id + 1 }, '0x10');
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const errors: unknown[] = [];
+    await provider.on('error', (error) => { errors.push(error); });
+
+    try {
+      await expect(provider.send('eth_blockNumber', [])).rejects.toMatchObject({
+        code: 'BAD_DATA',
+      });
+      await expect.poll(() => errors.length).toBe(1);
+      expect(errors[0]).toMatchObject({ code: 'BAD_DATA' });
+    } finally {
+      provider.destroy();
+      await harness.stopAll();
+    }
   });
 
   it('cancels the active ethers HTTP request when the caller aborts a chain read', async () => {
@@ -338,6 +484,77 @@ describe('RPC request transport', () => {
     })).toThrow(/batchMaxCount <= 1/u);
   });
 
+  it('requires an explicit batched transport when batching is requested', () => {
+    expect(() => createRpcRequestProvider('http://127.0.0.1:1', {
+      providerOptions: { batchMaxCount: 2 },
+    })).toThrow(/createBatchedRpcRequestProvider/u);
+  });
+
+  it('restores foreground and background admission across concurrent sends', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 2,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      network: Network.from(31_337),
+      admission: governor,
+    });
+    try {
+      const background = withOwnedRpcRequestContext(
+        { requestClass: 'background' },
+        () => provider.send('eth_blockNumber', []),
+      );
+      const foreground = withOwnedRpcRequestContext(
+        { requestClass: 'foreground' },
+        () => provider.send('eth_chainId', []),
+      );
+      await expect(background).resolves.toBe('0x10');
+      await expect(foreground).resolves.toBe(CHAIN_ID_HEX);
+      expect(governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 1,
+      });
+    } finally {
+      provider.destroy();
+    }
+  });
+
+  it('keeps startup network discovery foreground when the first caller is background', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 4,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      admission: governor,
+    });
+
+    try {
+      await expect(withRpcRequestContext(
+        { requestClass: 'background' },
+        () => provider.send('eth_blockNumber', []),
+      )).resolves.toBe('0x10');
+      expect(rpc.hits('eth_chainId')).toBe(1);
+      expect(governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 1,
+      });
+    } finally {
+      provider.destroy();
+    }
+  });
+
   it('paces concurrent governed sends as independent single-entry HTTP requests', async () => {
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
@@ -401,23 +618,26 @@ describe('RPC request transport', () => {
     }
   });
 
-  it('accounts every entry in an ungoverned batched payload at the HTTP-attempt boundary', async () => {
+  it('batches public sends and accounts every entry at the HTTP-attempt boundary', async () => {
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
     const observed: string[] = [];
-    const provider = createRpcRequestProvider(rpc.url, {
+    const provider = createBatchedRpcRequestProvider(rpc.url, {
       maxRetries: 0,
+      network: Network.from(31_337),
       providerOptions: { batchMaxCount: 2 },
       onRequest: (method) => { observed.push(method); },
     });
     try {
-      await expect(provider._send([
-        { id: 1, jsonrpc: '2.0', method: 'eth_blockNumber', params: [] },
-        { id: 2, jsonrpc: '2.0', method: 'eth_chainId', params: [] },
-      ])).resolves.toHaveLength(2);
-      expect(observed).toEqual(['eth_blockNumber', 'eth_chainId']);
+      const blockNumber = provider.send('eth_blockNumber', []);
+      const code = provider.send('eth_getCode', []);
+      await expect(Promise.all([blockNumber, code])).resolves.toEqual(['0x10', '0x1234']);
+      expect(observed).toEqual(['eth_blockNumber', 'eth_getCode']);
       expect(rpc.hits('eth_blockNumber')).toBe(1);
-      expect(rpc.hits('eth_chainId')).toBe(1);
+      expect(rpc.hits('eth_getCode')).toBe(1);
+      expect(rpc.httpRequestMethods()).toEqual([
+        ['eth_blockNumber', 'eth_getCode'],
+      ]);
     } finally {
       provider.destroy();
     }

@@ -385,3 +385,11 @@ describe('normalizeBizStep', () => {
     expect(() => normalizeBizStep('')).toThrow('Invalid bizStep');
   });
 });
+
+
+it.each([10_001, Number.POSITIVE_INFINITY, Number.NaN, 0.5])('rejects unsupported pagination offset %s', offset => {
+  expect(() => buildEpcisQuery({ offset }, 'pagination-bound')).toThrow('offset must be a safe integer no greater than 10000');
+});
+it('accepts the maximum bounded offset', () => {
+  expect(buildEpcisQuery({ offset: 10_000 }, 'pagination-bound')).toContain('OFFSET 10000');
+});

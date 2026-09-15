@@ -209,7 +209,7 @@ export function historicalFixture(pages: ReadonlyArray<ReadonlyArray<bigint>> = 
   const filterFactory = vi.fn(() => filter);
   const parseLog = vi.fn(({ data }: { data: string }) => ({
     name: 'ContextGraphCreated',
-    args: { contextGraphId: BigInt(data) },
+    args: { contextGraphId: BigInt(data), nameHash: NAME_HASH },
   }));
   const storage = {
     getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),

@@ -71,6 +71,7 @@ import {
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type ContextGraphIdV1, type EvmAddressV1, type NetworkIdV1,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -94,7 +95,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, isChainRpcTransportError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -131,6 +132,10 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
+import {
+  RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+  mintRfc64UnregisteredReplicaAuthorityEvidenceV1,
+} from './rfc64/unregistered-replica-authority-v1.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -373,7 +378,11 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { LocalContextGraphRegistrationStatusStore } from
+  './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { createLocalContextGraphOriginMembershipRecord } from
+  './local-context-graph-provenance.js';
 import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 import {
@@ -400,6 +409,37 @@ interface ContextGraphAgentInviteMutationPlan {
 
 export type PreparedContextGraphAgentInviteMutation =
   PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
+
+const DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES = new Set([
+  'ACTION_REJECTED',
+  'CALL_EXCEPTION',
+  'INSUFFICIENT_FUNDS',
+  'INVALID_ARGUMENT',
+  'UNPREDICTABLE_GAS_LIMIT',
+]);
+
+/** True only when the chain boundary proves no successful registration committed. */
+function isDefinitiveContextGraphRegistrationFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as {
+    code?: unknown;
+    txHash?: unknown;
+    receipt?: { status?: unknown };
+    contextGraphRegistrationSubmitted?: unknown;
+  };
+  if (record.contextGraphRegistrationSubmitted === false) return true;
+  if (record.receipt?.status === 0) return true;
+  const code = typeof record.code === 'string' ? record.code : '';
+  if (DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES.has(code)) return true;
+  // Transport failure before the adapter has a signed/broadcast transaction
+  // hash is pre-submission. Once a hash exists, or receipt lookup itself
+  // failed, the outcome remains ambiguous and the durable pending fence stays.
+  if (isChainRpcTransportError(error)) {
+    return error.code !== 'RPC_RECEIPT_LOOKUP_FAILED'
+      && typeof error.txHash !== 'string';
+  }
+  return false;
+}
 
 export class ContextGraphMethods extends DKGAgentBase {
   async createContextGraph(this: DKGAgent, opts: {
@@ -549,6 +589,87 @@ export class ContextGraphMethods extends DKGAgentBase {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${isCurated || opts.private ? 'private' : 'public'}"`, graph: defGraph },
     ];
+
+    // A public unregistered CG has no finalized chain record from which a
+    // replica can derive RFC-64 authority. Carry a canonical policy envelope,
+    // signed by the custodial caller/curator, in the existing public ontology
+    // definition. Receivers still require finalized chain absence before they
+    // may accept this evidence.
+    if (!isCurated && !opts.private) {
+      const networkId = (
+        this.config.rfc64CatalogDeploymentProfile?.networkId
+        ?? this.config.networkIdentity?.chainId
+      );
+      // The wallet namespace is the only independently checkable owner before
+      // registration. Never mint a self-asserted policy for a different
+      // caller/default address: replicas would (correctly) reject it forever.
+      const ownerAddress = opts.id.match(/^(0x[0-9a-f]{40})(?:\/|$)/iu)?.[1]?.toLowerCase();
+      const effectiveCallerAddress = (
+        opts.callerAgentAddress ?? this.defaultAgentAddress
+      )?.toLowerCase();
+      const requiresAuthenticatedReplicaAuthority =
+        this.config.rfc64CatalogDeploymentProfile !== undefined
+        && !this.config.rfc64CatalogExecutionPlan.killSwitchActive
+        && ownerAddress !== undefined;
+      if (requiresAuthenticatedReplicaAuthority) {
+        if (effectiveCallerAddress === undefined) {
+          throw new Error(
+            `Context graph "${opts.id}" uses wallet namespace ${ownerAddress}, ` +
+            'but no authenticated EVM caller is available. Use the matching agent-scoped token.',
+          );
+        }
+        if (ownerAddress !== effectiveCallerAddress) {
+          throw new Error(
+            `Context graph "${opts.id}" uses wallet namespace ${ownerAddress}, ` +
+            `but the authenticated caller is ${effectiveCallerAddress}. ` +
+            'Use the matching agent-scoped token.',
+          );
+        }
+      }
+      // Resolve the key only after the authenticated effective principal has
+      // been proven to own the namespace. A sibling tenant must never be able
+      // to make this node sign authority with another local agent's key.
+      const signerRecord = ownerAddress === effectiveCallerAddress
+        ? this.getWorkspaceSigningAgentForAddress(ownerAddress)
+        : null;
+      if (requiresAuthenticatedReplicaAuthority && signerRecord === null) {
+        throw new Error(
+          `Context graph "${opts.id}" requires an authenticated RFC-64 replica authority, ` +
+          `but this node has no custodial signing key for ${ownerAddress}.`,
+        );
+      }
+      if (
+        networkId !== undefined
+        && networkId !== 'none'
+        && ownerAddress !== undefined
+        && /^0x[0-9a-f]{40}$/iu.test(ownerAddress)
+        && signerRecord !== null
+      ) {
+        const owner = ownerAddress as EvmAddressV1;
+        const wallet = new ethers.Wallet(signerRecord.privateKey);
+        const evidence = await mintRfc64UnregisteredReplicaAuthorityEvidenceV1({
+          networkId: networkId as NetworkIdV1,
+          contextGraphId: opts.id as ContextGraphIdV1,
+          ownerAddress: owner,
+          accessPolicy: 0,
+          publishPolicy: opts.publishPolicy ?? 1,
+          publishAuthorityAccountId:
+            normalisedPublishAuthorityAccountId?.toString(10) ?? '0',
+          memberAddresses: [],
+          rosterVersion: '0',
+          signer: Object.freeze({
+            issuer: owner,
+            signDigest: (digest: Uint8Array) => wallet.signMessage(digest),
+          }),
+        });
+        quads.push({
+          subject: contextGraphUri,
+          predicate: RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+          object: `"${evidence}"`,
+          graph: ontologyGraph,
+        });
+      }
+    }
 
     // Store registration status and curator in _meta. Also persist
     // `publishPolicy` / `publishAuthorityAccountId` when supplied so
@@ -700,6 +821,11 @@ export class ContextGraphMethods extends DKGAgentBase {
     // before the caller is told it succeeded.
     await this.store.flush?.();
 
+    // From this boundary onward the graph exists durably. Origin is an
+    // immutable fact, so publish its runtime projection before any best-effort
+    // subscription, membership, gossip, or RFC-64 follow-up can run.
+    await this.persistLocalContextGraphOrigin(opts.id, 'local-create');
+
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: !opts.private,
@@ -721,14 +847,17 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     const curatorAgentAddress = opts.callerAgentAddress ?? this.defaultAgentAddress;
     if (curatorAgentAddress) {
-      this.upsertContextGraphMember({
+      // Membership is a roster projection, not the graph creation transaction
+      // or its immutable provenance. A configured-store failure after
+      // store.flush() must not report that the already-durable graph failed to
+      // be created. The independent origin journal above owns restart proof;
+      // replicated creator RDF is never trusted as origin evidence.
+      await this.upsertContextGraphMember(createLocalContextGraphOriginMembershipRecord({
         contextGraphId: opts.id,
-        principalType: 'agent',
         principalId: curatorAgentAddress,
         role: 'curator',
-        status: 'active',
         source: 'local-create',
-      });
+      }));
     }
 
     for (const peer of opts.allowedPeers ?? []) {
@@ -1014,11 +1143,17 @@ export class ContextGraphMethods extends DKGAgentBase {
     // Check if already registered
     const cgMetaGraph = contextGraphMetaUri(id);
     const contextGraphUri = `did:dkg:context-graph:${id}`;
-    const statusResult = await this.store.query(
-      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
-      { source: 'agent.contextGraph.register.status' },
-    );
-    if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
+    const registrationStatuses = new LocalContextGraphRegistrationStatusStore({
+      store: this.store,
+      markProjectionDirty: (contextGraphId) => (
+        this.contextGraphMetaProjection.markDirty(contextGraphId)
+      ),
+    });
+    const persistRegistrationStatus = async (
+      status: 'unregistered' | 'pending' | 'registered',
+    ): Promise<void> => registrationStatuses.set(id, status);
+    const registrationStatus = await this.readLocalContextGraphRegistrationStatus(id);
+    if (registrationStatus === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
@@ -1168,7 +1303,17 @@ export class ContextGraphMethods extends DKGAgentBase {
     // A local OnChainId triple alone is not enough — devnet restarts and
     // partial failures can leave ontology id "1" while the chain slot is
     // inactive, which would skip registration and strand publishes.
-    const existingOnChainId = await this.getContextGraphOnChainId(id);
+    // A locally-created graph with the exact durable `unregistered` marker and
+    // no numeric subscription binding is stronger evidence: `pending` is
+    // flushed before any registration transaction may be submitted. Avoid a
+    // full historical reverse-name scan for that fresh state. Missing/legacy,
+    // pending, and bound states retain the defensive chain reconciliation.
+    const freshLocalFirstRegistration = registrationStatus === 'unregistered'
+      && this.localContextGraphProvenance.hasLocalCreate(id)
+      && this.subscribedContextGraphs.get(id)?.onChainId === undefined;
+    const existingOnChainId = freshLocalFirstRegistration
+      ? null
+      : await this.getContextGraphOnChainId(id);
     if (existingOnChainId) {
       let onChainLive = false;
       if (typeof this.chain.isContextGraphActiveOnChain === 'function') {
@@ -1188,15 +1333,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       }
       if (onChainLive) {
         this.log.info(ctx, `Context graph "${id}" already has on-chain ID ${existingOnChainId} — skipping chain call`);
-        await deleteByPatternWithoutCount(this.store, {
-          graph: cgMetaGraph,
-          subject: contextGraphUri,
-          predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
-        });
-        await this.store.insert([
-          { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
-        ]);
-        this.contextGraphMetaProjection.markDirty(id);
+        await persistRegistrationStatus('registered');
         return { onChainId: existingOnChainId, txHash: undefined };
       }
       this.log.warn(
@@ -1448,73 +1585,128 @@ export class ContextGraphMethods extends DKGAgentBase {
     // subscribe will key on the wrong topic.
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 
-    const result = await this.registerContextGraphOnChain({
-      accessPolicy: resolvedLocalAccessPolicy,
-      publishPolicy,
-      ...(publishAuthority ? { publishAuthority } : {}),
-      ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
-      participantAgents,
-      nameHash,
-    });
-    const onChainId = result.contextGraphId.toString();
+    if (this.contextGraphRegistrationsInFlight.has(id)) {
+      throw new Error(`Context graph "${id}" registration is already in flight`);
+    }
+    this.contextGraphRegistrationsInFlight.add(id);
+    let onChainId: string;
+    try {
+      // Make the local-first bypass impossible before the transaction can
+      // commit. If the process exits, or any post-transaction store write
+      // fails, `pending` forces authority consumers to reconcile with chain
+      // instead of trusting the older `unregistered` fact indefinitely.
+      await persistRegistrationStatus('pending');
 
-    this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);
-
-    // Update _meta with registered status and the member-syncable on-chain
-    // binding.  The ontology copy remains for system-graph discovery, while
-    // the authenticated CG-local copy lets a late member learn the immutable
-    // slot from the curator's private `_meta` snapshot.  A private joiner may
-    // have missed the one-shot ontology gossip emitted below and must not be
-    // left unable to start chain-driven VM reconciliation as a result.
-    await deleteByPatternWithoutCount(this.store, {
-      graph: cgMetaGraph,
-      subject: contextGraphUri,
-      predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
-    });
-    // Single-valued binding guard (RS heal): the on-chain id is immutable, so
-    // clear any prior value before insert — the cgId resolver / heal read this
-    // and must never see a multi-valued (LIMIT-1-nondeterministic) binding.
-    await deleteByPatternWithoutCount(this.store, {
-      graph: ontologyGraph,
-      subject: contextGraphUri,
-      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-    });
-    await deleteByPatternWithoutCount(this.store, {
-      graph: cgMetaGraph,
-      subject: contextGraphUri,
-      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-    });
-    await this.store.insert([
-      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
-      { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
-      { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
-      // Persist the wire-id commitment in the cg's _meta graph so a
-      // restart can resume host-mode subscription on the correct
-      // topic without re-reading the chain event.
-      { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
-    ]);
-    this.invalidateListContextGraphsCache();
-    this.contextGraphMetaProjection.markDirty(id);
-    // We no longer persist `publishAuthorityAccountId` locally even on
-    // success (Codex PR #502 round-6 follow-through): with the
-    // stored-value fallback gone, nothing reads it. A CG can only
-    // register on-chain once anyway — re-reads of the stored id
-    // wouldn't be useful.
-
-    // Update in-memory subscription record and ensure we're subscribed
-    const sub = this.subscribedContextGraphs.get(id);
-    if (sub) {
-      const next = { ...sub, onChainHash: nameHash };
-      this.bindSubscriptionOnChainId(id, next, onChainId);
-      this.setContextGraphSubscription(id, next, { persist: false });
-      this.subscribeToContextGraph(id, {
-        trackSyncScope: true,
-        syncMode: 'always-on',
-      });
-      if (!next.subscribed) {
-        this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
+      let result: CreateOnChainContextGraphResult;
+      try {
+        result = await this.registerContextGraphOnChain({
+          accessPolicy: resolvedLocalAccessPolicy,
+          publishPolicy,
+          ...(publishAuthority ? { publishAuthority } : {}),
+          ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
+          participantAgents,
+          nameHash,
+        });
+      } catch (error) {
+        if (isDefinitiveContextGraphRegistrationFailure(error)) {
+          try {
+            await persistRegistrationStatus('unregistered');
+          } catch (recoveryError) {
+            this.log.warn(
+              ctx,
+              `Context graph "${id}" registration failed definitively, but its pending recovery marker could not be reset: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+            );
+          }
+        }
+        throw error;
       }
-      this.persistContextGraphSubscription(id);
+      if (!result.success || result.contextGraphId <= 0n) {
+        throw new Error(
+          `Context graph "${id}" registration returned without a confirmed on-chain binding; the durable pending marker was retained for reconciliation.`,
+        );
+      }
+      onChainId = result.contextGraphId.toString();
+
+      this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);
+
+      // Update _meta with registered status and the member-syncable on-chain
+      // binding.  The ontology copy remains for system-graph discovery, while
+      // the authenticated CG-local copy lets a late member learn the immutable
+      // slot from the curator's private `_meta` snapshot.  A private joiner may
+      // have missed the one-shot ontology gossip emitted below and must not be
+      // left unable to start chain-driven VM reconciliation as a result.
+      // Single-valued binding guard (RS heal): the on-chain id is immutable, so
+      // clear any prior value before insert — the cgId resolver / heal read this
+      // and must never see a multi-valued (LIMIT-1-nondeterministic) binding.
+      await deleteByPatternWithoutCount(this.store, {
+        graph: ontologyGraph,
+        subject: contextGraphUri,
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      });
+      await deleteByPatternWithoutCount(this.store, {
+        graph: cgMetaGraph,
+        subject: contextGraphUri,
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      });
+      await this.store.insert([
+        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
+        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
+        // Persist the wire-id commitment in the cg's _meta graph so a
+        // restart can resume host-mode subscription on the correct
+        // topic without re-reading the chain event.
+        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
+      ]);
+      await this.store.flush?.();
+      // Keep `pending` durable until every recovery binding above is committed.
+      // A crash or store failure before this final flip therefore forces the
+      // next authority read to reconcile the now-discoverable chain slot.
+      try {
+        await persistRegistrationStatus('registered');
+      } catch (error) {
+        // The transaction and recovery bindings may already be durable. Restore
+        // the fail-closed marker in the live view so this process also reconciles
+        // instead of claiming registration completed cleanly.
+        try {
+          await persistRegistrationStatus('pending');
+        } catch {
+          // Preserve the original final-commit failure; durable state is either
+          // the earlier pending fence or a fully committed registered marker.
+        }
+        throw error;
+      }
+      this.invalidateListContextGraphsCache();
+      this.contextGraphMetaProjection.markDirty(id);
+      // We no longer persist `publishAuthorityAccountId` locally even on
+      // success (Codex PR #502 round-6 follow-through): with the
+      // stored-value fallback gone, nothing reads it. A CG can only
+      // register on-chain once anyway — re-reads of the stored id
+      // wouldn't be useful.
+
+      // Update in-memory subscription record and ensure we're subscribed
+      const sub = this.subscribedContextGraphs.get(id);
+      if (sub) {
+        const next = { ...sub, onChainHash: nameHash };
+        this.bindSubscriptionOnChainId(id, next, onChainId);
+        this.setContextGraphSubscription(id, next, { persist: false });
+        this.subscribeToContextGraph(id, {
+          trackSyncScope: true,
+          syncMode: 'always-on',
+        });
+        if (!next.subscribed) {
+          this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
+        }
+        this.persistContextGraphSubscription(id);
+      }
+    } finally {
+      this.contextGraphRegistrationsInFlight.delete(id);
+      try {
+        this.scheduleRfc64CatalogResponsibilityReconciliationV1(id);
+      } catch (reconciliationError) {
+        this.log.warn(
+          ctx,
+          `Context graph "${id}" registration attempt ended, but its RFC-64 responsibility refresh could not be scheduled: ${reconciliationError instanceof Error ? reconciliationError.message : String(reconciliationError)}`,
+        );
+      }
     }
 
     // Registration status is in _meta — it propagates to peers via sync, not

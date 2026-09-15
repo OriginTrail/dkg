@@ -67,7 +67,12 @@ import {
   MockChainAdapter,
   mergeRpcUsageWindows,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  loadOpWallets,
+  KaNumberAllocator,
+  resolveSyncAgentsMeta,
+} from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
@@ -2009,6 +2014,9 @@ async function runDaemonInnerWithStartupOwnership(
           principalId: row.principal_id,
           role: row.role ?? undefined,
           status: row.status,
+          // Preserve application-specific labels for public custom-store
+          // compatibility. The agent's provenance classifier recognizes only
+          // its two trusted local-origin literals.
           source: row.source ?? undefined,
           displayName: row.display_name ?? undefined,
           ...(metadata ? { metadata } : {}),
@@ -2016,6 +2024,18 @@ async function runDaemonInnerWithStartupOwnership(
           updatedAt: row.updated_at,
         };
       }),
+      loadLocalOrigins: async () => dashDb.listLocalContextGraphOrigins().map((row) => ({
+        contextGraphId: row.context_graph_id,
+        source: row.source,
+        createdAt: row.created_at,
+      })),
+      recordLocalOrigin: async (record) => {
+        dashDb.recordLocalContextGraphOrigin({
+          context_graph_id: record.contextGraphId,
+          source: record.source,
+          created_at: record.createdAt,
+        });
+      },
       upsert: async (record) => {
         dashDb.upsertContextGraphMember({
           context_graph_id: record.contextGraphId,

@@ -4,11 +4,14 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   type FinalizationMessageMsg,
+  type GraphKnowledgeAssetAccessEnvelope,
+  type GraphKnowledgeAssetAccessPolicy,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
-export type GraphScopedAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+export type GraphScopedAccessPolicy = GraphKnowledgeAssetAccessPolicy;
+export type GraphScopedAccessEnvelope = GraphKnowledgeAssetAccessEnvelope;
 
 export interface ParsedGraphScopedFinalization {
   msg: FinalizationMessageMsg;

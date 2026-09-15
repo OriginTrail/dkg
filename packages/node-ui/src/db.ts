@@ -31,7 +31,7 @@ export {
 
 export { SqliteProtocolOutboxStore, type SqliteProtocolOutboxStoreOptions } from './protocol-outbox-store.js';
 
-export const SCHEMA_VERSION = 36;
+export const SCHEMA_VERSION = 37;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -354,6 +354,27 @@ export class DashboardDB {
         updated_at INTEGER NOT NULL
       );
     `);
+    const ensureLocalContextGraphOriginSchema = () => this.db.exec(`
+      CREATE TABLE IF NOT EXISTS local_context_graph_origins (
+        context_graph_id TEXT PRIMARY KEY CHECK (length(trim(context_graph_id)) > 0),
+        source TEXT NOT NULL CHECK (source IN ('local-create', 'implicit-swm-write')),
+        created_at INTEGER NOT NULL CHECK (created_at >= 0)
+      );
+      INSERT OR IGNORE INTO local_context_graph_origins (
+        context_graph_id, source, created_at
+      )
+      SELECT
+        context_graph_id,
+        CASE
+          WHEN MAX(CASE WHEN source = 'local-create' THEN 1 ELSE 0 END) = 1
+            THEN 'local-create'
+          ELSE 'implicit-swm-write'
+        END,
+        MIN(first_seen_at)
+      FROM context_graph_memberships
+      WHERE source IN ('local-create', 'implicit-swm-write')
+      GROUP BY context_graph_id;
+    `);
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -362,6 +383,7 @@ export class DashboardDB {
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
       ensureContextGraphAuthorityIndexSchema();
+      ensureLocalContextGraphOriginSchema();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1304,6 +1326,11 @@ export class DashboardDB {
       // One opaque checkpoint per physical ContextGraphStorage deployment.
       // Chain owns decoding/integrity; SQLite owns atomic revision CAS.
       ensureContextGraphAuthorityIndexSchema();
+    }
+    if (version < 37) {
+      // Local graph origin is immutable provenance, not mutable membership.
+      // Seed the graph-keyed journal once from trusted legacy source labels.
+      ensureLocalContextGraphOriginSchema();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -2301,6 +2328,26 @@ export class DashboardDB {
       'deleteContextGraphMember',
       'DELETE FROM context_graph_memberships WHERE context_graph_id = ? AND principal_type = ? AND principal_id = ?',
     ).run(contextGraphId, principalType, principalId);
+  }
+
+  recordLocalContextGraphOrigin(record: {
+    context_graph_id: string;
+    source: LocalContextGraphOriginSource;
+    created_at: number;
+  }): void {
+    this.stmt('recordLocalContextGraphOrigin', `
+      INSERT OR IGNORE INTO local_context_graph_origins (
+        context_graph_id, source, created_at
+      ) VALUES (@context_graph_id, @source, @created_at)
+    `).run(record);
+  }
+
+  listLocalContextGraphOrigins(): LocalContextGraphOriginRow[] {
+    return this.db.prepare(`
+      SELECT context_graph_id, source, created_at
+      FROM local_context_graph_origins
+      ORDER BY context_graph_id ASC
+    `).all() as LocalContextGraphOriginRow[];
   }
 
   getSnapshotHistory(from: number, to: number, maxPoints = 500): MetricSnapshotRow[] {
@@ -4149,6 +4196,16 @@ export interface ContextGraphMemberRow {
   metadata: string | null;
   first_seen_at: number;
   updated_at: number;
+}
+
+export type LocalContextGraphOriginSource =
+  | 'local-create'
+  | 'implicit-swm-write';
+
+export interface LocalContextGraphOriginRow {
+  context_graph_id: string;
+  source: LocalContextGraphOriginSource;
+  created_at: number;
 }
 
 export interface SpendingPeriod {

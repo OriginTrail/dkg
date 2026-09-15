@@ -466,6 +466,52 @@ function mapContextGraphSlotBindingOutcome(
   return false;
 }
 
+function evaluateContextGraphSlotBindingCommitment(
+  contextGraphId: string,
+  onChainId: string,
+  onChainHash: string | null,
+  allowNumericSelfAddress: boolean,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+  warn: (message: string) => void,
+): ContextGraphSlotBindingOutcome {
+  let numericId: bigint;
+  try {
+    numericId = BigInt(onChainId);
+  } catch {
+    return { kind: 'unprovable' };
+  }
+  if (numericId <= 0n) return { kind: 'unprovable' };
+
+  const trimmed = contextGraphId.trim();
+  if (
+    allowNumericSelfAddress
+    && /^\d+$/.test(trimmed)
+    && trimmed === numericId.toString()
+  ) {
+    return { kind: 'match' };
+  }
+  if (!onChainHash || !/^0x[0-9a-fA-F]{64}$/.test(onChainHash)) {
+    warn(
+      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO `
+      + 'valid committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). '
+      + 'Treating CG as NOT public (fail-closed).',
+    );
+    return { kind: 'mismatch' };
+  }
+  if (localContextGraphIdMatchesCommittedNameHash(
+    trimmed,
+    onChainHash,
+    isWireIdKeyedSubscription,
+  )) return { kind: 'match' };
+
+  warn(
+    `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits `
+    + `name-hash ${onChainHash.toLowerCase()} that does not match this CG's local identity — `
+    + 'local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).',
+  );
+  return { kind: 'mismatch' };
+}
+
 async function evaluateContextGraphSlotBinding(
   chain: ChainAdapter,
   contextGraphId: string,
@@ -532,28 +578,14 @@ async function evaluateContextGraphSlotBinding(
       ),
     };
   }
-  if (!onChainHash) {
-    warn(
-      opCtx ?? createOperationContext('share'),
-      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO `
-      + 'committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). '
-      + 'Treating CG as NOT public (fail-closed).',
-    );
-    return { kind: 'mismatch' };
-  }
-  if (localContextGraphIdMatchesCommittedNameHash(
-    trimmed,
+  return evaluateContextGraphSlotBindingCommitment(
+    contextGraphId,
+    onChainId,
     onChainHash,
+    allowNumericSelfAddress,
     isWireIdKeyedSubscription,
-  )) return { kind: 'match' };
-
-  warn(
-    opCtx ?? createOperationContext('share'),
-    `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits `
-    + `name-hash ${onChainHash.toLowerCase()} that does not match this CG's local identity — `
-    + 'local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).',
+    (message) => warn(opCtx ?? createOperationContext('share'), message),
   );
-  return { kind: 'mismatch' };
 }
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
@@ -892,14 +924,100 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     operationContext: OperationContext,
   ): Promise<ActivePublicContextGraphChainProof> {
     return resolveStrictActivePublicChainProof(
-      (id, resolverOperationContext, options) => this.resolveOnChainAccessPolicyState(
+      (id, resolverOperationContext) => this.resolveFinalizedOnChainAccessPolicyState(
         id,
         resolverOperationContext,
-        options,
       ),
       contextGraphId,
       operationContext,
     );
+  }
+
+  /**
+   * Metadata-bootstrap authority proof. Indexed adapters resolve identity,
+   * liveness, and policy from one finalized snapshot; legacy adapters retain
+   * the strict current-state repair path explicitly at this boundary.
+   */
+  async resolveFinalizedOnChainAccessPolicyState(this: DKGAgent,
+    contextGraphId: string,
+    opCtx?: OperationContext,
+  ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    const trimmed = contextGraphId.trim();
+    let onChainId: string | null = null;
+    let resolvedFromLocalCg = false;
+    if (typeof this.getContextGraphOnChainId === 'function') {
+      onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      if (onChainId) resolvedFromLocalCg = true;
+    }
+    if (!onChainId && /^\d+$/.test(trimmed)) {
+      if (typeof this.contextGraphExists === 'function') {
+        try {
+          if (!(await this.contextGraphExists(trimmed))) onChainId = trimmed;
+        } catch {
+          return 'unknown';
+        }
+      } else {
+        onChainId = trimmed;
+      }
+    }
+    if (!onChainId) return 'unregistered';
+
+    try {
+      const parsed = BigInt(onChainId);
+      if (
+        parsed <= 0n
+        || parsed > ethers.MaxUint256
+        || parsed.toString(10) !== onChainId
+      ) return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+
+    const indexedSnapshot = await this.readRfc64BatchedFinalizedAuthoritySnapshotV1(
+      onChainId,
+    );
+    if (indexedSnapshot === undefined) {
+      // Preserve the exact address resolution above when a legacy adapter has
+      // no finalized-index capability. Re-resolving through the generic
+      // policy helper can reinterpret a numeric local CG as a raw slot after
+      // a stateful resolver changes, bypassing its required name-hash proof.
+      if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(
+        contextGraphId,
+        onChainId,
+        opCtx,
+        { bindingMode: 'chain-attested-repair' },
+      ))) return 'unknown';
+      const policy = await this.readLiveOnChainAccessPolicy(onChainId, opCtx);
+      return policy === 0 || policy === 1 ? policy : 'unknown';
+    }
+    if (
+      indexedSnapshot === null
+      || indexedSnapshot.contextGraphId !== onChainId
+      || indexedSnapshot.active !== true
+    ) return 'unknown';
+
+    if (resolvedFromLocalCg) {
+      const bindingOutcome = evaluateContextGraphSlotBindingCommitment(
+        contextGraphId,
+        onChainId,
+        indexedSnapshot.nameHash,
+        false,
+        (localId) => this.isWireIdKeyedSubscription(localId),
+        (message) => this.log.warn(
+          opCtx ?? createOperationContext('share'),
+          message,
+        ),
+      );
+      if (!mapContextGraphSlotBindingOutcome(
+        bindingOutcome,
+        'chain-attested-repair',
+      )) return 'unknown';
+    }
+
+    const accessPolicy = indexedSnapshot.accessPolicy;
+    if (accessPolicy !== 0 && accessPolicy !== 1) return 'unknown';
+    this.onChainAccessPolicyCache.set(onChainId, accessPolicy);
+    return accessPolicy;
   }
 
   /**
@@ -1011,7 +1129,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveOnChainAccessPolicyState(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
-    options: { slotBindingMode?: PublicPolicySlotBindingMode } = {},
+    options: {
+      slotBindingMode?: PublicPolicySlotBindingMode;
+    } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
     const trimmed = contextGraphId.trim();
 

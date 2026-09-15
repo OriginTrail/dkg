@@ -531,7 +531,7 @@ import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResu
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  strip, stripLiteral, jsonLdToQuads,
+  stripLiteral, jsonLdToQuads,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
 import {
@@ -619,7 +619,8 @@ import {
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
-  type ContextGraphMembershipStore,
+  type ContextGraphMembershipSource,
+  type LocalContextGraphOriginSource,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -679,6 +680,11 @@ import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
+import {
+  createLocalContextGraphOriginMembershipRecord,
+  normalizeLocalContextGraphOriginPersistence,
+} from
+  './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
@@ -712,6 +718,48 @@ import { initializeRfc64LegacySwmBoundaryV1 } from
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
+
+type ContextGraphMembershipSnapshot = ReadonlyArray<
+  ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
+>;
+
+interface PersistedJoinApprovalProjection {
+  readonly principalId: string;
+  readonly updatedAt: number;
+  readonly curatorPeerId?: string;
+}
+
+function projectPersistedJoinApprovals(
+  persistedMembershipRows: ContextGraphMembershipSnapshot,
+  persistedContextGraphIds: ReadonlySet<string>,
+  localAgentAddresses: ReadonlySet<string>,
+): ReadonlyMap<string, PersistedJoinApprovalProjection> {
+  const newestApprovalByContextGraph = new Map<string, PersistedJoinApprovalProjection>();
+  for (const membership of persistedMembershipRows) {
+    const principalId = membership.principalId.toLowerCase();
+    if (
+      membership.principalType !== 'agent' ||
+      membership.status !== 'active' ||
+      membership.source !== 'join-approved' ||
+      !persistedContextGraphIds.has(membership.contextGraphId) ||
+      !localAgentAddresses.has(principalId)
+    ) {
+      continue;
+    }
+    const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
+    if (!existing || membership.updatedAt > existing.updatedAt) {
+      newestApprovalByContextGraph.set(membership.contextGraphId, {
+        principalId,
+        updatedAt: membership.updatedAt,
+        curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
+          membership.metadata['curatorPeerId'].trim()
+          ? membership.metadata['curatorPeerId'].trim()
+          : undefined,
+      });
+    }
+  }
+  return newestApprovalByContextGraph;
+}
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
@@ -2340,7 +2388,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
-    await this.rehydrateContextGraphSubscriptions();
+    await this.rehydrateContextGraphsFromDurableState();
 
     this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 
@@ -4598,6 +4646,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: {
       selectedSwmRetry?: boolean;
       rfc64RecoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
+      /** Accepted RFC-64 authority exposed a scope hidden from the prior pass. */
+      authorityScopeChanged?: boolean;
     } = {},
   ): boolean {
     if (!this.peerSyncSession.checkpoint()) return false;
@@ -4611,6 +4661,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return false;
     }
+    const authorityScopeChanged = options.authorityScopeChanged === true;
+    if (authorityScopeChanged) this.peerSyncSession.clearBackoff(remotePeer);
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const exactRecoveryPlan = options.rfc64RecoveryPlan;
@@ -4626,6 +4678,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const { lastSuccessfulSync } = admissionState;
     if (
       !selectedSwmRetryRequired &&
+      !authorityScopeChanged &&
       lastSuccessfulSync != null &&
       lastSuccessfulSync > disconnectBoundary &&
       now - lastSuccessfulSync < syncTiming.stalenessThresholdMs
@@ -4655,10 +4708,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // One exact post-catalog recovery may arrive just after an ordinary
       // timer completed. Its dedicated timestamp above permits that upgrade
       // once while keeping subsequent periodic exact plans bounded.
-      if (exactRecoveryPlan === undefined) return false;
+      if (exactRecoveryPlan === undefined && !authorityScopeChanged) return false;
     }
 
-    if (backoff && now < backoff.nextRetryAt) {
+    if (!authorityScopeChanged && backoff && now < backoff.nextRetryAt) {
       return false;
     }
 
@@ -9800,6 +9853,51 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Record node-local graph origin independently from mutable membership.
+   *
+   * Built-in stores use a monotonic graph-keyed journal. Older custom stores
+   * retain restart safety through a reserved membership key that ordinary
+   * curator/allowlist updates cannot collide with. Once the graph itself has
+   * been flushed this method is deliberately best-effort: persistence failure
+   * cannot make an already-created graph appear to have failed creation.
+   */
+  async persistLocalContextGraphOrigin(
+    this: DKGAgent,
+    contextGraphId: string,
+    source: LocalContextGraphOriginSource,
+  ): Promise<void> {
+    this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    const store = this.config.contextGraphMembershipStore;
+    if (store === undefined) return;
+    const originPersistence = normalizeLocalContextGraphOriginPersistence(store);
+    try {
+      if (originPersistence !== undefined) {
+        await this.enqueueContextGraphMembershipPersistWrite(
+          `local-origin\0${contextGraphId}`,
+          () => originPersistence.recordLocalOrigin({
+            contextGraphId,
+            source,
+            createdAt: Date.now(),
+          }),
+          { strict: true },
+        );
+        return;
+      }
+      await this.upsertContextGraphMember(createLocalContextGraphOriginMembershipRecord({
+        contextGraphId,
+        principalId: `did:dkg:local-origin:${this.peerId}`,
+        role: 'local-origin',
+        source,
+      }), { strict: true });
+    } catch (error) {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to persist local Context Graph origin for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   deleteContextGraphMember(this: DKGAgent,
     contextGraphId: string,
     principalType: ContextGraphMemberPrincipalType,
@@ -9830,7 +9928,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
   }
 
-  persistLocalNodeMembership(this: DKGAgent, contextGraphId: string, source = 'subscription'): void {
+  persistLocalNodeMembership(
+    this: DKGAgent,
+    contextGraphId: string,
+    source: ContextGraphMembershipSource = 'subscription',
+  ): void {
     const sub = this.subscribedContextGraphs.get(contextGraphId);
     this.upsertContextGraphMember({
       contextGraphId,
@@ -10004,7 +10106,63 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
-  async rehydrateContextGraphSubscriptions(this: DKGAgent): Promise<void> {
+  /** Bootstrap durable Context Graph projections in explicit ownership order. */
+  async rehydrateContextGraphsFromDurableState(this: DKGAgent): Promise<void> {
+    const ctx = createOperationContext('init');
+    const membershipStore = this.config.contextGraphMembershipStore;
+    const originPersistence = normalizeLocalContextGraphOriginPersistence(membershipStore);
+    let membershipRows: ContextGraphMembershipSnapshot | null = null;
+    if (membershipStore?.loadAll === undefined) {
+      this.log.warn(
+        ctx,
+        'Node-local membership provenance cannot be restored: loadAll is unavailable',
+      );
+    } else {
+      try {
+        // The lifecycle owns the single journal read. Provenance and
+        // subscription recovery are independent projections of this immutable
+        // snapshot; neither lower-level component owns the other's I/O.
+        membershipRows = await membershipStore.loadAll();
+        if (originPersistence === undefined) {
+          // Compatibility path for custom stores predating the independent
+          // graph-keyed journal, including one-sided implementations of that
+          // paired capability. New built-in stores never derive provenance
+          // from mutable membership rows.
+          this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
+        }
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Failed to load node-local membership provenance: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (originPersistence !== undefined) {
+      try {
+        this.localContextGraphProvenance.restoreOriginRecords(
+          await originPersistence.loadLocalOrigins(),
+        );
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Failed to load node-local Context Graph origin journal: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    await this.rehydrateContextGraphSubscriptions(membershipRows);
+  }
+
+  async rehydrateContextGraphSubscriptions(
+    this: DKGAgent,
+    persistedMembershipRows?: ContextGraphMembershipSnapshot | null,
+  ): Promise<void> {
+    // Preserve the exported zero-argument API. The startup owner passes its
+    // already-loaded snapshot explicitly; direct callers delegate to that
+    // owner so provenance and subscriptions still share one ordered bootstrap.
+    if (persistedMembershipRows === undefined) {
+      await this.rehydrateContextGraphsFromDurableState();
+      return;
+    }
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const ctx = createOperationContext('init');
@@ -10073,60 +10231,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
 
       // `pendingMeta` and the agent chosen for the first authenticated sync
-      // are deliberately in-memory state. Recover both from the durable
-      // join-approved membership fact before activating subscriptions. Load
-      // every persisted row (not just the rows that fit under the activation
-      // cap) so a dormant subscription still has the right signer when an
-      // operator later activates it explicitly.
-      const membershipStore = this.config.contextGraphMembershipStore;
-      if (membershipStore?.loadAll) {
-        try {
-          const persistedContextGraphIds = new Set(rows.map((row) => row.id));
-          const localAgentAddresses = new Set(
-            [...this.localAgents.keys()].map((address) => address.toLowerCase()),
-          );
-          const newestApprovalByContextGraph = new Map<string, {
-            principalId: string;
-            updatedAt: number;
-            curatorPeerId?: string;
-          }>();
-          for (const membership of await membershipStore.loadAll()) {
-            const principalId = membership.principalId.toLowerCase();
-            if (
-              membership.principalType !== 'agent' ||
-              membership.status !== 'active' ||
-              membership.source !== 'join-approved' ||
-              !persistedContextGraphIds.has(membership.contextGraphId) ||
-              !localAgentAddresses.has(principalId)
-            ) {
-              continue;
-            }
-            const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
-            if (!existing || membership.updatedAt > existing.updatedAt) {
-              newestApprovalByContextGraph.set(membership.contextGraphId, {
-                principalId,
-                updatedAt: membership.updatedAt,
-                curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
-                  membership.metadata['curatorPeerId'].trim()
-                  ? membership.metadata['curatorPeerId'].trim()
-                  : undefined,
-              });
-            }
+      // are deliberately in-memory state. Recover both from the membership
+      // snapshot already read by the provenance phase. Load every persisted
+      // row (not just rows under the activation cap) so a dormant subscription
+      // still has the right signer when an operator activates it explicitly.
+      if (persistedMembershipRows !== null) {
+        const persistedContextGraphIds = new Set(rows.map((row) => row.id));
+        const localAgentAddresses = new Set(
+          [...this.localAgents.keys()].map((address) => address.toLowerCase()),
+        );
+        const newestApprovalByContextGraph = projectPersistedJoinApprovals(
+          persistedMembershipRows,
+          persistedContextGraphIds,
+          localAgentAddresses,
+        );
+        for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
+          this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
+          if (approval.curatorPeerId) {
+            this.preferredSyncPeers.set(contextGraphId, approval.curatorPeerId);
           }
-          for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
-            this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
-            if (approval.curatorPeerId) {
-              this.preferredSyncPeers.set(contextGraphId, approval.curatorPeerId);
-            }
-          }
-        } catch (err) {
-          // Membership recovery improves restart liveness but must never make
-          // the subscription store itself unavailable. A later explicit join
-          // or successful metadata sync still repairs the in-memory hint.
-          this.log.warn(
-            ctx,
-            `Failed to rehydrate join-approved context-graph memberships: ${err instanceof Error ? err.message : String(err)}`,
-          );
         }
       }
 
@@ -10508,6 +10631,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     opts: { callerAgentAddress?: string } = {},
   ): Promise<boolean> {
+    const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
+      contextGraphId,
+      opts,
+    );
+    // The accepted snapshot is itself finalized, name-bound authority for a
+    // catalog-owned graph. It replaces both the legacy registration read and
+    // its metadata-bootstrap proof at this internal transport boundary.
+    if (acceptedRfc64Authority !== undefined) return acceptedRfc64Authority;
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }

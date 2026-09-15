@@ -60,6 +60,7 @@ export {
   resolveKnowledgeAssetWorkspaceHead,
   resolvePublishedKnowledgeAssetWorkspaceHead,
   resolveKnowledgeAssetOperationPublicQuads,
+  resolveKnowledgeAssetWorkspaceHeadPublicQuads,
   resolveLiftWorkspaceSlice,
   storeKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
@@ -71,7 +72,21 @@ export {
   type PublishedKnowledgeAssetWorkspaceHead,
   type ResolveKnowledgeAssetWorkspaceHeadParams,
   type KnowledgeAssetOperationPublicSnapshot,
+  type KnowledgeAssetWorkspaceOperationAlias,
+  type KnowledgeAssetWorkspaceOperationAliasClass,
+  type KnowledgeAssetWorkspaceSnapshotLocator,
 } from './workspace-resolution.js';
+export {
+  publisherWorkspaceOperationSemanticsKey,
+  canonicalPublisherWorkspaceOperationSemantics,
+  selectEquivalentWorkspaceOperation,
+  workspaceHeadIncludesShareOperationId,
+  type WorkspaceOperationModel,
+  type WorkspaceOperationProvenance,
+  type WorkspaceOperationCommitment,
+  type PublisherWorkspaceOperationSemantics,
+  type WorkspaceOperationAccessEnvelope,
+} from './workspace-operation-equivalence.js';
 export {
   type StageKnowledgeAssetSharedWorkingMemoryInputV1,
   type StagedKnowledgeAssetSharedWorkingMemoryV1,

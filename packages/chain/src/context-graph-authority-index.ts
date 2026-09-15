@@ -25,6 +25,8 @@ import { ContextGraphAuthorityIndexRepository } from
   './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 
+const ZERO_HASH = `0x${'00'.repeat(32)}`;
+
 export {
   ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
@@ -59,6 +61,16 @@ export interface ContextGraphAuthorityIndexResolveInput
 export interface ContextGraphAuthorityIndexRevisionInput
   extends ContextGraphAuthorityIndexScanInput {
   readonly contextGraphIds: readonly ContextGraphAuthorityIndexId[];
+}
+
+export interface ContextGraphAuthorityIndexNameHashInput
+  extends ContextGraphAuthorityIndexScanInput {
+  readonly nameHash: string;
+}
+
+export interface ContextGraphAuthorityIndexNameHashesInput
+  extends ContextGraphAuthorityIndexScanInput {
+  readonly nameHashes: readonly string[];
 }
 /**
  * Process-local owner for the durable contract-wide authority index.
@@ -108,6 +120,74 @@ export class ContextGraphAuthorityIndex {
       }
     }
     return revisions;
+  }
+
+  /** Project the minimal immutable/read-selection fields for many targets. */
+  async states(
+    input: ContextGraphAuthorityIndexRevisionInput,
+  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>> {
+    const targetIds = new Set<ContextGraphAuthorityIndexId>(input.contextGraphIds);
+    const checkpoint = await this.#snapshot(input);
+    const states = new Map<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>();
+    for (const state of checkpoint.states) {
+      if (!targetIds.has(state.contextGraphId)) continue;
+      states.set(state.contextGraphId, state);
+    }
+    return states;
+  }
+
+  /** Resolve one unique name commitment from the shared contract-wide snapshot. */
+  async resolveNameHash(
+    input: ContextGraphAuthorityIndexNameHashInput,
+  ): Promise<ContextGraphAuthorityIndexId | null> {
+    const nameHash = normalizeHash(input.nameHash);
+    if (nameHash === undefined) {
+      throw new Error('Context Graph authority index name hash is invalid');
+    }
+    // ContextGraphStorage permits an explicit zero commitment as an opt-out.
+    // It never participates in reverse name binding, even if several slots use it.
+    if (nameHash === ZERO_HASH) return null;
+    const matches = await this.statesByNameHashes({
+      ...input,
+      nameHashes: [nameHash],
+    });
+    return matches.get(nameHash)?.contextGraphId ?? null;
+  }
+
+  /**
+   * Project unique name commitments and their complete authority states from
+   * one checkpoint. Missing and zero-hash targets are omitted; any duplicate
+   * finalized commitment fails the whole projection closed.
+   */
+  async statesByNameHashes(
+    input: ContextGraphAuthorityIndexNameHashesInput,
+  ): Promise<ReadonlyMap<string, ContextGraphAuthorityIndexState>> {
+    const targets = new Set<string>();
+    for (const rawNameHash of input.nameHashes) {
+      const nameHash = normalizeHash(rawNameHash);
+      if (nameHash === undefined) {
+        throw new Error('Context Graph authority index name hash is invalid');
+      }
+      if (nameHash !== ZERO_HASH) targets.add(nameHash);
+    }
+    if (targets.size === 0) return new Map();
+
+    const checkpoint = await this.#snapshot(input);
+    const states = new Map<string, ContextGraphAuthorityIndexState>();
+    const counts = new Map<string, number>();
+    for (const state of checkpoint.states) {
+      if (!targets.has(state.nameHash)) continue;
+      counts.set(state.nameHash, (counts.get(state.nameHash) ?? 0) + 1);
+      states.set(state.nameHash, state);
+    }
+    for (const [nameHash, count] of counts) {
+      if (count <= 1) continue;
+      throw new Error(
+        `Context Graph name hash ${nameHash} is ambiguous across ` +
+        `${count} finalized Context Graphs`,
+      );
+    }
+    return states;
   }
 
   /** Resolve the complete materialized index at one finalized chain anchor. */

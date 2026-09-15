@@ -88,6 +88,7 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
+import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -968,6 +969,40 @@ export interface ContextGraphWritePreflightProbe {
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
 export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
+export const CONTEXT_GRAPH_MEMBERSHIP_SOURCES = [
+  'local-create',
+  'implicit-swm-write',
+  'allowed-peer',
+  'allowed-agent',
+  'participant-agent',
+  'on-chain-registration',
+  'join-approved',
+  'join-rejected',
+  'join-request',
+  'join-request-outbox-response',
+  'subscription',
+  'rehydrated-subscription',
+  // Retained for custom-store migration fixtures and legacy integrations.
+  'pre-existing',
+] as const;
+export type KnownContextGraphMembershipSource =
+  typeof CONTEXT_GRAPH_MEMBERSHIP_SOURCES[number];
+/**
+ * Public persistence integrations have always been allowed to attach their
+ * own provenance label. Keep that source-compatible contract while treating
+ * only the known internal vocabulary as trusted protocol evidence.
+ */
+export type ContextGraphMembershipSource = string;
+
+const contextGraphMembershipSourceSet: ReadonlySet<string> =
+  new Set(CONTEXT_GRAPH_MEMBERSHIP_SOURCES);
+
+/** Decode the closed source vocabulary at durable or external boundaries. */
+export function isContextGraphMembershipSource(
+  source: unknown,
+): source is KnownContextGraphMembershipSource {
+  return typeof source === 'string' && contextGraphMembershipSourceSet.has(source);
+}
 
 export interface ContextGraphMembershipRecord {
   contextGraphId: string;
@@ -975,12 +1010,36 @@ export interface ContextGraphMembershipRecord {
   principalId: string;
   role?: string;
   status: ContextGraphMemberStatus;
-  source?: string;
+  source?: ContextGraphMembershipSource;
   displayName?: string;
   metadata?: Record<string, unknown>;
 }
 
-export interface ContextGraphMembershipStore {
+/**
+ * Immutable node-local evidence that a Context Graph originated on this node.
+ * This is deliberately keyed only by Context Graph id: membership principals
+ * and their roles remain mutable and must never own creation provenance.
+ */
+export type LocalContextGraphOriginSource =
+  | 'local-create'
+  | 'implicit-swm-write';
+
+export interface LocalContextGraphOriginRecord {
+  contextGraphId: string;
+  source: LocalContextGraphOriginSource;
+  createdAt: number;
+}
+
+/**
+ * Paired graph-level persistence capability for immutable local-origin facts.
+ * Implementations are selected only when both methods are available.
+ */
+export interface LocalContextGraphOriginPersistence {
+  loadLocalOrigins(): Promise<LocalContextGraphOriginRecord[]>;
+  recordLocalOrigin(record: LocalContextGraphOriginRecord): Promise<void>;
+}
+
+export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOriginPersistence> {
   /**
    * Load persisted membership facts for restart recovery. Optional so custom
    * stores written before membership rehydration remain source-compatible.
@@ -989,6 +1048,16 @@ export interface ContextGraphMembershipStore {
     firstSeenAt?: number;
     updatedAt: number;
   }>>;
+  /**
+   * Load graph-level local-origin facts. Optional for source compatibility
+   * with custom stores predating the independent provenance journal.
+   */
+  loadLocalOrigins?(): Promise<LocalContextGraphOriginRecord[]>;
+  /**
+   * Insert a graph-level origin fact monotonically. Implementations must not
+   * replace an existing row for the same Context Graph id.
+   */
+  recordLocalOrigin?(record: LocalContextGraphOriginRecord): Promise<void>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
@@ -1273,8 +1342,23 @@ export interface Rfc64CatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
+/**
+ * Creates the durable finalization inbox for one agent data directory.
+ * The factory must return a fresh, open store. The agent owns the returned
+ * store and closes it during normal startup rollback or shutdown.
+ */
+export type FinalizationRecoveryStoreFactory = (
+  dataDir: string,
+) => Promise<FinalizationRecoveryStore>;
+
 export interface DKGAgentConfig {
   name: string;
+  /**
+   * Construction seam for the durable finalization inbox. Embedders and tests
+   * may supply a policy-specific store; omission opens the standard SQLite
+   * store in dataDir.
+   */
+  finalizationRecoveryStoreFactory?: FinalizationRecoveryStoreFactory;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */

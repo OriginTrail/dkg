@@ -46,6 +46,7 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
+import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -1524,16 +1525,15 @@ export class SharedMemoryHandler {
           }
           if (incomingVersion === currentVersion) {
             const sameAssertion =
-              currentHead.shareOperationId === shareOperationId &&
+              workspaceHeadIncludesShareOperationId(currentHead, shareOperationId) &&
               currentHead.publisherPeerId === publisherPeerId &&
               currentHead.publicQuadsDigest === publicDigest &&
               currentHead.publicTripleCount === (publicTripleCount ?? 0) &&
               currentHead.privateTripleCount === (privateTripleCount ?? 0) &&
               currentHead.privateMerkleRoot?.toLowerCase() === incomingPrivateRootHex &&
               currentHead.assertionGraph === swmGraph &&
-              (currentHead.accessPolicy
-                ?? (currentHead.privateTripleCount > 0 ? 'ownerOnly' : 'public')) === graphAccessPolicy &&
-              currentHead.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
+              currentHead.access.accessPolicy === graphAccessPolicy &&
+              currentHead.access.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
             if (sameAssertion) {
               // Exact replay: acknowledge idempotently without churning the
               // graph or immutable operation snapshot. Refresh the local-only

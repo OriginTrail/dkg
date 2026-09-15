@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
@@ -61,6 +62,13 @@ interface ProjectionEntry {
   invalidationVersion: number;
 }
 
+export interface ContextGraphReadAuthorityFactsSnapshot {
+  /** True only while no projection source has changed since capture began. */
+  assertCurrent(): boolean;
+  /** Absence in the captured, owned candidate set; meaningful only when current. */
+  isAbsent(contextGraphId: string): boolean;
+}
+
 const DKG_NS = 'https://dkg.network/ontology#';
 const LEGACY_DKG_NS = 'http://dkg.io/ontology/';
 const LEGACY_SCHEMA_NS = 'http://schema.org/';
@@ -81,6 +89,7 @@ const DIRECT_META_PREDICATES = new Set([
   DKG_ONTOLOGY.DKG_CURATOR,
   DKG_ONTOLOGY.DKG_CREATED_AT,
   DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+  DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
   DKG_ONTOLOGY.DKG_ALLOWED_PEER,
   DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
   DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
@@ -161,8 +170,93 @@ function emptyContextGraphMetaRecord(
 
 export class ContextGraphMetaProjection {
   private readonly entries = new Map<string, ProjectionEntry>();
+  private authorityFactsRevision = 0;
 
   constructor(private readonly store: TripleStore) {}
+
+  /** Invalidate request-local absence proofs when projection sources change. */
+  get readAuthorityFactsRevision(): number {
+    return this.authorityFactsRevision;
+  }
+
+  /**
+   * A conservative presence projection for batched read admission. Every fact
+   * about the exact CG subject in a normal projection source requires full
+   * authority resolution. This does not interpret policy or authorize a read.
+   */
+  async findContextGraphIdsWithReadAuthorityFacts(
+    contextGraphIds: readonly string[],
+    options: QueryOptions = {},
+  ): Promise<ReadonlySet<string>> {
+    options.signal?.throwIfAborted();
+    const ids = [...new Set(contextGraphIds)];
+    const present = new Set<string>();
+    for (const id of ids) {
+      const entry = this.entries.get(id);
+      const value = entry?.value;
+      if (entry?.inflight || (value && (
+        value.accessPolicy !== undefined || value.hasAgentGate || value.hasPeerGate
+        || value.onChainId !== undefined
+      ))) present.add(id);
+    }
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const batches = [...chunks(ids, 128)];
+    await mapWithConcurrency(batches, 4, async (batch) => {
+      options.signal?.throwIfAborted();
+      const idsByUri = new Map(batch.map((id) => [contextGraphDataUri(id), id]));
+      const values = batch.map((id) => (
+        `(<${assertSafeIri(contextGraphDataUri(id))}> `
+        + `<${assertSafeIri(contextGraphMetaGraphUri(id))}> `
+        + `<${assertSafeIri(contextGraphCatalogUri(id))}>)`
+      )).join(' ');
+      const result = await this.store.query(`
+        SELECT ?cg WHERE {
+          VALUES (?cg ?meta ?catalog) { ${values} }
+          FILTER EXISTS {
+            { GRAPH ?meta { ?cg ?p ?o } }
+            UNION { GRAPH ?catalog { ?cg ?p ?o } }
+            UNION { GRAPH <${agentsGraph}> { ?cg ?p ?o } }
+            UNION { GRAPH <${ontologyGraph}> { ?cg ?p ?o } }
+          }
+        }
+      `, { ...options, source: options.source ?? 'agent.query.localReadAuthorityFacts' });
+      options.signal?.throwIfAborted();
+      if (result.type !== 'bindings') {
+        throw new Error('Cannot authorize unscoped query: invalid local read-authority discovery result');
+      }
+      for (const row of result.bindings) {
+        const uri = typeof row['cg'] === 'string' ? strip(row['cg']) : '';
+        const id = idsByUri.get(uri);
+        if (id === undefined) {
+          throw new Error('Cannot authorize unscoped query: invalid local read-authority candidate');
+        }
+        present.add(id);
+      }
+    });
+    options.signal?.throwIfAborted();
+    return present;
+  }
+
+  /**
+   * Capture an owned request-local absence snapshot. Consumers never compare
+   * revision counters themselves; they ask this projection whether its proof
+   * is still current at the exact point where absence would be used.
+   */
+  async prepareReadAuthorityFactsSnapshot(
+    contextGraphIds: readonly string[],
+    options: QueryOptions = {},
+  ): Promise<ContextGraphReadAuthorityFactsSnapshot> {
+    const revision = this.authorityFactsRevision;
+    const present = new Set(
+      await this.findContextGraphIdsWithReadAuthorityFacts(contextGraphIds, options),
+    );
+    options.signal?.throwIfAborted();
+    return Object.freeze({
+      assertCurrent: () => this.authorityFactsRevision === revision,
+      isAbsent: (contextGraphId: string) => !present.has(contextGraphId),
+    });
+  }
 
   async get(contextGraphId: string, options: QueryOptions = {}): Promise<ContextGraphMetaRecord> {
     const existing = this.entries.get(contextGraphId);
@@ -198,6 +292,7 @@ export class ContextGraphMetaProjection {
   }
 
   markDirty(contextGraphId: string): void {
+    this.authorityFactsRevision += 1;
     const existing = this.entries.get(contextGraphId);
     if (existing) {
       existing.dirty = true;
@@ -213,17 +308,30 @@ export class ContextGraphMetaProjection {
    * from the mutation's inserted quads. A subject replace can DELETE
    * projection-relevant metadata or replace it with non-relevant/empty rows, so
    * keying off the inserted quads alone (`markDirtyFromQuads`) misses the delete.
-   * Keying off the target graph covers both insert and delete, with no whole-cache
-   * churn. No-op when the graph is not a CG meta/catalog graph (e.g. the publisher
-   * control-plane graph), so hot-path job writes never dirty the projection.
+   * Keying off an own meta/catalog graph covers both insert and delete. Shared
+   * AGENTS/ONTOLOGY sources invalidate every record because the callback does
+   * not supply the affected subject. Other graphs (e.g. publisher control-plane
+   * jobs) do not dirty the projection.
    */
   markDirtyForGraph(graphUri: string): void {
+    const graph = stripTerm(graphUri);
+    if (
+      graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
+      || graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)
+    ) {
+      // Shared metadata sources contain many owners. A subject replacement
+      // supplies only its graph here, so every cached/request-local projection
+      // must revalidate instead of retaining an absence proof for that owner.
+      this.markAllDirty();
+      return;
+    }
     const contextGraphId =
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
     if (contextGraphId) this.markDirty(contextGraphId);
   }
 
   markAllDirty(): void {
+    this.authorityFactsRevision += 1;
     for (const entry of this.entries.values()) {
       entry.dirty = true;
       entry.invalidationVersion += 1;

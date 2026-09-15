@@ -244,11 +244,11 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     expect(originalWorkspace.head).toMatchObject({
       shareOperationId: intent.shareOperationId,
       assertionVersion: intent.assertionVersion,
-      accessPolicy: intent.accessPolicy,
+      access: { kind: 'persisted', accessPolicy: intent.accessPolicy },
       publicQuadsDigest: originalWorkspace.operation.publicQuadsDigest,
       publisherPeerId: originalWorkspace.operation.publisherPeerId,
     });
-    expect([...(originalWorkspace.head?.allowedPeers ?? [])].sort()).toEqual(
+    expect([...(originalWorkspace.head?.access.allowedPeers ?? [])].sort()).toEqual(
       options.accessPolicy === 'allowList' ? ['reader-a', 'reader-b'] : [],
     );
 
@@ -370,7 +370,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect(newerIntent.shareOperationId).not.toBe(intent.shareOperationId);
       const newerWorkspace = await fixture.readWorkspace(newerIntent);
       if (change === 'content') expect(newerIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
-      else expect(newerWorkspace.head).toMatchObject({ accessPolicy: 'allowList', allowedPeers: ['new-reader'] });
+      else expect(newerWorkspace.head).toMatchObject({
+        access: { kind: 'persisted', accessPolicy: 'allowList', allowedPeers: ['new-reader'] },
+      });
 
       expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
       const rejected = await queue.processNext('wallet-1');
@@ -1348,7 +1350,23 @@ describe('rootless graph-scoped KA lifecycle', () => {
       ...recoveryInput,
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
     } as any);
+    const recoveredRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    expect(recoveredRfc64Confirmation).toHaveBeenCalledTimes(1);
+    expect(recoveredRfc64Confirmation).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CG_ID,
+      assertionCoordinate: name,
+      shareOperationId: intent.shareOperationId,
+      assertionUri,
+      publicationLabel: 'queued publish',
+      seal: expect.objectContaining({
+        kaUal: intent.kaUal,
+        assertionVersion: intent.assertionVersion,
+        authorAddress: intent.seal.authorAddress,
+      }),
+    }));
+    recoveredRfc64Confirmation.mockRestore();
     // RFC-64 catalog retirement may independently clear this exact published
     // scope under a system operation while the recovery pass is running. Keep
     // this assertion scoped to the recovery lane so unrelated, valid cleanup
@@ -1504,8 +1522,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
 
     const currentFinalizer = agent.getOrCreateFinalizationHandler();
     const supersededReconcile = vi.spyOn(currentFinalizer, 'handleChainReconciledKC');
+    const supersededRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(supersededReconcile).not.toHaveBeenCalled();
+    expect(supersededRfc64Confirmation).not.toHaveBeenCalled();
+    supersededRfc64Confirmation.mockRestore();
     supersededReconcile.mockRestore();
     const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);
     expect(afterSupersededRecovery?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
@@ -2382,9 +2404,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
       contextGraphId: cg,
       kaUal: intent.kaUal,
     });
-    expect(head?.accessPolicy).toBe('allowList');
-    expect(head?.allowedPeers).toHaveLength(allowedPeers.length);
-    expect(new Set(head?.allowedPeers)).toEqual(new Set(allowedPeers));
+    expect(head?.access).toMatchObject({ kind: 'persisted', accessPolicy: 'allowList' });
+    expect(head?.access.allowedPeers).toHaveLength(allowedPeers.length);
+    expect(new Set(head?.access.allowedPeers)).toEqual(new Set(allowedPeers));
     publisherPromote.mockRestore();
   }, 30_000);
 
@@ -2400,6 +2422,19 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // LOCAL-ONLY CG: created but DELIBERATELY never registered on-chain.
     await agent.createContextGraph({ id: unregisteredCgId, name: 'Unregistered CG Seal E2E' });
 
+    // Keep the semantic boundary explicit: SWM may reserve a globally unique KA
+    // number for eventual VM publication, but it must not discover, inspect, or
+    // create a ContextGraphs record. This catches a regression where an
+    // authority/signing helper quietly turns local-first SWM into a dependency
+    // on the CG registry RPC (or spends gas by registering the graph).
+    const chain = (agent as any).chain;
+    const cgRegistrationWrite = vi.spyOn(chain, 'createContextGraph');
+    const cgNameBindingRead = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const cgAccessPolicyRead = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+    const cgPublishPolicyRead = vi.spyOn(chain, 'getContextGraphPublishPolicy');
+    const cgParticipantRosterRead = vi.spyOn(chain, 'getContextGraphParticipantAgents');
+    const kaNumberFloorRead = vi.spyOn(chain, 'getMaxKaNumberForAuthor');
+
     const name = 'unregistered-cg-seal';
     await agent.assertion.create(unregisteredCgId, name);
     await agent.assertion.write(unregisteredCgId, name, [
@@ -2411,6 +2446,20 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const fullShare = await agent.assertion.promote(unregisteredCgId, name);
     expect(fullShare.sealed).toBe(true);
     expect(fullShare.publishReady).toBe(true);
+    expect(await agent.assertion.history(unregisteredCgId, name)).toMatchObject({
+      state: 'promoted',
+      status: 'swm-shared',
+      swmCurrentAssertion: expect.any(String),
+    });
+
+    expect(cgRegistrationWrite).not.toHaveBeenCalled();
+    expect(cgNameBindingRead).not.toHaveBeenCalled();
+    expect(cgAccessPolicyRead).not.toHaveBeenCalled();
+    expect(cgPublishPolicyRead).not.toHaveBeenCalled();
+    expect(cgParticipantRosterRead).not.toHaveBeenCalled();
+    // Incidental identity allocation, not CG registration: one cold-author
+    // high-water read keeps the reserved UAL collision-free across restarts.
+    expect(kaNumberFloorRead).toHaveBeenCalledTimes(1);
 
     // CORE ASSERTION: the CG is STILL unregistered after sealing — sealing did
     // NOT register it on-chain. Reintroducing seal-time registration breaks here.

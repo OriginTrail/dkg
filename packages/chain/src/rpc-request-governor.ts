@@ -10,7 +10,7 @@ import type { RpcRequestClass } from './rpc-request-transport.js';
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
   maxRequestsPerSecond?: number;
-  /** Percentage of total capacity unavailable to background work. Defaults to 80. */
+  /** Percentage of total rate and queue capacity unavailable to background work. Defaults to 80. */
   foregroundReservePercent?: number;
   /** Total request burst capacity. Defaults to 20 requests. */
   burstRequests?: number;
@@ -239,6 +239,7 @@ export class RpcRequestGovernor {
   readonly #clock: RpcRequestGovernorClock;
   readonly #backgroundRate: number;
   readonly #backgroundBurst: number;
+  readonly #backgroundQueueLimit: number;
   readonly #backgroundNotBeforeMs: number;
   readonly #foregroundQueue: RpcRequestWaiter[] = [];
   readonly #backgroundQueue: RpcRequestWaiter[] = [];
@@ -260,6 +261,13 @@ export class RpcRequestGovernor {
       1,
       Math.floor((this.#policy.burstRequests * backgroundFraction) + 1e-9),
     );
+    // Queue admission follows the same operator-defined capacity split as the
+    // token buckets. Round the foreground share up so any non-zero reserve
+    // protects at least one slot, even for very small queues.
+    const foregroundQueueReserve = Math.ceil(
+      this.#policy.maxQueueSize * (this.#policy.foregroundReservePercent / 100),
+    );
+    this.#backgroundQueueLimit = this.#policy.maxQueueSize - foregroundQueueReserve;
     this.#availableTokens = this.#policy.burstRequests;
     this.#backgroundAvailableTokens = this.#backgroundBurst;
     this.#lastRefillMs = this.#clock.now();
@@ -327,10 +335,9 @@ export class RpcRequestGovernor {
       return;
     }
     const queueSize = this.#foregroundQueue.length + this.#backgroundQueue.length;
-    const backgroundQueueLimit = Math.max(0, this.#policy.maxQueueSize - 1);
     if (
       queueSize >= this.#policy.maxQueueSize
-      || (requestClass === 'background' && queueSize >= backgroundQueueLimit)
+      || (requestClass === 'background' && queueSize >= this.#backgroundQueueLimit)
     ) {
       this.#window.rejected += 1;
       throw new RpcRequestGovernorQueueFullError(this.#policy.maxQueueSize);

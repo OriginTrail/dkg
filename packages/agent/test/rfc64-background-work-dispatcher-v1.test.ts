@@ -66,6 +66,24 @@ describe('Rfc64BackgroundWorkDispatcherV1', () => {
     expect(work).toHaveBeenCalledTimes(2);
   });
 
+  it('does not return idle before a settled keyed entry is released', async () => {
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
+    const work = vi.fn(async () => undefined);
+
+    expect(dispatcher.scheduleKeyed('responsibility\0cg', work)).toBe(true);
+    // Enter the deterministic gap where the work body has settled but its
+    // keyed owner has not yet run cleanup.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(work).toHaveBeenCalledOnce();
+
+    // This accepted notification belongs to the successor handoff. The idle
+    // fence must observe and drain that successor before returning.
+    expect(dispatcher.scheduleKeyed('responsibility\0cg', work)).toBe(true);
+    await dispatcher.whenIdle();
+    expect(work).toHaveBeenCalledTimes(2);
+  });
+
   it('reports an ordinary keyed failure once and remains schedulable', async () => {
     const onError = vi.fn();
     const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
