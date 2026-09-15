@@ -6252,7 +6252,7 @@ export class DKGPublisher implements Publisher {
   private async resolveAgentAddressForPeer(
     peerId: string, agentsGraph: string, dkgRegistry: string, RDF: string,
   ): Promise<string | null> {
-    // SPARQL string-literal escape: only `"` and `` are special inside `"..."`.
+    // SPARQL string-literal escape: only `"` and `\\` are special inside `"..."`.
     const escaped = peerId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     // GH #748 Codex rounds 2, 3, 5: resolve the agent address for a peer ID.
     // - Round 3: vocabulary is `https://dkg.network/ontology#` (the registry
