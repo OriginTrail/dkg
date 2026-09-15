@@ -741,6 +741,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "rewardSettlement",
+    "outputs": [
+      {
+        "internalType": "contract StakingRewardSettlement",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint40",

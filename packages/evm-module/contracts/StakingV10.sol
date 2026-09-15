@@ -9,6 +9,7 @@ import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {StakingRewardSettlement} from "./StakingRewardSettlement.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
@@ -140,7 +141,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //           not ship to mainnet without orphaning existing position NFTs.
     //           Also carries the #1297 boost-expiry reward-boundary fix (which
     //           had landed under the unchanged 10.0.4 string).
-    string private constant _VERSION = "10.0.5";
+    //   10.0.6 — delegate node reward-cache reconciliation to the
+    //           StakingRewardSettlement helper so late PCA pool credits are
+    //           included without exceeding the EVM bytecode limit.
+    string private constant _VERSION = "10.0.6";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
     /// stake / redelegate / claim but the sharding table is full, so its
@@ -170,6 +174,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         exclusively (v4.0.0 consolidation).
     StakingStorage public stakingStorage;
     ConvictionStakingStorage public convictionStorage;
+    StakingRewardSettlement public rewardSettlement;
     Chronos public chronos;
     RandomSamplingStorage public randomSamplingStorage;
     ShardingTableStorage public shardingTableStorage;
@@ -237,6 +242,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     function initialize() external onlyHub {
         stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         convictionStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
+        rewardSettlement = StakingRewardSettlement(hub.getContractAddress("StakingRewardSettlement"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
@@ -1170,26 +1176,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
         if (nodeScore18 == 0) return 0;
 
-        uint256 netNodeRewards;
-        if (!convictionStorage.isOperatorFeeClaimedForEpoch(identityId, e)) {
-            uint256 allNodesScore18 = randomSamplingStorage.getAllNodesEpochScore(e);
-            if (allNodesScore18 > 0) {
-                uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
-                    * nodeScore18) / allNodesScore18;
-                uint96 operatorFeeAmount = uint96(
-                    (grossNodeRewards
-                        * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
-                        / parametersStorage.maxOperatorFee()
-                );
-                netNodeRewards = grossNodeRewards - operatorFeeAmount;
-                convictionStorage.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
-                convictionStorage.setNetNodeEpochRewards(identityId, e, netNodeRewards);
-                // v4.0.0 — operator-fee balance lives on CSS now.
-                convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
-            }
-        } else {
-            netNodeRewards = convictionStorage.getNetNodeEpochRewards(identityId, e);
-        }
+        uint256 netNodeRewards = rewardSettlement.settleNodeEpochReward(e, identityId, nodeScore18);
 
         if (delegatorScore18 > 0) {
             epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;

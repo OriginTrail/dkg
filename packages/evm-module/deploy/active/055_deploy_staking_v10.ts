@@ -33,6 +33,7 @@ func.dependencies = [
   'Hub',
   'StakingStorage',
   'ConvictionStakingStorage',
+  'StakingRewardSettlement',
   'Chronos',
   'RandomSamplingStorage',
   'ShardingTableStorage',
