@@ -1687,12 +1687,21 @@ describe('listContextGraphs merge', () => {
 
       let sawAbort = false;
       let scanSettled: Promise<void> | undefined;
-      (store as any).listGraphs = recorder(async (options?: any) => {
+      const delayedScan = async (options?: any) => {
         scanSettled = new Promise(resolve => setTimeout(resolve, 20));
         await scanSettled;
         sawAbort = options?.signal?.aborted === true;
         return [];
-      });
+      };
+      const delayedPrefixScan = async (_prefix: string, options?: any) => (
+        delayedScan(options)
+      );
+      // Stores with the optional prefix capability take that path directly;
+      // override both entry points so this regression always exercises the
+      // abortable storage scan rather than depending on adapter shape.
+      const activeStore = agent.store as any;
+      activeStore.listGraphs = recorder(delayedScan);
+      activeStore.listGraphsByPrefix = recorder(delayedPrefixScan);
 
       await expect(agent.listContextGraphs({ callerAgentAddress: null }))
         .rejects.toThrow('storage context graph scan');
