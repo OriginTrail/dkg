@@ -36,7 +36,9 @@ program
   .description('DKG V10 node CLI')
   .version(getCliVersion());
 
-if (process.argv[2] === 'rfc64-gate2-adapter') {
+/* c8 ignore start -- exercised by the Gate 2 runtime harness, not CLI tests. */
+const gate2AdapterCommand = process.argv[2] === 'rfc64-gate2-adapter';
+if (gate2AdapterCommand) {
   // Testnet evidence must enter through the same built CLI module as a
   // release daemon. The adapter remains a harness-only protocol behind this
   // explicit command and is never registered in the public command tree.
@@ -49,37 +51,41 @@ if (process.argv[2] === 'rfc64-gate2-adapter') {
     '../../../devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts',
     import.meta.url,
   ).href);
-} else {
-  registerInitCommand(program);
-  registerAgentCommand(program);
-  registerAuthCommand(program);
-  registerLifecycleCommands(program);
-  registerNetworkCommands(program);
-  registerKnowledgeCommands(program);
-  registerKnowledgeAssetCommand(program);
-  registerSyncCommand(program);
-  registerContextGraphCommand(program);
-  registerAssertionCommand(program);
-  registerOpenclawCommand(program);
-  registerMcpCommand(program);
-  registerHermesCommand(program);
-  registerPrimeAgentCommand(program);
-  registerCclCommand(program);
-  registerIndexCommand(program);
-  registerSourceWorkerCommand(program);
-  registerPcaCommand(program);
-  registerPublisherCommand(program);
-  registerEpcisCommand(program);
-  registerNodeOpsCommands(program);
-  registerQueryCatalogCommand(program);
-  registerMaintenanceCommands(program);
-  registerRandomSamplingCommand(program);
-  registerOkfCommand(program);
-  registerLlmCommand(program);
-
-  // ─── dkg integration ─────────────────────────────────────────────────
-
-  registerIntegrationCommands(program);
-
-  program.parse();
+  // The adapter owns the process after import; avoid handing its protocol
+  // arguments to Commander when the normal entrypoint continues below.
+  process.argv.splice(2);
 }
+/* c8 ignore stop */
+
+registerInitCommand(program);
+registerAgentCommand(program);
+registerAuthCommand(program);
+registerLifecycleCommands(program);
+registerNetworkCommands(program);
+registerKnowledgeCommands(program);
+registerKnowledgeAssetCommand(program);
+registerSyncCommand(program);
+registerContextGraphCommand(program);
+registerAssertionCommand(program);
+registerOpenclawCommand(program);
+registerMcpCommand(program);
+registerHermesCommand(program);
+registerPrimeAgentCommand(program);
+registerCclCommand(program);
+registerIndexCommand(program);
+registerSourceWorkerCommand(program);
+registerPcaCommand(program);
+registerPublisherCommand(program);
+registerEpcisCommand(program);
+registerNodeOpsCommands(program);
+registerQueryCatalogCommand(program);
+registerMaintenanceCommands(program);
+registerRandomSamplingCommand(program);
+registerOkfCommand(program);
+registerLlmCommand(program);
+
+// ─── dkg integration ─────────────────────────────────────────────────
+
+registerIntegrationCommands(program);
+
+program.parse();
