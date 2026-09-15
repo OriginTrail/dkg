@@ -21,7 +21,11 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { UNRESTRICTED_SYNC_WORK, createSyncWorkAdmission } from '../src/sync/work-admission.js';
+import {
+  UNRESTRICTED_SYNC_WORK,
+  createSyncFetchSharingIdentity,
+  createSyncWorkAdmission,
+} from '../src/sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -380,16 +384,35 @@ describe('DKGAgent sync fetch coalescing', () => {
   });
 
   it.each([
-    { name: 'different custom keys', secondKey: 'lane-b', expectedSends: 2 },
-    { name: 'separate policies with the same custom key', secondKey: 'lane-a', expectedSends: 1 },
-  ])('preserves request ownership for $name', async ({ secondKey, expectedSends }) => {
+    {
+      name: 'independently minted sharing identities',
+      identities: [createSyncFetchSharingIdentity(), createSyncFetchSharingIdentity()],
+      expectedSends: 2,
+    },
+    {
+      name: 'one deliberately shared identity',
+      identities: (() => {
+        const identity = createSyncFetchSharingIdentity();
+        return [identity, identity];
+      })(),
+      expectedSends: 1,
+    },
+  ])('preserves request ownership for $name', async ({ identities, expectedSends }) => {
     const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
     let sends = 0;
     const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
     try {
-      const first = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: 'lane-a' }) });
+      const first = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000, {
+          fetchSharingIdentity: identities[0],
+        }),
+      });
       await flushMicrotasks();
-      const second = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: secondKey }) });
+      const second = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000, {
+          fetchSharingIdentity: identities[1],
+        }),
+      });
       let secondSettled = false;
       void second.then(() => { secondSettled = true; });
       await flushMicrotasks();
