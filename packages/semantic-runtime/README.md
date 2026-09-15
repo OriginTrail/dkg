@@ -16,6 +16,13 @@ gitignored local artifacts, validates their WIT world and bounded memories, and
 requires them to match `artifact-lock.json`. Generated Wasm and JavaScript glue
 are packaged in npm but are not stored in Git.
 
+The Wasm build normalizes source paths and compiler metadata so the pinned
+artifacts can be reproduced on different hosts. The compiler wrapper works
+around [Cargo's host-dependent metadata issue](https://github.com/rust-lang/cargo/issues/8140)
+and preserves the artifact hash checks. Custom `RUSTFLAGS`,
+`CARGO_ENCODED_RUSTFLAGS`, `RUSTC_WRAPPER`, and `RUSTC_WORKSPACE_WRAPPER` values
+are rejected; clear them before running this pinned build.
+
 Executing or admitting Programs requires a Node.js runtime with native
 WebAssembly JavaScript Promise Integration (JSPI); use **Node.js 26.8.2 or newer**,
 which is also the version exercised by the semantic runtime CI lanes.
