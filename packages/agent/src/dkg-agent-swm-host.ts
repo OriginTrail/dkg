@@ -5152,12 +5152,55 @@ export class SwmHostModeMethods extends DKGAgentBase {
     ].filter((peerId) => !record.attemptedPeerIds.has(peerId));
   }
 
+  /** Return whether a peer's current connection is known to ignore exact filters. */
+  vmReconcileExactFilterUnsupported(this: DKGAgent, peerId: string): boolean {
+    const cache = this.vmReconcileExactPeerCapabilities;
+    if (!cache) return false;
+    const entry = cache.get(peerId);
+    if (!entry) return false;
+    const now = this.vmReconcileRotationNow();
+    if (entry.expiresAt <= now) {
+      cache.delete(peerId);
+      return false;
+    }
+    const connectionKey = this.getSyncReconcilerConnectionKey(peerId);
+    if (connectionKey === null || connectionKey !== entry.connectionKey) {
+      cache.delete(peerId);
+      return false;
+    }
+    // Touch the entry so the bounded map evicts the least recently consulted
+    // peer when a large curator roster rotates through it.
+    cache.delete(peerId);
+    cache.set(peerId, entry);
+    return true;
+  }
+
+  /** Remember a clean legacy exact miss for this connection only. */
+  rememberVmReconcileExactFilterUnsupported(this: DKGAgent, peerId: string): void {
+    const cache = this.vmReconcileExactPeerCapabilities;
+    if (!cache) return;
+    const connectionKey = this.getSyncReconcilerConnectionKey(peerId);
+    if (connectionKey === null) return;
+    cache.delete(peerId);
+    cache.set(peerId, {
+      connectionKey,
+      expiresAt: this.vmReconcileRotationNow()
+        + DKGAgentBase.VM_RECONCILE_EXACT_CAPABILITY_TTL_MS,
+    });
+    while (cache.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+  }
+
   /**
-   * Select one physical peer for an exact-VM target. A peer that returned an
-   * exact hit in this slice is preferred for one bounded microbatch; all other
-   * peers remain one-use-per-slice. The provider policy owns every mutable
-   * transition so partial responses revoke affinity consistently. Unavailable
-   * peers and the global considered-peer cap remain authoritative.
+   * Select one physical peer for a VM-recovery target. A peer that returned an
+   * exact hit in this slice is preferred for one bounded microbatch; a peer
+   * whose current connection is cached as legacy remains eligible and is routed
+   * to bounded full sync by the executor. The provider policy owns every
+   * mutable transition so partial responses revoke affinity consistently.
+   * Unavailable peers and the global considered-peer cap remain authoritative.
    */
   selectVmReconcileExactCandidate(
     this: DKGAgent,
@@ -5167,7 +5210,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): string | undefined {
     const uncreditedCandidateOrder = record
       ? this.vmReconcileUncreditedCandidateOrder(record)
-      : [...fallbackCandidatePeerIds];
+      : fallbackCandidatePeerIds;
     return policy.selectNextCandidate(
       uncreditedCandidateOrder,
       DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
@@ -5268,6 +5311,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileRotationAdmissionCursorByCg?.clear();
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
+    this.vmReconcileExactPeerCapabilities?.clear();
   }
 
   openVmReconcileRotationState(this: DKGAgent): void {
@@ -5541,9 +5585,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Execute one already-admitted exact provider attempt. The caller owns
+   * Execute one already-admitted provider attempt. The caller owns
    * roster/admission, packing, and provider affinity; this executor owns the
-   * physical request, per-UAL chain revalidation, and rotation settlement.
+   * exact request or cached legacy fallback, per-UAL chain revalidation, and
+   * rotation settlement.
    * Returns immutable evidence for the caller to merge. A stale lifecycle is
    * discriminated by whether the physical attempt had already been admitted;
    * only the pre-admission variant guarantees zero attempt side effects.
@@ -5579,6 +5624,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // until this exact lifecycle has been re-proved at the ownership boundary.
     if (!isRecoveryCurrent()) return { kind: 'not-started-stale' };
 
+    const useCachedLegacyFallback = this.vmReconcileExactFilterUnsupported(peerId);
+
     const handledOrdinals: number[] = [];
     const attemptedOrdinals: number[] = [];
     const outcomes: Array<readonly [number, OrdinalOutcome]> = [];
@@ -5604,23 +5651,63 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ordinal: batchTarget.ordinal,
         kaId: batchTarget.kaId,
         ual: batchTarget.ual,
-        detail: attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
+        detail: useCachedLegacyFallback
+          ? 'legacy-sync'
+          : attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
       });
     }
     let disposition: VmRecoveryUalDisposition = 'incomplete';
+    const runLegacyFallback = async (): Promise<void> => {
+      try {
+        const fallback = await this.runLegacyDurableSyncDetailed(
+          ctx,
+          peerId,
+          [localCgId],
+          undefined,
+          undefined,
+          undefined,
+          {
+            stopOnBackoffWorthyFailure: true,
+            priority: 1_000,
+            source: 'vm-recovery',
+            signal,
+            isCurrent: isRecoveryCurrent,
+          },
+        );
+        this.log.info(
+          ctx,
+          `VM legacy fallback for "${localCgId}" from ${peerId.slice(-8)}: fetched=${fallback.result.fetchedDataTriples + fallback.result.fetchedMetaTriples} inserted=${fallback.result.insertedTriples} failed=${fallback.result.failedPeers + fallback.result.failedPhases}`,
+        );
+      } catch (fallbackError) {
+        this.log.info(
+          ctx,
+          `VM legacy fallback for "${localCgId}" from ${peerId.slice(-8)} failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+        );
+      }
+    };
     try {
-      const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
-        peerId,
-        localCgId,
-        attempts.map(({ entry }) => entry.target.ual),
-        { signal, isCurrent: isRecoveryCurrent },
-      );
-      const { result } = detailed;
-      disposition = detailed.disposition;
-      this.log.info(
-        ctx,
-        `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${attempts.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure} disposition=${disposition}`,
-      );
+      if (useCachedLegacyFallback) {
+        await runLegacyFallback();
+      } else {
+        const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
+          peerId,
+          localCgId,
+          attempts.map(({ entry }) => entry.target.ual),
+          { signal, isCurrent: isRecoveryCurrent },
+        );
+        const { result } = detailed;
+        disposition = detailed.disposition;
+        if (detailed.responderCapability === 'legacy-filter-unsupported') {
+          this.rememberVmReconcileExactFilterUnsupported(peerId);
+          if (isRecoveryCurrent() && disposition === 'incomplete') {
+            await runLegacyFallback();
+          }
+        }
+        this.log.info(
+          ctx,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${attempts.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure} disposition=${disposition}`,
+        );
+      }
     } catch (error) {
       this.log.info(
         ctx,
