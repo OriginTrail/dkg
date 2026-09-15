@@ -244,8 +244,7 @@ describe('@integration V10 curated publish authorization (#1689)', function () {
     );
     const cgId = await CGS.getLatestContextGraphId();
     expect(await CGS.getIsCurated(cgId)).to.equal(true);
-    expect(await CGFacade.isAuthorizedPublisher(cgId, authorityAddress)).to.be
-      .true;
+    expect(await CGFacade.isAuthorizedPublisher(cgId, authorityAddress)).to.equal(true);
     return cgId;
   };
 
@@ -369,10 +368,8 @@ describe('@integration V10 curated publish authorization (#1689)', function () {
 
     // The payer is genuinely unauthorized on its own; only the author is.
     // Without both of these, R2 could pass for the wrong reason.
-    expect(await CGFacade.isAuthorizedPublisher(cgId, payer.address)).to.be
-      .false;
-    expect(await CGFacade.isAuthorizedPublisher(cgId, authority.address)).to.be
-      .true;
+    expect(await CGFacade.isAuthorizedPublisher(cgId, payer.address)).to.equal(false);
+    expect(await CGFacade.isAuthorizedPublisher(cgId, authority.address)).to.equal(true);
 
     const p = await buildParams({
       author: authority,
@@ -416,8 +413,7 @@ describe('@integration V10 curated publish authorization (#1689)', function () {
     const cgId = await createCuratedCg(authority, authority.address);
     await fundPayer(authority);
 
-    expect(await CGFacade.isAuthorizedPublisher(cgId, member.address)).to.be
-      .false;
+    expect(await CGFacade.isAuthorizedPublisher(cgId, member.address)).to.equal(false);
 
     const p = await buildParams({
       author: member,
@@ -441,10 +437,8 @@ describe('@integration V10 curated publish authorization (#1689)', function () {
     const cgId = await createCuratedCg(authority, authority.address);
     await fundPayer(payer);
 
-    expect(await CGFacade.isAuthorizedPublisher(cgId, payer.address)).to.be
-      .false;
-    expect(await CGFacade.isAuthorizedPublisher(cgId, member.address)).to.be
-      .false;
+    expect(await CGFacade.isAuthorizedPublisher(cgId, payer.address)).to.equal(false);
+    expect(await CGFacade.isAuthorizedPublisher(cgId, member.address)).to.equal(false);
 
     const p = await buildParams({
       author: member,
@@ -501,10 +495,8 @@ describe('@integration V10 curated publish authorization (#1689)', function () {
     await NFT.connect(pcaOwner).registerAgent(accountId, pcaAgent.address);
     const cgId = await createPcaCuratedCg(cgMinter, pcaOwner, accountId);
 
-    expect(await CGFacade.isAuthorizedPublisher(cgId, pcaAgent.address)).to.be
-      .true;
-    expect(await CGFacade.isAuthorizedPublisher(cgId, member.address)).to.be
-      .false;
+    expect(await CGFacade.isAuthorizedPublisher(cgId, pcaAgent.address)).to.equal(true);
+    expect(await CGFacade.isAuthorizedPublisher(cgId, member.address)).to.equal(false);
 
     // Take the DIRECT-SPEND branch, not the PCA discount branch: the discount
     // requires `p.epochs == lockDurationEpochs`, and this row is about
@@ -539,10 +531,8 @@ describe('@integration V10 curated publish authorization (#1689)', function () {
 
     // The author is authorized via the live `ownerOf` resolve; the payer is
     // neither the owner nor a registered agent.
-    expect(await CGFacade.isAuthorizedPublisher(cgId, pcaOwner.address)).to.be
-      .true;
-    expect(await CGFacade.isAuthorizedPublisher(cgId, stranger.address)).to.be
-      .false;
+    expect(await CGFacade.isAuthorizedPublisher(cgId, pcaOwner.address)).to.equal(true);
+    expect(await CGFacade.isAuthorizedPublisher(cgId, stranger.address)).to.equal(false);
 
     await fundPayer(stranger);
 

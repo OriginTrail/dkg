@@ -22,12 +22,7 @@ import {
   sealFor,
   stubAgent,
 } from './_helpers/foreign-author-resolution-fixtures.js';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
-// The REAL planner, by source path — `PublisherPlanner` is not re-exported from
-// the publisher package index. Cross-package `../../<pkg>/(src|test)/` imports
-// are established in this suite (see `agent.shared.ts`).
 import { PublisherPlanner } from '../../publisher/src/publisher-planning.js';
-import { DKGAgent } from '../src/dkg-agent.js';
 
 /**
  * GH#1778 — a curator publishes a rootless named KA authored by a MEMBER and

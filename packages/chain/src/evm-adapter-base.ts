@@ -30,7 +30,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, PublisherNotAuthorizedForContextGraphError, formatPublisherNotAuthorizedForCgMessage, type PublisherNotAuthorizedForCgDetails, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, PublisherNotAuthorizedForContextGraphError, type PublisherNotAuthorizedForCgDetails, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -48,7 +48,6 @@ import {
 import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
-  ChainRpcTransportError,
   isChainRpcTransportError,
 } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
