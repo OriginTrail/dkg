@@ -61,6 +61,56 @@ describe('WasmStrategyAdmissionClient', () => {
     expect(result.diagnostics[0]).toMatchObject({ code: 'IR_SCHEMA_MISMATCH' });
   });
 
+  it('infers the remote execution capability and rejects missing arguments', async () => {
+    const client = new WasmStrategyAdmissionClient({ workerUrl });
+    const valid = await client.compileStrategy(`
+      (strategy compose
+        (version "1.0.0")
+        (scope network:testnet)
+        (goal invoke-child)
+        (delegate composer
+          (grant program.remote-execute)
+          (call remote-execute@1 peer-b urn:sr:program:child)))
+    `);
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.plan.requiredCapabilities).toContain('program.remote-execute');
+      expect(valid.plan.effectUpperBound).toContain('remote-execution');
+    }
+
+    const invalid = await client.compileStrategy(`
+      (strategy compose
+        (version "1.0.0")
+        (scope network:testnet)
+        (goal invoke-child)
+        (delegate composer
+          (grant program.remote-execute)
+          (call remote-execute@1 peer-b)))
+    `);
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.diagnostics[0]).toMatchObject({ code: 'IR_SCHEMA_MISMATCH' });
+  });
+
+  it('admits exactly one prompt for the safe LLM operation', async () => {
+    const client = new WasmStrategyAdmissionClient({ workerUrl });
+    const valid = await client.compileStrategy(`
+      (strategy safe-llm (version "1.0.0") (scope network:testnet) (goal answer)
+        (delegate assistant
+          (grant llm.invoke.safe)
+          (call llm/safe@1 "Use permitted programs")))
+    `);
+    expect(valid.ok).toBe(true);
+    if (valid.ok) expect(valid.plan.requiredCapabilities).toContain('llm.invoke.safe');
+    const invalid = await client.compileStrategy(`
+      (strategy safe-llm (version "1.0.0") (scope network:testnet) (goal answer)
+        (delegate assistant
+          (grant llm.invoke.safe)
+          (call llm/safe@1 "one" "two")))
+    `);
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.diagnostics[0]).toMatchObject({ code: 'IR_SCHEMA_MISMATCH' });
+  });
+
   it('rejects canonical bytes whose declared authority no longer matches the plan tree', async () => {
     const client = new WasmStrategyAdmissionClient({ workerUrl });
     const compiled = await client.compileStrategy(listenerBoy);

@@ -38,6 +38,8 @@ describe('semantic runtime artifact integrity', () => {
     expect(verified.manifest.component.imports).toEqual(expect.arrayContaining([
       'origintrail:semantic-runtime/investigator@0.1.0',
       'origintrail:semantic-runtime/query-catalog@0.1.0',
+      'origintrail:semantic-runtime/safe-llm@0.1.0',
+      'origintrail:semantic-runtime/remote-execute@0.1.0',
     ]));
     const wit = fs.readFileSync(
       path.join(defaultArtifactRoot(), 'component/wit/semantic-runtime.wit'),
@@ -45,6 +47,8 @@ describe('semantic runtime artifact integrity', () => {
     );
     expect(wit).toContain('import investigator;');
     expect(wit).toContain('import query-catalog;');
+    expect(wit).toContain('import safe-llm;');
+    expect(wit).toContain('import remote-execute;');
     expect(wit).not.toContain('effect-request');
     expect(wit).not.toContain('arguments: list<string>');
     expect(verified.wasmSha256).toMatch(/^[0-9a-f]{64}$/);

@@ -1,10 +1,7 @@
-import { createHash } from 'node:crypto';
-
 import {
   signAgentDelegation,
   verifyAgentDelegation,
   type DKGAgent,
-  type SignedAgentDelegation,
   type SkillRequest,
   type SkillResponse,
 } from '@origintrail-official/dkg-agent';
@@ -19,24 +16,19 @@ import {
   SemanticProgramError,
   type ConfiguredSemanticRuntimeService,
   type SemanticInvocationResult,
+  type SemanticProgramChildInvoker,
   type SemanticMemoryLayer,
 } from './semantic-runtime.js';
+import {
+  SEMANTIC_INVOCATION_AUTHORIZATION_TTL_MS,
+  SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
+  semanticInvocationScope,
+  type SemanticInboxInvocationV2,
+} from './semantic-runtime-remote-execute-adapter.js';
 
-export const SEMANTIC_RUNTIME_INBOX_SKILL_IRI =
-  'https://dkg.origintrail.io/skill#semantic-runtime-invoke';
+export { SEMANTIC_RUNTIME_INBOX_SKILL_IRI };
 
-const AUTHORIZATION_TTL_MS = 5 * 60_000;
 const INVOCATION_TIMEOUT_MS = 10 * 60_000;
-
-interface SemanticInboxInvocationV2 {
-  version: 2;
-  contextGraphId: string;
-  programIri: string;
-  invocationId: string;
-  programLayer: SemanticMemoryLayer;
-  executionLayer: SemanticMemoryLayer;
-  authorization: SignedAgentDelegation;
-}
 
 interface SemanticInboxError {
   code: string;
@@ -54,7 +46,7 @@ export function registerSemanticRuntimeInboxSkill(
   agent.registerSkill(SEMANTIC_RUNTIME_INBOX_SKILL_IRI, async (request, senderPeerId) => {
     try {
       const invocation = decodeInvocation(request);
-      const expectedScope = invocationScope(invocation, agent.peerId);
+      const expectedScope = semanticInvocationScope(invocation, agent.peerId);
       try {
         verifyAgentDelegation(invocation.authorization, { expectedScope });
       } catch {
@@ -76,7 +68,8 @@ export function registerSemanticRuntimeInboxSkill(
         || typeof invocation.authorization.expiresAtMs !== 'number'
         || !Number.isFinite(invocation.authorization.expiresAtMs)
         || invocation.authorization.expiresAtMs <= invocation.authorization.issuedAtMs
-        || invocation.authorization.expiresAtMs - invocation.authorization.issuedAtMs > AUTHORIZATION_TTL_MS
+        || invocation.authorization.expiresAtMs - invocation.authorization.issuedAtMs
+          > SEMANTIC_INVOCATION_AUTHORIZATION_TTL_MS
       ) {
         throw new SemanticProgramError(
           'INVOCATION_AUTHORIZATION_INVALID',
@@ -97,11 +90,17 @@ export function registerSemanticRuntimeInboxSkill(
         invocation.programLayer,
         callerAgentAddress,
       );
-      const localAuthor = localCustodialAgent(agent, program.authorAgentAddress);
-      if (!localAuthor) {
+      const executingAgentAddress = invocation.executionTarget === 'target-node'
+        ? localCustodialAgent(agent, agent.getDefaultAgentAddress() ?? '')
+        : localCustodialAgent(agent, program.authorAgentAddress);
+      if (!executingAgentAddress) {
         throw new SemanticProgramError(
-          'PROGRAM_AUTHOR_NOT_LOCAL',
-          'This node does not host the Program author wallet',
+          invocation.executionTarget === 'target-node'
+            ? 'TARGET_EXECUTOR_NOT_LOCAL'
+            : 'PROGRAM_AUTHOR_NOT_LOCAL',
+          invocation.executionTarget === 'target-node'
+            ? 'This node has no default custodial wallet available to execute the Program'
+            : 'This node does not host the Program author wallet',
           409,
         );
       }
@@ -116,6 +115,8 @@ export function registerSemanticRuntimeInboxSkill(
         config,
         llmConfig,
         callerAgentAddress,
+        executingAgentAddress,
+        childInvoker(agent, runtime, config, llmConfig),
       );
       return {
         success: true,
@@ -171,6 +172,8 @@ export async function invokeSemanticProgramOnAuthorNode(
       config,
       llmConfig,
       caller,
+      undefined,
+      childInvoker(agent, runtime, config, llmConfig),
     );
   }
 
@@ -212,9 +215,9 @@ export async function invokeSemanticProgramOnAuthorNode(
   const issuedAtMs = Date.now();
   const authorization = await signAgentDelegation({
     agentAddress: caller,
-    scope: invocationScope(unsigned, authorPeerId),
+    scope: semanticInvocationScope(unsigned, authorPeerId),
     issuedAtMs,
-    expiresAtMs: issuedAtMs + AUTHORIZATION_TTL_MS,
+    expiresAtMs: issuedAtMs + SEMANTIC_INVOCATION_AUTHORIZATION_TTL_MS,
     delegateePeerId: agent.peerId,
     agentPrivateKey: callerPrivateKey,
   });
@@ -260,6 +263,26 @@ export async function invokeSemanticProgramOnAuthorNode(
   return result;
 }
 
+function childInvoker(
+  agent: DKGAgent,
+  runtime: ConfiguredSemanticRuntimeService,
+  config: SemanticRuntimeConfig | undefined,
+  llmConfig: LlmConfig | undefined,
+): SemanticProgramChildInvoker {
+  return (input) => invokeSemanticProgramOnAuthorNode(
+    agent,
+    runtime,
+    input.contextGraphId,
+    input.programIri,
+    input.invocationId,
+    input.programLayer,
+    input.executionLayer,
+    config,
+    llmConfig,
+    input.callerAgentAddress,
+  );
+}
+
 async function assertRemoteSemanticInvocationAllowed(
   agent: DKGAgent,
   contextGraphId: string,
@@ -283,22 +306,6 @@ function localCustodialAgent(agent: DKGAgent, authorAgentAddress: string): strin
   return agent.getCustodialAgentPrivateKey(local.agentAddress) ? local.agentAddress : null;
 }
 
-function invocationScope(
-  invocation: Pick<SemanticInboxInvocationV2, 'version' | 'contextGraphId' | 'programIri' | 'invocationId' | 'programLayer' | 'executionLayer'>,
-  targetPeerId: string,
-): string {
-  const digest = createHash('sha256').update(JSON.stringify([
-    invocation.version,
-    invocation.contextGraphId,
-    invocation.programIri,
-    invocation.invocationId.toLowerCase(),
-    invocation.programLayer,
-    invocation.executionLayer,
-    targetPeerId,
-  ])).digest('hex');
-  return `dkg.semantic-runtime.invoke.v2:${digest}`;
-}
-
 function decodeInvocation(request: SkillRequest): SemanticInboxInvocationV2 {
   const value = decodeJson(request.inputData) as Partial<SemanticInboxInvocationV2> | null;
   if (
@@ -309,6 +316,9 @@ function decodeInvocation(request: SkillRequest): SemanticInboxInvocationV2 {
     || typeof value.invocationId !== 'string'
     || !isMemoryLayer(value.programLayer)
     || !isMemoryLayer(value.executionLayer)
+    || (value.executionTarget !== undefined
+      && value.executionTarget !== 'program-author'
+      && value.executionTarget !== 'target-node')
     || typeof value.authorization !== 'object'
     || value.authorization === null
   ) {
@@ -338,6 +348,9 @@ function decodeResult(
     || result.executionLayer !== executionLayer
     || (executionLayer === 'vm' && typeof result.executionUal !== 'string')
     || (executionLayer !== 'vm' && result.executionUal !== undefined)
+    || (result.outputs !== undefined
+      && (!Array.isArray(result.outputs)
+        || result.outputs.some((output) => typeof output !== 'string')))
     || result.persisted !== true
   ) {
     throw new SemanticProgramError(
