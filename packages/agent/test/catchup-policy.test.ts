@@ -64,6 +64,32 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(syncDurable).not.toHaveBeenCalled();
   });
 
+  it('runs durable after a successful selected shared-memory plane', async () => {
+    const order: string[] = [];
+    const syncSharedMemory = vi.fn(async () => {
+      order.push('shared');
+      return { deferredBackpressure: 0 };
+    });
+    const syncDurable = vi.fn(async () => {
+      order.push('durable');
+      return { deferredBackpressure: 0 };
+    });
+
+    await expect(runCatchupPlanesWithPolicy({
+      mode: 'foreground',
+      includeSharedMemory: true,
+      planeOrder: 'shared-first',
+      syncDurable,
+      syncSharedMemory,
+      retry: { maxWaitMs: 0 },
+    })).resolves.toEqual({
+      durable: { deferredBackpressure: 0 },
+      shared: { deferredBackpressure: 0 },
+      skippedPlanes: {},
+    });
+    expect(order).toEqual(['shared', 'durable']);
+  });
+
   it('derives foreground priority and source and retries durable before starting SWM', async () => {
     const order: string[] = [];
     const priorities: Array<number | undefined> = [];
