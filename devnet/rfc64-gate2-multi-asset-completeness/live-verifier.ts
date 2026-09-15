@@ -355,7 +355,16 @@ function verifyWireSynchronization(
   expectedApplied: unknown,
   peers: { author: string; receiver: string },
 ): { semantic: unknown; verifiedControlObjectCount: number } {
-  exact(negative.expectedFailureCode, 'catalog-native-receiver-authorization', `${path}.failureCode`);
+  // Scoped provider closures intentionally collapse an unauthorized or
+  // missing object into the indistinguishable not-found result. Preserve the
+  // stronger authorization code when the receiver reaches that check, while
+  // accepting the generic terminal record produced by a fail-closed not-found.
+  if (
+    negative.expectedFailureCode !== 'catalog-native-receiver-authorization'
+    && negative.expectedFailureCode !== null
+  ) {
+    fail(`${path}.failureCode`, 'must be authorization or null for a fail-closed rejection');
+  }
   digest(negative.attemptedCatalogHeadDigest, `${path}.attemptedCatalogHeadDigest`);
   const author = address(negative.catalogAuthorAddress, `${path}.catalogAuthorAddress`);
   exact(author, inventories.authored.catalogScope.authorAddress, `${path}.catalogAuthorAddress`);
