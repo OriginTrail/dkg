@@ -7,6 +7,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteFailureDisposition,
+  PROMOTE_STEP_NAMES,
   type PromoteFailureDisposition,
   type PromoteFailureClassification,
 } from '@origintrail-official/dkg-publisher';
@@ -23,14 +24,7 @@ export type ClassifiedPromoteError = (
 ) & { message?: string };
 
 const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
-const PROMOTE_DIAGNOSTIC_STAGES = new Set([
-  'ensureSubGraphRegistered',
-  'assertGraphScopedLifecycleWritable',
-  'knowledgeAssetPrivateQuads',
-  'assertionScopedQuads',
-  'assertTrustedCatalogTriplesAllowed',
-  'encodeWorkspaceGossipPayload',
-]);
+const PROMOTE_DIAGNOSTIC_STAGES = new Set<string>(PROMOTE_STEP_NAMES);
 
 // Only producer-owned, source-defined identities are safe to retain verbatim.
 // Arbitrary upstream name/code strings can be credentials even when they are

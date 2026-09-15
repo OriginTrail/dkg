@@ -6,6 +6,7 @@ import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrai
 import {
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
+  PROMOTE_STEP_NAMES,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import {
@@ -17,14 +18,7 @@ import {
 const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
 describe('diagnosticPromoteStage', () => {
-  it.each([
-    'ensureSubGraphRegistered',
-    'assertGraphScopedLifecycleWritable',
-    'knowledgeAssetPrivateQuads',
-    'assertionScopedQuads',
-    'assertTrustedCatalogTriplesAllowed',
-    'encodeWorkspaceGossipPayload',
-  ])('retains the producer-owned %s stage without its message', (stage) => {
+  it.each(PROMOTE_STEP_NAMES)('retains the producer-owned %s stage without its message', (stage) => {
     expect(diagnosticPromoteStage(`[promote:${stage}] opaque secret-sentinel failure`)).toBe(stage);
   });
 
