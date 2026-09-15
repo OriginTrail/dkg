@@ -54,6 +54,9 @@ export const CI_LANE_TOPOLOGY = {
   kosava_supporting: { job: 'kosava-supporting', groups: [{
     id: 'supporting', shards: 1, concurrency: 3, maxWorkers: 2,
     packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
+  }, {
+    id: 'semantic-runtime', shards: 1, maxWorkers: 1,
+    packages: ['semantic-runtime'],
   }] },
   kosava_hardhat_plugins: { job: 'kosava-hardhat-plugins', groups: [{ id: 'plugins', packages: ['random-sampling', 'kafka-plugin'], shards: 1 }] },
 };

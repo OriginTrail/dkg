@@ -1,0 +1,14 @@
+[package]
+name = "dkg-strategy-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dkg-ir.workspace = true
+minicbor.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

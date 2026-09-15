@@ -11,6 +11,8 @@
     "build": "node scripts/build.mjs",
     "build:packages": "turbo build",
     "build:runtime:packages": "node scripts/build-runtime-packages.mjs",
+    "build:semantic-runtime": "pnpm --filter @origintrail-official/dkg-semantic-runtime run build",
+    "check:semantic-runtime": "cargo +nightly-2026-08-18 test --manifest-path rust/Cargo.toml --workspace --locked && cargo +nightly-2026-08-18 clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings && pnpm --filter @origintrail-official/dkg-semantic-runtime test",
     "build:runtime": "pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui",
     "test": "turbo test && pnpm run test:scripts",
     "test:scripts": "node --test scripts/lib/__tests__/*.test.mjs scripts/audit-*.test.mjs packages/agent/scripts/*.test.mjs",
@@ -181,7 +183,8 @@
       "ip-address@>=10.0.0 <10.1.1": "10.1.1",
       "picomatch@>=4.0.0 <4.0.4": "4.0.4",
       "qs@>=6.0.0 <6.15.2": "6.15.2",
-      "ws@>=8.0.0 <8.20.1": "8.20.1"
+      "ws@>=8.0.0 <8.20.1": "8.20.1",
+      "@bytecodealliance/weval@0.4.1>decompress": "npm:@xhmikosr/decompress@11.1.4"
     },
     "patchedDependencies": {
       "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"

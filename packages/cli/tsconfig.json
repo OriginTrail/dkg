@@ -12,6 +12,7 @@
     { "path": "../epcis" },
     { "path": "../okf" },
     { "path": "../node-ui" },
+    { "path": "../semantic-runtime" },
     { "path": "../adapter-openclaw" },
     { "path": "../local-llm" },
     { "path": "../mcp-dkg" }

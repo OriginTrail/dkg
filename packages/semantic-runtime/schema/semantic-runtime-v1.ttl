@@ -1,0 +1,87 @@
+@prefix sr: <https://origintrail.io/semantic-runtime/v1#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+<https://origintrail.io/semantic-runtime/v1> a owl:Ontology ;
+  rdfs:label "OriginTrail DKG Semantic Runtime V1" .
+
+sr:Agent a rdfs:Class ; rdfs:subClassOf prov:Agent .
+sr:Program a rdfs:Class ; rdfs:subClassOf prov:Plan .
+sr:Tool a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:ExecutionPolicy a rdfs:Class ; rdfs:subClassOf prov:Plan .
+sr:Execution a rdfs:Class ; rdfs:subClassOf prov:Activity .
+sr:Behaviour a rdfs:Class .
+sr:Goal a rdfs:Class .
+sr:Strategy a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:StrategyVersion a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:SupervisionProfile a rdfs:Class ; rdfs:subClassOf prov:Plan .
+sr:ProcessExecution a rdfs:Class ; rdfs:subClassOf prov:Activity .
+sr:ExecutionSummary a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:CapabilityGrant a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:Delegation a rdfs:Class ; rdfs:subClassOf prov:Activity .
+sr:PolicyEpoch a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:Observation a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:Evidence a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:Hypothesis a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:Decision a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:Approval a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:Effect a rdfs:Class ; rdfs:subClassOf prov:Activity .
+sr:Reconciliation a rdfs:Class ; rdfs:subClassOf prov:Activity .
+sr:Compensation a rdfs:Class ; rdfs:subClassOf prov:Activity .
+sr:Incident a rdfs:Class ; rdfs:subClassOf prov:Activity .
+sr:Artifact a rdfs:Class ; rdfs:subClassOf prov:Entity .
+sr:ValidationRun a rdfs:Class ; rdfs:subClassOf prov:Activity .
+
+sr:usesStrategy a rdf:Property .
+sr:strategyHash a rdf:Property .
+sr:policyEpoch a rdf:Property .
+sr:graphRevision a rdf:Property .
+sr:status a rdf:Property .
+sr:traceHash a rdf:Property .
+sr:affectedResource a rdf:Property .
+sr:proposedBy a rdf:Property .
+sr:effectState a rdf:Property .
+sr:adapter a rdf:Property .
+sr:idempotencyClass a rdf:Property .
+sr:requestDigest a rdf:Property .
+sr:capability a rdf:Property .
+sr:authorization a rdf:Property .
+sr:language a rdf:Property .
+sr:version a rdf:Property .
+sr:source a rdf:Property .
+sr:requiresTool a rdf:Property .
+sr:offersTool a rdf:Property .
+sr:usesExecutionPolicy a rdf:Property .
+sr:allowsTool a rdf:Property .
+sr:operation a rdf:Property .
+sr:witInterface a rdf:Property .
+sr:invocationId a rdf:Property .
+sr:usedProgram a rdf:Property .
+sr:executedBy a rdf:Property .
+sr:appliedPolicy a rdf:Property .
+sr:policyHash a rdf:Property .
+sr:programHash a rdf:Property .
+sr:usedTool a rdf:Property .
+sr:adapterVersion a rdf:Property .
+sr:adapterHash a rdf:Property .
+sr:event a rdf:Property .
+sr:agentStatus a rdf:Property .
+sr:output a rdf:Property .
+sr:outputHash a rdf:Property .
+sr:failureCode a rdf:Property .
+
+# State vocabulary is descriptive only; none of these terms grants authority.
+sr:Active a prov:Entity .
+sr:Paused a prov:Entity .
+sr:Completed a prov:Entity .
+sr:Failed a prov:Entity .
+sr:Quarantined a prov:Entity .
+sr:Prepared a prov:Entity .
+sr:Dispatching a prov:Entity .
+sr:Succeeded a prov:Entity .
+sr:Unknown a prov:Entity .
+sr:Reconciling a prov:Entity .
+sr:Reconciled a prov:Entity .
+sr:ManualReviewRequired a prov:Entity .
