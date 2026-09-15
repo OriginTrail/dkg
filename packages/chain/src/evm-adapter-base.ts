@@ -49,7 +49,12 @@ import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
-import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
+import {
+  RpcFailoverClient,
+  createRpcReadDescriptor,
+  type ReadOpts,
+  type ReceiptLookupOptions,
+} from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
   RpcUsageTracker,
@@ -1477,10 +1482,12 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, (c) => c[method](...args), {
-      ...opts,
-      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
-    });
+    return this.rpcFailover.readContract(
+      this.rpcReadDescriptor(label, opts),
+      contract,
+      (c) => c[method](...args),
+      opts,
+    );
   }
 
   /** Canonical KAS update-context ABI read shared by storage and publish mixins. */
@@ -1511,10 +1518,12 @@ export class EVMChainAdapterBase {
     fn: (c: Contract) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, fn, {
-      ...opts,
-      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
-    });
+    return this.rpcFailover.readContract(
+      this.rpcReadDescriptor(label, opts),
+      contract,
+      fn,
+      opts,
+    );
   }
 
   /**
@@ -1529,10 +1538,17 @@ export class EVMChainAdapterBase {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.read(label, fn, {
-      ...opts,
-      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
-    });
+    return this.rpcFailover.read(this.rpcReadDescriptor(label, opts), fn, opts);
+  }
+
+  /**
+   * Adapter-owned reads bind their human label and telemetry owner together.
+   * The legacy `ReadOpts.rpcUsageConsumer` field remains accepted at the
+   * helper boundary, including `null` for a deliberate unattributed read.
+   */
+  private rpcReadDescriptor(label: string, opts?: ReadOpts) {
+    const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
+    return createRpcReadDescriptor(label, consumer);
   }
 
   /**
@@ -3621,7 +3637,7 @@ export class EVMChainAdapterBase {
     const chainId = this.configuredStaticChainId == null
       ? (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId
       : await this.rpcFailover.read(
-          'validate configured chainId',
+          createRpcReadDescriptor('validate configured chainId'),
           (p) => this.ensureConfiguredStaticChainIdValidated(p),
         );
     this.cachedChainId = { value: chainId, cachedAt: now };
