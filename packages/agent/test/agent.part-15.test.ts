@@ -869,6 +869,52 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('rolls a capped subscription into the next slot after safe readiness', async () => {
+      const rows = [
+        { id: 'rolling-cg-a', name: 'Rolling A', subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: false, syncScoped: true },
+        { id: 'rolling-cg-b', name: 'Rolling B', subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: false, syncScoped: true },
+      ];
+      const subscriptionStore = {
+        loadAll: async () => rows,
+        save: async () => {},
+        delete: async () => {},
+      };
+      const agent = await DKGAgent.create({
+        name: 'RollingRehydration',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        maxRehydratedContextGraphSubscriptions: 1,
+      });
+      try {
+        await agent.start();
+        expect(agent.getSubscribedContextGraphs().get('rolling-cg-a')?.subscribed).toBe(true);
+        expect(agent.getSubscribedContextGraphs().get('rolling-cg-b')).toBeUndefined();
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 1,
+          dormant: 1,
+          dormantIds: ['rolling-cg-b'],
+        });
+
+        agent.setContextGraphSubscription('rolling-cg-a', {
+          ...agent.getSubscribedContextGraphs().get('rolling-cg-a')!,
+          synced: true,
+          metaSynced: true,
+        });
+
+        await vi.waitFor(() => {
+          expect(agent.getSubscribedContextGraphs().get('rolling-cg-b')?.subscribed).toBe(true);
+        }, { timeout: 5_000, interval: 10 });
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 2,
+          dormant: 0,
+          dormantIds: [],
+        });
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
     it('keeps rehydration diagnostics when a persisted subscription delete fails', async () => {
       const rows = Array.from({ length: 65 }, (_, i) => ({
         id: `failed-delete-cg-${String(i).padStart(3, '0')}`,
