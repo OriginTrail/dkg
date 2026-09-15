@@ -347,6 +347,7 @@ import {
   emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,
+  recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
   createSwmMetaFetcher,
@@ -7440,8 +7441,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               result.completedPhases = 1;
               completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
             } else {
-              result.failedPhases = 1;
-              result.backoffWorthyFailures = 1;
+              // A recovery job can yield because this process exhausted its
+              // admission window. Preserve that local outcome through the
+              // lifecycle aggregation instead of treating it as a peer
+              // failure that should trigger backoff.
+              const failureCause = recovered.phaseFailureCause;
+              const failureCount = recovered.localYieldFailedPhases ?? 1;
+              recordSharedMemoryPhaseFailure(result, failureCause, failureCount);
+              if (failureCause !== 'local-budget') result.backoffWorthyFailures = 1;
             }
             return result;
           } catch (error) {
