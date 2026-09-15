@@ -5,6 +5,122 @@ import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
 import { makeChain, makeHandler, markPending } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller lifecycle', () => {
+  it('dispatches the extended event lanes with the poll lifecycle signal', async () => {
+    const events = [
+      {
+        type: 'KnowledgeAssetUpdated',
+        blockNumber: 100,
+        data: { merkleRoot: `0x${'11'.repeat(32)}`, batchId: '7' },
+      },
+      {
+        type: 'AllowListUpdated',
+        blockNumber: 100,
+        data: { contextGraphId: 'cg-1', agent: 'agent-1', added: false },
+      },
+      {
+        type: 'ProfileCreated',
+        blockNumber: 100,
+        data: { identityId: '9' },
+      },
+      {
+        type: 'ProfileUpdated',
+        blockNumber: 100,
+        data: { identityId: '10' },
+      },
+      {
+        type: 'KCCreated',
+        blockNumber: 100,
+        data: {
+          merkleRoot: `0x${'22'.repeat(32)}`,
+          kaId: '1',
+          author: '0x' + 'ef'.repeat(20),
+          txHash: '0x' + '12'.repeat(32),
+          publisherAddress: '0x' + 'ab'.repeat(20),
+          startKAId: '1',
+          endKAId: '2',
+        },
+      },
+    ] as never;
+    const { adapter } = makeChain({ head: 100, events });
+    const calls: string[] = [];
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onCollectionUpdated: async (info) => {
+        calls.push(`collection:${info.batchId}`);
+      },
+      onAllowListUpdated: async (info) => {
+        calls.push(`allow:${info.contextGraphId}:${info.added}`);
+      },
+      onProfileEvent: async (info) => {
+        calls.push(`profile:${info.identityId}`);
+      },
+      onKnowledgeAssetCreated: async (info) => {
+        calls.push(`created:${info.kaId}`);
+      },
+    });
+
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    await poller.stop();
+
+    expect(calls).toEqual([
+      'created:1',
+      'collection:7',
+      'allow:cg-1:false',
+      'profile:9',
+      'profile:10',
+    ]);
+  });
+
+  it('isolates callback errors on every extended event lane', async () => {
+    const events = [
+      {
+        type: 'KnowledgeAssetUpdated',
+        blockNumber: 100,
+        data: { merkleRoot: `0x${'33'.repeat(32)}`, batchId: '11' },
+      },
+      {
+        type: 'AllowListUpdated',
+        blockNumber: 100,
+        data: { contextGraphId: 'cg-2', agent: 'agent-2', added: true },
+      },
+      {
+        type: 'ProfileCreated',
+        blockNumber: 100,
+        data: { identityId: '12' },
+      },
+      {
+        type: 'KCCreated',
+        blockNumber: 100,
+        data: {
+          merkleRoot: `0x${'44'.repeat(32)}`,
+          kaId: '3',
+          author: '0x' + '12'.repeat(20),
+          txHash: '0x' + '34'.repeat(32),
+          publisherAddress: '0x' + 'cd'.repeat(20),
+          startKAId: '3',
+          endKAId: '4',
+        },
+      },
+    ] as never;
+    const { adapter } = makeChain({ head: 100, events });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onCollectionUpdated: async () => { throw new Error('collection failure'); },
+      onAllowListUpdated: async () => { throw new Error('allow-list failure'); },
+      onProfileEvent: async () => { throw new Error('profile failure'); },
+      onKnowledgeAssetCreated: async () => { throw new Error('allocator failure'); },
+    });
+
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    await poller.stop();
+  });
+
   it('aborts an in-flight event callback without advancing its durable cursor', async () => {
     let callbackSignal: AbortSignal | undefined;
     let markCallbackStarted: () => void = () => undefined;
