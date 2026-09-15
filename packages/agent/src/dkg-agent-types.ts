@@ -1065,7 +1065,13 @@ export interface LocalContextGraphOriginPersistence {
   recordLocalOrigin(record: LocalContextGraphOriginRecord): Promise<void>;
 }
 
-export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOriginPersistence> {
+export interface ContextGraphMembershipStore {
+  /**
+   * Optional graph-level origin journal. Presence statically guarantees the
+   * complete read/write capability; absence selects the legacy membership-row
+   * compatibility path.
+   */
+  localOrigins?: LocalContextGraphOriginPersistence;
   /**
    * Load persisted membership facts for restart recovery. Optional so custom
    * stores written before membership rehydration remain source-compatible.
@@ -1074,16 +1080,6 @@ export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOr
     firstSeenAt?: number;
     updatedAt: number;
   }>>;
-  /**
-   * Load graph-level local-origin facts. Optional for source compatibility
-   * with custom stores predating the independent provenance journal.
-   */
-  loadLocalOrigins?(): Promise<LocalContextGraphOriginRecord[]>;
-  /**
-   * Insert a graph-level origin fact monotonically. Implementations must not
-   * replace an existing row for the same Context Graph id.
-   */
-  recordLocalOrigin?(record: LocalContextGraphOriginRecord): Promise<void>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }

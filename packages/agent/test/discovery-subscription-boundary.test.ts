@@ -285,15 +285,17 @@ describe('Context Graph discovery/subscription boundary', () => {
       };
       const membershipStore = {
         loadAll: async () => [...persistedMemberships.values()].map((record) => ({ ...record })),
-        loadLocalOrigins: async () => [...persistedOrigins.values()].map((record) => ({ ...record })),
-        recordLocalOrigin: async (record: {
-          contextGraphId: string;
-          source: 'local-create' | 'implicit-swm-write';
-          createdAt: number;
-        }) => {
-          if (!persistedOrigins.has(record.contextGraphId)) {
-            persistedOrigins.set(record.contextGraphId, { ...record });
-          }
+        localOrigins: {
+          loadLocalOrigins: async () => [...persistedOrigins.values()].map((record) => ({ ...record })),
+          recordLocalOrigin: async (record: {
+            contextGraphId: string;
+            source: 'local-create' | 'implicit-swm-write';
+            createdAt: number;
+          }) => {
+            if (!persistedOrigins.has(record.contextGraphId)) {
+              persistedOrigins.set(record.contextGraphId, { ...record });
+            }
+          },
         },
         upsert: async (record: ContextGraphMembershipRecord & { updatedAt: number }) => {
           persistedMemberships.set(

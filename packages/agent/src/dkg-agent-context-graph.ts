@@ -95,7 +95,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, isChainRpcTransportError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, classifyContextGraphRegistrationFailure, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -409,37 +409,6 @@ interface ContextGraphAgentInviteMutationPlan {
 
 export type PreparedContextGraphAgentInviteMutation =
   PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
-
-const DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES = new Set([
-  'ACTION_REJECTED',
-  'CALL_EXCEPTION',
-  'INSUFFICIENT_FUNDS',
-  'INVALID_ARGUMENT',
-  'UNPREDICTABLE_GAS_LIMIT',
-]);
-
-/** True only when the chain boundary proves no successful registration committed. */
-function isDefinitiveContextGraphRegistrationFailure(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const record = error as {
-    code?: unknown;
-    txHash?: unknown;
-    receipt?: { status?: unknown };
-    contextGraphRegistrationSubmitted?: unknown;
-  };
-  if (record.contextGraphRegistrationSubmitted === false) return true;
-  if (record.receipt?.status === 0) return true;
-  const code = typeof record.code === 'string' ? record.code : '';
-  if (DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES.has(code)) return true;
-  // Transport failure before the adapter has a signed/broadcast transaction
-  // hash is pre-submission. Once a hash exists, or receipt lookup itself
-  // failed, the outcome remains ambiguous and the durable pending fence stays.
-  if (isChainRpcTransportError(error)) {
-    return error.code !== 'RPC_RECEIPT_LOOKUP_FAILED'
-      && typeof error.txHash !== 'string';
-  }
-  return false;
-}
 
 export class ContextGraphMethods extends DKGAgentBase {
   async createContextGraph(this: DKGAgent, opts: {
@@ -1157,6 +1126,12 @@ export class ContextGraphMethods extends DKGAgentBase {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
+    if (registrationStatus === 'pending') {
+      throw new Error(
+        `Context graph "${id}" has a pending registration outcome. ` +
+        'Refusing to submit another transaction until chain reconciliation resolves it.',
+      );
+    }
 
     // Read existing description and access policy. Curated CGs store
     // definition in _meta rather than ONTOLOGY, so check both locations.
@@ -1608,7 +1583,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           nameHash,
         });
       } catch (error) {
-        if (isDefinitiveContextGraphRegistrationFailure(error)) {
+        if (classifyContextGraphRegistrationFailure(error) === 'definitive-failure') {
           try {
             await persistRegistrationStatus('unregistered');
           } catch (recoveryError) {

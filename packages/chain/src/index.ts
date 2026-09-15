@@ -209,6 +209,11 @@ export {
   type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
 export {
+  classifyContextGraphRegistrationFailure,
+  markContextGraphRegistrationNotSubmitted,
+  type ContextGraphRegistrationFailureDisposition,
+} from './context-graph-registration-error.js';
+export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.
   // Test-only hook exported so cross-package route tests can reset the exact
   // package singleton that production code reads. Internal helpers

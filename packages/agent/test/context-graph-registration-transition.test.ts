@@ -198,6 +198,10 @@ describe('Context Graph registration durability transition', () => {
       .rejects.toBe(ambiguous);
 
     expect(await registrationStatus(agent, id)).toBe('pending');
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toThrow(`Context graph "${id}" has a pending registration outcome`);
+    expect(agent.registerContextGraphOnChain).toHaveBeenCalledOnce();
   });
 
   it('restores unregistered when only a preparatory transaction is ambiguous', async () => {
