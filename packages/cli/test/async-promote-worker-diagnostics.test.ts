@@ -6,12 +6,10 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import {
   type AsyncPromoteQueue,
   type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
-import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import { runPromoteJob } from '../src/daemon/worker/async-promote-worker.js';
 import {
   createAsyncPromoteWorkerFixture,

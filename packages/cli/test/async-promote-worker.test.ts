@@ -23,7 +23,6 @@ import {
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
   type PromoteRequest,
-  type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import {
