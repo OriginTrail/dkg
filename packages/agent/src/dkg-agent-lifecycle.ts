@@ -428,6 +428,7 @@ import {
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
   mergeDurableSyncAccumulatorInto,
+  mergeDurableSyncResults,
   mergeDurableSyncResultIntoAccumulator,
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
@@ -1794,6 +1795,32 @@ function mergeSharedMemorySyncResults(
 ): SharedMemorySyncResult {
   return {
     ...mergeSamePeerSharedMemoryDiagnostics(a, b),
+  };
+}
+
+/**
+ * Fold a retry's diagnostics while retaining the latest deferral control
+ * value. The lifecycle classifies this field to decide peer/job readiness;
+ * every other numeric counter remains cumulative across attempts.
+ */
+function mergeSharedMemorySyncRetryResults(
+  a: SharedMemorySyncResult,
+  b: SharedMemorySyncResult,
+): SharedMemorySyncResult {
+  return {
+    ...mergeSharedMemorySyncResults(a, b),
+    deferredBackpressure: b.deferredBackpressure,
+  };
+}
+
+/** Same retry contract for durable requester results. */
+function mergeDurableSyncRetryResults(
+  a: DurableSyncResult,
+  b: DurableSyncResult,
+): DurableSyncResult {
+  return {
+    ...mergeDurableSyncResults(a, b),
+    deferredBackpressure: b.deferredBackpressure,
   };
 }
 
@@ -8224,7 +8251,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   [contextGraphId],
                   { ...(priority === undefined ? {} : { priority }), source },
                 ).catch(emptyShared),
-                { sourceOverride: stats?.sourceOverride },
+                {
+                  sourceOverride: stats?.sourceOverride,
+                  mergeRetryResults: mergeSharedMemorySyncRetryResults,
+                },
               )
             : null,
         }),
@@ -8240,6 +8270,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             mode,
             sourceOverride: stats?.sourceOverride,
             includeSharedMemory,
+            mergeDurableRetryResults: mergeDurableSyncRetryResults,
+            mergeSharedMemoryRetryResults: mergeSharedMemorySyncRetryResults,
             syncDurable: ({ priority, source }) => this.syncFromPeerDetailed(
               remotePeerId,
               [contextGraphId],
@@ -8466,7 +8498,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     [contextGraphId],
                     { ...(priority === undefined ? {} : { priority }), source },
                   ).catch(emptyShared),
-                  { sourceOverride: stats?.sourceOverride },
+                  {
+                    sourceOverride: stats?.sourceOverride,
+                    mergeRetryResults: mergeSharedMemorySyncRetryResults,
+                  },
                 );
                 return { remotePeerId, shared };
               },

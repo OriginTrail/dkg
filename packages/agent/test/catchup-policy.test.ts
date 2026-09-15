@@ -430,6 +430,36 @@ describe('the removed retryDelaysMs ladder', () => {
     expect(result.deferredBackpressure).toBe(1);
     expect(clock.elapsed()).toBeLessThanOrEqual(300);
   });
+
+  it('folds retry diagnostics while using the latest deferral as the control signal', async () => {
+    type Result = {
+      insertedDataTriples: number;
+      deferredBackpressure: number;
+    };
+    let attempt = 0;
+    const result = await runCatchupPlaneWithPolicy<Result>(
+      'foreground',
+      async () => {
+        attempt += 1;
+        return {
+          insertedDataTriples: attempt,
+          deferredBackpressure: attempt === 1 ? 1 : 0,
+        };
+      },
+      {
+        retry: { maxWaitMs: 1_000 },
+        now: () => 0,
+        wait: async () => {},
+        mergeRetryResults: (previous, current) => ({
+          insertedDataTriples: previous.insertedDataTriples + current.insertedDataTriples,
+          deferredBackpressure: previous.deferredBackpressure + current.deferredBackpressure,
+        }),
+      },
+    );
+
+    expect(result).toEqual({ insertedDataTriples: 3, deferredBackpressure: 1 });
+    expect(attempt).toBe(2);
+  });
 });
 
 describe('nextCatchupBackpressureDelayMs', () => {
