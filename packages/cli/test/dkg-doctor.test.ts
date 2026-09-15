@@ -26,7 +26,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { join, resolve } from 'node:path';
-import { runDoctor, collectStateSummary, ALL_CHECK_IDS } from '../src/doctor/index.js';
+import {
+  runDoctor,
+  collectStateSummary,
+  formatDoctorReport,
+  ALL_CHECK_IDS,
+} from '../src/doctor/index.js';
 import type { DoctorDeps } from '../src/doctor/types.js';
 import { runOrphanReposCheck } from '../src/doctor/checks/orphan-repos.js';
 import { runConfigSanityCheck } from '../src/doctor/checks/config-sanity.js';
@@ -1062,5 +1067,10 @@ describe('runDoctor orchestrator', () => {
     expect(report.findings).toEqual([]);
     expect(report.state.daemon.nodeRole).toBe('core');
     expect(report.state.paths.dkgHome).toBe('/test/.dkg');
+    const formatted = formatDoctorReport(report).split('\n');
+    expect(formatted.find((line) => line.includes('runtime.nodeVersion')))
+      .toContain(report.state.runtime.nodeVersion);
+    expect(formatted.find((line) => line.includes('runtime.nodeSqlite')))
+      .toContain(String(report.state.runtime.nodeSqliteAvailable));
   });
 });
