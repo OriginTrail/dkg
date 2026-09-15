@@ -7,6 +7,10 @@ import {
   type SharedMemoryFreshnessSummary,
   type SelectedSharedMemorySyncResult,
 } from '../shared-memory-freshness.js';
+import {
+  SyncBackpressureBusyError,
+  type SyncBackpressureBusyReason,
+} from '../backpressure.js';
 
 type SyncProgressSummary = SharedMemoryFreshnessSummary & {
   insertedTriples: number;
@@ -183,6 +187,22 @@ export class SyncOnConnectPostSyncError extends Error {
   }
 }
 
+/**
+ * Typed control flow for local admission pressure. This marker is translated
+ * to `deferred-backpressure` by the attempt boundary before generic
+ * post-sync errors are constructed, so accounting never has to inspect an
+ * arbitrary `Error.cause` chain.
+ */
+export class SyncOnConnectBackpressureError extends Error {
+  readonly reason: SyncBackpressureBusyReason;
+
+  constructor(error: SyncBackpressureBusyError) {
+    super(error.message);
+    this.name = 'SyncOnConnectBackpressureError';
+    this.reason = error.reason;
+  }
+}
+
 interface SyncResultAccounting {
   insertedTriples: number;
   madeProgress: boolean;
@@ -284,6 +304,9 @@ async function runSessionSelectedSharedMemoryRetry(
       signal.throwIfAborted();
       return result;
     } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
@@ -466,6 +489,9 @@ async function runSessionSyncOnConnect(
       signal.throwIfAborted();
       return result;
     } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
@@ -582,6 +608,9 @@ async function runSessionSyncOnConnect(
 
     return finishSyncAccounting();
   } catch (err) {
+    if (err instanceof SyncOnConnectBackpressureError) {
+      throw err;
+    }
     if (err instanceof SyncOnConnectPostSyncError) {
       throw err;
     }
