@@ -56,9 +56,11 @@ interface StripInternals {
     subscribe(topic: string): void;
     onMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
   };
-  subscribedContextGraphs: Map<string, { subscribed: boolean; synced: boolean; onChainHash?: string }>;
-  config: { swmHostMode?: { enabled?: boolean; stripCiphertext?: boolean } };
+  subscribedContextGraphs: Map<string, { subscribed: boolean; synced: boolean; onChainHash?: string; onChainId?: string }>;
+  onChainAccessPolicyCache: Map<string, number>;
+  config: { swmHostMode?: { enabled?: boolean; hostPublic?: boolean; stripCiphertext?: boolean } };
   isPrivateContextGraph(cgId: string): Promise<boolean>;
+  isConfirmedPublicForHostMode(cgId: string): Promise<boolean>;
   wireSwmHostModeHandler(cgId: string, source?: SubscriptionSource, curated?: boolean): void;
   reconcileSwmHostModeSubscription(cgId: string): Promise<void>;
   ingestSwmHostModeEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
@@ -77,6 +79,11 @@ const CURATED = (id: string): { subscribed: boolean; synced: boolean; onChainHas
   synced: true,
   onChainHash: ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase(),
 });
+
+function markCurated(g: StripInternals, id: string): void {
+  g.onChainAccessPolicyCache.set('1', 1);
+  g.subscribedContextGraphs.set(id, { ...CURATED(id), onChainId: '1' });
+}
 
 function hostEnvelope(contextGraphId: string, chunked: boolean): Uint8Array {
   return encodeGossipEnvelope({
@@ -136,7 +143,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const core = await makeCore(); // no stripCiphertext → undefined → ON
     const g = core as unknown as StripInternals;
     const cgId = 'cg-curated-default';
-    g.subscribedContextGraphs.set(cgId, CURATED(cgId));
+    markCurated(g, cgId);
     const wired: string[] = [];
     g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
 
@@ -150,7 +157,45 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const core = await makeCore(true);
     const g = core as unknown as StripInternals;
     const cgId = 'cg-curated-stripped';
-    g.subscribedContextGraphs.set(cgId, CURATED(cgId));
+    markCurated(g, cgId);
+    const wired: string[] = [];
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+
+    await g.reconcileSwmHostModeSubscription(cgId);
+
+    expect(wired).toEqual([]);
+    expect(g.swmHostModeHandlers.size).toBe(0);
+  });
+
+  it('hostPublic opt-in wires a confirmed public CG even while private strip is ON', async () => {
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-public-core-tier';
+    g.config.swmHostMode = { enabled: true, hostPublic: true, stripCiphertext: true };
+    g.onChainAccessPolicyCache.set('2', 0);
+    g.subscribedContextGraphs.set(cgId, { subscribed: false, synced: false, onChainId: '2' });
+    g.isPrivateContextGraph = async () => false;
+    g.isConfirmedPublicForHostMode = async () => true;
+    expect(await (g as any).isCuratedForHostMode(cgId)).toBe(false);
+    const wired: Array<{ id: string; curated?: boolean }> = [];
+    g.wireSwmHostModeHandler = (id: string, _source?: SubscriptionSource, curated?: boolean) => {
+      wired.push({ id, curated });
+    };
+
+    await g.reconcileSwmHostModeSubscription(cgId);
+
+    expect(wired).toEqual([{ id: cgId, curated: false }]);
+  });
+
+  it('hostPublic refuses an unconfirmed or restricted CG', async () => {
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-public-policy-unknown';
+    g.config.swmHostMode = { enabled: true, hostPublic: true, stripCiphertext: true };
+    g.onChainAccessPolicyCache.set('2', 0);
+    g.subscribedContextGraphs.set(cgId, { subscribed: false, synced: false, onChainId: '2' });
+    g.isPrivateContextGraph = async () => false;
+    g.isConfirmedPublicForHostMode = async () => false;
     const wired: string[] = [];
     g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
 
@@ -164,7 +209,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const core = await makeCore(false);
     const g = core as unknown as StripInternals;
     const cgId = 'cg-curated-baseline';
-    g.subscribedContextGraphs.set(cgId, CURATED(cgId));
+    markCurated(g, cgId);
     const wired: string[] = [];
     g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
 
@@ -212,7 +257,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const core = await makeCore(true);
     const g = core as unknown as StripInternals;
     const cgId = 'cg-host-only-core';
-    g.subscribedContextGraphs.set(cgId, CURATED(cgId)); // curated via onChainHash
+    markCurated(g, cgId); // curated via the chain policy cache
     g.isPrivateContextGraph = async () => false;        // no local _meta
     const wired: string[] = [];
     g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
@@ -286,7 +331,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     installGossipStub(g);
 
     g.wireSwmHostModeHandler(cgId, undefined, false);
-    g.subscribedContextGraphs.set(cgId, CURATED(cgId));
+    markCurated(g, cgId);
     await g.reconcileSwmHostModeSubscription(cgId);
 
     expect([...g.swmHostModeCurated.values()]).toEqual([true]);

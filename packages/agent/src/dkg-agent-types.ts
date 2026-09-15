@@ -1751,6 +1751,10 @@ export interface DKGAgentConfig {
    *
    * Fields:
    *  - `enabled`: when `false`, cores skip host-mode entirely and behave like edges. Default `true` for cores.
+   *  - `hostPublic`: when `true`, cores also host fully public + open-publish
+   *    CG SWM. This is opt-in because public SWM is plaintext and hosting it
+   *    consumes core disk/mesh capacity; curated/private custody remains
+   *    governed by `stripCiphertext`.
    *  - `unregistered`: TTL/byte-cap for CGs the core knows about but that aren't on-chain registered yet.
    *  - `registered`: TTL/byte-cap for on-chain registered CGs (typically larger).
    *  - `pruneIntervalMs`: how often the TTL/cap sweep runs.
@@ -1760,6 +1764,7 @@ export interface DKGAgentConfig {
    */
   swmHostMode?: {
     enabled?: boolean;
+    hostPublic?: boolean;
     unregistered?: SwmHostModeStoreLimits;
     registered?: SwmHostModeStoreLimits;
     pruneIntervalMs?: number;
