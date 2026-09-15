@@ -407,7 +407,18 @@ function verifyPositiveWireInventory(
     'inventoryRowCount',
     'rows',
     'verifiedControlObjectCount',
-  ]);
+  ], ['finalizedSwmRetirementLifecycleReceipts']);
+  if (wire.finalizedSwmRetirementLifecycleReceipts !== undefined) {
+    if (
+      !Array.isArray(wire.finalizedSwmRetirementLifecycleReceipts)
+      || wire.finalizedSwmRetirementLifecycleReceipts.length > 1024
+    ) {
+      fail(
+        `${path}.finalizedSwmRetirementLifecycleReceipts`,
+        'must be a bounded Array',
+      );
+    }
+  }
   exact(wire.appliedHeadStatus, 'applied', `${path}.appliedHeadStatus`);
   exact(wire.catalogHeadDigest, inventories.authored.catalogHeadDigest, `${path}.catalogHeadDigest`);
   exact(wire.inventoryDigest, inventories.received.declaredInventoryDigest, `${path}.inventoryDigest`);
@@ -652,6 +663,7 @@ function closedRecord(
   value: unknown,
   path: string,
   expectedKeys: readonly string[],
+  optionalKeys: readonly string[] = [],
 ): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     fail(path, 'must be a plain object');
@@ -660,8 +672,15 @@ function closedRecord(
   if (prototype !== Object.prototype && prototype !== null) fail(path, 'must be plain');
   const keys = Object.keys(value).sort();
   const expected = [...expectedKeys].sort();
-  if (stableJson(keys) !== stableJson(expected)) {
-    fail(path, `must contain exactly keys ${expected.join(', ')}`);
+  const optional = new Set(optionalKeys);
+  const required = expectedKeys.filter((key) => !optional.has(key));
+  const allowed = new Set([...expectedKeys, ...optionalKeys]);
+  if (
+    required.some((key) => !keys.includes(key))
+    || keys.some((key) => !allowed.has(key))
+  ) {
+    fail(path, `must contain exactly keys ${expected.join(', ')}`
+      + (optionalKeys.length === 0 ? '' : ` (optional: ${optionalKeys.join(', ')})`));
   }
   return value as Record<string, unknown>;
 }
