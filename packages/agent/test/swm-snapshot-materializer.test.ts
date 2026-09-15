@@ -170,6 +170,43 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v2))).toBe(false);
     });
+
+    it('fails open when the write-revision capability throws', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      vi.spyOn(store, 'getWriteRevision').mockImplementation(() => {
+        throw new Error('revision probe unavailable');
+      });
+      const { materializer } = materializerFor(store);
+
+      // A revision-probe failure must fall back to the bounded count + digest
+      // validation instead of turning a transient capability error into a
+      // materialization failure.
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    });
+
+    it('evicts the oldest entries when the bounded memo reaches its limit', async () => {
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      try {
+        const store = new OxigraphStore();
+        const { materializer } = materializerFor(store);
+        const descriptors = Array.from({ length: 1025 }, (_, index) => ({
+          ...descriptorFor(v1),
+          assertionGraph: `${v1.assertionGraph}-${index}`,
+        }));
+        for (const descriptor of descriptors) {
+          await store.insert(inGraph(v1.payload, descriptor.assertionGraph));
+          expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        }
+
+        // The 1025th insert forces one LRU eviction. Rechecking the first
+        // descriptor therefore performs the full validation again and still
+        // returns the digest-bound answer.
+        expect(await materializer.isGraphAssetMaterialized(descriptors[0]!)).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   describe('readStoredHead', () => {
@@ -254,8 +291,11 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     const { materializer, invalidations } = materializerFor(store);
     await materializer.replaceGraph(v1.assertionGraph, inGraph(v1.payload, v1.assertionGraph));
     expect(invalidations()).toBe(1);
-    const { materializer: checker } = materializerFor(store);
-    expect(await checker.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    // A replacement on the same materializer must invalidate its process-local
+    // memo before the next validation.
+    await materializer.replaceGraph(v1.assertionGraph, inGraph(v1.payload, v1.assertionGraph));
+    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
   });
 
   describe('end-to-end catch-up with the real materializer', () => {

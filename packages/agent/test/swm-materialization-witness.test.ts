@@ -57,18 +57,21 @@ function descriptorFor(quads: Quad[]) {
 /** Counts CONSTRUCTs so "did the fast path actually skip the expensive read" is observable. */
 function countingStore(inner: TripleStore) {
   let constructs = 0;
+  let countQueries = 0;
   const proxy = new Proxy(inner, {
     get(target, prop, receiver) {
       if (prop === 'query') {
         return async (sparql: string, options?: unknown) => {
-          if (sparql.trimStart().startsWith('CONSTRUCT')) constructs += 1;
+          const normalized = sparql.trimStart();
+          if (normalized.startsWith('CONSTRUCT')) constructs += 1;
+          if (normalized.startsWith('SELECT (COUNT')) countQueries += 1;
           return (target as TripleStore).query(sparql, options as never);
         };
       }
       return Reflect.get(target, prop, receiver);
     },
   }) as TripleStore;
-  return { store: proxy, constructs: () => constructs };
+  return { store: proxy, constructs: () => constructs, countQueries: () => countQueries };
 }
 
 describe('#2079 witness module', () => {
@@ -111,7 +114,7 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
     const inner = newStore();
     const quads = payload('v1', 6);
     await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
-    const { store, constructs } = countingStore(inner);
+    const { store, constructs, countQueries } = countingStore(inner);
     const mat = createSharedMemorySnapshotMaterializer({
       store,
       writeLocks: new Map<string, Promise<void>>(),
@@ -122,10 +125,13 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
     expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
     const afterCold = constructs();
     expect(afterCold).toBe(1); // cold: paid the read-back once
+    const afterColdCounts = countQueries();
+    expect(afterColdCounts).toBe(1);
 
     expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
-    // THE WIN: warm check performed no further CONSTRUCT.
+    // THE WIN: the warm check performs neither the count nor the full read.
     expect(constructs()).toBe(afterCold);
+    expect(countQueries()).toBe(afterColdCounts);
   });
 
   it('still reports NOT materialized when the graph is dropped, despite a standing witness', async () => {
