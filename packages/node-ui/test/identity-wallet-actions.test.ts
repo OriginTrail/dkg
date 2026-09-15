@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getAddress, zeroAddress, type Address, type Hex, type TransactionReceipt } from 'viem';
-import type { IdentityWalletContracts, PcaContracts } from '../src/ui/api.js';
+import type { IdentityWalletContracts } from '../src/ui/api.js';
 import type { Eip1193Provider } from '../src/ui/web3/eip6963.js';
 import {
   ADMIN_KEY_PURPOSE,
@@ -22,8 +22,6 @@ const TARGET = getAddress(`0x${'33'.repeat(20)}`) as Address;
 const PROFILE = getAddress(`0x${'44'.repeat(20)}`) as Address;
 const IDENTITY = getAddress(`0x${'55'.repeat(20)}`) as Address;
 const IDENTITY_STORAGE = getAddress(`0x${'66'.repeat(20)}`) as Address;
-const NFT = getAddress(`0x${'77'.repeat(20)}`) as Address;
-const TOKEN = getAddress(`0x${'88'.repeat(20)}`) as Address;
 const TX_HASH = `0x${'ab'.repeat(32)}` as Hex;
 
 const IDENTITY_CONTRACTS: IdentityWalletContracts = {
@@ -33,13 +31,6 @@ const IDENTITY_CONTRACTS: IdentityWalletContracts = {
   chainId: 'base:84532',
   rpcUrls: ['/api/identity-wallets/rpc'],
 };
-const PCA_CONTRACTS: PcaContracts = {
-  nft: NFT,
-  token: TOKEN,
-  chainId: 'base:84532',
-  rpcUrls: ['/api/pca/rpc'],
-};
-
 class FakeProvider implements Eip1193Provider {
   accounts: Address[] = [ADMIN];
   chainId = 84532;
@@ -109,8 +100,6 @@ function makeHarness(options: {
     provider,
     address: options.stateAddress ?? ADMIN,
     chainId: options.stateChainId ?? 84532,
-    expectedChainId: 84532,
-    bootstrap: PCA_CONTRACTS,
   };
   const progress: IdentityWalletProgressEvent[] = [];
   const submitter = identityWalletActionSubmitter({
@@ -158,7 +147,7 @@ describe('identity wallet key reads', () => {
 });
 
 describe('identity wallet hardware-signed writes', () => {
-  it('registers an operational wallet through Profile after verifying the signer is admin', async () => {
+  it('registers through Profile without any PCA bootstrap after verifying the signer is admin', async () => {
     const h = makeHarness({ operationalAddresses: [PRIMARY] });
     const result = await h.submitter.addOperational('61', TARGET);
     expect(h.writeContract).toHaveBeenCalledOnce();

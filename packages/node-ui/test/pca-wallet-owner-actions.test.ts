@@ -138,6 +138,7 @@ function makeHarness(opts: {
   const walletClient: MinimalWalletClient = { writeContract };
   const progress: WalletTxProgressEvent[] = [];
   const submitter = walletOwnerActionSubmitter({
+    bootstrap: CONTRACTS,
     getWalletState: () => state,
     publicClientFor: () => publicClient,
     walletClientFromProvider: () => walletClient,
