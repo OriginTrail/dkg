@@ -265,7 +265,7 @@ describe('@unit RandomSampling', () => {
 
   describe('version()', () => {
     it('Should return correct version', async () => {
-      expect(await RandomSampling.version()).to.equal('10.6.0');
+      expect(await RandomSampling.version()).to.equal('10.6.1');
     });
   });
 
@@ -361,6 +361,16 @@ describe('@unit RandomSampling', () => {
   });
 
   describe('Access Control Modifiers', () => {
+    it('rejects contract callers before profile lookup so challenge draws cannot be ground', async () => {
+      const walletFactory = await hre.ethers.getContractFactory('MockRandomSamplingWallet');
+      const wallet = await walletFactory.deploy();
+      await wallet.waitForDeployment();
+
+      await expect(wallet.createChallenge(RandomSampling.target))
+        .to.be.revertedWithCustomError(RandomSampling, 'ContractCallerNotAllowed')
+        .withArgs(wallet.target);
+    });
+
     it('Should revert createChallenge if profile does not exist', async () => {
       await expect(
         RandomSampling.connect(accounts[5]).createChallenge(),
