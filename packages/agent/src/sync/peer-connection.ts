@@ -1,5 +1,6 @@
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerSyncConnection } from '../p2p/peer-connection.js';
+import { NetworkAdmissionProbeError } from '../p2p/network-admission-coordinator.js';
 import type { PeerSyncSession } from './peer-sync-session.js';
 
 export interface PeerConnectionSyncPorts {
@@ -46,8 +47,15 @@ export async function syncOpenedPeerConnection(
       admitted = await session.step(() => ports.ensureAdmitted(remotePeer, ctx, signal));
     } catch (err: unknown) {
       signal.throwIfAborted();
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
+      // NetworkAdmissionCoordinator already emits the retryable probe failure
+      // with the peer-specific reason. Repeating it here on every connection
+      // callback doubled the hottest network-churn warning without adding
+      // information. Keep this wrapper warning for unexpected failures whose
+      // owner cannot provide its own diagnostic.
+      if (!(err instanceof NetworkAdmissionProbeError)) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
+      }
       rejectCatalogReplay();
       return;
     }
