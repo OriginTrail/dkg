@@ -447,7 +447,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 
 - `GET /api/status`, `GET /api/info` — node status and health
 - `POST /api/agent/register`, `GET /api/agent/identity` — agent identity
-- `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management
+- `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management. Prefer `GET /api/context-graph/list?limit=100&projection=summary`; follow `nextCursor`, restart at page one after `409 CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED`, and reuse the first-page `ETag` for polling. Bounded pages contain at most 100 rows and 64 KiB of JSON. The parameterless legacy response remains available.
 - `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/vm/publish`, `/{name}/vm/publish-async`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — named knowledge asset lifecycle
 - `POST /api/query`, `POST /api/query-remote` — SPARQL querying
 - `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verifiable Memory trust operations

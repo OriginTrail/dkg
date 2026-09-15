@@ -523,17 +523,10 @@ function scrubResponseBody(value: unknown): unknown {
   return value;
 }
 
-export function jsonResponse(
-  res: ServerResponse,
-  status: number,
+export function serializeJsonResponseBody(
   data: unknown,
-  corsOrigin?: string | null,
-  extraHeaders?: Record<string, string>,
-): void {
-  const origin =
-    corsOrigin !== undefined
-      ? corsOrigin
-      : (((res as any).__corsOrigin as string | null) ?? null);
+  status = 200,
+): string {
   const scrubbed = scrubResponseBody(data);
   const rawBody = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
@@ -621,12 +614,63 @@ export function jsonResponse(
         )
         .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "")
     : rawBody;
-  res.writeHead(status, {
+  return body;
+}
+
+export function composeVaryHeader(...values: Array<string | undefined>): string | undefined {
+  const names = new Map<string, string>();
+  for (const value of values) {
+    for (const rawName of value?.split(',') ?? []) {
+      const name = rawName.trim();
+      if (name) names.set(name.toLowerCase(), name);
+    }
+  }
+  return names.size > 0 ? [...names.values()].join(', ') : undefined;
+}
+
+export function jsonResponseHeaders(
+  res: ServerResponse,
+  corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
+): Record<string, string> {
+  const origin = corsOrigin !== undefined
+    ? corsOrigin
+    : (((res as any).__corsOrigin as string | null) ?? null);
+  const cors = corsHeaders(origin);
+  const vary = composeVaryHeader(cors.Vary, extraHeaders?.Vary);
+  return {
     "Content-Type": "application/json",
-    ...corsHeaders(origin),
+    ...cors,
     ...(extraHeaders ?? {}),
-  });
+    ...(vary === undefined ? {} : { Vary: vary }),
+  };
+}
+
+export function jsonSerializedResponse(
+  res: ServerResponse,
+  status: number,
+  body: string,
+  corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
+): void {
+  res.writeHead(status, jsonResponseHeaders(res, corsOrigin, extraHeaders));
   res.end(body);
+}
+
+export function jsonResponse(
+  res: ServerResponse,
+  status: number,
+  data: unknown,
+  corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
+): void {
+  jsonSerializedResponse(
+    res,
+    status,
+    serializeJsonResponseBody(data, status),
+    corsOrigin,
+    extraHeaders,
+  );
 }
 
 export function safeDecodeURIComponent(
@@ -1675,7 +1719,7 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
   if (!origin) return {};
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match",
   };
   if (origin !== "*") headers["Vary"] = "Origin";
   return headers;
