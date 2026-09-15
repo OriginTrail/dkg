@@ -18,6 +18,8 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DKGAgent } from '../src/index.js';
+import { CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS } from
+  '../src/dkg-agent-constants.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   mintRfc64UnregisteredReplicaAuthorityEvidenceV1,
@@ -182,9 +184,17 @@ describe('RFC-64 unregistered replica authority', () => {
   });
 
   it('rejects forged, wrong-owner and cross-context replay evidence', async () => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
     const receiver = await startAgent({
       name: 'unregistered-evidence-adversarial-receiver',
-      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
     });
     const valid = await mintEvidence({
       wallet: OWNER_WALLET,
@@ -232,6 +242,18 @@ describe('RFC-64 unregistered replica authority', () => {
       undefined,
       { kind: 'finalized-absence' },
     )).rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { allowSubscriptionFallback: false },
+    )).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    expect((receiver as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      CONTEXT_GRAPH_ID,
+    )).toBeNull();
   });
 
   it('fences stale absence reconciliation behind later finalized registration', async () => {
@@ -554,7 +576,7 @@ describe('RFC-64 unregistered replica authority', () => {
       CONTEXT_GRAPH_ID,
     )).resolves.toMatchObject({
       kind: 'unavailable',
-      reason: 'chain-name-binding-unavailable',
+      reason: 'finalized-name-absence-unaccepted',
     });
     await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
       CONTEXT_GRAPH_ID,
@@ -599,7 +621,7 @@ describe('RFC-64 unregistered replica authority', () => {
     })).resolves.toMatchObject({
       outcome: 'unavailable',
       source: 'registered-chain',
-      reason: 'chain-name-binding-unavailable',
+      reason: 'finalized-name-absence-unaccepted',
     });
 
     expect(resolveFinalized).toHaveBeenCalledOnce();
@@ -671,6 +693,281 @@ describe('RFC-64 unregistered replica authority', () => {
     expect(pointRead).not.toHaveBeenCalled();
     expect(legacyScalar).not.toHaveBeenCalled();
     expect(legacyBatch).not.toHaveBeenCalled();
+  });
+
+  it('authenticates owner evidence at the cold subscription boundary', async () => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const pointRead = vi.fn(async () => { throw new Error('must not point-read'); });
+    const legacyScalar = vi.fn(async () => { throw new Error('must not legacy scalar-read'); });
+    const legacyBatch = vi.fn(async () => { throw new Error('must not legacy batch-read'); });
+    const whenIdle = vi.fn(async () => undefined);
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointRead,
+      resolveContextGraphIdByNameHash: legacyScalar,
+      resolveContextGraphIdsByNameHashes: legacyBatch,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle,
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unregistered-evidence-subscription-bootstrap',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    await storeOf(receiver).insert([evidenceQuad(await mintEvidence({
+      wallet: OWNER_WALLET,
+      owner: OWNER,
+      contextGraphId: CONTEXT_GRAPH_ID,
+    }))]);
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { allowSubscriptionFallback: false },
+    )).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'rfc64-public',
+    });
+    expect((receiver as any).hasAcceptedRfc64UnregisteredAuthorityV1(
+      CONTEXT_GRAPH_ID,
+    )).toBe(true);
+    expect(resolveFinalized).toHaveBeenCalledTimes(2);
+    expect(whenIdle).toHaveBeenCalledTimes(2);
+    expect(pointRead).not.toHaveBeenCalled();
+    expect(legacyScalar).not.toHaveBeenCalled();
+    expect(legacyBatch).not.toHaveBeenCalled();
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
+  it('does not promote a cold private owner policy through public subscription bootstrap', async () => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unregistered-private-evidence-cold-subscription',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    await storeOf(receiver).insert([evidenceQuad(await mintEvidence({
+      wallet: OWNER_WALLET,
+      owner: OWNER,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      accessPolicy: 1,
+    }))]);
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      {
+        callerAgentAddress: OWNER,
+        allowSubscriptionFallback: false,
+      },
+    )).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    expect(resolveFinalized).toHaveBeenCalledOnce();
+    expect((receiver as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      CONTEXT_GRAPH_ID,
+    )).toBeNull();
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
+  it('keeps repeated missing-evidence subscription retries on the finalized index lane', async () => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const pointRead = vi.fn(async () => { throw new Error('must not point-read'); });
+    const legacyScalar = vi.fn(async () => { throw new Error('must not legacy scalar-read'); });
+    const legacyBatch = vi.fn(async () => { throw new Error('must not legacy batch-read'); });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointRead,
+      resolveContextGraphIdByNameHash: legacyScalar,
+      resolveContextGraphIdsByNameHashes: legacyBatch,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unregistered-missing-evidence-subscription-retries',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+        CONTEXT_GRAPH_ID,
+        { allowSubscriptionFallback: false },
+      )).resolves.toMatchObject({
+        outcome: 'unavailable',
+        source: 'registered-chain',
+        reason: 'finalized-name-absence-unaccepted',
+      });
+    }
+    expect(resolveFinalized).toHaveBeenCalledTimes(3);
+    expect(pointRead).not.toHaveBeenCalled();
+    expect(legacyScalar).not.toHaveBeenCalled();
+    expect(legacyBatch).not.toHaveBeenCalled();
+    expect((receiver as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      CONTEXT_GRAPH_ID,
+    )).toBeNull();
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
+  it('replaces replica authority when registration finalizes during bootstrap', async () => {
+    const registered = finalizedAuthoritySnapshot();
+    let finalizedReads = 0;
+    const resolveFinalized = vi.fn(async (nameHashes: readonly string[]) => {
+      finalizedReads += 1;
+      return finalizedReads === 1
+        ? new Map()
+        : new Map([[nameHashes[0]!, registered]]);
+    });
+    const pointRead = vi.fn(async () => { throw new Error('must not point-read'); });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointRead,
+      isContextGraphActiveOnChain: vi.fn(async () => true),
+      getContextGraphAccessPolicy: vi.fn(async () => 0),
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unregistered-evidence-registration-during-bootstrap',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    await storeOf(receiver).insert([evidenceQuad(await mintEvidence({
+      wallet: OWNER_WALLET,
+      owner: OWNER,
+      contextGraphId: CONTEXT_GRAPH_ID,
+    }))]);
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { allowSubscriptionFallback: false },
+    )).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'registered-chain',
+      onChainId: BigInt(registered.contextGraphId),
+    });
+    expect((receiver as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      CONTEXT_GRAPH_ID,
+    )).toMatchObject({ policy: { source: { kind: 'finalized-chain' } } });
+    expect(resolveFinalized).toHaveBeenCalledTimes(4);
+    expect(pointRead).not.toHaveBeenCalled();
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
+  it('preserves a private registration denial that finalizes during bootstrap', async () => {
+    const registered = Object.freeze({
+      ...finalizedAuthoritySnapshot(),
+      accessPolicy: 1 as const,
+    });
+    let finalizedReads = 0;
+    const resolveFinalized = vi.fn(async (nameHashes: readonly string[]) => {
+      finalizedReads += 1;
+      return finalizedReads === 1
+        ? new Map()
+        : new Map([[nameHashes[0]!, registered]]);
+    });
+    const pointRead = vi.fn(async () => { throw new Error('must not point-read'); });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointRead,
+      isContextGraphActiveOnChain: vi.fn(async () => true),
+      getContextGraphAccessPolicy: vi.fn(async () => 1),
+      getContextGraphParticipantAgents: vi.fn(async () => []),
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unregistered-private-registration-during-bootstrap',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    await storeOf(receiver).insert([evidenceQuad(await mintEvidence({
+      wallet: OWNER_WALLET,
+      owner: OWNER,
+      contextGraphId: CONTEXT_GRAPH_ID,
+    }))]);
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { allowSubscriptionFallback: false },
+    )).resolves.toMatchObject({
+      outcome: 'denied',
+      source: 'registered-chain',
+      reason: 'agent-not-in-chain-roster',
+      onChainId: BigInt(registered.contextGraphId),
+      metadataBootstrap: 'forbidden',
+    });
+    expect(resolveFinalized).toHaveBeenCalledTimes(2);
+    expect(pointRead).not.toHaveBeenCalled();
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
+  it('bounds a stalled subscription evidence read and leaves no accepted authority', async () => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unregistered-evidence-subscription-store-timeout',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+    const store = storeOf(receiver);
+    const realQuery = store.query.bind(store);
+    let evidenceReadStarted!: () => void;
+    const started = new Promise<void>((resolve) => { evidenceReadStarted = resolve; });
+    vi.spyOn(store, 'query').mockImplementation((sparql, options) => {
+      if (!sparql.includes(RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1)) {
+        return realQuery(sparql, options);
+      }
+      evidenceReadStarted();
+      return new Promise(() => undefined);
+    });
+
+    vi.useFakeTimers();
+    try {
+      const authority = receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+        CONTEXT_GRAPH_ID,
+        { allowSubscriptionFallback: false },
+      );
+      await started;
+      await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS);
+      await expect(authority).resolves.toMatchObject({
+        outcome: 'unavailable',
+        source: 'registered-chain',
+        reason: 'chain-name-binding-unavailable',
+      });
+      expect(resolveFinalized).toHaveBeenCalledOnce();
+      expect((receiver as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+        NETWORK_ID,
+        CONTEXT_GRAPH_ID,
+      )).toBeNull();
+      expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

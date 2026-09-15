@@ -399,6 +399,7 @@ export type ContextGraphRegistrationBinding =
       reason:
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
+        | 'finalized-name-absence-unaccepted'
         | 'chain-name-binding-unavailable';
       detail?: string;
     };
@@ -1256,7 +1257,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
                 ? { kind: 'unregistered' } as const
                 : {
                     kind: 'unavailable' as const,
-                    reason: 'chain-name-binding-unavailable' as const,
+                    reason: 'finalized-name-absence-unaccepted' as const,
                     detail: 'finalized name absence has no accepted owner-signed unregistered authority',
                   };
             }

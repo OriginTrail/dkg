@@ -386,6 +386,7 @@ import {
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
+import { runBoundedOperation } from './bounded-operation.js';
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -769,17 +770,101 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    return resolveContextGraphReadAuthorityDecision(
-      QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-        this,
-        contextGraphId,
-        opts,
-        CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-          ? true
-          : undefined,
-      ),
-    );
+    try {
+      return await runBoundedOperation(
+        async (signal) => {
+          const boundedOpts = { ...opts, signal };
+          const resolve = () => resolveContextGraphReadAuthorityDecision(
+            QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+              this,
+              contextGraphId,
+              boundedOpts,
+              CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+              this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                ? true
+                : undefined,
+            ),
+          );
+          const initial = await resolve();
+          if (
+            initial.outcome !== 'unavailable'
+            || initial.reason !== 'finalized-name-absence-unaccepted'
+          ) return initial;
+
+          // The finalized index proved exact absence, but a replica cannot
+          // consume that fact until it authenticates the owner-signed policy
+          // copied through the ontology graph. Reconcile once at this explicit
+          // admission boundary; ordinary reads and periodic sweeps remain
+          // unable to promote unsigned metadata or reopen legacy scalar RPC
+          // discovery. A forged/missing seed preserves the initial denial.
+          try {
+            await this.reconcileRfc64CatalogAccessAuthorityV1(
+              contextGraphId,
+              signal,
+              Object.freeze({ kind: 'finalized-absence' }),
+            );
+          } catch {
+            return initial;
+          }
+          const afterReplicaAcceptance = await resolve();
+          if (afterReplicaAcceptance.outcome !== 'allowed') {
+            return afterReplicaAcceptance;
+          }
+          if (
+            afterReplicaAcceptance.source !== 'registered-chain'
+            || afterReplicaAcceptance.onChainId === undefined
+          ) return afterReplicaAcceptance;
+
+          // Registration may finalize while the signed ontology evidence is
+          // being authenticated. Do not return a registered admission while
+          // the catalog still holds the just-accepted public unregistered
+          // generation: a private registration would otherwise create a
+          // permissive window when the route activates its subscription.
+          // Refresh the exact finalized generation before returning; failure
+          // remains unavailable and the route creates no subscription.
+          try {
+            const requests = await this.createRfc64CatalogAuthorityRefreshRequestsV1(
+              [contextGraphId],
+              signal,
+            );
+            const request = requests.get(contextGraphId);
+            if (request?.kind !== 'finalized-evidence') {
+              return {
+                outcome: 'unavailable',
+                source: 'registered-chain',
+                reason: 'chain-name-binding-unavailable',
+                metadataBootstrap: 'eligible',
+              };
+            }
+            await this.reconcileRfc64CatalogAccessAuthorityV1(
+              contextGraphId,
+              signal,
+              request,
+            );
+          } catch {
+            return {
+              outcome: 'unavailable',
+              source: 'registered-chain',
+              reason: 'registered-authority-error',
+              metadataBootstrap: 'eligible',
+            };
+          }
+          return resolve();
+        },
+        {
+          label: `resolveContextGraphSubscriptionBootstrapAuthority(${contextGraphId})`,
+          timeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+          signal: opts.signal,
+        },
+      );
+    } catch {
+      return {
+        outcome: 'unavailable',
+        source: 'registered-chain',
+        reason: 'chain-name-binding-unavailable',
+        metadataBootstrap: 'eligible',
+      };
+    }
   }
 
   private async resolveContextGraphReadAuthorityWithRegistrationTimeout(this: DKGAgent,
