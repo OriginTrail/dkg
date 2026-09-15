@@ -2535,6 +2535,8 @@ export class DKGAgent extends DKGAgentBase {
     this.randomSamplingRuntime?.cancel();
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
+    const rehydrationPromotionDrain =
+      this.contextGraphSubscriptionRehydrationPromotionRuntime?.close() ?? null;
     // Fence every detached RFC-64 responsibility, observer, and recovery RPC
     // before sampling the physical drain. This owner signal reaches governor
     // admission and active HTTP through the shared request context.
@@ -2619,6 +2621,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
+    if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);

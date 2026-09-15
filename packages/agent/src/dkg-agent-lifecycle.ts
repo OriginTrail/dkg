@@ -501,6 +501,16 @@ import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-li
 const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 /** Yield to the event loop every N activations so concurrent store work can interleave. */
 const REHYDRATE_THROTTLE_BATCH = 8;
+/** Retry interval for a persisted-subscription activation that is waiting for a slot. */
+const REHYDRATION_ROLLING_RETRY_MS = 30_000;
+
+function rehydratedSubscriptionReachedSafeState(
+  subscription: Pick<ContextGraphSub, 'synced' | 'metaSynced' | 'pendingMeta'>,
+): boolean {
+  return subscription.synced === true
+    && subscription.metaSynced !== false
+    && subscription.pendingMeta !== true;
+}
 // A large rootless VM snapshot may need more than one graph-aligned fetch
 // window. Keep the post-approval bootstrap on the authenticated curator while
 // every round makes verified progress, instead of falling into a broad peer
@@ -2081,6 +2091,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       new InMemoryProtocolOutboxStore();
     assertBoundedProtocolOutboxStore(outboxStore);
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
+    await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
@@ -4248,6 +4259,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.getContextGraphSubscriptionRehydrationStatus()
       ?.dormantReasons.authorityUnavailable.length) {
       authorityRecovery.schedule();
+    }
+    const rehydrationPromotion = new CoalescingRecurringTask({
+      retryIntervalMs: REHYDRATION_ROLLING_RETRY_MS,
+      requestWhileRunning: 'drop',
+      runPass: async (signal) => this.promoteDormantContextGraphSubscriptions(signal),
+      onError: (error) => {
+        this.log.warn(
+          ctx,
+          `Rolling context-graph subscription activation failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+      closingMessage: 'Rolling context-graph subscription activation closing',
+    });
+    this.contextGraphSubscriptionRehydrationPromotionRuntime = rehydrationPromotion;
+    if (this.contextGraphSubscriptionRehydrationPendingIds.size > 0) {
+      // Give the initial activation pass a full startup window.  Rows that
+      // were already safe at boot do not emit a later slot-release transition;
+      // the delayed first pass still drains those rows without extending the
+      // synchronous startup fanout beyond the configured cap.
+      rehydrationPromotion.schedule(REHYDRATION_ROLLING_RETRY_MS);
     }
   }
 
@@ -9060,6 +9093,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    const rehydratedUserSubscription =
+      this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled === true
+      && this.contextGraphSubscriptionRehydrationStatus.activationCap > 0
+      && this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)
+      && canonicalNext.coreHosted !== true
+      && canonicalNext.subscribed === true;
+    if (rehydratedUserSubscription) {
+      if (rehydratedSubscriptionReachedSafeState(canonicalNext)) {
+        if (this.contextGraphSubscriptionRehydrationSlotIds.delete(contextGraphId)) {
+          this.log.info(
+            createOperationContext('init'),
+            `Rehydrated context-graph subscription "${contextGraphId}" reached a safe state; rolling activation slot released`,
+          );
+          this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+        }
+      } else {
+        // Readiness can regress after a later metadata/bootstrap reset. Keep
+        // the rolling slot occupied until that new recovery cycle is safe.
+        this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
+      }
+    } else if (this.contextGraphSubscriptionRehydrationSlotIds?.delete(contextGraphId)) {
+      // An unsubscribe/deactivation also frees a slot, even though it does not
+      // satisfy the normal synced readiness signal.
+      this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+    }
     const configuredRfc64Authority =
       this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId];
     if (
@@ -9309,6 +9367,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     for (const id of clearedSet) {
       if (systemContextGraphs.has(id)) continue;
+      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+      this.contextGraphSubscriptionRehydrationSlotIds.delete(id);
       const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
       const wasDormant = dormancyById.delete(id);
       removeFrom(hostedActivatedIds, id);
@@ -9320,6 +9380,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     for (const id of new Set(deactivatedIds)) {
       if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
+      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+      this.contextGraphSubscriptionRehydrationSlotIds.delete(id);
       if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
       removeFrom(hostedActivatedIds, id);
       if (!dormancyById.has(id)) {
@@ -10102,6 +10164,170 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Promote the next durable subscription when a rolling rehydration slot is
+   * released.  The startup pass deliberately leaves capped rows out of the
+   * live projection; this pass is the only automatic path that brings them
+   * online afterwards.  Every candidate is re-read from the durable store so
+   * an unsubscribe/delete racing with the timer cannot resurrect stale state.
+   */
+  async promoteDormantContextGraphSubscriptions(
+    this: DKGAgent,
+    signal: AbortSignal,
+  ): Promise<'rearm' | 'idle'> {
+    const store = this.config.contextGraphSubscriptionStore;
+    const status = this.contextGraphSubscriptionRehydrationStatus;
+    const runtime = this.contextGraphSubscriptionRehydrationPromotionRuntime;
+    if (
+      !store
+      || !status?.rehydrationEnabled
+      || status.activationCap <= 0
+      || !this.started
+      || !runtime?.owns(signal)
+    ) return 'idle';
+
+    const ctx = createOperationContext('init');
+    const loadRow = async (contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null> => (
+      store.load
+        ? store.load(contextGraphId)
+        : store.loadAll().then((rows) => rows.find((row) => row.id === contextGraphId) ?? null)
+    );
+    const touchStatus = (): void => {
+      const current = this.contextGraphSubscriptionRehydrationStatus;
+      if (current !== null) {
+        this.contextGraphSubscriptionRehydrationStatus = {
+          ...current,
+          updatedAt: Date.now(),
+        };
+      }
+    };
+    const pending = [...this.contextGraphSubscriptionRehydrationPendingIds]
+      .filter((id) => this.contextGraphSubscriptionDormancyById.get(id) === 'activationCap')
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    for (let i = 0; i < pending.length; i++) {
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (this.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
+      const contextGraphId = pending[i];
+      if (
+        !this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        || this.contextGraphSubscriptionDormancyById.get(contextGraphId) !== 'activationCap'
+      ) continue;
+
+      let row = await loadRow(contextGraphId);
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (row === null) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        continue;
+      }
+      // Rows without durable subscription or hosting intent are not eligible
+      // for activation.  A concurrent write may have removed that intent
+      // after startup even when the row still exists in a custom store.
+      if (!row.subscribed && !row.coreHosted) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        continue;
+      }
+      if (this.subscribedContextGraphs.has(contextGraphId)) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        continue;
+      }
+
+      const authority = await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+        allowSubscriptionFallback: false,
+        signal,
+      }).catch(() => ({
+        outcome: 'unavailable' as const,
+        source: 'legacy-local' as const,
+        reason: 'unexpected-authority-error',
+        metadataBootstrap: 'eligible' as const,
+      }));
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (authority.outcome !== 'allowed') {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.contextGraphSubscriptionDormancyById.set(
+          contextGraphId,
+          authority.outcome === 'denied' ? 'authorityDenied' : 'authorityUnavailable',
+        );
+        touchStatus();
+        this.log.warn(
+          ctx,
+          `Left pending persisted context-graph subscription "${contextGraphId}" dormant: ` +
+            `${authority.outcome} by ${authority.source} (${authority.reason})`,
+        );
+        continue;
+      }
+
+      // Authority resolution may yield while an operator unsubscribes or a
+      // store writer replaces the durable row. Reconcile that boundary before
+      // installing any network effects so a stale timer cannot resurrect the
+      // old record.
+      const freshRow = await loadRow(contextGraphId);
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (freshRow === null) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        continue;
+      }
+      if (!freshRow.subscribed && !freshRow.coreHosted) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        continue;
+      }
+      row = freshRow;
+
+      try {
+        await this.activatePersistedContextGraphSubscriptionRecord(row, {
+          updateRehydrationStatus: false,
+        });
+      } catch (error) {
+        // Keep the durable row pending and retain its activation-cap dormancy;
+        // the recurring owner will retry after its bounded delay.
+        this.log.warn(
+          ctx,
+          `Could not promote pending context-graph subscription "${contextGraphId}": ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+        return 'rearm';
+      }
+      if (!runtime.owns(signal)) return 'idle';
+
+      this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+      this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, {
+        subscribed: row.subscribed,
+        coreHosted: row.coreHosted,
+      });
+      const activated = this.subscribedContextGraphs.get(contextGraphId);
+      if (
+        !row.coreHosted
+        && activated
+        && !rehydratedSubscriptionReachedSafeState(activated)
+      ) {
+        this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
+      }
+      this.log.info(
+        ctx,
+        `Promoted pending persisted context-graph subscription "${contextGraphId}"; ` +
+          `pending=${this.contextGraphSubscriptionRehydrationPendingIds.size}, ` +
+          `slots=${this.contextGraphSubscriptionRehydrationSlotIds.size}/${status.activationCap}`,
+      );
+      if ((i + 1) % REHYDRATE_THROTTLE_BATCH === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    return this.contextGraphSubscriptionRehydrationPendingIds.size > 0
+      && this.contextGraphSubscriptionRehydrationSlotIds.size < status.activationCap
+      ? 'rearm'
+      : 'idle';
+  }
+
   /** Bootstrap durable Context Graph projections in explicit ownership order. */
   async rehydrateContextGraphsFromDurableState(this: DKGAgent): Promise<void> {
     const ctx = createOperationContext('init');
@@ -10160,6 +10386,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const store = this.config.contextGraphSubscriptionStore;
+    this.contextGraphSubscriptionRehydrationSlotIds.clear();
+    this.contextGraphSubscriptionRehydrationPendingIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     try {
@@ -10249,20 +10477,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
 
-      // Cap how many subscriptions we ACTIVATE on boot. Activation
-      // (in-memory restore + sync-track + gossip subscribe + member persist)
-      // does store-touching work per row; a large stale backlog fans this out
-      // and starves authenticated store-backed routes (#997 — a node that had
-      // "Rehydrated 173" wedged every authenticated write/query while storeless
-      // /api/status stayed green). Rows beyond the cap stay PERSISTED but
-      // dormant — they re-activate on next explicit access, or an operator
-      // prunes them via `DELETE /api/context-graph/subscriptions`. Prioritise
-      // core-hosted, then subscribed, so the kept set is the most relevant.
-      // NOTE: a dormant (capped-out) row has no in-memory entry, so individual
-      // `POST /api/context-graph/unsubscribe` can't target it — the bulk DELETE
-      // above is the prune path for the stale backlog by design. (Follow-up:
-      // reconcile contextGraphMembershipStore for rows left dormant / cleared so
-      // a prior `active` local-node membership row doesn't linger.)
+      // Bound how many non-hosted subscriptions are being brought online at
+      // once. Activation (in-memory restore + sync-track + gossip subscribe +
+      // member persist) does store-touching work per row; a large stale
+      // backlog fans this out and starves authenticated store-backed routes
+      // (#997 — a node that had "Rehydrated 173" wedged every authenticated
+      // write/query while storeless /api/status stayed green). Rows beyond
+      // the cap stay PERSISTED but dormant and are promoted when an earlier
+      // rehydrated subscription reaches a safe synced state. Prioritise
+      // core-hosted, then subscribed, so the first set is most relevant.
+      // A dormant (capped-out) row has no in-memory entry, so individual
+      // `POST /api/context-graph/unsubscribe` cannot target it. The row remains
+      // eligible for rolling activation or bulk pruning through the existing
+      // DELETE endpoint.
       // coreHosted graphs MUST always be restored — their chain-driven
       // reconcile / host-mode path depends on it — so EXEMPT them from the cap.
       // The cap (a #997 anti-wedge measure) applies only to the non-hosted
@@ -10272,7 +10499,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const byId = (a: ContextGraphSubscriptionRecord, b: ContextGraphSubscriptionRecord): number =>
         a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
       const hostedRows = rows.filter((r) => r.coreHosted).sort(byId);
-      const userRows = [...rows.filter((r) => !r.coreHosted)].sort(
+      const userRows = rows.filter((r) => !r.coreHosted).sort(
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
       const toActivate = [...hostedRows, ...userRows];
@@ -10285,8 +10512,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // The cap limits successful non-hosted activations, not candidates.
         // A denied/unavailable row therefore cannot consume capacity that a
         // later authorized subscription could use.
-        if (!row.coreHosted && cap > 0 && activatedUserRows >= cap) {
+        if (
+          !row.coreHosted
+          && cap > 0
+          && activatedUserRows >= cap
+        ) {
           dormancyById.set(row.id, 'activationCap');
+          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           continue;
         }
         const approvedAgentAddress = row.subscribed
@@ -10352,6 +10584,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           restorePendingMeta,
         });
+        if (
+          !row.coreHosted
+          && cap > 0
+          && !rehydratedSubscriptionReachedSafeState({
+            synced: restorePendingMeta ? false : row.synced,
+            metaSynced: restorePendingMeta ? false : row.metaSynced,
+            pendingMeta: restorePendingMeta,
+          })
+        ) {
+          this.contextGraphSubscriptionRehydrationSlotIds.add(row.id);
+        }
         if (restrictedApprovalBootstrap) {
           const curatorPeerId = this.preferredSyncPeers.get(row.id);
           this.log.info(
@@ -10419,7 +10662,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.log.warn(
           ctx,
           `${dormancy.dormantReasons.activationCap.length} context-graph subscription(s) left dormant by the activation cap. ` +
-            `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
+            `They will be promoted as rehydrated work reaches a safe state; prune stale ones via ` +
+            `'DELETE /api/context-graph/subscriptions', or raise ` +
             `maxRehydratedContextGraphSubscriptions. Inspect ` +
             `'GET /api/context-graph/subscriptions' for dormant ids.`,
         );
