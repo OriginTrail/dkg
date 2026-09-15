@@ -24,9 +24,12 @@ import {
   normalizeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
+  withOwnedRpcRequestContext,
   withRpcRequestContext,
+  withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 
 /**
@@ -36,6 +39,37 @@ import {
  * range reader below.
  */
 const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
+
+/** Bound one physical authority-index RPC without capping the durable scan. */
+export function readEvmContextGraphAuthorityIndexRpcV1<T>(
+  operation: string,
+  read: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const bounded = () => withRpcRequestTimeout(
+    RPC_LOG_SCAN_TIMEOUT_MS,
+    operation,
+    read,
+  );
+  return signal === undefined
+    ? bounded()
+    : withRpcRequestContext({ signal }, bounded);
+}
+
+/**
+ * Shared page/hash work belongs to the authority-index lifecycle, not to the
+ * first caller whose AsyncLocalStorage context starts the single flight.
+ */
+function readOwnedAuthorityIndexRpcV1<T>(
+  lifecycleSignal: AbortSignal,
+  operation: string,
+  read: () => Promise<T>,
+): Promise<T> {
+  return withOwnedRpcRequestContext(
+    { signal: lifecycleSignal },
+    () => readEvmContextGraphAuthorityIndexRpcV1(operation, read),
+  );
+}
 
 function boundedAuthorityIndexPageSizeV1(pageSize: number): number {
   return Number.isSafeInteger(pageSize)
@@ -77,15 +111,17 @@ function authorityIndexScanInputV1(
     pageSize: boundedAuthorityIndexPageSizeV1(input.pageSize),
     signal: input.signal,
     readBlockHash: async (blockNumber, lifecycleSignal) => (
-      (await withRpcRequestContext(
-        { signal: lifecycleSignal },
+      (await readOwnedAuthorityIndexRpcV1(
+        lifecycleSignal,
+        `${input.stabilizationOperation} block ${blockNumber}`,
         () => input.provider.getBlock(blockNumber),
       ))?.hash ?? null
     ),
     readPage: async (fromBlock, toBlock, lifecycleSignal) => {
       const logs = await readAdaptiveEvmLogRange({
-        read: (rangeFrom, rangeTo) => withRpcRequestContext(
-          { signal: lifecycleSignal },
+        read: (rangeFrom, rangeTo) => readOwnedAuthorityIndexRpcV1(
+          lifecycleSignal,
+          `${input.stabilizationOperation} logs ${rangeFrom}-${rangeTo}`,
           () => input.provider.getLogs({
             address: input.contractAddress,
             topics: [[...authorityTopics]],
@@ -115,12 +151,11 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
     value,
     stabilize: async () => {
       input.signal?.throwIfAborted();
-      const stable = input.signal === undefined
-        ? await input.provider.getBlock(input.finalized.number)
-        : await withRpcRequestContext(
-            { signal: input.signal },
-            () => input.provider.getBlock(input.finalized.number),
-          );
+      const stable = await readEvmContextGraphAuthorityIndexRpcV1(
+        `${input.stabilizationOperation} stabilization block`,
+        () => input.provider.getBlock(input.finalized.number),
+        input.signal,
+      );
       if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
         throw new Error(
           `finalized Context Graph authority anchor changed during ${input.stabilizationOperation}`,
@@ -262,7 +297,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return dependencies.readTipProvider(
       operationLabel,
       (provider) => lifecycle.run(async () => {
-        const finalized = await provider.getBlock('finalized');
+        const finalized = await readEvmContextGraphAuthorityIndexRpcV1(
+          `${operationLabel} finalized head`,
+          () => provider.getBlock('finalized'),
+          options.signal,
+        );
         if (finalized === null || finalized.hash === null) {
           throw new Error('finalized Context Graph authority block is unavailable');
         }
@@ -298,7 +337,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             || isRpcEndpointFailoverEligible(error)
           )
         ),
-        policy: 'wideLogScan',
+        policy: 'durablePagedLogScan',
       },
     );
   };
@@ -353,7 +392,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       operationLabel,
       options,
       async (scan, { provider, contractAddress }) => {
-        const chainId = (await provider.getNetwork()).chainId.toString(10);
+        const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
+          `${operationLabel} network`,
+          () => provider.getNetwork(),
+          options.signal,
+        )).chainId.toString(10);
         const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
         for (
           let offset = 0;
@@ -386,8 +429,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   return Object.freeze({
-    whenIdle(): Promise<void> {
-      return lifecycle.whenIdle();
+    async whenIdle(): Promise<void> {
+      await Promise.all([
+        lifecycle.whenIdle(),
+        dependencies.index.whenIdle(),
+      ]);
     },
     async resolveFinalizedContextGraphIdByNameHash(
       nameHash: string,
@@ -477,7 +523,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         'readContextGraphAuthorityIndexSnapshots',
         options,
         async (scan, { provider, contractAddress }) => {
-          const chainId = (await provider.getNetwork()).chainId.toString(10);
+          const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
+            'readContextGraphAuthorityIndexSnapshots network',
+            () => provider.getNetwork(),
+            options.signal,
+          )).chainId.toString(10);
           const snapshots = new Map<
             ContextGraphAuthorityIndexId,
             ContextGraphAuthoritySnapshot

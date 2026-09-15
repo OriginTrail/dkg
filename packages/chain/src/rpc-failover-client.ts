@@ -61,6 +61,7 @@ import {
 } from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 import {
+  waitForActiveRpcRequest,
   withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
@@ -91,6 +92,8 @@ export interface RpcEndpoint {
  * {@link resolveCapMs}.
  *   - `pointRead`           — a single `eth_call` / point provider read.
  *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
+ *   - `durablePagedLogScan` — a checkpointed scan whose physical requests
+ *     carry their own deadlines, so the complete projection is uncapped.
  *   - `watchdogPointRead`   — a background point read that must not wedge a
  *     one-RPC node.
  *   - `watchdogWideLogScan` — a background log scan that must not wedge a
@@ -101,6 +104,7 @@ export interface RpcEndpoint {
 export type ReadPolicy =
   | 'pointRead'
   | 'wideLogScan'
+  | 'durablePagedLogScan'
   | 'watchdogPointRead'
   | 'watchdogWideLogScan'
   | 'failOpenFundingRead';
@@ -245,6 +249,7 @@ export function isContractViewRetryable(err: unknown): boolean {
  *   |---------------------|--------------------------|-------------------------|
  *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
  *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
+ *   | durablePagedLogScan | uncapped                 | uncapped                |
  *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
  *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
@@ -255,6 +260,7 @@ export function isContractViewRetryable(err: unknown): boolean {
  * deadline over a multi-RPC failover sequence.
  */
 export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
+  if (policy === 'durablePagedLogScan') return undefined;
   if (policy === 'failOpenFundingRead' || policy === 'watchdogPointRead') {
     return RPC_READ_STALL_TIMEOUT_MS;
   }
@@ -377,7 +383,11 @@ export class RpcFailoverClient {
     );
     const run = () => this.runReadPasses(label, runPass, opts?.endpointSetRetry);
     const runWithAbort = () => opts?.signal
-      ? withRpcRequestContext({ signal: opts.signal }, run)
+      ? withRpcRequestContext({ signal: opts.signal }, () => (
+          policy === 'durablePagedLogScan'
+            ? waitForActiveRpcRequest(run())
+            : run()
+        ))
       : run();
     return opts?.rpcUsageConsumer
       ? withRpcUsageConsumer(opts.rpcUsageConsumer, runWithAbort)

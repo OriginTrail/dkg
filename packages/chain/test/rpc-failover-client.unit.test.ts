@@ -13,7 +13,7 @@
  * unit coverage has no other home once the loops leave the base, plus the
  * `resolveCapMs` policy matrix:
  *
- *   - resolveCapMs → the three policies × {single,multi} cap matrix (exhaustive).
+ *   - resolveCapMs → the named policies × {single,multi} cap matrix (exhaustive).
  *   - read / readContract → the matrix APPLIED (multi caps + fails over, single
  *     uncapped) + the view BAD_DATA classifier (non-retryable, surfaces directly)
  *     + a custom-classifier override. (The detailed control-flow + observability
@@ -84,7 +84,7 @@ describe('RPC retry disposition', () => {
   });
 });
 
-// ── resolveCapMs — the named timeout-policy matrix (exhaustive 3×2) ──────────
+// ── resolveCapMs — the named timeout-policy matrix ───────────────────────────
 describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => {
   it('pointRead: multi-RPC caps at RPC_READ_STALL_TIMEOUT_MS, single-RPC is uncapped (#894)', () => {
     expect(resolveCapMs('pointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
@@ -95,6 +95,11 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
   it('wideLogScan: multi-RPC caps at RPC_LOG_SCAN_TIMEOUT_MS, single-RPC is uncapped (#894)', () => {
     expect(resolveCapMs('wideLogScan', 2)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
     expect(resolveCapMs('wideLogScan', 1)).toBeUndefined();
+  });
+
+  it('durablePagedLogScan: aggregate provider attempts are uncapped', () => {
+    expect(resolveCapMs('durablePagedLogScan', 1)).toBeUndefined();
+    expect(resolveCapMs('durablePagedLogScan', 2)).toBeUndefined();
   });
 
   it('watchdog policies cap single-RPC attempts with the matching point/log deadline', () => {
