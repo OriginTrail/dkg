@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { pad, parseEther, type Address, type Hex, type TransactionReceipt } from 'viem';
 
 import type { PcaContracts } from '../src/ui/api.js';
+import { useWalletStore } from '../src/ui/stores/wallet.js';
 import type { Eip1193Provider } from '../src/ui/web3/eip6963.js';
 
 const apiMocks = vi.hoisted(() => ({
@@ -144,7 +145,17 @@ function makeHarness(opts: {
     walletClientFromProvider: () => walletClient,
     onProgress: (event) => progress.push(event),
   });
-  return { submitter, state, provider, readContract, waitForTransactionReceipt, writeContract, progress };
+  return {
+    submitter,
+    state,
+    provider,
+    readContract,
+    waitForTransactionReceipt,
+    writeContract,
+    publicClient,
+    walletClient,
+    progress,
+  };
 }
 
 beforeEach(() => {
@@ -152,6 +163,26 @@ beforeEach(() => {
 });
 
 describe('walletOwnerActionSubmitter create guards', () => {
+  it('reads browser wallet and PCA bootstrap state from the shared store by default', async () => {
+    const h = makeHarness({ allowanceQueue: [parseEther('5')] });
+    useWalletStore.setState(h.state);
+    const submitter = walletOwnerActionSubmitter({
+      publicClientFor: () => h.publicClient,
+      walletClientFromProvider: () => h.walletClient,
+    });
+
+    await expect(submitter.create({ tokens: '5', primaryNode: '42' }))
+      .resolves.toMatchObject({ accountId: '9' });
+  });
+
+  it('fails closed when neither injected nor shared PCA bootstrap state exists', async () => {
+    useWalletStore.setState({ bootstrap: null });
+    const submitter = walletOwnerActionSubmitter();
+
+    await expect(submitter.create({ tokens: '5', primaryNode: '42' }))
+      .rejects.toBeInstanceOf(WalletOwnerActionUnavailableError);
+  });
+
   it.each([
     ['missing', undefined],
     ['zero', '0'],

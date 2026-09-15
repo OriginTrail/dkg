@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getAddress, zeroAddress, type Address, type Hex, type TransactionReceipt } from 'viem';
 import type { IdentityWalletContracts } from '../src/ui/api.js';
+import { useWalletStore } from '../src/ui/stores/wallet.js';
 import type { Eip1193Provider } from '../src/ui/web3/eip6963.js';
 import {
   ADMIN_KEY_PURPOSE,
@@ -109,7 +110,17 @@ function makeHarness(options: {
     walletClientFromProvider: () => walletClient,
     onProgress: (event) => progress.push(event),
   });
-  return { provider, state, submitter, readContract, writeContract, waitForTransactionReceipt, publicClient, progress };
+  return {
+    provider,
+    state,
+    submitter,
+    readContract,
+    writeContract,
+    waitForTransactionReceipt,
+    publicClient,
+    walletClient,
+    progress,
+  };
 }
 
 describe('identity wallet key reads', () => {
@@ -147,6 +158,21 @@ describe('identity wallet key reads', () => {
 });
 
 describe('identity wallet hardware-signed writes', () => {
+  it('reads the browser wallet from the shared store when no state reader is injected', async () => {
+    const h = makeHarness({ operationalAddresses: [PRIMARY] });
+    useWalletStore.setState(h.state);
+    const submitter = identityWalletActionSubmitter({
+      bootstrap: IDENTITY_CONTRACTS,
+      publicClientFor: () => h.publicClient,
+      walletClientFromProvider: () => h.walletClient,
+    });
+
+    await expect(submitter.addOperational('61', TARGET)).resolves.toMatchObject({
+      action: 'add-operational',
+      address: TARGET,
+    });
+  });
+
   it('registers through Profile without any PCA bootstrap after verifying the signer is admin', async () => {
     const h = makeHarness({ operationalAddresses: [PRIMARY] });
     const result = await h.submitter.addOperational('61', TARGET);
