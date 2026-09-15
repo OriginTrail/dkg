@@ -11,10 +11,11 @@ describe('ManagedReadRecoveryCoordinatorV1', () => {
     const state = { recovering: false, generation: 0 };
     const recover = vi.fn();
     const coordinator = new ManagedReadRecoveryCoordinatorV1({
-      enabled: true,
       now: () => 0,
-      readRecoveryState: () => ({ ...state }),
-      recover,
+      capability: {
+        readState: () => ({ ...state }),
+        recover,
+      },
     });
 
     const staleToken = coordinator.begin({ ...state });
