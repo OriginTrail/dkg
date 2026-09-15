@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { SEMANTIC_RUST_TOOLCHAIN, SEMANTIC_RUST_VERSION } from './semantic-runtime-rustc.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..');
@@ -17,8 +18,8 @@ const ARTIFACT_LOCK_PATH = path.join(
   'semantic-runtime',
   'artifact-lock.json',
 );
-const EXPECTED_RUST_TOOLCHAIN = 'nightly-2026-08-18';
-const EXPECTED_RUST_VERSION = '1.100.0-nightly';
+const EXPECTED_RUST_TOOLCHAIN = SEMANTIC_RUST_TOOLCHAIN;
+const EXPECTED_RUST_VERSION = SEMANTIC_RUST_VERSION;
 const EXPECTED_WASM_BINDGEN = '0.2.127';
 const EXPECTED_JCO = '1.32.1';
 const COMPONENT_WIT_PACKAGE = 'origintrail:semantic-runtime@0.1.0';
@@ -130,9 +131,23 @@ function verifyToolchain() {
   }
 }
 
+export function assertPortableBuildEnvironment(env = process.env) {
+  if (env.RUSTC_WRAPPER || env.RUSTC_WORKSPACE_WRAPPER) {
+    throw new Error('semantic-runtime: external Rust wrappers are incompatible with the pinned portable Wasm build');
+  }
+  if (env.RUSTFLAGS !== undefined || env.CARGO_ENCODED_RUSTFLAGS !== undefined) {
+    throw new Error('semantic-runtime: ambient Rust flags are incompatible with the pinned portable Wasm build');
+  }
+}
+
 function buildInto(outputRoot) {
+  assertPortableBuildEnvironment();
   verifyToolchain();
+  const rustcWrapper = path.join(REPO_ROOT, 'scripts', 'semantic-runtime-rustc.mjs');
   const rustFlags = [
+    // Cargo fingerprints RUSTFLAGS, unlike a general wrapper's source. Bind the
+    // cache and crate metadata to every change in the portable compiler recipe.
+    '--cfg', `dkg_semantic_runtime_build_recipe="${sha256File(rustcWrapper)}"`,
     '-C', `link-arg=--initial-memory=${INITIAL_MEMORY_PAGES * 65_536}`,
     '-C', `link-arg=--max-memory=${MAXIMUM_MEMORY_PAGES * 65_536}`,
     '-C', 'link-arg=--export-memory',
@@ -146,11 +161,16 @@ function buildInto(outputRoot) {
       '--package', 'dkg-runtime-wasm',
       '--target', 'wasm32-unknown-unknown',
       '--release',
+      // Normalize workspace, registry, sysroot and build-directory paths in
+      // panic locations and generated code before hashing cross-host artifacts.
+      '-Z', 'trim-paths',
+      '--config', 'profile.release.trim-paths="all"',
       '--locked',
     ],
     {
       env: {
         ...process.env,
+        RUSTC_WRAPPER: rustcWrapper,
         CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: rustFlags,
       },
     },
@@ -185,11 +205,16 @@ function buildInto(outputRoot) {
       '--package', 'dkg-runtime-component',
       '--target', 'wasm32-wasip2',
       '--release',
+      // Normalize workspace, registry, sysroot and build-directory paths in
+      // panic locations and generated code before hashing cross-host artifacts.
+      '-Z', 'trim-paths',
+      '--config', 'profile.release.trim-paths="all"',
       '--locked',
     ],
     {
       env: {
         ...process.env,
+        RUSTC_WRAPPER: rustcWrapper,
         CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS: rustFlags,
       },
     },
