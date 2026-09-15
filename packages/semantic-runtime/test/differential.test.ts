@@ -35,7 +35,7 @@ describe('native and Wasm differential conformance', () => {
       execFileSync(
         'cargo',
         [
-          '+1.98.0',
+          '+nightly-2026-08-18',
           'run',
           '--quiet',
           '--locked',
@@ -92,7 +92,7 @@ describe('native and Wasm differential conformance', () => {
       execFileSync(
         'cargo',
         [
-          '+1.98.0',
+          '+nightly-2026-08-18',
           'run',
           '--quiet',
           '--locked',

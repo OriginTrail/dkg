@@ -382,6 +382,24 @@
         "statements": 86
       }
     },
+    "semantic-runtime": {
+      "sourceRevision": "a3cb87ec9561b6753aebcad82f65f20a6bd1703b",
+      "measuredAt": "2026-09-15",
+      "node": "25.2.1",
+      "platform": "darwin-arm64",
+      "measured": {
+        "lines": 63.69,
+        "functions": 70.58,
+        "branches": 54.01,
+        "statements": 60.48
+      },
+      "thresholds": {
+        "lines": 62,
+        "functions": 69,
+        "branches": 53,
+        "statements": 59
+      }
+    },
     "storage": {
       "measured": {
         "lines": 90,

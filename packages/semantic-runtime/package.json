@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-semantic-runtime",
-  "version": "10.0.14",
+  "version": "10.0.17",
   "description": "Locally built, integrity-verified Rust/Wasm semantic runtime host for DKG V10",
   "type": "module",
   "main": "dist/index.js",
@@ -34,6 +34,7 @@
     "@bytecodealliance/jco": "1.32.1",
     "@types/better-sqlite3": "^7",
     "@types/node": "^22",
+    "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },
   "files": [

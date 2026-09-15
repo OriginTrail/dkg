@@ -100,6 +100,13 @@
     ]
   },
   {
+    "pattern": "scripts/run-semantic-runtime-live-smoke.sh",
+    "lane": "devnet",
+    "reason": "Semantic runtime smoke uses an isolated devnet and explicitly enabled runtime",
+    "cadence": "manual",
+    "command": "bash {file}"
+  },
+  {
     "pattern": "scripts/*test*.sh",
     "lane": "devnet",
     "reason": "Executable shell test drivers; each script documents its node, chain and environment prerequisites",

@@ -996,11 +996,11 @@ jobs:
     env:
       DKG_CI_COVERAGE: '1'
       DKG_CI_ROW: ${{ matrix.row }}
-    name: "Kosava: adapters + utilities + demo"
+    name: "Kosava: ${{ matrix.label }}"
     needs: [changes, build]
     if: needs.changes.outputs.kosava_supporting == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['kosava-supporting'] }}
@@ -1017,6 +1017,7 @@ jobs:
       # after vitest (pytests/run-pytest.mjs), so this lane needs a Python
       # interpreter + the plugin's runtime/test deps.
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        if: matrix.suite == 'supporting'
         with:
           # Pin a concrete interpreter for reproducibility (matches the other CI
           # lanes' pins and the version pytests/requirements.txt was validated
@@ -1026,7 +1027,14 @@ jobs:
           # hygiene, not the fix.
           python-version: '3.13'
       - name: Install Hermes plugin Python test deps
+        if: matrix.suite == 'supporting'
         run: python -m pip install -r packages/adapter-hermes/pytests/requirements.txt
+      - name: Install pinned Rust for native/Wasm differential tests
+        if: matrix.suite == 'semantic-runtime'
+        run: |
+          rustup toolchain install nightly-2026-08-18 --profile minimal
+          cargo +nightly-2026-08-18 build --locked --manifest-path rust/Cargo.toml \
+            --package dkg-runtime-testkit --bins
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1043,11 +1051,14 @@ jobs:
         env:
           DKG_REQUIRE_PYTEST: '1'
           DKG_CI_COVERAGE: '1'
+          DKG_CI_SUITE: ${{ matrix.suite }}
         run: |
           status=0
           node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW" || status=$?
-          pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py || status=$?
-          pnpm --filter @origintrail-official/dkg-demo run test || status=$?
+          if [[ "$DKG_CI_SUITE" == supporting ]]; then
+            pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py || status=$?
+            pnpm --filter @origintrail-official/dkg-demo run test || status=$?
+          fi
           exit "$status"
       - name: Upload Vitest JUnit and coverage reports
         if: always()
