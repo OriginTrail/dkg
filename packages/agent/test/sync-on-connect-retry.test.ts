@@ -5,12 +5,18 @@ import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAG
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
   InMemoryPeerSyncLease,
+  runSelectedSharedMemoryRetry,
   runSyncOnConnect,
+  SyncOnConnectBackpressureError,
   SyncOnConnectPostSyncError,
   type SyncOnConnectPeerOutcome,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
-import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
+import {
+  resolveSyncGlobalBackpressure,
+  SyncBackpressureBusyError,
+  withGlobalSyncBackpressure,
+} from '../src/sync/backpressure.js';
 import type { OperationContext, PeerResolver } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
@@ -111,6 +117,46 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('preserves typed backpressure from selected-lane admission', async () => {
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('selected queue full', 'queue_full');
+
+    await expect(runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      selectedSharedMemoryLane: {
+        admitWork: async () => { throw busy; },
+      },
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
+  it('preserves typed backpressure from ordinary post-sync maintenance', async () => {
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('maintenance queue full', 'queue_full');
+
+    await expect(runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags: async () => { throw busy; },
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
   it('runs durable before ordinary SWM history', async () => {
     const remotePeer = freshPeerIdString();
     const order: string[] = [];
