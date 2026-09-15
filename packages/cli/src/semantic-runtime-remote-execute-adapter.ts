@@ -222,8 +222,11 @@ function decodeRemoteResult(
     !result
     || typeof result.invocationId !== 'string'
     || typeof result.executionIri !== 'string'
+    || result.executionIri.trim().length === 0
     || result.executionLayer !== executionLayer
-    || (executionLayer === 'vm' && typeof result.executionUal !== 'string')
+    || (executionLayer === 'vm' && (
+      typeof result.executionUal !== 'string' || result.executionUal.trim().length === 0
+    ))
     || (executionLayer !== 'vm' && result.executionUal !== undefined)
     || result.persisted !== true
   ) throw new Error('REMOTE_INVOCATION_RESPONSE_INVALID');
