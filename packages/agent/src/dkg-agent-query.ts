@@ -769,11 +769,16 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
-      this,
-      contextGraphId,
-      opts,
-      CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+    return resolveContextGraphReadAuthorityDecision(
+      QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+        this,
+        contextGraphId,
+        opts,
+        CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)
+          ? true
+          : undefined,
+      ),
     );
   }
 
@@ -801,6 +806,7 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     },
     registrationTimeoutMs: number,
+    hasAcceptedRfc64PublicPolicy?: boolean,
   ): ContextGraphReadAuthorityInput {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
@@ -812,22 +818,29 @@ export class QueryMethods extends DKGAgentBase {
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
       getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
-      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
-        contextGraphId,
-        {
-          registrationTimeoutMs,
-          signal: opts.signal,
-        },
+      getRegisteredAuthority: () => (
+        this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          {
+            registrationTimeoutMs,
+            signal: opts.signal,
+            allowAcceptedRfc64FinalizedAbsence:
+              this.hasAcceptedRfc64UnregisteredAuthorityV1(contextGraphId),
+          },
+        )
       ),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
       resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
       rfc64LocalAgentAddress: this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress,
       defaultAgentAddress: this.defaultAgentAddress,
-      hasAcceptedRfc64PublicPolicy: acceptedPublicPolicies.some(({ policyEnvelope }) => (
-        policyEnvelope.payload.contextGraphId === contextGraphId
-        && policyEnvelope.payload.accessPolicy === 0
-      )),
+      hasAcceptedRfc64PublicPolicy: hasAcceptedRfc64PublicPolicy ?? (
+        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)
+        || acceptedPublicPolicies.some(({ policyEnvelope }) => (
+          policyEnvelope.payload.contextGraphId === contextGraphId
+          && policyEnvelope.payload.accessPolicy === 0
+        ))
+      ),
       isPendingMetadata:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
       isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),

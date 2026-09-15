@@ -3161,6 +3161,41 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     );
   }
 
+  /** Whether the exact active network/CG authority is an accepted unregistered owner policy. */
+  hasAcceptedRfc64UnregisteredAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    const service = this.rfc64PublicCatalogServiceV1;
+    const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId;
+    if (service === undefined || activeNetworkId === undefined) return false;
+    try {
+      assertNetworkIdV1(activeNetworkId);
+      assertContextGraphIdV1(contextGraphId);
+    } catch {
+      return false;
+    }
+    return service.acceptedPolicySnapshot(activeNetworkId, contextGraphId)
+      ?.policy.source.kind === 'owner-signed-unregistered';
+  }
+
+  /** Whether the exact accepted unregistered authority is explicitly public. */
+  hasAcceptedRfc64PublicUnregisteredAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    if (!this.hasAcceptedRfc64UnregisteredAuthorityV1(contextGraphId)) return false;
+    const service = this.rfc64PublicCatalogServiceV1;
+    const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId;
+    if (service === undefined || activeNetworkId === undefined) return false;
+    return service.acceptedPolicySnapshot(
+      activeNetworkId as NetworkIdV1,
+      contextGraphId as ContextGraphIdV1,
+    )?.policy.accessPolicy === 0;
+  }
+
   /** Gather catalog-owned state once and feed values into the shared pure fence. */
   resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1(
     this: DKGAgent,

@@ -24,6 +24,8 @@ import {
 } from '../src/rfc64/unregistered-replica-authority-v1.js';
 import { composeRfc64UnregisteredCatalogAuthorityV1 } from
   '../src/rfc64/release-native-catalog-authority-v1.js';
+import { Rfc64CatalogAuthorityRefreshLoopV1 } from
+  '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import {
   createRfc64RolloutAgentHarness,
   RFC64_ROLLOUT_DEPLOYMENT as DEPLOYMENT,
@@ -345,10 +347,27 @@ describe('RFC-64 unregistered replica authority', () => {
     )).toBeNull();
   });
 
-  it('promotes accepted unregistered authority and cannot regress to its old seed', async () => {
+  it('scheduled authority refresh promotes accepted absence and unlocks VM binding', async () => {
+    let registered: ContextGraphAuthoritySnapshot | undefined;
+    const resolveFinalized = vi.fn(async (nameHashes: readonly string[]) => (
+      registered === undefined
+        ? new Map()
+        : new Map([[nameHashes[0]!, registered]])
+    ));
+    const legacyScalar = vi.fn(async () => {
+      throw new Error('scheduled transition must not use legacy name enumeration');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      resolveContextGraphIdByNameHash: legacyScalar,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
     const receiver = await startAgent({
       name: 'unregistered-evidence-sequential-promotion',
-      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
     });
     await storeOf(receiver).insert([evidenceQuad(await mintEvidence({
       wallet: OWNER_WALLET,
@@ -362,25 +381,51 @@ describe('RFC-64 unregistered replica authority', () => {
       undefined,
       { kind: 'finalized-absence' },
     )).resolves.toMatchObject({ source: 'owner-signed-unregistered' });
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    expect((receiver as any).isVmReconcileTargetSelected(CONTEXT_GRAPH_ID)).toBe(false);
 
-    const registered = finalizedAuthoritySnapshot();
-    receiver.recordDiscoveredContextGraph(CONTEXT_GRAPH_ID, {
-      name: CONTEXT_GRAPH_ID,
-      onChainId: registered.contextGraphId,
-      onChainHash: registered.nameHash,
-    });
-    await expect(receiver.reconcileRfc64CatalogAccessAuthorityV1(
-      CONTEXT_GRAPH_ID,
-      undefined,
-      {
-        kind: 'finalized-evidence',
-        evidence: {
-          contextGraphAuthorityIndexId: registered.contextGraphId,
-          batchTargetIds: [registered.contextGraphId],
-          snapshot: registered,
-        },
+    registered = finalizedAuthoritySnapshot();
+    const timer = {} as ReturnType<typeof setInterval>;
+    const scheduledRefresh = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => [CONTEXT_GRAPH_ID],
+      createRefreshRequests: (contextGraphIds, signal) => (
+        receiver.createRfc64CatalogAuthorityRefreshRequestsV1(contextGraphIds, signal)
+      ),
+      refreshContextGraph: async (contextGraphId, signal, request) => (
+        await receiver.reconcileRfc64CatalogAccessAuthorityV1(
+          contextGraphId,
+          signal,
+          request,
+        ) === null ? 'superseded' : 'committed'
+      ),
+      onActiveContextGraphIdsReadFailure: vi.fn(),
+      onRefreshFailure: vi.fn(),
+      scheduler: {
+        setInterval: vi.fn(() => timer),
+        clearInterval: vi.fn(),
       },
-    )).resolves.toMatchObject({ source: 'finalized-chain' });
+    });
+    scheduledRefresh.start();
+    await scheduledRefresh.whenIdle();
+    await scheduledRefresh.close();
+
+    expect((receiver as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      CONTEXT_GRAPH_ID,
+    )).toMatchObject({
+      policy: { source: { kind: 'finalized-chain' } },
+    });
+    expect((receiver as any).isVmReconcileTargetSelected(CONTEXT_GRAPH_ID)).toBe(true);
+    vi.spyOn(receiver as any, 'vmReconcileEnabled').mockReturnValue(true);
+    vi.spyOn(receiver, 'canReadContextGraph').mockResolvedValue(true);
+    await expect((receiver as any).resolveVmReconcileTarget(CONTEXT_GRAPH_ID))
+      .resolves.toMatchObject({
+        kind: 'subscription',
+        bindingKind: 'authoritative',
+        onChainId: registered.contextGraphId,
+      });
+    expect(receiver.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID))
+      .toMatchObject({ onChainId: registered.contextGraphId });
 
     await expect(receiver.reconcileRfc64CatalogAccessAuthorityV1(
       CONTEXT_GRAPH_ID,
@@ -393,6 +438,7 @@ describe('RFC-64 unregistered replica authority', () => {
     )).toMatchObject({
       policy: { source: { kind: 'finalized-chain' } },
     });
+    expect(legacyScalar).not.toHaveBeenCalled();
   });
 
   it('re-authenticates the durable ontology seed after a receiver restart', async () => {
@@ -427,12 +473,13 @@ describe('RFC-64 unregistered replica authority', () => {
 
   it('does not consume signed ontology evidence when finalized absence times out', async () => {
     const timeout = new Error('finalized authority index timeout');
+    const whenIdle = vi.fn(async () => undefined);
     const chainAdapter = Object.assign(new NoChainAdapter(), {
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes:
           vi.fn(async () => { throw timeout; }),
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
-        whenIdle: vi.fn(async () => undefined),
+        whenIdle,
       },
     });
     const receiver = await startAgent({
@@ -457,17 +504,125 @@ describe('RFC-64 unregistered replica authority', () => {
       NETWORK_ID,
       CONTEXT_GRAPH_ID,
     )).toBeNull();
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { allowSubscriptionFallback: false },
+    )).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+    });
+    expect(whenIdle).toHaveBeenCalledTimes(2);
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
+  it('does not reinterpret private owner-signed absence as public bootstrap authority', async () => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const legacyScalar = vi.fn(async () => { throw new Error('must not legacy scalar-read'); });
+    const legacyBatch = vi.fn(async () => { throw new Error('must not legacy batch-read'); });
+    const pointRead = vi.fn(async () => { throw new Error('must not point-read'); });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointRead,
+      resolveContextGraphIdByNameHash: legacyScalar,
+      resolveContextGraphIdsByNameHashes: legacyBatch,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unregistered-private-bootstrap-fence',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    const privateAuthority = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: OWNER,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses: [OWNER],
+      rosterVersion: '0',
+    });
+    receiver.acceptRfc64CatalogAccessSnapshotV1({
+      policy: privateAuthority.policy,
+      policyDigest: privateAuthority.policyDigest,
+      roster: privateAuthority.roster,
+    });
+
+    await expect(receiver.resolveContextGraphRegistrationBinding(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'chain-name-binding-unavailable',
+    });
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      {
+        callerAgentAddress: ATTACKER,
+        allowSubscriptionFallback: false,
+      },
+    )).resolves.toMatchObject({
+      outcome: 'denied',
+      source: 'rfc64-private',
+    });
+    expect(resolveFinalized).toHaveBeenCalledTimes(2);
+    expect(pointRead).not.toHaveBeenCalled();
+    expect(legacyScalar).not.toHaveBeenCalled();
+    expect(legacyBatch).not.toHaveBeenCalled();
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+  });
+
+  it('keeps finalized absence unavailable without independent accepted authority', async () => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const legacyScalar = vi.fn(async () => { throw new Error('must not legacy scalar-read'); });
+    const legacyBatch = vi.fn(async () => { throw new Error('must not legacy batch-read'); });
+    const whenIdle = vi.fn(async () => undefined);
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      resolveContextGraphIdByNameHash: legacyScalar,
+      resolveContextGraphIdsByNameHashes: legacyBatch,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle,
+      },
+    });
+    const receiver = await startAgent({
+      name: 'unaccepted-finalized-absence-fence',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT, chainAdapter },
+    });
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+    const localPolicy = vi.spyOn(receiver, 'isPrivateContextGraph');
+
+    await expect(receiver.resolveContextGraphReadAuthority(CONTEXT_GRAPH_ID, {
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'chain-name-binding-unavailable',
+    });
+
+    expect(resolveFinalized).toHaveBeenCalledOnce();
+    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(legacyScalar).not.toHaveBeenCalled();
+    expect(legacyBatch).not.toHaveBeenCalled();
+    expect(localPolicy).not.toHaveBeenCalled();
   });
 
   it('consumes one exact finalized-absence pass without reopening point RPC reads', async () => {
     const resolveFinalized = vi.fn(async () => new Map());
     const pointRead = vi.fn(async () => { throw new Error('must not point-read'); });
+    const legacyScalar = vi.fn(async () => { throw new Error('must not legacy scalar-read'); });
+    const legacyBatch = vi.fn(async () => { throw new Error('must not legacy batch-read'); });
+    const whenIdle = vi.fn(async () => undefined);
     const chainAdapter = Object.assign(new NoChainAdapter(), {
       getContextGraphAuthoritySnapshot: pointRead,
+      resolveContextGraphIdByNameHash: legacyScalar,
+      resolveContextGraphIdsByNameHashes: legacyBatch,
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveFinalized,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
-        whenIdle: vi.fn(async () => undefined),
+        whenIdle,
       },
     });
     const receiver = await startAgent({
@@ -496,8 +651,26 @@ describe('RFC-64 unregistered replica authority', () => {
       undefined,
       request,
     )).resolves.toMatchObject({ source: 'owner-signed-unregistered' });
-    expect(resolveFinalized).toHaveBeenCalledOnce();
+    expect((receiver as any).hasAcceptedRfc64UnregisteredAuthorityV1(
+      CONTEXT_GRAPH_ID,
+    )).toBe(true);
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      CONTEXT_GRAPH_ID,
+      { allowSubscriptionFallback: false },
+    )).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'rfc64-public',
+    });
+    await expect(receiver.query('SELECT * WHERE { ?s ?p ?o }', {
+      contextGraphId: CONTEXT_GRAPH_ID,
+    })).resolves.toMatchObject({ bindings: [] });
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
+    expect(resolveFinalized).toHaveBeenCalledTimes(3);
+    expect(whenIdle).toHaveBeenCalledTimes(3);
     expect(pointRead).not.toHaveBeenCalled();
+    expect(legacyScalar).not.toHaveBeenCalled();
+    expect(legacyBatch).not.toHaveBeenCalled();
   });
 });
 
