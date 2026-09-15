@@ -428,6 +428,7 @@ import {
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
   mergeDurableSyncAccumulatorInto,
+  mergeDurableSyncResults,
   mergeDurableSyncResultIntoAccumulator,
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
@@ -1794,6 +1795,58 @@ function mergeSharedMemorySyncResults(
 ): SharedMemorySyncResult {
   return {
     ...mergeSamePeerSharedMemoryDiagnostics(a, b),
+  };
+}
+
+type CatchupRetrySharedMemorySyncResult = SharedMemorySyncResult & {
+  /** Sum retained for diagnostics while `deferredBackpressure` stays latest-only. */
+  retryDeferredBackpressure?: number;
+};
+
+type CatchupRetryDurableSyncResult = DurableSyncResult & {
+  /** Sum retained for diagnostics while `deferredBackpressure` stays latest-only. */
+  retryDeferredBackpressure?: number;
+};
+
+/**
+ * Fold a retry's diagnostics while retaining the latest deferral control
+ * value. The lifecycle classifies this field to decide peer/job readiness;
+ * every other numeric counter remains cumulative across attempts.
+ */
+function mergeSharedMemorySyncRetryResults(
+  a: CatchupRetrySharedMemorySyncResult,
+  b: CatchupRetrySharedMemorySyncResult,
+): CatchupRetrySharedMemorySyncResult {
+  const merged = mergeSharedMemorySyncResults(
+    {
+      ...a,
+      deferredBackpressure: a.retryDeferredBackpressure ?? a.deferredBackpressure,
+    },
+    b,
+  );
+  return {
+    ...merged,
+    deferredBackpressure: b.deferredBackpressure,
+    retryDeferredBackpressure: merged.deferredBackpressure,
+  };
+}
+
+/** Same retry contract for durable requester results. */
+function mergeDurableSyncRetryResults(
+  a: CatchupRetryDurableSyncResult,
+  b: CatchupRetryDurableSyncResult,
+): CatchupRetryDurableSyncResult {
+  const merged = mergeDurableSyncResults(
+    {
+      ...a,
+      deferredBackpressure: a.retryDeferredBackpressure ?? a.deferredBackpressure,
+    },
+    b,
+  );
+  return {
+    ...merged,
+    deferredBackpressure: b.deferredBackpressure,
+    retryDeferredBackpressure: merged.deferredBackpressure,
   };
 }
 
@@ -8189,8 +8242,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // and the result array is unchanged (input order, one entry per peer) — the
     // load is just staggered into waves.
     let results: Array<{
-      durable: DurableSyncResult;
-      shared: SharedMemorySyncResult | null;
+      durable: CatchupRetryDurableSyncResult;
+      shared: CatchupRetrySharedMemorySyncResult | null;
     }>;
     if (coordinatedRecovery && syncCapable.length > 0) {
       // The caller has already applied curator/core ordering, maxPeers windowing,
@@ -8224,7 +8277,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   [contextGraphId],
                   { ...(priority === undefined ? {} : { priority }), source },
                 ).catch(emptyShared),
-                { sourceOverride: stats?.sourceOverride },
+                {
+                  sourceOverride: stats?.sourceOverride,
+                  mergeRetryResults: mergeSharedMemorySyncRetryResults,
+                },
               )
             : null,
         }),
@@ -8240,6 +8296,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             mode,
             sourceOverride: stats?.sourceOverride,
             includeSharedMemory,
+            mergeDurableRetryResults: mergeDurableSyncRetryResults,
+            mergeSharedMemoryRetryResults: mergeSharedMemorySyncRetryResults,
             syncDurable: ({ priority, source }) => this.syncFromPeerDetailed(
               remotePeerId,
               [contextGraphId],
@@ -8368,14 +8426,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.failedPeers += r.durable.failedPeers;
       diagnostics.durable.failedPhases += r.durable.failedPhases ?? 0;
       diagnostics.durable.deferredBackpressure = (diagnostics.durable.deferredBackpressure ?? 0)
-        + (r.durable.deferredBackpressure ?? 0);
+        + (r.durable.retryDeferredBackpressure ?? r.durable.deferredBackpressure ?? 0);
       deferredBackpressure += r.durable.deferredBackpressure ?? 0;
       let peerDenied = durableProgress.denied;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
         diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
           diagnostics.sharedMemory,
-          r.shared,
+          {
+            ...r.shared,
+            deferredBackpressure:
+              r.shared.retryDeferredBackpressure ?? r.shared.deferredBackpressure,
+          },
         );
         deferredBackpressure += r.shared.deferredBackpressure ?? 0;
         peerDenied = peerDenied || Boolean(sharedProgress?.denied);
@@ -8466,7 +8528,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     [contextGraphId],
                     { ...(priority === undefined ? {} : { priority }), source },
                   ).catch(emptyShared),
-                  { sourceOverride: stats?.sourceOverride },
+                  {
+                    sourceOverride: stats?.sourceOverride,
+                    mergeRetryResults: mergeSharedMemorySyncRetryResults,
+                  },
                 );
                 return { remotePeerId, shared };
               },

@@ -1208,6 +1208,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     const priorities: Array<number | undefined> = [];
     const sources: Array<string | undefined> = [];
     let durableCalls = 0;
+    let sharedCalls = 0;
 
     try {
       await agent.start();
@@ -1238,10 +1239,13 @@ describe('DKGAgent sync fetch coalescing', () => {
         _contextGraphIds: string[],
         options: { priority?: number; source?: string } | undefined,
       ) => {
+        sharedCalls += 1;
         priorities.push(options?.priority);
         sources.push(options?.source);
-        order.push('shared');
-        return cleanSharedMemorySyncResult();
+        order.push(`shared-${sharedCalls}`);
+        return sharedCalls === 1
+          ? { ...cleanSharedMemorySyncResult(), deferredBackpressure: 1 }
+          : cleanSharedMemorySyncResult();
       };
 
       const result = await (agent as any).runCatchupOverPeers(
@@ -1252,8 +1256,11 @@ describe('DKGAgent sync fetch coalescing', () => {
       );
 
       expect(result.deferredBackpressure).toBe(0);
-      expect(order).toEqual(['durable-1', 'durable-2', 'shared']);
+      expect(result.diagnostics.durable.deferredBackpressure).toBe(1);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
+      expect(order).toEqual(['durable-1', 'durable-2', 'shared-1', 'shared-2']);
       expect(priorities).toEqual([
+        FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
@@ -1263,6 +1270,7 @@ describe('DKGAgent sync fetch coalescing', () => {
       // inline foreground catch-up as `durable:unspecified` in node-wide
       // scheduler diagnostics (issue #2006).
       expect(sources).toEqual([
+        'catchup-foreground',
         'catchup-foreground',
         'catchup-foreground',
         'catchup-foreground',

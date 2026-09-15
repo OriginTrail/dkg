@@ -64,6 +64,32 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(syncDurable).not.toHaveBeenCalled();
   });
 
+  it('runs durable after a successful selected shared-memory plane', async () => {
+    const order: string[] = [];
+    const syncSharedMemory = vi.fn(async () => {
+      order.push('shared');
+      return { deferredBackpressure: 0 };
+    });
+    const syncDurable = vi.fn(async () => {
+      order.push('durable');
+      return { deferredBackpressure: 0 };
+    });
+
+    await expect(runCatchupPlanesWithPolicy({
+      mode: 'foreground',
+      includeSharedMemory: true,
+      planeOrder: 'shared-first',
+      syncDurable,
+      syncSharedMemory,
+      retry: { maxWaitMs: 0 },
+    })).resolves.toEqual({
+      durable: { deferredBackpressure: 0 },
+      shared: { deferredBackpressure: 0 },
+      skippedPlanes: {},
+    });
+    expect(order).toEqual(['shared', 'durable']);
+  });
+
   it('derives foreground priority and source and retries durable before starting SWM', async () => {
     const order: string[] = [];
     const priorities: Array<number | undefined> = [];
@@ -429,6 +455,36 @@ describe('the removed retryDelaysMs ladder', () => {
     );
     expect(result.deferredBackpressure).toBe(1);
     expect(clock.elapsed()).toBeLessThanOrEqual(300);
+  });
+
+  it('folds retry diagnostics while using the latest deferral as the control signal', async () => {
+    type Result = {
+      insertedDataTriples: number;
+      deferredBackpressure: number;
+    };
+    let attempt = 0;
+    const result = await runCatchupPlaneWithPolicy<Result>(
+      'foreground',
+      async () => {
+        attempt += 1;
+        return {
+          insertedDataTriples: attempt,
+          deferredBackpressure: attempt === 1 ? 1 : 0,
+        };
+      },
+      {
+        retry: { maxWaitMs: 1_000 },
+        now: () => 0,
+        wait: async () => {},
+        mergeRetryResults: (previous, current) => ({
+          insertedDataTriples: previous.insertedDataTriples + current.insertedDataTriples,
+          deferredBackpressure: previous.deferredBackpressure + current.deferredBackpressure,
+        }),
+      },
+    );
+
+    expect(result).toEqual({ insertedDataTriples: 3, deferredBackpressure: 1 });
+    expect(attempt).toBe(2);
   });
 });
 
