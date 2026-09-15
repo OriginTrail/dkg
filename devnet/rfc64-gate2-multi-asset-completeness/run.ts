@@ -393,10 +393,23 @@ async function execute(): Promise<void> {
       'forged',
     );
     const statsAfterForged = await readReceiverStats(receiver, 'after-forged');
-    exact(
-      requiredSafeInteger(statsAfterForged.failed, 'statsAfterForged.failed'),
-      requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed') + 1,
-      'forged terminal failure count',
+    const forgedFailedDelta = requiredSafeInteger(
+      statsAfterForged.failed,
+      'statsAfterForged.failed',
+    ) - requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed');
+    const forgedNotFoundDelta = requiredSafeInteger(
+      statsAfterForged.notFound,
+      'statsAfterForged.notFound',
+    ) - requiredSafeInteger(statsBeforeForged.notFound, 'statsBeforeForged.notFound');
+    // Scoped provider closures intentionally collapse an unauthorized or
+    // missing object into the indistinguishable not-found result. The forged
+    // announcement must still produce exactly one terminal rejection, whether
+    // the receiver learns of the invalid delegation before or after transport.
+    requireCondition(
+      (forgedFailedDelta === 1 && forgedNotFoundDelta === 0)
+        || (forgedFailedDelta === 0 && forgedNotFoundDelta === 1),
+      `forged terminal rejection was not recorded exactly once (failedDelta=${forgedFailedDelta}, `
+        + `notFoundDelta=${forgedNotFoundDelta})`,
     );
     const forgedScopeDigest = computeAuthorCatalogScopeDigestV1({
       networkId: NETWORK_ID,
