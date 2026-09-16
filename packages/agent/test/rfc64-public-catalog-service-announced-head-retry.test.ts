@@ -17,6 +17,10 @@
  *      failure is observable, and the head is applied by the retried pull.
  *  T3  The re-pull is bounded: the target is dropped after `maxAttempts`, the
  *      terminal pass is observable, and no timer is left armed.
+ *  T4  A throwing policy/authority read for one target drops that target,
+ *      observably, and never rejects the pass its siblings run in.
+ *  T5  A retained target re-inserted after a pass respects the announced-scope
+ *      cap: the most-attempted retained entry yields, never a fresh hint.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -46,6 +50,7 @@ import {
 import {
   Rfc64PublicCatalogServiceV1,
   type Rfc64AnnouncedCurrentHeadAccelerationFailureV1,
+  type Rfc64PublicCatalogServiceOptionsV1,
 } from '../src/rfc64/public-catalog-service-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
@@ -760,4 +765,334 @@ describe('RFC-64 announced-head acceleration re-pull (T2/T3)', () => {
     expect(readCurrentAppliedCatalogHeadDigest.mock.calls.length).toBe(providerReadsAtDrop);
     expect(replica.requester.stats().announcedCurrentHeadRetryArmed).toBe(false);
   }, 40_000);
+});
+
+// ---------------------------------------------------------------------------
+// Pass-integrity fixtures (T4/T5): an in-process router whose discovery
+// answers are gated per provider, so one pass can be held open while hints
+// keep arriving.
+// ---------------------------------------------------------------------------
+
+/** `MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1` (module-private in the service). */
+const ANNOUNCED_SCOPE_CAP = 1_024;
+/** Long enough that no re-pull deadline fires while a test holds a pass open. */
+const HELD_PASS_RETRY_INTERVAL_MS = 60_000;
+const FRESH_AUTHOR_BASE = 0x10_0000;
+
+/** Distinct lowercase author for one announced scope inside the shared open CG. */
+function authorAt(index: number): EvmAddressV1 {
+  return `0x${'ab'.repeat(16)}${index.toString(16).padStart(8, '0')}` as EvmAddressV1;
+}
+
+/**
+ * Discovery fake: a held provider keeps its query pending until it is released
+ * or the pass aborts; every other provider fails immediately.
+ */
+class GatedDiscoveryRouter extends RecordingRouter {
+  readonly failure = new Error('provider unreachable');
+  readonly #held = new Set<string>();
+  readonly #pending = new Map<string, Array<() => void>>();
+
+  constructor() {
+    super();
+    this.sendResponse = (protocolId, options, peerId) => {
+      if (protocolId !== RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1) {
+        return Promise.resolve(Uint8Array.of(1));
+      }
+      if (!this.#held.has(peerId)) return Promise.reject(this.failure);
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        options?.signal?.addEventListener(
+          'abort',
+          () => reject(options.signal?.reason),
+          { once: true },
+        );
+        const waiters = this.#pending.get(peerId) ?? [];
+        waiters.push(() => reject(this.failure));
+        this.#pending.set(peerId, waiters);
+      });
+    };
+  }
+
+  hold(...peerIds: readonly string[]): void {
+    for (const peerId of peerIds) this.#held.add(peerId);
+  }
+
+  /** Fail every pending and future discovery against the provider. */
+  release(peerId: string): void {
+    this.#held.delete(peerId);
+    for (const fail of this.#pending.get(peerId) ?? []) fail();
+    this.#pending.delete(peerId);
+  }
+}
+
+interface HeldPassFixtureV1 {
+  readonly router: GatedDiscoveryRouter;
+  readonly service: Rfc64PublicCatalogServiceV1;
+  readonly onAccelerationFailed: ReturnType<
+    typeof vi.fn<(event: Rfc64AnnouncedCurrentHeadAccelerationFailureV1) => void>
+  >;
+  /** Pending-scope count sampled inside every failure callback: right after any re-insert. */
+  readonly pendingAtEvent: number[];
+}
+
+function heldPassService(options: Readonly<{
+  maxAttempts: number;
+  resolveContextGraphAuthority?: Rfc64PublicCatalogServiceOptionsV1['resolveContextGraphAuthority'];
+}>): HeldPassFixtureV1 {
+  const router = new GatedDiscoveryRouter();
+  const pendingAtEvent: number[] = [];
+  const onAccelerationFailed =
+    vi.fn<(event: Rfc64AnnouncedCurrentHeadAccelerationFailureV1) => void>(() => {
+      pendingAtEvent.push(service.stats().announcedCurrentHeadPendingScopes);
+    });
+  const service = new Rfc64PublicCatalogServiceV1({
+    router: router.asProtocolRouter(),
+    controlObjects: inertControlObjects(),
+    native: {
+      readCatalogObjectByDigest: async () => null,
+      readKaBundleByDigest: async () => null,
+      createReconciler: () => ({
+        isHeadSatisfied: async () => false,
+        reconcileHead: async () => 'not-found',
+      }),
+    },
+    currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+    announcedCurrentHeadRetry: {
+      intervalMs: HELD_PASS_RETRY_INTERVAL_MS,
+      maxAttempts: options.maxAttempts,
+    },
+    onAccelerationFailed,
+    receiver: { retryBackoffMs: 0 },
+    ...(options.resolveContextGraphAuthority === undefined
+      ? {}
+      : { resolveContextGraphAuthority: options.resolveContextGraphAuthority }),
+  });
+  services.push(service);
+  return { router, service, onAccelerationFailed, pendingAtEvent };
+}
+
+/** The service's default authority shape: an active catalog-apply receiver. */
+const catalogApplyAuthority: NonNullable<
+  Rfc64PublicCatalogServiceOptionsV1['resolveContextGraphAuthority']
+> = (contextGraphId) => Object.freeze({
+  contextGraphId,
+  selected: false,
+  eligible: false,
+  active: true,
+  mode: 'catalog',
+  killSwitchActive: false,
+  legacySyncAllowed: true,
+  track2Enabled: true,
+  authoringAllowed: true,
+  reconciliationLane: 'catalog-apply',
+});
+
+/** Deliver one policy-admitted hint; the transport ACKs once it is scheduled. */
+async function deliverHint(
+  router: RecordingRouter,
+  head: Rfc64PublicCatalogHeadAnnouncementV1,
+  peerId: string,
+): Promise<void> {
+  const ack = await router.invoke(
+    RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+    encodeRfc64PublicCatalogHeadAnnouncementV1(head),
+    peerId,
+  );
+  expect(ack).toEqual(Uint8Array.of(1));
+}
+
+describe('RFC-64 announced-head acceleration pass integrity (T4/T5)', () => {
+  it('drops only the target whose authority read throws, records the error, and keeps its sibling in the pass', async () => {
+    const CG_B = '0x1111111111111111111111111111111111111111/announced-head-retry-b' as const;
+    let authorityReadFailure: Error | null = null;
+    const { router, service, onAccelerationFailed } = heldPassService({
+      maxAttempts: MAX_PULL_ATTEMPTS,
+      resolveContextGraphAuthority: (contextGraphId, direction) => {
+        if (
+          authorityReadFailure !== null
+          && contextGraphId === CONTEXT_GRAPH_ID
+          && direction === 'receiving'
+        ) {
+          throw authorityReadFailure;
+        }
+        return catalogApplyAuthority(contextGraphId, direction);
+      },
+    });
+    const policyA = acceptPolicy(service);
+    const policyB = service.acceptOpenPolicy({
+      networkId: NETWORK_ID,
+      contextGraphId: CG_B,
+      ownerAddress: AUTHOR,
+    });
+    service.start();
+    const headA = announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      catalogVersion: '0',
+      policyDigest: policyA.policyDigest,
+    });
+    const headB = announcement({
+      contextGraphId: CG_B,
+      authorAddress: AUTHOR,
+      catalogVersion: '0',
+      policyDigest: policyB.policyDigest,
+    });
+
+    // Pass 1: A alone fails fast and is retained with one attempt.
+    await deliverHint(router, headA, 'peer-a');
+    await service.whenReceiverIdle();
+    expect(onAccelerationFailed).toHaveBeenCalledTimes(1);
+    expect(service.stats()).toMatchObject({
+      announcedCurrentHeadPendingScopes: 1,
+      announcedCurrentHeadRetryArmed: true,
+    });
+
+    // Pass 2 starts on B's hint with [A, B]; both discoveries are held open.
+    router.hold('peer-a', 'peer-b');
+    await deliverHint(router, headB, 'peer-b');
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(0);
+
+    // A's authority read now throws. Finish A first so its outcome is settled
+    // before B's, then B: the pass must still run B to completion.
+    authorityReadFailure = new Error('authority registry unavailable');
+    router.release('peer-a');
+    await vi.waitFor(() => expect(onAccelerationFailed).toHaveBeenCalledTimes(2));
+    router.release('peer-b');
+    await service.whenReceiverIdle();
+
+    expect(onAccelerationFailed.mock.calls.map(([event]) => [
+      event.scope.contextGraphId,
+      event.attempt,
+      event.abandoned,
+      event.error,
+    ])).toEqual([
+      [CONTEXT_GRAPH_ID, 1, false, expect.any(AggregateError)],
+      [CONTEXT_GRAPH_ID, 2, true, authorityReadFailure],
+      [CG_B, 1, false, expect.any(AggregateError)],
+    ]);
+    // The sibling survived: B is retained and its re-pull deadline is armed.
+    expect(service.stats()).toMatchObject({
+      announcedCurrentHeadPendingScopes: 1,
+      announcedCurrentHeadRetryArmed: true,
+    });
+  });
+
+  it('keeps the announced-scope map at its cap on re-insert: the most-attempted retained target yields, never a fresh hint', async () => {
+    const { router, service, onAccelerationFailed, pendingAtEvent } =
+      heldPassService({ maxAttempts: MAX_PULL_ATTEMPTS });
+    const policy = acceptPolicy(service);
+    service.start();
+    const headFor = (authorAddress: EvmAddressV1) => announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress,
+      catalogVersion: '0',
+      policyDigest: policy.policyDigest,
+    });
+    const A = authorAt(0xa);
+    const B = authorAt(0xb);
+
+    // Pass 1: A alone fails fast and is retained with one attempt.
+    await deliverHint(router, headFor(A), 'peer-a');
+    await service.whenReceiverIdle();
+    expect(onAccelerationFailed).toHaveBeenCalledTimes(1);
+
+    // Pass 2 starts on B's hint with [A, B] and is held open on both.
+    router.hold('peer-a', 'peer-b');
+    await deliverHint(router, headFor(B), 'peer-b');
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(0);
+    // Fresh hints refill the cleared map to one below the cap while it runs.
+    for (let index = 0; index < ANNOUNCED_SCOPE_CAP - 1; index += 1) {
+      await deliverHint(router, headFor(authorAt(FRESH_AUTHOR_BASE + index)), 'peer-fresh');
+    }
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(ANNOUNCED_SCOPE_CAP - 1);
+
+    // A (now two attempts) re-inserts into the last free slot.
+    router.release('peer-a');
+    await vi.waitFor(() => expect(onAccelerationFailed).toHaveBeenCalledTimes(2));
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(ANNOUNCED_SCOPE_CAP);
+    // B (one attempt) finds the map full: A, the most-attempted retained
+    // entry, yields observably; no fresh hint does. The coalesced follow-up
+    // pass then pulls every fresh hint and B once (all fail fast, retained).
+    router.release('peer-b');
+    await service.whenReceiverIdle();
+
+    const events = onAccelerationFailed.mock.calls.map(([event]) => event);
+    expect(events.slice(0, 4).map((event) => [
+      event.scope.authorAddress,
+      event.attempt,
+      event.abandoned,
+    ])).toEqual([
+      [A, 1, false],
+      [A, 2, false],
+      [A, 2, true],
+      [B, 1, false],
+    ]);
+    expect(events[2]!.error).toBeInstanceOf(Error);
+    expect((events[2]!.error as Error).message).toMatch(/capacity exhausted/);
+    expect(events[3]!.error).toBeInstanceOf(AggregateError);
+    const followUp = events.slice(4);
+    expect(followUp).toHaveLength(ANNOUNCED_SCOPE_CAP);
+    const followUpAuthors = new Set(followUp.map((event) => event.scope.authorAddress));
+    expect(followUpAuthors.size).toBe(ANNOUNCED_SCOPE_CAP);
+    expect(followUpAuthors.has(A)).toBe(false);
+    expect(followUpAuthors.has(B)).toBe(true);
+    expect(followUp.every((event) => !event.abandoned)).toBe(true);
+    // Never above the cap at any re-insert, and at rest exactly at it.
+    expect(Math.max(...pendingAtEvent)).toBe(ANNOUNCED_SCOPE_CAP);
+    expect(service.stats()).toMatchObject({
+      announcedCurrentHeadPendingScopes: ANNOUNCED_SCOPE_CAP,
+      announcedCurrentHeadRetryArmed: true,
+    });
+  });
+
+  it('drops the retained target itself, observably, when the cap is held entirely by fresh hints', async () => {
+    const { router, service, onAccelerationFailed, pendingAtEvent } =
+      heldPassService({ maxAttempts: MAX_PULL_ATTEMPTS });
+    const policy = acceptPolicy(service);
+    service.start();
+    const headFor = (authorAddress: EvmAddressV1) => announcement({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress,
+      catalogVersion: '0',
+      policyDigest: policy.policyDigest,
+    });
+    const T = authorAt(0xc);
+
+    // Pass 1 starts on T's hint and is held open; fresh hints fill the map.
+    router.hold('peer-t');
+    await deliverHint(router, headFor(T), 'peer-t');
+    for (let index = 0; index < ANNOUNCED_SCOPE_CAP; index += 1) {
+      await deliverHint(router, headFor(authorAt(FRESH_AUTHOR_BASE + index)), 'peer-fresh');
+    }
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(ANNOUNCED_SCOPE_CAP);
+    // Admission refuses a new scope at the cap.
+    await deliverHint(router, headFor(authorAt(FRESH_AUTHOR_BASE + ANNOUNCED_SCOPE_CAP)), 'peer-fresh');
+    expect(service.stats().announcedCurrentHeadPendingScopes).toBe(ANNOUNCED_SCOPE_CAP);
+
+    // T finds no retained work older than itself: it is the one dropped.
+    router.release('peer-t');
+    await service.whenReceiverIdle();
+
+    const [dropped, ...followUp] = onAccelerationFailed.mock.calls.map(([event]) => event);
+    expect(dropped).toMatchObject({
+      scope: { authorAddress: T },
+      attempt: 1,
+      maxAttempts: MAX_PULL_ATTEMPTS,
+      abandoned: true,
+    });
+    expect((dropped!.error as Error).message).toMatch(/capacity exhausted/);
+    expect((dropped!.error as Error).cause).toBeInstanceOf(AggregateError);
+    // Every fresh hint survived and was pulled exactly once by the follow-up pass.
+    expect(followUp).toHaveLength(ANNOUNCED_SCOPE_CAP);
+    expect(new Set(followUp.map((event) => event.scope.authorAddress)).size)
+      .toBe(ANNOUNCED_SCOPE_CAP);
+    expect(followUp.every((event) => (
+      event.attempt === 1 && !event.abandoned && event.scope.authorAddress !== T
+    ))).toBe(true);
+    expect(Math.max(...pendingAtEvent)).toBe(ANNOUNCED_SCOPE_CAP);
+    expect(service.stats()).toMatchObject({
+      announcedCurrentHeadPendingScopes: ANNOUNCED_SCOPE_CAP,
+      announcedCurrentHeadRetryArmed: true,
+    });
+  });
 });

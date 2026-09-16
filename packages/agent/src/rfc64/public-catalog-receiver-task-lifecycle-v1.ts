@@ -14,6 +14,12 @@ export type Rfc64ReceiverSchedulingClassV1 =
 export interface Rfc64ReceiverSchedulingPolicyV1 {
   readonly schedulingClass: Rfc64ReceiverSchedulingClassV1;
   readonly placement: 'tail' | 'before-same-scope';
+  /**
+   * Version dominance over strictly older AMBIENT work for the same scope, in
+   * two halves: on admission, abort the active task holding the scope lock;
+   * after this task's durable success, retire the queued heads.
+   */
+  readonly preemptsOlderActiveAmbient: boolean;
   readonly retiresOlderAmbientAfterDurableSuccess: boolean;
 }
 
@@ -21,16 +27,19 @@ const RFC64_RECEIVER_SCHEDULING_POLICIES_V1 = Object.freeze({
   ambient: Object.freeze({
     schedulingClass: 'ambient',
     placement: 'tail',
+    preemptsOlderActiveAmbient: false,
     retiresOlderAmbientAfterDurableSuccess: false,
   }),
   isolated: Object.freeze({
     schedulingClass: 'isolated',
     placement: 'tail',
+    preemptsOlderActiveAmbient: false,
     retiresOlderAmbientAfterDurableSuccess: false,
   }),
   'verified-current-head': Object.freeze({
     schedulingClass: 'verified-current-head',
     placement: 'before-same-scope',
+    preemptsOlderActiveAmbient: true,
     retiresOlderAmbientAfterDurableSuccess: true,
   }),
 } satisfies Record<Rfc64ReceiverSchedulingClassV1, Rfc64ReceiverSchedulingPolicyV1>);

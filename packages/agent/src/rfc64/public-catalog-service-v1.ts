@@ -144,10 +144,31 @@ export {
 const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
 const MAX_FAILOVER_PROVIDERS_V1 = 8;
 const MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1 = 4;
+/**
+ * Bound on the whole announced-scope map, fresh hints and targets retained for
+ * re-pull alike. Admission refuses a new scope at the cap; a retained target
+ * re-inserted after a pass evicts older retained work to stay under it and
+ * never an entry the lane has not pulled yet.
+ */
 const MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1 = 1_024;
-/** Re-pull cadence for an announced head that a bounded acceleration pull left unapplied. */
+/**
+ * Delay armed AFTER a re-pull pass completes, before the next pass may start.
+ * Not a period: successive passes for a retained head are separated by the
+ * pass duration plus this interval.
+ */
 const DEFAULT_ANNOUNCED_CURRENT_HEAD_RETRY_INTERVAL_MS_V1 = 5_000;
-/** Re-pull passes per announced scope before the target is dropped (~60 s at 5 s). */
+/**
+ * Passes that leave an announced head unapplied before the target is dropped.
+ * This bounds attempts, not wall-clock time: abandonment takes
+ * `maxAttempts x (pass duration + interval)`, and a pass is cheap only when it
+ * fails fast. Against unreachable providers discovery alone spans up to
+ * ceil(MAX_FAILOVER_PROVIDERS_V1 / MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1)
+ * waves of `transportTimeoutMs` (20 s at the defaults), and a discovered but
+ * not-found head then awaits the receiver's whole failover chain
+ * (`maxProvidersPerHead x maxAttempts` reconciles with exponential backoff).
+ * With the defaults that is ~1 min only when every pass fails instantly and
+ * several minutes otherwise; size alerting on the abandoned record accordingly.
+ */
 const DEFAULT_ANNOUNCED_CURRENT_HEAD_MAX_PULL_ATTEMPTS_V1 = 12;
 
 /**
@@ -194,7 +215,9 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
    * failed, found no provider head, or applied nothing while the announced
    * version is still ahead of the durable applied head. Only WHEN a fully
    * verified pull is retried changes; verification itself never does.
-   * Defaults: 5 s cadence, 12 attempts.
+   * Defaults: 12 passes, 5 s armed after each pass completes. The budget is a
+   * pass count, not a wall-clock deadline: see
+   * `DEFAULT_ANNOUNCED_CURRENT_HEAD_MAX_PULL_ATTEMPTS_V1`.
    */
   readonly announcedCurrentHeadRetry?: Rfc64AnnouncedCurrentHeadRetryOptionsV1;
   /**
@@ -278,9 +301,16 @@ export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
 }
 
 export interface Rfc64AnnouncedCurrentHeadRetryOptionsV1 {
-  /** Positive integer milliseconds between re-pull passes. Default 5000. */
+  /**
+   * Positive integer milliseconds armed after a re-pull pass completes before
+   * the next pass may start (not a fixed period). Default 5000.
+   */
   readonly intervalMs?: number;
-  /** Positive integer re-pull passes before the announced head is dropped. Default 12. */
+  /**
+   * Positive integer re-pull passes before the announced head is dropped. A
+   * pass bound, not a deadline: wall-clock abandonment is
+   * `maxAttempts x (pass duration + intervalMs)`. Default 12.
+   */
   readonly maxAttempts?: number;
 }
 
@@ -416,7 +446,7 @@ export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly acceptedPolicies: number;
   readonly receiver: Rfc64PublicCatalogReceiverStatsV1;
   readonly nativeReceiver: Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
-  /** Announced scopes still awaiting a pull pass (fresh or retained for re-pull). */
+  /** Announced scopes awaiting a pull pass (fresh or retained); never above the scope cap. */
   readonly announcedCurrentHeadPendingScopes: number;
   /** True while a bounded re-pull deadline is armed for a retained scope. */
   readonly announcedCurrentHeadRetryArmed: boolean;
@@ -621,9 +651,13 @@ export class Rfc64PublicCatalogServiceV1 {
     )
       ? undefined
       : new CoalescingRecurringTask({
-        // A pass that retains any target returns `rearm`, so the supervisor
-        // arms exactly one re-pull deadline; `idle` clears it. Without this a
-        // request() during a running pass only set a flag and never re-armed.
+        // Without retryIntervalMs the lane never retried on its own: a pass
+        // that left a target unapplied ran again only when a NEW hint called
+        // request() (a request during a running pass already coalesced into a
+        // follow-up pass), and a retained target has no announcement coming to
+        // do that. Now a pass that retains any target returns `rearm`, so the
+        // supervisor arms exactly one re-pull deadline once the pass
+        // completes; `idle` clears it.
         retryIntervalMs: rfc64ReceiverPositiveIntV1(
           options.announcedCurrentHeadRetry?.intervalMs,
           DEFAULT_ANNOUNCED_CURRENT_HEAD_RETRY_INTERVAL_MS_V1,
@@ -1274,7 +1308,11 @@ export class Rfc64PublicCatalogServiceV1 {
    * One globally bounded pass; requests arriving during it coalesce into the
    * next pass. A target whose pull threw, found no provider head, or applied
    * nothing that satisfies the announced head is retained for one bounded
-   * re-pull (`rearm`) and dropped, observably, after the attempt budget.
+   * re-pull (`rearm`) and dropped, observably, after the attempt budget or
+   * when retaining it would breach the scope cap. No step after the pull may
+   * throw: `mapWithConcurrency` settles on its first rejection while its other
+   * workers run on unsupervised, so one target's bad read would report the
+   * pass complete early, swallow the rejection, and hide its siblings' fates.
    */
   async #synchronizeAnnouncedCurrentHeads(signal: AbortSignal): Promise<'rearm' | 'idle'> {
     const targets = [...this.#announcedCurrentHeadTargets.entries()];
@@ -1300,12 +1338,26 @@ export class Rfc64PublicCatalogServiceV1 {
         }
         if (signal.aborted || this.#closed) return;
         if (await this.#isAnnouncedHeadApplied(target.announcement)) return;
-        if (!this.#isAnnouncedHeadRetryable(scope)) return;
+        const retryability = this.#announcedHeadRetryability(scope);
+        if (retryability === 'inactive') return;
         target.attempts += 1;
-        const abandoned = target.attempts >= this.#announcedCurrentHeadMaxPullAttempts;
-        this.#observeAccelerationFailure(target, abandoned, error);
-        if (abandoned) return;
-        this.#retainAnnouncedCurrentHeadTarget(key, target);
+        if (retryability !== 'retryable') {
+          this.#observeAccelerationFailure(target, true, retryability.error);
+          return;
+        }
+        if (target.attempts >= this.#announcedCurrentHeadMaxPullAttempts) {
+          this.#observeAccelerationFailure(target, true, error);
+          return;
+        }
+        if (!this.#retainAnnouncedCurrentHeadTarget(key, target)) {
+          this.#observeAccelerationFailure(
+            target,
+            true,
+            announcedCurrentHeadRetainCapacityErrorV1(error),
+          );
+          return;
+        }
+        this.#observeAccelerationFailure(target, false, error);
         retained = true;
       },
     );
@@ -1323,34 +1375,77 @@ export class Rfc64PublicCatalogServiceV1 {
     }
   }
 
-  /** Never re-pull for a scope the receiver no longer applies; drop it silently. */
-  #isAnnouncedHeadRetryable(scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>): boolean {
-    return this.#policies.lookup(scope.networkId, scope.contextGraphId) !== null
-      && this.#resolveContextGraphAuthority(scope.contextGraphId, 'receiving')
-        .reconciliationLane === 'catalog-apply';
+  /**
+   * Never re-pull for a scope the receiver no longer applies: `inactive` is
+   * dropped silently. A policy or authority read that throws is not retryable
+   * either, but it is a failure rather than a deactivation, so the caller
+   * drops the target WITH the error; the throw itself must not leave the pass.
+   */
+  #announcedHeadRetryability(
+    scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>,
+  ): 'retryable' | 'inactive' | Readonly<{ error: unknown }> {
+    try {
+      return this.#policies.lookup(scope.networkId, scope.contextGraphId) !== null
+        && this.#resolveContextGraphAuthority(scope.contextGraphId, 'receiving')
+          .reconciliationLane === 'catalog-apply'
+        ? 'retryable'
+        : 'inactive';
+    } catch (error) {
+      return Object.freeze({ error });
+    }
   }
 
-  /** Merge a retained target with any fresher hint that arrived during the pass. */
-  #retainAnnouncedCurrentHeadTarget(key: string, target: AnnouncedCurrentHeadTargetV1): void {
-    const current = this.#announcedCurrentHeadTargets.get(key);
-    if (current === undefined) {
-      this.#announcedCurrentHeadTargets.set(key, target);
-      return;
+  /**
+   * Re-insert a target the pass left unapplied. It merges into any fresher
+   * hint that arrived during the pass; otherwise it must fit under
+   * `MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1`, which admission enforced only
+   * against the map this pass cleared on entry, so fresh hints may have
+   * refilled it meanwhile. Retained work is older than any fresh hint: when
+   * the map is full the most-attempted retained entry yields (dropped
+   * observably), and an entry the lane has not pulled yet never does. Returns
+   * false when this target is the one that yields.
+   */
+  #retainAnnouncedCurrentHeadTarget(key: string, target: AnnouncedCurrentHeadTargetV1): boolean {
+    const targets = this.#announcedCurrentHeadTargets;
+    const current = targets.get(key);
+    if (current !== undefined) {
+      for (const remotePeerId of target.remotePeerIds) {
+        if (current.remotePeerIds.size >= MAX_FAILOVER_PROVIDERS_V1) break;
+        current.remotePeerIds.add(remotePeerId);
+      }
+      const order = compareCatalogVersionsV1(
+        current.announcement.catalogVersion,
+        target.announcement.catalogVersion,
+      );
+      if (order < 0) {
+        current.announcement = target.announcement;
+        current.attempts = target.attempts;
+      } else if (order === 0) {
+        current.attempts = Math.max(current.attempts, target.attempts);
+      }
+      return true;
     }
-    for (const remotePeerId of target.remotePeerIds) {
-      if (current.remotePeerIds.size >= MAX_FAILOVER_PROVIDERS_V1) break;
-      current.remotePeerIds.add(remotePeerId);
+    if (targets.size >= MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1) {
+      // `attempts` is 0 exactly for an entry never pulled, and this target has
+      // at least one, so a fresh hint can never be selected here.
+      let victim: [string, AnnouncedCurrentHeadTargetV1] | undefined;
+      let victimAttempts = target.attempts;
+      for (const entry of targets) {
+        if (entry[1].attempts > victimAttempts) {
+          victim = entry;
+          victimAttempts = entry[1].attempts;
+        }
+      }
+      if (victim === undefined) return false;
+      targets.delete(victim[0]);
+      this.#observeAccelerationFailure(
+        victim[1],
+        true,
+        announcedCurrentHeadRetainCapacityErrorV1(null),
+      );
     }
-    const order = compareCatalogVersionsV1(
-      current.announcement.catalogVersion,
-      target.announcement.catalogVersion,
-    );
-    if (order < 0) {
-      current.announcement = target.announcement;
-      current.attempts = target.attempts;
-    } else if (order === 0) {
-      current.attempts = Math.max(current.attempts, target.attempts);
-    }
+    targets.set(key, target);
+    return true;
   }
 
   #observeAccelerationFailure(
@@ -1603,6 +1698,14 @@ function exactHeadIdentityV1(
     announcement.catalogHeadObjectDigest,
     announcement.signatureVariantDigest,
   ].join('\n');
+}
+
+/** A retained re-pull target dropped so the announced-scope map stays under its cap. */
+function announcedCurrentHeadRetainCapacityErrorV1(cause: unknown): Error {
+  return new Error(
+    'RFC-64 announced current-head re-pull dropped: retained-scope capacity exhausted',
+    cause === null ? {} : { cause },
+  );
 }
 
 /** Numeric order of two validated decimal catalog versions. */

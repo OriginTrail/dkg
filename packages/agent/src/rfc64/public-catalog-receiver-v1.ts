@@ -777,9 +777,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       }`,
       completion,
     );
-    if (schedulingClass === 'verified-current-head') {
-      this.#preemptSupersededActiveAmbientHead(task);
-    }
+    this.#preemptSupersededActiveAmbientHead(task);
     this.#tasks.schedule(task);
     if (schedulingClass === 'verified-current-head') {
       task.verifiedCurrentHeadTargetAccepted = true;
@@ -1218,22 +1216,43 @@ export class Rfc64PublicCatalogReceiverV1 {
   }
 
   /**
-   * A verified current head must not wait behind a strictly older ambient
-   * task that is merely slow (iterating unreachable providers). Placement
-   * alone only reorders the queue; the scope lock is held by the ACTIVE task,
-   * so abort it. Its run returns `aborted` and settles as `closed`, releasing
-   * the scope so the pump can start the verified task. This mirrors the
-   * version-dominance rule {@link #retireSupersededAmbientHeads} already
-   * applies to queued ambient work after a durable verified success; equal or
-   * newer active work, and every non-ambient class, is never preempted.
+   * The admission half of the version-dominance rule over ambient work; the
+   * durable-success half is {@link #retireSupersededAmbientHeads}. Both are
+   * declared as policy data (`preemptsOlderActiveAmbient`,
+   * `retiresOlderAmbientAfterDurableSuccess`) and hold only for
+   * `verified-current-head`. A verified current head must not wait behind a
+   * strictly older ambient task that is merely slow (iterating unreachable
+   * providers): placement alone only reorders the queue, while the scope lock
+   * is held by the ACTIVE task, so abort it. Its run returns `aborted` and
+   * settles as `closed`, releasing the scope so the pump can start the
+   * verified task. Equal or newer active work, and every non-ambient class,
+   * is never preempted.
+   *
+   * Unlike retirement this fires at admission, before the verified head is
+   * known to succeed, so a nearly finished older reconcile can be discarded
+   * for a head that then fails. That trade is deliberate: the admitted head
+   * passed exact fetch, signature, scope and authority verification and is
+   * strictly newer, so the aborted head is stale by construction;
+   * `reconcileHead` is idempotent by contract, so an aborted run leaves
+   * nothing a later run cannot redo; and the caller that admitted the
+   * verified head owns its retry (the bounded announced-head re-pull for the
+   * acceleration lane), while the older head stays reachable via replay.
+   *
+   * The preempted task settles as `closed`, the same outcome as receiver
+   * shutdown or CG deactivation, and its abort reason is not carried into
+   * the completion, so terminal-event consumers cannot tell the two apart;
+   * `preemptedActive` is the discriminating counter. A dedicated outcome
+   * would widen the completion type observability records and is left for a
+   * follow-up.
    */
-  #preemptSupersededActiveAmbientHead(verifiedTask: ReceiverTaskV1): void {
-    const active = this.#tasks.activeForScope(verifiedTask.scopeKey);
+  #preemptSupersededActiveAmbientHead(admittedTask: ReceiverTaskV1): void {
+    if (!admittedTask.schedulingPolicy.preemptsOlderActiveAmbient) return;
+    const active = this.#tasks.activeForScope(admittedTask.scopeKey);
     if (
       active === undefined
       || active.schedulingPolicy.schedulingClass !== 'ambient'
       || active.cancellation.signal.aborted
-      || active.catalogVersion >= verifiedTask.catalogVersion
+      || active.catalogVersion >= admittedTask.catalogVersion
     ) return;
     this.#preemptedActive += 1;
     active.cancellation.abort(new Error(
