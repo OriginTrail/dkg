@@ -237,6 +237,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const queueGossip = vi.fn();
     const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
     const pushReplay = vi.fn(async () => ({ attempted: 0, admitted: 0 }));
+    const bootstrapMetadata = vi.fn(async () => 'local-author' as const);
     const startSupervisor = vi.fn();
     const agent = {
       projectRfc64CatalogSubscriptionTransitionV1: project,
@@ -248,6 +249,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       queueSharedMemoryGossipSubscription: queueGossip,
       requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
       replayRfc64CatalogToConnectedPeersV1: pushReplay,
+      bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: bootstrapMetadata,
       // Author of record for this graph: the activation push is allowed.
       localContextGraphProvenance: { hasLocalCreate: () => true },
       startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
@@ -289,6 +291,11 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     // receive the head or the policy. Deactivation must not push.
     expect(pushReplay).toHaveBeenCalledOnce();
     expect(pushReplay).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
+    // Activation also pulls `<cg>/_meta` from already-connected peers: the
+    // catalog lane carries no declaration and a catalog-authoritative CG is
+    // outside legacy durable sync. Deactivation must not pull.
+    expect(bootstrapMetadata).toHaveBeenCalledOnce();
+    expect(bootstrapMetadata).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
     expect(startSupervisor).toHaveBeenCalledOnce();
   });
 
@@ -304,6 +311,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     });
     const pushReplay = vi.fn(async () => ({ attempted: 0, admitted: 0 }));
     const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
+    const bootstrapMetadata = vi.fn(async () => 'not-found' as const);
     const startSupervisor = vi.fn();
     const agent = {
       projectRfc64CatalogSubscriptionTransitionV1: project,
@@ -313,6 +321,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       queueSharedMemoryGossipSubscription: vi.fn(),
       requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
       replayRfc64CatalogToConnectedPeersV1: pushReplay,
+      bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: bootstrapMetadata,
       localContextGraphProvenance: { hasLocalCreate: () => false },
       startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
     };
@@ -325,6 +334,9 @@ describe('RFC-64 recovery-plan queue authorization', () => {
 
     expect(pushReplay).not.toHaveBeenCalled();
     expect(replay).toHaveBeenCalledOnce();
+    // A replica is exactly the node that has to pull `_meta` from its peers.
+    expect(bootstrapMetadata).toHaveBeenCalledOnce();
+    expect(bootstrapMetadata).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
     expect(startSupervisor).toHaveBeenCalledOnce();
   });
 

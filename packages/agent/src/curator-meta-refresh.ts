@@ -49,6 +49,14 @@ export interface CuratorMetaRefreshOptions {
   force?: boolean;
   /** Require the fetched snapshot to make this approved local member usable. */
   memberProof?: AuthoritativePrivateMetaMemberProof;
+  /**
+   * Accept only an unambiguous PUBLIC root definition. Set by the RFC-64
+   * replica metadata bootstrap, whose accepted owner-signed policy is already
+   * known to be public: a peer-served private definition must then be
+   * rejected instead of installed, so an arbitrary connected peer cannot flip
+   * the local graph private. Mutually exclusive with `memberProof`.
+   */
+  requirePublicDefinition?: boolean;
 }
 
 interface CuratorConnection {
@@ -422,11 +430,14 @@ async function fetchAuthoritativeMetaSnapshot(
   // subscriptions reach this refresh without a member proof.
   const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
     && hasAuthoritativePublicDefinition;
-  const hasAuthoritativePrivateDefinition = hasAuthoritativePrivateMetaDefinition(
-    contextGraphId,
-    controlMetaQuads,
-    options.memberProof,
-  );
+  // A public-only bootstrap never installs a private definition, however
+  // complete: the caller's accepted policy already says the graph is public.
+  const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true
+    && hasAuthoritativePrivateMetaDefinition(
+      contextGraphId,
+      controlMetaQuads,
+      options.memberProof,
+    );
   if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);

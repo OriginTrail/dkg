@@ -9412,6 +9412,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && this.rfc64PublicCatalogServiceV1 !== undefined) {
       void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId)
         .catch(() => undefined);
+      // The catalog lane carries KA rows but no Context Graph declaration, and
+      // a catalog-authoritative CG is excluded from legacy durable sync, so a
+      // subscriber that activates while its peers are already connected would
+      // never receive `<cg>/_meta` on its own. Pull it now from the connected
+      // peers (bounded, public-definition-only, gated on the accepted policy)
+      // instead of waiting for a `connection:open` that never comes.
+      void this.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId)
+        .catch(() => undefined);
       // A CG that becomes active while peers are already connected never
       // receives connect-time catalog replay: that transition fires only on
       // `connection:open`, and both replay request versions require the policy

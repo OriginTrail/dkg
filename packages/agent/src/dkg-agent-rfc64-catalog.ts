@@ -2319,6 +2319,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           finalizedAuthorityEvidence,
         );
       }
+      if (accessPolicy === null && authorityIndexId === undefined) {
+        // An unregistered graph has no chain evidence, and a replica that
+        // subscribed before the author's `_meta` replicated holds no local
+        // declaration either, so both reads above stay `null`. The catalog
+        // service's accepted snapshot is the owner-signed policy this node
+        // already authenticated (exact finalized name absence for a replica
+        // seed, or the local-first author path). It is the canonical
+        // access-policy fact for this decision; without it the graph would
+        // stay outside the responsibility set forever, so a late subscriber
+        // never activates its receiver, never requests head replay, and the
+        // catch-up job stalls "running" (subscribe-after-connect). A private
+        // snapshot still fails closed below without a verified roster, and
+        // chain evidence keeps precedence whenever a numeric binding exists.
+        accessPolicy = this.readAcceptedRfc64CatalogAccessPolicyV1(contextGraphId);
+      }
       const privateMembershipVerified = accessPolicy === 'private'
         && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
       const reason = resolveRfc64CatalogResponsibilityReasonV1({
@@ -2369,6 +2384,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // Subscription/lifecycle nudges can arrive once per restored graph.
           // They own responsibility selection only; one coalesced refresh pass
           // owns registered authority evidence for the selected inventory.
+          this.rfc64PublicCatalogOwnerV1.requestAuthorityRefresh();
+          return next;
+        }
+        if (
+          !localFirstUnregistered
+          && subscription.onChainId === undefined
+          && finalizedAuthorityEvidence === undefined
+          && this.hasAcceptedRfc64UnregisteredAuthorityV1(contextGraphId)
+        ) {
+          // A replica already holds the accepted owner-signed seed for this
+          // unbound name. An `auto` re-read cannot consume that seed (only an
+          // exact finalized-absence request may), so running it here would
+          // only demote the accepted generation to `blocked` and fence the
+          // receiver the moment `_meta` arrives. Keep the accepted authority
+          // and let the refresh owner revalidate against the finalized index
+          // with the request kind it derives from that index.
           this.rfc64PublicCatalogOwnerV1.requestAuthorityRefresh();
           return next;
         }
@@ -3257,6 +3288,37 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       activeNetworkId as NetworkIdV1,
       contextGraphId as ContextGraphIdV1,
     )?.policy.accessPolicy === 0;
+  }
+
+  /**
+   * Access policy of the authority this catalog owner has already accepted for
+   * the exact active network and graph, or `null` while none is accepted. The
+   * snapshot only ever enters the service through
+   * `reconcileRfc64CatalogAccessAuthorityV1`, so it is authenticated policy
+   * (finalized chain evidence or an owner-signed seed verified against exact
+   * finalized name absence), never unsigned RDF metadata.
+   */
+  readAcceptedRfc64CatalogAccessPolicyV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): 'public' | 'private' | null {
+    const service = this.rfc64PublicCatalogServiceV1;
+    const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId;
+    if (service === undefined || activeNetworkId === undefined) return null;
+    try {
+      assertNetworkIdV1(activeNetworkId);
+      assertContextGraphIdV1(contextGraphId);
+    } catch {
+      return null;
+    }
+    const accepted = service.acceptedPolicySnapshot(activeNetworkId, contextGraphId);
+    if (accepted === null) return null;
+    return accepted.policy.accessPolicy === 0
+      ? 'public'
+      : accepted.policy.accessPolicy === 1
+        ? 'private'
+        : null;
   }
 
   /** Gather catalog-owned state once and feed values into the shared pure fence. */
