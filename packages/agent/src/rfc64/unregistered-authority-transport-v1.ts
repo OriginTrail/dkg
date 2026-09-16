@@ -21,10 +21,14 @@
  * still prove finalized on-chain absence through the existing reconcile path
  * before the policy is accepted.
  *
- * Bounded by construction: a 2 KiB request, a 16 KiB response, one keyed read
+ * Bounded by construction: a 2 KiB request, a 4 KiB seed (the single
+ * `RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1` bound the keyed store and
+ * its SQL CHECK enforce) plus one status byte on the response, one keyed read
  * plus one signature recovery per request, and never an unbounded store scan.
- * Non-wallet-namespaced ids are rejected on both sides before any I/O: a
- * signature must never self-assign ownership of an arbitrary global name.
+ * The requester also hands the router that response cap as its per-call read
+ * ceiling, so it stops buffering the moment a peer exceeds it. Non-wallet-
+ * namespaced ids are rejected on both sides before any I/O: a signature must
+ * never self-assign ownership of an arbitrary global name.
  *
  * This transport does not persist, accept, or schedule anything; the agent
  * owns persistence (keyed seed store) and acceptance (reconcile fences).
@@ -33,7 +37,6 @@
 import {
   assertContextGraphIdV1,
   assertNetworkIdV1,
-  parseCanonicalSignedContextGraphPolicyEnvelopeV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -55,6 +58,18 @@ import {
   rethrowRfc64CatalogTransportWireUtilityErrorV1,
   type Rfc64CatalogTransportWireAdapterV1,
 } from './catalog-transport-wire-v1-internal.js';
+import {
+  RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
+  resolveRfc64WalletNamespaceOwnerV1,
+} from './unregistered-authority-seed-store-v1.js';
+import {
+  Rfc64UnregisteredReplicaAuthorityErrorV1,
+  authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1,
+} from './unregistered-replica-authority-v1.js';
+
+// One seed bound for the store, the SQL CHECK, the ontology carrier and this
+// wire; re-exported so the package surface keeps its historical name.
+export { RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1 };
 
 /** `/catalog/1` is the declared wire-compat boundary shared with the other RFC-64 protocols. */
 export const RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1 =
@@ -64,11 +79,11 @@ export const RFC64_UNREGISTERED_AUTHORITY_QUERY_KIND_V1 =
 
 export const RFC64_UNREGISTERED_AUTHORITY_QUERY_MAX_BYTES_V1 = 2 * 1024;
 /**
- * A seed envelope is ~1.3 KB. This cap is deliberately far below
- * MAX_CONTROL_OBJECT_BYTES (8 MiB) so neither side ever buffers or parses a
- * large payload on this policy-less path.
+ * Found response = one status byte + the canonical seed (~1.3 KiB, bounded by
+ * the shared 4 KiB seed cap). Deliberately far below MAX_CONTROL_OBJECT_BYTES
+ * (8 MiB) so neither side ever buffers or parses a large payload on this
+ * policy-less path; the requester passes it to the router as its read ceiling.
  */
-export const RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1 = 16 * 1024;
 export const RFC64_UNREGISTERED_AUTHORITY_RESPONSE_MAX_BYTES_V1 =
   RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1 + 1;
 
@@ -86,13 +101,6 @@ const QUERY_KEYS = Object.freeze([
   'kind',
   'networkId',
 ] as const);
-
-/**
- * Only wallet-namespaced CG ids carry an independently checkable owner before
- * registration. Mirrors the ontology loader's gate in
- * unregistered-replica-authority-v1.ts; both must stay identical.
- */
-const EVM_ADDRESS_PREFIXED_CONTEXT_GRAPH_V1 = /^(0x[0-9a-f]{40})(?:\/|$)/iu;
 
 const SEED_WIRE: Rfc64CatalogTransportWireAdapterV1 =
   createRfc64CatalogTransportWireAdapterV1({
@@ -183,22 +191,24 @@ export class Rfc64UnregisteredAuthorityTransportErrorV1 extends Error {
 
 /**
  * The only admissible owner derivation: the lowercase wallet prefix of the CG
- * id. Returns null for every non-wallet-namespaced id.
+ * id (the keyed store's wallet-namespace grammar, so the wire, the store and
+ * the ontology loader agree by construction). Null for every other id.
  */
 export function rfc64UnregisteredAuthorityOwnerV1(
   contextGraphId: string,
 ): EvmAddressV1 | null {
-  const owner = contextGraphId.match(EVM_ADDRESS_PREFIXED_CONTEXT_GRAPH_V1)?.[1]?.toLowerCase();
-  return owner === undefined ? null : owner as EvmAddressV1;
+  return resolveRfc64WalletNamespaceOwnerV1(contextGraphId);
 }
 
 /**
  * Authenticate canonical seed bytes against one exact scope. Shared by the
  * responder (before serving), the requester (before persisting), and the
- * deprecated ontology-carrier fallback, so all three run identical checks:
- * canonical parse under the seed cap, issuer signature, exact issuer proof,
- * owner == wallet prefix, network/graph binding, and the unregistered
- * generation-0 public-policy shape the ontology loader accepts.
+ * deprecated ontology-carrier fallback. The checks themselves are the single
+ * predicate in unregistered-replica-authority-v1.ts (byte bound, canonical
+ * parse, issuer signature through the injected verifier, owner == wallet
+ * prefix, network/graph binding, generation-0 public-policy shape); this
+ * layer only maps its failure codes onto the wire error codes and binds the
+ * returned proof to the exact envelope.
  */
 export async function authenticateRfc64UnregisteredAuthorityEnvelopeV1(
   canonicalBytes: Uint8Array,
@@ -208,41 +218,47 @@ export async function authenticateRfc64UnregisteredAuthorityEnvelopeV1(
 ): Promise<Rfc64VerifiedUnregisteredAuthoritySeedV1> {
   throwIfAborted(signal);
   const scope = validateScope(scopeInput);
-  const expectedOwner = rfc64UnregisteredAuthorityOwnerV1(scope.contextGraphId);
-  if (expectedOwner === null) {
-    fail(
-      'unregistered-authority-input',
-      'only wallet-namespaced Context Graph ids carry an owner-signed unregistered authority',
-    );
-  }
-  if (
-    !(canonicalBytes instanceof Uint8Array)
-    || canonicalBytes.byteLength === 0
-    || canonicalBytes.byteLength > RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1
-  ) {
-    fail('unregistered-authority-wire', 'unregistered-authority seed bytes are empty or oversized');
-  }
-
-  let envelope: SignedContextGraphPolicyEnvelopeV1;
+  let authenticated;
   try {
-    envelope = parseCanonicalSignedContextGraphPolicyEnvelopeV1(canonicalBytes, {
-      maxBytes: RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
+    authenticated = await authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(canonicalBytes, {
+      networkId: scope.networkId,
+      contextGraphId: scope.contextGraphId,
+      signal,
+      verifyIssuerSignature,
     });
   } catch (cause) {
-    fail(
-      'unregistered-authority-wire',
-      'unregistered-authority seed is not a canonical signed Context Graph policy envelope',
-      cause,
-    );
-  }
-
-  let issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
-  try {
-    issuerSignature = await verifyIssuerSignature(envelope);
-  } catch (cause) {
-    fail('unregistered-authority-signature', 'unregistered-authority seed issuer signature failed', cause);
+    throwIfAborted(signal);
+    if (!(cause instanceof Rfc64UnregisteredReplicaAuthorityErrorV1)) throw cause;
+    switch (cause.code) {
+      case 'seed-bytes':
+        fail('unregistered-authority-wire', 'unregistered-authority seed bytes are empty or oversized', cause);
+      case 'not-wallet-namespaced':
+        fail(
+          'unregistered-authority-wire',
+          'RFC-64 unregistered-authority scope must name a wallet-namespaced Context Graph',
+          cause,
+        );
+      case 'seed-canonical':
+        fail(
+          'unregistered-authority-wire',
+          'unregistered-authority seed is not a canonical signed Context Graph policy envelope',
+          cause,
+        );
+      case 'issuer-signature':
+        fail('unregistered-authority-signature', 'unregistered-authority seed issuer signature failed', cause);
+      default:
+        // owner-mismatch, scope-mismatch, policy-shape: the signature proves
+        // who signed; what they signed is not the public generation-0 policy
+        // of THIS graph on THIS network owned by the wallet the id names.
+        fail(
+          'unregistered-authority-mismatch',
+          'unregistered-authority seed is not the owner-signed public generation-0 policy of the requested graph',
+          cause,
+        );
+    }
   }
   throwIfAborted(signal);
+  const { envelope, issuerSignature } = authenticated;
   try {
     assertRfc64ExactIssuerSignatureProofV1(envelope, issuerSignature);
   } catch (cause) {
@@ -256,41 +272,14 @@ export async function authenticateRfc64UnregisteredAuthorityEnvelopeV1(
       message: 'issuer signature proof is not bound to the exact seed envelope',
     });
   }
-
-  // Exactly the ontology loader's acceptance predicate
-  // (unregistered-replica-authority-v1.ts). The signature proves who signed;
-  // this proves what they signed is the public generation-0 policy of THIS
-  // graph on THIS network, owned by the wallet the id names.
-  const owner = envelope.issuer.toLowerCase();
-  const policy = envelope.payload;
-  if (
-    owner !== expectedOwner
-    || policy.networkId !== scope.networkId
-    || policy.contextGraphId !== scope.contextGraphId
-    || policy.source.kind !== 'owner-signed-unregistered'
-    || policy.source.ownerAddress !== owner
-    || policy.source.ownerAuthorityEra !== '0'
-    || policy.governanceChainId !== null
-    || policy.governanceContractAddress !== null
-    || policy.ownershipTransitionDigest !== null
-    || policy.era !== '0'
-    || policy.version !== '0'
-    || policy.previousPolicyDigest !== null
-    || policy.accessPolicy !== 0
-  ) {
-    fail(
-      'unregistered-authority-mismatch',
-      'unregistered-authority seed is not the owner-signed public generation-0 policy of the requested graph',
-    );
-  }
   return Object.freeze({
     networkId: scope.networkId,
     contextGraphId: scope.contextGraphId,
-    ownerAddress: expectedOwner,
-    policyDigest: envelope.objectDigest as Digest32V1,
+    ownerAddress: authenticated.ownerAddress,
+    policyDigest: authenticated.policyDigest,
     envelope,
     issuerSignature,
-    canonicalBytes: Uint8Array.from(canonicalBytes),
+    canonicalBytes: authenticated.canonicalEnvelopeBytes,
   });
 }
 
@@ -368,11 +357,13 @@ export class Rfc64UnregisteredAuthorityTransportV1 {
       networkId: scope.networkId,
       contextGraphId: scope.contextGraphId,
     }));
+    // The router stops reading at the v1 response cap instead of buffering up
+    // to its router-wide default; a per-call cap can only tighten that limit.
     const response = await this.router.send(
       remotePeerId,
       RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1,
       encodeQuery(query),
-      sendOptions,
+      { ...sendOptions, maxReadBytes: RFC64_UNREGISTERED_AUTHORITY_RESPONSE_MAX_BYTES_V1 },
     );
     const payload = parseResponse(response);
     if (payload === null) return null;

@@ -166,6 +166,38 @@ describe('RFC-64 unregistered authority seed store (inventory table)', () => {
     expect(resolveRfc64WalletNamespaceOwnerV1(OWNER.toUpperCase().replace('0X', '0x'))).toBe(OWNER);
   });
 
+  it('fails closed on a stored row that no longer satisfies the storage-boundary shape', async () => {
+    const dataDir = await temporaryDataDir('corrupt-row');
+    const record = await mintRecord();
+    const store = await openStore(dataDir);
+    await store.put(record);
+    inventories.pop()?.close();
+
+    // Bypass the store: rewrite the owner to a wallet that is not the graph's
+    // namespace prefix. The SQL CHECK only pins the blob length, so the
+    // row-level snapshot is the guard that must refuse it on read.
+    const database = new DatabaseSync(join(dataDir, INVENTORY_V1_RELATIVE_PATH));
+    try {
+      database.prepare(
+        'UPDATE rfc64_unregistered_authority_seeds_v1 SET owner_address = ? '
+        + 'WHERE network_id = ? AND context_graph_id = ?',
+      ).run(Buffer.alloc(20, 0x42), NETWORK_ID, CONTEXT_GRAPH_ID);
+    } finally {
+      database.close();
+    }
+
+    const reopened = await openStore(dataDir);
+    await expect(reopened.read(NETWORK_ID, CONTEXT_GRAPH_ID)).rejects.toMatchObject({
+      code: 'candidate-database-corrupt',
+      message: /row is malformed/u,
+    });
+    // A replay of the legitimate seed conflicts with the row (no changes) and
+    // the stored-generation check runs into the same corrupt row.
+    await expect(reopened.put(record)).rejects.toMatchObject({
+      code: 'candidate-database-corrupt',
+    });
+  });
+
   it('keeps the seed table co-located with SQLite and creates no parallel directory', async () => {
     const dataDir = await temporaryDataDir('layout');
     const store = await openStore(dataDir);

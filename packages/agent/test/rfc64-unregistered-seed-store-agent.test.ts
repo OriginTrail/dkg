@@ -6,7 +6,9 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  canonicalizeSignedContextGraphPolicyEnvelopeBytesV1,
   contextGraphDataGraphUri,
+  parseCanonicalSignedContextGraphPolicyEnvelopeV1,
   type ContextGraphIdV1,
   type EvmAddressV1,
   type NetworkIdV1,
@@ -37,7 +39,7 @@ const ONTOLOGY_SOURCE = 'agent.rfc64.unregisteredReplicaAuthority';
 
 type SeedStore = Awaited<ReturnType<typeof openRfc64PersistenceV1>>['unregisteredAuthoritySeeds'];
 type SeedAgent = Rfc64SeedStoreMethods & {
-  readonly log: { warn: ReturnType<typeof vi.fn> };
+  readonly log: { warn: ReturnType<typeof vi.fn>; debug: ReturnType<typeof vi.fn> };
   readonly persistence: Awaited<ReturnType<typeof openRfc64PersistenceV1>> | undefined;
   /** Call-counting wrappers around the real (frozen) seed store facade. */
   readonly seeds: { read: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn> };
@@ -164,18 +166,23 @@ describe('Rfc64SeedStoreMethods contract', () => {
   it('fails closed on forged, wrong-wallet, wrong-network, cross-graph, private and oversize seeds', async () => {
     const agent = await createSeedAgent();
     const valid = await mintSeed();
-    const decoded = JSON.parse(Buffer.from(valid.canonicalEnvelopeBytes).toString('utf8')) as {
-      signature: string;
-    };
-    decoded.signature = `0x${'00'.repeat(65)}`;
-    const forged = new TextEncoder().encode(JSON.stringify(decoded));
+    // Same structure and issuer, canonical bytes, but the signature belongs to
+    // another object: only the signature check can refuse this.
+    const donor = parseCanonicalSignedContextGraphPolicyEnvelopeV1(
+      (await mintSeed({ contextGraphId: OTHER_CONTEXT_GRAPH_ID })).canonicalEnvelopeBytes,
+    );
+    const forged = canonicalizeSignedContextGraphPolicyEnvelopeBytesV1({
+      ...valid.envelope,
+      signature: donor.signature,
+    });
     const wrongWallet = await mintSeed({ wallet: ATTACKER_WALLET, owner: ATTACKER });
     const wrongNetwork = await mintSeed({ networkId: 'otp:1' as NetworkIdV1 });
     const crossGraph = await mintSeed({ contextGraphId: OTHER_CONTEXT_GRAPH_ID });
     const privatePolicy = await mintSeed({ accessPolicy: 1 });
 
     const rejected: ReadonlyArray<readonly [string, Uint8Array, RegExp]> = [
-      ['forged signature', forged, /signature|issuer|canonical/iu],
+      ['forged signature', forged, /signature/u],
+      ['not canonical', new TextEncoder().encode('{"not":"an envelope"}'), /canonical/u],
       ['wrong wallet', wrongWallet.canonicalEnvelopeBytes, /wallet owner/u],
       ['wrong network', wrongNetwork.canonicalEnvelopeBytes, /different network or Context Graph/u],
       ['cross-graph replay', crossGraph.canonicalEnvelopeBytes, /different network or Context Graph/u],
@@ -399,6 +406,54 @@ describe('loadRfc64UnregisteredReplicaAuthorityV1 with the keyed seed store', ()
     })).resolves.toBeNull();
     expect(read).not.toHaveBeenCalled();
     expect(store.query).not.toHaveBeenCalled();
+  });
+
+  it('contains a failing keyed read (warned once) so the ontology copy still reconciles; only abort propagates', async () => {
+    const agent = await createSeedAgent();
+    const seed = await mintSeed();
+    agent.seeds.read.mockRejectedValue(new Error('inventory latency budget exceeded'));
+    const store = ontologyStore([seed.evidence]);
+    const seeds = agent.rfc64UnregisteredAuthoritySeedAccessV1();
+
+    const first = await loadRfc64UnregisteredReplicaAuthorityV1({
+      store,
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      seeds,
+    });
+    expect(first).toMatchObject({ source: 'owner-signed-unregistered', policyDigest: seed.policyDigest });
+    expect(store.query).toHaveBeenCalledTimes(1);
+    expect(agent.log.warn).toHaveBeenCalledTimes(1);
+    expect(String(agent.log.warn.mock.calls[0]?.[1])).toMatch(/seed read .* failed.*latency budget exceeded/u);
+    // The write-through still landed even though the read path is wedged.
+    await expect(agent.persistence!.unregisteredAuthoritySeeds.read(NETWORK_ID, CONTEXT_GRAPH_ID))
+      .resolves.toMatchObject({ policyDigest: seed.policyDigest });
+
+    // Repeats for the same graph stay at debug: a wedged inventory must not
+    // flood the log from every reconcile.
+    const second = await loadRfc64UnregisteredReplicaAuthorityV1({
+      store,
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      seeds,
+    });
+    expect(second?.policyDigest).toBe(seed.policyDigest);
+    expect(agent.log.warn).toHaveBeenCalledTimes(1);
+    expect(agent.log.debug).toHaveBeenCalledTimes(1);
+    expect(store.query).toHaveBeenCalledTimes(2);
+
+    // The caller's own abort is never swallowed.
+    const controller = new AbortController();
+    agent.seeds.read.mockImplementation(async () => {
+      controller.abort(new Error('bootstrap budget exhausted'));
+      throw new Error('read torn down');
+    });
+    await expect(seeds.read({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      signal: controller.signal,
+    })).rejects.toThrow(/read torn down/u);
+    expect(agent.log.warn).toHaveBeenCalledTimes(1);
   });
 
   it('treats a stored row that no longer authenticates as absent and still resolves from the carrier', async () => {

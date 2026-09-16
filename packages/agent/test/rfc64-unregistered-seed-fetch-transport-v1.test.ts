@@ -32,6 +32,10 @@ import {
   encodeRfc64FoundStatusResponseV1,
 } from '../src/rfc64/catalog-transport-wire-v1-internal.js';
 import { Rfc64PublicCatalogServiceV1 } from '../src/rfc64/public-catalog-service-v1.js';
+import { RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1 } from
+  '../src/rfc64/public-catalog-transport-v1.js';
+import { RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1 as SEED_STORE_MAX_BYTES } from
+  '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import {
   RFC64_UNREGISTERED_AUTHORITY_FANOUT_CONCURRENCY_V1,
   RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1,
@@ -201,13 +205,28 @@ async function expectCode(
     error instanceof Rfc64UnregisteredAuthorityTransportErrorV1 && error.code === code);
 }
 
+/** Several failures share one code; the message is what discriminates them. */
+async function expectCodeAndMessage(
+  promise: Promise<unknown>,
+  code: Rfc64UnregisteredAuthorityTransportErrorV1['code'],
+  message: RegExp,
+): Promise<void> {
+  await expect(promise).rejects.toSatisfy((error: unknown) =>
+    error instanceof Rfc64UnregisteredAuthorityTransportErrorV1
+    && error.code === code
+    && message.test(error.message));
+}
+
 describe('RFC-64 unregistered-authority seed transport (wire contract)', () => {
-  it('pins the protocol id, kind and caps', () => {
+  it('pins the protocol id, kind and caps, sharing the single seed bound with the keyed store', () => {
     expect(RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1).toBe('/dkg/catalog/1/unregistered-authority');
     expect(RFC64_UNREGISTERED_AUTHORITY_QUERY_KIND_V1).toBe('rfc64-unregistered-authority-query-v1');
     expect(RFC64_UNREGISTERED_AUTHORITY_QUERY_MAX_BYTES_V1).toBe(2 * 1024);
-    expect(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1).toBe(16 * 1024);
-    expect(RFC64_UNREGISTERED_AUTHORITY_RESPONSE_MAX_BYTES_V1).toBe(16 * 1024 + 1);
+    // One bound: the store's SQL CHECK, the persist path and the wire agree.
+    expect(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1).toBe(4096);
+    expect(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1).toBe(SEED_STORE_MAX_BYTES);
+    // Found response = one status byte + the seed.
+    expect(RFC64_UNREGISTERED_AUTHORITY_RESPONSE_MAX_BYTES_V1).toBe(4096 + 1);
   });
 
   it('round-trips a canonical query and rejects oversize, extra-key and non-wallet queries', () => {
@@ -266,6 +285,9 @@ describe('RFC-64 unregistered-authority seed transport (fake router)', () => {
     expect(read.mock.calls[0]![0]).toEqual(SCOPE);
     expect(router.sends).toHaveLength(1);
     expect(router.sends[0]!.protocolId).toBe(RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1);
+    // The requester hands the router the v1 response cap as its read ceiling
+    // so it never buffers up to the router-wide default for this protocol.
+    expect(router.sends[0]!.options?.maxReadBytes).toBe(RFC64_UNREGISTERED_AUTHORITY_RESPONSE_MAX_BYTES_V1);
     // Wire framing: status byte 1 followed by the exact canonical bytes.
     const response = await router.invoke(
       RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1,
@@ -336,8 +358,22 @@ describe('RFC-64 unregistered-authority seed transport (fake router)', () => {
     const router = new FakeRouter(async () => response);
     const requester = startTransport(router, async () => null);
 
+    // Exactly one byte over the response cap fails on SIZE (the same code as
+    // a malformed payload, so the message is what proves the cap is live).
     response = new Uint8Array(RFC64_UNREGISTERED_AUTHORITY_RESPONSE_MAX_BYTES_V1 + 1).fill(1);
-    await expectCode(requester.fetchUnregisteredAuthority(PROVIDER_PEER, SCOPE), 'unregistered-authority-wire');
+    await expectCodeAndMessage(
+      requester.fetchUnregisteredAuthority(PROVIDER_PEER, SCOPE),
+      'unregistered-authority-wire',
+      /response is empty or oversized/u,
+    );
+    // A found frame carrying a seed one byte over the seed cap is refused by
+    // the seed bound before any parse, not by the response frame.
+    response = encodeRfc64FoundStatusResponseV1(new Uint8Array(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1).fill(0x20));
+    await expectCodeAndMessage(
+      requester.fetchUnregisteredAuthority(PROVIDER_PEER, SCOPE),
+      'unregistered-authority-wire',
+      /not a canonical signed Context Graph policy envelope/u,
+    );
     response = Uint8Array.of(0, 0);
     await expectCode(requester.fetchUnregisteredAuthority(PROVIDER_PEER, SCOPE), 'unregistered-authority-wire');
     response = Uint8Array.of(7, ...seed);
@@ -457,14 +493,170 @@ describe('RFC-64 unregistered-authority seed transport (fake router)', () => {
       ),
       'unregistered-authority-wire',
     );
-    await expectCode(
+    await expectCodeAndMessage(
       authenticateRfc64UnregisteredAuthorityEnvelopeV1(
         new Uint8Array(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1 + 1),
         SCOPE,
         verifyControlEnvelopeIssuerSignatureV1,
       ),
       'unregistered-authority-wire',
+      /seed bytes are empty or oversized/u,
     );
+    await expectCodeAndMessage(
+      authenticateRfc64UnregisteredAuthorityEnvelopeV1(
+        new Uint8Array(0),
+        SCOPE,
+        verifyControlEnvelopeIssuerSignatureV1,
+      ),
+      'unregistered-authority-wire',
+      /seed bytes are empty or oversized/u,
+    );
+    // Exactly at the cap the bound passes and the canonical parse decides.
+    await expectCodeAndMessage(
+      authenticateRfc64UnregisteredAuthorityEnvelopeV1(
+        new Uint8Array(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1).fill(0x20),
+        SCOPE,
+        verifyControlEnvelopeIssuerSignatureV1,
+      ),
+      'unregistered-authority-wire',
+      /not a canonical signed Context Graph policy envelope/u,
+    );
+  });
+
+  it('binds the injected verifier proof to the exact envelope', async () => {
+    const seed = await mintSeedBytes();
+    const donor = parseCanonicalSignedContextGraphPolicyEnvelopeV1(
+      await mintSeedBytes({ contextGraphId: OTHER_CONTEXT_GRAPH_ID }),
+    );
+    const donorProof = await verifyControlEnvelopeIssuerSignatureV1(donor);
+    // A verifier answering with a proof it minted for ANOTHER envelope.
+    await expectCodeAndMessage(
+      authenticateRfc64UnregisteredAuthorityEnvelopeV1(seed, SCOPE, async () => donorProof),
+      'unregistered-authority-signature',
+      /not bound to the exact seed envelope/u,
+    );
+    // A verifier answering with an object the verifier never minted.
+    await expectCodeAndMessage(
+      authenticateRfc64UnregisteredAuthorityEnvelopeV1(seed, SCOPE, async () => ({}) as never),
+      'unregistered-authority-signature',
+      /not minted by the verifier/u,
+    );
+    // A verifier that throws is a signature failure carrying its cause.
+    await expect(authenticateRfc64UnregisteredAuthorityEnvelopeV1(
+      seed,
+      SCOPE,
+      async () => { throw new Error('recovery failed'); },
+    )).rejects.toSatisfy((error: unknown) =>
+      error instanceof Rfc64UnregisteredAuthorityTransportErrorV1
+      && error.code === 'unregistered-authority-signature'
+      && /issuer signature failed/u.test(error.message)
+      && (error.cause as Error | undefined)?.cause instanceof Error
+      && /recovery failed/u.test(String(((error.cause as Error).cause as Error).message)));
+    // An abort raised while verifying surfaces as the abort, never as a code.
+    const controller = new AbortController();
+    await expect(authenticateRfc64UnregisteredAuthorityEnvelopeV1(
+      seed,
+      SCOPE,
+      async () => {
+        controller.abort(new Error('bootstrap budget exhausted'));
+        throw new Error('verifier torn down');
+      },
+      controller.signal,
+    )).rejects.toThrow(/bootstrap budget exhausted/u);
+  });
+
+  it('rejects malformed queries and peer ids at the handler and requester boundaries', async () => {
+    const router = new FakeRouter();
+    const read = vi.fn(async () => mintSeedBytes());
+    const transport = startTransport(router, read);
+
+    const wrongKind = encodeRfc64FlatCanonicalJsonV1({
+      kind: 'rfc64-other-query-v1',
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+    }, RFC64_UNREGISTERED_AUTHORITY_QUERY_MAX_BYTES_V1);
+    await expectCodeAndMessage(
+      router.invoke(RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1, wrongKind),
+      'unregistered-authority-wire',
+      /query kind must be rfc64-unregistered-authority-query-v1/u,
+    );
+    const emptyNetwork = encodeRfc64FlatCanonicalJsonV1({
+      kind: RFC64_UNREGISTERED_AUTHORITY_QUERY_KIND_V1,
+      networkId: '',
+      contextGraphId: CONTEXT_GRAPH_ID,
+    }, RFC64_UNREGISTERED_AUTHORITY_QUERY_MAX_BYTES_V1);
+    await expectCodeAndMessage(
+      router.invoke(RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1, emptyNetwork),
+      'unregistered-authority-wire',
+      /scope contains an invalid scalar/u,
+    );
+    const validQuery = encodeRfc64UnregisteredAuthorityQueryV1({
+      kind: RFC64_UNREGISTERED_AUTHORITY_QUERY_KIND_V1,
+      ...SCOPE,
+    });
+    await expectCodeAndMessage(
+      router.invoke(RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1, validQuery, ''),
+      'unregistered-authority-input',
+      /remotePeerId is empty, oversized, or noncanonical/u,
+    );
+    await expectCodeAndMessage(
+      transport.fetchUnregisteredAuthority(42 as never, SCOPE),
+      'unregistered-authority-input',
+      /remotePeerId must be a string/u,
+    );
+    await expectCodeAndMessage(
+      transport.fetchUnregisteredAuthority(PROVIDER_PEER, { networkId: '' as NetworkIdV1, contextGraphId: CONTEXT_GRAPH_ID }),
+      'unregistered-authority-wire',
+      /scope contains an invalid scalar/u,
+    );
+    // A non-Error abort reason is wrapped so the handler still fails closed.
+    await expect(router.invoke(
+      RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1,
+      validQuery,
+      REQUESTER_PEER,
+      AbortSignal.abort('peer went away'),
+    )).rejects.toSatisfy((error: unknown) =>
+      error instanceof Error
+      && /request was aborted/u.test(error.message)
+      && error.cause === 'peer went away');
+    expect(read).not.toHaveBeenCalled();
+    expect(router.sends).toHaveLength(0);
+  });
+
+  it('refuses construction without its collaborators and rolls back a failed registration', () => {
+    const router = new FakeRouter();
+    expect(() => new Rfc64UnregisteredAuthorityTransportV1(router.asProtocolRouter(), {
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    } as never)).toThrow(/readSeedEnvelopeBytes must be a function/u);
+    expect(() => new Rfc64UnregisteredAuthorityTransportV1(router.asProtocolRouter(), {
+      readSeedEnvelopeBytes: async () => null,
+    } as never)).toThrow(/verifyIssuerSignature must be a function/u);
+    expect(() => new Rfc64UnregisteredAuthorityTransportV1(router.asProtocolRouter(), {
+      readSeedEnvelopeBytes: async () => null,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      isServingAllowed: true as never,
+    })).toThrow(/isServingAllowed must be a function when configured/u);
+
+    const refusing = new FakeRouter();
+    const unregister = vi.spyOn(refusing, 'unregister');
+    vi.spyOn(refusing, 'register').mockImplementation(() => {
+      throw new Error('router is closing');
+    });
+    const transport = new Rfc64UnregisteredAuthorityTransportV1(refusing.asProtocolRouter(), {
+      readSeedEnvelopeBytes: async () => null,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    expect(() => transport.start()).toThrow(/router is closing/u);
+    expect(transport.started).toBe(false);
+    expect(unregister).toHaveBeenCalledWith(RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1);
+    // Idempotent lifecycle: a second start after success is a no-op, as is a
+    // stop when never started.
+    const transportB = startTransport(new FakeRouter(), async () => null);
+    transportB.start();
+    expect(transportB.started).toBe(true);
+    transportB.stop();
+    transportB.stop();
+    expect(transportB.started).toBe(false);
   });
 });
 
@@ -525,7 +717,63 @@ describe('RFC-64 unregistered-authority seed fan-out (service)', () => {
     for (const send of router.sends) {
       expect(send.options?.timeoutMs).toBe(2_000);
       expect(send.options?.signal).toBeInstanceOf(AbortSignal);
+      expect(send.options?.maxReadBytes).toBe(RFC64_UNREGISTERED_AUTHORITY_RESPONSE_MAX_BYTES_V1);
     }
+  });
+
+  it('lets the first verified seed win while a hanging sibling is aborted, and skips denials', async () => {
+    const seed = await mintSeedBytes();
+    let hangSignal: AbortSignal | undefined;
+    let markHangAborted: (() => void) | undefined;
+    // Resolves once the fan-out aborts the hanging request.
+    const hung = new Promise<void>((resolve) => { markHangAborted = resolve; });
+    const router = new FakeRouter(async (peerId, _protocol, _data, options) => {
+      if (peerId === 'peer-hang') {
+        hangSignal = options?.signal;
+        return new Promise<Uint8Array>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            markHangAborted?.();
+            reject(options.signal!.reason);
+          }, { once: true });
+        });
+      }
+      if (peerId === 'peer-denied') return Uint8Array.of(2);
+      if (peerId === 'peer-seed') return encodeRfc64FoundStatusResponseV1(seed);
+      throw new Error(`unexpected peer ${peerId}`);
+    });
+    const service = startService(router, async () => null, 'peer-self');
+
+    const fetched = await service.fetchUnregisteredAuthorityFromPeers({
+      ...SCOPE,
+      peerIds: ['peer-hang', 'peer-denied', 'peer-seed'],
+    });
+
+    expect(fetched?.remotePeerId).toBe('peer-seed');
+    expect(Buffer.from(fetched!.seed.canonicalBytes).equals(Buffer.from(seed))).toBe(true);
+    await hung;
+    expect(hangSignal?.aborted).toBe(true);
+    expect(router.sends.map((send) => send.peerId).sort()).toEqual(['peer-denied', 'peer-hang', 'peer-seed']);
+  });
+
+  it('stops its seed endpoint again when a later protocol registration fails during start', () => {
+    const router = new FakeRouter();
+    const register = router.register.bind(router);
+    vi.spyOn(router, 'register').mockImplementation((protocolId, handler) => {
+      if (protocolId === RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1) {
+        throw new Error('announcement protocol refused');
+      }
+      register(protocolId, handler);
+    });
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      unregisteredAuthority: { readSeedEnvelopeBytes: async () => null },
+    });
+    services.push(service);
+
+    expect(() => service.start()).toThrow(/announcement protocol refused/u);
+    // The seed endpoint registered first and was rolled back with the rest.
+    expect(router.handlers.has(RFC64_UNREGISTERED_AUTHORITY_PROTOCOL_V1)).toBe(false);
   });
 
   it('resolves null when every peer misses, and caps the fan-out at the peer bound', async () => {

@@ -387,6 +387,8 @@ import {
   type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
 import { runBoundedOperation } from './bounded-operation.js';
+import { isRfc64UnregisteredOwnerUnresolvedErrorV1 } from './dkg-agent-rfc64-catalog.js';
+import type { Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 } from './dkg-agent-rfc64-seed-fetch.js';
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -791,35 +793,43 @@ export class QueryMethods extends DKGAgentBase {
             || initial.reason !== 'finalized-name-absence-unaccepted'
           ) return initial;
 
-          // A replica that connected after the graph was created, or an edge
-          // that never syncs the ontology graph, may hold no owner-signed seed
-          // at all. Pull it from currently connected peers (bounded fan-out,
-          // first verified envelope wins) before reconciling. The fetched seed
-          // is only persisted through the keyed store, never accepted here, so
-          // the reconcile fences below still decide; any failure or miss keeps
-          // the initial denial.
-          try {
-            await this.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(contextGraphId, signal);
-          } catch {
-            // Best-effort: reconcile re-reads local state and a missing seed
-            // preserves the initial denial below.
-          }
-
           // The finalized index proved exact absence, but a replica cannot
           // consume that fact until it authenticates the owner-signed policy
           // (keyed seed store, or the deprecated ontology-graph copy). Reconcile
           // once at this explicit admission boundary; ordinary reads and
           // periodic sweeps remain unable to promote unsigned metadata or
           // reopen legacy scalar RPC discovery. A forged/missing seed preserves
-          // the initial denial.
+          // the initial denial. Local state runs FIRST so a replica that
+          // already holds the seed never spends its caller's budget (restart
+          // rehydration passes CHAIN_POLICY_READ_TIMEOUT_MS) on the network.
+          const finalizedAbsence = Object.freeze({ kind: 'finalized-absence' as const });
           try {
-            await this.reconcileRfc64CatalogAccessAuthorityV1(
-              contextGraphId,
-              signal,
-              Object.freeze({ kind: 'finalized-absence' }),
-            );
-          } catch {
-            return initial;
+            await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);
+          } catch (error) {
+            // Only "no authenticated owner authority" is curable by fetching
+            // the seed; every other failure keeps the initial denial.
+            if (!isRfc64UnregisteredOwnerUnresolvedErrorV1(error)) return initial;
+
+            // A replica that connected after the graph was created, or an
+            // edge that never syncs the ontology graph, may hold no owner-
+            // signed seed at all. Pull it from currently connected peers
+            // (bounded fan-out, first verified envelope wins) under the same
+            // caller signal, so the fan-out can never outlive the caller's
+            // budget. The fetched seed is only persisted through the keyed
+            // store, never accepted here: the reconcile fences still decide.
+            let fetched: Rfc64UnregisteredAuthoritySeedFetchOutcomeV1;
+            try {
+              fetched = await this.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(contextGraphId, signal);
+            } catch {
+              return initial;
+            }
+            if (signal.aborted) return initial;
+            if (fetched !== 'fetched' && fetched !== 'already-present') return initial;
+            try {
+              await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);
+            } catch {
+              return initial;
+            }
           }
           const afterReplicaAcceptance = await resolve();
           if (afterReplicaAcceptance.outcome !== 'allowed') {

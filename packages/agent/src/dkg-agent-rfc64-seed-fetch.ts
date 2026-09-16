@@ -13,7 +13,11 @@
  *
  * Provider side: serve the seed from the keyed store. The ontology system
  * graph is consulted only as a DEPRECATED backward-compat fallback for graphs
- * this node created or subscribes to before the keyed store existed.
+ * this node created, actively subscribes to, or core-hosts (never for a name
+ * that merely appeared in unauthenticated gossip discovery), at most once in
+ * flight per scope and with a bounded negative cache, so a remote requester
+ * cannot make this node re-run the SPARQL read and its verifications on
+ * every query for an absent scope.
  */
 
 import {
@@ -43,10 +47,50 @@ import { RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1 } from
 
 /** Bound on the deprecated ontology fallback read behind one peer request. */
 const RFC64_UNREGISTERED_AUTHORITY_ONTOLOGY_FALLBACK_TIMEOUT_MS_V1 = 5_000;
+/**
+ * How long an absent compat scope stays negative before the ontology read may
+ * run again for it. Graphs created after the keyed store existed never reach
+ * this path (their seed is a keyed hit), so the TTL only paces legacy misses.
+ */
+export const RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1 = 60_000;
+/** Hard bound on remembered absent scopes; the oldest entry is evicted first. */
+const MAX_COMPAT_NEGATIVE_SCOPES_V1 = 1_024;
 const MAX_ONTOLOGY_SEED_ROWS_V1 = 32;
 const MAX_ONTOLOGY_SEED_BASE64URL_CHARS_V1 =
   Math.ceil(RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1 * 4 / 3) + 4;
 const BASE64URL_LITERAL_V1 = /^"([A-Za-z0-9_-]+)"(?:\^\^<[^>]+>)?$/u;
+
+/** Per-agent serve-side compat state: single-flight, negative cache, one write-through per scope. */
+interface Rfc64CompatServeStateV1 {
+  readonly inflight: Map<string, Promise<Uint8Array | null>>;
+  /** scope key -> epoch ms until which the scope is known absent. */
+  readonly negativeUntil: Map<string, number>;
+  readonly writeThroughAttempted: Set<string>;
+}
+
+const rfc64CompatServeStateV1 = new WeakMap<DKGAgent, Rfc64CompatServeStateV1>();
+
+function compatServeState(agent: DKGAgent): Rfc64CompatServeStateV1 {
+  let state = rfc64CompatServeStateV1.get(agent);
+  if (state === undefined) {
+    state = { inflight: new Map(), negativeUntil: new Map(), writeThroughAttempted: new Set() };
+    rfc64CompatServeStateV1.set(agent, state);
+  }
+  return state;
+}
+
+function compatScopeKey(scope: Rfc64UnregisteredAuthorityScopeV1): string {
+  return `${scope.networkId}\u0000${scope.contextGraphId}`;
+}
+
+function rememberCompatAbsence(state: Rfc64CompatServeStateV1, key: string, now: number): void {
+  state.negativeUntil.delete(key);
+  if (state.negativeUntil.size >= MAX_COMPAT_NEGATIVE_SCOPES_V1) {
+    const oldest = state.negativeUntil.keys().next().value;
+    if (oldest !== undefined) state.negativeUntil.delete(oldest);
+  }
+  state.negativeUntil.set(key, now + RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1);
+}
 
 export type Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 =
   | 'service-dormant'
@@ -158,12 +202,26 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
   }
 
   /**
+   * Whether this node may consult its own deprecated ontology copy on behalf
+   * of a remote requester. Only graphs this node durably created, actively
+   * subscribes to (gossip topics live), or core-hosts qualify. A discovery
+   * row that merely records a name seen in unauthenticated gossip
+   * (`subscribed: false`) must not let a stranger steer local reads.
+   */
+  private isRfc64CompatSeedServingScopeV1(this: DKGAgent, contextGraphId: string): boolean {
+    if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) return true;
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    return subscription?.subscribed === true || subscription?.coreHosted === true;
+  }
+
+  /**
    * Provider-side point lookup behind the seed transport. Keyed store first.
    * The ontology system graph is consulted only as a DEPRECATED backward-compat
-   * fallback, only for graphs this node created or subscribes to (never a scan
-   * on behalf of an arbitrary remote-named graph), bounded by the handler
-   * signal and a short local deadline, and written through so the next request
-   * is a point lookup.
+   * fallback, only for graphs this node created, subscribes to or core-hosts
+   * (never a scan on behalf of an arbitrary remote-named graph), at most once
+   * in flight per scope, remembered as absent for a bounded TTL, bounded by a
+   * short local deadline, and written through once per scope so the next
+   * request is a point lookup.
    */
   async readRfc64UnregisteredAuthoritySeedForServingV1(
     this: DKGAgent,
@@ -172,32 +230,59 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
   ): Promise<Uint8Array | null> {
     const stored = await this.readRfc64UnregisteredAuthoritySeedV1({ ...scope, signal });
     if (stored !== null) return stored;
-    if (
-      !this.localContextGraphProvenance.hasLocalCreate(scope.contextGraphId)
-      && !this.subscribedContextGraphs.has(scope.contextGraphId)
-    ) return null;
+    if (!this.isRfc64CompatSeedServingScopeV1(scope.contextGraphId)) return null;
+
+    const state = compatServeState(this);
+    const key = compatScopeKey(scope);
+    const now = Date.now();
+    const negativeUntil = state.negativeUntil.get(key);
+    if (negativeUntil !== undefined) {
+      if (negativeUntil > now) return null;
+      state.negativeUntil.delete(key);
+    }
 
     // DEPRECATED: ontology system-graph carrier, backward-compat only. Graphs
     // created before the keyed seed store existed hold their seed solely as an
     // ontology literal on the author. Remove once every author has written
-    // through.
-    const compat = await this.readDeprecatedRfc64OntologySeedBytesV1(scope, signal);
-    if (compat === null) return null;
-    try {
-      await this.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
-        networkId: scope.networkId,
-        contextGraphId: scope.contextGraphId,
-        canonicalEnvelopeBytes: compat,
-        signal,
-      });
-    } catch (cause) {
-      // Best-effort write-through; the authenticated compat copy still serves.
-      this.log.warn(
-        createOperationContext('system'),
-        `RFC-64 unregistered authority seed write-through failed for ${scope.contextGraphId}: `
-        + `${cause instanceof Error ? cause.message : String(cause)}`,
-      );
+    // through. Single-flight: concurrent requests for one scope share the read
+    // and its verifications, and the shared read is bounded by its own local
+    // deadline rather than the first requester's stream so one early hang-up
+    // cannot fail the siblings.
+    let shared = state.inflight.get(key);
+    if (shared === undefined) {
+      shared = this.readDeprecatedRfc64OntologySeedBytesV1(scope)
+        .then(async (compat) => {
+          if (compat === null) {
+            rememberCompatAbsence(state, key, Date.now());
+            return null;
+          }
+          if (!state.writeThroughAttempted.has(key)) {
+            state.writeThroughAttempted.add(key);
+            try {
+              await this.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
+                networkId: scope.networkId,
+                contextGraphId: scope.contextGraphId,
+                canonicalEnvelopeBytes: compat,
+              });
+            } catch (cause) {
+              // Best-effort, attempted once: the authenticated compat copy
+              // still serves and the next request re-reads the carrier.
+              this.log.debug(
+                createOperationContext('system'),
+                `RFC-64 unregistered authority seed write-through failed for ${scope.contextGraphId}: `
+                + `${cause instanceof Error ? cause.message : String(cause)}`,
+              );
+            }
+          }
+          return compat;
+        })
+        .finally(() => {
+          state.inflight.delete(key);
+        });
+      state.inflight.set(key, shared);
     }
+    const compat = await shared;
+    signal?.throwIfAborted();
     return compat;
   }
 
@@ -206,14 +291,13 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
    * loadRfc64UnregisteredReplicaAuthorityV1 but yields the canonical bytes the
    * wire needs. Every row is authenticated with the shared verifier; exactly
    * one distinct generation may be served, conflicting generations serve none.
+   * Bounded by a short local deadline only (see the single-flight caller).
    */
   private async readDeprecatedRfc64OntologySeedBytesV1(
     this: DKGAgent,
     scope: Rfc64UnregisteredAuthorityScopeV1,
-    signal?: AbortSignal,
   ): Promise<Uint8Array | null> {
-    const deadline = AbortSignal.timeout(RFC64_UNREGISTERED_AUTHORITY_ONTOLOGY_FALLBACK_TIMEOUT_MS_V1);
-    const readSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+    const readSignal = AbortSignal.timeout(RFC64_UNREGISTERED_AUTHORITY_ONTOLOGY_FALLBACK_TIMEOUT_MS_V1);
     const graph = contextGraphDataGraphUri('ontology');
     const subject = contextGraphDataGraphUri(scope.contextGraphId);
     const result = await this.store.query(

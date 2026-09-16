@@ -93,6 +93,53 @@ describe('RFC-64 unregistered authority keyed seed store (agents)', () => {
     })).resolves.toBeNull();
   });
 
+  it('keeps the create durable and warns when the keyed seed row cannot be stored', async () => {
+    const publisher = await startAgent({
+      name: 'seed-store-author-store-fault',
+      config: {
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        chainAdapter: new NoChainAdapter(),
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: HUB,
+          operationalKeys: [DEFAULT_NODE_WALLET.privateKey],
+        },
+      },
+    });
+    const nestedAgent = await publisher.registerAgent('nested-author');
+    const nestedOwner = nestedAgent.agentAddress.toLowerCase() as EvmAddressV1;
+    const nestedContextGraphId = `${nestedOwner}/seed-store-fault` as ContextGraphIdV1;
+    const persist = vi.spyOn(publisher, 'persistVerifiedRfc64UnregisteredAuthoritySeedV1')
+      .mockRejectedValue(new Error('inventory is closed'));
+    const warn = vi.spyOn((publisher as unknown as { log: { warn: (...args: unknown[]) => void } }).log, 'warn');
+
+    await publisher.createContextGraph({
+      id: nestedContextGraphId,
+      name: 'Seed store fault',
+      accessPolicy: 0,
+      callerAgentAddress: nestedOwner,
+    });
+
+    expect(persist).toHaveBeenCalledOnce();
+    expect(warn.mock.calls.some(([, message]) =>
+      typeof message === 'string'
+      && message.includes(nestedContextGraphId)
+      && /not stored in the keyed seed store.*inventory is closed/u.test(message))).toBe(true);
+    // The graph exists and its deprecated ontology literal was still written.
+    expect(publisher.getSubscribedContextGraphs().has(nestedContextGraphId)).toBe(true);
+    const result = await storeOf(publisher).query(
+      `SELECT ?evidence WHERE { GRAPH <${ONTOLOGY_GRAPH}> { ` +
+      `<${contextGraphDataGraphUri(nestedContextGraphId)}> ` +
+      `<${RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1}> ?evidence . } }`,
+    );
+    expect(result.type === 'bindings' && result.bindings.length).toBe(1);
+    persist.mockRestore();
+    await expect(publisher.readRfc64UnregisteredAuthoritySeedV1({
+      networkId: NETWORK_ID,
+      contextGraphId: nestedContextGraphId,
+    })).resolves.toBeNull();
+  });
+
   it('bootstraps replica authority from the keyed store without any ontology copy or scan', async () => {
     const resolveFinalized = vi.fn(async () => new Map());
     const pointRead = vi.fn(async () => { throw new Error('must not point-read'); });

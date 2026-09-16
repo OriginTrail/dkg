@@ -55,6 +55,13 @@ function snapshotRfc64SeedKeyV1(input: Readonly<{
   return Object.freeze({ networkId, contextGraphId });
 }
 
+/**
+ * Scopes whose keyed read already failed once on this agent. The first failure
+ * is a warning; repeats stay at debug so a wedged inventory cannot flood the
+ * log from every reconcile of every graph.
+ */
+const rfc64SeedReadFailureWarnedV1 = new WeakMap<DKGAgent, Set<string>>();
+
 export class Rfc64SeedStoreMethods extends DKGAgentBase {
   /**
    * Re-authenticate and durably store one owner-signed seed for its exact
@@ -113,18 +120,43 @@ export class Rfc64SeedStoreMethods extends DKGAgentBase {
   }
 
   /**
-   * Loader adapter for `loadRfc64UnregisteredReplicaAuthorityV1`: store-first
-   * read plus a contained write-through. The write-through only accelerates
-   * the next read, so a closed or unavailable store must never turn an
-   * already-authenticated ontology authority into a reconcile failure.
+   * Loader adapter for `loadRfc64UnregisteredReplicaAuthorityV1`: contained
+   * store-first read plus a contained write-through. Both only accelerate the
+   * replica path (the deprecated ontology copy still authenticates on its
+   * own), so a closed, stalled or corrupt inventory must never turn an
+   * authenticatable authority into a reconcile failure: a failing read
+   * reports absence (warned once per graph) and a failing write-through is
+   * logged. Only the caller's own abort propagates.
    */
   rfc64UnregisteredAuthoritySeedAccessV1(
     this: DKGAgent,
   ): Rfc64UnregisteredReplicaAuthoritySeedAccessV1 {
     type SeedAccess = Rfc64UnregisteredReplicaAuthoritySeedAccessV1;
     return Object.freeze({
-      read: (input: Parameters<SeedAccess['read']>[0]) =>
-        this.readRfc64UnregisteredAuthoritySeedV1(input),
+      read: async (input: Parameters<SeedAccess['read']>[0]) => {
+        try {
+          return await this.readRfc64UnregisteredAuthoritySeedV1(input);
+        } catch (error) {
+          if (input.signal?.aborted) throw error;
+          const key = `${input.networkId}\u0000${input.contextGraphId}`;
+          let warned = rfc64SeedReadFailureWarnedV1.get(this);
+          if (warned === undefined) {
+            warned = new Set();
+            rfc64SeedReadFailureWarnedV1.set(this, warned);
+          }
+          const message =
+            `RFC-64 unregistered authority seed read for "${input.contextGraphId}" failed; ` +
+            'falling back to the deprecated ontology copy: ' +
+            (error instanceof Error ? error.message : String(error));
+          if (warned.has(key)) {
+            this.log.debug(createOperationContext('system'), message);
+          } else {
+            warned.add(key);
+            this.log.warn(createOperationContext('system'), message);
+          }
+          return null;
+        }
+      },
       persist: async (input: Parameters<SeedAccess['persist']>[0]) => {
         if (this.rfc64PersistenceV1 === undefined) return;
         try {

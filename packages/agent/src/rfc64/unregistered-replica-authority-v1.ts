@@ -12,6 +12,7 @@ import {
   type EvmAddressV1,
   type NetworkIdV1,
   type SignedContextGraphPolicyEnvelopeV1,
+  type SignedControlEnvelopeV1,
   type UnsignedContextGraphPolicyEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -111,14 +112,54 @@ export interface Rfc64AuthenticatedUnregisteredReplicaAuthorityV1
   /** Lowercase envelope issuer, proven equal to the Context Graph wallet namespace. */
   readonly ownerAddress: EvmAddressV1;
   readonly canonicalEnvelopeBytes: Uint8Array;
+  /** The parsed canonical envelope the checks ran against. */
+  readonly envelope: SignedContextGraphPolicyEnvelopeV1;
+  /** The verifier's proof for `envelope`, so callers can bind it exactly. */
+  readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
 }
+
+/**
+ * Which acceptance check refused a seed. Transports map these onto their own
+ * wire/signature/mismatch error codes instead of re-implementing the checks.
+ */
+export type Rfc64UnregisteredReplicaAuthorityFailureCodeV1 =
+  | 'seed-bytes'
+  | 'not-wallet-namespaced'
+  | 'seed-canonical'
+  | 'issuer-signature'
+  | 'owner-mismatch'
+  | 'scope-mismatch'
+  | 'policy-shape';
+
+export class Rfc64UnregisteredReplicaAuthorityErrorV1 extends Error {
+  constructor(
+    readonly code: Rfc64UnregisteredReplicaAuthorityFailureCodeV1,
+    message: string,
+    options: ErrorOptions = {},
+  ) {
+    super(message, options);
+    this.name = 'Rfc64UnregisteredReplicaAuthorityErrorV1';
+  }
+}
+
+/**
+ * Issuer-signature verifier the predicate runs. Defaults to the pure dkg-chain
+ * EIP-191 verifier; transports inject the verifier they were configured with
+ * so the proof they bind is the one they minted.
+ */
+export type Rfc64UnregisteredReplicaAuthorityVerifyIssuerSignatureV1 = (
+  envelope: SignedControlEnvelopeV1,
+  options?: Readonly<{ readonly signal?: AbortSignal }>,
+) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
 
 /**
  * Authenticate one canonical owner-signed seed against the graph it claims.
  * This is the single acceptance predicate shared by the keyed seed store, the
- * deprecated ontology carrier, and any peer transport: issuer signature, owner
- * equal to the wallet-namespace prefix, network/graph binding, and the exact
- * unregistered generation-0 public policy shape. Every failure throws; nothing
+ * deprecated ontology carrier, and the peer transport: byte bound, canonical
+ * parse, issuer signature, owner equal to the wallet-namespace prefix,
+ * network/graph binding, and the exact unregistered generation-0 public policy
+ * shape. Every failure throws an `Rfc64UnregisteredReplicaAuthorityErrorV1`
+ * naming the failed check (an aborted `signal` rethrows its reason); nothing
  * here proves finalized on-chain absence, which callers MUST establish
  * separately before accepting the result.
  */
@@ -128,6 +169,7 @@ export async function authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(
     readonly networkId: NetworkIdV1;
     readonly contextGraphId: ContextGraphIdV1;
     readonly signal?: AbortSignal;
+    readonly verifyIssuerSignature?: Rfc64UnregisteredReplicaAuthorityVerifyIssuerSignatureV1;
   }>,
 ): Promise<Rfc64AuthenticatedUnregisteredReplicaAuthorityV1> {
   input.signal?.throwIfAborted();
@@ -136,26 +178,59 @@ export async function authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(
     || canonicalEnvelopeBytes.byteLength < 1
     || canonicalEnvelopeBytes.byteLength > RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1
   ) {
-    throw new Error('RFC-64 unregistered replica authority seed is outside its byte bound');
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'seed-bytes',
+      'RFC-64 unregistered replica authority seed is outside its byte bound',
+    );
   }
   // Only wallet-namespaced CG IDs have an independently checkable owner before
   // registration. A signature cannot safely self-assign ownership of an
   // arbitrary global name.
   const expectedOwner = resolveRfc64WalletNamespaceOwnerV1(input.contextGraphId);
   if (expectedOwner === null) {
-    throw new Error('RFC-64 unregistered replica authority requires a wallet-namespaced Context Graph');
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'not-wallet-namespaced',
+      'RFC-64 unregistered replica authority requires a wallet-namespaced Context Graph',
+    );
   }
-  const envelope = parseCanonicalSignedContextGraphPolicyEnvelopeV1(canonicalEnvelopeBytes, {
-    maxBytes: RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
-  });
-  await verifyControlEnvelopeIssuerSignatureV1(envelope, { signal: input.signal });
+  let envelope: SignedContextGraphPolicyEnvelopeV1;
+  try {
+    envelope = parseCanonicalSignedContextGraphPolicyEnvelopeV1(canonicalEnvelopeBytes, {
+      maxBytes: RFC64_UNREGISTERED_AUTHORITY_SEED_MAX_BYTES_V1,
+    });
+  } catch (cause) {
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'seed-canonical',
+      'RFC-64 unregistered replica authority seed is not a canonical signed Context Graph policy envelope',
+      { cause },
+    );
+  }
+  const verify = input.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
+  let issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
+  try {
+    issuerSignature = await verify(envelope, { signal: input.signal });
+  } catch (cause) {
+    if (input.signal?.aborted) throw cause;
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'issuer-signature',
+      'RFC-64 unregistered replica authority issuer signature failed',
+      { cause },
+    );
+  }
+  input.signal?.throwIfAborted();
   const owner = envelope.issuer.toLowerCase() as EvmAddressV1;
   const policy = envelope.payload;
   if (owner !== expectedOwner) {
-    throw new Error('RFC-64 unregistered replica authority issuer is not the Context Graph wallet owner');
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'owner-mismatch',
+      'RFC-64 unregistered replica authority issuer is not the Context Graph wallet owner',
+    );
   }
   if (policy.networkId !== input.networkId || policy.contextGraphId !== input.contextGraphId) {
-    throw new Error('RFC-64 unregistered replica authority is bound to a different network or Context Graph');
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'scope-mismatch',
+      'RFC-64 unregistered replica authority is bound to a different network or Context Graph',
+    );
   }
   if (
     policy.source.kind !== 'owner-signed-unregistered'
@@ -169,7 +244,10 @@ export async function authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(
     || policy.previousPolicyDigest !== null
     || policy.accessPolicy !== 0
   ) {
-    throw new Error('RFC-64 unregistered replica authority is not a generation-0 public owner policy');
+    throw new Rfc64UnregisteredReplicaAuthorityErrorV1(
+      'policy-shape',
+      'RFC-64 unregistered replica authority is not a generation-0 public owner policy',
+    );
   }
   return Object.freeze({
     policy,
@@ -178,6 +256,8 @@ export async function authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1(
     source: 'owner-signed-unregistered' as const,
     ownerAddress: owner,
     canonicalEnvelopeBytes: Uint8Array.from(canonicalEnvelopeBytes),
+    envelope,
+    issuerSignature,
   });
 }
 

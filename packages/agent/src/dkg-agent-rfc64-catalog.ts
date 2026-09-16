@@ -1229,6 +1229,15 @@ function rfc64CatalogAuthorityFailureCodeV1(error: unknown): string {
   return 'authority-resolution-failed';
 }
 
+/**
+ * Whether a reconcile failed only because no authenticated owner authority
+ * (owner-signed seed) was available locally, the one failure a peer seed
+ * fetch can cure. Every other failure code must keep its denial.
+ */
+export function isRfc64UnregisteredOwnerUnresolvedErrorV1(error: unknown): boolean {
+  return rfc64CatalogAuthorityFailureCodeV1(error) === 'unregistered-owner-unresolved';
+}
+
 function aggregateRfc64DigestV1(values: readonly string[]): Digest32V1 | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort();
