@@ -18,10 +18,30 @@ export type ChainEventPollerLane =
 interface ChainEventPollerLaneState {
   lastBlock: number;
   headKnown: boolean;
-  requiresFullHistory?: boolean;
+  cursorStrategyKind?: ChainEventPollerLaneCursorStrategy['kind'];
   nextRunAtMs?: number;
   failureBackoffMs?: number;
 }
+
+/**
+ * Describes the cursor lifecycle for a lane as one explicit strategy.
+ *
+ * The legacy aggregate marker is deliberately a literal opt-in.  A lane that
+ * does not declare it cannot accidentally participate in aggregate-cursor
+ * migration, while full-history lanes can still preserve the publish-lane
+ * compatibility path during restored-publish recovery.
+ */
+export type ChainEventPollerLaneCursorStrategy =
+  | {
+    kind: 'full-history';
+    legacyAggregateCursor?: true;
+    onBackfillFromGenesis?(ctx: OperationContext): void;
+  }
+  | {
+    kind: 'live-tail';
+    legacyAggregateCursor?: true;
+    liveSeedLookbackBlocks?: number;
+  };
 
 const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
@@ -31,21 +51,16 @@ export interface ChainEventPollerLaneSpec {
   name: ChainEventPollerLane;
   enabled(): boolean;
   eventTypes(): readonly string[];
-  requiresFullHistory(): boolean;
-  canUseLegacyAggregateCursor?(): boolean;
-  liveSeedLookbackBlocks?: number;
+  cursorStrategy(): ChainEventPollerLaneCursorStrategy;
   cadenceMs: number;
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
-  onBackfillFromGenesis?(ctx: OperationContext): void;
 }
 
 interface ChainEventPollerLaneRuntime {
   spec: ChainEventPollerLaneSpec;
   state: ChainEventPollerLaneState;
   eventTypes: string[];
-  requiresFullHistory: boolean;
-  canUseLegacyAggregateCursor: boolean;
-  liveSeedLookbackBlocks: number;
+  cursorStrategy: ChainEventPollerLaneCursorStrategy;
 }
 
 interface ChainEventPollerLaneScanResult {
@@ -132,20 +147,20 @@ export class ChainEventLaneRunner {
       if (!spec.enabled()) return [];
       const eventTypes = [...spec.eventTypes()];
       if (eventTypes.length === 0) return [];
-      const requiresFullHistory = spec.requiresFullHistory();
+      const cursorStrategy = spec.cursorStrategy();
       return [{
         spec,
         state: this.stateFor(spec.name),
         eventTypes,
-        requiresFullHistory,
-        canUseLegacyAggregateCursor: spec.canUseLegacyAggregateCursor?.() ?? !requiresFullHistory,
-        liveSeedLookbackBlocks: this.liveSeedLookbackBlocks(spec),
+        cursorStrategy,
       }];
     });
   }
 
-  private liveSeedLookbackBlocks(spec: ChainEventPollerLaneSpec): number {
-    const lookback = spec.liveSeedLookbackBlocks ?? DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
+  private liveSeedLookbackBlocks(strategy: ChainEventPollerLaneCursorStrategy): number {
+    const lookback = strategy.kind === 'live-tail'
+      ? strategy.liveSeedLookbackBlocks ?? DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS
+      : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
     return Number.isFinite(lookback) && lookback >= 0
       ? Math.floor(lookback)
       : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
@@ -189,7 +204,7 @@ export class ChainEventLaneRunner {
   private async loadPersistedLaneCursor(lane: ChainEventPollerLaneRuntime): Promise<number | undefined> {
     if (!this.cursorStore) return undefined;
     if (this.cursorStore.kind === 'lane') return this.cursorStore.loadLane(lane.spec.name);
-    if (lane.canUseLegacyAggregateCursor) return this.cursorStore.loadLegacyAggregate();
+    if (lane.cursorStrategy.legacyAggregateCursor) return this.cursorStore.loadLegacyAggregate();
     return undefined;
   }
 
@@ -229,7 +244,7 @@ export class ChainEventLaneRunner {
 
   private legacyAggregateCursorToSave(activeLanes: readonly ChainEventPollerLaneRuntime[]): number {
     if (activeLanes.length === 0) return 0;
-    if (!activeLanes.every((lane) => lane.canUseLegacyAggregateCursor)) return 0;
+    if (!activeLanes.every((lane) => lane.cursorStrategy.legacyAggregateCursor)) return 0;
 
     let min = Number.POSITIVE_INFINITY;
     for (const lane of activeLanes) {
@@ -248,15 +263,15 @@ export class ChainEventLaneRunner {
   ): Promise<ChainEventPollerLaneScanResult> {
     const state = lane.state;
 
-    this.applyHistoryModeTransition(lane, head, ctx);
+    this.applyCursorStrategyTransition(lane, head, ctx);
 
     if (head != null && !state.headKnown) {
       state.headKnown = true;
-      if (state.lastBlock === 0 && !lane.requiresFullHistory) {
-        state.lastBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
+      if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'live-tail') {
+        state.lastBlock = Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy));
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
-      } else if (state.lastBlock === 0 && lane.spec.onBackfillFromGenesis) {
-        lane.spec.onBackfillFromGenesis(ctx);
+      } else if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'full-history') {
+        lane.cursorStrategy.onBackfillFromGenesis?.(ctx);
       }
     }
 
@@ -314,18 +329,18 @@ export class ChainEventLaneRunner {
     state.nextRunAtMs = outcome.now + next;
   }
 
-  private applyHistoryModeTransition(
+  private applyCursorStrategyTransition(
     lane: ChainEventPollerLaneRuntime,
     head: number | undefined,
     ctx: OperationContext,
   ): void {
     const state = lane.state;
-    const previousRequiresFullHistory = state.requiresFullHistory;
-    state.requiresFullHistory = lane.requiresFullHistory;
+    const previousStrategyKind = state.cursorStrategyKind;
+    state.cursorStrategyKind = lane.cursorStrategy.kind;
 
-    if (previousRequiresFullHistory !== true || lane.requiresFullHistory || head == null) return;
+    if (previousStrategyKind !== 'full-history' || lane.cursorStrategy.kind === 'full-history' || head == null) return;
 
-    const liveSeedBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
+    const liveSeedBlock = Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy));
     if (state.lastBlock >= liveSeedBlock) return;
 
     state.lastBlock = liveSeedBlock;
