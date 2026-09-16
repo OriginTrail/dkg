@@ -167,12 +167,33 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     const before = runtime.revision;
     await expect(fullRun(runtime, [HEALTHY_PEER])).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestedPeers(requestPeer)).toEqual([HEALTHY_PEER]);
+    // NOTE: this cannot isolate the drop's own revision bump -- `request()` bumps
+    // unconditionally before starting a run, and a run starts here. The case where
+    // the drop's bump is the ONLY one is covered by the next test.
     expect(runtime.revision).toBeGreaterThan(before);
     expect(runtime.status(CG, POLICY)).toEqual({
       active: false,
       failed: false,
       unresolvedPeerCount: 0,
     });
+  });
+
+  it('bumps the revision for a drop that starts no run, so the status re-read is not skipped', async () => {
+    const { runtime, requestPeer } = createRuntime();
+
+    await expect(fullRun(runtime, [FAILING_PEER])).resolves.toEqual({ requested: 0, failed: 1 });
+    expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
+
+    // Every peer is gone. The drop empties `unresolvedPeers`, nothing is left pending,
+    // and `request()` returns before it reaches its unconditional bump -- so the drop's
+    // own bump is the only one. Without it, `readRfc64CatalogOperationalStatusV1` sees an
+    // unchanged revision across a real state transition and skips the applied-head re-read.
+    requestPeer.mockClear();
+    const before = runtime.revision;
+    await expect(fullRun(runtime, [])).resolves.toEqual({ requested: 0, failed: 0 });
+    expect(requestedPeers(requestPeer)).toEqual([]);
+    expect(runtime.revision).toBeGreaterThan(before);
+    expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(0);
   });
 
   it('lets a clean connected-peer pass clear a parity witness despite a stale provider', async () => {
