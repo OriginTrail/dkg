@@ -137,6 +137,16 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+  /**
+   * Terminal observer for a head that every retained provider reported as
+   * not-found. Nothing is thrown on this path, so without an observer the
+   * outcome is invisible to operators even though the head was never applied.
+   */
+  readonly onNotFound?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    providerAttempts: number,
+    providerCount: number,
+  ) => void;
   /** Single typed terminal boundary for ambient and explicit work alike. */
   readonly onTerminalEvent?: (
     event: Rfc64PublicCatalogReceiverTerminalEventV1,
@@ -230,6 +240,11 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly droppedProviders: number;
   /** Older ambient heads discarded after a verified current head became durable. */
   readonly supersededQueued: number;
+  /**
+   * Active strictly-older ambient tasks aborted so a verified current head for
+   * the same scope could start instead of waiting behind stale provider work.
+   */
+  readonly preemptedActive: number;
   /**
    * Times a task stepped aside for a busy finalized chain lane. Distinct from
    * `failed`: the head is still pending, not lost.
@@ -395,6 +410,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #maxProvidersPerHead: number;
   readonly #retryBackoffMs: number;
   readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
+  readonly #onNotFound?: Rfc64PublicCatalogReceiverOptionsV1['onNotFound'];
   readonly #onTerminalEvent?: Rfc64PublicCatalogReceiverOptionsV1['onTerminalEvent'];
   readonly #onAttemptStart?: Rfc64PublicCatalogReceiverOptionsV1['onAttemptStart'];
   readonly #onReconciliationAttemptStart?:
@@ -434,6 +450,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   #droppedQueueFull = 0;
   #droppedProviders = 0;
   #supersededQueued = 0;
+  #preemptedActive = 0;
   #providerAttempts = 0;
   #providerSwitches = 0;
   #providerSuccesses = 0;
@@ -473,6 +490,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     );
     this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
+    this.#onNotFound = options.onNotFound;
     this.#onTerminalEvent = options.onTerminalEvent;
     this.#onAttemptStart = options.onAttemptStart;
     this.#onReconciliationAttemptStart = options.onReconciliationAttemptStart;
@@ -759,6 +777,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       }`,
       completion,
     );
+    if (schedulingClass === 'verified-current-head') {
+      this.#preemptSupersededActiveAmbientHead(task);
+    }
     this.#tasks.schedule(task);
     if (schedulingClass === 'verified-current-head') {
       task.verifiedCurrentHeadTargetAccepted = true;
@@ -829,6 +850,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       droppedQueueFull: this.#droppedQueueFull,
       droppedProviders: this.#droppedProviders,
       supersededQueued: this.#supersededQueued,
+      preemptedActive: this.#preemptedActive,
       admissionDeferred: this.#admissionDeferred,
       deferred: this.#tasks.deferredCount,
       inFlight: this.#tasks.activeCount,
@@ -917,13 +939,22 @@ export class Rfc64PublicCatalogReceiverV1 {
               providerAttempts: task.providerAttempts ?? 0,
             }));
             break;
-          case 'not-found':
+          case 'not-found': {
             this.#notFound += 1;
+            const firstProvider = task.providers.values().next().value;
+            if (firstProvider !== undefined) {
+              this.#safeNotify(() => this.#onNotFound?.(
+                firstProvider.announcement,
+                task.providerAttempts ?? 0,
+                task.providers.size,
+              ));
+            }
             this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'not-found',
               providerAttempts: task.providerAttempts ?? 0,
             }));
             break;
+          }
           case 'failed':
             this.#failed += 1;
             this.#safeNotify(() => this.#onError?.(
@@ -1184,6 +1215,30 @@ export class Rfc64PublicCatalogReceiverV1 {
       }),
       (waiter) => this.#safeNotify(waiter),
     );
+  }
+
+  /**
+   * A verified current head must not wait behind a strictly older ambient
+   * task that is merely slow (iterating unreachable providers). Placement
+   * alone only reorders the queue; the scope lock is held by the ACTIVE task,
+   * so abort it. Its run returns `aborted` and settles as `closed`, releasing
+   * the scope so the pump can start the verified task. This mirrors the
+   * version-dominance rule {@link #retireSupersededAmbientHeads} already
+   * applies to queued ambient work after a durable verified success; equal or
+   * newer active work, and every non-ambient class, is never preempted.
+   */
+  #preemptSupersededActiveAmbientHead(verifiedTask: ReceiverTaskV1): void {
+    const active = this.#tasks.activeForScope(verifiedTask.scopeKey);
+    if (
+      active === undefined
+      || active.schedulingPolicy.schedulingClass !== 'ambient'
+      || active.cancellation.signal.aborted
+      || active.catalogVersion >= verifiedTask.catalogVersion
+    ) return;
+    this.#preemptedActive += 1;
+    active.cancellation.abort(new Error(
+      'RFC-64 receiver preempted an older active ambient head for a verified current head',
+    ));
   }
 
   #finishTask(
