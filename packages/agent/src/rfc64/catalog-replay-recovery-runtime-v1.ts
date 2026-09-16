@@ -490,8 +490,20 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // rotation, `clear()` or a process restart drops it (see
         // `#progressFor`). The next full connected-peers pass re-raises it, and
         // until then `unresolvedPeerCount` reads as unknown rather than zero.
+        // The RAISE is gated on the COMMAND KIND, not on `wasFullPass`.
+        // `requestedFullReplay` is set only when the pass managed to queue every
+        // connected peer, so it encodes the right to CLEAR a witness. Reusing it
+        // here would withhold the DUTY to raise one in exactly the case that most
+        // deserves it: a full-connected-peers pass that could not even queue every
+        // peer AND had every dial fail has `requested === 0`, no `#overflowed`
+        // (seedBounded defers rather than overflowing) and `#pending <= 64`, so no
+        // `requiresFullReplay` either -- it would settle a Context Graph with
+        // applied heads as `complete` having corroborated nothing. Incomplete
+        // coverage plus zero corroboration is MORE reason to report unverified,
+        // not less. The two directions are opposites and must not share a flag.
+        const wasConnectedPeerPass = input.kind === 'full-connected-peers';
         if (requested > 0) current.unverified = false;
-        else if (wasFullPass && providerFailures > 0) current.unverified = true;
+        else if (wasConnectedPeerPass && providerFailures > 0) current.unverified = true;
         current.completion = null;
         current.peerWorklist.settleOverflow();
         this.#bumpRevision();

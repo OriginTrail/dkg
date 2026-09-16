@@ -498,6 +498,45 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)?.unverified).toBe(false);
   });
 
+  it('raises the uncorroborated state on a connected-peer pass that could not cover every peer', async () => {
+    // The RAISE must not share the CLEAR's gate. `requestedFullReplay` is set
+    // only when a pass queued EVERY connected peer, so it encodes the right to
+    // CLEAR a witness. Gating the raise on it withholds the DUTY to raise one in
+    // the case that most deserves it: a connected-peer pass that could not cover
+    // every peer AND had every dial fail has `requested === 0`, no overflow
+    // (`seedBounded` defers) and `#pending <= 64`, so nothing else raises either.
+    // The Context Graph would settle corroborated having reached no provider.
+    const deadPeers = Array.from({ length: 40 }, (_unused, index) => `peer-dead-${index}`);
+    // Enough fresh peers to fill the truncation window on their own, so the
+    // retained seeds consume slots the connected fill then cannot use.
+    const otherPeers = Array.from(
+      { length: RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 },
+      (_unused, index) => `peer-other-${index}`,
+    );
+    const { runtime } = createRuntime({
+      requestPeer: async (_cg, peerId) => {
+        if (peerId === HEALTHY_PEER) return completed();
+        throw new Error('provider unreachable');
+      },
+    });
+
+    // One answered replay clears `unverified` while leaving 40 peers retained,
+    // so the discriminating pass starts from a CLEAN state, not a witnessed one.
+    await fullRun(runtime, [HEALTHY_PEER, ...deadPeers]);
+    expect(runtime.status(CG, POLICY)).toMatchObject({
+      unverified: false,
+      unresolvedPeerCount: deadPeers.length,
+    });
+
+    // The retained peers sit OUTSIDE the truncation window (`connectedPeerIds`
+    // is sliced to the announce bound before the coverage loop), so the slots
+    // they take are slots the fill cannot use and coverage is incomplete. Every
+    // dial fails, so nothing is corroborated.
+    await expect(fullRun(runtime, [...otherPeers, ...deadPeers]))
+      .resolves.toMatchObject({ requested: 0 });
+    expect(runtime.status(CG, POLICY)?.unverified).toBe(true);
+  });
+
   it('never reports a witnessed Context Graph clean while a reconnect fence is held', async () => {
     const { runtime } = createRuntime({
       requestPeer: async () => completed([{ id: 'promised-head' }]),
