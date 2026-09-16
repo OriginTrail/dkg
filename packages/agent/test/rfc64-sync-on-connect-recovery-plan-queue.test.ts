@@ -236,6 +236,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const invalidate = vi.fn();
     const queueGossip = vi.fn();
     const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
+    const pushReplay = vi.fn(async () => ({ attempted: 0, admitted: 0 }));
     const startSupervisor = vi.fn();
     const agent = {
       projectRfc64CatalogSubscriptionTransitionV1: project,
@@ -246,6 +247,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       invalidateRfc64PublicCatalogBootstrapPassV1: invalidate,
       queueSharedMemoryGossipSubscription: queueGossip,
       requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      replayRfc64CatalogToConnectedPeersV1: pushReplay,
       startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
     };
     const handle = LifecycleSyncMethods.prototype
@@ -279,6 +281,12 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     expect(invalidate).toHaveBeenCalledTimes(2);
     expect(queueGossip).toHaveBeenCalledTimes(2);
     expect(replay).toHaveBeenCalledOnce();
+    // Activation must also PUSH replay to already-connected peers: a replica
+    // that connected before this CG existed gets no connect-time replay and
+    // cannot pull without the policy digest, so it would otherwise never
+    // receive the head or the policy. Deactivation must not push.
+    expect(pushReplay).toHaveBeenCalledOnce();
+    expect(pushReplay).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
     expect(startSupervisor).toHaveBeenCalledOnce();
   });
 

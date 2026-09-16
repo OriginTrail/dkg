@@ -97,6 +97,7 @@ import type {
 } from './rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
   Rfc64PublicCatalogServiceV1,
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
   type PublishAuthorCatalogGenesisResultV1,
@@ -3704,12 +3705,42 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Announcement fan-out target set. Author paths that publish the first heads
+   * of a fresh CG pass an empty set (that CG's gossip mesh does not exist yet),
+   * which announces to nobody — so a replica that connected before the CG was
+   * created never learns its head or the policy the head carries. Fall back to
+   * the currently connected peers: exactly the set connect-time reannounce
+   * already reaches, capped by the wire limit. Non-empty explicit sets are
+   * honoured unchanged.
+   */
+  resolveRfc64CatalogAnnouncementPeersV1(
+    this: DKGAgent,
+    requested: readonly string[],
+  ): readonly string[] {
+    const explicit = snapshotRfc64PublicCatalogAnnouncementPeersV1(requested);
+    if (explicit.length > 0) return explicit;
+    const libp2p = (this.node as any)?.libp2p;
+    if (libp2p === undefined) return explicit;
+    const localPeerId = libp2p.peerId.toString();
+    // The wire snapshot rejects duplicates rather than collapsing them, so
+    // dedupe here: a repeated peer must not make the whole announce throw.
+    const connected = [...new Set(
+      (libp2p.getPeers() as Array<{ toString(): string }>).map((peer) => peer.toString()),
+    )]
+      .filter((peerId) => peerId !== localPeerId)
+      .sort()
+      .slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1);
+    return snapshotRfc64PublicCatalogAnnouncementPeersV1(connected);
+  }
+
   /** Explicit best-effort availability fan-out for an already durable head. */
   announceRfc64PublicCatalogHeadV1(
     this: DKGAgent,
     input: AnnounceRfc64PublicCatalogHeadInputV1,
   ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
-    return this.requireRfc64PublicCatalogServiceV1().announceCatalogHead(input);
+    const peers = this.resolveRfc64CatalogAnnouncementPeersV1(input.peers);
+    return this.requireRfc64PublicCatalogServiceV1().announceCatalogHead({ ...input, peers });
   }
 
   /** Re-advertise durable current heads to one newly admitted peer. */
@@ -4061,7 +4092,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     params: PublishAuthorCatalogExactSetSuccessorParamsV1,
     history: BoundedAuthorCatalogHistoryV1,
   ): Promise<PublishAuthorCatalogExactSetSuccessorResultV1> {
-    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
+    const peers = this.resolveRfc64CatalogAnnouncementPeersV1(params.peers);
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
