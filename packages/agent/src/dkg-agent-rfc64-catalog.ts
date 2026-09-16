@@ -1197,6 +1197,8 @@ type Rfc64CatalogAuthorityFailureCodeV1 =
   | 'catalog-service-unavailable'
   | 'registered-authority-adapter-unsupported'
   | 'registered-authority-binding-mismatch'
+  /** Bound on-chain id is known locally but the FINALIZED authority index has no entry for it yet (chain finality lag); retryable, not a denial. */
+  | 'registered-authority-unfinalized'
   | 'unregistered-owner-unresolved'
   | 'access-policy-unresolved';
 
@@ -2815,6 +2817,26 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const batchedSnapshot = ownedAuthorityEvidence === null
         ? null
         : ownedAuthorityEvidence?.snapshot;
+      // "Bound locally but absent from the FINALIZED index" is chain-finality lag
+      // (Base Sepolia lags ~600 blocks / ~20 min), which is retryable -- not a
+      // binding fault. `auto` / `finalized-evidence` requests have already read
+      // the index, so a null snapshot IS that absence. A `finalized-absence`
+      // request is ambiguous: the refresh loop derives it from a null finalized
+      // snapshot (lag), but an explicit caller may assert an absence the index
+      // contradicts (a real mismatch). Probe the index once to tell them apart;
+      // with no indexed reader we keep failing closed as a mismatch.
+      let boundIdUnfinalized = false;
+      if (boundOnChainId !== undefined && batchedSnapshot === null) {
+        if (authorityRequest.kind !== 'finalized-absence') {
+          boundIdUnfinalized = true;
+        } else {
+          const probe = await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
+            boundOnChainId,
+            signal,
+          );
+          boundIdUnfinalized = probe !== undefined && probe.snapshot === null;
+        }
+      }
       const registeredAuthorityRead = (
         localFirstUnregistered
         || directAcceptedPrivateAuthority
@@ -2828,8 +2850,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : batchedSnapshot !== undefined
         ? (() => {
           if (batchedSnapshot === null || boundOnChainId === undefined) {
+            // Retryable lag vs. a genuine mismatch: see `boundIdUnfinalized`.
+            // Whether accepted authority is RETAINED through the lag is decided
+            // by the refresh caller and is author-scoped.
             throw new Rfc64CatalogAuthorityResolutionErrorV1(
-              'registered-authority-binding-mismatch',
+              boundIdUnfinalized
+                ? 'registered-authority-unfinalized'
+                : 'registered-authority-binding-mismatch',
               'registered RFC-64 Context Graph has no finalized indexed authority',
             );
           }
@@ -3071,15 +3098,47 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         contextGraphId,
         authorityRevision,
       )) {
-        setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
-          state: 'blocked',
-          retainsAcceptedAuthorityDuringRefresh: false,
-          source: null,
-          policyDigest: null,
-          policyEra: null,
-          reason: rfc64CatalogAuthorityFailureCodeV1(error),
-          updatedAtMs: Date.now(),
-        });
+        const failureCode = rfc64CatalogAuthorityFailureCodeV1(error);
+        if (failureCode === 'registered-authority-unfinalized') {
+          // Finality lag is transient. Stay in `resolving`, keep whatever
+          // accepted lineage the refresh started with (so an author keeps
+          // serving and announcing under its accepted policy), and leave the
+          // graph in the refresh workload so it flips to `accepted` as soon as
+          // the finalized index catches up. Demoting to `blocked` here silenced
+          // authors for the whole finality window after every registration.
+          // Only the graph's author of record keeps serving under its own
+          // accepted owner-signed policy while the chain index catches up; a
+          // replica must never retain a pre-registration seed for a graph that
+          // is now registered (that stays fail-closed, as before) -- it simply
+          // stays `resolving` and is retried instead of being parked as `blocked`.
+          const authorOfRecord = this.localContextGraphProvenance.hasLocalCreate(contextGraphId);
+          const retains = authorOfRecord && (
+            previousAuthorityProgress?.state === 'accepted'
+            || (
+              previousAuthorityProgress?.state === 'resolving'
+              && previousAuthorityProgress.retainsAcceptedAuthorityDuringRefresh
+            )
+          );
+          setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
+            state: 'resolving',
+            retainsAcceptedAuthorityDuringRefresh: retains,
+            source: retains ? previousAuthorityProgress?.source ?? null : null,
+            policyDigest: retains ? previousAuthorityProgress?.policyDigest ?? null : null,
+            policyEra: retains ? previousAuthorityProgress?.policyEra ?? null : null,
+            reason: failureCode,
+            updatedAtMs: Date.now(),
+          });
+        } else {
+          setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
+            state: 'blocked',
+            retainsAcceptedAuthorityDuringRefresh: false,
+            source: null,
+            policyDigest: null,
+            policyEra: null,
+            reason: failureCode,
+            updatedAtMs: Date.now(),
+          });
+        }
       }
       throw error;
     }

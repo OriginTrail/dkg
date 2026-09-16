@@ -9418,9 +9418,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // digest a cold replica does not yet hold, so it cannot pull either.
       // Push the same fenced transition to every current peer so the head —
       // and the policy it carries — reaches replicas that connected before
-      // this CG existed.
-      void this.replayRfc64CatalogToConnectedPeersV1(contextGraphId)
-        .catch(() => undefined);
+      // this CG existed. Author-of-record only: a replica running this would
+      // take replay fences toward the very provider its own bootstrap pass is
+      // about to use ("no configured provider was reachable").
+      if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
+        void this.replayRfc64CatalogToConnectedPeersV1(contextGraphId)
+          .catch(() => undefined);
+      }
       // Re-entering the idempotent start boundary also dirties an existing
       // failed repair for this newly active CG, including retryIntervalMs=0.
       this.startRfc64SwmCatalogProjectionSupervisorV1(

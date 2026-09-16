@@ -248,6 +248,8 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       queueSharedMemoryGossipSubscription: queueGossip,
       requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
       replayRfc64CatalogToConnectedPeersV1: pushReplay,
+      // Author of record for this graph: the activation push is allowed.
+      localContextGraphProvenance: { hasLocalCreate: () => true },
       startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
     };
     const handle = LifecycleSyncMethods.prototype
@@ -287,6 +289,42 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     // receive the head or the policy. Deactivation must not push.
     expect(pushReplay).toHaveBeenCalledOnce();
     expect(pushReplay).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
+    expect(startSupervisor).toHaveBeenCalledOnce();
+  });
+
+  it('does not push catalog replay to connected peers on activation for a graph this node did not author', () => {
+    // A replica taking replay fences toward its own provider at activation
+    // starved its bootstrap pass ("no configured provider was reachable"), so
+    // the push is author-of-record only; everything else still happens.
+    const project = vi.fn().mockReturnValueOnce({
+      previousReceiverActive: false,
+      nextReceiverActive: true,
+      receiverChanged: true,
+      recoveryChanged: false,
+    });
+    const pushReplay = vi.fn(async () => ({ attempted: 0, admitted: 0 }));
+    const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
+    const startSupervisor = vi.fn();
+    const agent = {
+      projectRfc64CatalogSubscriptionTransitionV1: project,
+      rfc64PublicCatalogServiceV1: { deactivateReceiverContextGraph: vi.fn() },
+      clearRfc64CatalogOperationalTargetsV1: vi.fn(),
+      invalidateRfc64PublicCatalogBootstrapPassV1: vi.fn(),
+      queueSharedMemoryGossipSubscription: vi.fn(),
+      requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      replayRfc64CatalogToConnectedPeersV1: pushReplay,
+      localContextGraphProvenance: { hasLocalCreate: () => false },
+      startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
+    };
+    LifecycleSyncMethods.prototype.handleRfc64CatalogReceiverSelectionTransitionV1
+      .call(agent as never, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+        kind: 'subscription' as const,
+        previousSubscribed: false,
+        nextSubscribed: true,
+      });
+
+    expect(pushReplay).not.toHaveBeenCalled();
+    expect(replay).toHaveBeenCalledOnce();
     expect(startSupervisor).toHaveBeenCalledOnce();
   });
 
