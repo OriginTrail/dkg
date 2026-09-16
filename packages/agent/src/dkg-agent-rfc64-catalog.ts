@@ -479,8 +479,10 @@ export interface Rfc64CatalogOperationalStatusV1 {
     /**
      * Per-CG providers whose last catalog replay failed and are still retried.
      * Diagnostic only: it never blocks the phase or nulls the parity fields.
+     * `null` means unknown -- no resolved authority, or a replay snapshot that
+     * moved under the read -- so it is never confused with "no failures".
      */
-    unresolvedReplayPeers: number;
+    unresolvedReplayPeers: number | null;
     attempts: number;
     switches: number;
     successes: number;
@@ -1269,7 +1271,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ?? this.config.networkIdentity?.chainId
         ) as NetworkIdV1 | undefined;
         if (service === undefined || networkId === undefined || networkId === 'none') {
-          throw new Error('RFC-64 catalog replay recovery is not active');
+          // A missing catalog service or network identity is a local
+          // precondition, not a peer problem. Throwing here would attribute the
+          // local fault to this provider and retain it as unresolved long after
+          // the service came back.
+          return Object.freeze({ status: 'local-unavailable' as const });
         }
         try {
           const completion = await service.requestCatalogHeadReplay({
@@ -1512,8 +1518,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // Only parity/overflow evidence fails a Context Graph. Providers that
       // could not be replayed from surface through providerHealth instead.
       const replayFailed = currentReplayProgress?.failed === true;
-      const replayUnsettled = replayActive || replayFailed;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
+      // A full pass that reached no provider at all corroborated nothing: with
+      // an empty promised set parity is vacuously satisfied, so applied rows
+      // would otherwise be reported as agreed by every provider. It is not
+      // evidence of missing rows, so it stays distinct from `replayFailed`, and
+      // it can only mislead once something has been applied.
+      const replayUnverified = currentReplayProgress?.unverified === true
+        && heads.length > 0;
+      const replayUnsettled = replayActive || replayFailed || replayUnverified;
       const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
       const targets = targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [];
       const targetCapacityExceeded = targetTracker
@@ -1617,10 +1630,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                 && authorityFreshness === 'current'
                 && legacyReadOnlyCount > 0
                 ? 'legacy-read-only-boundary'
+              : replayUnverified
+                ? 'catalog-replay-unverified'
               : null;
       const phase: Rfc64CatalogOperationalPhaseV1 = !activeCatalog
         ? 'inactive'
-        : stableReason !== null && stableReason !== 'legacy-read-only-boundary'
+        : stableReason !== null
+          && stableReason !== 'legacy-read-only-boundary'
+          && stableReason !== 'catalog-replay-unverified'
           ? 'blocked'
           : accepted === null || authorityState === 'resolving'
             ? 'resolving-authority'
@@ -1636,6 +1653,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               ? 'known-incomplete'
             : heads.length === 0
               ? 'bootstrapping'
+            : replayUnverified
+              ? 'unknown-freshness'
               : 'complete';
       return Object.freeze({
         contextGraphId: selection.contextGraphId,
@@ -1684,7 +1703,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         lastSuccessfulAdvanceAt,
         providerHealth: Object.freeze({
           candidateCount: targetCapacityExceeded || replayUnsettled ? null : targets.length,
-          unresolvedReplayPeers: currentReplayProgress?.unresolvedPeerCount ?? 0,
+          unresolvedReplayPeers: currentReplayProgress === null || replaySnapshotUnstable
+            ? null
+            : currentReplayProgress.unresolvedPeerCount,
           attempts: receiverStats?.providerAttempts ?? 0,
           switches: receiverStats?.providerSwitches ?? 0,
           successes: receiverStats?.providerSuccesses ?? 0,

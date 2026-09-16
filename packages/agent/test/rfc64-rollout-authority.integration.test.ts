@@ -1013,7 +1013,7 @@ describe('RFC-64 rollout authority integration', () => {
     queueGeneration(1);
     await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ requested: 0, failed: 65 });
+    )).resolves.toEqual({ requested: 0, failed: 64 });
 
     requestReplay.mockClear();
     requestReplay.mockResolvedValue(Object.freeze({
@@ -1026,7 +1026,7 @@ describe('RFC-64 rollout authority integration', () => {
     )).not.toBeNull();
     await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ requested: 64, failed: 1 });
+    )).resolves.toEqual({ requested: 64, failed: 0 });
     expect(requestReplay).toHaveBeenCalledTimes(64);
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({

@@ -8,8 +8,10 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from '../src/rfc64/catalog-peers-v1.js';
-import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
-  '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
+import {
+  Rfc64CatalogReplayRecoveryRuntimeV1,
+  type Rfc64CatalogReplayPeerResultV1,
+} from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from
   '../src/rfc64/public-catalog-inventory-completeness-v1.js';
 import {
@@ -43,7 +45,7 @@ const completed = (targets: readonly Target[] = []) => Object.freeze({
 
 function createRuntime(overrides: {
   readonly requestPeer?: (contextGraphId: string, peerId: string) => Promise<
-    ReturnType<typeof completed>
+    Rfc64CatalogReplayPeerResultV1<Target>
   >;
   readonly whenReceiverIdle?: () => Promise<void>;
   readonly parityFailed?: () => Promise<boolean>;
@@ -91,6 +93,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 1,
+      unverified: false,
     });
 
     // The retained provider is re-seeded by the next scoped request (two dial attempts).
@@ -101,6 +104,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 1,
+      unverified: false,
     });
 
     // Attribution clears only when a replay from that exact provider succeeds.
@@ -110,6 +114,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 0,
+      unverified: false,
     });
   });
 
@@ -124,6 +129,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: true,
       unresolvedPeerCount: 0,
+      unverified: false,
     });
   });
 
@@ -146,6 +152,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)).toMatchObject({
       failed: true,
       unresolvedPeerCount: 0,
+      unverified: false,
     });
   });
 
@@ -167,14 +174,16 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     const before = runtime.revision;
     await expect(fullRun(runtime, [HEALTHY_PEER])).resolves.toEqual({ requested: 1, failed: 0 });
     expect(requestedPeers(requestPeer)).toEqual([HEALTHY_PEER]);
-    // NOTE: this cannot isolate the drop's own revision bump -- `request()` bumps
-    // unconditionally before starting a run, and a run starts here. The case where
-    // the drop's bump is the ONLY one is covered by the next test.
-    expect(runtime.revision).toBeGreaterThan(before);
+    // A run follows, so its own two bumps (start and settle) already publish the
+    // drop: a third bump would only cost every racing status read a durable
+    // applied-head re-read and a transient all-null parity projection. The case
+    // where the drop's bump is the ONLY one is covered by the next test.
+    expect(runtime.revision - before).toBe(2);
     expect(runtime.status(CG, POLICY)).toEqual({
       active: false,
       failed: false,
       unresolvedPeerCount: 0,
+      unverified: false,
     });
   });
 
@@ -196,7 +205,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(0);
   });
 
-  it('lets a clean connected-peer pass clear a parity witness despite a stale provider', async () => {
+  it('clears a parity witness on a corroborated pass even while an unreplayable provider stays connected', async () => {
     let parityFails = true;
     const { runtime } = createRuntime({
       requestPeer: async (_cg, peerId) => {
@@ -212,17 +221,19 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: true,
       unresolvedPeerCount: 1,
+      unverified: false,
     });
 
-    // While the stale provider is still listed as connected, its dial failure
-    // keeps the full pass from being clean and the parity witness survives.
+    // A provider that never answers is attributed and retried; it cannot keep a
+    // parity witness alive once a clean pass corroborated this node's applied rows.
     parityFails = false;
     await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
       .resolves.toEqual({ requested: 1, failed: 1 });
     expect(runtime.status(CG, POLICY)).toEqual({
       active: false,
-      failed: true,
+      failed: false,
       unresolvedPeerCount: 1,
+      unverified: false,
     });
 
     // Once it is gone from the connected set, one clean full pass settles the CG.
@@ -231,6 +242,289 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 0,
+      unverified: false,
+    });
+  });
+
+  it('does not manufacture a full-replay witness when a retained provider is retried past the seed bound', async () => {
+    const { runtime } = createRuntime();
+
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
+
+    // The retained provider is still connected but sits outside the seeded
+    // window, so its retry must be deferred -- never counted as overflow.
+    await fullRun(runtime, [
+      ...Array.from(
+        { length: RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 },
+        (_unused, index) => `peer-healthy-${index}`,
+      ),
+      FAILING_PEER,
+    ]);
+    expect(runtime.status(CG, POLICY)).toEqual({
+      active: false,
+      failed: false,
+      unresolvedPeerCount: 1,
+      unverified: false,
+    });
+  });
+
+  it('does not let a later scoped run consume a full-replay request that started no run', async () => {
+    let parityFails = true;
+    const { runtime } = createRuntime({
+      requestPeer: async (_cg, peerId) => {
+        if (peerId === FAILING_PEER) throw new Error('provider unreachable');
+        return completed([{ id: 'promised-head' }]);
+      },
+      parityFailed: async () => parityFails,
+    });
+
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 2 });
+    expect(runtime.status(CG, POLICY)).toEqual({
+      active: false,
+      failed: true,
+      unresolvedPeerCount: 1,
+      unverified: false,
+    });
+
+    // The drop empties `unresolvedPeers` and nothing is pending, so this full
+    // request starts no run: its consent must not outlive the request.
+    parityFails = false;
+    await expect(fullRun(runtime, [])).resolves.toEqual({ requested: 0, failed: 0 });
+
+    // One healthy peer is no full pass, so it may not clear the parity witness.
+    await runtime.request({
+      contextGraphId: CG,
+      policyDigest: POLICY,
+      kind: 'connection-demand',
+      demand: { peerId: HEALTHY_PEER, generation: 1 },
+    });
+    expect(runtime.status(CG, POLICY)?.failed).toBe(true);
+  });
+
+  it('keeps a parity witness when no provider answered the full pass', async () => {
+    let parityFails = true;
+    let answer: (peerId: string) => Rfc64CatalogReplayPeerResultV1<Target> = () => (
+      completed([{ id: 'promised-head' }])
+    );
+    const { runtime } = createRuntime({
+      requestPeer: async (_cg, peerId) => answer(peerId),
+      parityFailed: async () => parityFails,
+    });
+
+    await expect(fullRun(runtime, [HEALTHY_PEER])).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.status(CG, POLICY)?.failed).toBe(true);
+
+    // Every peer denies the Context Graph: the pass corroborates nothing, so it
+    // cannot vacuously clear a witness even though it attributed no failure.
+    parityFails = false;
+    answer = () => Object.freeze({ status: 'not-provider' as const });
+    await expect(fullRun(runtime, [HEALTHY_PEER])).resolves.toEqual({ requested: 0, failed: 0 });
+    expect(runtime.status(CG, POLICY)?.failed).toBe(true);
+  });
+
+  it('settles a full pass that reached no provider as uncorroborated, not clean', async () => {
+    const { runtime } = createRuntime({
+      requestPeer: async () => { throw new Error('provider unreachable'); },
+    });
+
+    // Every provider replay fails, so the promised set is empty and the parity
+    // predicate is vacuously satisfied. Nothing was verified, which is not the
+    // same claim as "every provider agrees".
+    await expect(fullRun(runtime, [FAILING_PEER, 'peer-also-unreachable']))
+      .resolves.toEqual({ requested: 0, failed: 2 });
+    expect(runtime.status(CG, POLICY)).toEqual({
+      active: false,
+      failed: false,
+      unresolvedPeerCount: 2,
+      unverified: true,
+    });
+
+    // One answered replay corroborates the applied rows again.
+    const { runtime: recovered } = createRuntime();
+    await expect(fullRun(recovered, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 1 });
+    expect(recovered.status(CG, POLICY)?.unverified).toBe(false);
+  });
+
+  it('does not raise the uncorroborated state when every peer denies the Context Graph', async () => {
+    const { runtime } = createRuntime({
+      requestPeer: async () => Object.freeze({ status: 'not-provider' as const }),
+    });
+
+    // A policy-denied answer is an authoritative negative from a reachable
+    // peer, not absence of evidence.
+    await expect(fullRun(runtime, [HEALTHY_PEER])).resolves.toEqual({ requested: 0, failed: 0 });
+    expect(runtime.status(CG, POLICY)?.unverified).toBe(false);
+  });
+
+  it('does not attribute a local precondition failure to the provider', async () => {
+    let localFault = false;
+    const { runtime } = createRuntime({
+      requestPeer: async (_cg, peerId) => {
+        if (localFault) return Object.freeze({ status: 'local-unavailable' as const });
+        if (peerId === FAILING_PEER) throw new Error('provider unreachable');
+        return completed();
+      },
+    });
+
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
+
+    // A local fault neither attributes a new provider nor clears a retained one.
+    localFault = true;
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 0, failed: 2 });
+    expect(runtime.status(CG, POLICY)).toEqual({
+      active: false,
+      failed: false,
+      unresolvedPeerCount: 1,
+      unverified: false,
+    });
+  });
+
+  it('rejects an invalid connected-peer list before it drops provider attribution', async () => {
+    const { runtime } = createRuntime();
+
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 1 });
+    const before = runtime.revision;
+
+    // The command is rejected, so it may not have already discarded the
+    // retained provider (nor moved the revision) on its way out.
+    expect(() => fullRun(runtime, [HEALTHY_PEER, HEALTHY_PEER])).toThrow(TypeError);
+    expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
+    expect(runtime.revision).toBe(before);
+  });
+
+  it('dials a retained provider that sits past the connected-peer truncation bound', async () => {
+    const { runtime, requestPeer } = createRuntime();
+
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 1 });
+
+    // The drop reads the untruncated connected set and keeps this provider, so
+    // the seed order has to reach it as well -- otherwise it is kept forever
+    // and never dialed again.
+    requestPeer.mockClear();
+    await fullRun(runtime, [
+      ...Array.from(
+        { length: RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 },
+        (_unused, index) => `peer-healthy-${index}`,
+      ),
+      FAILING_PEER,
+    ]);
+    expect(requestedPeers(requestPeer)).toContain(FAILING_PEER);
+    expect(runtime.status(CG, POLICY)).toEqual({
+      active: false,
+      failed: false,
+      unresolvedPeerCount: 1,
+      unverified: false,
+    });
+  });
+
+  it('releases a dropped provider from the worklist so it is not dialed again', async () => {
+    const { runtime, requestPeer } = createRuntime();
+
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 1 });
+
+    // An unsettled reconnect fence leaves the provider queued in the worklist.
+    expect(runtime.markPeerPending(CG, POLICY, FAILING_PEER)).not.toBeNull();
+
+    requestPeer.mockClear();
+    await expect(fullRun(runtime, [HEALTHY_PEER])).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(requestedPeers(requestPeer)).toEqual([HEALTHY_PEER]);
+    expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(0);
+  });
+
+  it('stops re-seeding a retained provider once its bounded retry budget is spent', async () => {
+    const { runtime, requestPeer } = createRuntime();
+
+    await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
+      .resolves.toEqual({ requested: 1, failed: 1 });
+    for (let retry = 0; retry < 3; retry += 1) {
+      await expect(scopedRun(runtime)).resolves.toEqual({ requested: 0, failed: 1 });
+    }
+
+    // Ambient runs stop spending their demand budget on a dead dial...
+    requestPeer.mockClear();
+    await expect(scopedRun(runtime)).resolves.toEqual({ requested: 0, failed: 0 });
+    expect(requestedPeers(requestPeer)).toEqual([]);
+    // ...while the attribution stays reported.
+    expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
+
+    // Its own reconnect still raises a fresh demand, which is seeded directly.
+    requestPeer.mockClear();
+    await runtime.request({
+      contextGraphId: CG,
+      policyDigest: POLICY,
+      kind: 'connection-demand',
+      demand: { peerId: FAILING_PEER, generation: 1 },
+    });
+    expect(requestedPeers(requestPeer)).toEqual([FAILING_PEER, FAILING_PEER]);
+  });
+
+  it('reserves connected-peer worklist slots when the attribution set is saturated', async () => {
+    const deadPeers = Array.from(
+      { length: RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 },
+      (_unused, index) => `peer-dead-${index}`,
+    );
+    const { runtime, requestPeer } = createRuntime({
+      requestPeer: async (_cg, peerId) => {
+        if (peerId === HEALTHY_PEER) return completed();
+        throw new Error('provider unreachable');
+      },
+    });
+
+    // Saturate attribution: every provider in the pass fails, so all 64 slots
+    // of `unresolvedPeers` are held by peers that are still connected.
+    await fullRun(runtime, deadPeers);
+    expect(runtime.status(CG, POLICY)).toMatchObject({
+      unresolvedPeerCount: RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
+      unverified: true,
+    });
+
+    // Retained retries may not take the whole worklist: a live provider in the
+    // pass's own connected set must still be dialed, or `requested` is 0 on
+    // every run and the Context Graph can never re-corroborate.
+    requestPeer.mockClear();
+    await expect(fullRun(runtime, [HEALTHY_PEER, ...deadPeers]))
+      .resolves.toMatchObject({ requested: 1 });
+    expect(requestedPeers(requestPeer)).toContain(HEALTHY_PEER);
+    expect(runtime.status(CG, POLICY)?.unverified).toBe(false);
+  });
+
+  it('never reports a witnessed Context Graph clean while a reconnect fence is held', async () => {
+    const { runtime } = createRuntime({
+      requestPeer: async () => completed([{ id: 'promised-head' }]),
+      parityFailed: async () => true,
+    });
+
+    await expect(fullRun(runtime, [HEALTHY_PEER])).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.status(CG, POLICY)?.failed).toBe(true);
+
+    // A fence activates the Context Graph without running anything, so it may
+    // not clear the witness: `failed` is derived, never mirrored.
+    const lease = runtime.markPeerPending(CG, POLICY, HEALTHY_PEER);
+    expect(lease).not.toBeNull();
+    expect(runtime.status(CG, POLICY)).toEqual({
+      active: true,
+      failed: true,
+      unresolvedPeerCount: 0,
+      unverified: false,
+    });
+
+    // A reservation that is rejected releases the lease without a run.
+    lease!.release();
+    expect(runtime.status(CG, POLICY)).toEqual({
+      active: false,
+      failed: true,
+      unresolvedPeerCount: 0,
+      unverified: false,
     });
   });
 });
@@ -363,6 +657,58 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       ([{ remotePeerId }]) => remotePeerId === failingPeer,
     )).toHaveLength(2);
     expect((await readStatus(edge)).providerHealth.unresolvedReplayPeers).toBe(1);
+  });
+
+  it('reports unknown provider health as null, never as zero failures', async () => {
+    const edge = await startAgent({
+      name: 'replay-provider-health-unknown',
+      activation: activation('catalog'),
+    });
+    await applyConsistentGenesisHead(edge);
+    expect((await readStatus(edge)).providerHealth.unresolvedReplayPeers).toBe(0);
+
+    // Receiver ownership ended, so the runtime holds no replay progress for
+    // this graph: "not known" must not read as "no provider failures", the way
+    // every sibling field in this block already reports the unknown case.
+    edge.clearRfc64CatalogOperationalTargetsV1(CONTEXT_GRAPH_ID);
+    expect((await readStatus(edge)).providerHealth.unresolvedReplayPeers).toBeNull();
+  });
+
+  it('does not report a converged Context Graph complete when no provider answered', async () => {
+    const edge = await startAgent({
+      name: 'replay-peer-failure-uncorroborated',
+      activation: activation('catalog'),
+    });
+    await applyConsistentGenesisHead(edge);
+    const failingPeer = '12D3KooWReplayOnlyProviderUnreachable';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => failingPeer },
+    ] as never);
+    vi.spyOn(replayService(edge), 'requestCatalogHeadReplay').mockRejectedValue(
+      new Rfc64PublicCatalogTransportErrorV1(
+        'catalog-transport-wire',
+        'provider persistently unreachable',
+      ),
+    );
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 0, failed: 1 });
+
+    // No manifest means the parity predicate was vacuously satisfied. That may
+    // not be reported as "every provider agrees" -- and it is not evidence of
+    // missing rows either, so it must not read as the blocked lane.
+    const status = await readStatus(edge);
+    expect(status).toMatchObject({
+      phase: 'unknown-freshness',
+      stableReason: 'catalog-replay-unverified',
+      appliedRowCount: '0',
+      expectedRowCount: null,
+      missingRowCount: null,
+      expectedInventoryDigest: null,
+      providerHealth: expect.objectContaining({ unresolvedReplayPeers: 1 }),
+    });
+    expect(status.stableReason).not.toBe('catalog-replay-incomplete');
   });
 
   it('still blocks a Context Graph whose provider promises a head this node never applied', async () => {
