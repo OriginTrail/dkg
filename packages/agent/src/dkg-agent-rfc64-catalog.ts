@@ -1202,6 +1202,11 @@ type Rfc64CatalogAuthorityFailureCodeV1 =
   | 'unregistered-owner-unresolved'
   | 'access-policy-unresolved';
 
+/** Intermediate acceleration-pull WARNs are rate-limited per scope to this window. */
+const RFC64_ACCELERATION_WARN_INTERVAL_MS_V1 = 30_000;
+/** Bound on rate-limit bookkeeping so hostile scope churn cannot grow it unboundedly. */
+const RFC64_ACCELERATION_WARN_MAX_SCOPES_V1 = 1_024;
+
 class Rfc64CatalogAuthorityResolutionErrorV1 extends Error {
   constructor(
     readonly code: Rfc64CatalogAuthorityFailureCodeV1,
@@ -3539,6 +3544,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       terminalOutcome: { value: Rfc64PublicCatalogReceiverCompletionOutcomeV1 | null };
     }>>();
     const verifiedTargetLeases = new Map<number, Rfc64CatalogTargetLeaseV1>();
+    // Per-scope WARN rate limit for the bounded acceleration re-pull. The
+    // terminal (abandoned) pass always warns; intermediate passes at most once
+    // per window so a flapping provider cannot flood the log.
+    const accelerationWarnedAtByScope = new Map<string, number>();
     const service = new Rfc64PublicCatalogServiceV1({
       router: this.router,
       controlObjects: persistence.controlObjects,
@@ -3572,6 +3581,56 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       unregisteredAuthority: {
         readSeedEnvelopeBytes: (scope, signal) =>
           this.readRfc64UnregisteredAuthoritySeedForServingV1(scope, signal),
+      },
+      onAccelerationFailed: (event) => {
+        const scopeKey = [
+          event.scope.networkId,
+          event.scope.contextGraphId,
+          event.scope.subGraphName ?? '',
+          event.scope.authorAddress,
+          event.scope.catalogEra,
+        ].join('\n');
+        const now = Date.now();
+        const warnedAt = accelerationWarnedAtByScope.get(scopeKey);
+        if (event.abandoned) {
+          accelerationWarnedAtByScope.delete(scopeKey);
+          this.rfc64PublicCatalogReconciliationFailuresV1.record(
+            event.catalogHeadObjectDigest,
+            Object.assign(
+              new Error('RFC-64 announced catalog head was not applied within the pull budget'),
+              {
+                name: 'Rfc64AnnouncedCurrentHeadPullAbandonedErrorV1',
+                code: 'catalog-announced-head-pull-abandoned',
+              },
+            ),
+          );
+        } else if (
+          warnedAt !== undefined
+          && now - warnedAt < RFC64_ACCELERATION_WARN_INTERVAL_MS_V1
+        ) {
+          return;
+        } else {
+          if (accelerationWarnedAtByScope.size >= RFC64_ACCELERATION_WARN_MAX_SCOPES_V1) {
+            const oldest = accelerationWarnedAtByScope.keys().next().value;
+            if (oldest !== undefined) accelerationWarnedAtByScope.delete(oldest);
+          }
+          accelerationWarnedAtByScope.set(scopeKey, now);
+        }
+        const detail = event.error === null
+          ? 'no provider served a newer applicable current head'
+          : event.error instanceof Error
+            ? `${event.error.name}: ${event.error.message}`
+            : String(event.error);
+        this.log.warn(
+          ctx,
+          `RFC-64 announced catalog head ${event.abandoned ? 'pull abandoned' : 'pull failed'}`
+            + ` head=${event.catalogHeadObjectDigest}`
+            + ` cg=${event.scope.contextGraphId}`
+            + ` version=${event.announcedCatalogVersion}`
+            + ` attempt=${event.attempt}/${event.maxAttempts}`
+            + ` providers=${event.remotePeerIds.map((peerId) => peerId.slice(-8)).join(',')}`
+            + ` detail=${detail.slice(0, 200)}`,
+        );
       },
       receiver: {
         onTerminalEvent: ({ announcement, outcome }) => {
@@ -3658,6 +3717,30 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             authorAddress: authorAddress as EvmAddressV1,
             ctx,
           });
+        },
+        onNotFound: (announcement, providerAttempts, providerCount) => {
+          // Every retained provider denied knowing the announced head. Nothing
+          // is thrown on this path, so record and warn here or the replica
+          // silently waits for connect-time replay churn to re-deliver it.
+          this.rfc64PublicCatalogReconciliationFailuresV1.record(
+            announcement.catalogHeadObjectDigest,
+            Object.assign(
+              new Error('RFC-64 catalog head not found at any announcing provider'),
+              {
+                name: 'Rfc64CatalogHeadNotFoundErrorV1',
+                code: 'catalog-receiver-not-found',
+              },
+            ),
+          );
+          this.log.warn(
+            ctx,
+            'RFC-64 catalog head not found at any announcing provider'
+              + ` head=${announcement.catalogHeadObjectDigest}`
+              + ` cg=${announcement.contextGraphId}`
+              + ` version=${announcement.catalogVersion}`
+              + ` providers=${providerCount}`
+              + ` attempts=${providerAttempts}`,
+          );
         },
         onError: (announcement, error) => {
           this.rfc64PublicCatalogReconciliationFailuresV1.record(

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
+import { Rfc64CatalogUpsertMethods } from '../src/dkg-agent-rfc64-catalog-upsert.js';
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from '../src/rfc64/catalog-peers-v1.js';
 
 // Realistic libp2p peer-id shapes so the wire snapshot validator accepts them.
@@ -72,5 +73,50 @@ describe('RFC-64 catalog announcement peer fallback', () => {
 
     expect(announceCatalogHead).toHaveBeenCalledOnce();
     expect(announceCatalogHead).toHaveBeenCalledWith({ announcement, peers: [] });
+  });
+
+  it('warns the author about every peer whose announce delivery failed', () => {
+    const warn = vi.fn();
+    const agent = Object.assign(Object.create(Rfc64CatalogUpsertMethods.prototype), {
+      log: { warn },
+    });
+    const announcement = {
+      catalogHeadObjectDigest: `0x${'aa'.repeat(32)}`,
+      contextGraphId: '0x1111111111111111111111111111111111111111/lane',
+      catalogVersion: '7',
+    };
+
+    agent.warnRfc64CatalogAnnounceFailuresV1({
+      announcement,
+      announcedPeers: [PEER_A],
+      failedPeers: [
+        { peerId: PEER_B, error: 'stream reset by peer' },
+        { peerId: SELF, error: 'dial timeout' },
+      ],
+    });
+
+    expect(warn).toHaveBeenCalledOnce();
+    const [, message] = warn.mock.calls[0]!;
+    expect(message).toContain('RFC-64 catalog head announce failed for 2/3 peer(s)');
+    expect(message).toContain(`head=${announcement.catalogHeadObjectDigest}`);
+    expect(message).toContain(`cg=${announcement.contextGraphId}`);
+    expect(message).toContain('version=7');
+    expect(message).toContain(`peers=${PEER_B.slice(-8)},${SELF.slice(-8)}`);
+    expect(message).toContain('error=stream reset by peer');
+  });
+
+  it('stays silent when every announce delivery was acknowledged', () => {
+    const warn = vi.fn();
+    const agent = Object.assign(Object.create(Rfc64CatalogUpsertMethods.prototype), {
+      log: { warn },
+    });
+
+    agent.warnRfc64CatalogAnnounceFailuresV1({
+      announcement: { catalogHeadObjectDigest: `0x${'aa'.repeat(32)}` },
+      announcedPeers: [PEER_A, PEER_B],
+      failedPeers: [],
+    });
+
+    expect(warn).not.toHaveBeenCalled();
   });
 });
