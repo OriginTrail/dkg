@@ -236,7 +236,7 @@ function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any
  * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
  * publish path, which never down-classified them).
  */
-function respondAssertionError(res: RequestContext["res"], e: any): void {
+export function respondAssertionError(res: RequestContext["res"], e: any): void {
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
     return;
@@ -288,6 +288,17 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     jsonResponse(res, 409, {
       error: e.message,
       code: "ASSERTION_EMPTY",
+    });
+    return;
+  }
+  // GH#1425 — discard is valid only for an active WM draft. A shared or
+  // published asset must keep its lifecycle metadata so it can be reopened;
+  // expose the engine's typed precondition as an actionable conflict instead
+  // of leaking it as a generic 500.
+  if (e?.code === "KA_WM_LIFECYCLE_REQUIRED") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "KA_WM_LIFECYCLE_REQUIRED",
     });
     return;
   }
