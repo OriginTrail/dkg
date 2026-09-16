@@ -624,6 +624,7 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     }
     v2.exec(`
       PRAGMA journal_mode = DELETE;
+      DROP TABLE rfc64_unregistered_authority_seeds_v1;
       DROP TABLE rfc64_finalized_private_placement_repairs_v1;
       DROP TABLE rfc64_staged_catalog_heads_v1;
       DROP TABLE rfc64_swm_author_inventory_rows_v1;

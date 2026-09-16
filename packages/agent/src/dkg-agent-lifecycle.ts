@@ -9412,12 +9412,83 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && this.rfc64PublicCatalogServiceV1 !== undefined) {
       void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId)
         .catch(() => undefined);
+      // The catalog lane carries KA rows but no Context Graph declaration, and
+      // a catalog-authoritative CG is excluded from legacy durable sync, so a
+      // subscriber that activates while its peers are already connected would
+      // never receive `<cg>/_meta` on its own. Pull it now from the connected
+      // peers (bounded, public-definition-only, gated on the accepted policy)
+      // instead of waiting for a `connection:open` that never comes.
+      void this.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId)
+        .catch(() => undefined);
+      // A CG that becomes active while peers are already connected never
+      // receives connect-time catalog replay: that transition fires only on
+      // `connection:open`, and both replay request versions require the policy
+      // digest a cold replica does not yet hold, so it cannot pull either.
+      // Push the same fenced transition to every current peer so the head —
+      // and the policy it carries — reaches replicas that connected before
+      // this CG existed. Author-of-record only: a replica running this would
+      // take replay fences toward the very provider its own bootstrap pass is
+      // about to use ("no configured provider was reachable").
+      if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
+        void this.replayRfc64CatalogToConnectedPeersV1(contextGraphId)
+          .catch(() => undefined);
+      }
       // Re-entering the idempotent start boundary also dirties an existing
       // failed repair for this newly active CG, including retryIntervalMs=0.
       this.startRfc64SwmCatalogProjectionSupervisorV1(
         createOperationContext('system'),
       );
     }
+  }
+
+  /**
+   * Run the connect-time RFC-64 catalog replay transition for every peer that
+   * is already connected. Mirrors `syncOpenedPeerConnection` exactly —
+   * prepare, network admission, then admit or reject — so debounce, fences
+   * and policy gates are unchanged; only the trigger is new.
+   */
+  async replayRfc64CatalogToConnectedPeersV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<Readonly<{ attempted: number; admitted: number }>> {
+    const libp2p = (this.node as any)?.libp2p;
+    if (libp2p === undefined || this.rfc64PublicCatalogServiceV1 === undefined) {
+      return Object.freeze({ attempted: 0, admitted: 0 });
+    }
+    const localPeerId = libp2p.peerId.toString();
+    const ctx = createOperationContext('system');
+    let attempted = 0;
+    let admitted = 0;
+    for (const peer of libp2p.getPeers() as Array<{ toString(): string }>) {
+      const remotePeer = peer.toString();
+      if (remotePeer === localPeerId) continue;
+      const reservation = this.prepareRfc64CatalogConnectionReplayV1(remotePeer);
+      if (reservation === null) continue;
+      attempted += 1;
+      try {
+        const ok = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx);
+        if (!ok) {
+          reservation.reject();
+          continue;
+        }
+        reservation.admit();
+        admitted += 1;
+      } catch (error: unknown) {
+        reservation.reject();
+        const message = error instanceof Error ? error.message : String(error);
+        this.log.warn(
+          ctx,
+          `RFC-64 catalog replay to connected peer ${remotePeer.slice(-8)} failed for "${contextGraphId.slice(0, 28)}": ${message}`,
+        );
+      }
+    }
+    if (attempted > 0) {
+      this.log.info(
+        ctx,
+        `RFC-64 catalog replay pushed to ${admitted}/${attempted} already-connected peer(s) for "${contextGraphId.slice(0, 28)}"`,
+      );
+    }
+    return Object.freeze({ attempted, admitted });
   }
 
   persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): Promise<void> {

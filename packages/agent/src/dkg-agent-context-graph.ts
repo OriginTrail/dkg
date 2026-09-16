@@ -134,7 +134,8 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
-  mintRfc64UnregisteredReplicaAuthorityEvidenceV1,
+  mintRfc64UnregisteredReplicaAuthoritySeedV1,
+  type Rfc64MintedUnregisteredReplicaAuthoritySeedV1,
 } from './rfc64/unregistered-replica-authority-v1.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -591,10 +592,16 @@ export class ContextGraphMethods extends DKGAgentBase {
     ];
 
     // A public unregistered CG has no finalized chain record from which a
-    // replica can derive RFC-64 authority. Carry a canonical policy envelope,
-    // signed by the custodial caller/curator, in the existing public ontology
-    // definition. Receivers still require finalized chain absence before they
-    // may accept this evidence.
+    // replica can derive RFC-64 authority. Mint a canonical policy envelope
+    // ("seed"), signed by the custodial caller/curator. Its primary home is the
+    // keyed RFC-64 seed store written after the durability boundary below; the
+    // ontology definition still carries it for backward compatibility.
+    // Receivers still require finalized chain absence before they may accept
+    // this evidence.
+    let mintedReplicaAuthoritySeed: Readonly<{
+      readonly networkId: NetworkIdV1;
+      readonly seed: Rfc64MintedUnregisteredReplicaAuthoritySeedV1;
+    }> | null = null;
     if (!isCurated && !opts.private) {
       const networkId = (
         this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -647,7 +654,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       ) {
         const owner = ownerAddress as EvmAddressV1;
         const wallet = new ethers.Wallet(signerRecord.privateKey);
-        const evidence = await mintRfc64UnregisteredReplicaAuthorityEvidenceV1({
+        const seed = await mintRfc64UnregisteredReplicaAuthoritySeedV1({
           networkId: networkId as NetworkIdV1,
           contextGraphId: opts.id as ContextGraphIdV1,
           ownerAddress: owner,
@@ -662,10 +669,15 @@ export class ContextGraphMethods extends DKGAgentBase {
             signDigest: (digest: Uint8Array) => wallet.signMessage(digest),
           }),
         });
+        mintedReplicaAuthoritySeed = Object.freeze({ networkId: networkId as NetworkIdV1, seed });
+        // DEPRECATED compat path: the ontology system graph is being retired as
+        // a carrier. This literal stays only so older peers and pre-migration
+        // replicas that still read the ontology copy can authenticate the seed;
+        // new consumers use the keyed seed store / peer fetch instead.
         quads.push({
           subject: contextGraphUri,
           predicate: RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
-          object: `"${evidence}"`,
+          object: `"${seed.evidence}"`,
           graph: ontologyGraph,
         });
       }
@@ -825,6 +837,27 @@ export class ContextGraphMethods extends DKGAgentBase {
     // immutable fact, so publish its runtime projection before any best-effort
     // subscription, membership, gossip, or RFC-64 follow-up can run.
     await this.persistLocalContextGraphOrigin(opts.id, 'local-create');
+
+    // Keyed seed store row for the owner-signed replica authority. The graph is
+    // already durable and the author never reads its own seed (its reconcile
+    // takes the local-first path), so this row only serves replicas and peer
+    // fetches with a point lookup; contain a store fault like the other
+    // best-effort RFC-64 follow-ups below rather than failing the create.
+    if (mintedReplicaAuthoritySeed !== null && this.rfc64PersistenceV1 !== undefined) {
+      try {
+        await this.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
+          networkId: mintedReplicaAuthoritySeed.networkId,
+          contextGraphId: opts.id,
+          canonicalEnvelopeBytes: mintedReplicaAuthoritySeed.seed.canonicalEnvelopeBytes,
+        });
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `RFC-64 unregistered authority seed for "${opts.id}" was not stored in the keyed seed store: ` +
+          (error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
 
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
