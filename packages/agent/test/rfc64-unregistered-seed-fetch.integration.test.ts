@@ -275,7 +275,7 @@ function installSeedStoreStub(
   options: { readonly bridgeToOntology?: boolean } = {},
 ) {
   const seeds = new Map<string, Uint8Array>();
-  const keyOf = (networkId: string, contextGraphId: string) => `${networkId} ${contextGraphId}`;
+  const keyOf = (networkId: string, contextGraphId: string) => `${networkId}\u0000${contextGraphId}`;
   const read = vi.fn(async (input: { networkId: string; contextGraphId: string }) =>
     seeds.get(keyOf(input.networkId, input.contextGraphId)) ?? null);
   const persist = vi.fn(async (input: {
