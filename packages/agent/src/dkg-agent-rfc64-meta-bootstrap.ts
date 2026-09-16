@@ -20,6 +20,13 @@
  *    snapshot wins, and it never dials;
  *  - it installs only an unambiguous public root definition
  *    (`requirePublicDefinition`), so a peer cannot flip the graph private;
+ *  - the serving peer is an unauthenticated relay, so the snapshot's chain
+ *    registration claims (`OnChainId`, `OnChainHash`, a non-placeholder
+ *    `registrationStatus`) are stripped and no subscription chain binding is
+ *    applied (`ignoreRegistrationBinding`): a binding comes only from chain
+ *    truth through the finalized-index / name-hash paths;
+ *  - a snapshot whose `dkg:curator` is not the owner the accepted policy
+ *    authenticated is rejected (`expectedCuratorAddress`);
  *  - it never touches the `ontology` / `agents` system graphs.
  */
 
@@ -31,6 +38,8 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
+import { rfc64UnregisteredAuthorityOwnerV1 } from
+  './rfc64/unregistered-authority-transport-v1.js';
 
 export type Rfc64CatalogMetadataBootstrapOutcomeV1 =
   | 'system-graph'
@@ -93,17 +102,25 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     // Fail closed: only an accepted PUBLIC policy may drive this pull. A
     // private graph's metadata arrives through the authenticated join-approval
     // path, and a graph with no accepted policy has no business fetching.
-    if (this.readAcceptedRfc64CatalogAccessPolicyV1(contextGraphId) !== 'public') {
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    if (accepted === null || accepted.policy.accessPolicy !== 0) {
       return 'no-accepted-public-policy';
     }
+    // The owner this node already authenticated: the seed signer for an
+    // owner-signed policy, otherwise the wallet namespace of the id. A served
+    // declaration that names a different curator is not this graph's.
+    const expectedCuratorAddress = accepted.policy.source.kind === 'owner-signed-unregistered'
+      ? accepted.policy.source.ownerAddress
+      : rfc64UnregisteredAuthorityOwnerV1(contextGraphId) ?? undefined;
     if (await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
       return 'already-confirmed';
     }
     signal?.throwIfAborted();
     // Connected peers only (deduped, self excluded, rejected peers dropped,
-    // cores first, deterministic, capped) -- the same candidate set the seed
-    // fetch uses, so the two bootstrap steps agree on who is asked.
-    const peerIds = this.resolveRfc64UnregisteredAuthoritySeedPeersV1();
+    // configured complete providers first, cores next with slots reserved for
+    // non-cores, deterministic, capped, window rotated per attempt) -- the
+    // same candidate policy the seed fetch uses, scoped to this graph.
+    const peerIds = this.resolveRfc64UnregisteredAuthoritySeedPeersV1({ contextGraphId });
     if (peerIds.length === 0) return 'no-connected-peers';
 
     const ctx = createOperationContext('sync');
@@ -111,10 +128,14 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
       signal?.throwIfAborted();
       // `force` bypasses the auth-probe cooldown: this is an explicit
       // activation event, not a repeated probe. `requirePublicDefinition`
-      // rejects any private snapshot outright.
+      // rejects any private snapshot outright. `ignoreRegistrationBinding`
+      // strips the peer's chain-registration claims and skips the
+      // subscription binding: an arbitrary connected peer is not chain truth.
       const refreshed = await runCuratorMetaRefreshFromPeer(this, contextGraphId, peerId, {
         force: true,
         requirePublicDefinition: true,
+        ignoreRegistrationBinding: true,
+        ...(expectedCuratorAddress === undefined ? {} : { expectedCuratorAddress }),
         signal,
       });
       if (!refreshed) continue;
@@ -125,7 +146,7 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
       this.log.info(
         ctx,
         `RFC-64 metadata bootstrap for "${contextGraphId}" installed the public `
-        + `declaration from connected peer ${peerId.slice(-8)}`,
+        + `declaration (chain binding excluded) from connected peer ${peerId.slice(-8)}`,
       );
       return 'fetched';
     }

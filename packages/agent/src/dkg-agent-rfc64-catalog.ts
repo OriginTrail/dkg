@@ -3311,6 +3311,24 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): 'public' | 'private' | null {
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    if (accepted === null) return null;
+    return accepted.policy.accessPolicy === 0
+      ? 'public'
+      : accepted.policy.accessPolicy === 1
+        ? 'private'
+        : null;
+  }
+
+  /**
+   * The full accepted snapshot behind `readAcceptedRfc64CatalogAccessPolicyV1`
+   * (same provenance guarantees), or `null` while none is accepted for the
+   * exact active network and graph.
+   */
+  readAcceptedRfc64CatalogAccessSnapshotV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): AcceptedRfc64CatalogAccessSnapshotV1 | null {
     const service = this.rfc64PublicCatalogServiceV1;
     const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
       ?? this.config.networkIdentity?.chainId;
@@ -3321,13 +3339,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     } catch {
       return null;
     }
-    const accepted = service.acceptedPolicySnapshot(activeNetworkId, contextGraphId);
-    if (accepted === null) return null;
-    return accepted.policy.accessPolicy === 0
-      ? 'public'
-      : accepted.policy.accessPolicy === 1
-        ? 'private'
-        : null;
+    return service.acceptedPolicySnapshot(activeNetworkId, contextGraphId);
   }
 
   /** Gather catalog-owned state once and feed values into the shared pure fence. */

@@ -57,6 +57,26 @@ export interface CuratorMetaRefreshOptions {
    * the local graph private. Mutually exclusive with `memberProof`.
    */
   requirePublicDefinition?: boolean;
+  /**
+   * The serving peer is an UNAUTHENTICATED relay of the declaration (RFC-64
+   * replica bootstrap from whichever peers happen to be connected), not a
+   * curator whose authority the caller established. The snapshot's chain
+   * registration claims -- `OnChainId`, `OnChainHash`, and any
+   * `registrationStatus` other than the `unregistered` placeholder -- are
+   * stripped BEFORE the projection is installed, and no subscription chain
+   * binding is applied afterwards. A chain binding may only come from chain
+   * truth (finalized authority index / name-hash resolution). The
+   * authenticated join-approval and curator-resolved refreshes never set this.
+   */
+  ignoreRegistrationBinding?: boolean;
+  /**
+   * Reject a snapshot whose root `dkg:curator` names any wallet other than
+   * this EVM address (case-insensitive). Set by the RFC-64 replica bootstrap
+   * to the owner the accepted policy already authenticated, so a relayed
+   * declaration cannot re-home the graph under a stranger's identity. A
+   * snapshot that names no curator passes this check.
+   */
+  expectedCuratorAddress?: string;
 }
 
 interface CuratorConnection {
@@ -143,6 +163,60 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+}
+
+const CURATOR_AGENT_DID_PREFIX = 'did:dkg:agent:';
+
+/**
+ * Registration claims a relayed (unauthenticated-source) snapshot may not
+ * carry into the local projection. `OnChainId` / `OnChainHash` are the chain
+ * binding `applyCuratorRegistrationBinding` and the cgId resolver read;
+ * `registrationStatus` is the local registration state machine's fence. Only
+ * the `unregistered` placeholder survives: it is what the author writes for an
+ * unregistered graph and it can only make metadata confirmation stricter.
+ */
+function isRelayedRegistrationClaim(predicate: string, object: string): boolean {
+  if (
+    predicate === `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`
+    || predicate === `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`
+  ) return true;
+  return predicate === DKG_ONTOLOGY.DKG_REGISTRATION_STATUS
+    && stripLiteral(object).trim().toLowerCase() !== 'unregistered';
+}
+
+/** Drop every root-subject chain-registration claim from a relayed snapshot. */
+export function stripRelayedRegistrationBindingQuads(
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+): Quad[] {
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  return snapshot.filter((quad) => !(
+    quad.graph === metaGraph
+    && quad.subject === contextGraphUri
+    && isRelayedRegistrationClaim(quad.predicate, quad.object)
+  ));
+}
+
+/**
+ * Whether every root `dkg:curator` row of the snapshot names `expectedAddress`.
+ * A curator DID is `did:dkg:agent:<evm address>`; anything else (another
+ * wallet, a peer id, a malformed value) is a mismatch. No curator row passes.
+ */
+export function snapshotCuratorMatches(
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+  expectedAddress: string,
+): boolean {
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const expected = `${CURATOR_AGENT_DID_PREFIX}${expectedAddress.toLowerCase()}`;
+  return snapshot.every((quad) => (
+    quad.graph !== metaGraph
+    || quad.subject !== contextGraphUri
+    || quad.predicate !== DKG_ONTOLOGY.DKG_CURATOR
+    || stripLiteral(quad.object).trim().toLowerCase() === expected
+  ));
 }
 
 /**
@@ -447,7 +521,25 @@ async function fetchAuthoritativeMetaSnapshot(
     );
     return undefined;
   }
-  return { checkpointKey: result.checkpointKey, quads: controlMetaQuads };
+  if (
+    options.expectedCuratorAddress !== undefined
+    && !snapshotCuratorMatches(contextGraphId, controlMetaQuads, options.expectedCuratorAddress)
+  ) {
+    agent.syncCheckpoints.delete(snapshotCheckpointKey);
+    agent.syncCheckpoints.delete(result.checkpointKey);
+    agent.log.warn(
+      ctx,
+      `Rejected curator metadata snapshot for "${contextGraphId}" from ${curatorPeerId.slice(-8)}: `
+      + 'its curator is not the owner the accepted policy names',
+    );
+    return undefined;
+  }
+  // A relayed declaration is installed without its chain-registration claims;
+  // the peer that served it is not a source of chain truth.
+  const quads = options.ignoreRegistrationBinding === true
+    ? stripRelayedRegistrationBindingQuads(contextGraphId, controlMetaQuads)
+    : controlMetaQuads;
+  return { checkpointKey: result.checkpointKey, quads };
 }
 
 /**
@@ -678,7 +770,13 @@ async function executeCuratorMetaRefresh(
     );
     if (!snapshot) return false;
     await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot.quads, ctx);
-    applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
+    // The relayed snapshot carries no binding claims any more (stripped above);
+    // skipping the binding step keeps the subscription row untouched even if a
+    // future field slipped past the strip list. Chain bindings for such a
+    // graph arrive only through the finalized-index / name-hash paths.
+    if (options.ignoreRegistrationBinding !== true) {
+      applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
+    }
     agent.syncCheckpoints.delete(snapshot.checkpointKey);
     agent.log.info(
       ctx,
@@ -697,6 +795,21 @@ async function executeCuratorMetaRefresh(
   }
 }
 
+/**
+ * Generation identity for result sharing. A relayed (binding-stripped) run and
+ * an authenticated curator run against the same peer are different contracts:
+ * neither may be satisfied by the other's result, though both still serialize
+ * on the target graph.
+ */
+function curatorMetaRefreshSourceKey(
+  curatorPeerId: string,
+  options: CuratorMetaRefreshOptions,
+): string {
+  return options.ignoreRegistrationBinding === true
+    ? `${curatorPeerId}\u0000relayed`
+    : curatorPeerId;
+}
+
 function scheduleCuratorMetaRefresh(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
@@ -706,6 +819,7 @@ function scheduleCuratorMetaRefresh(
 ): Promise<boolean> {
   const refreshes = inFlightCuratorMetaRefreshesFor(agent);
   const existingState = refreshes.get(contextGraphId);
+  const source = curatorMetaRefreshSourceKey(curatorPeerId, options);
   const execute = (runOptions: CuratorMetaRefreshOptions) => executeCuratorMetaRefresh(
     agent,
     contextGraphId,
@@ -718,13 +832,13 @@ function scheduleCuratorMetaRefresh(
     // Explicit post-approval/credential events queue one fresh generation;
     // concurrent followers share it. Different curator sources also serialize
     // by target graph so two snapshot replacements can never race.
-    if (!options.force && existingState.activeSource === curatorPeerId) {
+    if (!options.force && existingState.activeSource === source) {
       return waitForSharedRefresh(existingState.active, options.signal);
     }
     if (
       options.force
       && existingState.queued
-      && existingState.queuedSource === curatorPeerId
+      && existingState.queuedSource === source
     ) {
       return waitForSharedRefresh(existingState.queued, options.signal);
     }
@@ -741,9 +855,9 @@ function scheduleCuratorMetaRefresh(
     };
     queued = predecessor.then(startFreshGeneration, startFreshGeneration);
     existingState.active = queued;
-    existingState.activeSource = curatorPeerId;
+    existingState.activeSource = source;
     existingState.queued = queued;
-    existingState.queuedSource = curatorPeerId;
+    existingState.queuedSource = source;
     const cleanup = () => {
       if (
         refreshes.get(contextGraphId) === existingState
@@ -760,7 +874,7 @@ function scheduleCuratorMetaRefresh(
   const refresh = execute(options);
   const state: CuratorMetaRefreshState = {
     active: refresh,
-    activeSource: curatorPeerId,
+    activeSource: source,
   };
   refreshes.set(contextGraphId, state);
   return refresh.finally(() => {
