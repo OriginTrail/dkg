@@ -438,6 +438,7 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import { Rfc64SeedFetchMethods } from './dkg-agent-rfc64-seed-fetch.js';
 import { Rfc64SwmCatalogProjectionMethods } from
   './dkg-agent-rfc64-swm-catalog-projection.js';
 import {
@@ -457,6 +458,7 @@ import {
   Rfc64SwmRecoveryRuntimeMethods,
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import { Rfc64SeedStoreMethods } from './dkg-agent-rfc64-seed-store.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
   './rfc64/catalog-authority-refresh-binding-v1.js';
@@ -4167,5 +4169,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods]);

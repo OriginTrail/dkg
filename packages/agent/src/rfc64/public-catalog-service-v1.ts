@@ -90,6 +90,16 @@ import {
   type Rfc64PublicCatalogNativeTransportOptionsV1,
 } from './public-catalog-native-transport-v1.js';
 import {
+  RFC64_UNREGISTERED_AUTHORITY_FANOUT_CONCURRENCY_V1,
+  RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1,
+  RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1,
+  RFC64_UNREGISTERED_AUTHORITY_PEER_TIMEOUT_MS_V1,
+  Rfc64UnregisteredAuthorityTransportV1,
+  type Rfc64UnregisteredAuthorityScopeV1,
+  type Rfc64UnregisteredAuthorityTransportOptionsV1,
+  type Rfc64VerifiedUnregisteredAuthoritySeedV1,
+} from './unregistered-authority-transport-v1.js';
+import {
   produceDirectAuthorCatalogIssuerDelegationV1,
 } from './public-catalog-issuer-delegation-v1.js';
 import {
@@ -121,7 +131,7 @@ import {
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
 import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
-import { mapWithConcurrency } from '../map-with-concurrency.js';
+import { everyWithConcurrency, mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
@@ -133,6 +143,28 @@ const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
 const MAX_FAILOVER_PROVIDERS_V1 = 8;
 const MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1 = 4;
 const MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1 = 1_024;
+
+/**
+ * Policy-less seed serving for wallet-namespaced unregistered graphs. The
+ * read must be a keyed point lookup; the service adds signature verification,
+ * the per-CG kill-switch gate, and the wire caps.
+ */
+export interface Rfc64PublicCatalogServiceUnregisteredAuthorityOptionsV1 {
+  readonly readSeedEnvelopeBytes:
+    Rfc64UnregisteredAuthorityTransportOptionsV1['readSeedEnvelopeBytes'];
+}
+
+export interface FetchRfc64UnregisteredAuthorityFromPeersInputV1
+  extends Rfc64UnregisteredAuthorityScopeV1 {
+  /** Candidate providers; self is removed and the list is capped at the fan-out bound. */
+  readonly peerIds: readonly string[];
+  readonly signal?: AbortSignal;
+}
+
+export interface FetchedRfc64UnregisteredAuthorityFromPeersV1 {
+  readonly remotePeerId: string;
+  readonly seed: Rfc64VerifiedUnregisteredAuthoritySeedV1;
+}
 
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
@@ -151,6 +183,13 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
    * ambient receiver queue.
    */
   readonly currentHeadDiscovery?: Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1;
+  /**
+   * Optional owner-signed seed exchange for wallet-namespaced unregistered
+   * graphs. Requires no held policy on the requester: the envelope is public
+   * and self-authenticating, and holding it grants nothing until the replica
+   * independently proves finalized on-chain absence.
+   */
+  readonly unregisteredAuthority?: Rfc64PublicCatalogServiceUnregisteredAuthorityOptionsV1;
   /** Per-peer announce/fetch timeout (ms). */
   readonly transportTimeoutMs?: number;
   /**
@@ -344,6 +383,7 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #currentHeadDiscoveryTransport:
     Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 | undefined;
   readonly #nativeTransport: Rfc64PublicCatalogNativeTransportV1 | undefined;
+  readonly #unregisteredAuthorityTransport: Rfc64UnregisteredAuthorityTransportV1 | undefined;
   readonly #transportTimeoutMs: number;
   readonly #readNativeResourceStats: () =>
     Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
@@ -409,6 +449,19 @@ export class Rfc64PublicCatalogServiceV1 {
         authorizeCatalogOperation: (input) =>
           this.#authorizeCurrentHeadDiscovery(input),
         verifyIssuerSignature: this.#verifyIssuerSignature,
+      });
+
+    this.#unregisteredAuthorityTransport = options.unregisteredAuthority === undefined
+      ? undefined
+      : new Rfc64UnregisteredAuthorityTransportV1(options.router, {
+        readSeedEnvelopeBytes: options.unregisteredAuthority.readSeedEnvelopeBytes,
+        verifyIssuerSignature: this.#verifyIssuerSignature,
+        // The seed is public and self-authenticating, so serving is gated only
+        // by the per-CG kill switch: never by Track-2 selection (an author in
+        // legacy mode must still seed its replicas) and never by a requester
+        // policy (a bootstrapping replica holds none yet).
+        isServingAllowed: (contextGraphId) =>
+          !this.#resolveContextGraphAuthority(contextGraphId, 'serving').killSwitchActive,
       });
 
     this.#nativeTransport = options.native === undefined
@@ -587,6 +640,10 @@ export class Rfc64PublicCatalogServiceV1 {
     if (this.#started) return;
     this.#nativeTransport?.start();
     try {
+      // Seed serving registers before discovery and announce so a fresh
+      // replica's first bootstrap pull can never race this endpoint's
+      // registration on a node that has just come up.
+      this.#unregisteredAuthorityTransport?.start();
       this.#currentHeadDiscoveryTransport?.start();
       // Register the announcement protocol last so no callback can schedule
       // reconciliation before content-fetch and pull-discovery are live.
@@ -594,6 +651,7 @@ export class Rfc64PublicCatalogServiceV1 {
       this.#started = true;
     } catch (cause) {
       this.#currentHeadDiscoveryTransport?.stop();
+      this.#unregisteredAuthorityTransport?.stop();
       this.#nativeTransport?.stop();
       throw cause;
     }
@@ -628,8 +686,76 @@ export class Rfc64PublicCatalogServiceV1 {
     } finally {
       this.#transport.stop();
       this.#currentHeadDiscoveryTransport?.stop();
+      this.#unregisteredAuthorityTransport?.stop();
       this.#nativeTransport?.stop();
     }
+  }
+
+  /**
+   * Bounded first-verified-wins pull of one wallet-namespaced graph's
+   * owner-signed seed from connected peers. Every answer is authenticated
+   * against the exact scope and the wallet prefix of the graph id before it
+   * counts; not-found, denial, wire, signature and mismatch failures are
+   * per-peer misses. Resolves null when no peer served a verified seed. This
+   * method persists and accepts nothing: the caller writes the seed through the
+   * keyed store and lets the finalized-absence reconcile decide.
+   */
+  async fetchUnregisteredAuthorityFromPeers(
+    input: FetchRfc64UnregisteredAuthorityFromPeersInputV1,
+  ): Promise<FetchedRfc64UnregisteredAuthorityFromPeersV1 | null> {
+    this.#requireStarted();
+    const transport = this.#unregisteredAuthorityTransport;
+    if (transport === undefined) {
+      throw new Error('RFC-64 unregistered-authority seed exchange is not configured');
+    }
+    const scope: Rfc64UnregisteredAuthorityScopeV1 = Object.freeze({
+      networkId: input.networkId,
+      contextGraphId: input.contextGraphId,
+    });
+    const peers = (this.#localPeerId === undefined
+      ? snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peerIds)
+      : snapshotRfc64RemoteCatalogAnnouncementPeersV1(input.peerIds, this.#localPeerId)
+    ).slice(0, RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1);
+    input.signal?.throwIfAborted();
+    if (peers.length === 0) return null;
+
+    // The whole fan-out shares one deadline well inside the caller's bootstrap
+    // budget; each peer additionally gets a short send deadline so one slow
+    // dial cannot consume the budget on behalf of the others.
+    const budget = AbortSignal.timeout(RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1);
+    const signal = input.signal === undefined
+      ? budget
+      : AbortSignal.any([input.signal, budget]);
+    const perPeerTimeoutMs = Math.min(
+      this.#transportTimeoutMs,
+      RFC64_UNREGISTERED_AUTHORITY_PEER_TIMEOUT_MS_V1,
+    );
+    let winner: FetchedRfc64UnregisteredAuthorityFromPeersV1 | null = null;
+    await everyWithConcurrency(
+      peers,
+      RFC64_UNREGISTERED_AUTHORITY_FANOUT_CONCURRENCY_V1,
+      async (remotePeerId, _index, siblingSignal) => {
+        try {
+          const seed = await transport.fetchUnregisteredAuthority(remotePeerId, scope, {
+            timeoutMs: perPeerTimeoutMs,
+            signal: siblingSignal,
+          });
+          if (seed === null) return true;
+          if (winner === null) winner = Object.freeze({ remotePeerId, seed });
+          // First verified seed wins; abort the siblings still in flight.
+          return false;
+        } catch (cause) {
+          // A sibling cancelled by the winner is not a failure of anything.
+          if (winner !== null) return false;
+          // Caller abort or fan-out deadline: stop everything, surface it.
+          if (signal.aborted) throw signal.reason ?? cause;
+          // Per-peer miss (denied, wire, signature, mismatch, dial): next peer.
+          return true;
+        }
+      },
+      signal,
+    );
+    return winner;
   }
 
   /**

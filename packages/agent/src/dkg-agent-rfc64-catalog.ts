@@ -2781,7 +2781,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // Replica authority is admissible only after the shared finalized name
       // index proves that no on-chain graph owns this name. The embedded
       // policy is independently owner-signed and graph/network-bound; plain
-      // ontology creator/access-policy triples remain unauthenticated.
+      // ontology creator/access-policy triples remain unauthenticated. The
+      // keyed seed store is consulted first (point lookup); the ontology scan
+      // remains only as the deprecated backward-compat carrier.
       const replicaUnregisteredAuthority = (
         boundOnChainId === undefined
         && !localFirstUnregistered
@@ -2793,6 +2795,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           networkId,
           contextGraphId: contextGraphId as ContextGraphIdV1,
           signal,
+          seeds: this.rfc64UnregisteredAuthoritySeedAccessV1(),
         })
         : null;
       if (
@@ -3480,6 +3483,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           );
           return applied?.currentCatalogHeadDigest ?? null;
         },
+      },
+      // Policy-less seed serving for wallet-namespaced unregistered graphs:
+      // keyed store first, deprecated ontology copy only for locally known CGs.
+      unregisteredAuthority: {
+        readSeedEnvelopeBytes: (scope, signal) =>
+          this.readRfc64UnregisteredAuthoritySeedForServingV1(scope, signal),
       },
       receiver: {
         onTerminalEvent: ({ announcement, outcome }) => {

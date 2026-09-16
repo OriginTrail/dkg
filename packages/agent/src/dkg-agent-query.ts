@@ -791,12 +791,27 @@ export class QueryMethods extends DKGAgentBase {
             || initial.reason !== 'finalized-name-absence-unaccepted'
           ) return initial;
 
+          // A replica that connected after the graph was created, or an edge
+          // that never syncs the ontology graph, may hold no owner-signed seed
+          // at all. Pull it from currently connected peers (bounded fan-out,
+          // first verified envelope wins) before reconciling. The fetched seed
+          // is only persisted through the keyed store, never accepted here, so
+          // the reconcile fences below still decide; any failure or miss keeps
+          // the initial denial.
+          try {
+            await this.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(contextGraphId, signal);
+          } catch {
+            // Best-effort: reconcile re-reads local state and a missing seed
+            // preserves the initial denial below.
+          }
+
           // The finalized index proved exact absence, but a replica cannot
           // consume that fact until it authenticates the owner-signed policy
-          // copied through the ontology graph. Reconcile once at this explicit
-          // admission boundary; ordinary reads and periodic sweeps remain
-          // unable to promote unsigned metadata or reopen legacy scalar RPC
-          // discovery. A forged/missing seed preserves the initial denial.
+          // (keyed seed store, or the deprecated ontology-graph copy). Reconcile
+          // once at this explicit admission boundary; ordinary reads and
+          // periodic sweeps remain unable to promote unsigned metadata or
+          // reopen legacy scalar RPC discovery. A forged/missing seed preserves
+          // the initial denial.
           try {
             await this.reconcileRfc64CatalogAccessAuthorityV1(
               contextGraphId,
