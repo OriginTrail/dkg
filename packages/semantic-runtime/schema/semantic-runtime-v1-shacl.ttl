@@ -1,0 +1,25 @@
+@prefix sr: <https://origintrail.io/semantic-runtime/v1#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+sr:EffectShape a sh:NodeShape ;
+  sh:targetClass sr:Effect ;
+  sh:closed false ;
+  sh:property [ sh:path sr:effectState ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ;
+  sh:property [ sh:path sr:idempotencyClass ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ;
+  sh:property [ sh:path sr:proposedBy ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ;
+  sh:property [ sh:path sr:requestDigest ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:pattern "^sha256:[0-9a-f]{64}$" ] ;
+  sh:property [ sh:path sr:authorization ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] .
+
+sr:ExecutionSummaryShape a sh:NodeShape ;
+  sh:targetClass sr:ExecutionSummary ;
+  sh:closed false ;
+  sh:property [ sh:path sr:usesStrategy ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ;
+  sh:property [ sh:path sr:strategyHash ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:pattern "^sha256:[0-9a-f]{64}$" ] ;
+  sh:property [ sh:path sr:policyEpoch ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:unsignedLong ] ;
+  sh:property [ sh:path sr:graphRevision ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:pattern "^sha256:[0-9a-f]{64}$" ] ;
+  sh:property [ sh:path sr:status ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] .
+
+# SHACL validates projected structure. It is not an authorization policy and
+# must never be treated as one by the broker or adapter gateway.

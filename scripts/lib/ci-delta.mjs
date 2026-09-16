@@ -132,6 +132,12 @@ export const WORKSPACE_RULES = Object.freeze({
     ],
     evmScopes: ['agent'],
   },
+  'packages/semantic-runtime': {
+    // Supporting owns package coverage; the dedicated Rust/Wasm gate also
+    // runs whenever Node work is selected. Keep the CLI consumers covered.
+    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/cli': {
     lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
@@ -215,6 +221,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/publisher': ['tornado_publisher'],
   'packages/random-sampling': ['kosava_hardhat_plugins'],
   'packages/agent': ['tornado_agent'],
+  'packages/semantic-runtime': ['kosava_supporting'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
   'packages/graph-viz': ['kosava_supporting'],
