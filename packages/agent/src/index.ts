@@ -374,6 +374,11 @@ export {
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type FinalizationRecoveryStoreFactory,
+  type CatchupSyncDiagnostics,
+  type ContextGraphCatchupDiagnostics,
+  type CatchupResultCore,
+  type ContextGraphCatchupResult,
+  type SharedMemorySyncAggregate,
   type SharedMemorySyncDiagnostics,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
@@ -560,6 +565,14 @@ export {
   mergeSamePeerSharedMemoryDiagnostics,
   selectSwmSnapshotCoverage,
 } from './sync/shared-memory-diagnostics.js';
+export {
+  createSharedMemoryCatchupRoundAggregation,
+  foldSharedMemoryRound,
+  sharedMemoryCatchupPlaneProven,
+  type FoldSharedMemoryRoundOptions,
+  type SharedMemoryCatchupPeerSets,
+  type SharedMemoryCatchupRoundAggregation,
+} from './sync/shared-memory-catchup-round.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.
