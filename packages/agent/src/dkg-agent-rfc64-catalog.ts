@@ -476,6 +476,11 @@ export interface Rfc64CatalogOperationalStatusV1 {
   /** Per-CG authenticated target count plus process-wide receiver counters. */
   readonly providerHealth: Readonly<{
     candidateCount: number | null;
+    /**
+     * Per-CG providers whose last catalog replay failed and are still retried.
+     * Diagnostic only: it never blocks the phase or nulls the parity fields.
+     */
+    unresolvedReplayPeers: number;
     attempts: number;
     switches: number;
     successes: number;
@@ -1504,6 +1509,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         ? null
         : replayRecovery.status(selection.contextGraphId, accepted.policyDigest);
       const replayActive = replaySnapshotUnstable || currentReplayProgress?.active === true;
+      // Only parity/overflow evidence fails a Context Graph. Providers that
+      // could not be replayed from surface through providerHealth instead.
       const replayFailed = currentReplayProgress?.failed === true;
       const replayUnsettled = replayActive || replayFailed;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
@@ -1677,6 +1684,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         lastSuccessfulAdvanceAt,
         providerHealth: Object.freeze({
           candidateCount: targetCapacityExceeded || replayUnsettled ? null : targets.length,
+          unresolvedReplayPeers: currentReplayProgress?.unresolvedPeerCount ?? 0,
           attempts: receiverStats?.providerAttempts ?? 0,
           switches: receiverStats?.providerSwitches ?? 0,
           successes: receiverStats?.providerSuccesses ?? 0,

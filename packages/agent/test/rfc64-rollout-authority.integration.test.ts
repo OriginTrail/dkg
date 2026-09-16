@@ -923,11 +923,14 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 0, failed: 2 });
+    // Unreachable providers say nothing about this node's applied rows: they
+    // stay visible as retried provider failures, never as CG incompleteness.
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
-        phase: 'blocked',
-        stableReason: 'catalog-replay-incomplete',
+        phase: 'bootstrapping',
+        stableReason: null,
+        providerHealth: expect.objectContaining({ unresolvedReplayPeers: 2 }),
       }),
     );
   });
@@ -955,8 +958,9 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
-        phase: 'blocked',
-        stableReason: 'catalog-replay-incomplete',
+        phase: 'bootstrapping',
+        stableReason: null,
+        providerHealth: expect.objectContaining({ unresolvedReplayPeers: 1 }),
       }),
     );
 
@@ -978,6 +982,7 @@ describe('RFC-64 rollout authority integration', () => {
     ))).toEqual(new Set([failedPeer, newPeer]));
     const [recoveredStatus] = await edge.readRfc64CatalogOperationalStatusV1();
     expect(recoveredStatus?.stableReason).not.toBe('catalog-replay-incomplete');
+    expect(recoveredStatus?.providerHealth.unresolvedReplayPeers).toBe(0);
   });
 
   it('bounds unresolved provider attribution and retains an aggregate churn witness', async () => {

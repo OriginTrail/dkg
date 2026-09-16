@@ -59,7 +59,13 @@ export interface Rfc64CatalogReplayRecoveryResultV1 {
 
 export interface Rfc64CatalogReplayRecoveryStatusV1 {
   readonly active: boolean;
+  /**
+   * Parity or worklist-overflow evidence that this node's applied rows may be
+   * incomplete. Never set by a provider that merely failed to answer.
+   */
   readonly failed: boolean;
+  /** Retained providers whose last replay failed; retried, never blocking. */
+  readonly unresolvedPeerCount: number;
 }
 
 /**
@@ -156,6 +162,7 @@ interface ReplayProgressV1 {
   requestedFullReplay: boolean;
   token: number;
   active: boolean;
+  /** Mirrors `requiresFullReplay` after each run; unresolved peers never set it. */
   failed: boolean;
   completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> | null;
 }
@@ -184,7 +191,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   ): Readonly<Rfc64CatalogReplayRecoveryStatusV1> | null {
     const progress = this.#byContextGraph.get(contextGraphId);
     if (progress === undefined || progress.policyDigest !== policyDigest) return null;
-    return Object.freeze({ active: progress.active, failed: progress.failed });
+    return Object.freeze({
+      active: progress.active,
+      failed: progress.failed,
+      unresolvedPeerCount: progress.unresolvedPeers.size,
+    });
   }
 
   clear(contextGraphId: string): void {
@@ -233,6 +244,9 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     const progress = this.#progressFor(input.contextGraphId, input.policyDigest);
     if (input.kind === 'full-connected-peers') {
+      if (this.#dropDisconnectedUnresolvedPeers(progress, input.connectedPeerIds)) {
+        this.#bumpRevision();
+      }
       const connectedPeers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
         input.connectedPeerIds.slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1),
       );
@@ -333,7 +347,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         if (requiresFullReplay) current.requiresFullReplay = true;
         if (!replayFailed && current.requestedFullReplay) current.requiresFullReplay = false;
         current.requestedFullReplay = false;
-        current.failed = current.unresolvedPeers.size > 0 || current.requiresFullReplay;
+        // Only evidence that applied rows may be missing (parity, worklist or
+        // attribution overflow) fails the Context Graph. A provider that could
+        // not be replayed from stays retained for retry and is reported on its
+        // own; it says nothing about this node's applied state.
+        current.failed = current.requiresFullReplay;
         current.completion = null;
         current.peerWorklist.settleOverflow();
         this.#bumpRevision();
@@ -358,6 +376,28 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       this.#byContextGraph.set(contextGraphId, progress);
     }
     return progress;
+  }
+
+  /**
+   * A retained provider that is no longer connected cannot be replayed from:
+   * re-seeding it only burns worklist budget on a dead dial and, at the bound,
+   * overflows into a spurious full-replay witness. Its reconnect raises a fresh
+   * connection demand, so dropping it here forfeits no retry. Scoped runs carry
+   * no connectivity evidence and keep every retained provider.
+   */
+  #dropDisconnectedUnresolvedPeers(
+    progress: ReplayProgressV1,
+    connectedPeerIds: readonly string[],
+  ): boolean {
+    if (progress.unresolvedPeers.size === 0) return false;
+    const connected = new Set(connectedPeerIds);
+    let dropped = false;
+    for (const peerId of progress.unresolvedPeers) {
+      if (connected.has(peerId)) continue;
+      progress.unresolvedPeers.delete(peerId);
+      dropped = true;
+    }
+    return dropped;
   }
 
   /** Retain bounded attribution; overflow survives as a full-replay witness. */
