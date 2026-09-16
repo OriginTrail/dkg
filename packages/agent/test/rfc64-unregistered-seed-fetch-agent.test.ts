@@ -177,6 +177,12 @@ describe('Rfc64SeedFetchMethods provider-side compat fallback', () => {
   });
 
   it('runs the ontology read once for an absent scope across consecutive and concurrent queries', async () => {
+    // Pin the clock before the first read so the negative entry is stamped at
+    // `base`; on a slow runner real time can advance >= 1 ms between the read
+    // and the assertions below, which would expire the entry early.
+    const base = Date.now();
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(base);
     const consecutive = createFetchAgent({ created: [CONTEXT_GRAPH_ID], literals: [] });
     await expect(consecutive.agent.readRfc64UnregisteredAuthoritySeedForServingV1(SCOPE)).resolves.toBeNull();
     await expect(consecutive.agent.readRfc64UnregisteredAuthoritySeedForServingV1(SCOPE)).resolves.toBeNull();
@@ -184,8 +190,6 @@ describe('Rfc64SeedFetchMethods provider-side compat fallback', () => {
     expect(consecutive.persist).not.toHaveBeenCalled();
 
     // The negative entry expires: one more read is allowed after the TTL.
-    const base = Date.now();
-    const now = vi.spyOn(Date, 'now');
     now.mockReturnValue(base + RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1 - 1);
     await expect(consecutive.agent.readRfc64UnregisteredAuthoritySeedForServingV1(SCOPE)).resolves.toBeNull();
     expect(consecutive.query).toHaveBeenCalledTimes(1);
