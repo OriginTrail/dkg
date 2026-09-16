@@ -22,11 +22,12 @@ function agentWithConnectedPeers(peerIds: readonly string[]) {
 }
 
 /**
- * Author paths that publish the first heads of a fresh CG pass `peers: []`
- * (that CG's gossip mesh does not exist yet). Before the fix that announced to
- * nobody, so a replica connected before the CG was created never received the
- * head or the policy it carries, and — because both replay request versions
- * require the policy digest — could never pull it either.
+ * The SWM projection lane's configured announcement set is empty for a fresh
+ * public CG (no gossip mesh exists yet), so a replica connected before the CG
+ * was created never received the head or the policy it carries, and -- because
+ * both replay request versions require the policy digest -- could never pull it
+ * either. The lane resolves its set through this helper; the generic announce
+ * API deliberately does not.
  */
 describe('RFC-64 catalog announcement peer fallback', () => {
   it('falls back to the currently connected peers when the requested set is empty', () => {
@@ -59,16 +60,17 @@ describe('RFC-64 catalog announcement peer fallback', () => {
     expect(agent.resolveRfc64CatalogAnnouncementPeersV1([])).toEqual([]);
   });
 
-  it('announceRfc64PublicCatalogHeadV1 delivers to the resolved fallback peers', async () => {
+  it('announceRfc64PublicCatalogHeadV1 keeps `peers: []` meaning "announce to nobody" (no widening)', async () => {
+    // Internal author paths pass [] to defer announcing to their caller, and
+    // replay-based tests/callers pass [] so a head reaches a replica ONLY via
+    // replay. Widening here double-announced and broke that contract
+    // (`keeps multi-author replay applying after one promised head lands`).
     const { agent, announceCatalogHead } = agentWithConnectedPeers([PEER_A, PEER_B]);
     const announcement = { kind: 'stub-announcement' } as never;
 
     await agent.announceRfc64PublicCatalogHeadV1({ announcement, peers: [] });
 
     expect(announceCatalogHead).toHaveBeenCalledOnce();
-    expect(announceCatalogHead).toHaveBeenCalledWith({
-      announcement,
-      peers: [PEER_A, PEER_B],
-    });
+    expect(announceCatalogHead).toHaveBeenCalledWith({ announcement, peers: [] });
   });
 });

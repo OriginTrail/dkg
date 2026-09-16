@@ -3765,13 +3765,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Announcement fan-out target set. Author paths that publish the first heads
-   * of a fresh CG pass an empty set (that CG's gossip mesh does not exist yet),
-   * which announces to nobody — so a replica that connected before the CG was
-   * created never learns its head or the policy the head carries. Fall back to
-   * the currently connected peers: exactly the set connect-time reannounce
-   * already reaches, capped by the wire limit. Non-empty explicit sets are
-   * honoured unchanged.
+   * Explicit opt-in fan-out for the SWM projection lane: its configured
+   * announcement set is empty for a fresh public CG (no gossip mesh exists yet),
+   * so a replica that connected before the CG was created would never learn
+   * the head or the policy it carries. Fall back to the currently connected
+   * peers -- exactly the set connect-time reannounce already reaches, capped by
+   * the wire limit. Non-empty explicit sets are honoured unchanged. NOT applied
+   * to the generic announce API, where `[]` deliberately means "nobody".
    */
   resolveRfc64CatalogAnnouncementPeersV1(
     this: DKGAgent,
@@ -3793,13 +3793,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return snapshotRfc64PublicCatalogAnnouncementPeersV1(connected);
   }
 
-  /** Explicit best-effort availability fan-out for an already durable head. */
+  /**
+   * Explicit best-effort availability fan-out for an already durable head.
+   * `peers: []` means "announce to nobody" and must stay that way: internal
+   * author paths rely on it to defer announcing to their caller, and replicas
+   * rely on it so a head reaches them through replay rather than an announce.
+   */
   announceRfc64PublicCatalogHeadV1(
     this: DKGAgent,
     input: AnnounceRfc64PublicCatalogHeadInputV1,
   ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
-    const peers = this.resolveRfc64CatalogAnnouncementPeersV1(input.peers);
-    return this.requireRfc64PublicCatalogServiceV1().announceCatalogHead({ ...input, peers });
+    return this.requireRfc64PublicCatalogServiceV1().announceCatalogHead(input);
   }
 
   /** Re-advertise durable current heads to one newly admitted peer. */
@@ -4151,7 +4155,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     params: PublishAuthorCatalogExactSetSuccessorParamsV1,
     history: BoundedAuthorCatalogHistoryV1,
   ): Promise<PublishAuthorCatalogExactSetSuccessorResultV1> {
-    const peers = this.resolveRfc64CatalogAnnouncementPeersV1(params.peers);
+    const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(params.peers);
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) {
       throw new Error('RFC-64 persistence is not available');
