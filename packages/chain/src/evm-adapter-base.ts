@@ -42,14 +42,22 @@ import {
 import {
   createRpcRequestProvider,
   activeRpcRequestAbortSignal,
+  activeRpcRequestContext,
   withOwnedRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
+import type { RpcRequestClass } from './rpc-request-transport.js';
 import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
-import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
+import {
+  RpcFailoverClient,
+  createRpcReadDescriptor,
+  type ReadOpts,
+  type RpcReadDescriptor,
+  type ReceiptLookupOptions,
+} from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
   RpcUsageTracker,
@@ -102,6 +110,18 @@ type SerializedSignerWriteContext = {
   /** Refresh the lane-health clock after a meaningful write-stage boundary. */
   markProgress: () => void;
 };
+
+/**
+ * Bind an adapter read's human label and telemetry owner together.
+ *
+ * Kept as a module helper so it does not become part of the concrete adapter's
+ * prototype API (the mock-adapter parity test intentionally enumerates that
+ * surface).
+ */
+function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
+  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
+  return createRpcReadDescriptor(label, consumer);
+}
 
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
@@ -865,8 +885,17 @@ export class EVMChainAdapterBase {
     { value: bigint; cachedAt: number }
   >();
 
-  protected readonly configuredStaticChainIdValidationsByProvider =
-    new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>();
+  /**
+   * Keep shared validation work inside the caller's admission class. A
+   * background validation must not borrow the foreground reserve, while a
+   * foreground caller must not wait behind lower-priority physical work.
+   */
+  protected readonly configuredStaticChainIdValidationsByProvider: Readonly<
+    Record<RpcRequestClass, AbortableKeyedSingleFlight<JsonRpcProvider, bigint>>
+  > = Object.freeze({
+    foreground: new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>(),
+    background: new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>(),
+  });
 
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
@@ -970,9 +999,11 @@ export class EVMChainAdapterBase {
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
     this.configuredStaticChainIdsByProvider.clear();
-    this.configuredStaticChainIdValidationsByProvider.invalidateAll(
-      'Configured chainId validation was invalidated',
-    );
+    for (const validation of Object.values(
+      this.configuredStaticChainIdValidationsByProvider,
+    )) {
+      validation.invalidateAll('Configured chainId validation was invalidated');
+    }
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
@@ -1477,10 +1508,12 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, (c) => c[method](...args), {
-      ...opts,
-      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
-    });
+    return this.rpcFailover.readContract(
+      rpcReadDescriptor(label, opts),
+      contract,
+      (c) => c[method](...args),
+      opts,
+    );
   }
 
   /** Canonical KAS update-context ABI read shared by storage and publish mixins. */
@@ -1511,10 +1544,12 @@ export class EVMChainAdapterBase {
     fn: (c: Contract) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, fn, {
-      ...opts,
-      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
-    });
+    return this.rpcFailover.readContract(
+      rpcReadDescriptor(label, opts),
+      contract,
+      fn,
+      opts,
+    );
   }
 
   /**
@@ -1529,10 +1564,7 @@ export class EVMChainAdapterBase {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.read(label, fn, {
-      ...opts,
-      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
-    });
+    return this.rpcFailover.read(rpcReadDescriptor(label, opts), fn, opts);
   }
 
   /**
@@ -3621,7 +3653,7 @@ export class EVMChainAdapterBase {
     const chainId = this.configuredStaticChainId == null
       ? (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId
       : await this.rpcFailover.read(
-          'validate configured chainId',
+          createRpcReadDescriptor('validate configured chainId'),
           (p) => this.ensureConfiguredStaticChainIdValidated(p),
         );
     this.cachedChainId = { value: chainId, cachedAt: now };
@@ -3636,11 +3668,12 @@ export class EVMChainAdapterBase {
       return cached!.value;
     }
 
-    return this.configuredStaticChainIdValidationsByProvider.run(
+    const requestClass = activeRpcRequestContext().requestClass;
+    return this.configuredStaticChainIdValidationsByProvider[requestClass].run(
       provider,
       (sharedSignal) => withOwnedRpcRequestContext(
         {
-          requestClass: 'foreground',
+          requestClass,
           signal: sharedSignal,
         },
         () => withRpcRequestTimeout(

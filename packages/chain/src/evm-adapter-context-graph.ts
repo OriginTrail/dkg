@@ -41,6 +41,8 @@ import {
   readEvmContextGraphAuthorityStateV1,
 } from
   './evm-context-graph-authority-index-reader.js';
+import { normalizeContextGraphAuthorityHash } from
+  './context-graph-authority-generation.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -1287,12 +1289,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                   targetContextGraphId,
                   fromBlock,
                   toBlock,
-                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => ({
-                  blockNumber: event.blockNumber,
-                  blockHash: event.blockHash,
-                  index: event.index,
-                  nameHash: String(event.args.nameHash ?? event.args[2]).toLowerCase(),
-                })))
+                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => {
+                  const nameHash = normalizeContextGraphAuthorityHash(
+                    event.args.nameHash ?? event.args[2],
+                  );
+                  if (nameHash === undefined) {
+                    throw new Error(
+                      'ContextGraphStorage returned an invalid ContextGraphCreated name hash',
+                    );
+                  }
+                  return {
+                    blockNumber: event.blockNumber,
+                    blockHash: event.blockHash,
+                    index: event.index,
+                    nameHash,
+                  };
+                }))
               ),
               readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
                 const { name } = query;
