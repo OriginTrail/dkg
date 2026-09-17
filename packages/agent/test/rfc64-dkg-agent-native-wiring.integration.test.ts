@@ -6609,11 +6609,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       loadAll: async () => [],
       upsert: async () => undefined,
       delete: async () => undefined,
-      loadLocalOrigins: async () => originRecords.map((record) => ({ ...record })),
-      recordLocalOrigin: async (record) => {
-        if (!originRecords.some(({ contextGraphId }) => contextGraphId === record.contextGraphId)) {
-          originRecords.push({ ...record });
-        }
+      localOrigins: {
+        loadLocalOrigins: async () => originRecords.map((record) => ({ ...record })),
+        recordLocalOrigin: async (record) => {
+          if (!originRecords.some(({ contextGraphId }) => contextGraphId === record.contextGraphId)) {
+            originRecords.push({ ...record });
+          }
+        },
       },
     };
     const assertionCoordinate = 'legacy-boundary-republish';
