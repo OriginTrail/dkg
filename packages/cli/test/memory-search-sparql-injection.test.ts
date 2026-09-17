@@ -28,8 +28,14 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
   const url = new URL('http://127.0.0.1/api/memory/search');
   const agent = {
     // The route gates on read authority before either fan-out runs; these
-    // injection tests exercise the SPARQL builder, so grant it.
-    canReadContextGraph: async () => true,
+    // injection tests exercise the SPARQL builder, so grant it. The reason
+    // must be a CALLER-scoped one — node-scoped reasons are refused for
+    // agent principals (see memory-search-read-authority.test.ts).
+    resolveContextGraphReadAuthority: async () => ({
+      outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant',
+    }),
+    canUseSharedMemoryForContextGraph: async () => true,
+    listLocalAgents: () => [],
     // The text search fans out per memory-layer view through the guarded
     // `DKGAgent.query` path; the literal-escaping contract under test lives
     // in the caller query either way.
@@ -37,7 +43,6 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
       captureSparql(sparql);
       return { bindings: [] };
     },
-    listLocalAgents: () => [],
   };
   const ctx = {
     req: fakeReq('POST', body),
