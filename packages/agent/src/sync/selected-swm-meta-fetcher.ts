@@ -366,6 +366,26 @@ export function createSelectedSwmMetaFetcher(options: {
     // Reserve before yielding to transport. Overlapping selected invocations
     // therefore cannot both spend the same process-wide free allowance.
     const reservation = state.retentionLease.reserve();
+    if (reservation.exhaustion === 'shared') {
+      // Sibling transfers hold the whole process-wide allowance. Spending a
+      // fetch here cannot succeed — the first returned row exceeds a zero
+      // allowance — and the thrown accumulation limit is fail-closed, so it
+      // would also discard the prefix this invocation already paid for. Yield
+      // the retained prefix instead: the continuation ledger sees no progress,
+      // bounds its own passes, and a later pass runs once capacity frees.
+      // `prefix` exhaustion is NOT yielded: that ceiling is this lease's own
+      // and no later pass can widen it, so it must keep failing closed.
+      reservation.release();
+      return {
+        quads: state.quads,
+        bytesReceived: 0,
+        resumedFromOffset: state.nextOffset,
+        nextOffset: state.nextOffset,
+        checkpointKey: state.checkpointKey,
+        completed: false,
+        timedOut: true,
+      };
+    }
     try {
       const fetched = await options.fetchPage({
         ...request,
