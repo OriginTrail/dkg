@@ -6,6 +6,8 @@ import { Rfc64SwmRecoveryRuntimeV1 } from
 import { Rfc64BackgroundWorkDispatcherV1 } from
   '../src/rfc64/background-work-dispatcher-v1.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 export const LOCAL_ID = 'selected-public-cg';
 export const NAME_HASH = `0x${'ab'.repeat(32)}`;
 
@@ -46,6 +48,14 @@ function createBindingAgentHarness<TState extends object>(
 ): TState & BindingAgentMethods {
   return Object.assign(
     Object.create(DKGAgent.prototype) as BindingAgentMethods,
+    {
+      // Registered authority reads run under the shared governor on a real
+      // agent, so a synthetic host owns one too. Scenarios that care about
+      // circuit behavior override it.
+      rfc64PublicCatalogOwnerV1: {
+        authorityReads: new Rfc64AuthorityReadCoordinatorV1(),
+      },
+    },
     state,
   );
 }

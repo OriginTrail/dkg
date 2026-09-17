@@ -1923,24 +1923,67 @@ else
 fi
 
 echo "--- 26i: Memory search scoped — no cross-CG leakage ---"
-FAKE_CG="nonexistent-memory-cg-$(date +%s)"
-LEAK_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/search" -d "{
+# A CG that does not exist is NOT a leak test: it has no data under its graph
+# prefix, so it returns 0 results against any implementation — including a
+# completely ungated one. That is what this check used to do, and it is why a
+# real cross-CG read hole in /api/memory/search survived it.
+#
+# Probe the two cases that can actually leak instead:
+#   (1) a CG that EXISTS and HAS matching data, named by a caller with no
+#       read authority for it  -> must be refused, not served;
+#   (2) the same CG named by a caller that DOES have authority -> must still
+#       work, so the check cannot pass by simply breaking search.
+#
+# Case (2) is the control. Without it, a route that 403s everything would
+# score as "correctly scoped".
+LEAK_PROBE_CG="$MEMORY_CG"
+
+# Control: the authorised caller must still get results for this CG.
+CONTROL_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/search" -d "{
   \"query\":\"Tri-Modal Memory\",
-  \"contextGraphId\":\"$FAKE_CG\",
+  \"contextGraphId\":\"$LEAK_PROBE_CG\",
   \"limit\":5
 }")
-LEAK_CT=$(echo "$LEAK_RESP" | python3 -c 'import sys,json
+CONTROL_CT=$(echo "$CONTROL_RESP" | python3 -c 'import sys,json
 try:
   d=json.load(sys.stdin)
   print(len(d.get("results",[])))
 except: print("ERR")
 ' 2>/dev/null || echo "ERR")
-if [[ "$LEAK_CT" == "ERR" ]]; then
-  warn "Cross-CG search returned unparseable response: ${LEAK_RESP:0:200}"
-elif [[ "$LEAK_CT" -eq 0 ]]; then
-  ok "Memory search correctly scoped — no cross-CG leakage"
+if [[ "$CONTROL_CT" == "ERR" || "$CONTROL_CT" -lt 1 ]]; then
+  fail "Cross-CG control failed: authorised caller got '$CONTROL_CT' results for a CG that has data — the leak probe below would be vacuous"
 else
-  fail "Memory search leaked $LEAK_CT results to wrong CG"
+  ok "Cross-CG control: authorised caller sees $CONTROL_CT results"
+fi
+
+# Leak probe: an UNAUTHORISED caller naming that same populated CG.
+# A bearer token that is valid for the daemon but bound to an agent with no
+# read authority for $LEAK_PROBE_CG. Skip rather than pass if the devnet has
+# not provisioned one — a skipped check is honest, a vacuous pass is not.
+if [[ -n "${FOREIGN_AGENT_TOKEN:-}" ]]; then
+  LEAK_STATUS=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+    -H "Authorization: Bearer $FOREIGN_AGENT_TOKEN" -H "Content-Type: application/json" \
+    -o /tmp/devnet-leak-body.json -w "%{http_code}" \
+    -X POST "http://127.0.0.1:9201/api/memory/search" -d "{
+      \"query\":\"Tri-Modal Memory\",
+      \"contextGraphId\":\"$LEAK_PROBE_CG\",
+      \"limit\":5
+    }")
+  LEAK_CT=$(python3 -c 'import sys,json
+try:
+  d=json.load(open("/tmp/devnet-leak-body.json"))
+  print(len(d.get("results",[])))
+except: print(0)
+' 2>/dev/null || echo 0)
+  if [[ "$LEAK_STATUS" == "403" ]]; then
+    ok "Memory search refused an unauthorised caller on a populated CG (403)"
+  elif [[ "$LEAK_CT" -gt 0 ]]; then
+    fail "Memory search LEAKED $LEAK_CT results from '$LEAK_PROBE_CG' to an unauthorised caller (HTTP $LEAK_STATUS)"
+  else
+    warn "Memory search returned HTTP $LEAK_STATUS with 0 results for an unauthorised caller — expected an explicit 403"
+  fi
+else
+  warn "SKIPPED cross-CG leak probe: set FOREIGN_AGENT_TOKEN to a token bound to an agent without read authority for '$LEAK_PROBE_CG'"
 fi
 
 echo "--- 26j: Invalid sessionUri rejected with 400 ---"

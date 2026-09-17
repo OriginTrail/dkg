@@ -227,16 +227,48 @@ function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any
   return true;
 }
 
+interface PromoteRecoveryContext {
+  contextGraphId: string;
+  name: string;
+  phase: string;
+  subGraphName?: string;
+}
+
+function respondPromoteRecoveryError(
+  res: RequestContext["res"],
+  e: any,
+  context?: PromoteRecoveryContext,
+): boolean {
+  if (e?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') return false;
+  process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
+    event: 'knowledge_asset_recovery_required',
+    code: e.code,
+    ...context,
+  })}\n`);
+  jsonResponse(res, 409, {
+    code: e.code,
+    error: sanitizeRpcMessage(e.message ?? String(e)),
+    retryAction: 'resume_existing_knowledge_asset',
+    retryPhase: 'swm-share',
+    ...(context ? {
+      contextGraphId: context.contextGraphId,
+      retryKnowledgeAssetName: context.name,
+      ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
+    } : {}),
+  });
+  return true;
+}
+
 /**
- * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
- * HTTP status mapping the legacy `/api/assertion/*` routes use, so callers see
- * 400 for their own mistakes (missing assertion, unsafe/reserved IRI) and 409
- * for the "_meta says completed but the data graph is empty" case — instead of
- * a blanket 500. NOT applied to vm/publish: on-chain/storage failures there can
- * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
- * publish path, which never down-classified them).
+ * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
+ * VM publishing keeps its own mapping so chain failures remain server errors.
  */
-function respondAssertionError(res: RequestContext["res"], e: any): void {
+function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
+  if (respondPromoteRecoveryError(res, e, context)) return;
+  if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
+    jsonResponse(res, 409, { code: e.code, error: e.message });
+    return;
+  }
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
     return;
@@ -1043,12 +1075,20 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ? ((finalizeOptions as Record<string, unknown>).authorAgentAddress as string)
         : undefined;
     try {
+      const createAuthorAgentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
+        finalizeOptions,
+        writePreflightCallerAgentAddress,
+      );
+      const atomicAuthorLane = createAuthorAgentAddress
+        ? { agentAddress: createAuthorAgentAddress }
+        : {};
       // `alreadyExists` parity (#988): the engine create is a non-destructive
       // get-or-create, so detect prior existence up front (cheap descriptor
       // read) and surface it for idempotent callers.
       let alreadyExists = false;
+      let prior: Awaited<ReturnType<typeof agent.assertion.history>> | null = null;
       try {
-        const prior = await agent.assertion.history(resolvedContextGraphId, name, { subGraphName });
+        prior = await agent.assertion.history(resolvedContextGraphId, name, { subGraphName, ...atomicAuthorLane });
         alreadyExists = prior != null;
       } catch {
         /* treat a failed lookup as "does not exist yet" */
@@ -1058,20 +1098,47 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // finalize throws KaIdNamespaceMismatch. So stamp under the same resolved
       // author the finalize uses: the body author, else the token's agent (else
       // undefined → the daemon's default agent for node/admin tokens).
-      const createAuthorAgentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
-        finalizeOptions,
-        writePreflightCallerAgentAddress,
-      );
-      const atomicAuthorLane = createAuthorAgentAddress
-        ? { agentAddress: createAuthorAgentAddress }
-        : {};
+      let createDisposition: 'created' | 'sealed-noop' | undefined;
       const assertionUri = await agent.assertion.create(resolvedContextGraphId, name, {
         subGraphName,
         ...(createAuthorAgentAddress ? { agentAddress: createAuthorAgentAddress } : {}),
+        onDisposition: (disposition) => { createDisposition = disposition; },
       });
-      const result: Record<string, unknown> = { name, assertionUri, alreadyExists, status: "draft-open" };
-      emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_created", source: "api", counts: { triples: 0 } });
-      recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "created", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName });
+      // The engine reports whether create opened a draft or observed an active
+      // seal while it still holds the lifecycle lock. That closes the race
+      // between the pre-read and create without adding an unconditional second
+      // store read: a successful create must remain successful when an optional
+      // store tail is unavailable after the mutation.
+      let sealedStatus = typeof prior?.status === 'string' && prior.status !== 'draft-open'
+        ? prior.status
+        : undefined;
+      const sealedCreateNoop = createDisposition === 'sealed-noop'
+        || (createDisposition === undefined && sealedStatus !== undefined);
+      // Only the rare case where another request seals between the pre-read and
+      // the locked create needs a second descriptor read to recover its exact
+      // durable status. Legacy/fake agents do not report a disposition and keep
+      // the pre-existing single-read behavior.
+      if (createDisposition === 'sealed-noop' && sealedStatus === undefined) {
+        const afterCreate = await agent.assertion.history(resolvedContextGraphId, name, {
+          subGraphName,
+          ...atomicAuthorLane,
+        });
+        if (!afterCreate || afterCreate.status === 'draft-open') {
+          throw new Error(`Knowledge Asset "${name}" was not readable as sealed after creation`);
+        }
+        sealedStatus = afterCreate.status;
+      }
+      if (sealedCreateNoop) alreadyExists = true;
+      const result: Record<string, unknown> = {
+        name,
+        assertionUri,
+        alreadyExists,
+        status: sealedStatus ?? 'draft-open',
+      };
+      if (!sealedCreateNoop) {
+        emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_created", source: "api", counts: { triples: 0 } });
+        recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "created", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName });
+      }
 
       // Write quads whenever supplied; SEAL only when finalize !== false. An
       // explicit finalize:false leaves an editable WM draft and never touches
@@ -1186,6 +1253,17 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (errors.length > 0) return jsonResponse(res, 207, { created: true, ...result, errors });
       return jsonResponse(res, 201, result);
     } catch (e: any) {
+      if (respondPromoteRecoveryError(res, e, {
+        contextGraphId: resolvedContextGraphId, name, subGraphName, phase: 'create',
+      })) return;
+      if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
+        return jsonResponse(res, 409, {
+          code: e.code,
+          error: e.message,
+          retryAction: 'resume_existing_knowledge_asset',
+          retryKnowledgeAssetName: name,
+        });
+      }
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }
@@ -1280,7 +1358,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const sorted = [...quads].sort((l, r) => JSON.stringify(l).localeCompare(JSON.stringify(r)));
       return jsonResponse(res, 200, { quads: sorted, count: sorted.length });
     } catch (e: any) {
-      return respondAssertionError(res, e);
+      return respondAssertionError(res, e, {
+        contextGraphId: p.cg, name: resolvedName, subGraphName: p.subGraphName, phase: 'wm-quads',
+      });
     }
   }
 
@@ -1846,7 +1926,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     }
   } catch (e: any) {
     // WM/SWM mutation verbs (write/finalize/discard/pull-from/share) only.
-    return respondAssertionError(res, e);
+    return respondAssertionError(res, e, {
+      contextGraphId, name, subGraphName, phase: `${layer}-${verb}`,
+    });
   }
 
   // Unmatched under the prefix — fall through to the daemon's 404.

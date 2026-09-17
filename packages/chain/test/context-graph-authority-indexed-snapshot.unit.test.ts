@@ -21,6 +21,7 @@ import {
   LATE_NAME_HASH,
   MEMBER,
   NAME_HASH,
+  NEXT_POLICY_HASH,
   OWNER,
 } from './helpers/context-graph-authority-scenario.js';
 
@@ -30,6 +31,7 @@ const authorityIndexId = (value: string): ContextGraphAuthorityIndexId => (
 
 interface IndexedAuthorityEvidence {
   readonly blockReads: Array<string | number>;
+  readonly headReads: number[];
   readonly filters: Array<readonly [string, ...unknown[]]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly readOptions: Array<Readonly<{
@@ -48,6 +50,7 @@ interface IndexedAuthorityEvidence {
 }
 
 interface IndexedAuthorityProvider {
+  getBlockNumber(): Promise<number>;
   getBlock(tag: string | number): Promise<Readonly<{
     number: number;
     hash: string;
@@ -68,6 +71,7 @@ interface IndexedAuthorityHarness {
   advanceAuthorityHead(): void;
   replaceAuthorityFork(): void;
   holdBlockRead(tag: string | number): Readonly<{ entered: Promise<void>; release(): void }>;
+  holdHeadRead(): Readonly<{ entered: Promise<void>; release(): void }>;
   holdIndexPageRead(): Readonly<{ entered: Promise<void>; release(): void }>;
 }
 
@@ -78,12 +82,14 @@ function makeIndexedAuthorityAdapter(
     zeroHashContextGraphs?: number;
     lateContextGraphNameHash?: string;
     finalizedNumber?: number;
+    finalizedHash?: string;
     authorityIndexPageSize?: number;
     maxLogRangeBlocks?: number;
     transientFailIndexRangeOnce?: readonly [number, number];
     hangIndexRangeOnce?: readonly [number, number];
     indexReadDelayMs?: number;
     authorityIndexStore?: MemoryAuthorityIndexStore;
+    finalityConfirmations?: number;
   }> = {},
 ): IndexedAuthorityHarness {
   const scenario = createAuthorityScenario(options);
@@ -95,6 +101,9 @@ function makeIndexedAuthorityAdapter(
     allowNoAdminSigner: true,
     chainId: 'evm:31337',
     localContextGraphAuthorityIndexStore: authorityIndexStore,
+    ...(options.finalityConfirmations === undefined
+      ? {}
+      : { finalityConfirmations: options.finalityConfirmations }),
   });
   adapter.initialized = true;
   adapter.init = async () => {};
@@ -102,6 +111,7 @@ function makeIndexedAuthorityAdapter(
 
   const evidence: IndexedAuthorityEvidence = {
     blockReads: [],
+    headReads: [],
     filters: [],
     staticCalls: [],
     readOptions: [],
@@ -156,9 +166,18 @@ function makeIndexedAuthorityAdapter(
   };
 
   const provider: IndexedAuthorityProvider = {
-    getBlock: (tag) => {
-      evidence.blockReads.push(tag);
-      return scenario.getBlock(tag);
+    getBlockNumber: async () => {
+      const head = await scenario.getBlockNumber();
+      evidence.headReads.push(head);
+      return head;
+    },
+    getBlock: async (tag) => {
+      const block = await scenario.getBlock(tag);
+      // The head is read as `getBlock('latest')`; record it as a HEAD read
+      // rather than as a numbered anchor/fence read.
+      if (tag === 'latest') evidence.headReads.push(block.number);
+      else evidence.blockReads.push(tag);
+      return block;
     },
     getNetwork: async () => ({ chainId: 31337n }),
     getLogs: async (filter) => {
@@ -267,6 +286,7 @@ function makeIndexedAuthorityAdapter(
     advanceAuthorityHead: scenario.advanceAuthorityHead,
     replaceAuthorityFork: scenario.replaceAuthorityFork,
     holdBlockRead: scenario.holdBlockRead,
+    holdHeadRead: scenario.holdHeadRead,
     holdIndexPageRead: () => {
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
@@ -323,11 +343,17 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
 
     expect(evidence.indexRanges).toEqual([
       [7, 10_006],
-      [10_007, 20_006],
-      [20_007, 20_020],
+      // Clamped to the durable horizon (head 20_020 less the reorg holdback)
+      // so the persisted cursor never lands on a reorgable block.
+      [10_007, 19_970],
+      // The remainder is projected to the anchor but NOT written down.
+      [19_971, 20_020],
     ]);
     expect(evidence.rejectedIndexRanges).toEqual([]);
-    expect(evidence.blockReads).toEqual(['finalized', 10_006, 20_006, 20_020]);
+    expect(evidence.headReads).toEqual([20_020]);
+    // The tail's own boundary is the anchor, whose hash is already in hand, so
+    // it costs no extra block read — only the horizon and the fence do.
+    expect(evidence.blockReads).toEqual([10_006, 19_970, 20_020]);
   });
 
   it('does not turn an invalid authority page size into a valid bounded page', async () => {
@@ -356,13 +382,17 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       ]]));
 
     expect(evidence.indexRanges).toEqual([
-      [7, 10_006],
-      [7, 5_006],
-      [5_007, 10_006],
-      [10_007, 10_020],
+      // The committing page stops at the durable horizon (10_020 less the
+      // holdback), and the provider's stricter cap splits THAT range.
+      [7, 9_970],
+      [7, 4_988],
+      [4_989, 9_970],
+      // Tail above the horizon: projected, never persisted.
+      [9_971, 10_020],
     ]);
-    expect(evidence.rejectedIndexRanges).toEqual([[7, 10_006]]);
-    expect(evidence.blockReads).toEqual(['finalized', 10_006, 10_020]);
+    expect(evidence.rejectedIndexRanges).toEqual([[7, 9_970]]);
+    expect(evidence.headReads).toEqual([10_020]);
+    expect(evidence.blockReads).toEqual([9_970, 10_020]);
   });
 
   it('gives each sequential adaptive split its own physical RPC deadline', async () => {
@@ -376,6 +406,10 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       });
       const backupReads: string[] = [];
       const backup: IndexedAuthorityProvider = {
+        getBlockNumber: async () => {
+          backupReads.push('head');
+          return harness.provider.getBlockNumber();
+        },
         getBlock: async (tag) => {
           backupReads.push(`block:${tag}`);
           return harness.provider.getBlock(tag);
@@ -392,15 +426,28 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       bindProductionRpcTipReader(harness, [harness.provider, backup]);
 
       const pending = harness.adapter.getContextGraphAuthoritySnapshot(9n);
-      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-      expect(harness.evidence.indexRanges).toEqual([[7, 10_006]]);
+      // Pump until the first page is in flight rather than counting microtask
+      // turns: resolving the anchor costs a head read plus a block read, so a
+      // fixed turn budget silently under-ran once the `finalized` tag went away.
+      for (
+        let turn = 0;
+        turn < 100 && harness.evidence.indexRanges.length < 1;
+        turn += 1
+      ) await Promise.resolve();
+      expect(harness.evidence.indexRanges).toEqual([[7, 9_956]]);
 
-      await vi.advanceTimersByTimeAsync(60_001);
+      // One advance per physical leg. The durable horizon adds a fourth: the
+      // tail above it is projected on every read and never resumed from a
+      // cursor, so it is a real extra `eth_getLogs` per authority scan.
+      await vi.advanceTimersByTimeAsync(100_001);
       await expect(pending).resolves.toMatchObject({ contextGraphId: '9' });
       expect(harness.evidence.indexRanges).toEqual([
-        [7, 10_006],
-        [7, 5_006],
-        [5_007, 10_006],
+        // The committing page stops at the durable horizon and the provider's
+        // stricter cap splits it; the fourth leg is the tail above the horizon.
+        [7, 9_956],
+        [7, 4_981],
+        [4_982, 9_956],
+        [9_957, 10_006],
       ]);
       expect(backupReads).toEqual([]);
     } finally {
@@ -412,7 +459,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     const { adapter, evidence } = makeIndexedAuthorityAdapter({
       finalizedNumber: 20_020,
       authorityIndexPageSize: 25_000,
-      transientFailIndexRangeOnce: [10_007, 20_006],
+      transientFailIndexRangeOnce: [10_007, 19_970],
     });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
@@ -426,11 +473,15 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
 
     expect(evidence.indexRanges).toEqual([
       [7, 10_006],
-      [10_007, 20_006],
-      [10_007, 20_006],
-      [20_007, 20_020],
+      [10_007, 19_970],
+      [10_007, 19_970],
+      // 19_970 is the durable horizon (head 20_020 less the reorg holdback), so
+      // the last range is the TAIL: projected to the anchor, never written down,
+      // and therefore re-read on the retry rather than resumed from a cursor
+      // sitting on a block a reorg could take away.
+      [19_971, 20_020],
     ]);
-    expect(evidence.transientFailedIndexRanges).toEqual([[10_007, 20_006]]);
+    expect(evidence.transientFailedIndexRanges).toEqual([[10_007, 19_970]]);
   });
 
   it('resumes a new authority-index instance at the first unfinished durable page', async () => {
@@ -447,7 +498,8 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await expect(restarted.adapter.getContextGraphAuthoritySnapshot(9n))
       .resolves.toMatchObject({ contextGraphId: '9' });
     expect(restarted.evidence.indexRanges).toEqual([[17, 26], [27, 30]]);
-    expect(restarted.evidence.blockReads).toEqual(['finalized', 16, 26, 30]);
+    expect(restarted.evidence.headReads).toEqual([30]);
+    expect(restarted.evidence.blockReads).toEqual([16, 26, 30]);
   });
 
   it('times out one hung physical page and fails over from the durable checkpoint', async () => {
@@ -523,6 +575,10 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       const harness = makeIndexedAuthorityAdapter({ indexReadDelayMs: 15_000 });
       const backupReads: string[] = [];
       const backup: IndexedAuthorityProvider = {
+        getBlockNumber: async () => {
+          backupReads.push('head');
+          return harness.provider.getBlockNumber();
+        },
         getBlock: async (tag) => {
           backupReads.push(`block:${tag}`);
           return harness.provider.getBlock(tag);
@@ -595,8 +651,42 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       [NAME_HASH, 9n],
       [secondNameHash, 10n],
     ]));
-    expect(evidence.blockReads).toEqual(['finalized', 16, 26, 30]);
+    expect(evidence.headReads).toEqual([30]);
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+  });
+
+  it('resolves a Context Graph registered at the current head', async () => {
+    // THE release blocker, as an assertion. The endpoint's `finalized` tag sits
+    // ~600 blocks (~20 minutes) behind head on Base Sepolia, so a freshly
+    // registered Context Graph was absent from the authority index for that
+    // whole window: both nodes fenced each other's catalog traffic,
+    // announcements were denied, and the replica permanently lost rows while
+    // reporting itself complete. At the default depth of 1 the registration
+    // block IS the anchor, so the Context Graph is authoritative immediately.
+    const atHead = makeIndexedAuthorityAdapter({
+      finalizedNumber: 33,
+      finalizedHash: NEXT_POLICY_HASH,
+      lateContextGraphNameHash: LATE_NAME_HASH,
+    });
+
+    await expect(atHead.adapter.contextGraphAuthorityIndexRevisionReader!
+      .resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBe(11n);
+    expect(atHead.evidence.blockReads).not.toContain('finalized');
+
+    // Only the OPERATOR's configured depth can hold it back now, and holding it
+    // back is then a deliberate choice rather than an endpoint's fixed policy.
+    const behindHead = makeIndexedAuthorityAdapter({
+      finalizedNumber: 33,
+      finalizedHash: NEXT_POLICY_HASH,
+      lateContextGraphNameHash: LATE_NAME_HASH,
+      finalityConfirmations: 4,
+    });
+
+    await expect(behindHead.adapter.contextGraphAuthorityIndexRevisionReader!
+      .resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
   });
 
   it('does not retain a finalized miss after the authority index advances', async () => {
@@ -666,7 +756,8 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       owner: MEMBER,
       sourceBlockNumber: '18',
     });
-    expect(evidence.blockReads).toEqual(['finalized', 16, 26, 30]);
+    expect(evidence.headReads).toEqual([30]);
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
 
     advanceAuthorityHead();
@@ -674,7 +765,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       NAME_HASH,
       secondNameHash,
     ])).rejects.toThrow('ambiguous across 2 finalized Context Graphs');
-    expect(evidence.blockReads.filter((tag) => tag === 'finalized')).toHaveLength(2);
+    expect(evidence.headReads).toHaveLength(2);
     expect(evidence.indexRanges).toEqual([
       [7, 16], [17, 26], [27, 30],
       [31, 35],
@@ -741,7 +832,8 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
         accessPolicy: 1,
       })],
     ]));
-    expect(evidence.blockReads).toEqual(['finalized', 16, 26, 30]);
+    expect(evidence.headReads).toEqual([30]);
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
     expect(evidence.staticCalls).toEqual([]);
   });
@@ -854,7 +946,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     ]]));
     expect(revisions.mock.calls.map(([input]) => input.contextGraphIds.length))
       .toEqual([4_096, 1]);
-    expect(evidence.blockReads.filter((tag) => tag === 'finalized')).toHaveLength(1);
+    expect(evidence.headReads).toHaveLength(1);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
@@ -875,7 +967,71 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       .resolves.toEqual(new Map([[NAME_HASH, 9n]]));
     expect(statesByNameHashes.mock.calls.map(([input]) => input.nameHashes.length))
       .toEqual([4_096, 1]);
-    expect(evidence.blockReads.filter((tag) => tag === 'finalized')).toHaveLength(1);
+    expect(evidence.headReads).toHaveLength(1);
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+  });
+
+  it('anchors the durable authority index at chain.finalityConfirmations', async () => {
+    // GH release blocker: with the endpoint's `finalized` tag the durable index
+    // could not see a freshly registered Context Graph for ~20 minutes on Base
+    // Sepolia, so announcements were denied and the replica lost rows while
+    // reporting itself complete. Finality is SINGULAR and operator-defined, so
+    // the index anchors at head - confirmations + 1 and never asks for the tag.
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      finalityConfirmations: 4,
+    });
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n))
+      .resolves.toMatchObject({ contextGraphId: '9' });
+
+    expect(evidence.headReads).toEqual([30]);
+    // head 30 at depth 4 pins 30 - 4 + 1 = 27, read FIRST and fenced LAST.
+    expect(evidence.blockReads[0]).toBe(27);
+    expect(evidence.blockReads.at(-1)).toBe(27);
+    expect(evidence.blockReads).not.toContain('finalized');
+    expect(evidence.staticCalls).toEqual([]);
+    // The durable page scan stops at the anchor; nothing above it is indexed.
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 27]]);
+  });
+
+  it('anchors the durable revision reader at chain.finalityConfirmations', async () => {
+    // The shared revision/name-hash reader resolves its own anchor, so it needs
+    // its own pin: a fix applied only to the snapshot path would leave named-CG
+    // resolution waiting on the endpoint's ~20-minute `finalized` marker.
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      finalityConfirmations: 4,
+    });
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .resolves.toEqual(new Map([[
+        '9',
+        expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      ]]));
+
+    expect(evidence.headReads).toEqual([30]);
+    expect(evidence.blockReads[0]).toBe(27);
+    expect(evidence.blockReads.at(-1)).toBe(27);
+    expect(evidence.blockReads).not.toContain('finalized');
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 27]]);
+  });
+
+  it('follows the head at the default depth of one', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n))
+      .resolves.toMatchObject({ contextGraphId: '9' });
+
+    // Confirmation 1 IS the head, which is the whole point of the default: a
+    // Context Graph registered one block ago is already authoritative.
+    expect(evidence.headReads).toEqual([30]);
+    // The anchor IS that head block, so resolving it costs no second numbered
+    // read — the round-trip a sibling backend of a load-balanced URL could
+    // answer `null`. The first numbered read is the first PAGE boundary, and
+    // the trailing one is the stabilization fence, which must still happen.
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
+    expect(evidence.blockReads).not.toContain('finalized');
+    expect(evidence.blockReads).not.toContain('latest');
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
@@ -923,7 +1079,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it.each([
-    ['finalized head', (harness: IndexedAuthorityHarness) => harness.holdBlockRead('finalized')],
+    ['chain head', (harness: IndexedAuthorityHarness) => harness.holdHeadRead()],
     ['stabilization fence', (harness: IndexedAuthorityHarness) => harness.holdBlockRead(30)],
   ] as const)('keeps revision-reader cancellation bound during the indexed %s read', async (
     _stage,
@@ -954,7 +1110,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it.each([
-    ['finalized head', (harness: IndexedAuthorityHarness) => harness.holdBlockRead('finalized')],
+    ['chain head', (harness: IndexedAuthorityHarness) => harness.holdHeadRead()],
     ['stabilization fence', (harness: IndexedAuthorityHarness) => harness.holdBlockRead(30)],
   ] as const)('keeps name-snapshot cancellation bound during the indexed %s read', async (
     _stage,
@@ -981,7 +1137,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   it('propagates cancellation and retry policy for the finalized name resolver', async () => {
     const harness = makeIndexedAuthorityAdapter();
     bindAbortableTipReader(harness);
-    const gate = harness.holdBlockRead('finalized');
+    const gate = harness.holdHeadRead();
     const abort = new AbortController();
     const pending = harness.adapter.contextGraphAuthorityIndexRevisionReader!
       .resolveFinalizedContextGraphIdByNameHash!(NAME_HASH, { signal: abort.signal });
@@ -1149,7 +1305,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it.each([
-    ['finalized head', (harness: IndexedAuthorityHarness) => harness.holdBlockRead('finalized')],
+    ['chain head', (harness: IndexedAuthorityHarness) => harness.holdHeadRead()],
     ['stabilization fence', (harness: IndexedAuthorityHarness) => harness.holdBlockRead(30)],
   ] as const)('keeps caller cancellation bound during the indexed %s read', async (
     _stage,
@@ -1198,7 +1354,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await gate.entered;
     const survivor = reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(NAME_HASH);
     for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-    expect(harness.evidence.blockReads.filter((tag) => tag === 'finalized')).toHaveLength(2);
+    expect(harness.evidence.headReads).toHaveLength(2);
 
     const sharedPageSignal = harness.evidence.indexPageSignals[0]!;
     firstAbort.abort(new Error('initiating snapshot waiter left'));

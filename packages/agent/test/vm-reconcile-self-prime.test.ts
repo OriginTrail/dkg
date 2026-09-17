@@ -244,9 +244,11 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       .rejects.toMatchObject({ code: 'ContextGraphOnChainIdUnresolved' });
 
     expect(index.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
+      // The governed authority lane always supplies a signal, so a coordinator
+      // close can cancel this read even when the caller passed none.
       .toHaveBeenCalledWith([
         (internals as any).contextGraphNameCommitment(contextGraphId),
-      ], expect.objectContaining({ signal: undefined }));
+      ], expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(index.whenIdle).toHaveBeenCalledOnce();
     expect(legacyLookup).not.toHaveBeenCalled();
     expect(readAuthority).not.toHaveBeenCalled();
