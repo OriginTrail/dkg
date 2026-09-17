@@ -1350,7 +1350,23 @@ describe('rootless graph-scoped KA lifecycle', () => {
       ...recoveryInput,
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
     } as any);
+    const recoveredRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    expect(recoveredRfc64Confirmation).toHaveBeenCalledTimes(1);
+    expect(recoveredRfc64Confirmation).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CG_ID,
+      assertionCoordinate: name,
+      shareOperationId: intent.shareOperationId,
+      assertionUri,
+      publicationLabel: 'queued publish',
+      seal: expect.objectContaining({
+        kaUal: intent.kaUal,
+        assertionVersion: intent.assertionVersion,
+        authorAddress: intent.seal.authorAddress,
+      }),
+    }));
+    recoveredRfc64Confirmation.mockRestore();
     // RFC-64 catalog retirement may independently clear this exact published
     // scope under a system operation while the recovery pass is running. Keep
     // this assertion scoped to the recovery lane so unrelated, valid cleanup
@@ -1506,8 +1522,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
 
     const currentFinalizer = agent.getOrCreateFinalizationHandler();
     const supersededReconcile = vi.spyOn(currentFinalizer, 'handleChainReconciledKC');
+    const supersededRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(supersededReconcile).not.toHaveBeenCalled();
+    expect(supersededRfc64Confirmation).not.toHaveBeenCalled();
+    supersededRfc64Confirmation.mockRestore();
     supersededReconcile.mockRestore();
     const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);
     expect(afterSupersededRecovery?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));

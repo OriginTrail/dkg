@@ -71,6 +71,7 @@ import {
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type ContextGraphIdV1, type EvmAddressV1, type NetworkIdV1,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -131,6 +132,11 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
+import {
+  RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+  mintRfc64UnregisteredReplicaAuthoritySeedV1,
+  type Rfc64MintedUnregisteredReplicaAuthoritySeedV1,
+} from './rfc64/unregistered-replica-authority-v1.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -554,6 +560,98 @@ export class ContextGraphMethods extends DKGAgentBase {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${isCurated || opts.private ? 'private' : 'public'}"`, graph: defGraph },
     ];
 
+    // A public unregistered CG has no finalized chain record from which a
+    // replica can derive RFC-64 authority. Mint a canonical policy envelope
+    // ("seed"), signed by the custodial caller/curator. Its primary home is the
+    // keyed RFC-64 seed store written after the durability boundary below; the
+    // ontology definition still carries it for backward compatibility.
+    // Receivers still require finalized chain absence before they may accept
+    // this evidence.
+    let mintedReplicaAuthoritySeed: Readonly<{
+      readonly networkId: NetworkIdV1;
+      readonly seed: Rfc64MintedUnregisteredReplicaAuthoritySeedV1;
+    }> | null = null;
+    if (!isCurated && !opts.private) {
+      const networkId = (
+        this.config.rfc64CatalogDeploymentProfile?.networkId
+        ?? this.config.networkIdentity?.chainId
+      );
+      // The wallet namespace is the only independently checkable owner before
+      // registration. Never mint a self-asserted policy for a different
+      // caller/default address: replicas would (correctly) reject it forever.
+      const ownerAddress = opts.id.match(/^(0x[0-9a-f]{40})(?:\/|$)/iu)?.[1]?.toLowerCase();
+      const effectiveCallerAddress = (
+        opts.callerAgentAddress ?? this.defaultAgentAddress
+      )?.toLowerCase();
+      const requiresAuthenticatedReplicaAuthority =
+        this.config.rfc64CatalogDeploymentProfile !== undefined
+        && !this.config.rfc64CatalogExecutionPlan.killSwitchActive
+        && ownerAddress !== undefined;
+      if (requiresAuthenticatedReplicaAuthority) {
+        if (effectiveCallerAddress === undefined) {
+          throw new Error(
+            `Context graph "${opts.id}" uses wallet namespace ${ownerAddress}, ` +
+            'but no authenticated EVM caller is available. Use the matching agent-scoped token.',
+          );
+        }
+        if (ownerAddress !== effectiveCallerAddress) {
+          throw new Error(
+            `Context graph "${opts.id}" uses wallet namespace ${ownerAddress}, ` +
+            `but the authenticated caller is ${effectiveCallerAddress}. ` +
+            'Use the matching agent-scoped token.',
+          );
+        }
+      }
+      // Resolve the key only after the authenticated effective principal has
+      // been proven to own the namespace. A sibling tenant must never be able
+      // to make this node sign authority with another local agent's key.
+      const signerRecord = ownerAddress === effectiveCallerAddress
+        ? this.getWorkspaceSigningAgentForAddress(ownerAddress)
+        : null;
+      if (requiresAuthenticatedReplicaAuthority && signerRecord === null) {
+        throw new Error(
+          `Context graph "${opts.id}" requires an authenticated RFC-64 replica authority, ` +
+          `but this node has no custodial signing key for ${ownerAddress}.`,
+        );
+      }
+      if (
+        networkId !== undefined
+        && networkId !== 'none'
+        && ownerAddress !== undefined
+        && /^0x[0-9a-f]{40}$/iu.test(ownerAddress)
+        && signerRecord !== null
+      ) {
+        const owner = ownerAddress as EvmAddressV1;
+        const wallet = new ethers.Wallet(signerRecord.privateKey);
+        const seed = await mintRfc64UnregisteredReplicaAuthoritySeedV1({
+          networkId: networkId as NetworkIdV1,
+          contextGraphId: opts.id as ContextGraphIdV1,
+          ownerAddress: owner,
+          accessPolicy: 0,
+          publishPolicy: opts.publishPolicy ?? 1,
+          publishAuthorityAccountId:
+            normalisedPublishAuthorityAccountId?.toString(10) ?? '0',
+          memberAddresses: [],
+          rosterVersion: '0',
+          signer: Object.freeze({
+            issuer: owner,
+            signDigest: (digest: Uint8Array) => wallet.signMessage(digest),
+          }),
+        });
+        mintedReplicaAuthoritySeed = Object.freeze({ networkId: networkId as NetworkIdV1, seed });
+        // DEPRECATED compat path: the ontology system graph is being retired as
+        // a carrier. This literal stays only so older peers and pre-migration
+        // replicas that still read the ontology copy can authenticate the seed;
+        // new consumers use the keyed seed store / peer fetch instead.
+        quads.push({
+          subject: contextGraphUri,
+          predicate: RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+          object: `"${seed.evidence}"`,
+          graph: ontologyGraph,
+        });
+      }
+    }
+
     // Store registration status and curator in _meta. Also persist
     // `publishPolicy` / `publishAuthorityAccountId` when supplied so
     // the deferred-registration path (memory.ts auto-register on
@@ -708,6 +806,27 @@ export class ContextGraphMethods extends DKGAgentBase {
     // immutable fact, so publish its runtime projection before any best-effort
     // subscription, membership, gossip, or RFC-64 follow-up can run.
     await this.persistLocalContextGraphOrigin(opts.id, 'local-create');
+
+    // Keyed seed store row for the owner-signed replica authority. The graph is
+    // already durable and the author never reads its own seed (its reconcile
+    // takes the local-first path), so this row only serves replicas and peer
+    // fetches with a point lookup; contain a store fault like the other
+    // best-effort RFC-64 follow-ups below rather than failing the create.
+    if (mintedReplicaAuthoritySeed !== null && this.rfc64PersistenceV1 !== undefined) {
+      try {
+        await this.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
+          networkId: mintedReplicaAuthoritySeed.networkId,
+          contextGraphId: opts.id,
+          canonicalEnvelopeBytes: mintedReplicaAuthoritySeed.seed.canonicalEnvelopeBytes,
+        });
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `RFC-64 unregistered authority seed for "${opts.id}" was not stored in the keyed seed store: ` +
+          (error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
 
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,

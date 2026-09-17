@@ -12,6 +12,8 @@ import {
   assertCanonicalDigest,
   assertAssertionCoordinateV1,
   assertAuthorCatalogBucketScopeBindingV1,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
   assertAuthorCatalogBucketV1,
   assertAuthorCatalogBucketCountV1,
   assertAuthorCatalogRowV1,
@@ -36,11 +38,13 @@ import {
   type ByteLengthV1,
   type CatalogSealDeploymentProfileV1,
   type CgSharedProjectionVerificationLimitsV1,
+  type ContextGraphIdV1,
   type CountV1,
   type DecimalU64V1,
   type Digest32V1,
   type EvmAddressV1,
   type KaIdV1,
+  type NetworkIdV1,
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SubGraphNameV1,
@@ -78,6 +82,11 @@ import {
   type Rfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairOperationsV1,
 } from '../finalized-private-placement-repair-store-v1.js';
+import {
+  snapshotRfc64UnregisteredAuthoritySeedV1,
+  type Rfc64UnregisteredAuthoritySeedOperationsV1,
+  type Rfc64UnregisteredAuthoritySeedRecordV1,
+} from '../unregistered-authority-seed-store-v1.js';
 import type {
   CompareAndSwapSwmAuthorInventoryInputV1,
   SwmAuthorInventoryCasResultV1,
@@ -244,6 +253,7 @@ export type InventoryV1CandidateErrorCode =
   | 'applied-head-input'
   | 'applied-head-cas-conflict'
   | 'applied-head-database-corrupt'
+  | 'unregistered-authority-seed-conflict'
   | SwmAuthorInventoryErrorCodeV1
   | 'candidate-database-corrupt'
   | 'latency-budget-exceeded'
@@ -272,7 +282,8 @@ export interface Rfc64SwmAuthorInventoryOperationsV1 {
 
 export interface Rfc64InventoryV1CandidateApi
   extends Rfc64SwmAuthorInventoryOperationsV1,
-    Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
+    Rfc64FinalizedPrivatePlacementRepairOperationsV1,
+    Rfc64UnregisteredAuthoritySeedOperationsV1 {
   purgeNextStartupStaleCandidateBatch(): CandidateSessionGcBatchResultV1;
   createCandidateSession(): CandidateSessionV1;
   putVerifiedCandidateBucket(load: VerifiedCandidateBucketLoadV1): CandidateBucketPutResultV1;
@@ -1255,6 +1266,108 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
        WHERE repair_digest = :repairDigest;`,
     );
     return (this.statement(() => query.get({ repairDigest: digest })) as SqlRowV1 | undefined) ?? null;
+  }
+
+  readUnregisteredAuthoritySeedV1(
+    networkId: NetworkIdV1,
+    contextGraphId: ContextGraphIdV1,
+  ): Readonly<Rfc64UnregisteredAuthoritySeedRecordV1> | null {
+    this.assertOpen();
+    assertNetworkIdV1(networkId, 'unregistered authority seed networkId');
+    assertContextGraphIdV1(contextGraphId, 'unregistered authority seed contextGraphId');
+    return this.readTransaction(
+      () => this.readUnregisteredAuthoritySeedRow(networkId, contextGraphId),
+    );
+  }
+
+  putUnregisteredAuthoritySeedV1(
+    input: Readonly<Rfc64UnregisteredAuthoritySeedRecordV1>,
+  ): void {
+    this.assertOpen();
+    const seed = snapshotRfc64UnregisteredAuthoritySeedV1(input);
+    const parameters = {
+      networkId: seed.networkId,
+      contextGraphId: seed.contextGraphId,
+      ownerAddress: evmAddressToSqlBlobV1(seed.ownerAddress),
+      policyDigest: digest32ToSqlBlobV1(seed.policyDigest),
+      signedEnvelope: seed.signedEnvelope,
+    };
+    const insert = () => {
+      const statement = this.prepare(INVENTORY_V1_STATEMENT_SQL.insertUnregisteredAuthoritySeed);
+      return this.statement(() => statement.run(parameters));
+    };
+    // First verified writer wins. The policy shape pins era/version to '0',
+    // so one legitimate generation exists per (network, graph); a second
+    // digest is a double-create or an attack and must never replace the row.
+    const assertStoredGenerationMatches = (): void => {
+      const existing = this.readUnregisteredAuthoritySeedRow(seed.networkId, seed.contextGraphId);
+      if (existing === null) {
+        throw new InventoryV1CandidateError(
+          'candidate-database-corrupt',
+          'unregistered authority seed insert conflicted with no stored row',
+        );
+      }
+      if (
+        existing.policyDigest !== seed.policyDigest
+        || !sqlBlobsEqualV1(existing.signedEnvelope, seed.signedEnvelope)
+      ) {
+        // Raised as an inventory error so the write transaction rethrows it
+        // verbatim; the seed-store facade translates it for its callers.
+        throw new InventoryV1CandidateError(
+          'unregistered-authority-seed-conflict',
+          'unregistered authority seed already holds a different signed generation for this Context Graph',
+        );
+      }
+    };
+    this.writeTransaction('put unregistered authority seed', () => {
+      const result = insert();
+      if (Number(result.changes) === 0) assertStoredGenerationMatches();
+    }, {
+      resolve: () => this.readUnregisteredAuthoritySeedRow(
+        seed.networkId,
+        seed.contextGraphId,
+      ) === null ? 'not-committed' : 'committed',
+      retry: () => {
+        const result = insert();
+        if (Number(result.changes) === 0) assertStoredGenerationMatches();
+      },
+    });
+  }
+
+  private readUnregisteredAuthoritySeedRow(
+    networkId: NetworkIdV1,
+    contextGraphId: ContextGraphIdV1,
+  ): Readonly<Rfc64UnregisteredAuthoritySeedRecordV1> | null {
+    const query = this.prepare(INVENTORY_V1_STATEMENT_SQL.getUnregisteredAuthoritySeed);
+    const row = this.statement(
+      () => query.get({ networkId, contextGraphId }) as SqlRowV1 | undefined,
+    );
+    if (row === undefined) return null;
+    if (
+      typeof row.network_id !== 'string'
+      || typeof row.context_graph_id !== 'string'
+      || !(row.signed_envelope instanceof Uint8Array)
+    ) {
+      throw new InventoryV1CandidateError(
+        'candidate-database-corrupt',
+        'unregistered authority seed row has invalid storage types',
+      );
+    }
+    try {
+      return snapshotRfc64UnregisteredAuthoritySeedV1({
+        networkId: row.network_id as NetworkIdV1,
+        contextGraphId: row.context_graph_id as ContextGraphIdV1,
+        ownerAddress: sqlBlobToEvmAddressV1(row.owner_address),
+        policyDigest: sqlBlobToDigest32V1(row.policy_digest),
+        signedEnvelope: row.signed_envelope,
+      });
+    } catch (cause) {
+      throw new InventoryV1CandidateError(
+        'candidate-database-corrupt',
+        'unregistered authority seed row is malformed',
+        { cause },
+      );
+    }
   }
 
   private decodeFinalizedPrivatePlacementRepair(

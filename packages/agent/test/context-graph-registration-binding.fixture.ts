@@ -105,6 +105,7 @@ export function selectedFixture(resolved: bigint | null = 42n) {
         reconciliationLane: 'legacy',
       }),
       resolveRecoveryConfig: () => undefined,
+      resolveDynamicallyAcceptedPolicy: () => null,
     },
     admission: { invalidateContextGraph: () => [] },
     cooldown: { deleteProvider: () => undefined },

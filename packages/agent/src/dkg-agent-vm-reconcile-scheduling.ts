@@ -22,10 +22,11 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
       // name-hash scan on every sweep even though they can never reconcile
       // against ContextGraphStorage.
       if (VM_RECONCILE_SYSTEM_CONTEXT_GRAPH_IDS.has(localCgId)) continue;
-      const hasBindingCandidate = this.contextGraphBindingState.hasBindingCandidate(
+      const binding = this.contextGraphBindingState.currentBindingFor(
         localCgId,
         sub,
       );
+      const hasBindingCandidate = binding !== undefined;
       // A graph created on this node remains SWM-only until registration (or
       // authoritative registration recovery) installs its numeric binding.
       // The unbound VM lane exists for pre-subscribed remote PUBLIC graphs;
@@ -40,12 +41,28 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
       // delayed receipt; the registration completion path or next sweep will
       // make the newly authoritative target visible.
       if (this.contextGraphRegistrationsInFlight?.has(localCgId)) continue;
+      // An accepted owner-signed unregistered authority is terminal evidence
+      // that this subscription has no finalized VM inventory. Do not turn the
+      // periodic safety net into a fresh historical name-hash crawl each tick.
+      if (
+        binding?.bindingKind !== 'authoritative'
+        && this.hasAcceptedRfc64UnregisteredAuthorityV1(localCgId)
+      ) {
+        continue;
+      }
       if (hasBindingCandidate) bound.add(localCgId);
       else if (sub.subscribed) unbound.push(localCgId);
     }
     for (const localCgId of this.rfc64SelectedVmReconcileTargetIds()) {
       if (VM_RECONCILE_SYSTEM_CONTEXT_GRAPH_IDS.has(localCgId)) continue;
       const sub = this.subscribedContextGraphs.get(localCgId);
+      const binding = sub === undefined
+        ? undefined
+        : this.contextGraphBindingState.currentBindingFor(localCgId, sub);
+      if (
+        binding?.bindingKind !== 'authoritative'
+        && this.hasAcceptedRfc64UnregisteredAuthorityV1(localCgId)
+      ) continue;
       if (
         this.localContextGraphProvenance.hasLocalCreate(localCgId)
         && (sub === undefined
