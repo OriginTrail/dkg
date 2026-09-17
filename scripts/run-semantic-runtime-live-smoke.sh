@@ -690,14 +690,14 @@ if [ "$PRIVATE_REMOTE" = "1" ]; then
 fi
 
 if [ "$PRIVATE_REMOTE" = "1" ]; then
-  FORK_INVOKE_URL="$API_URL/api/semantic-runtime/invoke"
+  FORK_INVOKE_URL="$API_URL/api/programs/execute"
 else
   echo "semantic-runtime-live-smoke: proving the public CG cannot invoke node B's fork remotely"
   remote_invoke_status=$(curl --silent --show-error \
     --write-out '%{http_code}' \
     -H "Content-Type: application/json" \
     --data @"$INVOKE_REQUEST_PATH" \
-    "$API_URL/api/semantic-runtime/invoke" \
+    "$API_URL/api/programs/execute" \
     --output "$REMOTE_INVOKE_DENIAL_PATH")
   if [ "$remote_invoke_status" != "403" ]; then
     echo "semantic-runtime-live-smoke: expected public remote invocation to return 403, got $remote_invoke_status" >&2
@@ -711,14 +711,14 @@ else
       throw new Error(`unexpected public remote-invocation denial: ${JSON.stringify(denial)}`);
     }
   '
-  FORK_INVOKE_URL="$API_URL_NODE_B/api/semantic-runtime/invoke"
+  FORK_INVOKE_URL="$API_URL_NODE_B/api/programs/execute"
 fi
 
 echo "semantic-runtime-live-smoke: invoking two Program KAs concurrently through DKG routes"
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
   --data @"$SOURCE_INVOKE_REQUEST_PATH" \
-  "$API_URL/api/semantic-runtime/invoke" \
+  "$API_URL/api/programs/execute" \
   --output "$SOURCE_INVOKE_PATH" &
 source_invoke_pid=$!
 curl --fail-with-body --silent --show-error \
@@ -745,7 +745,7 @@ query_started_ns=$(node -e 'process.stdout.write(process.hrtime.bigint().toStrin
 curl --fail-with-body --silent --show-error \
   -H "Content-Type: application/json" \
   --data @"$QUERY_INVOKE_REQUEST_PATH" \
-  "$API_URL/api/semantic-runtime/invoke" \
+  "$API_URL/api/programs/execute" \
   --output "$QUERY_INVOKE_PATH"
 query_finished_ns=$(node -e 'process.stdout.write(process.hrtime.bigint().toString())')
 SMOKE_QUERY_TIMING_PATH="$QUERY_TIMING_PATH" \
@@ -766,7 +766,7 @@ if [ "$PRIVATE_REMOTE" = "1" ]; then
   curl --fail-with-body --silent --show-error \
     -H "Content-Type: application/json" \
     --data @"$COMPOSER_INVOKE_REQUEST_PATH" \
-    "$API_URL/api/semantic-runtime/invoke" \
+    "$API_URL/api/programs/execute" \
     --output "$COMPOSER_INVOKE_PATH"
 fi
 

@@ -28,6 +28,7 @@ export function createDkgQueryAdapter(
   contextGraphId: string,
   callerAgentAddress?: string,
   queryPins?: SemanticQueryPin[],
+  assertAuthorized?: () => Promise<void>,
 ): RuntimeAdapterOperation<DkgQueryInput, string> {
   if (queryPins !== undefined) validateSemanticQueryPins(queryPins);
   const pins = queryPins === undefined ? undefined : structuredClone(queryPins);
@@ -64,6 +65,7 @@ export function createDkgQueryAdapter(
     async dispatch(authorization, input) {
       traceTiming('start', authorization.effectId);
       try {
+        await assertAuthorized?.();
         if (!(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))) {
           throw new Error('QUERY_CONTEXT_GRAPH_ACCESS_DENIED');
         }
@@ -77,6 +79,7 @@ export function createDkgQueryAdapter(
         );
         if (!item) throw new Error('QUERY_CATALOG_ENTRY_NOT_FOUND');
         const pin = pins === undefined ? undefined : assertSemanticQueryDefinition(pins, input.selector, item);
+        await assertAuthorized?.();
         const execution = prepareQueryCatalogExecution(item, input.parameters);
         const result = await agent.query(execution.sparql, {
           contextGraphId,
@@ -85,6 +88,7 @@ export function createDkgQueryAdapter(
           ...(execution.view ? { view: execution.view } : {}),
           ...(callerAgentAddress ? { callerAgentAddress } : {}),
         });
+        await assertAuthorized?.();
         assertBoundedResult(result);
         const output = canonicalizeJson(
           { queryIri: item.queryIri, result } as unknown as CanonicalJsonValue,
@@ -140,7 +144,7 @@ function qualifiedSelector(item: QueryCatalogItem): string {
   return `${item.subGraph}/${item.catalogSlug}/${item.slug}`;
 }
 
-function findSavedQuery(items: QueryCatalogItem[], selector: string): QueryCatalogItem | undefined {
+export function findSavedQuery(items: QueryCatalogItem[], selector: string): QueryCatalogItem | undefined {
   const exact = items.filter((item) =>
     item.queryIri === selector || qualifiedSelector(item) === selector);
   if (exact.length === 1) return exact[0];

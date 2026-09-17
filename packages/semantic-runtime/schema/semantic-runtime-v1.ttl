@@ -88,3 +88,9 @@ sr:Unknown a prov:Entity .
 sr:Reconciling a prov:Entity .
 sr:Reconciled a prov:Entity .
 sr:ManualReviewRequired a prov:Entity .
+
+# Tenant-approved Program binding provenance.
+sr:programContextGraphId a rdf:Property .
+sr:dataContextGraphId a rdf:Property .
+sr:bindingHash a rdf:Property .
+sr:sourceHash a rdf:Property .

@@ -95,7 +95,7 @@ The operator must also select one DKG-published execution policy. For example:
 `GET /api/semantic-runtime/resolve?contextGraphId=...&programIri=...&programLayer=vm` exposes the
 effective authority used by the native Program panel: Program requirements,
 operator Tool offers, the selected policy, and locally installed and enabled
-adapters. `POST /api/semantic-runtime/invoke` requires
+adapters. `POST /api/programs/execute` requires
 `{ "contextGraphId": "...", "programIri": "...", "invocationId": "<UUID>",
 "programLayer": "wm|swm|vm", "executionLayer": "wm|swm|vm" }`.
 It loads the Program from the explicitly selected memory layer and executes its
@@ -779,3 +779,5 @@ for the design rationale, threat model, and stability guarantees.
 - `@origintrail-official/dkg-storage` — triple-store adapters
 - `@origintrail-official/dkg-chain` — blockchain abstraction
 - `@origintrail-official/dkg-node-ui` — web dashboard serving
+
+Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation.

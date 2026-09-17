@@ -84,7 +84,7 @@ execution capability and four explicit typed tool interfaces.
 
 Programs are stored in the DKG as `sr:Program` resources with `sr:language`,
 `sr:version`, and `sr:source` triples. The authenticated
-`POST /api/semantic-runtime/invoke` route loads a program by IRI from the
+`POST /api/programs/execute` route loads a program by IRI from the
 explicitly selected WM, SWM, or VM view of the requested context graph, admits
 its S-expression in Wasm, and executes its logical agents there. The caller
 also explicitly selects the Execution KA's target layer. The narrow execution
@@ -257,3 +257,5 @@ The direct Rig LLM adapter does not implement `resume`: an interrupted model req
 still requires reconciliation/manual review and is never blindly replayed. Provider
 idempotency/status protocols, paid-call receipts, billing and seller transport belong to
 the adapter/application that supplies those guarantees.
+
+Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation.

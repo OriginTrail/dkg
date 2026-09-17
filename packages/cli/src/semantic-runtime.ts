@@ -7,6 +7,7 @@ import {
   sparqlIri,
   validateContextGraphId,
 } from '@origintrail-official/dkg-core';
+import { decodeQueryCatalogBindings } from '@origintrail-official/dkg-core/query-catalog';
 import type { LlmConfig } from '@origintrail-official/dkg-node-ui';
 import { ethers } from 'ethers';
 import {
@@ -20,13 +21,17 @@ import {
   type AdmittedPlanSummary,
   type ComponentToolDispatcher,
   type SemanticRuntimeConfig,
+  type SemanticProgramBinding,
   type SemanticRuntimeHost,
   type SemanticRuntimeHostOptions,
   type ExecutionCapabilityDescriptor,
 } from '@origintrail-official/dkg-semantic-runtime';
 
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
-import { createDkgQueryAdapter } from './semantic-runtime-query-adapter.js';
+import { createDkgQueryAdapter, findSavedQuery } from './semantic-runtime-query-adapter.js';
+import { readContextGraphQueryCatalogBindings } from './daemon/query-catalog-service.js';
+import { programBindingDigest, validateProgramBindings } from './semantic-runtime-program-bindings.js';
+import { assertSemanticQueryDefinition, assertSemanticQueryOutput } from './semantic-runtime-query-pins.js';
 import { validateSemanticProgramPolicy } from './semantic-runtime-program-policy.js';
 import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
 import {
@@ -426,6 +431,82 @@ export async function resolveStoredSemanticProgram(
   )).public;
 }
 
+/** Host-created context; never decoded from an HTTP or inbox payload. */
+interface BoundProgramInvocation {
+  binding: SemanticProgramBinding;
+  digest: string;
+  assertAuthorized(): Promise<void>;
+}
+
+/** Invoke-only access to one tenant-approved, immutable Program/query pair. */
+export async function invokeBoundSemanticProgram(
+  agent: DKGAgent,
+  runtime: ConfiguredSemanticRuntimeService,
+  contextGraphId: string,
+  operationIri: string,
+  invocationId: string,
+  config: SemanticRuntimeConfig,
+  authenticatedCaller: string | undefined,
+): Promise<SemanticInvocationResult> {
+  const denied = () => new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'This operation is not authorized for the caller', 403);
+  validateProgramBindings(config.programBindings ?? []);
+  const selected = config.programBindings?.find((item) =>
+    item.contextGraphId === contextGraphId && item.operationIri === operationIri);
+  if (!authenticatedCaller || !selected?.enabled
+    || !selected.allowedCallerAgentAddresses.some((address) => address.toLowerCase() === authenticatedCaller.toLowerCase())) {
+    throw denied();
+  }
+  const binding = structuredClone(selected);
+  const digest = programBindingDigest(binding);
+  const assertAuthorized = async () => {
+    const checkGrant = () => {
+      const current = config.programBindings?.find((item) =>
+        item.contextGraphId === contextGraphId && item.operationIri === operationIri);
+      if (!current?.enabled || programBindingDigest(current) !== digest) throw denied();
+    };
+    checkGrant();
+    for (const graph of new Set([contextGraphId, binding.program.contextGraphId])) {
+      if (!(await agent.canReadContextGraph(graph, {
+        callerAgentAddress: binding.executorAgentAddress, allowSubscriptionFallback: false,
+      }))) throw denied();
+    }
+    checkGrant();
+  };
+  await assertAuthorized();
+  const result = await invokeStoredSemanticProgram(
+    agent, runtime, contextGraphId, binding.program.programIri, invocationId,
+    binding.program.programLayer, 'wm', config, undefined,
+    authenticatedCaller, binding.executorAgentAddress, undefined, undefined,
+    { binding, digest, assertAuthorized },
+  );
+  // Replays and fresh executions both pass the current grant and query contract.
+  await assertAuthorized();
+  const rows = await readContextGraphQueryCatalogBindings(agent, contextGraphId, {
+    callerAgentAddress: binding.executorAgentAddress, source: 'semantic-runtime-query-catalog',
+  });
+  const item = findSavedQuery(decodeQueryCatalogBindings(rows, { contextGraphId }), binding.query.selector);
+  if (!item) throw new SemanticProgramError('PROGRAM_QUERY_UNAVAILABLE', 'The approved query is unavailable', 409);
+  try {
+    assertSemanticQueryDefinition([binding.query], binding.query.selector, item);
+  } catch {
+    throw new SemanticProgramError('PROGRAM_QUERY_CHANGED', 'The query differs from the tenant approval', 409);
+  }
+  for (const output of result.outputs ?? []) {
+    let parsed: { queryIri?: unknown; result?: unknown };
+    try { parsed = JSON.parse(output); } catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409); }
+    if (!parsed || parsed.queryIri !== binding.query.queryIri || Object.keys(parsed).some((key) => !['queryIri', 'result'].includes(key))) {
+      throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409);
+    }
+    try {
+      assertSemanticQueryOutput(binding.query, parsed.result);
+    } catch {
+      throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409);
+    }
+  }
+  await assertAuthorized();
+  return result;
+}
+
 interface LocalInvocationScope {
   ancestors: string[];
   assertAncestors?: () => Promise<void>;
@@ -445,6 +526,7 @@ export async function invokeStoredSemanticProgram(
   executingAgentAddress?: string,
   childInvoker?: SemanticProgramChildInvoker,
   scope: LocalInvocationScope = { ancestors: [] },
+  bound?: BoundProgramInvocation,
 ): Promise<SemanticInvocationResult> {
   validateSemanticMemoryLayer(programLayer, 'programLayer');
   validateSemanticMemoryLayer(executionLayer, 'executionLayer');
@@ -456,7 +538,7 @@ export async function invokeStoredSemanticProgram(
   }
   const requestIdentity = hashParts([
     programIri, programLayer, executionLayer, callerAgentAddress?.toLowerCase() ?? '',
-    executingAgentAddress?.toLowerCase() ?? '', programPolicyHash(config), ...scope.ancestors,
+    executingAgentAddress?.toLowerCase() ?? '', programPolicyHash(config), ...(bound ? [bound.digest] : []), ...scope.ancestors,
   ]);
   const key = `${contextGraphId}\0${invocationId.toLowerCase()}`;
   const existing = runtime.inFlight.get(key);
@@ -484,6 +566,7 @@ export async function invokeStoredSemanticProgram(
     executingAgentAddress,
     childInvoker,
     scope,
+    bound,
   );
   runtime.inFlight.set(key, { requestIdentity, promise: invocation });
   try {
@@ -514,16 +597,24 @@ async function resolveInternal(
   executionLayer: SemanticMemoryLayer = 'vm',
   childInvoker?: SemanticProgramChildInvoker,
   assertAuthorized?: () => Promise<void>,
+  bound?: BoundProgramInvocation,
 ): Promise<InternalResolution> {
+  await bound?.assertAuthorized();
+  const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
   const program = await loadStoredSemanticProgram(
     agent,
-    contextGraphId,
+    bound?.binding.program.contextGraphId ?? contextGraphId,
     programIri,
     programLayer,
-    callerAgentAddress,
+    readPrincipal,
   );
+  if (bound && (sourceHashOf(program) !== bound.binding.program.sourceHash
+    || program.authorAgentAddress.toLowerCase() !== bound.binding.program.authorAgentAddress.toLowerCase()
+    || program.permittedPrograms.length !== 0)) {
+    throw new SemanticProgramError('PROGRAM_BINDING_MISMATCH', 'Program identity differs from the tenant approval', 403);
+  }
   const originalCaller = callerAgentAddress ?? program.authorAgentAddress;
-  if (config?.programPolicy) {
+  if (!bound && config?.programPolicy) {
     validateProgramPin(config, program);
     if (!await agent.canReadContextGraph(contextGraphId, { callerAgentAddress: originalCaller })) {
       throw new SemanticProgramError('PROGRAM_CALLER_ACCESS_DENIED', 'Caller cannot read the Context Graph', 403);
@@ -540,6 +631,11 @@ async function resolveInternal(
         : 'Program admission failed',
       422,
     );
+  }
+  if (bound && (compilation.plan.adapterVersions.size !== 1
+    || compilation.plan.adapterVersions.get('dkg/query') !== 1
+    || compilation.plan.effectUpperBound.some((effect) => effect !== 'read'))) {
+    throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Invoke-only Programs may only use dkg/query@1', 403);
   }
   const operatorAddress = executingAgentAddress
     ? checksumAgentAddress(executingAgentAddress, 'INVALID_EXECUTING_WALLET')
@@ -567,7 +663,7 @@ async function resolveInternal(
           <${SR}allowsTool> ?tool .
       }
     }
-  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-policy-load', callerAgentAddress));
+  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-policy-load', readPrincipal));
   const policyRows = resultRows(policyResult).filter((row) =>
     isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
   const policyGraphs = new Set(policyRows.map((row) => iriValue(row.g)));
@@ -598,7 +694,7 @@ async function resolveInternal(
           <${SR}witInterface> ?witInterface .
       }
     }
-  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-tool-offers', callerAgentAddress));
+  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-tool-offers', readPrincipal));
   const offerRows = resultRows(offerResult).filter((row) =>
     isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
 
@@ -614,7 +710,7 @@ async function resolveInternal(
       callerAgentAddress,
     );
   }));
-  if (config?.programPolicy) {
+  if (!bound && config?.programPolicy) {
     for (const child of childPrograms) {
       validateProgramPin(config, child);
       if (!agent.listLocalAgents().some(({ agentAddress }) => agentAddress.toLowerCase() === child.authorAgentAddress.toLowerCase())
@@ -636,14 +732,14 @@ async function resolveInternal(
     };
   });
   const registry = new RuntimeAdapterRegistry();
-  if (!config?.programPolicy) {
+  if (!bound && !config?.programPolicy) {
     registry.register(createInvestigatorAdapter(llmConfig));
     registry.register(createRemoteExecuteAdapter(agent, contextGraphId, operatorAddress, programLayer, executionLayer));
   }
   const programPin = config?.programPolicy?.programs.find((pin) => pin.programIri === programIri);
-  registry.register(createDkgQueryAdapter(agent, contextGraphId, config?.programPolicy ? originalCaller : callerAgentAddress,
-    config?.programPolicy ? programPin?.queries ?? [] : undefined));
-  if (!config?.programPolicy || config.programPolicy.disclosure) {
+  registry.register(createDkgQueryAdapter(agent, contextGraphId, bound ? readPrincipal : config?.programPolicy ? originalCaller : callerAgentAddress,
+    bound ? [bound.binding.query] : config?.programPolicy ? programPin?.queries ?? [] : undefined, bound?.assertAuthorized));
+  if (!bound && (!config?.programPolicy || config.programPolicy.disclosure)) {
     registry.register(createSafeLlmAdapter(
       llmConfig,
       safePrograms,
@@ -711,7 +807,7 @@ async function resolveInternal(
     }
   }
 
-  const previousResult = await agent.query(`
+  const previousResult = bound ? { bindings: [] } : await agent.query(`
     SELECT DISTINCT ?execution WHERE {
       GRAPH ?g {
         ?execution <${RDF_TYPE}> <${SR}Execution> ;
@@ -759,9 +855,11 @@ async function invokeResolved(
   executingAgentAddress?: string,
   childInvoker?: SemanticProgramChildInvoker,
   scope: LocalInvocationScope = { ancestors: [] },
+  bound?: BoundProgramInvocation,
 ): Promise<SemanticInvocationResult> {
-  const pinnedPolicyHash = programPolicyHash(config);
+  const pinnedPolicyHash = bound ? '' : programPolicyHash(config);
   const assertAuthorized = async () => {
+    await bound?.assertAuthorized();
     if (!pinnedPolicyHash) return;
     if (!config?.programPolicy || programPolicyHash(config) !== pinnedPolicyHash) {
       throw new SemanticProgramError('PROGRAM_POLICY_CHANGED', 'Operator Program policy changed during execution', 403);
@@ -794,6 +892,7 @@ async function invokeResolved(
     executionLayer,
     config?.programPolicy ? pinnedChildInvoker : childInvoker,
     assertAuthorized,
+    bound,
   );
   const localOperator = agent.listLocalAgents().find(({ agentAddress }) =>
     agentAddress.toLowerCase() === resolved.operatorAddress.toLowerCase());
@@ -826,6 +925,7 @@ async function invokeResolved(
     sourceHashOf(resolved.program),
     (callerAgentAddress ?? resolved.operatorAddress).toLowerCase(),
     pinnedPolicyHash,
+    ...(bound ? [bound.digest] : []),
     ...scope.ancestors,
     contextGraphId,
     programIri,
@@ -900,7 +1000,11 @@ async function invokeResolved(
         leaseEpoch: 0n,
       });
     } catch (error) {
-      if (!runtime.store.execution(executionIri)) throw error;
+      const concurrent = runtime.store.execution(executionIri);
+      if (!concurrent) throw error;
+      if (concurrent.graphRevision !== executionGraphRevision) {
+        throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'invocationId belongs to a different invocation', 409);
+      }
     }
   }
 
@@ -988,6 +1092,9 @@ async function invokeResolved(
 
   const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
+    if (bound && (call.kind !== 'query-catalog' || call.queryId !== bound.binding.query.selector || call.parameters.length !== 0)) {
+      throw new SemanticProgramError('PROGRAM_BINDING_QUERY_FORBIDDEN', 'Only the approved fixed query can be invoked', 403);
+    }
     const binding = call.kind === 'investigator'
       ? {
         operation: 'agent/investigate',
@@ -1118,8 +1225,10 @@ async function invokeResolved(
   } finally {
     await runtime.host.dropPlan(receipt.handle).catch(() => undefined);
   }
+  await bound?.assertAuthorized();
   const finishedAt = new Date();
   const quads = buildExecutionQuads({
+    bound,
     executionIri,
     invocationId,
     programIri,
@@ -1218,6 +1327,7 @@ async function loadExecutionOutputs(
 }
 
 function buildExecutionQuads(input: {
+  bound?: BoundProgramInvocation;
   executionIri: string;
   invocationId: string;
   programIri: string;
@@ -1247,6 +1357,13 @@ function buildExecutionQuads(input: {
     typedLiteralQuad(input.executionIri, `${PROV}startedAtTime`, input.startedAt.toISOString(), XSD_DATE_TIME),
     typedLiteralQuad(input.executionIri, `${PROV}endedAtTime`, input.finishedAt.toISOString(), XSD_DATE_TIME),
   ];
+  if (input.bound) {
+    quads.push(iriQuad(input.executionIri, `${SR}operation`, input.bound.binding.operationIri));
+    quads.push(literalQuad(input.executionIri, `${SR}programContextGraphId`, input.bound.binding.program.contextGraphId));
+    quads.push(literalQuad(input.executionIri, `${SR}dataContextGraphId`, input.bound.binding.contextGraphId));
+    quads.push(literalQuad(input.executionIri, `${SR}bindingHash`, input.bound.digest));
+    quads.push(literalQuad(input.executionIri, `${SR}sourceHash`, input.bound.binding.program.sourceHash));
+  }
   for (const tool of input.tools) {
     quads.push(iriQuad(input.executionIri, `${SR}usedTool`, tool.toolIri));
     if (tool.adapterVersion) quads.push(literalQuad(input.executionIri, `${SR}adapterVersion`, tool.adapterVersion));
@@ -1473,6 +1590,7 @@ async function assertProgramInvocationAuthorized(input: {
 }
 
 export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): void {
+  if (config.programBindings !== undefined) validateProgramBindings(config.programBindings);
   if (config.programPolicy !== undefined) validateSemanticProgramPolicy(config.programPolicy);
   validatePositiveInteger(config.watchdogMs, 'semanticRuntime.watchdogMs', 60_000);
   validatePositiveInteger(config.startupTimeoutMs, 'semanticRuntime.startupTimeoutMs', 120_000);
