@@ -9,6 +9,7 @@ import type {
 import { CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS } from './chain-adapter.js';
 import {
   ContextGraphAuthorityIndex,
+  ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
   type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
@@ -63,9 +64,21 @@ export function readEvmContextGraphAuthorityIndexRpcV1<T>(
  * The message is preserved verbatim as a prefix: it is the contract callers
  * (and operators reading logs) already recognize. The detail only says which
  * step of the anchor resolution failed.
+ *
+ * RETRYABLE by type, not by message. Every condition it reports — a head an
+ * endpoint could not answer, an anchor below the configured depth, a block that
+ * came back at the wrong height — is one that a different endpoint or a later
+ * attempt can satisfy, so it must fail over rather than abort the authority
+ * read that gates catalog admission. Typing it also keeps it away from
+ * `classifyRpcRetryDisposition`'s message regex, which alternates bare
+ * `429|503|502|500` with no word boundaries: the details here interpolate block
+ * numbers, so a head of 31500123 would classify as `failover` and 31499123 as
+ * `fail` purely on its digits.
  */
-export function contextGraphAuthorityAnchorUnavailableV1(detail: string): Error {
-  return new Error(
+export function contextGraphAuthorityAnchorUnavailableV1(
+  detail: string,
+): ContextGraphAuthorityIndexRetryableError {
+  return new ContextGraphAuthorityIndexRetryableError(
     `finalized Context Graph authority block is unavailable: ${detail}`,
   );
 }
@@ -171,7 +184,12 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
         input.signal,
       );
       if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
-        throw new Error(
+        // Anchored at the operator's depth the anchor can be the head, so a
+        // routine single-block tip reorg reaches here during the 1-3s a page
+        // scan plus `readCurrentState` takes. That is a re-read, not a broken
+        // node: retryable, so the caller re-resolves against the new tip
+        // instead of failing the authority read that gates catalog admission.
+        throw new ContextGraphAuthorityIndexRetryableError(
           `finalized Context Graph authority anchor changed during ${input.stabilizationOperation}`,
         );
       }
@@ -326,9 +344,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // same provider, so the pair can never be spliced across endpoints.
         const finalized = await resolveEvmFinalityAnchorBlockV1({
           finalityConfirmations: dependencies.finalityConfirmations(),
-          readHeadBlockNumber: () => readEvmContextGraphAuthorityIndexRpcV1(
+          readHead: () => readEvmContextGraphAuthorityIndexRpcV1(
             `${operationLabel} chain head`,
-            () => provider.getBlockNumber(),
+            () => provider.getBlock('latest'),
             options.signal,
           ),
           readBlockAt: (anchorBlockNumber) => readEvmContextGraphAuthorityIndexRpcV1(

@@ -133,7 +133,9 @@ export function parseStrictFinalizedChainIdV1(input: unknown): ChainIdV1 {
  * anchor with the SAME arithmetic every other subsystem uses. Confirmation 1 —
  * the default — makes the head itself the anchor, so the common case still costs
  * exactly ONE header read, which matters on a path with a non-queueing admission
- * gate and a hard total deadline.
+ * gate and a hard total deadline. That reuse is the shared resolver's, not this
+ * module's: every subsystem gets the same one-read behaviour at depth 1 and the
+ * same second read below it.
  *
  * The anchor DISCIPLINE these transports are named for is unchanged: every read
  * runs against the same endpoint inside one attempt, the deeper anchor is
@@ -146,34 +148,23 @@ export async function readStrictFinalityAnchorV1(
   finalityConfirmations: number,
   label: string,
 ): Promise<FinalizedAnchorV1> {
-  let head: FinalizedAnchorV1 | undefined;
+  const readAnchorAtTag = async (blockTag: string) => {
+    const anchor = parseStrictFinalizedAnchorV1(
+      await rpc('eth_getBlockByNumber', Object.freeze([blockTag, false])),
+      label,
+    );
+    return Object.freeze({
+      number: anchorHeightV1(anchor),
+      hash: anchor.blockHash as string,
+      anchor,
+    });
+  };
   const resolved = await resolveEvmFinalityAnchorBlockV1({
     finalityConfirmations,
-    readHeadBlockNumber: async () => {
-      head = parseStrictFinalizedAnchorV1(
-        await rpc('eth_getBlockByNumber', Object.freeze(['latest', false])),
-        label,
-      );
-      return anchorHeightV1(head);
-    },
-    readBlockAt: async (anchorBlockNumber) => {
-      const pinned = head;
-      if (pinned === undefined) throw new Error('unreachable: head read did not run');
-      const anchor = anchorHeightV1(pinned) === anchorBlockNumber
-        ? pinned
-        : parseStrictFinalizedAnchorV1(
-          await rpc(
-            'eth_getBlockByNumber',
-            Object.freeze([`0x${anchorBlockNumber.toString(16)}`, false]),
-          ),
-          label,
-        );
-      return Object.freeze({
-        number: anchorHeightV1(anchor),
-        hash: anchor.blockHash as string,
-        anchor,
-      });
-    },
+    readHead: () => readAnchorAtTag('latest'),
+    readBlockAt: (anchorBlockNumber) => readAnchorAtTag(
+      `0x${anchorBlockNumber.toString(16)}`,
+    ),
     unavailable: (detail) => new CurrentFinalizedEvmCallErrorV1(
       'finalized-state-unavailable',
       `${label}: ${detail}`,

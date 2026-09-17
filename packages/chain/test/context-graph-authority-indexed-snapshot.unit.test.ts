@@ -171,9 +171,13 @@ function makeIndexedAuthorityAdapter(
       evidence.headReads.push(head);
       return head;
     },
-    getBlock: (tag) => {
-      evidence.blockReads.push(tag);
-      return scenario.getBlock(tag);
+    getBlock: async (tag) => {
+      const block = await scenario.getBlock(tag);
+      // The head is read as `getBlock('latest')`; record it as a HEAD read
+      // rather than as a numbered anchor/fence read.
+      if (tag === 'latest') evidence.headReads.push(block.number);
+      else evidence.blockReads.push(tag);
+      return block;
     },
     getNetwork: async () => ({ chainId: 31337n }),
     getLogs: async (filter) => {
@@ -344,7 +348,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     ]);
     expect(evidence.rejectedIndexRanges).toEqual([]);
     expect(evidence.headReads).toEqual([20_020]);
-    expect(evidence.blockReads).toEqual([20_020, 10_006, 20_006, 20_020]);
+    expect(evidence.blockReads).toEqual([10_006, 20_006, 20_020]);
   });
 
   it('does not turn an invalid authority page size into a valid bounded page', async () => {
@@ -380,7 +384,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     ]);
     expect(evidence.rejectedIndexRanges).toEqual([[7, 10_006]]);
     expect(evidence.headReads).toEqual([10_020]);
-    expect(evidence.blockReads).toEqual([10_020, 10_006, 10_020]);
+    expect(evidence.blockReads).toEqual([10_006, 10_020]);
   });
 
   it('gives each sequential adaptive split its own physical RPC deadline', async () => {
@@ -477,7 +481,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       .resolves.toMatchObject({ contextGraphId: '9' });
     expect(restarted.evidence.indexRanges).toEqual([[17, 26], [27, 30]]);
     expect(restarted.evidence.headReads).toEqual([30]);
-    expect(restarted.evidence.blockReads).toEqual([30, 16, 26, 30]);
+    expect(restarted.evidence.blockReads).toEqual([16, 26, 30]);
   });
 
   it('times out one hung physical page and fails over from the durable checkpoint', async () => {
@@ -630,7 +634,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       [secondNameHash, 10n],
     ]));
     expect(evidence.headReads).toEqual([30]);
-    expect(evidence.blockReads).toEqual([30, 16, 26, 30]);
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
@@ -735,7 +739,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       sourceBlockNumber: '18',
     });
     expect(evidence.headReads).toEqual([30]);
-    expect(evidence.blockReads).toEqual([30, 16, 26, 30]);
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
 
     advanceAuthorityHead();
@@ -811,7 +815,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       })],
     ]));
     expect(evidence.headReads).toEqual([30]);
-    expect(evidence.blockReads).toEqual([30, 16, 26, 30]);
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
     expect(evidence.staticCalls).toEqual([]);
   });
@@ -1003,8 +1007,13 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     // Confirmation 1 IS the head, which is the whole point of the default: a
     // Context Graph registered one block ago is already authoritative.
     expect(evidence.headReads).toEqual([30]);
-    expect(evidence.blockReads[0]).toBe(30);
+    // The anchor IS that head block, so resolving it costs no second numbered
+    // read — the round-trip a sibling backend of a load-balanced URL could
+    // answer `null`. The first numbered read is the first PAGE boundary, and
+    // the trailing one is the stabilization fence, which must still happen.
+    expect(evidence.blockReads).toEqual([16, 26, 30]);
     expect(evidence.blockReads).not.toContain('finalized');
+    expect(evidence.blockReads).not.toContain('latest');
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 

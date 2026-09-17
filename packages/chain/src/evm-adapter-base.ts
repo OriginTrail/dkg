@@ -3609,6 +3609,14 @@ export class EVMChainAdapterBase {
     return addr;
   }
 
+  /**
+   * The resolved operator depth backing every anchor this adapter resolves.
+   * See `ChainAdapter.getFinalityConfirmations`.
+   */
+  getFinalityConfirmations(): number {
+    return this.finalityConfirmations;
+  }
+
   async getEvmChainId(): Promise<bigint> {
     // PR3 / RC11: TTL-cached so an `eth_chainId` rate-limit on the
     // public RPC (the dzudza failure mode) cannot kill steady-state

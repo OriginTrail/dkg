@@ -50,7 +50,15 @@ function makeEvmAuthorityAdapter(
     finalityConfirmations?: number;
   } = {},
 ): EvmAuthorityHarness {
-  const scenario = createAuthorityScenario({ reorg: options.reorg });
+  // The scenario needs the depth too: it derives the anchor height to tell an
+  // anchor read apart from the stabilization fence at the same height, which is
+  // what makes `reorg` injectable below depth 1.
+  const scenario = createAuthorityScenario({
+    reorg: options.reorg,
+    ...(options.finalityConfirmations === undefined
+      ? {}
+      : { finalityConfirmations: options.finalityConfirmations }),
+  });
   // The anchor the reader must pin: `chain.finalityConfirmations` applied to the
   // CURRENT chain head. Confirmation 1 is the head itself, and the head moves
   // (advanceAuthorityHead), so this is resolved per read, not captured once.
@@ -137,9 +145,13 @@ function makeEvmAuthorityAdapter(
       evidence.headReads.push(head);
       return head;
     },
-    getBlock: (tag: string | number) => {
-      evidence.blockReads.push(tag);
-      return scenario.getBlock(tag);
+    getBlock: async (tag: string | number) => {
+      const block = await scenario.getBlock(tag);
+      // The head is read as `getBlock('latest')`, so record it as a HEAD read
+      // rather than as a numbered anchor/fence read.
+      if (tag === 'latest') evidence.headReads.push(block.number);
+      else evidence.blockReads.push(tag);
+      return block;
     },
     getNetwork: async () => ({ chainId: 31337n }),
   };
@@ -301,6 +313,26 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       .rejects.toThrow('anchor changed');
   });
 
+  it('rejects an anchor that changes at a CONFIGURED depth, not just at the head', async () => {
+    // The anchor-moved fence has to hold at every depth this PR made
+    // configurable, not only where the anchor happens to be the head. The
+    // scenario keys its anchor-vs-fence discriminator on the DERIVED anchor
+    // height for exactly this reason: keyed on the head it never disarms below
+    // depth 1, so `{ reorg: true, finalityConfirmations: 4 }` silently injected
+    // no reorg at all and this case asserted nothing.
+    const { adapter, evidence } = makeEvmAuthorityAdapter({
+      reorg: true,
+      finalityConfirmations: 4,
+    });
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n))
+      .rejects.toThrow('anchor changed');
+    // Head 30 at depth 4 pins 27, and the fence re-read that height — not 30.
+    expect(evidence.headReads).toEqual([30]);
+    expect(evidence.blockReads).toContain(27);
+    expect(evidence.blockReads).not.toContain(30);
+  });
+
   it('rechecks the anchor after a delayed concurrent current-state read', async () => {
     const harness = makeEvmAuthorityAdapter();
     const gate = harness.holdCurrentStateRead();
@@ -323,7 +355,7 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     const makeProvider = () => ({
       getBlockNumber: async () => 30,
       getBlock: async (tag: string | number) => ({
-        number: tag === 'finalized' ? 30 : Number(tag),
+        number: typeof tag === 'string' ? 30 : Number(tag),
         hash: FINALIZED_HASH,
       }),
       getNetwork: async () => ({ chainId: 31337n }),

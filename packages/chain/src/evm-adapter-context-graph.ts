@@ -1197,11 +1197,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // wall-clock times never shared a bound either).
         const finalized = await resolveEvmFinalityAnchorBlockV1({
           finalityConfirmations: this.finalityConfirmations,
-          readHeadBlockNumber: () => (this.contextGraphAuthorityIndex === undefined
-            ? provider.getBlockNumber()
+          readHead: () => (this.contextGraphAuthorityIndex === undefined
+            ? provider.getBlock('latest')
             : readEvmContextGraphAuthorityIndexRpcV1(
                 'getContextGraphAuthoritySnapshot chain head',
-                () => provider.getBlockNumber(),
+                () => provider.getBlock('latest'),
                 options.signal,
               )),
           readBlockAt: (anchorBlockNumber) => (this.contextGraphAuthorityIndex === undefined
@@ -1377,14 +1377,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // index lifecycle signal above, so one cancelled waiter does not abort
         // transport work still serving another waiter.
         signal: options.signal,
-        ...(this.contextGraphAuthorityIndex === undefined ? {} : {
-          isRetryable: (error: unknown) => (
-            !options.signal?.aborted && (
-              isContextGraphAuthorityIndexRetryableError(error)
-              || isRpcEndpointFailoverEligible(error)
-            )
-          ),
-        }),
+        // Both branches raise ContextGraphAuthorityIndexRetryableError for a
+        // moved anchor, a cached checkpoint ahead of this endpoint and an
+        // unresolvable anchor block. It is recognized BY TYPE here, ahead of
+        // `isRpcEndpointFailoverEligible`'s message regex, so an authority read
+        // fails over instead of aborting the catalog admission it gates.
+        isRetryable: (error: unknown) => (
+          !options.signal?.aborted && (
+            isContextGraphAuthorityIndexRetryableError(error)
+            || isRpcEndpointFailoverEligible(error)
+          )
+        ),
         // A durable index gives every physical request its own 30s deadline and
         // checkpoints each page, so its complete projection has no aggregate
         // cap. The legacy history scan retains the ordinary wide-scan policy.
