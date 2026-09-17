@@ -1269,6 +1269,13 @@ export class DKGAgentBase {
   /** Detached owner for post-readiness persisted-subscription authority recovery. */
   protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
     CoalescingRecurringTask;
+  /** Detached owner that drains activation-cap subscriptions as slots become safe. */
+  protected contextGraphSubscriptionRehydrationPromotionRuntime?:
+    CoalescingRecurringTask;
+  /** Non-hosted rows currently consuming a rolling rehydration slot. */
+  protected readonly contextGraphSubscriptionRehydrationSlotIds = new Set<string>();
+  /** Non-hosted rows waiting behind the rolling rehydration cap. */
+  protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
