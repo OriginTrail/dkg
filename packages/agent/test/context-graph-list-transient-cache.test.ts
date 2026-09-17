@@ -1,6 +1,8 @@
 import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 
 const CONTEXT_GRAPH_ID = 'listing-transient-authority-failure';
 
@@ -40,6 +42,10 @@ function transientFailureAgent() {
     };
   });
   const fakeAgent = {
+    // Listing enrichment runs under the shared authority governor. This
+    // host is a plain object, so it carries the coordinator directly
+    // rather than through the agent's owner-backed accessor.
+    rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
     subscribedContextGraphs: new Map(),
     store: {
       query: async () => ({

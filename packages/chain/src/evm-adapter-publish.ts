@@ -36,8 +36,8 @@ import {
 } from './publisher-plan.js';
 import { errorMessage } from './evm-adapter-errors.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
-  confirmedStateBlockAtHead,
 } from './evm-adapter-constants.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
@@ -74,6 +74,17 @@ function isNonexistentTokenRevert(err: unknown): boolean {
   if (typeof e.revert?.name === 'string' && e.revert.name === 'ERC721NonexistentToken') return true;
   return typeof e.reason === 'string'
     && NONEXISTENT_TOKEN_LEGACY_REASONS.has(e.reason.trim().toLowerCase());
+}
+
+/**
+ * The chain-proof snapshot's own fail-closed anchor verdict.
+ *
+ * Distinguishes "this endpoint cannot give me a usable anchor" — an EMPTY VIEW
+ * that must fail over — from a transport error or an abort, which the retry
+ * machinery classifies itself.
+ */
+class ChainProofAnchorUnavailableError extends Error {
+  override readonly name = 'ChainProofAnchorUnavailableError';
 }
 
 export class PublishMethods extends EVMChainAdapterBase {
@@ -644,14 +655,30 @@ export class PublishMethods extends EVMChainAdapterBase {
             const network = await provider.getNetwork();
             if (BigInt(network.chainId) !== expectedChainId) return null;
           }
-          const latestBlockNumber = await provider.getBlockNumber();
-          const proofBlockNumber = confirmedStateBlockAtHead(
-            latestBlockNumber,
-            this.finalityConfirmations,
-          );
-          if (proofBlockNumber === null) return null;
-          const block = await provider.getBlock(proofBlockNumber);
-          if (!block || !block.hash) return null;
+          // Resolved through the shared anchor so this path gets the checks it
+          // was missing: an endpoint answering a DIFFERENT height than the one
+          // asked for was previously accepted here, and this snapshot decides a
+          // publish tx never landed and the job may be resent — the one place a
+          // wrong-height answer fabricates exactly the conjunction that requeues
+          // a job. An empty view, not a verdict, so failover reaches a correct
+          // endpoint (see `readProviderRetryingNull` above).
+          const block = await resolveEvmFinalityAnchorBlockV1({
+            finalityConfirmations: this.finalityConfirmations,
+            readHead: () => provider.getBlock('latest'),
+            readBlockAt: (anchorBlockNumber) => provider.getBlock(anchorBlockNumber),
+            unavailable: (detail) => new ChainProofAnchorUnavailableError(
+              `chain-proof snapshot anchor: ${detail}`,
+            ),
+          }).catch((error: unknown) => {
+            // ONLY the resolver's own fail-closed verdicts become an empty view
+            // (`readProviderRetryingNull` fails over on null without a thrown
+            // sentinel polluting stickiness). A transport failure or an abort
+            // still propagates to the failover machinery exactly as it did
+            // before this path used the shared resolver.
+            if (error instanceof ChainProofAnchorUnavailableError) return null;
+            throw error;
+          });
+          if (block === null) return null;
           const accountNonce = await provider.getTransactionCount(params.address, block.number);
           let kaMinted: boolean | null = null;
           const storage = this.contracts.knowledgeAssetStorage;

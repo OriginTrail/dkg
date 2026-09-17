@@ -29,7 +29,7 @@ export interface Rfc64CatalogAuthorityRevisionSourceBindingV1 {
   readonly resolveBinding: (contextGraphId: string) => string | undefined;
   readonly runAuthorityRead: <T>(
     signal: AbortSignal,
-    read: (signal: AbortSignal | undefined) => Promise<T>,
+    read: (signal: AbortSignal) => Promise<T>,
   ) => Promise<T>;
 }
 

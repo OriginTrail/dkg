@@ -43,10 +43,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
+import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
+  '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 import type { Rfc64CatalogRuntimeV1 } from '../src/rfc64/catalog-runtime-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
@@ -1115,7 +1118,7 @@ describe('RFC-64 rollout authority integration', () => {
       .mockResolvedValue(0);
     const warn = vi.spyOn((edge as any).log, 'warn');
     const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
+    const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
       .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
@@ -1156,7 +1159,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer')
       .mockResolvedValue(0);
     const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
+    const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     const reannounce = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
       .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
@@ -1175,14 +1178,14 @@ describe('RFC-64 rollout authority integration', () => {
     await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
     expect(markPending).toHaveBeenCalledTimes(1);
     expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peerId);
-    expect(replay).toHaveBeenCalledWith(
-      CONTEXT_GRAPH_ID,
-      expect.objectContaining({
+    expect(replay).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kind: 'connection-demand',
+      demand: expect.objectContaining({
         peerId,
         generation: expect.any(Number),
-        release: expect.any(Function),
       }),
-    );
+    }));
     expect(reannounce).toHaveBeenCalledTimes(1);
   }, 15_000);
 
@@ -1204,7 +1207,7 @@ describe('RFC-64 rollout authority integration', () => {
     const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
     let providerHead = 'head-v1';
     const replayedHeads: string[] = [];
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
+    const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockImplementation(async () => {
         replayedHeads.push(providerHead);
         return Object.freeze({ requested: 1, failed: 0 });
@@ -1386,6 +1389,47 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(provider.reannounceRfc64CatalogHeadsToPeerV1(
       '12D3KooWReplayMissingHeadPeer',
     )).rejects.toThrow(/durable catalog head is missing or unverifiable/u);
+  });
+
+  it('discards the replay snapshot cache at the mutation-persistence close boundary', async () => {
+    const { provider, persistence } = await startAppliedOpenReplayProvider(
+      'replay-snapshot-lifecycle-reset',
+    );
+    let readHeadCalls = 0;
+    const getVerifiedObjectByDigest = persistence.controlObjects
+      .getVerifiedObjectByDigest.bind(persistence.controlObjects);
+    const lifecyclePersistence = Object.freeze({
+      ...persistence,
+      controlObjects: Object.freeze({
+        ...persistence.controlObjects,
+        getVerifiedObjectByDigest: async (
+          ...args: Parameters<typeof getVerifiedObjectByDigest>
+        ) => {
+            readHeadCalls += 1;
+            return getVerifiedObjectByDigest(...args);
+        },
+      }),
+    });
+    (provider as any).rfc64PersistenceV1 = lifecyclePersistence;
+    vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
+
+    await expect(provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplaySnapshotFirstLifecycle',
+    )).resolves.toMatchObject({ announced: 1, failed: 0 });
+    expect(readHeadCalls).toBe(1);
+
+    await provider.closeRfc64PublicCatalogMutationPersistenceV1();
+    (provider as any).rfc64CatalogMutationCoordinatorV1.reopen();
+    provider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+
+    await expect(provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplaySnapshotReopenedLifecycle',
+    )).resolves.toMatchObject({ announced: 1, failed: 0 });
+    expect(readHeadCalls).toBe(2);
   });
 
   it('refreshes scoped provider replay after its head advances while the scope lock waits', async () => {
@@ -1954,14 +1998,21 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('propagates caller cancellation into the registered authority snapshot read', async () => {
     let readSignal: AbortSignal | undefined;
+    const readStarted = Promise.withResolvers<void>();
     const readAuthority = vi.fn(async (
       _contextGraphId: bigint,
       options?: { signal?: AbortSignal },
     ) => {
       readSignal = options?.signal;
-      return Object.freeze({
-        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'),
-        accessPolicy: 0,
+      readStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        if (readSignal?.aborted) {
+          reject(readSignal.reason);
+          return;
+        }
+        readSignal?.addEventListener('abort', () => reject(readSignal!.reason), {
+          once: true,
+        });
       });
     });
     const edge = await startAgent({
@@ -1975,13 +2026,15 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     const controller = new AbortController();
 
-    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+    const operation = edge.reconcileRfc64CatalogAccessAuthorityV1(
       CONTEXT_GRAPH_ID,
       controller.signal,
-    )).resolves.toMatchObject({ policy: { contextGraphId: CONTEXT_GRAPH_ID } });
+    );
+    await readStarted.promise;
     expect(readSignal).toBeInstanceOf(AbortSignal);
     const reason = new Error('caller stopped');
     controller.abort(reason);
+    await expect(operation).rejects.toBe(reason);
     expect(readSignal).toMatchObject({ aborted: true, reason });
   });
 
@@ -2053,6 +2106,224 @@ describe('RFC-64 rollout authority integration', () => {
 
     expect(resolveOnChainId).toHaveBeenCalledOnce();
     expect(readAuthority).not.toHaveBeenCalled();
+  });
+
+  /**
+   * These two cover the production evidence call sites, which the coordinator's
+   * own unit tests cannot reach: delete `markRpcAttempt`/`onRpcRead` from the
+   * agent and the circuit never closes again, yet every isolated coordinator
+   * test still passes. One test per lane, because the indexed daemon path and
+   * the point-read path record their evidence in different places.
+   */
+  async function openSharedAuthorityCircuit(edge: DKGAgent): Promise<void> {
+    await expect((edge as unknown as {
+      rfc64AuthorityReadCoordinatorV1: {
+        run: (
+          signal: AbortSignal | undefined,
+          operation: () => Promise<never>,
+        ) => Promise<never>;
+      };
+    }).rfc64AuthorityReadCoordinatorV1.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError(
+        'an unrelated registered authority read exhausted every provider',
+        { exhaustionKind: 'mixed', retryAfterMs: 30_000 },
+      );
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'open',
+      consecutiveExhaustions: 1,
+    });
+  }
+
+  it('degrades Context Graph listing instead of failing it while the circuit is open', async () => {
+    const readTargets = vi.fn(async () => {
+      throw new Error('listing enrichment must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'listing-enrichment-open-circuit',
+      config: { chainAdapter: new NoChainAdapter() },
+    });
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Listing enrichment open circuit',
+      callerAgentAddress: AUTHOR,
+    });
+    vi.spyOn(edge, 'resolveFinalizedContextGraphAuthorityTargetsV1')
+      .mockImplementation(readTargets);
+    await openSharedAuthorityCircuit(edge);
+
+    // The enrichment fan-out is exactly what the circuit holds back, so it is
+    // deferred — but a deferral must degrade the listing, never reject it.
+    const rows = await edge.listContextGraphs();
+
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: CONTEXT_GRAPH_ID }),
+    ]));
+    expect(readTargets).not.toHaveBeenCalled();
+  });
+
+  it('defers VM reconcile binding resolution while the circuit is open', async () => {
+    const resolveSnapshots = vi.fn(async () => {
+      throw new Error('VM reconcile must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'vm-reconcile-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    await expect(edge.resolveFinalizedVmReconcileBinding(CONTEXT_GRAPH_ID, () => true))
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+    // A deferral is not a closed queue: the reconcile lane must keep the target
+    // and retry on its own cadence rather than treat it as permanently gone.
+    await expect(edge.resolveFinalizedVmReconcileBinding(CONTEXT_GRAPH_ID, () => true))
+      .rejects.not.toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+  });
+
+  it('still resolves a curator binding while the shared circuit is open', async () => {
+    const curatorSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const readAuthority = vi.fn(async () => curatorSnapshot);
+    const edge = await startAgent({
+      name: 'curator-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    await openSharedAuthorityCircuit(edge);
+
+    // An ordinary governed read is still deferred: the circuit really is open.
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      `${AUTHOR}/deferred-while-open` as ContextGraphIdV1,
+    )).rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+
+    // A repeatable caller — the per-message catalog admission hook — stays
+    // governed, so it cannot turn every inbound message into a probe.
+    await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+    expect(readAuthority).not.toHaveBeenCalled();
+
+    // The join-decision caller is admitted: its binding is stamped into a
+    // payload the outbox replays verbatim, so it must not be downgraded to
+    // "absent" for a whole backoff window. It is one more serialized probe.
+    await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(
+      CONTEXT_GRAPH_ID,
+      { admitWhileOpen: true },
+    )).resolves.toEqual({ agentAddress: AUTHOR, authorityEra: '0' });
+    expect(readAuthority).toHaveBeenCalledOnce();
+
+    // Reaching the pool is also what clears the outstanding exhaustion.
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
+  });
+
+  it('closes the shared circuit when a point-read authority lookup reaches the pool', async () => {
+    // Only move forward, so unrelated agent timers keep a monotonic clock.
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const readAuthority = vi.fn(async () => Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    }));
+    const edge = await startAgent({
+      name: 'authority-recovery-evidence-point-read',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    await openSharedAuthorityCircuit(edge);
+
+    // Past the retry deadline the circuit is merely eligible to probe: the
+    // exhaustion is still outstanding until some read proves recovery.
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+      retryAtMs: null,
+    });
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+
+    expect(readAuthority).toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+      retryAtMs: null,
+    });
+  });
+
+  it('closes the shared circuit when an indexed authority projection reaches the pool', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase();
+    const indexedSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async () => new Map([
+      [expectedNameHash, indexedSnapshot],
+    ]));
+    const pointAuthorityRead = vi.fn(async () => {
+      throw new Error('an indexed projection must not reopen a point read');
+    });
+    const edge = await startAgent({
+      name: 'authority-recovery-evidence-indexed',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: pointAuthorityRead,
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
   });
 
   it('rejects a curator binding returned for a different registered Context Graph ID', async () => {

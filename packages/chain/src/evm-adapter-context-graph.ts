@@ -32,6 +32,7 @@ import {
   type EvmContextGraphAuthoritySource,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { markContextGraphRegistrationNotSubmitted } from
@@ -39,6 +40,7 @@ import { markContextGraphRegistrationNotSubmitted } from
 import { contextGraphAuthorityIndexIdFromBigInt } from
   './context-graph-authority-index-id.js';
 import {
+  contextGraphAuthorityAnchorUnavailableV1,
   readEvmContextGraphAuthorityIndexRpcV1,
   readEvmContextGraphAuthorityStateV1,
 } from
@@ -1177,8 +1179,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   /**
    * Resolve policy, membership, and their stable event-derived generations at
-   * one finalized block. The event generation (rather than the observation
-   * block) keeps independently booted RFC-64 peers on the same policy digest.
+   * ONE anchor block, selected by `chain.finalityConfirmations` — the node's
+   * single definition of finality (see evm-finality-anchor.ts). The event
+   * generation (rather than the observation block) keeps independently booted
+   * RFC-64 peers on the same policy digest: every field the digest is built
+   * from is event-derived, so peers agree once they have observed the same
+   * events, and never needed to agree on an observation bound.
    */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
@@ -1191,16 +1197,30 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       'getContextGraphAuthoritySnapshot',
       async (provider) => {
         options.signal?.throwIfAborted();
-        const finalized = this.contextGraphAuthorityIndex === undefined
-          ? await provider.getBlock('finalized')
-          : await readEvmContextGraphAuthorityIndexRpcV1(
-              'getContextGraphAuthoritySnapshot finalized head',
-              () => provider.getBlock('finalized'),
-              options.signal,
-            );
-        if (finalized === null || finalized.hash === null) {
-          throw new Error('finalized Context Graph authority block is unavailable');
-        }
+        // One anchor for the whole snapshot, at the operator-configured finality
+        // depth rather than at the endpoint's `finalized` tag. The docstring's
+        // "one finalized block" buys INTRA-snapshot coherence; peer agreement
+        // comes from the event-derived generations below, never from the
+        // observation bound (two peers reading the `finalized` tag at different
+        // wall-clock times never shared a bound either).
+        const finalized = await resolveEvmFinalityAnchorBlockV1({
+          finalityConfirmations: this.finalityConfirmations,
+          readHead: () => (this.contextGraphAuthorityIndex === undefined
+            ? provider.getBlock('latest')
+            : readEvmContextGraphAuthorityIndexRpcV1(
+                'getContextGraphAuthoritySnapshot chain head',
+                () => provider.getBlock('latest'),
+                options.signal,
+              )),
+          readBlockAt: (anchorBlockNumber) => (this.contextGraphAuthorityIndex === undefined
+            ? provider.getBlock(anchorBlockNumber)
+            : readEvmContextGraphAuthorityIndexRpcV1(
+                `getContextGraphAuthoritySnapshot anchor block ${anchorBlockNumber}`,
+                () => provider.getBlock(anchorBlockNumber),
+                options.signal,
+              )),
+          unavailable: contextGraphAuthorityAnchorUnavailableV1,
+        });
         const finalizedHash = finalized.hash;
         const contract = base.connect(provider) as Contract;
         const filters = contract.filters as unknown as Record<
@@ -1230,6 +1250,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             deploymentBlockNumber,
             finalized: { number: finalized.number, hash: finalizedHash },
             pageSize: this.cgRegistryScanPageSize,
+            finalityConfirmations: this.finalityConfirmations,
             stabilizationOperation: 'resolution',
             contextGraphId: authorityIndexId,
             signal: options.signal,
@@ -1375,14 +1396,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // index lifecycle signal above, so one cancelled waiter does not abort
         // transport work still serving another waiter.
         signal: options.signal,
-        ...(this.contextGraphAuthorityIndex === undefined ? {} : {
-          isRetryable: (error: unknown) => (
-            !options.signal?.aborted && (
-              isContextGraphAuthorityIndexRetryableError(error)
-              || isRpcEndpointFailoverEligible(error)
-            )
-          ),
-        }),
+        // Both branches raise ContextGraphAuthorityIndexRetryableError for a
+        // moved anchor, a cached checkpoint ahead of this endpoint and an
+        // unresolvable anchor block. It is recognized BY TYPE here, ahead of
+        // `isRpcEndpointFailoverEligible`'s message regex, so an authority read
+        // fails over instead of aborting the catalog admission it gates.
+        isRetryable: (error: unknown) => (
+          !options.signal?.aborted && (
+            isContextGraphAuthorityIndexRetryableError(error)
+            || isRpcEndpointFailoverEligible(error)
+          )
+        ),
         // A durable index gives every physical request its own 30s deadline and
         // checkpoints each page, so its complete projection has no aggregate
         // cap. The legacy history scan retains the ordinary wide-scan policy.
