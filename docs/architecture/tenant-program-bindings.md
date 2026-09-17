@@ -111,6 +111,12 @@ An illustrative successful response preserves the existing runtime response shap
 
 Execution records remain in the executor's private Working Memory. They record the source Program, stable operation, source and data graph IDs, binding/source hashes, original caller and tenant executor. `appliedPolicy` is the local identifier `urn:dkg:program-binding:<bindingHash>`; `policyHash` binds that approval to the executor and fixed tool descriptor, and broker decisions use `TENANT_PROGRAM_BINDING_ALLOW`. These identify local approval, not a VM publication or on-chain attestation. The execution IRI is a reference, not a grant to read that private graph. IDENER receives only the approved query outputs through the invocation response; raw `/api/query`, Program resolve/fork and inbox authorization remain unchanged.
 
+## Program graph readiness
+
+A bound caller does not become the tenant node's identity. RFC-64 automatic local-principal selection considers the node's default identity and custodial agents; public-key-only API registrations are external callers. An explicit operator identity or authenticated graph-specific approval still takes precedence, and every selected identity must remain in the verified graph roster. Multiple matching custodial identities still require an explicit selection.
+
+An authorized bound invocation whose Program is in SWM checks the tenant executor's graph admission before loading it. If unavailable, it returns HTTP 503 with `PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE`; a caller without binding permission still receives HTTP 403. The normal query-time graph checks remain in effect. Resolve graph authority and retry; a successful read with no matching Program still returns `PROGRAM_NOT_FOUND`. This diagnostic does not grant membership, activate a graph, or publish anything.
+
 ## Updates, retries and revocation
 
 - **Activation:** keep the operation IRI stable and explicitly replace its Program/query pins after tenant approval. There is no automatic “latest published” lookup. The active binding is the tenant-approved version.

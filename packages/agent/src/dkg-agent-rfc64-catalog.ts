@@ -1712,7 +1712,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * Resolve this node's exact private-CG principal from authenticated lifecycle
    * state. An explicit operator authority remains authoritative; default mode
    * otherwise uses a valid CG-scoped approval hint or one unambiguous
-   * intersection between the verified roster and locally held identities.
+   * intersection between the verified roster and node-held identities. API
+   * clients registered with a public key are not implicit node principals.
    */
   async resolveRfc64CatalogLocalAgentAddressV1(
     this: DKGAgent,
@@ -1730,11 +1731,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : null;
     }
 
-    const localAgents = new Set<EvmAddressV1>();
-    for (const { agentAddress } of this.listLocalAgents()) {
+    const registeredAgents = new Set<EvmAddressV1>();
+    const nodeAgents = new Set<EvmAddressV1>();
+    for (const { agentAddress, mode } of this.listLocalAgents()) {
       const normalized = agentAddress.toLowerCase();
       if (ethers.isAddress(normalized) && normalized !== ethers.ZeroAddress) {
-        localAgents.add(normalized as EvmAddressV1);
+        registeredAgents.add(normalized as EvmAddressV1);
+        // Registration of an external caller stores its public identity and
+        // bearer mapping, not custody of its wallet. Counting it here can
+        // both invent node membership and deactivate the real local member.
+        if (mode === 'custodial') nodeAgents.add(normalized as EvmAddressV1);
       }
     }
     const defaultAgentAddress = this.defaultAgentAddress?.toLowerCase();
@@ -1743,17 +1749,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       && ethers.isAddress(defaultAgentAddress)
       && defaultAgentAddress !== ethers.ZeroAddress
     ) {
-      localAgents.add(defaultAgentAddress as EvmAddressV1);
+      registeredAgents.add(defaultAgentAddress as EvmAddressV1);
+      nodeAgents.add(defaultAgentAddress as EvmAddressV1);
     }
 
     const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase();
     if (
       approvedAgent !== undefined
-      && localAgents.has(approvedAgent as EvmAddressV1)
+      && registeredAgents.has(approvedAgent as EvmAddressV1)
       && rosterSet.has(approvedAgent as EvmAddressV1)
     ) return approvedAgent as EvmAddressV1;
 
-    const matching = [...localAgents].filter((address) => rosterSet.has(address));
+    const matching = [...nodeAgents].filter((address) => rosterSet.has(address));
     return matching.length === 1 ? matching[0]! : null;
   }
 
