@@ -162,6 +162,7 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
+import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
   exitAfterFatalLogDrain,
@@ -1200,6 +1201,9 @@ async function runDaemonInnerWithStartupOwnership(
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
     daemonLogFileWriter.push(line + "\n");
+  }
+  if (!assertNodeRuntimeSupported(log)) {
+    throw new Error('Node runtime preflight failed; see the preceding fatal message.');
   }
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),

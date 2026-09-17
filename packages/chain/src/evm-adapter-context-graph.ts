@@ -112,6 +112,24 @@ function buildPublicContextGraphRegistryScanPlan(
     | (ContextGraphChainScanOptions & { mode?: string })
     | undefined;
   const mode = runtimeOptions?.mode;
+  const legacy = runtimeOptions as {
+    incremental?: boolean;
+    seedIncrementalWatermark?: boolean;
+    resumeFromCursor?: boolean;
+  } | undefined;
+  if (
+    mode !== undefined &&
+    [legacy?.incremental, legacy?.seedIncrementalWatermark, legacy?.resumeFromCursor]
+      .some((value) => value !== undefined)
+  ) {
+    throw new Error('Context graph list mode cannot be combined with legacy scan flags');
+  }
+  if (legacy?.incremental === true && legacy.seedIncrementalWatermark === true) {
+    throw new Error('Context graph list cannot be both incremental and a watermark seed');
+  }
+  if (legacy?.resumeFromCursor === true && legacy.seedIncrementalWatermark !== true) {
+    throw new Error('resumeFromCursor requires seedIncrementalWatermark');
+  }
 
   if (fromBlock !== undefined) {
     return {
@@ -332,11 +350,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     fromBlock?: number,
     options?: ContextGraphChainScanOptions,
   ): Promise<ContextGraphOnChain[]> {
+    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     await this.init();
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     return this._collectContextGraphRegistryScan(registry, registryAddress, fromBlock, scanPlan);
   }
 
