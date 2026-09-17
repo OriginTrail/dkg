@@ -105,11 +105,28 @@ export const MIN_RPC_RECEIPT_TIMEOUT_MS = 1_000;
 export const DEFAULT_FINALITY_CONFIRMATIONS = 1;
 
 /**
- * Normalize an operator-selected mined-receipt confirmation depth.
+ * Blocks below the chain tip that this node treats as reorg-safe.
+ *
+ * Lives here, in the leaf constants module, because BOTH the Context Graph
+ * registry scan and the authority index's durable cursor need it, and the
+ * authority-index reader cannot import it from `evm-adapter-base` — that module
+ * imports the reader.
+ */
+export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
+/**
+ * Normalize the operator-selected finality depth — the node's SINGLE definition
+ * of chain finality, not a write-side knob.
  *
  * Standard EVM semantics apply: the receipt's own canonical block is
  * confirmation 1, so a value of 1 makes the receipt eligible immediately
  * after inclusion. An omitted value defaults to 1.
+ *
+ * Besides mined-receipt finality and recovery proof snapshots, this same depth
+ * selects the anchor for the Context Graph authority index, named-CG
+ * resolution and the RFC-64 precommits (see evm-finality-anchor.ts). Raising it
+ * therefore buys reorg resistance on the write side AND delays how quickly a
+ * newly registered Context Graph becomes authoritative on this node.
  */
 export function resolveFinalityConfirmations(value: unknown): number {
   if (value === undefined) return DEFAULT_FINALITY_CONFIRMATIONS;
