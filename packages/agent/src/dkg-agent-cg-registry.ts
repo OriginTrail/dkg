@@ -1062,51 +1062,61 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader !== undefined) {
       try {
-        const finalizedBinding = await runBoundedOperation(async (ownerSignal) => {
-          try {
-            const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
-              [contextGraphId],
-              { signal: ownerSignal },
-            );
-            // An older reader object without any finalized name capability is
-            // an explicitly legacy adapter and may use the compatibility path.
-            if (resolution.kind === 'legacy-current') return null;
-            const target = resolution.targets.get(contextGraphId);
-            if (target === undefined) {
-              return options.allowAcceptedRfc64FinalizedAbsence === true
-                ? { kind: 'unregistered' } as const
-                : {
-                    kind: 'unavailable' as const,
-                    reason: 'finalized-name-absence-unaccepted' as const,
-                    detail: 'finalized name absence has no accepted owner-signed unregistered authority',
-                  };
-            }
-            if (
-              target.expectedOnChainId <= 0n
-              || target.expectedOnChainId >= (1n << 256n)
-            ) {
-              throw new Error('finalized Context Graph id is outside uint256');
-            }
-            if (target.kind === 'resolved-snapshot') {
-              const snapshot = target.finalizedSnapshot;
-              if (
-                snapshot.active !== true
-                || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
-                || this.contextGraphWireId(snapshot.nameHash)
-                  !== this.contextGraphWireId(target.expectedNameHash)
-              ) {
-                throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
+        const finalizedBinding = await runBoundedOperation(async (ownerSignal) => (
+          // Registration discovery reads the same finalized authority index as
+          // the catalog refresh pass and the VM reconcile lane, so it shares
+          // the one governor instead of opening the last ungoverned lane into
+          // the pool: its exhaustion now trips the shared circuit for every
+          // other reader, and a real provider read here proves recovery for
+          // them too. Deferral is fail-closed exactly like every other failure
+          // of this boundary — the caller already treats it as `unavailable`
+          // and retries — and the bounded operation above still caps the wait.
+          this.rfc64AuthorityReadCoordinatorV1.run(ownerSignal, async (readSignal, evidence) => {
+            try {
+              const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
+                [contextGraphId],
+                { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+              );
+              // An older reader object without any finalized name capability is
+              // an explicitly legacy adapter and may use the compatibility path.
+              if (resolution.kind === 'legacy-current') return null;
+              const target = resolution.targets.get(contextGraphId);
+              if (target === undefined) {
+                return options.allowAcceptedRfc64FinalizedAbsence === true
+                  ? { kind: 'unregistered' } as const
+                  : {
+                      kind: 'unavailable' as const,
+                      reason: 'finalized-name-absence-unaccepted' as const,
+                      detail: 'finalized name absence has no accepted owner-signed unregistered authority',
+                    };
               }
+              if (
+                target.expectedOnChainId <= 0n
+                || target.expectedOnChainId >= (1n << 256n)
+              ) {
+                throw new Error('finalized Context Graph id is outside uint256');
+              }
+              if (target.kind === 'resolved-snapshot') {
+                const snapshot = target.finalizedSnapshot;
+                if (
+                  snapshot.active !== true
+                  || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
+                  || this.contextGraphWireId(snapshot.nameHash)
+                    !== this.contextGraphWireId(target.expectedNameHash)
+                ) {
+                  throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
+                }
+              }
+              return {
+                kind: 'registered',
+                onChainId: target.expectedOnChainId,
+                provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
+              } as const;
+            } finally {
+              await indexReader.whenIdle();
             }
-            return {
-              kind: 'registered',
-              onChainId: target.expectedOnChainId,
-              provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
-            } as const;
-          } finally {
-            await indexReader.whenIdle();
-          }
-        }, {
+          })
+        ), {
           label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
           timeoutMs: registrationResolutionTimeoutMs,
           signal: options.signal,

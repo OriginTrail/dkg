@@ -305,9 +305,19 @@ independently. Bootstrap targets for eligible but unsubscribed CGs report
 
 The same block exposes `authorityRpcCircuit`, containing only `state`,
 `consecutiveExhaustions`, and `retryAtMs`. `open` means authority reads are
-cooling down after all configured RPC endpoints were exhausted; `half-open`
-means one recovery probe is in flight; `closed` is normal. This status omits
-endpoint URLs, RPC payloads, and graph identifiers.
+cooling down after all configured RPC endpoints were exhausted. `half-open`
+means the cooldown has elapsed while an exhaustion is still outstanding:
+recovery is not proven until an authority read actually reaches a provider, so
+the node reports `half-open` from the retry deadline onward whether or not a
+probe is running — an idle node stays there until its next scheduled authority
+read. `closed` is normal. This status omits endpoint URLs, RPC payloads, and
+graph identifiers.
+
+A brief `half-open` after each exhaustion is expected. Treat it as a signal
+only when it persists across several refresh intervals on a node that is
+actively syncing registered graphs: that means authority reads keep failing to
+reach the pool, and `consecutiveExhaustions` shows how far the backoff has
+escalated.
 
 ```json
 {
