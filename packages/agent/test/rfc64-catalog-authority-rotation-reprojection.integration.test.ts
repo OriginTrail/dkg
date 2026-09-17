@@ -144,6 +144,153 @@ async function rotateToFinalizedChainV1(
   await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 }
 
+/** Collect every warning the agent emits, so a reported failure can be asserted on. */
+function captureWarningsV1(agent: DKGAgent): string[] {
+  const lines: string[] = [];
+  vi.spyOn((agent as unknown as { log: { warn: (ctx: unknown, m: string) => void } }).log, 'warn')
+    .mockImplementation((_ctx: unknown, message: string) => { lines.push(String(message)); });
+  return lines;
+}
+
+/**
+ * Every re-projection failure is REPORTED rather than thrown, because an escaping error here
+ * would demote the graph's authority progress. That makes the warning the only evidence a
+ * row was left behind, so each report path is asserted individually -- an unreported failure
+ * would be indistinguishable from success.
+ */
+describe('RFC-64 catalog re-projection failure reporting', () => {
+  const REPROJECTION_WARNING = /re-projection after an authority rotation did not complete/u;
+
+  it('reports, and does not throw, when admission itself fails', async () => {
+    const author = await startRotationAuthorV1('authority-rotation-admit-throws');
+    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    const warnings = captureWarningsV1(author);
+    vi.spyOn(author, 'listLocalAgents').mockImplementation(() => {
+      throw new Error('local agent registry unavailable');
+    });
+
+    // The rotation itself must still succeed: authority acceptance may not be demoted by a
+    // re-projection that could not even decide whether it had work to do.
+    await rotateToFinalizedChainV1(author);
+
+    expect(warnings.filter((line) => REPROJECTION_WARNING.test(line)
+      && /local agent registry unavailable/u.test(line))).toHaveLength(1);
+  }, 60_000);
+
+  it('reports when the authoring lane cannot be resolved', async () => {
+    const author = await startRotationAuthorV1('authority-rotation-lane-throws');
+    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    await seedInventoryAssetV1(author, 'authority-rotation-lane-throws', 61n);
+    await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+    await rotateToFinalizedChainV1(author);
+
+    const warnings = captureWarningsV1(author);
+    vi.spyOn(author, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(() => {
+      throw new Error('authoring lane is unresolvable');
+    });
+    // Admission is synchronous and returns null here, so there is nothing to await.
+    expect(author.beginRfc64CatalogReprojectionForAuthorityRotationV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+    expect(warnings.filter((line) => REPROJECTION_WARNING.test(line)
+      && /authoring lane is unresolvable/u.test(line))).toHaveLength(1);
+  }, 60_000);
+
+  it('reports per author when carrying one author\'s rows fails', async () => {
+    const author = await startRotationAuthorV1('authority-rotation-carry-throws');
+    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    await seedInventoryAssetV1(author, 'authority-rotation-carry-throws', 62n);
+    await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+    await rotateToFinalizedChainV1(author);
+
+    const warnings = captureWarningsV1(author);
+    vi.spyOn(
+      author as unknown as { carryRfc64AuthorInventoryIntoAcceptedGenerationV1: () => Promise<void> },
+      'carryRfc64AuthorInventoryIntoAcceptedGenerationV1',
+    ).mockRejectedValue(new Error('durable carry failed'));
+
+    // One author failing must not abort the others, so the returned promise still resolves.
+    await expect(author.beginRfc64CatalogReprojectionForAuthorityRotationV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeUndefined();
+    expect(warnings.filter((line) => REPROJECTION_WARNING.test(line)
+      && line.includes(AUTHOR) && /durable carry failed/u.test(line))).toHaveLength(1);
+  }, 60_000);
+
+  it('reports when the projection supervisor refuses the request', async () => {
+    const author = await startRotationAuthorV1('authority-rotation-supervisor-refuses');
+    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    await seedInventoryAssetV1(author, 'authority-rotation-supervisor-refuses', 63n);
+    await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+    await rotateToFinalizedChainV1(author);
+
+    const warnings = captureWarningsV1(author);
+    vi.spyOn(author, 'requestRfc64SwmCatalogProjectionV1').mockReturnValue(false);
+    await author.beginRfc64CatalogReprojectionForAuthorityRotationV1(CONTEXT_GRAPH_ID);
+
+    expect(warnings.filter((line) => REPROJECTION_WARNING.test(line)
+      && /supervisor refused the request/u.test(line))).toHaveLength(1);
+  }, 60_000);
+
+  it('names a row that cannot cross into the accepted generation', async () => {
+    const author = await startRotationAuthorV1('authority-rotation-row-dormant');
+    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    await seedInventoryAssetV1(author, 'authority-rotation-row-dormant', 64n);
+    await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+
+    // Installed BEFORE the rotation so the carry sees rows it has not already moved.
+    const warnings = captureWarningsV1(author);
+    vi.spyOn(author, 'recordRfc64SwmAuthorInventoryShadowV1').mockResolvedValue({
+      status: 'dormant',
+      action: 'upsert',
+      attempts: 1,
+      headObjectDigest: null,
+      error: null,
+      dormantReason: 'policy-mismatch',
+    });
+    await rotateToFinalizedChainV1(author);
+
+    // The row is named, so an operator can tell WHICH asset stayed behind.
+    expect(warnings.filter((line) => /could not carry/u.test(line)
+      && /policy-mismatch/u.test(line))).toHaveLength(1);
+  }, 60_000);
+
+  it('stays silent for a row a durable VM confirmation already retired', async () => {
+    const author = await startRotationAuthorV1('authority-rotation-row-vm-confirmed');
+    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    await seedInventoryAssetV1(author, 'authority-rotation-row-vm-confirmed', 65n);
+    await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+
+    const warnings = captureWarningsV1(author);
+    vi.spyOn(author, 'recordRfc64SwmAuthorInventoryShadowV1').mockResolvedValue({
+      status: 'dormant',
+      action: 'upsert',
+      attempts: 1,
+      headObjectDigest: null,
+      error: null,
+      dormantReason: 'vm-confirmed',
+    });
+    await rotateToFinalizedChainV1(author);
+
+    // The finalized lane owns this row deliberately. Warning about it would train operators
+    // to ignore the one signal that means a row really was stranded.
+    expect(warnings.filter((line) => /could not carry/u.test(line))).toHaveLength(0);
+  }, 60_000);
+});
+
 describe('RFC-64 catalog re-projection on authority rotation', () => {
   it('makes a pre-rotation head reachable under the newly accepted scope', async () => {
     const author = await startRotationAuthorV1('authority-rotation-reprojection');
