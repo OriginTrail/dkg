@@ -62,7 +62,7 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC, MemoryLayer, contextGraphLayerPrefixCandidates, canonicalKnowledgeAssetAgentAddress } from '@origintrail-official/dkg-core';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -1846,9 +1846,41 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     // still allow `\` to escape the closing quote and break out of the literal.
     const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
     const cgUri = `did:dkg:context-graph:${contextGraphId}`;
+    // Working memory is per-agent. The unscoped `<cg>/_working_memory` /
+    // `<cg>/assertion/` prefixes match EVERY agent's drafts in this context
+    // graph, so an authenticated agent could read a co-tenant's working
+    // memory — the A-1 isolation that `DKGAgent.query` enforces on the
+    // `working-memory` view does not reach this route, because fan-out 2
+    // queries the store directly.
+    //
+    // Narrow the prefixes to the caller's own namespace. Reuse
+    // `contextGraphLayerPrefixCandidates` rather than hand-writing the URI:
+    // it already emits the canonical (EVM-lowercased) prefix plus the
+    // caller's original casing, which is how pre-canonicalization drafts are
+    // still addressed. The `/assertion/<addr>/` pair is the legacy
+    // pre-uniform-layout shape and gets the same canonical/raw treatment.
+    //
+    // A node operator (or an auth-disabled caller) has no agent identity, so
+    // the wide prefixes stay — that matches the cross-agent view those
+    // principals already have through `/api/query`.
+    const wmPrefixes = callerAgentAddress
+      ? [
+        ...contextGraphLayerPrefixCandidates(
+          contextGraphId,
+          MemoryLayer.WorkingMemory,
+          callerAgentAddress,
+        ),
+        ...new Set([
+          `${cgUri}/assertion/${canonicalKnowledgeAssetAgentAddress(callerAgentAddress)}/`,
+          `${cgUri}/assertion/${callerAgentAddress}/`,
+        ]),
+      ]
+      : [`${cgUri}/_working_memory`, `${cgUri}/assertion/`];
     const graphFilters = memoryLayers.map((l) => {
       if (l === 'wm') {
-        return `(STRSTARTS(STR(?g), "${cgUri}/_working_memory") || STRSTARTS(STR(?g), "${cgUri}/assertion/"))`;
+        return `(${wmPrefixes
+          .map((prefix) => `STRSTARTS(STR(?g), "${escapeSparqlLiteral(prefix)}")`)
+          .join(' || ')})`;
       }
       if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
       // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
