@@ -905,21 +905,9 @@ chain:
     refillBelowFraction: 0.1                     # refill when current < target × this (default 10%)
 ```
 
-`finalityConfirmations` is an operator-selected positive integer, and it is the node's **single** definition of chain finality. Standard EVM confirmation counting applies: `1` means the block itself, `2` waits for one successor, and so on. The default is `1`.
+`finalityConfirmations` is an operator-selected positive integer and the node's **single** definition of chain finality — for writes (when a mined publish receipt becomes terminal, and the recovery proof snapshots deciding whether a publish landed) *and* for reads (the Context Graph authority index, named-Context-Graph resolution, and the RFC-64 policy and VM precommit anchors). Standard EVM counting: `1` means the block itself, `2` waits for one successor. The default is `1`. The RPC provider's own `finalized` block tag is never substituted — it is the endpoint's consensus marker (~600 blocks / ~20 min behind head on Base Sepolia), not operator-configurable, and using it made a freshly registered Context Graph invisible to the authority index for that whole window.
 
-It governs every path that has to decide "the block whose state this node is willing to believe":
-
-- **Writes** — when a mined publish receipt becomes terminal and its publisher wallet may take another queued job, and the recovery proof snapshots that decide whether a publish landed.
-- **Reads** — the Context Graph authority index and named-Context-Graph resolution, and the RFC-64 policy and VM precommit anchors.
-
-The node never substitutes the RPC provider's own `finalized` block tag for this value. That tag is the endpoint's consensus-finality marker — roughly 600 blocks, about 20 minutes, behind head on Base Sepolia — is not operator-configurable, and using it made a freshly registered Context Graph invisible to the authority index for that entire window.
-
-Choosing a value is now a **two-sided** trade, not just a latency-versus-reversal one:
-
-- A value of `1` gives no successor-block buffer. A reorganization can reverse a receipt after the node accepted it and released the wallet, and can move an authority read's anchor between resolution and use (both are detected and fail closed, then retry — they are not silently accepted).
-- A **larger** value buys that buffer everywhere, but it also pushes the authority index, named-CG resolution and both precommit anchors that many blocks behind head — partially reintroducing the invisibility window above. A newly registered Context Graph stays unauthorized for roughly `finalityConfirmations` block times.
-
-Set a larger value when reversal resistance matters more than publish speed **and** than how quickly a new Context Graph becomes authoritative on this node.
+Choosing a value is therefore a **two-sided** trade. `1` gives no successor-block buffer: a reorganization can reverse a receipt after the node released the wallet, and can move an authority read's anchor mid-read (both are detected and fail closed, then retry — never silently accepted). A larger value buys that buffer everywhere, but also pushes the authority index, named-CG resolution and both precommit anchors that many blocks behind head, so a newly registered Context Graph stays unauthorized for roughly that many block times. Raise it when reversal resistance matters more than publish speed **and** than authority freshness.
 
 `targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
 
