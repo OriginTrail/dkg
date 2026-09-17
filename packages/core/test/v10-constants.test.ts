@@ -36,6 +36,7 @@ import {
   contextGraphLayerUri,
   contextGraphLayerUriCandidates,
   contextGraphLayerPrefixCandidates,
+  contextGraphAssertionPrefixCandidates,
   knowledgeAssetAgentAddressesEqual,
   contextGraphRulesUri,
   contextGraphSubGraphUri,
@@ -233,6 +234,51 @@ describe('V10 named graph URIs', () => {
     ]);
     expect(knowledgeAssetAgentAddressesEqual(mixed, lower)).toBe(true);
     expect(knowledgeAssetAgentAddressesEqual('PeerA', 'peera')).toBe(false);
+  });
+
+  it('contextGraphAssertionPrefixCandidates covers the name-keyed WM family', () => {
+    // Working memory lives in TWO graph families. `…/_working_memory/{addr}/`
+    // is the uniform per-KA layout; `…/assertion/{addr}/` is the name-keyed
+    // one, which `DKGPublisher.wmGraphUri` still writes whenever a per-author
+    // KA number cannot be resolved. An unscoped WM read has to span both, so
+    // this builder is the assertion-family counterpart of
+    // `contextGraphLayerPrefixCandidates`.
+    const id = 'cg-assertion-prefix';
+    const mixed = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+    const lower = mixed.toLowerCase();
+
+    // Canonical (EVM-lowercased) first, caller casing second — the same order
+    // and rationale as the layer-prefix builder, because graphs written before
+    // address canonicalization are still addressed with the original casing.
+    expect(contextGraphAssertionPrefixCandidates(id, mixed)).toEqual([
+      `did:dkg:context-graph:${id}/assertion/${lower}/`,
+      `did:dkg:context-graph:${id}/assertion/${mixed}/`,
+    ]);
+
+    // Already-canonical input collapses to a single prefix rather than
+    // emitting a duplicate.
+    expect(contextGraphAssertionPrefixCandidates(id, lower)).toEqual([
+      `did:dkg:context-graph:${id}/assertion/${lower}/`,
+    ]);
+
+    // Sub-graph scoping inserts the sub-graph segment before `assertion`,
+    // mirroring contextGraphAssertionUri's own sub-graph shape.
+    expect(contextGraphAssertionPrefixCandidates(id, lower, 'game-state')).toEqual([
+      `did:dkg:context-graph:${id}/game-state/assertion/${lower}/`,
+    ]);
+
+    // Non-EVM legacy identities (peer IDs) are byte-stable, so they too
+    // collapse to one prefix instead of being lowercased.
+    const peer = '12D3KooWLegacyPeerIdNamespace';
+    expect(contextGraphAssertionPrefixCandidates(id, peer)).toEqual([
+      `did:dkg:context-graph:${id}/assertion/${peer}/`,
+    ]);
+
+    // Every prefix must end in `/` so a STRSTARTS scan cannot match a
+    // sibling agent whose address merely shares this one as a prefix.
+    for (const prefix of contextGraphAssertionPrefixCandidates(id, mixed)) {
+      expect(prefix.endsWith('/')).toBe(true);
+    }
   });
 
   it('uniform per-KA layer URI: sub-graph scoping is uniform across layers', () => {

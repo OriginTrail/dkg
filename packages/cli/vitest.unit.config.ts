@@ -55,6 +55,8 @@ export default defineConfig({
           // Read-authority gate on POST /api/memory/search — a pure route-handler
           // test (fake req/res, stubbed agent + vector store), no hardhat.
           'test/memory-search-read-authority.test.ts',
+          // Guarded per-view fan-out on the same route (pure handler).
+          'test/memory-search-guarded-query-path.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',
