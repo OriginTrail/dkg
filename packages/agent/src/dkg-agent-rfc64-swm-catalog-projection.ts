@@ -5,17 +5,22 @@
 import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
+  computeAuthorCatalogScopeDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
+  createOperationContext,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
   type CatalogSealDeploymentProfileV1,
   type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
+  type DecimalU64V1,
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
+  type OperationContext,
   type PositiveDecimalU64V1,
+  type SwmAuthorInventoryRowV1,
   type SwmAuthorInventoryScopeV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -56,6 +61,16 @@ import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
 
+/**
+ * Era of the owner-signed unregistered generation every locally created Context
+ * Graph starts in. `composeRfc64UnregisteredCatalogAuthorityV1` pins that
+ * generation's era to zero and its whole governance tuple to `null`, so the
+ * lane scope it produces stays reconstructible from `(networkId,
+ * contextGraphId, authorAddress)` alone after the graph has already rotated
+ * away from it -- no retained previous-generation state is required.
+ */
+const RFC64_UNREGISTERED_ORIGIN_ERA_V1 = '0' as DecimalU64V1;
+
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
   readonly authorAddress: EvmAddressV1;
@@ -89,6 +104,13 @@ type ResolvedRfc64CatalogAuthoringLaneV1 =
     readonly acceptsFinalizedVmRepair: boolean;
   }>;
 
+/** One local author's rows still addressed by the pre-rotation origin scope. */
+interface Rfc64PreRotationAuthorInventoryV1 {
+  readonly authorAddress: EvmAddressV1;
+  readonly originDigest: Digest32V1;
+  readonly rows: readonly Readonly<SwmAuthorInventoryRowV1>[];
+}
+
 type Rfc64CatalogAuthoringLaneDecisionV1 =
   | Readonly<{ readonly status: 'inactive' }>
   | Readonly<{ readonly status: 'unavailable'; readonly error: Error }>
@@ -118,6 +140,241 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
     if (lane === null) return null;
     return this.reconcileRfc64PublicCatalogFromSwmInventoryLaneV1(lane, params);
+  }
+
+  /**
+   * Re-project this author's inventory under a newly accepted authority
+   * generation so heads published before the rotation stop being orphaned.
+   *
+   * Every applied catalog head is keyed by a scope digest that includes the
+   * governance tuple (`AUTHOR_LANE_SCOPE_KEYS_V1`), and so is the durable SWM
+   * author inventory this projection reads. A Context Graph rotating from its
+   * owner-signed unregistered generation to a finalized-chain generation
+   * therefore enters the new generation with an empty inventory: the replay
+   * manifest, keyed only on `(networkId, contextGraphId)`, keeps advertising
+   * the pre-rotation head while current-head discovery and `isHeadSatisfied`,
+   * keyed on the new scope digest, can never resolve it. Both sides then retry
+   * forever and every row published before the rotation is unreachable through
+   * the catalog path.
+   *
+   * Only the graph's author of record carries its own rows forward, and only
+   * through the ordinary shadow recorder, which re-derives the lane scope from
+   * the currently accepted policy and re-validates each row against durable
+   * store state. This never weakens the authority fence: a row whose durable
+   * workspace head no longer matches the accepted lane's access policy (a
+   * registration that turned a public graph owner-only) is left behind and
+   * reported, never carried across the fence.
+   *
+   * Re-entry is safe. A row already present under the accepted scope is
+   * skipped, the recorder itself returns `existing` without advancing the
+   * inventory lineage, and the projection is an exact-set reconcile onto the
+   * accepted scope's own applied head.
+   *
+   * Admission is deliberately synchronous and returns `null` when there is
+   * nothing to carry. This runs inside authority acceptance, where even an
+   * already-resolved `await` yields a microtask and re-orders the coalesced
+   * finalized-authority batch passes around it, so the overwhelmingly common
+   * no-op must not suspend that path at all.
+   *
+   * The returned promise never rejects: an escaping error here would wrongly
+   * demote the graph's authority progress.
+   */
+  beginRfc64CatalogReprojectionForAuthorityRotationV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    ctx: OperationContext = createOperationContext('system'),
+  ): Promise<void> | null {
+    let admitted: Readonly<{
+      lane: ResolvedRfc64CatalogAuthoringLaneV1;
+      origins: readonly Rfc64PreRotationAuthorInventoryV1[];
+    }> | null;
+    try {
+      admitted = this.admitRfc64CatalogReprojectionV1(contextGraphId, ctx);
+    } catch (cause) {
+      this.log.warn(ctx, rfc64ReprojectionWarningV1(contextGraphId, cause));
+      return null;
+    }
+    if (admitted === null) return null;
+    return this.runRfc64CatalogReprojectionV1(admitted.lane, {
+      contextGraphId,
+      ctx,
+      origins: admitted.origins,
+    });
+  }
+
+  /** Fully synchronous admission: who may re-project, and is anything stranded. */
+  private admitRfc64CatalogReprojectionV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    ctx: OperationContext,
+  ): Readonly<{
+    lane: ResolvedRfc64CatalogAuthoringLaneV1;
+    origins: readonly Rfc64PreRotationAuthorInventoryV1[];
+  }> | null {
+    // A replica must never fabricate an author lineage for someone else's
+    // graph. Only the author of record re-projects its own inventory.
+    if (!this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) return null;
+    const persistence = this.rfc64PersistenceV1;
+    const networkId = (this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId) as NetworkIdV1 | undefined;
+    if (persistence === undefined || networkId === undefined) return null;
+    const origins = this.listLocalAgents().flatMap(({ agentAddress }) => {
+      const authorAddress = agentAddress.toLowerCase() as EvmAddressV1;
+      const originScope = Object.freeze({
+        networkId,
+        contextGraphId: contextGraphId as ContextGraphIdV1,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress,
+        era: RFC64_UNREGISTERED_ORIGIN_ERA_V1,
+      }) as SwmAuthorInventoryScopeV1;
+      const originDigest = computeSwmAuthorInventoryScopeDigestV1(originScope);
+      const snapshot = persistence.swmAuthorInventory
+        .readSwmAuthorInventorySnapshotV1(originDigest, authorAddress);
+      return snapshot === null || snapshot.rows.length === 0
+        ? []
+        : [Object.freeze({ authorAddress, originDigest, rows: snapshot.rows })];
+    });
+    // Nothing was ever durably published under the unregistered origin
+    // generation, so this rotation cannot have orphaned a head. Stay silent
+    // rather than warning on every ordinary acceptance.
+    if (origins.length === 0) return null;
+    let lane: ResolvedRfc64CatalogAuthoringLaneV1 | null;
+    try {
+      lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
+    } catch (cause) {
+      this.log.warn(ctx, rfc64ReprojectionWarningV1(contextGraphId, cause));
+      return null;
+    }
+    if (lane === null) {
+      this.log.warn(ctx, rfc64ReprojectionWarningV1(
+        contextGraphId,
+        'the catalog authoring lane is inactive',
+      ));
+      return null;
+    }
+    return Object.freeze({ lane, origins });
+  }
+
+  private async runRfc64CatalogReprojectionV1(
+    this: DKGAgent,
+    lane: ResolvedRfc64CatalogAuthoringLaneV1,
+    params: Readonly<{
+      readonly contextGraphId: string;
+      readonly ctx: OperationContext;
+      readonly origins: readonly Rfc64PreRotationAuthorInventoryV1[];
+    }>,
+  ): Promise<void> {
+    for (const origin of params.origins) {
+      try {
+        await this.carryRfc64AuthorInventoryIntoAcceptedGenerationV1(lane, {
+          contextGraphId: params.contextGraphId,
+          ctx: params.ctx,
+          ...origin,
+        });
+      } catch (cause) {
+        this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
+          params.contextGraphId,
+          cause,
+          origin.authorAddress,
+        ));
+      }
+    }
+  }
+
+  /**
+   * Carry one local author's pre-rotation rows into the accepted generation and
+   * request its projection. A row that cannot cross is reported rather than
+   * dropped: before this existed, the failure mode was entirely invisible.
+   */
+  private async carryRfc64AuthorInventoryIntoAcceptedGenerationV1(
+    this: DKGAgent,
+    lane: ResolvedRfc64CatalogAuthoringLaneV1,
+    params: Readonly<{
+      readonly contextGraphId: string;
+      readonly authorAddress: EvmAddressV1;
+      readonly originDigest: Digest32V1;
+      readonly rows: readonly Readonly<SwmAuthorInventoryRowV1>[];
+      readonly ctx: OperationContext;
+    }>,
+  ): Promise<void> {
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+    const acceptedScope = Object.freeze({
+      ...lane.scopeBase,
+      authorAddress: params.authorAddress,
+    }) as SwmAuthorInventoryScopeV1;
+    const acceptedDigest = computeSwmAuthorInventoryScopeDigestV1(acceptedScope);
+    // The accepted generation still is the unregistered origin: the ordinary
+    // projection already reads exactly these rows and nothing was orphaned.
+    if (acceptedDigest === params.originDigest) return;
+    const acceptedCatalogScope = Object.freeze({
+      ...acceptedScope,
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    const acceptedHead = persistence.inventory.readAppliedCatalogHeadV1(
+      computeAuthorCatalogScopeDigestV1(acceptedCatalogScope),
+      params.authorAddress,
+    );
+    // A catalog lineage can only be opened by an era-zero direct-author genesis
+    // delegation (`produceDirectAuthorCatalogIssuerDelegationV1` fails closed on
+    // `catalog-delegation-scope` otherwise). Registration keeps `ownershipEra`
+    // at zero, so the rotation this repairs can always mint one; an ownership
+    // TRANSFER advances the era, and a catalog for that generation has to be
+    // carried by the RFC-64 transferred-catalog-bundle path instead. Report it
+    // once here rather than handing the supervisor a permanently failing pass.
+    if (acceptedHead === null && acceptedScope.era !== '0') {
+      this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
+        params.contextGraphId,
+        `the accepted authority generation is era ${acceptedScope.era} and has no `
+        + 'catalog lineage; a non-zero era cannot open one with a direct-author '
+        + 'genesis delegation and needs a transferred catalog bundle',
+        params.authorAddress,
+      ));
+      return;
+    }
+    const alreadyCarried = new Set(
+      (persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+        acceptedDigest,
+        params.authorAddress,
+      )?.rows ?? []).map(rfc64AuthorInventoryRowIdentityV1),
+    );
+    for (const row of params.rows) {
+      if (alreadyCarried.has(rfc64AuthorInventoryRowIdentityV1(row))) continue;
+      const carried = await this.recordRfc64SwmAuthorInventoryShadowV1({
+        contextGraphId: params.contextGraphId,
+        assertionCoordinate: row.assertionCoordinate,
+        lifecycleAgentAddress: params.authorAddress,
+        shareOperationId: row.shareOperationId,
+      });
+      if (carried.status === 'applied' || carried.status === 'existing') continue;
+      // A durable VM confirmation retires the SWM-only row deliberately; the
+      // finalized lane owns it and this rotation did not orphan it.
+      if (carried.dormantReason === 'vm-confirmed') continue;
+      this.log.warn(
+        params.ctx,
+        `RFC-64 catalog re-projection could not carry ${row.kaUal} for `
+        + `${params.contextGraphId} / ${params.authorAddress} into the accepted `
+        + `authority generation (${carried.dormantReason ?? carried.status}`
+        + `${carried.error === null ? '' : `: ${carried.error}`}); that row stays `
+        + 'unreachable through the catalog path',
+      );
+    }
+    // Requested even when every row was already carried: a crash between the
+    // inventory carry and its catalog successor would otherwise leave the
+    // accepted generation with rows and no applied head.
+    if (this.requestRfc64SwmCatalogProjectionV1({
+      contextGraphId: params.contextGraphId as ContextGraphIdV1,
+      authorAddress: params.authorAddress,
+      ctx: params.ctx,
+    })) return;
+    this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
+      params.contextGraphId,
+      'the projection supervisor refused the request',
+      params.authorAddress,
+    ));
   }
 
   /**
@@ -523,4 +780,30 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     });
   }
 
+}
+
+/** Exact durable identity of one inventory row, used to skip an already-carried row. */
+function rfc64AuthorInventoryRowIdentityV1(
+  row: Readonly<SwmAuthorInventoryRowV1>,
+): string {
+  return JSON.stringify([
+    row.assertionCoordinate,
+    row.assertionVersion,
+    row.kaUal,
+    row.shareOperationId,
+    row.sealDigest,
+  ]);
+}
+
+/** One observable line for a re-projection that could not run to completion. */
+function rfc64ReprojectionWarningV1(
+  contextGraphId: string,
+  reason: unknown,
+  authorAddress?: EvmAddressV1,
+): string {
+  const detail = reason instanceof Error ? reason.message : String(reason);
+  const author = authorAddress === undefined ? '' : ` / ${authorAddress}`;
+  return `RFC-64 catalog re-projection after an authority rotation did not `
+    + `complete for ${contextGraphId}${author}: ${detail}; catalog rows `
+    + 'published under the previous authority generation stay unreachable';
 }

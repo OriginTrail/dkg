@@ -3206,6 +3206,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
+        // The scope digest keying every applied catalog head -- and the durable
+        // author inventory the catalog is projected from -- includes the
+        // governance tuple, so a generation change strands everything published
+        // under the previous generation behind a digest current-head discovery
+        // can no longer resolve. Re-project the author's own inventory under the
+        // accepted scope. Gated on the same condition as the transport
+        // reconciler above, which also covers the first acceptance in a fresh
+        // process, so a restart between the rotation and the re-projection still
+        // converges (`rfc64CatalogAuthorityGenerationChangedV1` is false when
+        // there is no in-process predecessor). Admission is synchronous and
+        // yields `null` whenever there is nothing stranded, so the ordinary
+        // acceptance never suspends here and the coalesced finalized-authority
+        // batch passes around it keep their exact shape. The promise it does
+        // return never rejects.
+        const reprojection = this
+          .beginRfc64CatalogReprojectionForAuthorityRotationV1(contextGraphId);
+        if (reprojection !== null) await reprojection;
       }
       await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
       return authority;
