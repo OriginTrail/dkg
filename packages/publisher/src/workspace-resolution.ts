@@ -1,6 +1,8 @@
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
-import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
+import {
+  emitSwmHead, emitSwmPublicSlice, emitGraphSwmSnapshotFragment,
+} from './swm-metadata-schema.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -750,13 +752,11 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
     { graph: metaGraph, subject },
     workspaceHeadStoreOptions(params.queryOptions, 'deleteByPattern'),
   );
-  const rows: Quad[] = [
-    { subject, predicate: `${DKG}contentScopeVersion`, object: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), graph: metaGraph },
-    { subject, predicate: `${DKG}kaUal`, object: scope.ual, graph: metaGraph },
-    { subject, predicate: `${DKG}assertionVersion`, object: intLit(BigInt(scope.assertionVersion)), graph: metaGraph },
-    { subject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
-    { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: metaGraph },
-  ];
+  const rows = emitSwmHead(subject, metaGraph, {
+    contentScopeVersion: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), kaUal: scope.ual,
+    assertionVersion: intLit(BigInt(scope.assertionVersion)), assertionGraph,
+    shareOperationId: lit(params.shareOperationId),
+  });
   await params.store.insert(
     rows,
     workspaceHeadStoreOptions(params.queryOptions, 'insert'),
@@ -871,25 +871,16 @@ export async function storeWorkspaceOperationPublicQuads(params: {
         await params.store.insert(rootQuads.map((quad) => ({ ...quad, graph: snapshotGraph! })));
       }
     }
-    snapshotQuads.push(
-      { subject, predicate: ENTITY_SHARE.contextGraphId, object: lit(params.contextGraphId), graph: workspaceMetaGraph },
-      { subject, predicate: ENTITY_SHARE.shareOperationId, object: lit(params.shareOperationId), graph: workspaceMetaGraph },
-      { subject, predicate: ENTITY_SHARE.publicSliceRootEntity, object: root, graph: workspaceMetaGraph },
-      { subject, predicate: ENTITY_SHARE.publicQuadsDigest, object: lit(digest), graph: workspaceMetaGraph },
-      { subject, predicate: ENTITY_SHARE.publicQuadsCount, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
-      // Peer-bound readers use the dedicated field; attribution uses the durable agent DID when known.
-      { subject, predicate: ENTITY_SHARE.publisherPeerId, object: lit(publisherPeerId), graph: workspaceMetaGraph },
-      { subject, predicate: ENTITY_SHARE.wasAttributedTo, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
-      { subject, predicate: ENTITY_SHARE.publishedAt, object: dateLit(timestamp), graph: workspaceMetaGraph },
-    );
-    if (snapshotGraph) snapshotQuads.push({ subject, predicate: ENTITY_SHARE.publicSnapshotGraph, object: snapshotGraph, graph: workspaceMetaGraph });
-    if (subGraphName) snapshotQuads.push({ subject, predicate: ENTITY_SHARE.subGraphName, object: lit(subGraphName), graph: workspaceMetaGraph });
-    // RFC ka-metadata-trim Phase 2: `dkg:publicSnapshotRef` is no longer
-    // written — `FileWorkspacePublicSnapshotStore.putSnapshot` returns
-    // `ref === digest`, so the row was byte-identical to
-    // `dkg:publicQuadsDigest`. A store-backed snapshot row is now identified
-    // by "digest present AND no `dkg:publicSnapshotGraph` row"; readers are
-    // read-both (an explicit legacy ref row wins when present).
+    snapshotQuads.push(...emitSwmPublicSlice(subject, workspaceMetaGraph, {
+      contextGraphId: lit(params.contextGraphId), shareOperationId: lit(params.shareOperationId),
+      publicSliceRootEntity: root, publicQuadsDigest: lit(digest), publicQuadsCount: intLit(rootQuads.length),
+      publisherPeerId: lit(publisherPeerId),
+      wasAttributedTo: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId),
+      publishedAt: dateLit(timestamp),
+      // Current store-backed snapshots use digest as the reference; legacy refs remain readable.
+      ...(snapshotGraph ? { publicSnapshotGraph: snapshotGraph } : {}),
+      ...(subGraphName ? { subGraphName: lit(subGraphName) } : {}),
+    }));
   }
   await params.store.insert(snapshotQuads);
 }
@@ -967,20 +958,10 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
     },
     workspaceMetaGraph,
   );
-  metadata.push({
-    subject: operationSubject,
-    predicate: `${DKG}publicQuadsDigest`,
-    object: lit(digest),
-    graph: workspaceMetaGraph,
-  });
-  if (snapshotGraph) {
-    metadata.push({
-      subject: operationSubject,
-      predicate: `${DKG}publicSnapshotGraph`,
-      object: snapshotGraph,
-      graph: workspaceMetaGraph,
-    });
-  }
+  metadata.push(...emitGraphSwmSnapshotFragment(operationSubject, workspaceMetaGraph, {
+    publicQuadsDigest: lit(digest),
+    ...(snapshotGraph ? { publicSnapshotGraph: snapshotGraph } : {}),
+  }));
   await params.store.insert(metadata);
 }
 
