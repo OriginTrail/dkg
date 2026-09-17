@@ -109,16 +109,17 @@ async function fetchContextGraphPages(
       projection: 'summary',
       ...(cursor === undefined ? {} : { cursor }),
     });
-    return fetchWithTimeout(`${BASE}/api/context-graph/list?${query}`, {
+    const response = await fetchWithTimeout(`${BASE}/api/context-graph/list?${query}`, {
       headers: {
         ...authorization.headers,
         ...(etag === undefined ? {} : { 'If-None-Match': etag }),
       },
     }, CONTEXT_GRAPH_LOAD_TIMEOUT_MS);
+    if (!authorizationIsCurrent(authorization)) throw new AuthorizationChangedError();
+    return response;
   };
 
   let response = await requestPage(undefined, cached?.etag);
-  if (!authorizationIsCurrent(authorization)) throw new AuthorizationChangedError();
   if (response.status === 304) {
     if (!cached) throw new Error('Context-graph list returned an unexpected 304');
     return { kind: 'not-modified', view: cached };

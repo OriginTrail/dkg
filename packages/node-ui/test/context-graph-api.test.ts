@@ -325,6 +325,52 @@ describe('context graph API', () => {
     ]);
   });
 
+  it('discards a failed continuation when the bearer changes in flight', async () => {
+    if (typeof window === 'undefined') (globalThis as any).window = {};
+    window.__DKG_TOKEN__ = 'token-a';
+    responseOverrides.push(
+      {
+        match: (url) => !url.includes('cursor='),
+        status: 200,
+        body: {
+          contextGraphs: [contextGraphSummary('private-a')],
+          nextCursor: 'private-a-page-2',
+        },
+        headers: { ETag: '"token-a"' },
+      },
+      {
+        match: (url) => url.includes('cursor=private-a-page-2'),
+        status: 401,
+        body: { error: 'old token expired' },
+        delayMs: 50,
+      },
+      {
+        match: (url) => !url.includes('cursor='),
+        status: 200,
+        body: { contextGraphs: [contextGraphSummary('visible-b')] },
+        headers: { ETag: '"token-b"' },
+      },
+    );
+
+    const result = fetchContextGraphs();
+    while (requestLog.length < 2) await new Promise((resolveRequest) => setTimeout(resolveRequest, 0));
+    window.__DKG_TOKEN__ = 'token-b';
+
+    await expect(result).resolves.toEqual({
+      contextGraphs: [contextGraphSummary('visible-b')],
+    });
+    expect(requestLog.map((entry) => entry.headers.authorization)).toEqual([
+      'Bearer token-a',
+      'Bearer token-a',
+      'Bearer token-b',
+    ]);
+    expect(requestLog.map((entry) => entry.url)).toEqual([
+      '/api/context-graph/list?limit=100&projection=summary',
+      '/api/context-graph/list?limit=100&cursor=private-a-page-2&projection=summary',
+      '/api/context-graph/list?limit=100&projection=summary',
+    ]);
+  });
+
   it('invalidates a delayed conditional walk across an A to B to A change', async () => {
     if (typeof window === 'undefined') (globalThis as any).window = {};
     window.__DKG_TOKEN__ = 'token-a';
