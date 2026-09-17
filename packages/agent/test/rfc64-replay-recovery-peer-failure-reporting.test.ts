@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  assertCanonicalGraphScopedAuthorSealV1,
+  buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   type AuthorCatalogScopeV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from '../src/rfc64/catalog-peers-v1.js';
@@ -25,6 +30,7 @@ import {
   RFC64_ROLLOUT_AUTHOR as AUTHOR,
   RFC64_ROLLOUT_AUTHOR_WALLET as AUTHOR_WALLET,
   RFC64_ROLLOUT_CONTEXT_GRAPH_ID as CONTEXT_GRAPH_ID,
+  RFC64_ROLLOUT_DEPLOYMENT as DEPLOYMENT,
   RFC64_ROLLOUT_NETWORK_ID as NETWORK_ID,
   rfc64RolloutActivation as activation,
 } from './_helpers/rfc64-rollout-agent-harness.js';
@@ -578,6 +584,50 @@ afterEach(async () => {
 const GENESIS_ISSUED_AT = '1773900000000' as TimestampMsV1;
 const DELEGATION_EFFECTIVE_AT = '1773899999000' as TimestampMsV1;
 const DELEGATION_EXPIRES_AT = '1893456000000' as TimestampMsV1;
+const SUCCESSOR_ISSUED_AT = '1773900001000' as TimestampMsV1;
+const ASSERTION_ROOT = (
+  '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f'
+) as Digest32V1;
+const PROJECTION = new TextEncoder().encode(
+  '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+  + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
+);
+
+async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
+  const kaNumber = 2647n;
+  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
+  const typedData = buildAuthorAttestationTypedData({
+    chainId: BigInt(DEPLOYMENT.assertedAtChainId),
+    kav10Address: DEPLOYMENT.assertedAtKav10Address,
+    merkleRoot: ethers.getBytes(ASSERTION_ROOT),
+    authorAddress: AUTHOR,
+    reservedKaId: BigInt(kaId),
+  });
+  const signature = ethers.Signature.from(await AUTHOR_WALLET.signTypedData(
+    typedData.domain,
+    typedData.types,
+    typedData.message,
+  ));
+  const seal = {
+    assertionMerkleRoot: ASSERTION_ROOT,
+    authorAddress: AUTHOR,
+    authorAttestationR: signature.r,
+    authorAttestationVS: signature.yParityAndS,
+    authorSchemeVersion: '1',
+    assertedAtChainId: DEPLOYMENT.assertedAtChainId,
+    assertedAtKav10Address: DEPLOYMENT.assertedAtKav10Address,
+    reservedKaId: kaId,
+    assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
+    contentScopeVersion: '2',
+    kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
+    assertionVersion: '1',
+    publicTripleCount: '2',
+    privateTripleCount: '0',
+    privateMerkleRoot: null,
+  } as unknown as CanonicalGraphScopedAuthorSealV1;
+  assertCanonicalGraphScopedAuthorSealV1(seal);
+  return seal;
+}
 
 /** Give the edge one durable, self-consistent applied head for the rollout CG. */
 async function applyConsistentGenesisHead(edge: Awaited<ReturnType<typeof startAgent>>) {
@@ -748,6 +798,53 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       providerHealth: expect.objectContaining({ unresolvedReplayPeers: 1 }),
     });
     expect(status.stableReason).not.toBe('catalog-replay-incomplete');
+  });
+
+  it('reports a verified promised row missing after its head announcement was lost', async () => {
+    const edge = await startAgent({
+      name: 'replay-promised-row-missing',
+      activation: activation('catalog'),
+    });
+    const genesis = await applyConsistentGenesisHead(edge);
+    // The successor is durable but deliberately has no announcement recipient,
+    // reproducing the post-denial state: the replica still has only genesis.
+    const successor = await edge.publishOpenAuthorCatalogSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assertionCoordinate: 'replay-promised-missing-row' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(),
+      deployment: DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [],
+    });
+    expect(successor.inventoryRowCount).toBe('1');
+
+    const providerPeer = '12D3KooWReplayPromisedMissingRow';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => providerPeer },
+    ] as never);
+    vi.spyOn(replayService(edge), 'requestCatalogHeadReplay').mockResolvedValue(
+      Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: Object.freeze([successor.announcement]),
+      }),
+    );
+
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(await readStatus(edge)).toMatchObject({
+      phase: 'blocked',
+      stableReason: 'catalog-replay-incomplete',
+      expectedRowCount: '1',
+      appliedRowCount: '0',
+      missingRowCount: '1',
+    });
   });
 
   it('still blocks a Context Graph whose provider promises a head this node never applied', async () => {

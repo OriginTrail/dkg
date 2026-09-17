@@ -260,6 +260,45 @@ function groupRfc64OperationalAppliedHeadsV1(
   return byContextGraph;
 }
 
+async function loadRfc64OperationalPromisedRowCountsV1(
+  persistence: Rfc64PersistenceV1,
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+): Promise<ReadonlyMap<string, string | null>> {
+  const uniqueTargets = new Map(targets.map((target) => [
+    rfc64CatalogTargetExactIdentityKeyV1(target),
+    target,
+  ]));
+  const loaded = await mapWithConcurrency(
+    [...uniqueTargets],
+    RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
+    async ([identity, target]): Promise<readonly [string, string | null]> => {
+      const stored = await persistence.controlObjects.getVerifiedObject({
+        objectDigest: target.catalogHeadObjectDigest,
+        signatureVariantDigest: target.signatureVariantDigest,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      }).catch(() => null);
+      if (stored === null) return [identity, null] as const;
+      try {
+        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+        const payload = stored.envelope.payload;
+        if (
+          stored.envelope.objectDigest !== target.catalogHeadObjectDigest
+          || payload.networkId !== target.networkId
+          || payload.contextGraphId !== target.contextGraphId
+          || payload.subGraphName !== target.subGraphName
+          || payload.authorAddress !== target.authorAddress
+          || payload.era !== target.catalogEra
+          || payload.version !== target.catalogVersion
+        ) return [identity, null] as const;
+        return [identity, payload.totalRows] as const;
+      } catch {
+        return [identity, null] as const;
+      }
+    },
+  );
+  return new Map(loaded);
+}
+
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -1261,6 +1300,70 @@ function sumDecimalCountsV1(values: readonly string[]): string {
   return values.reduce((sum, value) => sum + BigInt(value), 0n).toString(10);
 }
 
+interface Rfc64OperationalRowProjectionV1 {
+  readonly expectedRowCount: string | null;
+  readonly missingRowCount: string | null;
+}
+
+function projectRfc64OperationalRowCountsV1(
+  heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+  promisedRowCounts: ReadonlyMap<string, string | null>,
+): Readonly<Rfc64OperationalRowProjectionV1> {
+  if (heads.length === 0 && targets.length === 0) {
+    return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+  }
+  const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
+  const expectedByScope = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, {
+    catalogVersion: snapshot.catalogVersion,
+    catalogHeadObjectDigest: snapshot.currentCatalogHeadDigest,
+    rowCount: snapshot.inventoryRowCount as string | null,
+    target: null as Rfc64PublicCatalogHeadAnnouncementV1 | null,
+  }]));
+  let ambiguous = false;
+  for (const target of targets) {
+    const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
+    const current = expectedByScope.get(scopeKey);
+    if (current === undefined || BigInt(target.catalogVersion) > BigInt(current.catalogVersion)) {
+      expectedByScope.set(scopeKey, {
+        catalogVersion: target.catalogVersion,
+        catalogHeadObjectDigest: target.catalogHeadObjectDigest,
+        rowCount: null,
+        target,
+      });
+    } else if (
+      target.catalogVersion === current.catalogVersion
+      && target.catalogHeadObjectDigest !== current.catalogHeadObjectDigest
+    ) {
+      ambiguous = true;
+    }
+  }
+  if (ambiguous) return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+
+  let expected = 0n;
+  let missing = 0n;
+  for (const [scopeKey, projected] of expectedByScope) {
+    const targetRowCount = projected.target === null
+      ? projected.rowCount
+      : promisedRowCounts.get(
+          rfc64CatalogTargetExactIdentityKeyV1(projected.target),
+        ) ?? null;
+    if (targetRowCount === null) {
+      return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+    }
+    const expectedForScope = BigInt(targetRowCount);
+    const appliedForScope = BigInt(
+      appliedByScope.get(scopeKey)?.snapshot.inventoryRowCount ?? '0',
+    );
+    expected += expectedForScope;
+    if (expectedForScope > appliedForScope) missing += expectedForScope - appliedForScope;
+  }
+  return Object.freeze({
+    expectedRowCount: expected.toString(10),
+    missingRowCount: missing.toString(10),
+  });
+}
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Stable recovery capabilities are captured once per agent-owned runtime. */
   private rfc64CatalogReplayRecoveryRuntimeV1(
@@ -1505,6 +1608,34 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await loadRfc64OperationalAppliedHeadsV1(persistence),
       );
     }
+    const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
+    const targetsByContextGraph = new Map(selections.map((selection) => [
+      selection.contextGraphId,
+      targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [],
+    ]));
+    const promisedTargetsByContextGraph = new Map(selections.map((selection) => {
+      const accepted = service !== undefined && networkId !== undefined
+        ? service.acceptedPolicySnapshot(
+          networkId,
+          selection.contextGraphId as ContextGraphIdV1,
+        )
+        : null;
+      return [
+        selection.contextGraphId,
+        accepted === null
+          ? null
+          : replayRecovery.promisedTargets(selection.contextGraphId, accepted.policyDigest),
+      ] as const;
+    }));
+    const operationalTargets = [...new Map(
+      selections.flatMap((selection) => [
+        ...targetsByContextGraph.get(selection.contextGraphId) ?? [],
+        ...promisedTargetsByContextGraph.get(selection.contextGraphId) ?? [],
+      ]).map((target) => [rfc64CatalogTargetExactIdentityKeyV1(target), target]),
+    ).values()];
+    const promisedRowCounts = persistence === undefined
+      ? new Map<string, string | null>()
+      : await loadRfc64OperationalPromisedRowCountsV1(persistence, operationalTargets);
     const replaySnapshotUnstable = replaySnapshotRevision !== replayRecovery.revision;
     const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
     const receiverStats = service?.stats().receiver;
@@ -1532,8 +1663,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const replayUnverified = currentReplayProgress?.unverified === true
         && heads.length > 0;
       const replayUnsettled = replayActive || replayFailed || replayUnverified;
-      const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
-      const targets = targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [];
+      const targets = targetsByContextGraph.get(selection.contextGraphId) ?? [];
+      const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
+      const authoritativeTargets = [...new Map([
+        ...targets,
+        ...promisedTargets ?? [],
+      ].map((target) => [rfc64CatalogTargetExactIdentityKeyV1(target), target])).values()];
       const targetCapacityExceeded = targetTracker
         ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
       const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
@@ -1568,6 +1703,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const rowCount = heads.length === 0
         ? null
         : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
+      const rowProjectionUnavailable = targetCapacityExceeded
+        || replayActive
+        || replayUnverified
+        || (replayFailed && promisedTargets === null);
+      const rowProjection = rowProjectionUnavailable
+        ? Object.freeze({ expectedRowCount: null, missingRowCount: null })
+        : projectRfc64OperationalRowCountsV1(
+          heads,
+          authoritativeTargets,
+          promisedRowCounts,
+        );
       const appliedCatalogVersion = heads.length === 0
         ? null
         : heads.reduce((highest, { snapshot }) => (
@@ -1656,6 +1802,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               ? 'applying'
             : legacyReadOnlyCount > 0
               ? 'known-incomplete'
+            : rowProjection.missingRowCount !== null
+              && BigInt(rowProjection.missingRowCount) > 0n
+              ? 'known-incomplete'
             : heads.length === 0
               ? 'bootstrapping'
             : replayUnverified
@@ -1690,18 +1839,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ? null
             : inventoryDigest,
         appliedInventoryDigest: inventoryDigest,
-        expectedRowCount:
-          targetCapacityExceeded || replayUnsettled || pendingTargets.length > 0
-            ? null
-            : rowCount,
+        expectedRowCount: rowProjection.expectedRowCount,
         appliedRowCount: rowCount,
-        missingRowCount:
-          targetCapacityExceeded
-          || replayUnsettled
-          || pendingTargets.length > 0
-          || rowCount === null
-            ? null
-            : '0',
+        missingRowCount: rowProjection.missingRowCount,
         legacyReadOnlyCount,
         catalogVersion,
         authorHeadCount: heads.length,
