@@ -146,6 +146,11 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       // the current head. Larger values pin head-depth+1. Using the RPC-specific `finalized` tag
       // here made one-block receipt finality ineffective because named-KA recovery still waited
       // many minutes for the endpoint's consensus finality marker to advance.
+      // Deliberately NOT routed through `resolveEvmFinalityAnchorBlockV1`: this
+      // read pins by NUMBER only and never needs the anchor block's hash, so the
+      // shared resolver would add a `getBlock` round-trip for a field nothing
+      // here consumes. The arithmetic — the part that must stay singular — is
+      // still `confirmedStateBlockAtHead`, the same function the resolver uses.
       const latestBlockNumber = await provider.getBlockNumber();
       if (!Number.isSafeInteger(latestBlockNumber) || latestBlockNumber < 0) return null;
       const blockNumber = confirmedStateBlockAtHead(

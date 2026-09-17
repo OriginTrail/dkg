@@ -3600,45 +3600,62 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader === undefined) return { kind: 'legacy-current' };
     try {
-      const resolution = await raceVmReconcileAbort(
-        this.resolveFinalizedContextGraphAuthorityTargetsV1([localCgId], { signal }),
+      // Reconciliation reads the same finalized authority index as the catalog
+      // refresh pass, so it shares the one governor rather than opening a
+      // second ungoverned lane into the pool. A reconcile deferred by an open
+      // circuit is retried by the queue's own cadence, so failing closed here
+      // costs a pass, not a binding.
+      return await this.rfc64AuthorityReadCoordinatorV1.run(
         signal,
+        async (readSignal, evidence) => {
+          const resolution = await raceVmReconcileAbort(
+            this.resolveFinalizedContextGraphAuthorityTargetsV1(
+              [localCgId],
+              { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            ),
+            signal,
+          );
+          if (!isCurrent()) throw new VmReconcileQueueClosedError();
+          if (resolution.kind === 'legacy-current') return resolution;
+          const target = resolution.targets.get(localCgId);
+          if (target === undefined) return { kind: 'absent' as const };
+          let snapshot: ContextGraphAuthoritySnapshot;
+          if (target.kind === 'resolved-snapshot') {
+            snapshot = target.finalizedSnapshot;
+          } else {
+            if (this.contextGraphAuthorityReaderCapability.status !== 'supported') {
+              throw new Error('Finalized VM authority target has no snapshot reader');
+            }
+            evidence.markRpcAttempt();
+            snapshot = await raceVmReconcileAbort(
+              this.contextGraphAuthorityReaderCapability.reader
+                .getContextGraphAuthoritySnapshot(
+                  target.expectedOnChainId,
+                  { signal: readSignal },
+                ),
+              signal,
+            );
+          }
+          if (!isCurrent()) throw new VmReconcileQueueClosedError();
+          const expectedNameHash = this.contextGraphWireId(target.expectedNameHash);
+          const expectedOnChainId = target.expectedOnChainId.toString(10);
+          if (
+            target.expectedOnChainId <= 0n
+            || target.expectedOnChainId > ethers.MaxUint256
+            || snapshot.active !== true
+            || snapshot.contextGraphId !== expectedOnChainId
+            || this.contextGraphWireId(snapshot.nameHash) !== expectedNameHash
+          ) {
+            throw new Error(`Invalid finalized VM authority evidence for "${localCgId}"`);
+          }
+          return {
+            kind: 'resolved' as const,
+            nameHash: expectedNameHash,
+            onChainId: expectedOnChainId,
+            onChainCgId: target.expectedOnChainId,
+          };
+        },
       );
-      if (!isCurrent()) throw new VmReconcileQueueClosedError();
-      if (resolution.kind === 'legacy-current') return resolution;
-      const target = resolution.targets.get(localCgId);
-      if (target === undefined) return { kind: 'absent' };
-      let snapshot: ContextGraphAuthoritySnapshot;
-      if (target.kind === 'resolved-snapshot') {
-        snapshot = target.finalizedSnapshot;
-      } else {
-        if (this.contextGraphAuthorityReaderCapability.status !== 'supported') {
-          throw new Error('Finalized VM authority target has no snapshot reader');
-        }
-        snapshot = await raceVmReconcileAbort(
-          this.contextGraphAuthorityReaderCapability.reader
-            .getContextGraphAuthoritySnapshot(target.expectedOnChainId, { signal }),
-          signal,
-        );
-      }
-      if (!isCurrent()) throw new VmReconcileQueueClosedError();
-      const expectedNameHash = this.contextGraphWireId(target.expectedNameHash);
-      const expectedOnChainId = target.expectedOnChainId.toString(10);
-      if (
-        target.expectedOnChainId <= 0n
-        || target.expectedOnChainId > ethers.MaxUint256
-        || snapshot.active !== true
-        || snapshot.contextGraphId !== expectedOnChainId
-        || this.contextGraphWireId(snapshot.nameHash) !== expectedNameHash
-      ) {
-        throw new Error(`Invalid finalized VM authority evidence for "${localCgId}"`);
-      }
-      return {
-        kind: 'resolved',
-        nameHash: expectedNameHash,
-        onChainId: expectedOnChainId,
-        onChainCgId: target.expectedOnChainId,
-      };
     } catch (err) {
       if (err instanceof VmReconcileQueueClosedError || signal?.aborted || !isCurrent()) {
         throw new VmReconcileQueueClosedError();

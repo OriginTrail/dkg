@@ -86,6 +86,13 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // Pure EVM bookkeeping surfaces that the mock has no reason to emulate.
   'getContract',            // resolves a Contract from the Hub — not applicable off-chain
   'getBlockNumber',         // the mock exposes its own block counter differently (advanceBlock)
+  // `getFinalityConfirmations` reports the depth THIS adapter resolved from
+  // `chain.finalityConfirmations` so callers holding a pre-built adapter stop
+  // re-deriving it from a `chainConfig` that may be ignored. It is optional on
+  // the ChainAdapter interface precisely so an adapter with no chain has NO
+  // OPINION: the mock returning a number here would override the operator's
+  // configured value in mock mode rather than deferring to it.
+  'getFinalityConfirmations',
   'getProvider',            // returns a JsonRpcProvider; mock has none
   'getReadProvider',        // @deprecated bare-primary accessor; mock has no RPC provider
   'getSignerAddress',       // mock exposes `signerAddress` as a field
