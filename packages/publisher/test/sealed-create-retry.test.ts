@@ -61,7 +61,11 @@ describe('sealed Knowledge Asset create retry', () => {
     const { publisher, store } = await sealedDraft();
     const before = await snapshot(store);
     const graph = await publisher.wmGraphUri(CG, AUTHOR, NAME);
-    expect(await publisher.assertionCreate(CG, NAME, AUTHOR)).toBe(graph);
+    const dispositions: string[] = [];
+    expect(await publisher.assertionCreate(CG, NAME, AUTHOR, undefined, {
+      onDisposition: (disposition) => dispositions.push(disposition),
+    })).toBe(graph);
+    expect(dispositions).toEqual(['sealed-noop']);
     expect(await snapshot(store)).toBe(before);
   });
 
@@ -107,7 +111,11 @@ describe('sealed Knowledge Asset create retry', () => {
 
   it('keeps unrelated asset creation writable', async () => {
     const { publisher } = await sealedDraft();
-    await publisher.assertionCreate(CG, 'another-asset', AUTHOR);
+    const dispositions: string[] = [];
+    await publisher.assertionCreate(CG, 'another-asset', AUTHOR, undefined, {
+      onDisposition: (disposition) => dispositions.push(disposition),
+    });
+    expect(dispositions).toEqual(['created']);
     await publisher.assertionWrite(CG, 'another-asset', AUTHOR, [quad('new')]);
     expect(await publisher.assertionQuery(CG, 'another-asset', AUTHOR)).toHaveLength(1);
   });

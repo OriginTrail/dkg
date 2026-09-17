@@ -3484,13 +3484,24 @@ export class DKGAgent extends DKGAgentBase {
       return { author, allocateKaNumber };
     };
     return {
-      async create(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<string> {
+      async create(
+        contextGraphId: string,
+        name: string,
+        opts?: {
+          subGraphName?: string;
+          agentAddress?: string;
+          onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
+        },
+      ): Promise<string> {
         // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
         // KA's identity from the first write. assertionCreate only allocates when the
         // draft has no preserved kaId (the re-open guard lives there), so passing the
         // callback is safe — re-opens reuse the preserved identity.
         const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
-        return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, { allocateKaNumber });
+        return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, {
+          allocateKaNumber,
+          onDisposition: opts?.onDisposition,
+        });
       },
 
       async migrateLegacyRootScopedWorkingMemory(

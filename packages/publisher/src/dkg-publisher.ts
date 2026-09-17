@@ -7705,7 +7705,10 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+    opts?: {
+      allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+      onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
+    },
   ): Promise<string> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     return this.withAssertionLifecycleWriteLock(
@@ -7726,15 +7729,18 @@ export class DKGPublisher implements Publisher {
         // clears the active seal before calling assertionCreateUnlocked.
         if (await this.hasActiveAssertionSeal(contextGraphId, name, agentAddress, subGraphName)) {
           await this.assertGraphScopedLifecycleWritable(contextGraphId, agentAddress, name, subGraphName);
+          opts?.onDisposition?.('sealed-noop');
           return this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
         }
-        return this.assertionCreateUnlocked(
+        const assertionUri = await this.assertionCreateUnlocked(
           contextGraphId,
           name,
           agentAddress,
           subGraphName,
           opts,
         );
+        opts?.onDisposition?.('created');
+        return assertionUri;
       },
     );
   }
@@ -7744,7 +7750,10 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
-    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+    opts?: {
+      allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+      onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
+    },
   ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 

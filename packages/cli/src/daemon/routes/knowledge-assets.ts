@@ -1086,8 +1086,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // get-or-create, so detect prior existence up front (cheap descriptor
       // read) and surface it for idempotent callers.
       let alreadyExists = false;
+      let prior: Awaited<ReturnType<typeof agent.assertion.history>> | null = null;
       try {
-        const prior = await agent.assertion.history(resolvedContextGraphId, name, { subGraphName, ...atomicAuthorLane });
+        prior = await agent.assertion.history(resolvedContextGraphId, name, { subGraphName, ...atomicAuthorLane });
         alreadyExists = prior != null;
       } catch {
         /* treat a failed lookup as "does not exist yet" */
@@ -1097,28 +1098,42 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // finalize throws KaIdNamespaceMismatch. So stamp under the same resolved
       // author the finalize uses: the body author, else the token's agent (else
       // undefined → the daemon's default agent for node/admin tokens).
+      let createDisposition: 'created' | 'sealed-noop' | undefined;
       const assertionUri = await agent.assertion.create(resolvedContextGraphId, name, {
         subGraphName,
         ...(createAuthorAgentAddress ? { agentAddress: createAuthorAgentAddress } : {}),
+        onDisposition: (disposition) => { createDisposition = disposition; },
       });
-      // `assertion.create` is a read-only get-or-create when an active seal is
-      // present. Re-read the exact descriptor so the response and activity
-      // stream describe the durable state rather than inventing a draft-open
-      // transition that did not happen.
-      const afterCreate = await agent.assertion.history(resolvedContextGraphId, name, {
-        subGraphName,
-        ...atomicAuthorLane,
-      });
-      if (!afterCreate) {
-        throw new Error(`Knowledge Asset "${name}" was not readable after creation`);
+      // The engine reports whether create opened a draft or observed an active
+      // seal while it still holds the lifecycle lock. That closes the race
+      // between the pre-read and create without adding an unconditional second
+      // store read: a successful create must remain successful when an optional
+      // store tail is unavailable after the mutation.
+      let sealedStatus = typeof prior?.status === 'string' && prior.status !== 'draft-open'
+        ? prior.status
+        : undefined;
+      const sealedCreateNoop = createDisposition === 'sealed-noop'
+        || (createDisposition === undefined && sealedStatus !== undefined);
+      // Only the rare case where another request seals between the pre-read and
+      // the locked create needs a second descriptor read to recover its exact
+      // durable status. Legacy/fake agents do not report a disposition and keep
+      // the pre-existing single-read behavior.
+      if (createDisposition === 'sealed-noop' && sealedStatus === undefined) {
+        const afterCreate = await agent.assertion.history(resolvedContextGraphId, name, {
+          subGraphName,
+          ...atomicAuthorLane,
+        });
+        if (!afterCreate || afterCreate.status === 'draft-open') {
+          throw new Error(`Knowledge Asset "${name}" was not readable as sealed after creation`);
+        }
+        sealedStatus = afterCreate.status;
       }
-      const sealedCreateNoop = afterCreate.status !== "draft-open";
       if (sealedCreateNoop) alreadyExists = true;
       const result: Record<string, unknown> = {
         name,
         assertionUri,
         alreadyExists,
-        status: afterCreate.status,
+        status: sealedStatus ?? 'draft-open',
       };
       if (!sealedCreateNoop) {
         emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_created", source: "api", counts: { triples: 0 } });
