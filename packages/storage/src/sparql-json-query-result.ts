@@ -25,6 +25,20 @@ type AdapterSparqlJsonTerm =
 const SPARQL_JSON_BLANK_NODE_LABEL =
   /^[\p{L}\p{Nl}_0-9][\p{L}\p{Nl}\p{M}\p{Nd}_.\-\u00B7\u203F-\u2040]*$/u;
 const SPARQL_JSON_LANGUAGE_TAG = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/u;
+const MAX_CACHED_IRI_VARIABLES = 128;
+const MAX_CACHED_IRI_LENGTH = 1024;
+type IriValidator = (value: string) => boolean;
+
+/** One last successful value per column, never a growing per-row/global cache. */
+function createIriValidator(): IriValidator {
+  let lastValidIri: string | undefined;
+  return value => {
+    if (value === lastValidIri) return true;
+    const valid = isSafeIri(value);
+    if (valid && value.length <= MAX_CACHED_IRI_LENGTH) lastValidIri = value;
+    return valid;
+  };
+}
 
 interface ResponseDataReader {
   read: typeof ownDataValue;
@@ -183,11 +197,17 @@ function parseSelectResponse(
   if (new Set(variables).size !== variables.length) {
     malformed('SPARQL JSON head.vars must not contain duplicates');
   }
+  // Graphs, predicates and datatypes commonly repeat in consecutive rows.
+  // Cap both column count and retained string length; uncached values still
+  // receive the exact same validator. Term shape is checked before any hit.
   const results = ownDataRecord(response, 'results', 'SPARQL JSON response', reader);
   const rows = reader.array(
     reader.read(results, 'bindings', 'SPARQL JSON results'),
     'SPARQL JSON results.bindings',
   );
+  const iriValidators = rows.length > 1
+    ? variables.slice(0, MAX_CACHED_IRI_VARIABLES).map(createIriValidator)
+    : [];
   const bindings = rows.map((input, rowIndex) => {
     if (!isOrdinaryDataRecord(input)) {
       malformed(`SPARQL JSON binding ${rowIndex} must be a plain object`);
@@ -199,10 +219,13 @@ function parseSelectResponse(
       }
     }
     const binding: Record<string, string> = {};
-    for (const variable of variables) {
+    for (let variableIndex = 0; variableIndex < variables.length; variableIndex++) {
+      const variable = variables[variableIndex];
       if (!Object.prototype.hasOwnProperty.call(row, variable)) continue;
       const term = reader.read(row, variable, `SPARQL JSON binding ${rowIndex}`);
-      binding[variable] = formatSparqlJsonTerm(snapshotTerm(term, rowIndex, variable, reader));
+      binding[variable] = formatSparqlJsonTerm(snapshotTerm(
+        term, rowIndex, variable, reader, iriValidators[variableIndex] ?? isSafeIri,
+      ));
     }
     return binding;
   });
@@ -229,7 +252,7 @@ function denseArray(input: unknown, label: string): unknown[] {
   return [...snapshotDenseDataArray(input, label, malformed)];
 }
 
-function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader): AdapterSparqlJsonTerm {
+function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: IriValidator): AdapterSparqlJsonTerm {
   const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
   if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain term object`);
   const term = input as Record<string, unknown>;
@@ -240,7 +263,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
   }
   if (type === 'uri') {
     reader.exact(term, ['type', 'value'], label, malformed);
-    if (!isSafeIri(value)) malformed(`${label} URI value must be an absolute safe IRI`);
+    if (!validateIri(value)) malformed(`${label} URI value must be an absolute safe IRI`);
     return { type, value };
   }
   if (type === 'bnode') {
@@ -280,7 +303,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
   }
   if (hasDatatype) {
     const datatype = reader.read(term, 'datatype', label);
-    if (typeof datatype !== 'string' || !isSafeIri(datatype)) {
+    if (typeof datatype !== 'string' || !validateIri(datatype)) {
       malformed(`${label} datatype must be an absolute safe IRI`);
     }
     return { type, value, datatype };
