@@ -260,8 +260,15 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     await handleMemoryRoutes(ctx);
 
     expect(res.statusCode).toBe(503);
-    expect(JSON.parse(res.body).retryable).toBe(true);
-    expect(JSON.parse(res.body).error).toContain('registered-authority-error');
+    const body = JSON.parse(res.body);
+    expect(body.retryable).toBe(true);
+    expect(body.code).toBe('CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE');
+    expect(res.headers['Retry-After']).toBe('3');
+    // Per issue #2641 / PR #2649: an outage response must not disclose the CG
+    // id, the authority source or the internal reason — otherwise the 503
+    // becomes the enumeration oracle the denial path avoids.
+    expect(res.body).not.toContain('registered-authority-error');
+    expect(res.body).not.toContain('cg1');
     expect(probe.storeQueried).toBe(false);
     expect(probe.vectorSearched).toBe(false);
   });
