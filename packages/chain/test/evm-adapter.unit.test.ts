@@ -15,6 +15,7 @@ import {
   InsufficientPublisherFundsError,
   PublisherNotAuthorizedError,
   isNoFundedPublisherWalletError,
+  isPublisherNotAuthorizedError,
   isTooLowAllowanceError,
   resolveRpcUrls,
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
@@ -1049,6 +1050,37 @@ describe('isNoFundedPublisherWalletError (code-first + shared message marker)', 
     expect(isNoFundedPublisherWalletError(new Error('insufficient funds for gas'))).toBe(false);
     expect(isNoFundedPublisherWalletError(undefined)).toBe(false);
     expect(isNoFundedPublisherWalletError(null)).toBe(false);
+  });
+});
+
+describe('isPublisherNotAuthorizedError (code-first + shared message marker) [GH#2648]', () => {
+  const ADDR = '0xd896f0E677b5648cd727794C5e0334966264b40F';
+
+  it('matches the typed error thrown by the adapter', () => {
+    expect(isPublisherNotAuthorizedError(new PublisherNotAuthorizedError(ADDR, 7n))).toBe(true);
+  });
+
+  it('matches the bare structured code', () => {
+    expect(isPublisherNotAuthorizedError({ code: 'PUBLISHER_NOT_AUTHORIZED' })).toBe(true);
+  });
+
+  it('matches the shared message marker when a wrapper dropped .code', () => {
+    // The re-wrap path is the one that matters: an Error rebuilt across a transport keeps the
+    // text and loses the class. Built from the dkg-core formatter, so a re-wording that broke
+    // this classification would break this assertion first.
+    const rewrapped = new Error(`publish failed: ${new PublisherNotAuthorizedError(ADDR, 7n).message}`);
+    expect((rewrapped as { code?: unknown }).code).toBeUndefined();
+    expect(isPublisherNotAuthorizedError(rewrapped)).toBe(true);
+  });
+
+  it('does NOT match unrelated errors', () => {
+    // Each of these must stay RETRYABLE. Answering true here would condemn a job that a later
+    // attempt could still finalize, which is the mirror image of the forever-retry trap.
+    expect(isPublisherNotAuthorizedError({ code: 'CALL_EXCEPTION' })).toBe(false);
+    expect(isPublisherNotAuthorizedError(new Error('rpc down'))).toBe(false);
+    expect(isPublisherNotAuthorizedError(new Error('No operational wallet has enough funds to publish.'))).toBe(false);
+    expect(isPublisherNotAuthorizedError(undefined)).toBe(false);
+    expect(isPublisherNotAuthorizedError(null)).toBe(false);
   });
 });
 

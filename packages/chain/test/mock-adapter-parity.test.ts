@@ -533,6 +533,33 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(await mock.isAuthorizedPublisher(999_999n, CURATOR)).toBe(false);
   });
 
+  it('resolves a CURATED graph in PCA mode live, admitting the owner and its agents (GH#2648)', async () => {
+    // The EOA row above stops at line `publishAuthorityAccountId === 0n`. This is the other
+    // branch: when the graph names a Publishing Conviction Account, the stored authority
+    // snapshot is IGNORED and the answer is resolved live, so registering an agent grants it
+    // publish rights without rewriting the graph. publishPolicy stays 0 — an open graph short
+    // -circuits before either branch is reached.
+    const mock = new MockChainAdapter();
+    const OWNER = ethers.getAddress(mock.signerAddress); // createPublishingConvictionAccount mints to the signer
+    const AGENT = ethers.getAddress('0x11ce5510000000000000000000000000000000cc');
+    const STRANGER = ethers.getAddress('0x9d0f0e11000000000000000000000000000000dd');
+
+    const { accountId } = await mock.createPublishingConvictionAccount(10_000n * 10n ** 18n);
+    await mock.registerPublishingConvictionAgent(accountId, AGENT);
+    const cg = await mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 0,
+      publishAuthority: OWNER,
+      publishAuthorityAccountId: accountId,
+    });
+
+    expect(await mock.isAuthorizedPublisher(cg.contextGraphId, OWNER)).toBe(true);
+    expect(await mock.isAuthorizedPublisher(cg.contextGraphId, AGENT)).toBe(true);
+    // A wallet registered to no account at all resolves to account id 0 and is refused — this is
+    // the arm that keeps the two admitting assertions above from being vacuous.
+    expect(await mock.isAuthorizedPublisher(cg.contextGraphId, STRANGER)).toBe(false);
+  });
+
   it('rejects participant agent configs that would revert on-chain', async () => {
     const mock = new MockChainAdapter();
 
