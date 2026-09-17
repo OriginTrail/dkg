@@ -8508,7 +8508,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const accumulateContinuationShared = (
       remotePeerId: string,
-      shared: SharedMemorySyncResult,
+      shared: CatchupRetrySharedMemorySyncResult,
     ): void => {
       const progress = classifyDurableProgress(shared);
       if (progress.completedWithoutFailure) {
@@ -8523,7 +8523,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sharedMemorySynced += shared.insertedDataTriples;
       diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
         diagnostics.sharedMemory,
-        shared,
+        {
+          ...shared,
+          deferredBackpressure:
+            shared.retryDeferredBackpressure ?? shared.deferredBackpressure,
+        },
       );
       deferredBackpressure += shared.deferredBackpressure ?? 0;
 

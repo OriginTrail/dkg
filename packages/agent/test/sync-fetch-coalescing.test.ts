@@ -1928,11 +1928,14 @@ describe('DKGAgent sync fetch coalescing', () => {
       };
       (agent as any).syncSharedMemoryFromPeerDetailed = async (peerId: string) => {
         sharedCalls.push(peerId);
-        const resolved = sharedCalls.length === 1 ? 2 : 3;
+        const call = sharedCalls.length;
+        const resolved = call < 3 ? 2 : 3;
         return {
           ...cleanSharedMemorySyncResult(),
-          completedPhases: 1,
-          ...(resolved < 3
+          ...(call === 2
+            ? { deferredBackpressure: 1 }
+            : { completedPhases: 1 }),
+          ...(call === 1
             ? {
               failedPhases: 1,
               localYield: true as const,
@@ -1945,11 +1948,14 @@ describe('DKGAgent sync fetch coalescing', () => {
 
       const recovery = await agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
+        mode: 'foreground',
       });
       const result = recovery.catchup;
 
       expect(durableCalls).toEqual([PEER_A]);
-      expect(sharedCalls).toEqual([PEER_A, PEER_A]);
+      expect(sharedCalls).toEqual([PEER_A, PEER_A, PEER_A]);
+      expect(result.deferredBackpressure).toBe(0);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
       expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
