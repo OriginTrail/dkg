@@ -2755,16 +2755,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       throw entry.reason;
     });
 
+    // Listing fans one authority read out over every discovered row, which is
+    // exactly the shape the shared governor exists to hold back. Resolve the
+    // governor here rather than inside the callback: enrichment turns any
+    // throw into a degraded listing, so a missing owner would silently drop
+    // on-chain ids instead of failing.
+    const authorityReads = this.rfc64AuthorityReadCoordinatorV1;
     // Discovery establishes row identity; this collaborator owns the complete
     // finalized/legacy/degraded authority-enrichment state machine.
     const authorityEnrichment = await enrichContextGraphListAuthorityV1({
       rows,
-      // Listing fans one authority read out over every discovered row, which
-      // is exactly the shape the shared governor exists to hold back. An open
-      // circuit degrades enrichment for this listing instead of adding a
-      // whole-corpus fan-out to an exhausted pool; the next listing recomputes.
+      // An open circuit degrades enrichment for this listing instead of adding
+      // a whole-corpus fan-out to an exhausted pool; the next listing recomputes.
       readFinalizedTargets: (contextGraphIds) => withBudget(
-        (signal) => this.rfc64AuthorityReadCoordinatorV1.run(
+        (signal) => authorityReads.run(
           signal,
           (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
             contextGraphIds,
