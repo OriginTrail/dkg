@@ -151,10 +151,13 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         _;
     }
 
-    /// @dev `tx.origin` is used only as a caller-type check here. It is not
-    /// used for identity or authorization; those remain keyed to `msg.sender`.
+    /// @dev `tx.origin` and caller code are used only as caller-type checks.
+    /// Identity and authorization remain keyed to `msg.sender`. The code-size
+    /// check is required for EIP-7702 delegated EOAs: delegated execution can
+    /// preserve `msg.sender == tx.origin`, but the authority carries the
+    /// 23-byte delegation designator while the transaction executes.
     modifier externallyOwnedCaller() {
-        if (msg.sender != tx.origin) {
+        if (msg.sender != tx.origin || msg.sender.code.length != 0) {
             revert ContractCallerNotAllowed(msg.sender);
         }
         _;
