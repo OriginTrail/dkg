@@ -148,6 +148,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     includeSharedMemory?: boolean;
     syncMode?: unknown;
     forceCatchup?: unknown;
+    authorityDecision?: {
+      outcome: 'allowed' | 'denied' | 'unavailable';
+      source: 'registered-chain' | 'legacy-local';
+      reason: string;
+      metadataBootstrap: 'eligible' | 'forbidden';
+    };
     readiness?: {
       version: number;
       durableVerified: boolean;
@@ -199,7 +205,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
-      resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
+      resolveContextGraphSubscriptionBootstrapAuthority: async () => opts.authorityDecision ?? ({
         outcome: 'allowed' as const,
         source: 'legacy-local' as const,
         reason: 'test-public',
@@ -349,6 +355,35 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     ]);
     expect(result.state.syncMode).toBe('always-on');
     expect(result.responsibilityCalls).toEqual([expect.any(String)]);
+  });
+
+  it.each([
+    ['unavailable', 503, 'eligible'],
+    ['denied', 403, 'forbidden'],
+  ] as const)('leaves no subscription or catch-up side effect when authority is %s', async (
+    outcome,
+    expectedStatus,
+    metadataBootstrap,
+  ) => {
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+      authorityDecision: {
+        outcome,
+        source: 'registered-chain',
+        reason: outcome === 'unavailable'
+          ? 'finalized-name-absence-unaccepted'
+          : 'agent-not-in-chain-roster',
+        metadataBootstrap,
+      },
+    });
+
+    expect(result.responseStatus).toBe(expectedStatus);
+    expect(result.subscribeCalls).toEqual([]);
+    expect(result.responsibilityCalls).toEqual([]);
+    expect(result.runCalls).toBe(0);
+    expect(result.job).toBeUndefined();
+    expect(result.state).toEqual({});
+    expect(result.patches).toEqual([]);
   });
 
   it('forwards explicit on-demand edge intent without making it always-on', async () => {

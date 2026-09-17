@@ -181,6 +181,9 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
   it('uses a live private roster for scoped VM reads without bootstrap config', async () => {
     const fixture = runtimePrivateQueryAgent();
     expect(fixture.agent.config).not.toHaveProperty('rfc64CatalogBootstrap');
+    expect(fixture.agent).not.toHaveProperty(
+      'hasAcceptedRfc64PublicUnregisteredAuthorityV1',
+    );
 
     const member = await QueryMethods.prototype.query.call(
       fixture.agent as never,

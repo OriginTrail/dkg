@@ -1929,6 +1929,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
+    const admittedOnChainId = readAuthority.onChainId?.toString(10);
     // Preview the only existing-live-state promotion rule without mutating the
     // agent. The authoritative normalization still happens in
     // subscribeToContextGraph below, after the shutdown admission guard and
@@ -1946,6 +1947,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           acceptingJobs: daemonState.catchupAcceptingJobs,
           subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
             syncMode: requestedSyncMode,
+            ...(admittedOnChainId === undefined ? {} : { onChainId: admittedOnChainId }),
           }).syncMode,
         });
         if (!lifetimeMutation.accepted) {
@@ -1997,6 +1999,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           acceptingJobs: daemonState.catchupAcceptingJobs,
           subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
             syncMode: requestedSyncMode,
+            ...(admittedOnChainId === undefined ? {} : { onChainId: admittedOnChainId }),
           }).syncMode,
         });
         if (!lifetimeMutation.accepted) {
@@ -2073,6 +2076,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
       syncMode: requestedSyncMode,
+      ...(admittedOnChainId === undefined ? {} : { onChainId: admittedOnChainId }),
     }).syncMode;
     console.log(
       `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode} forceCatchup=${forceCatchup}`,
