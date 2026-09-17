@@ -5,11 +5,14 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import type { LlmConfig } from '@origintrail-official/dkg-node-ui';
-import type { RuntimeAdapterOperation } from '@origintrail-official/dkg-semantic-runtime';
+import type { RuntimeAdapterOperation, SemanticDisclosurePolicy } from '@origintrail-official/dkg-semantic-runtime';
+
+import { assertSemanticPrompt, projectSemanticOutput } from './semantic-runtime-program-policy.js';
 
 export interface SafeLlmProgram {
   capabilityId: string;
   programIri: string;
+  sourceHash?: string;
   name: string;
   description: string;
 }
@@ -25,6 +28,12 @@ export type SafeLlmChildInvoker = (
   programIri: string,
   invocationId: string,
 ) => Promise<SafeLlmChildResult>;
+
+export interface SafeLlmDisclosureOptions {
+  policy: SemanticDisclosurePolicy;
+  /** Recheck host authority before dispatch, child execution and data release. */
+  assertAuthorized: () => Promise<void>;
+}
 
 interface RunnerMessage {
   type?: unknown;
@@ -48,12 +57,23 @@ export function createSafeLlmAdapter(
   llmConfig: LlmConfig | undefined,
   programs: SafeLlmProgram[],
   invokeChild?: SafeLlmChildInvoker,
+  disclosure?: SafeLlmDisclosureOptions,
 ): RuntimeAdapterOperation<{ prompt: string }, string> {
+  programs = structuredClone(programs);
+  if (disclosure) {
+    disclosure = { ...disclosure, policy: structuredClone(disclosure.policy) };
+    programs = programs.filter((program) => disclosure!.policy.programs.some((release) =>
+      release.programIri === program.programIri && release.sourceHash === program.sourceHash));
+    // Graph-provided descriptions are not a data-release grant.
+    programs = programs.map((program) => ({ ...program, description: 'Execute the approved Program.' }));
+  }
   const provider = resolveSafeLlmProvider(llmConfig);
   const runnerBinary = process.env.SEMANTIC_RUNTIME_RIG_BIN
     ?? fileURLToPath(new URL('../../../rust/target/release/dkg-safe-llm-runner', import.meta.url));
   const implementationHash = createHash('sha256')
     .update(readFileSync(fileURLToPath(import.meta.url)))
+    .update(readFileSync(new URL(`./semantic-runtime-program-policy.${import.meta.url.endsWith('.ts') ? 'ts' : 'js'}`, import.meta.url)))
+    .update(JSON.stringify(disclosure?.policy ?? null))
     .update(existsSync(runnerBinary) ? readFileSync(runnerBinary) : 'runner-missing')
     .digest('hex');
   return {
@@ -87,6 +107,10 @@ export function createSafeLlmAdapter(
       if (!provider || programs.length === 0 || !invokeChild || !existsSync(runnerBinary)) {
         throw new Error('SAFE_LLM_NOT_CONFIGURED');
       }
+      if (disclosure) {
+        assertSemanticPrompt(disclosure.policy, input.prompt);
+        await disclosure.assertAuthorized();
+      }
       const result = await runRig(
         provider,
         input.prompt,
@@ -94,6 +118,7 @@ export function createSafeLlmAdapter(
         invokeChild,
         authorization.effectId,
         runnerBinary,
+        disclosure,
       );
       return {
         status: 'succeeded',
@@ -119,6 +144,7 @@ async function runRig(
   invokeChild: SafeLlmChildInvoker,
   effectId: string,
   binary: string,
+  disclosure?: SafeLlmDisclosureOptions,
 ): Promise<{ output: string; childExecutions: string[] }> {
   const child = spawn(binary, [], {
     env: provider.apiKey ? { OPENAI_API_KEY: provider.apiKey } : {},
@@ -186,6 +212,7 @@ async function runRig(
         continue;
       }
       try {
+        await disclosure?.assertAuthorized();
         const result = await invokeChild(
           program.programIri,
           invocationUuid(effectId, calls, program.capabilityId),
@@ -193,20 +220,22 @@ async function runRig(
         if (result.persisted !== true || !Array.isArray(result.outputs)) {
           throw new Error('child Execution output was not persisted');
         }
+        await disclosure?.assertAuthorized();
+        const released = disclosure ? projectSemanticOutput(disclosure.policy, program, result) : JSON.stringify({
+          executionIri: result.executionIri,
+          ...(result.executionUal ? { executionUal: result.executionUal } : {}),
+          outputs: result.outputs,
+        });
         childExecutions.push(result.executionIri);
         child.stdin.write(`${JSON.stringify({
           type: 'result',
           id: message.id,
           ok: true,
-          output: JSON.stringify({
-            executionIri: result.executionIri,
-            ...(result.executionUal ? { executionUal: result.executionUal } : {}),
-            outputs: result.outputs,
-          }),
+          output: released,
         })}\n`);
       } catch (error) {
         child.stdin.write(`${JSON.stringify({
-          type: 'result', id: message.id, ok: false, error: safeMessage(error),
+          type: 'result', id: message.id, ok: false, error: disclosure ? 'program result unavailable' : safeMessage(error),
         })}\n`);
       }
     }

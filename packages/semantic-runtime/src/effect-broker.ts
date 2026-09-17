@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 
 import { decode, encode } from 'cborg';
 
@@ -80,6 +81,12 @@ export interface RuntimeAdapterOperation<I = unknown, O = unknown> {
     output: O;
     evidenceRef: string;
   }>;
+  /** Opt-in continuation from durable checkpoints; never replay unresolved effects. */
+  resume?(authorization: Readonly<PreparedEffectToken>, input: I): Promise<{
+    status: 'succeeded' | 'failed';
+    output: O;
+    evidenceRef: string;
+  }>;
   reconcile(
     effect: Readonly<EffectRecord>,
     input: I,
@@ -99,6 +106,23 @@ export interface RuntimeAdapterDescriptor {
 }
 
 const REGISTERED_ADAPTERS = new WeakMap<RuntimeAdapterRegistry, Map<string, RuntimeAdapterOperation>>();
+const CONTINUATIONS = new Map<string, Promise<unknown>>();
+const MEMORY_STORES = new WeakMap<SemanticRuntimeStore, number>();
+let memoryStoreId = 0;
+
+// A daemon owns its local runtime database. Share the gate across broker/store
+// instances, but only for the same effect; unrelated Programs continue freely.
+// This is process-local ownership, not a multi-process execution lease.
+async function withContinuation<T>(store: SemanticRuntimeStore, effectId: string, run: () => Promise<T>): Promise<T> {
+  if (store.databasePath === ':memory:' && !MEMORY_STORES.has(store)) MEMORY_STORES.set(store, ++memoryStoreId);
+  const database = store.databasePath === ':memory:' ? `memory:${MEMORY_STORES.get(store)}` : realpathSync(store.databasePath);
+  const key = JSON.stringify([database, effectId]);
+  const prior = CONTINUATIONS.get(key) ?? Promise.resolve();
+  const current = prior.then(run, run);
+  CONTINUATIONS.set(key, current);
+  try { return await current; }
+  finally { if (CONTINUATIONS.get(key) === current) CONTINUATIONS.delete(key); }
+}
 
 export class RuntimeAdapterRegistry {
   constructor() {
@@ -319,40 +343,7 @@ export class RuntimeEffectBroker {
       throw new Error(`effect ${effectId} is ${prepared.state}; dispatch requires prepared`);
     }
     const operation = this.requirePlanAdapter(prepared.adapterId, prepared.adapterVersion);
-    const capability = this.revalidatePreparedCapability(prepared, operation, now);
-    const metadata = decodeCapabilityMetadata(capability.metadataCbor);
-    const currentPolicy = await this.policy.evaluate({
-      executionId: prepared.executionId,
-      principal: metadata.subject,
-      capabilityId: prepared.capabilityId,
-      adapterId: prepared.adapterId,
-      adapterVersion: prepared.adapterVersion,
-      verb: prepared.verb,
-      resource: prepared.resource,
-      requestDigest: prepared.requestDigest,
-      policyEpoch: capability.policyEpoch,
-    });
-    if (currentPolicy.decision !== 'allow' || currentPolicy.policyEpoch !== capability.policyEpoch) {
-      throw new Error('prepared effect failed final pinned-policy authorization');
-    }
-    assertDigest(currentPolicy.factsDigest, 'current policy facts digest');
-    if (prepared.approvalId) {
-      const approval = requireValue(
-        this.store.approval(prepared.approvalId),
-        'prepared approval disappeared',
-      );
-      if (
-        approval.executionId !== prepared.executionId
-        || approval.effectClass !== operation.effectClass
-        || approval.principal !== metadata.subject
-        || now < approval.notBefore
-        || now >= approval.expiresAt
-        || !bytesEqual(approval.requestDigest, prepared.requestDigest)
-        || (approval.oneShot && approval.consumedAt === null)
-      ) {
-        throw new Error('prepared effect failed final approval checks');
-      }
-    }
+    await this.revalidateFinalPolicy(prepared, operation, now);
     const input = operation.validateInput(decode(prepared.normalizedInput));
     const dispatching = this.store.transitionEffect(
       effectId,
@@ -397,7 +388,12 @@ export class RuntimeEffectBroker {
   }
 
   async reconcileUnknown(effectId: string, now: number): Promise<EffectRecord> {
+    return withContinuation(this.store, effectId, () => this.reconcileExclusive(effectId, now));
+  }
+
+  private async reconcileExclusive(effectId: string, now: number): Promise<EffectRecord> {
     const unknown = requireValue(this.store.effect(effectId), 'effect does not exist');
+    if (unknown.state === 'succeeded' || unknown.state === 'failed') return unknown;
     if (unknown.state !== 'unknown' && unknown.state !== 'reconciling') {
       throw new Error('only unknown/reconciling effects can reconcile');
     }
@@ -425,14 +421,7 @@ export class RuntimeEffectBroker {
         now,
       );
     }
-    this.store.transitionEffect(
-      effectId,
-      'reconciled',
-      result.evidenceRef,
-      encodeCanonical(result.output ?? null),
-      now,
-    );
-    return this.store.transitionEffect(
+    return this.store.completeReconciliation(
       effectId,
       result.status === 'applied' ? 'succeeded' : 'failed',
       result.evidenceRef,
@@ -441,12 +430,77 @@ export class RuntimeEffectBroker {
     );
   }
 
+  /** Explicit authenticated continuation, distinct from read-only reconciliation. */
+  async resumeUnknown(effectId: string, now: number): Promise<EffectRecord> {
+    const startedAt = Date.now();
+    return withContinuation(this.store, effectId, () => this.resumeExclusive(effectId, now + Math.max(0, Date.now() - startedAt)));
+  }
+
+  private async resumeExclusive(effectId: string, now: number): Promise<EffectRecord> {
+    const effect = requireValue(this.store.effect(effectId), 'effect does not exist');
+    const operation = this.requirePlanAdapter(effect.adapterId, effect.adapterVersion);
+    if (!operation.resume) throw new Error('adapter does not support checkpointed continuation');
+    await this.revalidateFinalPolicy(effect, operation, now);
+    // A preceding continuation may have completed while this request waited
+    // for its gate. Recheck authorization, then use its durable result.
+    if (effect.state === 'succeeded' || effect.state === 'failed') return effect;
+    if (!['unknown', 'reconciling', 'manual_review_required'].includes(effect.state)) {
+      throw new Error('only interrupted effects can resume');
+    }
+    const input = operation.validateInput(decode(effect.normalizedInput));
+    if (effect.state !== 'reconciling') {
+      this.store.transitionEffect(effectId, 'reconciling', 'checkpointed-continuation-authorized', new Uint8Array(), now);
+    }
+    try {
+      const result = await operation.resume(Object.freeze({
+        effectId, attemptId: effect.attemptId, requestDigest: Uint8Array.from(effect.requestDigest),
+        capabilityId: effect.capabilityId, policyDecisionId: effect.policyDecisionId,
+      }), input);
+      return this.store.completeReconciliation(effectId, result.status, result.evidenceRef, encodeCanonical(result.output), Date.now());
+    } catch (error) {
+      // A later retry may obtain the missing durable receipt. Do not turn a
+      // transient status failure into either a new dispatch or a terminal loss.
+      return this.store.transitionEffect(effectId, 'unknown', 'checkpointed-continuation-pending',
+        encodeCanonical({ error: safeErrorCode(error) }), Date.now());
+    }
+  }
+
+  private async revalidateFinalPolicy(effect: EffectRecord, operation: RuntimeAdapterOperation, now: number): Promise<void> {
+    const startedAt = Date.now();
+    const capability = this.revalidatePreparedCapability(effect, operation, now);
+    const metadata = decodeCapabilityMetadata(capability.metadataCbor);
+    const policy = await this.policy.evaluate({
+      executionId: effect.executionId, principal: metadata.subject, capabilityId: effect.capabilityId,
+      adapterId: effect.adapterId, adapterVersion: effect.adapterVersion, verb: effect.verb,
+      resource: effect.resource, requestDigest: effect.requestDigest, policyEpoch: capability.policyEpoch,
+    });
+    if (policy.decision !== 'allow' || policy.policyEpoch !== capability.policyEpoch) {
+      throw new Error('prepared effect failed final pinned-policy authorization');
+    }
+    assertDigest(policy.factsDigest, 'current policy facts digest');
+    const checkedAt = now + Math.max(0, Date.now() - startedAt);
+    // Policy evaluation may await graph/network reads. Revocation, expiry,
+    // execution status, and adapter enablement must still hold when it returns.
+    this.requirePlanAdapter(effect.adapterId, effect.adapterVersion);
+    this.revalidatePreparedCapability(effect, operation, checkedAt);
+    if (effect.approvalId) {
+      const approval = requireValue(this.store.approval(effect.approvalId), 'prepared approval disappeared');
+      if (approval.executionId !== effect.executionId || approval.effectClass !== operation.effectClass
+        || approval.principal !== metadata.subject || checkedAt < approval.notBefore || checkedAt >= approval.expiresAt
+        || !bytesEqual(approval.requestDigest, effect.requestDigest)
+        || (approval.oneShot && approval.consumedAt === null)) {
+        throw new Error('prepared effect failed final approval checks');
+      }
+    }
+  }
+
   private requirePlanAdapter(id: string, version: string): RuntimeAdapterOperation {
     if (this.plan.adapterVersions.get(id) !== version) {
       throw new Error(`adapter ${id}@${version} is not pinned by the admitted plan`);
     }
     const operation = requireRegistry(this.adapters).get(adapterKey(id, version));
     if (!operation) throw new Error(`adapter ${id}@${version} is not registered`);
+    if (operation.enabled?.() === false) throw new Error(`adapter ${id}@${version} is disabled`);
     if (!this.plan.allowedEffectClasses.has(operation.effectClass)) {
       throw new Error(`effect class ${operation.effectClass} is outside the admitted upper bound`);
     }

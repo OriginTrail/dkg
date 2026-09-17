@@ -40,6 +40,8 @@ export default defineConfig({
           'test/semantic-runtime.test.ts',
           'test/semantic-runtime-inbox.test.ts',
           'test/semantic-runtime-query-adapter.test.ts',
+          'test/semantic-runtime-query-pins.test.ts',
+          'test/semantic-runtime-program-policy.test.ts',
           'test/semantic-runtime-routes.test.ts',
           'test/semantic-runtime-safe-llm-adapter.test.ts',
           'test/semantic-runtime-remote-execute-adapter.test.ts',

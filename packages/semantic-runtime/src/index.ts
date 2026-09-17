@@ -125,3 +125,5 @@ export {
   type SemanticProjectionQuad,
   type SemanticProjectionSink,
 } from './projection.js';
+
+export type { SemanticProgramPolicy, SemanticProgramPin, SemanticDisclosurePolicy, SemanticQueryPin, SemanticQueryOutputSchema } from './program-policy.js';

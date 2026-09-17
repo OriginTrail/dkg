@@ -71,6 +71,7 @@ sr:adapterHash a rdf:Property .
 sr:event a rdf:Property .
 sr:agentStatus a rdf:Property .
 sr:output a rdf:Property .
+sr:orderedOutputs a rdf:Property .
 sr:outputHash a rdf:Property .
 sr:failureCode a rdf:Property .
 

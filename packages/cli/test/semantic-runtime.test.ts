@@ -28,6 +28,25 @@ afterEach(() => {
 });
 
 describe('semantic runtime daemon configuration', () => {
+  it('does not coalesce another caller or Program under the same normalized invocation UUID', async () => {
+    let release!: (value: unknown) => void;
+    const agent = { query: vi.fn(() => new Promise((resolve) => { release = resolve; })) } as any;
+    const runtime = { inFlight: new Map() } as any;
+    const invocationId = '123e4567-e89b-42d3-a456-426614174abc';
+    const pending = invokeStoredSemanticProgram(agent, runtime, 'tenant', 'urn:program:a', invocationId,
+      'vm', 'wm', undefined, undefined, '0x1111111111111111111111111111111111111111').catch(error => error);
+    try {
+      for (const [program, caller] of [
+        ['urn:program:b', '0x1111111111111111111111111111111111111111'],
+        ['urn:program:a', '0x2222222222222222222222222222222222222222'],
+      ]) {
+        await expect(invokeStoredSemanticProgram(agent, runtime, 'tenant', program, invocationId.toUpperCase(),
+          'vm', 'wm', undefined, undefined, caller)).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
+      }
+      expect(agent.query).toHaveBeenCalledTimes(1);
+    } finally { release({ bindings: [] }); await pending; }
+  });
+
   it.each(['wm', 'swm', 'vm'] as const)(
     'forks a VM Program into a %s KA authored by the copying wallet',
     async (targetLayer) => {
@@ -379,6 +398,7 @@ describe('semantic runtime daemon configuration', () => {
     let finalized = false;
     let promoted = false;
     let published = false;
+    let replayOutputs: Array<{ output?: string; orderedOutputs?: string }> | undefined;
     const history = vi.fn(async () => finalized ? {
       wmCurrentAssertion: '11'.repeat(32),
       ...((promoted || published) ? {
@@ -428,14 +448,14 @@ describe('semantic runtime daemon configuration', () => {
         };
         if (sparql.includes('<https://origintrail.io/semantic-runtime/v1#output>')) return {
           type: 'bindings',
-          bindings: [{
+          bindings: (replayOutputs ?? [{ output: '"semantic-runtime-llm-ok"' }]).map((row) => ({
             g: graph.replace('_verifiable_memory', {
               wm: '_working_memory',
               swm: '_shared_memory',
               vm: '_verifiable_memory',
             }[executionLayer]),
-            output: '"semantic-runtime-llm-ok"',
-          }],
+            ...row,
+          })),
         };
         return { type: 'bindings', bindings: [] };
       }),
@@ -522,6 +542,16 @@ describe('semantic runtime daemon configuration', () => {
         executionLayer === 'wm' ? 'vm' : 'wm',
         config,
       )).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT', status: 409 });
+      await expect(invokeStoredSemanticProgram(
+        agent, runtime!, 'devnet-test', programIri, '123e4567-e89b-42d3-a456-426614174000',
+        'vm', executionLayer, config, undefined, '0x2222222222222222222222222222222222222222',
+      )).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
+      replayOutputs = [{ output: '"b"' }, { output: '"a"' }, { orderedOutputs: JSON.stringify('["b","a","b"]') }];
+      await expect(invoke()).resolves.toMatchObject({ outputs: ['b', 'a', 'b'] });
+      replayOutputs = [{ output: '"a"' }, { output: '"b"' }];
+      await expect(invoke()).rejects.toMatchObject({ code: 'EXECUTION_OUTPUT_ORDER_UNAVAILABLE' });
+      replayOutputs = [{ output: '"a"' }, { orderedOutputs: JSON.stringify('["b"]') }];
+      await expect(invoke()).rejects.toMatchObject({ code: 'EXECUTION_OUTPUT_ORDER_INVALID' });
       expect(fs.readFileSync(codexCount, 'utf8')).toBe('x');
     } finally {
       await runtime?.stop();
