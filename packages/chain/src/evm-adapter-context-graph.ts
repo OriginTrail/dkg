@@ -282,6 +282,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * absorbed — it throws, so the caller can tell "unknown" from "refused" (the lift scan holds
    * the job in `accepted` rather than either claiming or condemning it).
    */
+  /**
+   * The binding is resolved once during `init()` and `initContracts()` swallows every failure
+   * there — including a transient RPC error — while still marking the adapter initialized. A
+   * lost binding is therefore sticky for the process lifetime, which is exactly why callers
+   * must be able to see it rather than infer authorization from a permissive `true`.
+   */
+  async isPublishAuthorityEnforceable(): Promise<boolean> {
+    await this.init();
+    return this.contracts.contextGraphs !== undefined;
+  }
+
   async isAuthorizedPublisher(contextGraphId: bigint, publisherAddress: string): Promise<boolean> {
     await this.init();
     const contextGraphs = this.contracts.contextGraphs;

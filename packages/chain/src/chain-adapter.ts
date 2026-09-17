@@ -1706,6 +1706,17 @@ export interface ChainAdapter {
   isAuthorizedPublisher?(contextGraphId: bigint, publisherAddress: string): Promise<boolean>;
 
   /**
+   * Can {@link isAuthorizedPublisher} actually ENFORCE anything through this adapter?
+   *
+   * `isAuthorizedPublisher` answers `true` both for "this wallet is authorized" and for "there
+   * is no policy contract to ask", and a caller that folds the second into a per-wallet verdict
+   * routes jobs to wallets the graph never admitted. This separates the two: `false` means the
+   * adapter has no `ContextGraphs` surface, so authority is UNENFORCEABLE and every lane must
+   * stay eligible. Implemented wherever `isAuthorizedPublisher` is.
+   */
+  isPublishAuthorityEnforceable?(): Promise<boolean>;
+
+  /**
    * Resolve authorization, candidate-specific PCA lifetime/pricing, strict
    * fundability, and signer-pool rotation as one adapter-owned operation.
    * Publishers call this before ACK collection or encrypted staging so no

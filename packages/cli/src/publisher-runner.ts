@@ -231,16 +231,38 @@ interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
  * (a `NoChainAdapter`, or a build predating the probe). Authority that cannot be asked is
  * UNENFORCEABLE, not denied, and a partial answer across a mixed adapter set would be worse than
  * none: it would route on a subset while claiming to speak for the pool.
+ *
+ * The same reasoning applies per call, not just at construction: an adapter that HAS the probe
+ * but lost its `ContextGraphs` binding answers `unenforced` for the whole pool rather than
+ * contributing a permissive `true` to `authorizedWalletIds`.
  */
 export function createPublishAuthorityResolver(
   wallets: readonly ConfiguredPublisherWallet[],
 ): ((contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>) | undefined {
   if (wallets.length === 0) return undefined;
-  if (!wallets.every((wallet) => typeof wallet.chain.isAuthorizedPublisher === 'function')) {
+  if (!wallets.every((wallet) => (
+    typeof wallet.chain.isAuthorizedPublisher === 'function'
+    && typeof wallet.chain.isPublishAuthorityEnforceable === 'function'
+  ))) {
     return undefined;
   }
   const candidateWalletIds = wallets.map((wallet) => wallet.address);
   return async (contextGraphId: bigint): Promise<AsyncLiftPublishAuthority> => {
+    // `isAuthorizedPublisher` answers `true` both for "authorized" and for "no ContextGraphs
+    // surface to ask". Folding the second into `authorizedWalletIds` reports an UNENFORCEABLE
+    // adapter as an affirmative per-wallet verdict, and mixes it with truthful answers from the
+    // other adapters — so a lane claims jobs its wallet was never admitted for and the
+    // transaction reverts on chain. `initContracts()` swallows a transient failure while still
+    // marking the adapter initialized, so a lost binding is sticky for the process lifetime.
+    const enforceable = await Promise.all(wallets.map(async (wallet) => {
+      try {
+        return await wallet.chain.isPublishAuthorityEnforceable!();
+      } catch {
+        // A probe that cannot answer is not evidence of enforceability.
+        return false;
+      }
+    }));
+    if (enforceable.includes(false)) return { kind: 'unenforced' };
     const verdicts = await Promise.all(wallets.map(async (wallet) => {
       try {
         return await wallet.chain.isAuthorizedPublisher!(contextGraphId, wallet.address)

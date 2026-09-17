@@ -685,11 +685,14 @@ export class TripleStoreAsyncLiftPublisher
     this.graphManager = new GraphManager(store);
     this.publishAuthority = config.publishAuthorityResolver
       ? new PublishAuthorityCache({
-        resolveContextGraphId: async (contextGraphName) =>
-          positiveOnChainContextGraphId(contextGraphName)
-          ?? positiveOnChainContextGraphId(
-            await resolveOnChainContextGraphId({ store, contextGraphId: contextGraphName }),
-          ),
+        // Resolve the id the SAME way the publish path does — via the local store mapping only.
+        // Treating an all-digit NAME as the on-chain id first made the scan ask about a different
+        // graph than the publish would use: a graph named "12" stamped to on-chain id 900 was
+        // probed as CG 12, routing the job to the wrong lane or failing it terminally with
+        // `authority_forbidden` when it would have published fine.
+        resolveContextGraphId: async (contextGraphName) => positiveOnChainContextGraphId(
+          await resolveOnChainContextGraphId({ store, contextGraphId: contextGraphName }),
+        ),
         resolveAuthority: config.publishAuthorityResolver,
         now: this.now,
         ...(config.publishAuthorityCacheTtlMs !== undefined

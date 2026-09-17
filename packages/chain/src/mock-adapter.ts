@@ -1734,6 +1734,16 @@ export class MockChainAdapter implements ChainAdapter {
    * CURATED graph in PCA mode ignores the stored snapshot and live-resolves the account owner
    * plus its registered agents.
    */
+  /**
+   * The mock always has its in-memory context-graph table, so authority is always enforceable
+   * here — unlike the EVM adapter, whose `ContextGraphs` binding can be missing. Parity with
+   * `isAuthorizedPublisher` matters: a caller must be able to ask BOTH questions of any adapter
+   * that answers either, or it cannot tell an authorized wallet from an unenforceable adapter.
+   */
+  async isPublishAuthorityEnforceable(): Promise<boolean> {
+    return true;
+  }
+
   async isAuthorizedPublisher(contextGraphId: bigint, publisherAddress: string): Promise<boolean> {
     const cg = this.contextGraphs.get(contextGraphId);
     if (contextGraphId <= 0n || !cg || !cg.active) return false;

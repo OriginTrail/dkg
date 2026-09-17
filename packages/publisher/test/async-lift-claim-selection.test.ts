@@ -153,11 +153,30 @@ describe('async-lift claim selection respects context-graph publish authority (G
   const AUTHORIZED = '0xd896f0E6000000000000000000000000000000aa';
   const REFUSED = '0x3bccEeD2000000000000000000000000000000bb';
 
-  beforeEach(() => {
+  beforeEach(async () => {
     store = new OxigraphStore();
+    // These rows use numeric NAMES. The scan resolves a name through this mapping exactly as the
+    // publish path does, so the binding has to exist for the job to be routed at all.
+    await bindOnChainId('453', '453');
+    await bindOnChainId('999', '999');
   });
 
-  /** A queued request whose contextGraphId is already the numeric on-chain id. */
+  /**
+   * Bind a queue-level context graph NAME to its on-chain id, the way the publish path resolves
+   * it. The scan used to shortcut an all-digit name straight to a bigint, which meant these rows
+   * never exercised the production name -> id lookup — and a graph whose name happened to be
+   * numeric was probed as a DIFFERENT on-chain graph than the publish would use.
+   */
+  async function bindOnChainId(contextGraphName: string, onChainId: string): Promise<void> {
+    await store.insert([{
+      subject: `did:dkg:context-graph:${contextGraphName}`,
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+      object: literal(onChainId),
+      graph: 'did:dkg:context-graph:ontology',
+    }]);
+  }
+
+  /** A queued request whose contextGraphId is a name bound to an on-chain id via the store. */
   function curatedRequest(shareOperationId: string, contextGraphId = '453'): RawLiftRequest {
     return {
       swmId: 'swm-1',

@@ -23,12 +23,26 @@ const CG = 453n;
 function wallet(
   address: string,
   isAuthorizedPublisher?: ChainAdapter['isAuthorizedPublisher'],
+  /**
+   * Defaults to an ENFORCEABLE adapter, so each test states only what it is about. An adapter
+   * that answers `isAuthorizedPublisher` but has no `ContextGraphs` binding is the separate
+   * `unenforced` case below.
+   */
+  isPublishAuthorityEnforceable: ChainAdapter['isPublishAuthorityEnforceable'] | 'omit' =
+    async () => true,
 ): { address: string; identityId: bigint; publisher: DKGPublisher; chain: ChainAdapter } {
   return {
     address,
     identityId: 0n,
     publisher: {} as DKGPublisher,
-    chain: (isAuthorizedPublisher ? { isAuthorizedPublisher } : {}) as ChainAdapter,
+    chain: (isAuthorizedPublisher
+      ? {
+        isAuthorizedPublisher,
+        ...(isPublishAuthorityEnforceable === 'omit'
+          ? {}
+          : { isPublishAuthorityEnforceable }),
+      }
+      : {}) as ChainAdapter,
   };
 }
 
@@ -83,6 +97,41 @@ describe('createPublishAuthorityResolver', () => {
       wallet(REFUSED),
     ])).toBeUndefined();
     expect(createPublishAuthorityResolver([])).toBeUndefined();
+  });
+
+  it('reports unenforced when an adapter has no ContextGraphs binding', async () => {
+    // `isAuthorizedPublisher` answers `true` BOTH for "authorized" and for "no policy contract
+    // to ask". Folding the second into `authorizedWalletIds` reported an adapter that cannot
+    // enforce anything as an affirmative per-wallet verdict, mixed it with truthful answers from
+    // the other adapters, and let a lane claim jobs the graph never admitted — the transaction is
+    // really sent and reverts on chain. `initContracts()` swallows a transient failure while
+    // still marking the adapter initialized, so a lost binding is sticky for the process.
+    const resolve = createPublishAuthorityResolver([
+      wallet(AUTHORIZED, async (_cg, address) => address === AUTHORIZED),
+      wallet(REFUSED, async () => true, async () => false),
+    ]);
+    if (!resolve) throw new Error('expected a resolver');
+
+    await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
+  });
+
+  it('treats an enforceability probe that throws as not enforceable', async () => {
+    const resolve = createPublishAuthorityResolver([
+      wallet(AUTHORIZED, async () => true),
+      wallet(REFUSED, async () => true, async () => { throw new Error('rpc down'); }),
+    ]);
+    if (!resolve) throw new Error('expected a resolver');
+
+    await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
+  });
+
+  it('disables the filter when an adapter answers authority but cannot report enforceability', () => {
+    // Same reasoning as a missing `isAuthorizedPublisher`: an adapter that cannot say whether it
+    // enforces anything must not be spoken for.
+    expect(createPublishAuthorityResolver([
+      wallet(AUTHORIZED, async () => true),
+      wallet(REFUSED, async () => true, 'omit'),
+    ])).toBeUndefined();
   });
 
   it('asks every wallet about the context graph it was given', async () => {

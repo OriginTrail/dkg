@@ -13,6 +13,20 @@ import type { AsyncLiftPublishAuthority } from './async-lift-publisher-types.js'
 export const PUBLISH_AUTHORITY_CACHE_TTL_MS = 30_000;
 
 /**
+ * GH#2648 — hard ceiling on ONE authority resolution, because it runs inside the coordinator's
+ * process-wide claim lock.
+ *
+ * `pointRead` has no per-attempt cap when a node is configured with a single RPC provider (the
+ * #894 single-RPC carve-out), so a chain read that never settles never returns. Before this scan
+ * existed that read ran inside an already-claimed job's publish, outside the lock, and one hung
+ * lane did not stop the other nine. Under the lock it stops ALL claiming and blocks
+ * `recoverUnreplacedExpiredClaim`, which takes the same lock — with no log line and no failure
+ * record, because nothing ever throws. A capped read degrades to `unknown`, which is exactly the
+ * "ask again next poll" state the cache already models and deliberately does not memoize.
+ */
+export const PUBLISH_AUTHORITY_READ_TIMEOUT_MS = 5_000;
+
+/**
  * What one lane should do about one accepted job, given the job's context graph authority.
  *
  * `other-wallet` and `unknown` both mean "skip", but they are NOT the same fact and must not be
@@ -46,6 +60,8 @@ export interface PublishAuthorityCacheDependencies {
   readonly resolveAuthority: (contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>;
   readonly now: () => number;
   readonly ttlMs?: number;
+  /** Per-resolution ceiling; see {@link PUBLISH_AUTHORITY_READ_TIMEOUT_MS}. */
+  readonly readTimeoutMs?: number;
 }
 
 interface ResolvedAuthority {
@@ -64,9 +80,11 @@ export class PublishAuthorityCache {
   private readonly cached = new Map<string, { value: ResolvedAuthority; expiresAt: number }>();
   private readonly inFlight = new Map<string, Promise<ResolvedAuthority>>();
   private readonly ttlMs: number;
+  private readonly readTimeoutMs: number;
 
   constructor(private readonly dependencies: PublishAuthorityCacheDependencies) {
     this.ttlMs = dependencies.ttlMs ?? PUBLISH_AUTHORITY_CACHE_TTL_MS;
+    this.readTimeoutMs = dependencies.readTimeoutMs ?? PUBLISH_AUTHORITY_READ_TIMEOUT_MS;
   }
 
   /** Drop every memoized answer — for an operator-visible authority change, and for tests. */
@@ -109,7 +127,7 @@ export class PublishAuthorityCache {
     const pending = this.inFlight.get(contextGraphName);
     if (pending) return await pending;
 
-    const started = this.read(contextGraphName);
+    const started = this.readWithinDeadline(contextGraphName);
     this.inFlight.set(contextGraphName, started);
     try {
       const value = await started;
@@ -126,6 +144,26 @@ export class PublishAuthorityCache {
       return value;
     } finally {
       this.inFlight.delete(contextGraphName);
+    }
+  }
+
+  /**
+   * Resolve, but never outlast the deadline. The underlying read is abandoned rather than
+   * cancelled — there is no cancellation channel through the adapter — so the timer is cleared on
+   * both paths and the loser's rejection is swallowed, leaving no unhandled rejection behind.
+   */
+  private async readWithinDeadline(contextGraphName: string): Promise<ResolvedAuthority> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<ResolvedAuthority>((resolve) => {
+      timer = setTimeout(() => resolve({ authority: { kind: 'unknown' } }), this.readTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      const read = this.read(contextGraphName);
+      read.catch(() => {});
+      return await Promise.race([read, expired]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
