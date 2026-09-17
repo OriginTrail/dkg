@@ -1101,9 +1101,29 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         subGraphName,
         ...(createAuthorAgentAddress ? { agentAddress: createAuthorAgentAddress } : {}),
       });
-      const result: Record<string, unknown> = { name, assertionUri, alreadyExists, status: "draft-open" };
-      emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_created", source: "api", counts: { triples: 0 } });
-      recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "created", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName });
+      // `assertion.create` is a read-only get-or-create when an active seal is
+      // present. Re-read the exact descriptor so the response and activity
+      // stream describe the durable state rather than inventing a draft-open
+      // transition that did not happen.
+      const afterCreate = await agent.assertion.history(resolvedContextGraphId, name, {
+        subGraphName,
+        ...atomicAuthorLane,
+      });
+      if (!afterCreate) {
+        throw new Error(`Knowledge Asset "${name}" was not readable after creation`);
+      }
+      const sealedCreateNoop = afterCreate.status !== "draft-open";
+      if (sealedCreateNoop) alreadyExists = true;
+      const result: Record<string, unknown> = {
+        name,
+        assertionUri,
+        alreadyExists,
+        status: afterCreate.status,
+      };
+      if (!sealedCreateNoop) {
+        emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_created", source: "api", counts: { triples: 0 } });
+        recordActivityAndNotify(ctx, { contextGraphId: resolvedContextGraphId, kind: "created", actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress, subGraphName });
+      }
 
       // Write quads whenever supplied; SEAL only when finalize !== false. An
       // explicit finalize:false leaves an editable WM draft and never touches

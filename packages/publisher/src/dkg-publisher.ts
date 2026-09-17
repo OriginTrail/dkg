@@ -6923,15 +6923,22 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
   ): Promise<boolean> {
-    const subject = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const result = await this.store.query(`ASK { GRAPH <${assertSafeIri(metaGraph)}> {
-      <${assertSafeIri(subject)}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root
-    } }`);
-    if (result.type !== 'boolean') {
-      throw new Error('Cannot determine whether the Knowledge Asset already has a finalized seal');
+    for (const subject of await this.activeAssertionSealSubjects(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+    )) {
+      const result = await this.store.query(`ASK { GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(subject)}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root
+      } }`);
+      if (result.type !== 'boolean') {
+        throw new Error('Cannot determine whether the Knowledge Asset already has a finalized seal');
+      }
+      if (result.value) return true;
     }
-    return result.value;
+    return false;
   }
 
   private async assertDraftUnsealedForWrite(
