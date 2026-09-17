@@ -227,6 +227,8 @@ import {
   classifyClientError,
   sanitizeRevertMessage,
   respondIfStoreUnavailable,
+  isContextGraphReadAuthorityUnavailable,
+  respondIfContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -370,41 +372,6 @@ export type PublicApiQueryResult = import('@origintrail-official/dkg-core').Publ
   Record<string, string>,
   { subject: string; predicate: string; object: string; graph: string }
 >;
-
-// Kept structural for the same package-boundary reason as
-// CALLER_SPARQL_REJECTED in query-error.ts: the agent emits this internal
-// marker, while the daemon owns its public HTTP representation.
-const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
-  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE';
-
-function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
-  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return false;
-  try {
-    return Reflect.get(err, 'code') === CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE
-      && Reflect.get(err, 'retryable') === true;
-  } catch {
-    return false;
-  }
-}
-
-function respondIfContextGraphReadAuthorityUnavailable(
-  res: ServerResponse,
-  err: unknown,
-): boolean {
-  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
-  jsonResponse(
-    res,
-    503,
-    {
-      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '3' },
-  );
-  return true;
-}
 
 /** Normalize the legacy engine shape at the public daemon boundary. */
 export function normalizePublicApiQueryResult(
@@ -577,6 +544,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       details: { sparql: sparql.slice(0, 200) },
     });
     tracker.startPhase(ctx, "parse");
+    // Declared outside the try so the catch can tell a caller abort apart from
+    // a genuine server-side failure.
+    let queryLifecycle: ApiQueryRequestLifecycle | undefined;
     try {
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
@@ -634,7 +604,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // and SWM catch-up (issue #1989). Thread connection cancellation all the
       // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
       // its queued/in-flight store request must not remain as orphan work.
-      const queryLifecycle = createApiQueryRequestLifecycle(req, res);
+      queryLifecycle = createApiQueryRequestLifecycle(req, res);
 
       let result;
       try {
@@ -665,7 +635,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           operationCtx: ctx,
         });
       } finally {
-        queryLifecycle.dispose();
+        queryLifecycle?.dispose();
       }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
@@ -688,7 +658,18 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         if (!res.writableEnded) res.end();
         return;
       }
-      if (respondIfContextGraphReadAuthorityUnavailable(res, err)) {
+      if (isContextGraphReadAuthorityUnavailable(err)) {
+        // The authority resolver folds ANY failure of its sources — including
+        // the abort raised when this caller disconnected — into `unavailable`,
+        // which drops the API_QUERY_CALLER_DISCONNECTED code checked above. An
+        // aborted request is a cancellation, not a retryable server failure:
+        // classify it as such instead of writing a 503 to a dead socket.
+        if (queryLifecycle?.signal.aborted) {
+          tracker.cancel(ctx, err);
+          if (!res.writableEnded) res.end();
+          return;
+        }
+        respondIfContextGraphReadAuthorityUnavailable(res, err);
         tracker.fail(ctx, err);
         return;
       }
@@ -778,6 +759,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       if (typeT) entityRdfType = typeT.o;
     } catch (err: any) {
       if (respondIfStoreUnavailable(res, err) !== null) return;
+      // The scoped triple read goes through the same authority resolution as
+      // `/api/query`; an unavailable source is retryable and its internal
+      // source/reason must not be echoed back through the generic 500 message.
+      if (respondIfContextGraphReadAuthorityUnavailable(res, err)) return;
       return jsonResponse(res, 500, {
         error: `Failed to fetch entity triples: ${err.message}`,
       });
