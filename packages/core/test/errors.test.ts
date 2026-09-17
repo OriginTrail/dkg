@@ -9,6 +9,9 @@ import {
   PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
   formatPublishAuthorNotCustodialMessage,
   messageIndicatesPublishAuthorNotCustodial,
+  PUBLISHER_NOT_AUTHORIZED_MESSAGE_MARKER,
+  formatPublisherNotAuthorizedMessage,
+  messageIndicatesPublisherNotAuthorized,
 } from '../src/errors.js';
 
 describe('DKGError hierarchy', () => {
@@ -114,5 +117,49 @@ describe('publish-author-not-custodial cross-package message contract', () => {
     expect(messageIndicatesPublishAuthorNotCustodial(undefined)).toBe(false);
     expect(messageIndicatesPublishAuthorNotCustodial(null)).toBe(false);
     expect(messageIndicatesPublishAuthorNotCustodial({ message: PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER })).toBe(false);
+  });
+});
+
+describe('publisher-not-authorized message contract [GH#2648]', () => {
+  const ADDR = '0xd896f0E677b5648cd727794C5e0334966264b40F';
+
+  it('builds a message the matching classifier recognises', () => {
+    // Emitter and classifier are paired here on purpose: the chain adapter throws a typed error
+    // carrying `.code`, but a re-wrap across a transport keeps only the text. Asserting the round
+    // trip is what stops a re-wording from silently turning a PERMANENT refusal back into a
+    // retryable one, which is the forever-retry trap this constant exists to close.
+    const message = formatPublisherNotAuthorizedMessage(ADDR, 7n);
+    expect(message).toContain(ADDR);
+    expect(message).toContain(PUBLISHER_NOT_AUTHORIZED_MESSAGE_MARKER);
+    expect(message).toContain('7');
+    expect(messageIndicatesPublisherNotAuthorized(message)).toBe(true);
+  });
+
+  it('accepts the context graph id as a string as well as a bigint', () => {
+    expect(formatPublisherNotAuthorizedMessage(ADDR, '7'))
+      .toBe(formatPublisherNotAuthorizedMessage(ADDR, 7n));
+  });
+
+  it('still matches when the message is re-wrapped with a prefix and lowercased', () => {
+    const inner = formatPublisherNotAuthorizedMessage(ADDR, 7n);
+    expect(messageIndicatesPublisherNotAuthorized(`publish failed: ${inner}`)).toBe(true);
+    expect(messageIndicatesPublisherNotAuthorized(inner.toLowerCase())).toBe(true);
+  });
+
+  it('does not match unrelated publish failures or non-strings', () => {
+    // Each of these must stay retryable. The sibling no-custodial and no-funded-wallet messages
+    // are included because all three travel the same classifier.
+    expect(messageIndicatesPublisherNotAuthorized('RPC submit timed out after 30s')).toBe(false);
+    expect(messageIndicatesPublisherNotAuthorized(
+      'No operational wallet has enough funds to publish to Verifiable Memory',
+    )).toBe(false);
+    expect(messageIndicatesPublisherNotAuthorized(
+      formatPublishAuthorNotCustodialMessage('0xabc'),
+    )).toBe(false);
+    expect(messageIndicatesPublisherNotAuthorized(undefined)).toBe(false);
+    expect(messageIndicatesPublisherNotAuthorized(null)).toBe(false);
+    expect(messageIndicatesPublisherNotAuthorized(
+      { message: PUBLISHER_NOT_AUTHORIZED_MESSAGE_MARKER },
+    )).toBe(false);
   });
 });
