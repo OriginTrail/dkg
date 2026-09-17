@@ -258,26 +258,39 @@ export function createPublishAuthorityResolver(
   // `initialized`, which is precisely why a lost binding is sticky for the process lifetime —
   // so asking per call bought nothing and put an `await init()` per wallet on the claim scan's
   // hot path, inside the coordinator's global claim lock.
-  let enforceable: boolean | undefined;
-  const resolveEnforceable = async (): Promise<boolean> => {
-    // A probe that THREW established nothing, so it is answered `false` for this pass but not
-    // memoized — otherwise one transient error would disable the filter for the process, which
-    // is the very behaviour this resolver exists to replace.
-    let definitive = true;
+  //
+  // Only `true` is memoized. A `false` cannot be told apart from "the binding was lost to a
+  // swallowed `initContracts()` error" — the very stickiness described above — so caching it
+  // would let one startup 429 disable lane routing for the whole process. Since this PR makes
+  // the refusal terminal (`authority_forbidden`, `autoRetry:false`), that would silently
+  // DESTROY every curated-CG lift job until restart rather than merely misroute it.
+  let enforceable: true | undefined;
+  type EnforceabilityV1 = 'enforceable' | 'unenforceable' | 'unreadable';
+  const resolveEnforceable = async (): Promise<EnforceabilityV1> => {
+    let unreadable = false;
     const answers = await Promise.all(wallets.map(async (wallet) => {
       try {
         return await wallet.chain.isPublishAuthorityEnforceable!();
       } catch {
-        definitive = false;
+        // A probe that THREW established nothing. `init()` rethrows
+        // `RpcEndpointsExhaustedError`, so this is an ordinary RPC blip, and answering
+        // `unenforced` here would make every lane eligible — fail-OPEN into permanent job
+        // loss. Hold the job instead and ask again next poll.
+        unreadable = true;
         return false;
       }
     }));
+    if (unreadable) return 'unreadable';
     const result = !answers.includes(false);
-    if (definitive) enforceable = result;
-    return result;
+    if (result) enforceable = true;
+    return result ? 'enforceable' : 'unenforceable';
   };
   return async (contextGraphId: bigint): Promise<AsyncLiftPublishAuthority> => {
-    if (!(enforceable ?? await resolveEnforceable())) return { kind: 'unenforced' };
+    if (enforceable !== true) {
+      const state = await resolveEnforceable();
+      if (state === 'unreadable') return { kind: 'unknown' };
+      if (state === 'unenforceable') return { kind: 'unenforced' };
+    }
     const verdicts = await Promise.all(wallets.map(async (wallet) => {
       try {
         return await wallet.chain.isAuthorizedPublisher!(contextGraphId, wallet.address)

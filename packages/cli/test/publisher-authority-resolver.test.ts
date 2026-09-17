@@ -115,14 +115,18 @@ describe('createPublishAuthorityResolver', () => {
     await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
   });
 
-  it('treats an enforceability probe that throws as not enforceable', async () => {
+  it('HOLDS the job when an enforceability probe throws, rather than freeing every lane', async () => {
+    // A throw established nothing — `init()` rethrows `RpcEndpointsExhaustedError`, so this is
+    // an ordinary RPC blip. Answering `unenforced` would make every lane eligible, and since the
+    // refusal is terminal (`authority_forbidden`, `autoRetry:false`) a wrong-lane claim destroys
+    // the job instead of retrying it. `unknown` holds it for the next poll.
     const resolve = createPublishAuthorityResolver([
       wallet(AUTHORIZED, async () => true),
       wallet(REFUSED, async () => true, async () => { throw new Error('rpc down'); }),
     ]);
     if (!resolve) throw new Error('expected a resolver');
 
-    await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
+    await expect(resolve(CG)).resolves.toEqual({ kind: 'unknown' });
   });
 
   it('disables the filter when an adapter answers authority but cannot report enforceability', () => {
@@ -153,8 +157,6 @@ describe('createPublishAuthorityResolver', () => {
   });
 
   it('does not memoize an enforceability probe that threw', async () => {
-    // A throw established nothing. Caching it would disable the filter for the whole process
-    // after one transient error — exactly the behaviour this resolver replaces.
     let failing = true;
     const probe = vi.fn(async () => {
       if (failing) throw new Error('rpc down');
@@ -165,8 +167,25 @@ describe('createPublishAuthorityResolver', () => {
     ]);
     if (!resolve) throw new Error('expected a resolver');
 
-    await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
+    await expect(resolve(CG)).resolves.toEqual({ kind: 'unknown' });
     failing = false;
+    await expect(resolve(CG)).resolves.toMatchObject({ kind: 'resolved' });
+  });
+
+  it('does not memoize a NEGATIVE enforceability answer either', async () => {
+    // `false` is indistinguishable from "the binding was lost to a swallowed `initContracts()`
+    // error", which the adapter docstring says is sticky for the process. Caching it would let
+    // one startup 429 disable lane routing until restart — and with the refusal terminal, that
+    // silently destroys every curated-CG lift job in the meantime.
+    let bound = false;
+    const probe = vi.fn(async () => bound);
+    const resolve = createPublishAuthorityResolver([
+      wallet(AUTHORIZED, async (_cg, address) => address === AUTHORIZED, probe),
+    ]);
+    if (!resolve) throw new Error('expected a resolver');
+
+    await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
+    bound = true;
     await expect(resolve(CG)).resolves.toMatchObject({ kind: 'resolved' });
   });
 

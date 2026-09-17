@@ -303,6 +303,28 @@ describe('async-lift claim selection respects context-graph publish authority (G
     expect(seen).toContain(453n);
   });
 
+  it('falls back to a numeric NAME when the store has no mapping, exactly as publish does', async () => {
+    // `DKGPublisher` uses `BigInt(onChainContextGraphId ?? contextGraphId)` — stored mapping
+    // first, then the name. Resolving store-ONLY here reported `unenforced` (every lane
+    // eligible) for a CG named by its numeric id with no local stamp, while publish still
+    // targeted that id and could be refused — and the refusal is terminal, so that is permanent
+    // job loss rather than a retry.
+    const seen: bigint[] = [];
+    const publisher = publisherWithAuthority(async (contextGraphId) => {
+      seen.push(contextGraphId);
+      return { kind: 'resolved', authorizedWalletIds: [AUTHORIZED], candidateWalletIds: [AUTHORIZED, REFUSED] };
+    });
+    // Deliberately NO bindOnChainId for '777'.
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-unstamped', '777'), {
+      idGenerator: () => 'job-unstamped',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+    expect(seen).toContain(777n);
+  });
+
   it('fails a job NO configured wallet can publish terminally instead of leaving it queued', async () => {
     // The starvation half. Skipping alone would rebuild the original bug quietly: the job would
     // sit in `accepted` forever with nothing to explain it.
