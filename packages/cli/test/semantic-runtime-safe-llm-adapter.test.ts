@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -46,6 +47,47 @@ function completeFixture() {
 }
 
 describe('safe LLM Rig adapter', () => {
+  it('projects disclosure and hides raw errors, identifiers and graph descriptions from the runner', async () => {
+    fixtureRunner(`
+      if (!request) { request = message; send({type:'call',id:1,capabilityId:'opaque-capability'}); }
+      else { send({type:'complete',output:JSON.stringify({request,result:message})}); }
+    `);
+    const program = { ...opaqueProgram, sourceHash: 'a'.repeat(64), description: 'PRIVATE-DESCRIPTION' };
+    const policy = { policyId: 'release', promptSha256s: [createHash('sha256').update('approved').digest('hex')],
+      programs: [{ programIri: program.programIri, sourceHash: program.sourceHash, outputIndexes: [0], allowedJsonPointers: ['/count'] }] };
+    const assertAuthorized = vi.fn(async () => {});
+    const invokeChild = vi.fn(async () => ({ persisted: true as const, executionIri: 'PRIVATE-EXECUTION',
+      outputs: ['{"count":2,"secret":"PRIVATE-SECRET"}'] }));
+    const adapter = createSafeLlmAdapter(undefined, [program], invokeChild, { policy, assertAuthorized });
+    const response = await adapter.dispatch({ effectId: 'effect' } as any, { prompt: 'approved' });
+    const runner = JSON.parse(JSON.parse(response.output).output);
+    expect(JSON.parse(runner.result.output)).toEqual({ outputs: [{ '/count': 2 }] });
+    expect(JSON.stringify(runner)).not.toContain('PRIVATE-');
+    expect(assertAuthorized).toHaveBeenCalledTimes(3);
+    await expect(adapter.dispatch({ effectId: 'effect' } as any, { prompt: 'private unapproved prompt' }))
+      .rejects.toThrow('SEMANTIC_PROMPT_NOT_PINNED');
+    expect(invokeChild).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks authority after the child finishes and releases no child data after revocation', async () => {
+    fixtureRunner(`
+      if (!request) { request = message; send({type:'call',id:1,capabilityId:'opaque-capability'}); }
+      else { send({type:'complete',output:JSON.stringify(message)}); }
+    `);
+    const program = { ...opaqueProgram, sourceHash: 'a'.repeat(64) };
+    const policy = { policyId: 'release', promptSha256s: [createHash('sha256').update('approved').digest('hex')],
+      programs: [{ programIri: program.programIri, sourceHash: program.sourceHash, outputIndexes: [0] }] };
+    let revoked = false;
+    const adapter = createSafeLlmAdapter(undefined, [program], async () => {
+      revoked = true;
+      return { persisted: true, executionIri: 'PRIVATE-EXECUTION', outputs: ['PRIVATE-OUTPUT'] };
+    }, { policy, assertAuthorized: async () => { if (revoked) throw new Error('PRIVATE-REVOCATION-DETAIL'); } });
+    const response = await adapter.dispatch({ effectId: 'effect' } as any, { prompt: 'approved' });
+    const runner = JSON.parse(response.output).output;
+    expect(runner).toContain('program result unavailable');
+    expect(runner).not.toContain('PRIVATE-');
+  });
+
   it('uses a keyless local endpoint and lets Rig invoke only an opaque Program', async () => {
     const requests: string[] = [];
     const toolName = 'program_0123456789abcdef';

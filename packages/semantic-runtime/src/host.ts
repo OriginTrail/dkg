@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import type { SemanticProgramPolicy } from './program-policy.js';
+
 import {
   MESSAGE_TYPE,
   decodeAbiSuccess,
@@ -38,6 +40,8 @@ export interface SemanticRuntimeConfig {
   enabled?: boolean;
   /** Operator-owned policy selected locally; Programs cannot override it. */
   operatorPolicyIri?: string;
+  /** Optional operator-owned local Program pins and LLM disclosure rules. */
+  programPolicy?: SemanticProgramPolicy;
   watchdogMs?: number;
   startupTimeoutMs?: number;
   maxEvents?: number;

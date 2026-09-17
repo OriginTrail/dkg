@@ -9,9 +9,10 @@ import {
   prepareQueryCatalogExecution,
   type QueryCatalogItem,
 } from '@origintrail-official/dkg-core/query-catalog';
-import type { RuntimeAdapterOperation } from '@origintrail-official/dkg-semantic-runtime';
+import type { RuntimeAdapterOperation, SemanticQueryPin } from '@origintrail-official/dkg-semantic-runtime';
 
 import { readContextGraphQueryCatalogBindings } from './daemon/query-catalog-service.js';
+import { assertSemanticQueryDefinition, assertSemanticQueryOutput, validateSemanticQueryPins } from './semantic-runtime-query-pins.js';
 
 const MAX_SELECTOR_BYTES = 512;
 const MAX_RESULT_ITEMS = 1_000;
@@ -26,9 +27,14 @@ export function createDkgQueryAdapter(
   agent: DKGAgent,
   contextGraphId: string,
   callerAgentAddress?: string,
+  queryPins?: SemanticQueryPin[],
 ): RuntimeAdapterOperation<DkgQueryInput, string> {
+  if (queryPins !== undefined) validateSemanticQueryPins(queryPins);
+  const pins = queryPins === undefined ? undefined : structuredClone(queryPins);
   const implementationHash = createHash('sha256')
     .update(readFileSync(fileURLToPath(import.meta.url)))
+    .update(readFileSync(new URL(`./semantic-runtime-query-pins.${import.meta.url.endsWith('.ts') ? 'ts' : 'js'}`, import.meta.url)))
+    .update(pins === undefined ? 'direct-query' : canonicalizeJson(pins as unknown as CanonicalJsonValue))
     .digest('hex');
   return {
     id: 'dkg/query',
@@ -70,6 +76,7 @@ export function createDkgQueryAdapter(
           input.selector,
         );
         if (!item) throw new Error('QUERY_CATALOG_ENTRY_NOT_FOUND');
+        const pin = pins === undefined ? undefined : assertSemanticQueryDefinition(pins, input.selector, item);
         const execution = prepareQueryCatalogExecution(item, input.parameters);
         const result = await agent.query(execution.sparql, {
           contextGraphId,
@@ -83,6 +90,7 @@ export function createDkgQueryAdapter(
           { queryIri: item.queryIri, result } as unknown as CanonicalJsonValue,
           { maxBytes: MAX_OUTPUT_BYTES },
         );
+        if (pin) assertSemanticQueryOutput(pin, result);
         return {
           status: 'succeeded',
           output,

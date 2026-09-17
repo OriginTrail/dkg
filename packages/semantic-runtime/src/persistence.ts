@@ -5,7 +5,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 
 export const RUNTIME_DATABASE_FILENAME = 'semantic-runtime.sqlite';
-export const RUNTIME_DATABASE_SCHEMA_VERSION = 1;
+export const RUNTIME_DATABASE_SCHEMA_VERSION = 2;
 
 export type ExecutionStatus = 'active' | 'paused' | 'completed' | 'failed' | 'quarantined';
 export type EffectState =
@@ -209,9 +209,9 @@ const EFFECT_TRANSITIONS: Readonly<Record<EffectState, readonly EffectState[]>> 
   succeeded: ['compensation_pending'],
   failed: ['compensation_pending'],
   unknown: ['reconciling'],
-  reconciling: ['reconciled', 'manual_review_required'],
+  reconciling: ['reconciled', 'manual_review_required', 'unknown'],
   reconciled: ['succeeded', 'failed', 'manual_review_required'],
-  manual_review_required: [],
+  manual_review_required: ['reconciling'],
   compensation_pending: ['compensated', 'manual_review_required'],
   compensated: [],
 };
@@ -708,6 +708,35 @@ export class SemanticRuntimeStore {
     return row ? effectFromRow(row) : null;
   }
 
+  effectsForExecution(executionId: string): EffectRecord[] {
+    return (this.db.prepare('SELECT * FROM effect WHERE execution_id = ? ORDER BY effect_id')
+      .all(executionId) as SqlEffectRow[]).map(effectFromRow);
+  }
+
+  /** Private adapter continuation state, bound to the already authorized effect. */
+  adapterCheckpoint(effectId: string): { version: number; payload: Uint8Array } | null {
+    const row = this.db.prepare('SELECT version, payload FROM adapter_checkpoint WHERE effect_id = ?')
+      .get(effectId) as { version: bigint; payload: Buffer } | undefined;
+    return row ? { version: Number(row.version), payload: Uint8Array.from(row.payload) } : null;
+  }
+
+  writeAdapterCheckpoint(effectId: string, requestDigest: Uint8Array, payload: Uint8Array, expectedVersion: number): number {
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0 || payload.byteLength > 32 * 1024 * 1024) {
+      throw new Error('invalid adapter checkpoint bounds');
+    }
+    return this.db.transaction(() => {
+      const effect = requireValue(this.effect(effectId), 'checkpoint effect does not exist');
+      if (!bytesEqual(effect.requestDigest, requestDigest)) throw new Error('checkpoint request digest mismatch');
+      const previous = this.adapterCheckpoint(effectId);
+      if ((previous?.version ?? 0) !== expectedVersion) throw new Error('concurrent adapter checkpoint update');
+      const version = expectedVersion + 1;
+      this.db.prepare(`INSERT INTO adapter_checkpoint(effect_id, version, payload, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(effect_id) DO UPDATE SET version=excluded.version, payload=excluded.payload, updated_at=excluded.updated_at`)
+        .run(effectId, version, Buffer.from(payload), Date.now());
+      return version;
+    })();
+  }
+
   transitionEffect(
     effectId: string,
     next: EffectState,
@@ -728,6 +757,16 @@ export class SemanticRuntimeStore {
       if (changed.changes !== 1) throw new Error('concurrent effect transition conflict');
       this.insertEffectTransition(effectId, version, next, evidenceRef, cbor, createdAt);
       return requireValue(this.effect(effectId), 'effect disappeared after transition');
+    })();
+  }
+
+  /** Reconciliation proof and terminal outcome commit together. A crash must
+   * not strand an effect between the two individually valid transitions. */
+  completeReconciliation(effectId: string, outcome: 'succeeded' | 'failed', evidenceRef: string,
+    cbor: Uint8Array, createdAt: number): EffectRecord {
+    return this.db.transaction(() => {
+      this.transitionEffect(effectId, 'reconciled', evidenceRef, cbor, createdAt);
+      return this.transitionEffect(effectId, outcome, evidenceRef, cbor, createdAt);
     })();
   }
 
@@ -817,7 +856,8 @@ export class SemanticRuntimeStore {
     }
     if (version === RUNTIME_DATABASE_SCHEMA_VERSION) return;
     this.db.transaction(() => {
-      this.db.exec(SCHEMA_V1);
+      if (version < 1) this.db.exec(SCHEMA_V1);
+      if (version < 2) this.db.exec(SCHEMA_V2);
       this.db.pragma(`user_version = ${RUNTIME_DATABASE_SCHEMA_VERSION}`);
     })();
   }
@@ -1161,4 +1201,13 @@ const SCHEMA_V1 = `
   CREATE INDEX snapshot_partition_idx ON snapshot(partition_id, seq DESC);
   CREATE INDEX effect_state_idx ON effect(state, execution_id);
   CREATE INDEX effect_transition_idx ON effect_transition(effect_id, version);
+`;
+
+const SCHEMA_V2 = `
+  CREATE TABLE adapter_checkpoint (
+    effect_id TEXT PRIMARY KEY REFERENCES effect(effect_id),
+    version INTEGER NOT NULL CHECK(version > 0),
+    payload BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
 `;
