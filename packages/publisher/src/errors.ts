@@ -23,6 +23,42 @@ export class PublisherWalletRequiredError extends Error {
   }
 }
 
+/**
+ * GH#2648 — NO wallet this publisher runtime operates is authorized by the target context
+ * graph's on-chain publish policy, so no lift lane can ever sign the job.
+ *
+ * The starvation half of the lane-authority fix. Once the claim scan filters a lane to jobs its
+ * own wallet may publish, a job that NO wallet may publish would otherwise sit in `accepted`
+ * with nothing to explain it — a quieter version of the forever-retry bug it replaced. One lane
+ * therefore claims it anyway, purely to record this terminal failure.
+ *
+ * `.code` is the contract: the async-lift classifier registers it in
+ * `classifyKnowledgeAssetVmPublishPreconditionCode`, which is what routes it to the terminal
+ * `authority_forbidden` rather than the message-keyed `canonicalization_failed` fallback. It is
+ * deliberately DISTINCT from the chain adapter's `PUBLISHER_NOT_AUTHORIZED` (one pinned wallet
+ * refused, raised mid-publish): this one is knowable before any work starts, is about the whole
+ * wallet set, and carries the operator-actionable list.
+ */
+export const NO_AUTHORIZED_PUBLISHER_WALLET_CODE = 'NO_AUTHORIZED_PUBLISHER_WALLET';
+
+export class NoAuthorizedPublisherWalletError extends Error {
+  readonly code = NO_AUTHORIZED_PUBLISHER_WALLET_CODE;
+  readonly contextGraphId: string;
+  readonly walletIds: readonly string[];
+  constructor(contextGraphId: bigint | string, walletIds: readonly string[]) {
+    super(
+      `No configured publisher wallet is authorized to publish to context graph `
+      + `${contextGraphId.toString()}. This node operates ${walletIds.length} publisher `
+      + `wallet${walletIds.length === 1 ? '' : 's'} (${walletIds.join(', ') || 'none'}), and the `
+      + 'context graph\'s on-chain publish authority admits none of them. Authorize one of these '
+      + 'wallets on the context graph, or publish from the wallet its authority names.',
+    );
+    this.name = 'NoAuthorizedPublisherWalletError';
+    this.contextGraphId = contextGraphId.toString();
+    this.walletIds = [...walletIds];
+  }
+}
+
 export interface CASCondition {
   subject: string;
   predicate: string;

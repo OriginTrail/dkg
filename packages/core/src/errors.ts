@@ -100,6 +100,53 @@ export function messageIndicatesPublishAuthorNotCustodial(message: unknown): boo
 }
 
 /**
+ * GH#2648 — the wallet a publish is PINNED to is not authorized on-chain to publish to the
+ * target context graph. On a CURATED context graph (publishPolicy 0) in EOA mode,
+ * `ContextGraphs.isAuthorizedPublisher` admits exactly ONE address, so every other wallet a
+ * node operates is permanently refused for that graph.
+ *
+ * Shared here for the same reason as the two codes above: it crosses packages. The EVM
+ * adapter raises it from `resolvePinnedPublisherSigner`, and the publisher's async-job
+ * classifier must recognise it as a PERMANENT authority refusal. Without that last consumer
+ * it falls through to the retryable `rpc_unavailable` default and the queue keeps resetting a
+ * job that can never finalize — the SAME forever-retry trap #1013 fixed for unfundable
+ * publishes and #1121/GH#1786 fixed for non-custodial authors, reaching its third class.
+ */
+export const PUBLISHER_NOT_AUTHORIZED_CODE = 'PUBLISHER_NOT_AUTHORIZED';
+
+/** The literal fragment every publisher-not-authorized message contains. The chain adapter
+ *  builds its message from {@link formatPublisherNotAuthorizedMessage}; consumers holding only
+ *  a (possibly re-wrapped, code-stripped) message match on it via
+ *  {@link messageIndicatesPublisherNotAuthorized}. Emitter and classifier share this constant
+ *  so re-wording the message can never silently un-classify the failure. */
+export const PUBLISHER_NOT_AUTHORIZED_MESSAGE_MARKER =
+  'is not authorized to publish to context graph';
+
+const PUBLISHER_NOT_AUTHORIZED_MARKER = new RegExp(
+  PUBLISHER_NOT_AUTHORIZED_MESSAGE_MARKER,
+  'i',
+);
+
+/** The canonical CONDITION sentence for {@link PUBLISHER_NOT_AUTHORIZED_CODE}. Built here,
+ *  beside the marker it must keep containing, rather than inline at the throw site — so a
+ *  re-wording cannot un-classify the failure downstream. Transport-neutral: remediation
+ *  ("authorize this wallet, or publish from the graph's authority") is presentation owned by
+ *  the layer that has somewhere to point. */
+export function formatPublisherNotAuthorizedMessage(
+  publisherAddress: string,
+  contextGraphId: bigint | string,
+): string {
+  return `Configured publisherAddress ${publisherAddress} `
+    + `${PUBLISHER_NOT_AUTHORIZED_MESSAGE_MARKER} ${contextGraphId.toString()}.`;
+}
+
+/** True iff a message string indicates a publisher-not-authorized failure — the fallback used
+ *  when the structured `.code` was lost to a re-wrap. */
+export function messageIndicatesPublisherNotAuthorized(message: unknown): boolean {
+  return typeof message === 'string' && PUBLISHER_NOT_AUTHORIZED_MARKER.test(message);
+}
+
+/**
  * An error caused by invalid user input or a pre-condition that the user
  * can fix. CLI handlers can show these messages directly without a stack trace.
  */

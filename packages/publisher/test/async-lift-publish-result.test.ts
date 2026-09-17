@@ -243,6 +243,70 @@ describe('async lift publish result mapping', () => {
     expect(failure.phase).toBe('validation');
   });
 
+  it('classifies PUBLISHER_NOT_AUTHORIZED as a TERMINAL authority_forbidden failure (not retryable)', () => {
+    // GH#2648: a curated context graph's on-chain publish policy refuses the wallet this publish
+    // was pinned to. PERMANENT — `ContextGraphs.isAuthorizedPublisher` admits exactly one address
+    // on a curated graph in EOA mode, so re-sending from this wallet can only be refused again.
+    //
+    // The message deliberately matches NONE of classifyPublishFailureCode's keywords (no
+    // 'timeout' / 'insufficient funds' / 'nonce' / 'revert' / 'reorg' / 'mismatch'), which is
+    // exactly why it fell through to the retryable rpc_unavailable default and the queue reset
+    // and re-claimed the job until the run deadline killed it — the third recurrence of the
+    // forever-retry trap #1013/#1121.
+    const err = Object.assign(
+      new Error(
+        'Configured publisherAddress 0x3bccEeD2000000000000000000000000000000aa '
+        + 'is not authorized to publish to context graph 453.',
+      ),
+      { code: 'PUBLISHER_NOT_AUTHORIZED' },
+    );
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: err,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:publisher-not-authorized',
+    });
+
+    expect(failure.code).toBe('authority_forbidden');
+    expect(failure.retryable).toBe(false);
+    expect(failure.resolution).toBe('fail_job');
+    expect(failure.phase).toBe('validation');
+  });
+
+  it('classifies a code-stripped publisher-not-authorized error (message marker only) as terminal', () => {
+    // Same robustness as the two precedents: a re-wrap can drop .code but keep the message, and
+    // the shared dkg-core marker is what keeps the classification alive across that boundary.
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new Error(
+        'rpc_unavailable Configured publisherAddress 0x3bccEeD2000000000000000000000000000000aa '
+        + 'is not authorized to publish to context graph 453.',
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:publisher-not-authorized-nocode',
+    });
+
+    expect(failure.code).toBe('authority_forbidden');
+    expect(failure.retryable).toBe(false);
+    expect(failure.phase).toBe('validation');
+  });
+
+  it('leaves a publisher-not-authorized refusal from included on the confirmation classifier', () => {
+    // The force is scoped to 'broadcast', matching the two precedents beside it: that is where
+    // the executor raises this (pre-signing, inside the publish call) and the only state whose
+    // default is the RETRYABLE rpc_unavailable. An 'included' failure is a confirmation-phase
+    // concern and keeps the classifier's answer — `authority_forbidden` is not even recordable
+    // from 'included'.
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: Object.assign(
+        new Error('Configured publisherAddress 0xabc is not authorized to publish to context graph 453.'),
+        { code: 'PUBLISHER_NOT_AUTHORIZED' },
+      ),
+      failedFromState: 'included',
+      errorPayloadRef: 'urn:error:publisher-not-authorized-included',
+    });
+
+    expect(failure.code).toBe('confirmation_mismatch');
+  });
+
   it('classifies a code-stripped funds error (message marker only) as terminal insufficient_funds from broadcast', () => {
     // A re-wrap could drop .code but preserve the message — the marker fallback
     // must still keep it terminal (mirrors the daemon + node-ui robustness).

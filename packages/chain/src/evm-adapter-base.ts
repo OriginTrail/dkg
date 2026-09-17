@@ -30,7 +30,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PublisherNotAuthorizedError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -1421,10 +1421,11 @@ export class EVMChainAdapterBase {
         selected.address,
       );
       if (!authorized) {
-        throw new Error(
-          `Configured publisherAddress ${selected.address} is not authorized to publish ` +
-          `to context graph ${contextGraphId.toString()}.`,
-        );
+        // GH#2648 — TYPED, because this refusal is permanent for this wallet and the async-lift
+        // classifier reads `.code`. As a bare Error its message matched no classifier keyword
+        // and fell through to the retryable `rpc_unavailable` default, so the lift queue reset
+        // and re-claimed the job forever (#1013/#1121, third recurrence).
+        throw new PublisherNotAuthorizedError(selected.address, contextGraphId);
       }
     }
     return selected;

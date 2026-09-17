@@ -391,9 +391,13 @@ export {
   AMBIGUOUS_ASSERTION_AUTHOR_CODE,
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  PUBLISHER_NOT_AUTHORIZED_CODE,
+  PUBLISHER_NOT_AUTHORIZED_MESSAGE_MARKER,
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
+  messageIndicatesPublisherNotAuthorized,
   formatPublishAuthorNotCustodialMessage,
+  formatPublisherNotAuthorizedMessage,
 } from './errors.js';
 export {
   dkgHomeDir,

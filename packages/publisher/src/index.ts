@@ -117,6 +117,8 @@ export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMet
 export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 export {
   DKGPublisher,
+  NoAuthorizedPublisherWalletError,
+  NO_AUTHORIZED_PUBLISHER_WALLET_CODE,
   StaleWriteError,
   AssertionNotPersistedError,
   MultiRootPublishNotAtomicError,
@@ -353,6 +355,7 @@ export {
   type AsyncLiftPublisher,
   type ClaimSessionAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftPublishAuthority,
   type AsyncLiftRetryOutcome,
   type AsyncLiftRetryStateReader,
   type AsyncKnowledgeAssetVmPublishExecutionInput,

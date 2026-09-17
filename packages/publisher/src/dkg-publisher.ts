@@ -111,6 +111,8 @@ import {
 } from './workspace-gossip-payload.js';
 import {
   PublisherWalletRequiredError,
+  NoAuthorizedPublisherWalletError,
+  NO_AUTHORIZED_PUBLISHER_WALLET_CODE,
   StaleWriteError,
   ReservedNamespaceError,
   AssertionNotPersistedError,
@@ -140,6 +142,8 @@ export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject
 // from this module) stays the stable import path for every consumer.
 export {
   PublisherWalletRequiredError,
+  NoAuthorizedPublisherWalletError,
+  NO_AUTHORIZED_PUBLISHER_WALLET_CODE,
   StaleWriteError,
   ReservedNamespaceError,
   AssertionNotPersistedError,

@@ -229,7 +229,12 @@ export interface AsyncLiftClaimCoordinatorDependencies {
   readonly ensureGraph: () => Promise<void>;
   readonly isPaused: () => boolean;
   readonly readStatus: (jobId: string) => Promise<LiftJobPayloadDecodeResult>;
-  readonly nextAccepted: () => Promise<LiftJobAccepted | undefined>;
+  /**
+   * The next accepted job THIS wallet should claim. GH#2648 — the wallet is a parameter because
+   * eligibility is per wallet: a lane whose wallet the target context graph's on-chain publish
+   * policy refuses can never sign that job, so the selector must be able to pass over it.
+   */
+  readonly nextAccepted: (walletId: string) => Promise<LiftJobAccepted | undefined>;
   readonly reacceptDueFailedJobs: (now: number) => Promise<unknown>;
   readonly toClaimed: (current: LiftJobAccepted, walletId: string) => LiftJobClaimed;
   readonly writeJob: (
@@ -291,7 +296,7 @@ export class AsyncLiftClaimCoordinator {
       if (await this.hasActiveWalletLock(walletId)) return null;
 
       await this.dependencies.reacceptDueFailedJobs(this.config.now());
-      const next = await this.dependencies.nextAccepted();
+      const next = await this.dependencies.nextAccepted(walletId);
       if (!next) return null;
       const claimedJob = await this.withJobTransitionLock(next.jobId, async () => {
         const current = await this.getStatus(next.jobId);

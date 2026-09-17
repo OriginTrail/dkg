@@ -1723,6 +1723,37 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
+   * GH#2648: chain-backed publish-AUTHORITY oracle parity for the mock. Mirrors
+   * `ContextGraphs.isAuthorizedPublisher(uint256,address)` branch for branch, because the async
+   * lift claim scan routes lanes on this answer and a mock that always said `true` would make
+   * every offline test of that routing vacuous.
+   *
+   * Bounds/liveness first (an unknown id is NOT authorized), then: an OPEN graph admits any
+   * non-zero principal; a CURATED graph in EOA mode admits exactly the stored authority — which
+   * is why a node running ten wallets has nine lanes that can never publish to one; and a
+   * CURATED graph in PCA mode ignores the stored snapshot and live-resolves the account owner
+   * plus its registered agents.
+   */
+  async isAuthorizedPublisher(contextGraphId: bigint, publisherAddress: string): Promise<boolean> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (contextGraphId <= 0n || !cg || !cg.active) return false;
+    if (!ethers.isAddress(publisherAddress)) return false;
+    const publisher = ethers.getAddress(publisherAddress);
+    if (cg.publishPolicy === 1) return publisher !== ethers.ZeroAddress;
+    if (publisher === ethers.ZeroAddress) return false;
+    if (cg.publishAuthorityAccountId === 0n) {
+      const storedAuthority = cg.publishAuthority
+        ? ethers.getAddress(cg.publishAuthority)
+        : ethers.ZeroAddress;
+      return publisher === storedAuthority;
+    }
+    const owner = await this.getPublishingConvictionAccountOwner(cg.publishAuthorityAccountId);
+    if (ethers.isAddress(owner) && ethers.getAddress(owner) === publisher) return true;
+    const publisherAccountId = await this.getConvictionAgentAccountId(publisher);
+    return publisherAccountId !== 0n && publisherAccountId === cg.publishAuthorityAccountId;
+  }
+
+  /**
    * OT-RFC-38 / LU-6 Phase B: chain-backed participant-agent allowlist
    * parity for the mock. Mirrors {@link getContextGraphAccessPolicy}
    * shape. Returns an empty array when the CG is unknown or has no

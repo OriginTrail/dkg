@@ -507,6 +507,32 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(addr).toMatch(/^0x[0-9a-fA-F]{40}$/);
   });
 
+  it('mirrors ContextGraphs.isAuthorizedPublisher for open, curated and unknown graphs (GH#2648)', async () => {
+    // The async lift claim scan routes lanes on this answer, so a mock that always said `true`
+    // would make every offline test of that routing vacuous. The curated row is the defect that
+    // motivated it: exactly ONE address is admitted, so a node running many wallets has one lane
+    // that can publish and the rest that never can.
+    const mock = new MockChainAdapter();
+    const CURATOR = ethers.getAddress('0xd896f0e6000000000000000000000000000000aa');
+    const OTHER = ethers.getAddress('0x3bcceed2000000000000000000000000000000bb');
+
+    const open = await mock.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1 });
+    expect(await mock.isAuthorizedPublisher(open.contextGraphId, OTHER)).toBe(true);
+    expect(await mock.isAuthorizedPublisher(open.contextGraphId, ethers.ZeroAddress)).toBe(false);
+
+    const curated = await mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 0,
+      publishAuthority: CURATOR,
+    });
+    expect(await mock.isAuthorizedPublisher(curated.contextGraphId, CURATOR)).toBe(true);
+    expect(await mock.isAuthorizedPublisher(curated.contextGraphId, OTHER)).toBe(false);
+
+    // Unknown / out-of-bounds ids fail CLOSED, matching the contract's bounds + liveness gate.
+    expect(await mock.isAuthorizedPublisher(0n, CURATOR)).toBe(false);
+    expect(await mock.isAuthorizedPublisher(999_999n, CURATOR)).toBe(false);
+  });
+
   it('rejects participant agent configs that would revert on-chain', async () => {
     const mock = new MockChainAdapter();
 

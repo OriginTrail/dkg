@@ -112,6 +112,13 @@ import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { isKnowledgeAssetWorkspaceHeadCorruptError, resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 import {
+  PublishAuthorityCache,
+  positiveOnChainContextGraphId,
+  type PublishAuthorityClaimVerdict,
+} from './async-lift-publish-authority.js';
+import { resolveOnChainContextGraphId } from './workspace-resolution.js';
+import { NoAuthorizedPublisherWalletError, NO_AUTHORIZED_PUBLISHER_WALLET_CODE } from './errors.js';
+import {
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   DEFAULT_GRAPH_URI,
   DEFAULT_JOURNAL_GRAPH_URI,
@@ -369,6 +376,22 @@ function statusToKind(status: LiftJobState): JournalKind {
   }
 }
 
+/**
+ * GH#2648 — the context graph a queued job targets, whichever request shape it carries.
+ *
+ * A NAME, not the numeric on-chain id: both `KnowledgeAssetVmPublishRequest` and
+ * `LiftPublishSnapshotRequest` hold the local identifier, and the on-chain id is resolved from the
+ * store (`resolveOnChainContextGraphId`) during workspace resolution — far too late for a
+ * claim-time routing decision. Blank is `undefined`, not an empty name.
+ */
+function liftJobContextGraphName(request: LiftJobRequest): string | undefined {
+  const contextGraphId = isKnowledgeAssetVmPublishJobRequest(request)
+    ? request.knowledgeAssetVmPublish.contextGraphId
+    : rawLiftRequestFromJobRequest(request)?.contextGraphId;
+  const trimmed = contextGraphId?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 function assertGraphScopedLiftSnapshot(request: LiftPublishSnapshotRequest): void {
   if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
     throw new LegacyKnowledgeAssetReadOnlyError();
@@ -472,6 +495,12 @@ export class TripleStoreAsyncLiftPublisher
     walletId: string,
     operationKind: 'create' | 'update' | undefined,
   ) => boolean;
+  /**
+   * GH#2648 — the per-context-graph publish-authority answers the claim scan routes on. Undefined
+   * when no resolver is configured, which is what keeps the scan byte-for-byte unfiltered for
+   * direct library consumers.
+   */
+  private readonly publishAuthority?: PublishAuthorityCache;
   private readonly chainProofDispatchBatchSize: number;
   private readonly chainProofDispatchTimeBudgetMs: number;
   /**
@@ -654,6 +683,20 @@ export class TripleStoreAsyncLiftPublisher
       hasNamedRecoveryResolver: config.knowledgeAssetVmPublishRecoveryResolver !== undefined,
     });
     this.graphManager = new GraphManager(store);
+    this.publishAuthority = config.publishAuthorityResolver
+      ? new PublishAuthorityCache({
+        resolveContextGraphId: async (contextGraphName) =>
+          positiveOnChainContextGraphId(contextGraphName)
+          ?? positiveOnChainContextGraphId(
+            await resolveOnChainContextGraphId({ store, contextGraphId: contextGraphName }),
+          ),
+        resolveAuthority: config.publishAuthorityResolver,
+        now: this.now,
+        ...(config.publishAuthorityCacheTtlMs !== undefined
+          ? { ttlMs: config.publishAuthorityCacheTtlMs }
+          : {}),
+      })
+      : undefined;
     this.claimCoordinator = new AsyncLiftClaimCoordinator(
       store,
       {
@@ -666,7 +709,7 @@ export class TripleStoreAsyncLiftPublisher
         ensureGraph: async () => await this.ensureGraph(),
         isPaused: () => this.paused,
         readStatus: async (jobId) => await this.readJobPayload(jobId),
-        nextAccepted: async () => await this.readNextAcceptedJob(),
+        nextAccepted: async (walletId) => await this.readNextAcceptedJob(walletId),
         reacceptDueFailedJobs: async (now) => await this.reacceptDueFailedJobs(now),
         toClaimed: (current, walletId) =>
           this.buildTransitionJob(current, 'claimed', { claim: { walletId } }),
@@ -901,17 +944,65 @@ export class TripleStoreAsyncLiftPublisher
    * row cannot block valid work behind it. Ordering is explicit over the
    * decoded durable values: acceptedAt first, then jobId for deterministic ties.
    */
-  private async readNextAcceptedJob(): Promise<LiftJobAccepted | undefined> {
+  private async readNextAcceptedJob(walletId: string): Promise<LiftJobAccepted | undefined> {
     await this.ensureGraph();
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ${literal('accepted')} ; <${ACCEPTED_AT_PREDICATE}> ?acceptedAt ; <${PAYLOAD_PREDICATE}> ?payload } }`,
       { source: 'publisher.asyncLift.nextAccepted' },
     );
-    return expectBindings(result)
+    const accepted = expectBindings(result)
       .map((row) => this.parseJobPayloadForScan(row['payload']))
       .filter((job): job is LiftJobAccepted => job?.status === 'accepted')
-      .sort(compareAcceptedJobs)
-      .at(0);
+      .sort(compareAcceptedJobs);
+    if (!this.publishAuthority) return accepted.at(0);
+    // GH#2648 — walk the queue in order and take the FIRST job this wallet may actually sign,
+    // rather than the first job outright. Skipping is not starvation: the lane that IS authorized
+    // claims the skipped job on its own pass, and the ordering within each lane's eligible subset
+    // is still acceptedAt-then-jobId. A job NO wallet can sign is deliberately NOT skipped — it is
+    // returned so the claim can record its terminal failure (see assertClaimablePublishAuthority).
+    for (const job of accepted) {
+      const verdict = await this.publishAuthorityVerdict(job.request, walletId);
+      if (verdict.kind === 'eligible' || verdict.kind === 'unpublishable') return job;
+    }
+    return undefined;
+  }
+
+  /**
+   * GH#2648 — the claim scan's routing question: may THIS lane's wallet publish THIS job?
+   *
+   * A job with no context graph name (no shape carries one) is `eligible`: there is nothing to
+   * ask about, and refusing it would strand work the authority feature has no opinion on.
+   */
+  private async publishAuthorityVerdict(
+    request: LiftJobRequest,
+    walletId: string,
+  ): Promise<PublishAuthorityClaimVerdict> {
+    if (!this.publishAuthority) return { kind: 'eligible' };
+    const contextGraphName = liftJobContextGraphName(request);
+    if (contextGraphName === undefined) return { kind: 'eligible' };
+    return await this.publishAuthority.verdictFor(contextGraphName, walletId);
+  }
+
+  /**
+   * GH#2648, starvation half. The scan lets exactly one class of unauthorized job through: one no
+   * configured wallet may EVER publish. Returning the error here (rather than skipping the job in
+   * the scan) is what keeps such a job from sitting in `accepted` with nothing to explain it —
+   * the quieter successor to the forever-retry bug this fix removes.
+   *
+   * Re-asked here rather than threaded through the claim because the answer is memoized: the scan
+   * that let this job through and this check read the same cached verdict. If authority rotated in
+   * between and this wallet is now merely the wrong one, the job proceeds and is refused on chain,
+   * which the publish classifier records as the same terminal `authority_forbidden` — one
+   * diagnosis, reached two ways, never two lanes disagreeing.
+   */
+  private async unpublishablePublishAuthorityError(
+    request: LiftJobRequest,
+    walletId: string,
+  ): Promise<NoAuthorizedPublisherWalletError | undefined> {
+    const verdict = await this.publishAuthorityVerdict(request, walletId);
+    return verdict.kind === 'unpublishable'
+      ? new NoAuthorizedPublisherWalletError(verdict.contextGraphId, verdict.candidateWalletIds)
+      : undefined;
   }
 
   async inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null> {
@@ -965,7 +1056,17 @@ export class TripleStoreAsyncLiftPublisher
   async processNext(walletId: string): Promise<PersistedLiftJob | null> {
     const outcome = await this.claimCoordinator.processClaim(
       walletId,
-      async (session) => await this.jobHandlerFor(session.claim.request).process(session),
+      async (session) => {
+        // GH#2648 — the only unauthorized job the scan admits is one NO configured wallet may
+        // publish. Fail it terminally from 'claimed', before any workspace read or preflight:
+        // nothing downstream can change an on-chain policy answer.
+        const unpublishable = await this.unpublishablePublishAuthorityError(
+          session.claim.request,
+          walletId,
+        );
+        if (unpublishable) return await session.recordExecutionFailure('claimed', unpublishable);
+        return await this.jobHandlerFor(session.claim.request).process(session);
+      },
       (release) => this.onClaimProcessingReleased(release),
     );
     return outcome.kind === 'idle' ? null : outcome.job;
@@ -1993,12 +2094,22 @@ export class TripleStoreAsyncLiftPublisher
   private classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJobFailureCode | null {
     // GH#1786 — permanent author-capability refusal; no transaction was ever sent.
     if (isPermanentAuthorCapabilityFailure(error)) return 'authority_forbidden';
+    // GH#2648 — no configured publisher wallet is admitted by this context graph's on-chain
+    // publish policy, so no lane can ever sign this job. Raised by the claim gate BEFORE any work
+    // starts; registered here so its code is `authority_forbidden` rather than the message-keyed
+    // `canonicalization_failed` this chain's default would reach.
+    //
+    // The chain adapter's PUBLISHER_NOT_AUTHORIZED (one PINNED wallet refused, raised mid-publish)
+    // is deliberately NOT registered here: it is recorded from 'broadcast', where
+    // `mapPublishExceptionToLiftJobFailure` owns it. Routing it through this pre-send branch would
+    // make that recognizer dead on the KA VM path.
     let structuredCode: unknown;
     try {
       structuredCode = (error as { code?: unknown } | null | undefined)?.code;
     } catch {
       structuredCode = undefined;
     }
+    if (structuredCode === NO_AUTHORIZED_PUBLISHER_WALLET_CODE) return 'authority_forbidden';
     if (structuredCode === 'PUBLISH_INTENT_STALE') return 'publish_intent_stale';
     // The EVM adapter rejects this before signing or broadcasting. Keep it in
     // the validated retry lane, where an operator can raise the cap or wait for

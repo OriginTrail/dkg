@@ -17,6 +17,7 @@ export type {
   AsyncLiftPublisher,
   ClaimSessionAsyncLiftPublisher,
   AsyncLiftPublisherConfig,
+  AsyncLiftPublishAuthority,
   AsyncLiftPublishExecutionInput,
   AsyncLiftChainProofLookup,
   AsyncLiftCreateChainProofLookup,

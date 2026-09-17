@@ -35,6 +35,9 @@ export {
   InsufficientPublisherFundsError,
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
+  PublisherNotAuthorizedError,
+  isPublisherNotAuthorizedError,
+  PUBLISHER_NOT_AUTHORIZED_CODE,
   formatNoFundedPublisherWalletMessage,
   type PublisherWalletBalance,
 } from './evm-adapter-errors.js';

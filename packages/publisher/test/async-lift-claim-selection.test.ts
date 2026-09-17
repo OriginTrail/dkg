@@ -4,6 +4,7 @@ import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import {
   createLiftJobFailureMetadata,
   TripleStoreAsyncLiftPublisher,
+  type AsyncLiftPublishAuthority,
 } from '../src/index.js';
 import type {
   LiftJobFailedFromAccepted,
@@ -17,6 +18,7 @@ import {
   serializeJob,
 } from '../src/async-lift-control-plane.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 
 describe('async-lift accepted-job selection', () => {
   let store: OxigraphStore;
@@ -142,5 +144,220 @@ describe('async-lift accepted-job selection', () => {
 
     expect((await publisher.claimNext('wallet-1'))?.jobId).toBe(oldestId);
     expect(selectedBindingCount).toBe(2);
+  });
+});
+
+describe('async-lift claim selection respects context-graph publish authority (GH#2648)', () => {
+  let store: OxigraphStore;
+
+  const AUTHORIZED = '0xd896f0E6000000000000000000000000000000aa';
+  const REFUSED = '0x3bccEeD2000000000000000000000000000000bb';
+
+  beforeEach(() => {
+    store = new OxigraphStore();
+  });
+
+  /** A queued request whose contextGraphId is already the numeric on-chain id. */
+  function curatedRequest(shareOperationId: string, contextGraphId = '453'): RawLiftRequest {
+    return {
+      swmId: 'swm-1',
+      namespace: 'default',
+      contextGraphId,
+      shareOperationId,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7',
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
+      scope: 'full',
+      transitionType: 'CREATE',
+      authority: { type: 'owner', proofRef: 'proof:owner:1' },
+    };
+  }
+
+  function publisherWithAuthority(
+    resolver: (contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>,
+  ): TripleStoreAsyncLiftPublisher {
+    return new TripleStoreAsyncLiftPublisher(store, {
+      now: () => 1_000,
+      claimTokenGenerator: () => 'claim-token',
+      publishAuthorityResolver: resolver,
+    });
+  }
+
+  /** The observed production shape: one curated CG, exactly one of the node's wallets admitted. */
+  function curatedAuthority(): (contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority> {
+    return async () => ({
+      kind: 'resolved',
+      authorizedWalletIds: [AUTHORIZED],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    });
+  }
+
+  it('does not let a lane claim a job its wallet is refused for, and hands it to the one that is', async () => {
+    // The whole defect: ten lanes claimed round-robin without asking, so nine of them took work
+    // only the tenth could sign — each failing, resetting, and re-claiming until the deadline.
+    const publisher = publisherWithAuthority(curatedAuthority());
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+  });
+
+  it('passes over a refused job to reach one the same lane can publish', async () => {
+    // Skipping must not be head-of-line blocking: the refused job stays for its own lane while
+    // this lane keeps draining the work it CAN sign.
+    const publisher = publisherWithAuthority(async (contextGraphId) =>
+      contextGraphId === 453n
+        ? { kind: 'resolved', authorizedWalletIds: [AUTHORIZED], candidateWalletIds: [AUTHORIZED, REFUSED] }
+        : { kind: 'resolved', authorizedWalletIds: [AUTHORIZED, REFUSED], candidateWalletIds: [AUTHORIZED, REFUSED] });
+    await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-curated', '453'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+    const openJobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-open', '999'), {
+      idGenerator: () => 'job-open',
+      now: () => 2,
+    });
+
+    // 'job-curated' is strictly older, so the unfiltered selector would return it.
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe(openJobId);
+  });
+
+  it('claims nothing while authority cannot be read, leaving the job accepted for the next poll', async () => {
+    // A transient RPC failure must NOT open the gate: with the refusal now classified permanent,
+    // an unauthorized lane claiming on a blip would END the job instead of retrying it.
+    let verdict: AsyncLiftPublishAuthority = { kind: 'unknown' };
+    const publisher = publisherWithAuthority(async () => verdict);
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(AUTHORIZED)).toBeNull();
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+
+    // 'unknown' is never cached, so the very next poll sees the recovered answer.
+    verdict = {
+      kind: 'resolved',
+      authorizedWalletIds: [AUTHORIZED],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    };
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+  });
+
+  it('leaves the selector unfiltered when authority is unenforceable', async () => {
+    const publisher = publisherWithAuthority(async () => ({ kind: 'unenforced' }));
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe(jobId);
+  });
+
+  it('resolves a context graph NAME through the local on-chain id mapping', async () => {
+    // Production queues a NAME; the numeric id lives in the local ontology graph.
+    const seen: bigint[] = [];
+    const publisher = publisherWithAuthority(async (contextGraphId) => {
+      seen.push(contextGraphId);
+      return { kind: 'resolved', authorizedWalletIds: [AUTHORIZED], candidateWalletIds: [AUTHORIZED, REFUSED] };
+    });
+    await store.insert([{
+      subject: 'did:dkg:context-graph:music-social',
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+      object: literal('453'),
+      graph: 'did:dkg:context-graph:ontology',
+    }]);
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1', 'music-social'), {
+      idGenerator: () => 'job-named',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+    expect(seen).toContain(453n);
+  });
+
+  it('fails a job NO configured wallet can publish terminally instead of leaving it queued', async () => {
+    // The starvation half. Skipping alone would rebuild the original bug quietly: the job would
+    // sit in `accepted` forever with nothing to explain it.
+    const publisher = publisherWithAuthority(async () => ({
+      kind: 'resolved',
+      authorizedWalletIds: [],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    }));
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-unpublishable',
+      now: () => 1,
+    });
+
+    const processed = await publisher.processNext(REFUSED);
+
+    expect(processed?.jobId).toBe(jobId);
+    const job = await publisher.getStatus(jobId);
+    if (job?.status !== 'failed') throw new Error(`expected failed job, got ${job?.status}`);
+    expect(job.failure.code).toBe('authority_forbidden');
+    expect(job.failure.retryable).toBe(false);
+    expect(job.failure.resolution).toBe('fail_job');
+    expect(job.failure.failedFromState).toBe('claimed');
+    // Actionable: names the graph and every wallet that was asked.
+    expect(job.failure.message).toContain('453');
+    expect(job.failure.message).toContain(AUTHORIZED);
+    expect(job.failure.message).toContain(REFUSED);
+    // Terminal means terminal — nothing reschedules it.
+    expect(job.timestamps.nextRetryAt).toBeUndefined();
+  });
+
+  it('routes a KNOWLEDGE-ASSET VM publish job by authority too — the cohort that failed', async () => {
+    // The harness cell that lost 15 of 20 assets was {"cohort":"vm","phase":"vm-lift"}, and the
+    // VM-publish request nests its context graph under a different key than raw lift. Without a
+    // row on THIS shape, a wrong field path would silently return `undefined` — read as "nothing
+    // to ask about" — and disable the filter for exactly the cohort the defect was reported on.
+    const publisher = publisherWithAuthority(curatedAuthority());
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ contextGraphId: '453' }),
+    );
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+  });
+
+  it('fails an unpublishable KNOWLEDGE-ASSET VM publish job terminally from claimed', async () => {
+    const publisher = publisherWithAuthority(async () => ({
+      kind: 'resolved',
+      authorizedWalletIds: [],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    }));
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ contextGraphId: '453' }),
+    );
+
+    await publisher.processNext(REFUSED);
+
+    const job = await publisher.getStatus(jobId);
+    if (job?.status !== 'failed') throw new Error(`expected failed job, got ${job?.status}`);
+    expect(job.failure.code).toBe('authority_forbidden');
+    expect(job.failure.failedFromState).toBe('claimed');
+    expect(job.failure.retryable).toBe(false);
+    expect(job.failure.message).toContain('453');
+  });
+
+  it('is byte-for-byte unfiltered when no authority resolver is configured', async () => {
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => 1_000,
+      claimTokenGenerator: () => 'claim-token',
+    });
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe(jobId);
   });
 });

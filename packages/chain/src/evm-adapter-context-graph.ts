@@ -266,6 +266,33 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     return (await this.nextAuthorizedSigner(contextGraphId)).address;
   }
 
+  /**
+   * GH#2648 — may `publisherAddress` publish to `contextGraphId`, per on-chain policy?
+   *
+   * A NARROW read, deliberately unlike {@link getAuthorizedPublisherAddress}: no funding reads,
+   * no PCA quote, no signer-pool rotation, and it answers about an address rather than picking
+   * one. The async-lift claim scan asks this per accepted job before a lane claims it, so it
+   * has to be cheap and it must not fail for reasons other than authority.
+   *
+   * No `ContextGraphs` surface ⇒ `true`: authority is UNENFORCEABLE here, not denied. This
+   * mirrors `_authorizedPublisherSigners` and `poolHasFundableSigner`, both of which treat a
+   * missing contract as "every operational wallet is a candidate". A read FAILURE is not
+   * absorbed — it throws, so the caller can tell "unknown" from "refused" (the lift scan holds
+   * the job in `accepted` rather than either claiming or condemning it).
+   */
+  async isAuthorizedPublisher(contextGraphId: bigint, publisherAddress: string): Promise<boolean> {
+    await this.init();
+    const contextGraphs = this.contracts.contextGraphs;
+    if (!contextGraphs) return true;
+    return Boolean(await this.readContract(
+      contextGraphs,
+      'contextGraphs.isAuthorizedPublisher',
+      'isAuthorizedPublisher',
+      contextGraphId,
+      ethers.getAddress(publisherAddress),
+    ));
+  }
+
   // =====================================================================
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   //
