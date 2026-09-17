@@ -29,6 +29,37 @@ export interface ContextGraphReadAuthorityDecision {
   onChainId?: bigint;
 }
 
+export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' as const;
+
+/**
+ * Scoped queries must preserve the distinction between an authoritative deny
+ * and an authority source that could not answer. The daemon recognizes the
+ * stable code structurally so this internal error does not become part of the
+ * public agent package surface.
+ */
+export class ContextGraphReadAuthorityUnavailableError extends Error {
+  readonly code = CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE;
+  readonly retryable = true;
+  readonly contextGraphId: string;
+  readonly source: ContextGraphReadAuthoritySource;
+  readonly reason: string;
+
+  constructor(
+    contextGraphId: string,
+    decision: Pick<ContextGraphReadAuthorityDecision, 'source' | 'reason'>,
+  ) {
+    super(
+      `Context Graph read authority is unavailable for "${contextGraphId}" `
+      + `(${decision.source}/${decision.reason})`,
+    );
+    this.name = 'ContextGraphReadAuthorityUnavailableError';
+    this.contextGraphId = contextGraphId;
+    this.source = decision.source;
+    this.reason = decision.reason;
+  }
+}
+
 export interface ContextGraphReadAuthorityInput {
   contextGraphId: string;
   callerAgentAddress?: string;
