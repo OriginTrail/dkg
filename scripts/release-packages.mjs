@@ -9,6 +9,11 @@ import { cliRuntimeAssetManifest } from './copy-cli-runtime-assets.mjs';
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
 export const NODE_SQLITE_SUPPORTED_RANGE = '>=22.13.0 <23.0.0 || >=23.4.0';
+export const NODE_SQLITE_INSTALL_GUARD = Object.freeze({
+  rootCommand: 'node packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+  cliCommand: 'node ./scripts/verify-node-sqlite-runtime.mjs',
+  cliAsset: 'scripts/verify-node-sqlite-runtime.mjs',
+});
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -84,6 +89,56 @@ export function findNodeSqliteEngineViolations(rootDir = ROOT_DIR) {
         expected: NODE_SQLITE_SUPPORTED_RANGE,
       });
     }
+  }
+  return violations;
+}
+
+/**
+ * Older active updaters cannot execute checks added to the target release.
+ * Keep a target-owned install hook in both paths those updaters already run:
+ * npm installs the published CLI package, while git slots run the workspace
+ * root install before building and swapping the target checkout.
+ */
+export function findNodeSqliteInstallGuardViolations(rootDir = ROOT_DIR) {
+  const checks = [
+    {
+      path: 'package.json',
+      expected: NODE_SQLITE_INSTALL_GUARD.rootCommand,
+    },
+    {
+      path: 'packages/cli/package.json',
+      expected: NODE_SQLITE_INSTALL_GUARD.cliCommand,
+    },
+  ];
+  const violations = [];
+  for (const check of checks) {
+    const packageJsonPath = path.join(rootDir, check.path);
+    let actual;
+    try {
+      actual = readJson(packageJsonPath).scripts?.preinstall;
+    } catch {
+      actual = '<unreadable package metadata>';
+    }
+    if (actual !== check.expected) {
+      violations.push({
+        path: check.path,
+        actual: actual ?? '<missing>',
+        expected: check.expected,
+      });
+    }
+  }
+  const assetPath = path.join(
+    rootDir,
+    'packages',
+    'cli',
+    ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'),
+  );
+  if (!fs.existsSync(assetPath)) {
+    violations.push({
+      path: `packages/cli/${NODE_SQLITE_INSTALL_GUARD.cliAsset}`,
+      actual: '<missing>',
+      expected: '<present>',
+    });
   }
   return violations;
 }
@@ -363,6 +418,7 @@ export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture
   const required = [
     ...cliRuntimeAssetManifest({ rootDir }).requiredPackAssets,
     'build-info.json',
+    NODE_SQLITE_INSTALL_GUARD.cliAsset,
   ];
   // `npm pack --dry-run --json` reports exactly what would be published,
   // running the package's `prepack` first — so this reflects the real tarball.
@@ -380,6 +436,15 @@ export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture
 }
 
 function commandVerifyPack() {
+  const installGuardViolations = findNodeSqliteInstallGuardViolations(ROOT_DIR);
+  if (installGuardViolations.length > 0) {
+    console.error('Release pack check failed — node:sqlite install guards must protect predecessor update paths:');
+    for (const violation of installGuardViolations) {
+      console.error(`- ${violation.path}: ${violation.actual} (expected ${violation.expected})`);
+    }
+    process.exitCode = 1;
+    return;
+  }
   const runtimeViolations = findNodeSqliteEngineViolations(ROOT_DIR);
   if (runtimeViolations.length > 0) {
     console.error('Release pack check failed — publishable node:sqlite consumers must declare the supported Node.js range:');
