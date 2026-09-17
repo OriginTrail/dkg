@@ -287,7 +287,11 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
-import { composeSyncWorkAdmission } from './sync/work-admission.js';
+import {
+  composeSyncWorkAdmission,
+  createSyncFetchSharingIdentity,
+  type SyncFetchSharingIdentity,
+} from './sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -905,7 +909,13 @@ type InFlightSyncSingleFlight = {
 };
 type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeers']>>;
 
-const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
+type InFlightSyncPageFetches = Map<
+  SyncFetchSharingIdentity,
+  Map<string, InFlightSyncPageFetch>
+>;
+
+const defaultPageFetchSharingIdentity = createSyncFetchSharingIdentity();
+const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, InFlightSyncPageFetches>();
 const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncSingleFlight>>();
 const syncPageSizeProfilesByAgent = new WeakMap<DKGAgent, SyncPageSizeProfileCache>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
@@ -1074,7 +1084,7 @@ function syncPageFetchCoalescingKey(params: {
   ]);
 }
 
-function inFlightSyncPageFetchesFor(agent: DKGAgent): Map<string, InFlightSyncPageFetch> {
+function inFlightSyncPageFetchesFor(agent: DKGAgent): InFlightSyncPageFetches {
   let inFlight = inFlightSyncPageFetchesByAgent.get(agent);
   if (!inFlight) {
     inFlight = new Map();
@@ -6969,17 +6979,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } = options;
     const effectiveWorkAdmission = workAdmission ?? composeSyncWorkAdmission({
       deadline,
-      scope: { sharing: 'coalescible', key: 'default-page-fetch' },
+      fetchSharingIdentity: defaultPageFetchSharingIdentity,
     });
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals);
     // Coalescing is declared by the capability, never inferred from singleton
     // identity. Exclusive private rounds cannot inherit another job's clock.
-    const coalescingScopeKey = effectiveWorkAdmission.scope.sharing === 'coalescible'
-      ? effectiveWorkAdmission.scope.key
-      : null;
-    const coalescingKeyBase = signal || shouldStopAfterPage || coalescingScopeKey === null
+    const fetchSharingIdentity = effectiveWorkAdmission.fetchSharingIdentity;
+    const coalescingKey = signal || shouldStopAfterPage || fetchSharingIdentity === undefined
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,
@@ -6998,15 +7006,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         maxAcceptedQuads,
         maxAcceptedHeapBytesEstimate,
       });
-    const coalescingKey = coalescingKeyBase === null
-      ? null
-      : `${coalescingKeyBase}|admission:${coalescingScopeKey}`;
     const inFlight = inFlightSyncPageFetchesFor(this);
     // Read once, here: this fetch runs inside the admitted operation, so the
     // ambient source is the trigger that both a join and the shared fetch's
     // own attempts belong to.
     const pageFetchSource = activeSyncAdmissionSource();
-    const existing = coalescingKey ? inFlight.get(coalescingKey) : undefined;
+    const existingLane = coalescingKey && fetchSharingIdentity
+      ? inFlight.get(fetchSharingIdentity)
+      : undefined;
+    const existing = coalescingKey ? existingLane?.get(coalescingKey) : undefined;
     if (existing) {
       if (!existing.controller.signal.aborted) {
         // At map-hit time, before any bytes move. An aborted entry below is NOT
@@ -7018,7 +7026,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
         return waitForSyncPageFetch(existing, signal);
       }
-      if (coalescingKey) inFlight.delete(coalescingKey);
+      if (coalescingKey && existingLane) {
+        existingLane.delete(coalescingKey);
+        if (existingLane.size === 0 && fetchSharingIdentity) {
+          inFlight.delete(fetchSharingIdentity);
+        }
+      }
     }
     if (signal?.aborted) {
       return Promise.reject(asSyncFetchAbortError(signal.reason));
@@ -7037,6 +7050,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     let entry!: InFlightSyncPageFetch;
+    let coalescingLane: Map<string, InFlightSyncPageFetch> | undefined;
     const sharedFetch = fetchSyncPages({
       ctx,
       remotePeerId,
@@ -7111,8 +7125,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
     }).finally(() => {
       nodeStopSignal?.removeEventListener('abort', onNodeStop);
-      if (coalescingKey && inFlight.get(coalescingKey) === entry) {
-        inFlight.delete(coalescingKey);
+      if (coalescingKey && coalescingLane?.get(coalescingKey) === entry) {
+        coalescingLane.delete(coalescingKey);
+        if (
+          coalescingLane.size === 0
+          && fetchSharingIdentity
+          && inFlight.get(fetchSharingIdentity) === coalescingLane
+        ) {
+          inFlight.delete(fetchSharingIdentity);
+        }
       }
     });
     sharedFetch.catch(() => {
@@ -7121,7 +7142,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // active waiters through the original promise.
     });
     entry = { promise: sharedFetch, controller, waiters: 0, ownerSource: pageFetchSource };
-    if (coalescingKey) inFlight.set(coalescingKey, entry);
+    if (coalescingKey && fetchSharingIdentity) {
+      coalescingLane = inFlight.get(fetchSharingIdentity);
+      if (!coalescingLane) {
+        coalescingLane = new Map();
+        inFlight.set(fetchSharingIdentity, coalescingLane);
+      }
+      coalescingLane.set(coalescingKey, entry);
+    }
     return waitForSyncPageFetch(entry, signal);
   }
 
