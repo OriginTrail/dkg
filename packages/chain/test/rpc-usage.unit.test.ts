@@ -583,6 +583,29 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(usage.ethCallByConsumer.human_label_with_spaces_can_change).toBeUndefined();
   }, 30_000);
 
+  it('allows an adapter read helper to opt out of raw-read attribution explicitly', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpc.url,
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+
+    await expect(
+      a.readProvider(
+        'health probe label',
+        (p: any) => p.send('eth_call', [{ to: HUB, data: '0x' }, 'latest']),
+        { rpcUsageConsumer: null },
+      ),
+    ).resolves.toBeDefined();
+
+    const usage = a.drainRpcUsage();
+    expect(usage.byMethod.eth_call).toBeGreaterThanOrEqual(1);
+    expect(usage.ethCallByConsumer).toEqual({});
+  }, 30_000);
+
   it('attributes same-endpoint eth_call retry attempts to the readProvider label', async () => {
     installMeter();
     const rpc = await startLoopbackRpc({ throttle: ['eth_call'] });

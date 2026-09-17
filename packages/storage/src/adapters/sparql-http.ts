@@ -96,7 +96,9 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import { ManagedReadRecoveryCoordinatorV1 } from
+import {
+  ManagedReadRecoveryCoordinatorV1,
+} from
   '../managed-read-recovery-coordinator.js';
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -198,6 +200,32 @@ export interface SparqlHttpRecoveryState {
   generation: number;
 }
 
+/** Runtime-only recovery capability supplied by a DKG-managed Oxigraph supervisor. */
+export interface SparqlHttpManagedRecoveryV1 {
+  readonly readState: () => SparqlHttpRecoveryState;
+  readonly recover: (operation: StoreOperation) => void;
+}
+
+function snapshotManagedRecoveryCapability(
+  input: SparqlHttpManagedRecoveryV1 | undefined,
+): SparqlHttpManagedRecoveryV1 | undefined {
+  if (input === undefined || input === null || typeof input !== 'object') return undefined;
+  const readState = Object.getOwnPropertyDescriptor(input, 'readState');
+  const recover = Object.getOwnPropertyDescriptor(input, 'recover');
+  if (
+    readState === undefined
+    || recover === undefined
+    || !Object.prototype.hasOwnProperty.call(readState, 'value')
+    || !Object.prototype.hasOwnProperty.call(recover, 'value')
+    || typeof readState.value !== 'function'
+    || typeof recover.value !== 'function'
+  ) return undefined;
+  return Object.freeze({
+    readState: readState.value as () => SparqlHttpRecoveryState,
+    recover: recover.value as (operation: StoreOperation) => void,
+  });
+}
+
 export type SparqlHttpConsistencyProfile =
   | 'best-effort'
   | 'atomic-update'
@@ -229,11 +257,11 @@ export interface SparqlHttpStoreOptions {
    * closed instead of failing boot; it never grants managed guarantees.
    */
   managedOxigraph?: boolean;
-  /** Runtime-only recovery hook for a client deadline, including a cancelled
-   * managed read reaching its retained deadline with server work unconfirmed. */
-  onClientTimeout?: (operation: string) => void;
-  /** Runtime-only managed-server state used to classify restart collateral. */
-  getRecoveryState?: () => SparqlHttpRecoveryState;
+  /**
+   * Runtime-only managed-server recovery capability. Both operations must be
+   * present; incomplete runtime configurations are treated as unavailable.
+   */
+  managedRecovery?: SparqlHttpManagedRecoveryV1;
   /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
@@ -284,8 +312,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
   private readonly managedOxigraph: boolean;
-  private readonly onClientTimeout?: (operation: string) => void;
-  private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
+  private readonly managedRecovery?: SparqlHttpManagedRecoveryV1;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
@@ -321,8 +348,9 @@ export class SparqlHttpStore implements TripleStore {
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
-    this.onClientTimeout = options.onClientTimeout;
-    this.getRecoveryState = options.getRecoveryState;
+    this.managedRecovery = this.managedOxigraph
+      ? snapshotManagedRecoveryCapability(options.managedRecovery)
+      : undefined;
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
       : resolveConsistencyProfile(options);
@@ -338,10 +366,8 @@ export class SparqlHttpStore implements TripleStore {
     );
     this.onSlowQuery = options.onSlowQuery;
     this.managedReadRecovery = new ManagedReadRecoveryCoordinatorV1({
-      enabled: this.managedOxigraph,
       now: this.now,
-      readRecoveryState: () => this.readRecoveryState(),
-      recover: (operation) => this.notifyClientTimeout(operation),
+      capability: this.managedRecovery,
     });
     // Content-Type is set per-request by the query/mutation transports (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
@@ -438,9 +464,9 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   private readRecoveryState(): SparqlHttpRecoveryState | null {
-    if (!this.managedOxigraph || !this.getRecoveryState) return null;
+    if (this.managedRecovery === undefined) return null;
     try {
-      const state = this.getRecoveryState();
+      const state = this.managedRecovery.readState();
       if (
         typeof state?.recovering === 'boolean'
         && Number.isSafeInteger(state.generation)
@@ -480,7 +506,7 @@ export class SparqlHttpStore implements TripleStore {
 
   private notifyClientTimeout(operation: StoreOperation): void {
     try {
-      this.onClientTimeout?.(operation);
+      this.managedRecovery?.recover(operation);
     } catch {
       // Recovery notification must never replace the typed timeout contract.
     }

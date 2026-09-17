@@ -7,7 +7,7 @@ import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 import {
   reduceContextGraphAuthorityIndexPage,
-  type ContextGraphAuthorityIndexEvent,
+  type RawContextGraphAuthorityIndexEvent as ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 

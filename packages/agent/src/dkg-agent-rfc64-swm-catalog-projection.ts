@@ -200,7 +200,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: lane.announcementPeers,
+      peers: this.resolveRfc64CatalogAnnouncementPeersV1(lane.announcementPeers),
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     });
@@ -353,7 +353,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           ),
           assets: prepared.assets,
           deployment,
-          peers: lane.announcementPeers,
+          peers: this.resolveRfc64CatalogAnnouncementPeersV1(lane.announcementPeers),
           catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
           catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
           targetPolicy: lane.projectionTargetPolicy,

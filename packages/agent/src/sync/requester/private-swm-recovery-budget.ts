@@ -4,7 +4,6 @@ import {
   createSyncWorkAdmission,
   UNRESTRICTED_SYNC_WORK,
   type SyncWorkAdmission,
-  type SyncWorkAdmissionScope,
 } from '../work-admission.js';
 
 export const DEFAULT_PRIVATE_SWM_RECOVERY_BUDGET_MS = 600_000;
@@ -13,7 +12,7 @@ export const DEFAULT_PRIVATE_SWM_RECOVERY_BUDGET_MS = 600_000;
 export type PrivateSwmRecoveryWindow = Readonly<{
   kind: 'budgeted' | 'initial-round-only';
   canStartRound: (round: number) => boolean;
-  admitRound: (deadline: number, scope: SyncWorkAdmissionScope) => SyncWorkAdmission;
+  admitRound: (deadline: number) => SyncWorkAdmission;
 }>;
 
 export function resolvePrivateSwmRecoveryBudgetMs(
@@ -41,21 +40,17 @@ export function createPrivateSwmRecoveryWindow(budgetMs: number): PrivateSwmReco
   if (budgetMs === 0) return Object.freeze({
     kind: 'initial-round-only',
     canStartRound: (round: number) => round === 1,
-    admitRound: (deadline, scope) => composeSyncWorkAdmission({
+    admitRound: deadline => composeSyncWorkAdmission({
       deadline,
       window: UNRESTRICTED_SYNC_WORK,
-      scope,
     }),
   });
   const expiresAt = monotonicNow() + budgetMs;
   const remainingMs = () => Math.max(0, expiresAt - monotonicNow());
-  const window = createSyncWorkAdmission(remainingMs, {
-    sharing: 'exclusive',
-    owner: 'private-swm-job-window',
-  });
+  const window = createSyncWorkAdmission(remainingMs);
   return Object.freeze({
     kind: 'budgeted',
     canStartRound: (round: number) => round === 1 || remainingMs() > 0,
-    admitRound: (deadline, scope) => composeSyncWorkAdmission({ deadline, window, scope }),
+    admitRound: deadline => composeSyncWorkAdmission({ deadline, window }),
   });
 }

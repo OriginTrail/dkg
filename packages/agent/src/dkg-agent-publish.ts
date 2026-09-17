@@ -485,6 +485,40 @@ function planKnowledgeAssetVmPublication(input: {
   return { kind: 'initial', pricingPolicy: input.pricingPolicy };
 }
 
+/** Rebuild the immutable graph-scoped seal carried by one queued VM request. */
+function assertionSealFromQueuedKnowledgeAssetVmPublishRequest(
+  request: KnowledgeAssetVmPublishRequest,
+): AssertionSeal {
+  // Both execution boundaries validate the immutable graph-scoped envelope
+  // before calling this shared reconstruction helper.
+  const graphScope = createGraphKnowledgeAssetScope(
+    request.kaUal!,
+    request.assertionVersion!,
+  );
+  return {
+    merkleRoot: ethers.getBytes(request.seal.merkleRoot),
+    authorAddress: ethers.getAddress(request.seal.authorAddress),
+    authorAttestationR: ethers.getBytes(request.seal.signature.r),
+    authorAttestationVS: ethers.getBytes(request.seal.signature.vs),
+    authorSchemeVersion: request.seal.schemeVersion,
+    chainId: BigInt(request.sealChainId),
+    kav10Address: ethers.getAddress(request.sealKav10Address),
+    finalizedAtIso: request.sealFinalizedAtIso,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: graphScope.ual,
+    assertionVersion: graphScope.assertionVersion,
+    publicTripleCount: request.publicTripleCount!,
+    ...(request.privateMerkleRoot
+      ? { privateMerkleRoot: ethers.getBytes(request.privateMerkleRoot) }
+      : {}),
+    privateTripleCount: request.privateTripleCount!,
+    rootEntities: [],
+    ...(request.seal.reservedKaId !== undefined
+      ? { reservedKaId: BigInt(request.seal.reservedKaId) }
+      : {}),
+  };
+}
+
 export type KnowledgeAssetVmPublishRequestWithoutIntentKey = Omit<
   KnowledgeAssetVmPublishRequest,
   'intentKey'
@@ -5229,6 +5263,28 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    // A recovery-finalized transaction owns the same RFC-64 lifecycle tail as
+    // an in-band confirmed publish. Chain reconciliation may already have
+    // retired the exact SWM twin; complete its lane-specific signed inventory
+    // transition as well so a public catalog cannot retain an unresolvable
+    // asset after recovery (private lanes keep their finalized placement).
+    await this.afterConfirmedGraphScopedVmPublishV1({
+      status: 'confirmed',
+      contextGraphId: request.contextGraphId,
+      subGraphName: request.subGraphName,
+      assertionCoordinate: request.name,
+      shareOperationId: request.shareOperationId,
+      seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request),
+      assertionUri: contextGraphAssertionUri(
+        request.contextGraphId,
+        request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
+        request.name,
+        request.subGraphName,
+      ),
+      ctx,
+      publicationLabel: 'queued publish',
+    });
+
     // SWM-source materialization owns its exact transition. VM-only recovery
     // must not run a second, unlocked cleanup: a newer unpublished assertion
     // can already occupy the same per-KA SWM graph. Publisher lifecycle owns
@@ -5292,9 +5348,6 @@ export class PublishMethods extends DKGAgentBase {
       request.kaUal,
       request.assertionVersion,
     );
-    const queuedPrivateMerkleRoot = request.privateMerkleRoot
-      ? ethers.getBytes(request.privateMerkleRoot)
-      : undefined;
     const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const assertionUri = contextGraphAssertionUri(
       request.contextGraphId,
@@ -5310,24 +5363,7 @@ export class PublishMethods extends DKGAgentBase {
     );
     const metaGraph = contextGraphMetaUri(request.contextGraphId);
 
-    const seal: AssertionSeal = {
-      merkleRoot: ethers.getBytes(request.seal.merkleRoot),
-      authorAddress: ethers.getAddress(request.seal.authorAddress),
-      authorAttestationR: ethers.getBytes(request.seal.signature.r),
-      authorAttestationVS: ethers.getBytes(request.seal.signature.vs),
-      authorSchemeVersion: request.seal.schemeVersion,
-      chainId: BigInt(request.sealChainId),
-      kav10Address: ethers.getAddress(request.sealKav10Address),
-      finalizedAtIso: request.sealFinalizedAtIso,
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: graphScope.ual,
-      assertionVersion: graphScope.assertionVersion,
-      publicTripleCount: request.publicTripleCount,
-      ...(queuedPrivateMerkleRoot ? { privateMerkleRoot: queuedPrivateMerkleRoot } : {}),
-      privateTripleCount: request.privateTripleCount,
-      rootEntities: [],
-      ...(request.seal.reservedKaId !== undefined ? { reservedKaId: BigInt(request.seal.reservedKaId) } : {}),
-    };
+    const seal = assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request);
     const queuedMerkleRoot = ethers.hexlify(seal.merkleRoot).toLowerCase();
     if (queuedMerkleRoot !== request.sealMerkleRoot.toLowerCase()) {
       throw Object.assign(
