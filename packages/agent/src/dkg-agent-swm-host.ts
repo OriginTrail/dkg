@@ -779,7 +779,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // mechanisms; this is the "we already knew about this CG before"
     // shortcut that keeps the per-restart re-derivation cheap.
     try {
-      const previouslySubscribed = await this.swmHostModeStore.listHostModeSubscribedCgs();
+      const previouslySubscribed = await this.swmHostModeStore.listHostModeSubscriptions();
       if (previouslySubscribed.length > 0) {
         // OT-RFC-49 WS-A — persisted subscriptions created before the
         // private-ciphertext strip may be curated, while GH #1611 adds an
@@ -793,8 +793,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
             `Re-evaluating ${previouslySubscribed.length} persisted host-mode subscription(s) under current policy ` +
             `(private-ciphertext strip is ON; public restore requires swmHostMode.hostPublic=true)`,
           );
-          for (const cgId of previouslySubscribed) {
+          for (const { contextGraphId: cgId, onChainId } of previouslySubscribed) {
             try {
+              this.restorePersistedHostModeBinding(cgId, onChainId);
               await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER);
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
@@ -809,13 +810,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
             createOperationContext('system'),
             `Restoring ${previouslySubscribed.length} persisted host-mode subscription(s) from disk`,
           );
-          for (const cgId of previouslySubscribed) {
+          for (const { contextGraphId: cgId, onChainId } of previouslySubscribed) {
             // Re-engage the gossip handler directly; we trust the
             // previous decision (the curated check ran when the
             // subscription was first wired). The chain-anchored
             // authority check on every envelope ingest still catches
             // revocations even if curator state has changed since.
             try {
+              this.restorePersistedHostModeBinding(cgId, onChainId);
               this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
               // Codex PR #620 R2: also re-probe registration state.
               // Without this, a host-only CG that was registered while
@@ -842,6 +844,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
         `Failed to list persisted host-mode subscriptions: ${msg}`,
       );
     }
+  }
+
+  /** Rehydrate the chain binding stored beside a cold host-mode marker. */
+  restorePersistedHostModeBinding(
+    this: DKGAgent,
+    contextGraphId: string,
+    onChainId: string | undefined,
+  ): void {
+    if (onChainId === undefined) return;
+    if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
+      this.stageOnChainContextGraphBindingFromNameHash(
+        contextGraphId,
+        onChainId,
+        { persist: false },
+      );
+      return;
+    }
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    this.setContextGraphSubscription(contextGraphId, {
+      ...(existing ?? {
+        subscribed: false,
+        synced: false,
+        pendingMeta: true,
+      }),
+      onChainId,
+    }, { persist: false });
   }
 
   /**
@@ -1247,12 +1275,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // {@link hostModePersistenceStoreKey}.
     const queueKey = this.canonicalSwmHostModeKey(contextGraphId);
     const storeCgId = this.hostModePersistenceStoreKey(contextGraphId);
+    const onChainId = this.subscribedContextGraphs.get(storeCgId)?.onChainId
+      ?? this.subscribedContextGraphs.get(contextGraphId)?.onChainId
+      ?? this.subscribedContextGraphs.get(queueKey)?.onChainId;
     const store = this.swmHostModeStore;
     const op = subscribe ? 'mark' : 'unmark';
     const apply = async (): Promise<void> => {
       try {
         if (subscribe) {
-          await store.markHostModeSubscribed(storeCgId);
+          await store.markHostModeSubscribed(storeCgId, { onChainId });
         } else {
           await store.markHostModeUnsubscribed(storeCgId);
         }

@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '../../src/index.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   encodeGossipEnvelope,
   GOSSIP_ENVELOPE_VERSION,
@@ -51,6 +52,7 @@ import {
 interface StripInternals {
   swmHostModeStore?: SwmHostModeStore;
   swmHostModeHandlers: Map<string, (topic: string, data: Uint8Array, from: string) => void>;
+  swmHostModeSubscribed: Map<string, SubscriptionSource>;
   swmHostModeCurated: Map<string, boolean>;
   gossip: {
     subscribe(topic: string): void;
@@ -71,6 +73,9 @@ interface StripInternals {
   handleSwmHostCatchup(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
   handleGetCiphertextChunk(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
   initializeSwmHostModeStore(): Promise<void>;
+  stageOnChainContextGraphBindingFromNameHash(nameHash: string, onChainId: string): string | null;
+  enqueueHostModePersistence(contextGraphId: string, subscribe: boolean): void;
+  awaitHostModePersistence(contextGraphId: string): Promise<void>;
 }
 
 /** A curated CG: any `onChainHash` makes the three-source curation probe in
@@ -206,37 +211,68 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(g.swmHostModeHandlers.size).toBe(0);
   });
 
-  it('restart restore re-evaluates a persisted public subscription under hostPublic policy', async () => {
+  it('cold restart restores a hash-only public host from its persisted chain binding', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-public-'));
     tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestorePublicCore',
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes('cg-public-cold-host')).toLowerCase();
+    const onChainId = '42';
+
+    const first = await DKGAgent.create({
+      name: 'StripCiphertextFirstPublicCore',
       listenHost: '127.0.0.1',
       dataDir,
       nodeRole: 'core',
       rfc64CatalogActivation: { enabled: false },
       swmHostMode: { enabled: true, hostPublic: true, stripCiphertext: true },
     });
-    agents.push(core);
-    const g = core as unknown as StripInternals;
-    const cgId = 'cg-public-restore';
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
-    await store.markHostModeSubscribed(cgId);
-    g.subscribedContextGraphs.set(cgId, { subscribed: false, synced: false, onChainId: '2' });
-    g.onChainAccessPolicyCache.set('2', 0);
-    g.isPrivateContextGraph = async () => false;
-    g.isConfirmedPublicForHostMode = async () => true;
-    (g as any).maybeMarkRegisteredForHostMode = async () => {};
-    const wired: Array<{ id: string; curated?: boolean }> = [];
-    g.wireSwmHostModeHandler = (id: string, _source?: SubscriptionSource, curated?: boolean) => {
-      wired.push({ id, curated });
-    };
+    const firstInternals = first as unknown as StripInternals;
+    const firstStore = new SwmHostModeStore({
+      dataDir: join(dataDir, 'swm-host'),
+      ...SwmHostModeStore.defaultLimits(),
+    });
+    await firstStore.init();
+    firstInternals.swmHostModeStore = firstStore;
+    (firstInternals as any).scheduleRfc64CatalogResponsibilityReconciliationV1 = () => {};
+    expect(firstInternals.stageOnChainContextGraphBindingFromNameHash(wireId, onChainId))
+      .toBe(wireId);
+    firstInternals.enqueueHostModePersistence(wireId, true);
+    await firstInternals.awaitHostModePersistence(wireId);
+    expect(await firstStore.listHostModeSubscriptions()).toEqual([{
+      contextGraphId: wireId,
+      onChainId,
+    }]);
+    await first.stop().catch(() => {});
+    await first.store.close().catch(() => {});
 
-    await g.initializeSwmHostModeStore();
+    const chain = new MockChainAdapter();
+    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphPublishPolicy = vi.fn(async () => ({
+      publishPolicy: 1,
+      publishAuthority: ethers.ZeroAddress,
+    }));
+    chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    chain.getContextGraphPublishPolicy = getContextGraphPublishPolicy;
+    const restarted = await DKGAgent.create({
+      name: 'StripCiphertextRestartedPublicCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      chainAdapter: chain,
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, hostPublic: true, stripCiphertext: true },
+    });
+    agents.push(restarted);
+    const restored = restarted as unknown as StripInternals;
+    installGossipStub(restored);
+    (restored as any).maybeMarkRegisteredForHostMode = async () => {};
 
-    expect(wired).toEqual([{ id: cgId, curated: false }]);
+    await restored.initializeSwmHostModeStore();
+
+    expect(restored.subscribedContextGraphs.get(wireId)?.onChainId).toBe(onChainId);
+    expect(restored.swmHostModeSubscribed.has(wireId)).toBe(true);
+    expect(restored.swmHostModeHandlers.has(wireId)).toBe(true);
+    expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
+    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(42n);
   });
 
   it('restart restore contains a failing policy re-evaluation to keep startup alive', async () => {

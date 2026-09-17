@@ -119,6 +119,16 @@ const DEFAULT_REGISTERED_LIMITS: SwmHostModeStoreLimits = {
 const ENTRY_HEADER_BYTES = 8 + 8 + 4;
 const META_FILE = '_meta.json';
 
+function normalizePositiveOnChainId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const parsed = BigInt(value);
+    return parsed > 0n ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 interface CgMetaState {
   seqno: number;
   registered: boolean;
@@ -139,6 +149,18 @@ interface CgMetaState {
    * will clear `hostModeSubscribed`).
    */
   hostModeSubscribed?: boolean;
+  /**
+   * Numeric chain id captured when host mode was engaged. Host-only cores can
+   * know a graph solely by its wire hash; retaining this binding lets a cold
+   * restart re-check the public/open policy without replaying an old creation
+   * event or inventing a cleartext graph id.
+   */
+  hostModeOnChainId?: string;
+}
+
+export interface SwmHostModeSubscriptionBinding {
+  contextGraphId: string;
+  onChainId?: string;
 }
 
 /**
@@ -424,11 +446,19 @@ export class SwmHostModeStore {
    * mode). Persisted so a restart can re-engage the gossip handler
    * before the chain-event poller catches up. Idempotent.
    */
-  async markHostModeSubscribed(contextGraphId: string): Promise<void> {
+  async markHostModeSubscribed(
+    contextGraphId: string,
+    options: { onChainId?: string } = {},
+  ): Promise<void> {
     await this.withCgWriteLock(contextGraphId, async () => {
       const meta = await this.loadMeta(contextGraphId);
-      if (meta.hostModeSubscribed === true) return;
+      const onChainId = normalizePositiveOnChainId(options.onChainId);
+      if (
+        meta.hostModeSubscribed === true
+        && (onChainId === undefined || meta.hostModeOnChainId === onChainId)
+      ) return;
       meta.hostModeSubscribed = true;
+      if (onChainId !== undefined) meta.hostModeOnChainId = onChainId;
       await this.persistMeta(contextGraphId, meta);
     });
   }
@@ -444,6 +474,7 @@ export class SwmHostModeStore {
       const meta = await this.loadMeta(contextGraphId);
       if (meta.hostModeSubscribed !== true) return;
       meta.hostModeSubscribed = false;
+      delete meta.hostModeOnChainId;
       await this.persistMeta(contextGraphId, meta);
     });
   }
@@ -455,11 +486,25 @@ export class SwmHostModeStore {
    * chain-event poller to re-derive them.
    */
   async listHostModeSubscribedCgs(): Promise<string[]> {
+    return (await this.listHostModeSubscriptions()).map(({ contextGraphId }) => contextGraphId);
+  }
+
+  /**
+   * Restore records with their authoritative numeric binding when available.
+   * Legacy metadata has no `onChainId` and remains supported.
+   */
+  async listHostModeSubscriptions(): Promise<SwmHostModeSubscriptionBinding[]> {
     await this.init();
-    const out: string[] = [];
+    const out: SwmHostModeSubscriptionBinding[] = [];
     for (const { contextGraphId } of await this.listKnownCgs()) {
       const meta = await this.loadMeta(contextGraphId).catch(() => null);
-      if (meta?.hostModeSubscribed === true) out.push(contextGraphId);
+      if (meta?.hostModeSubscribed === true) {
+        const onChainId = normalizePositiveOnChainId(meta.hostModeOnChainId);
+        out.push({
+          contextGraphId,
+          ...(onChainId === undefined ? {} : { onChainId }),
+        });
+      }
     }
     return out;
   }
@@ -659,11 +704,13 @@ export class SwmHostModeStore {
       parsed = undefined;
     }
     const logSeqno = await this.recoverLastSeqnoFromLog(contextGraphId);
+    const restoredOnChainId = normalizePositiveOnChainId(parsed?.hostModeOnChainId);
     const state: CgMetaState = {
       seqno: Math.max(parsed?.seqno ?? 0, logSeqno),
       registered: parsed?.registered ?? false,
       contextGraphId,
       ...(parsed?.hostModeSubscribed === true ? { hostModeSubscribed: true } : {}),
+      ...(restoredOnChainId === undefined ? {} : { hostModeOnChainId: restoredOnChainId }),
     };
     // If the log says more than the meta does, persist the
     // reconciled cursor so subsequent cold loads don't have to
