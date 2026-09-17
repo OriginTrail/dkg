@@ -51,4 +51,10 @@ describe('bounded response-local IRI validation reuse', () => {
     const input = { head: { vars }, results: { bindings: [row, { ...row, v128: uri('relative') }] } };
     for (const decode of decodeBoth(input)) expect(decode).toThrow(SparqlJsonResultsShapeError);
   });
+
+  it('keeps validating high-cardinality columns after cache comparison is disabled', () => {
+    const unique = Array.from({ length: 50 }, (_, i) => uri(`urn:test:unique:${i}`));
+    for (const decode of decodeBoth(response(unique))) expect(decode()).toMatchObject({ bindings: unique.map(v => ({ v: v.value })) });
+    for (const decode of decodeBoth(response([...unique, uri('relative')]))) expect(decode).toThrow(SparqlJsonResultsShapeError);
+  });
 });

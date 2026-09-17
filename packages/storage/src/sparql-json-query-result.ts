@@ -32,10 +32,23 @@ type IriValidator = (value: string) => boolean;
 /** One last successful value per column, never a growing per-row/global cache. */
 function createIriValidator(): IriValidator {
   let lastValidIri: string | undefined;
+  let consecutiveMisses = 0;
+  let disabled = false;
   return value => {
-    if (value === lastValidIri) return true;
+    if (disabled) return isSafeIri(value);
+    if (value === lastValidIri) {
+      consecutiveMisses = 0;
+      return true;
+    }
     const valid = isSafeIri(value);
-    if (valid && value.length <= MAX_CACHED_IRI_LENGTH) lastValidIri = value;
+    // High-cardinality columns (e.g. one subject per row) should not keep
+    // doing cache comparisons/assignments without ever saving validation.
+    if (++consecutiveMisses >= 16) {
+      disabled = true;
+      lastValidIri = undefined;
+    } else if (valid && value.length <= MAX_CACHED_IRI_LENGTH) {
+      lastValidIri = value;
+    }
     return valid;
   };
 }

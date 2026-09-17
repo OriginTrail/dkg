@@ -33,14 +33,16 @@ if (process.argv[2] === '--worker') {
   symlinkSync(join(repo, 'packages/storage/node_modules'), join(directory, 'node_modules'), 'dir');
   const fixture = join(directory, 'fixture.json');
   const fixturePath = argument('fixture');
+  const shape = argument('shape') ?? 'repeated';
+  if (!['repeated', 'unique', 'single'].includes(shape)) throw new Error('shape must be repeated, unique or single');
   const uri = value => ({ type: 'uri', value });
   writeFileSync(fixture, fixturePath ? readFileSync(fixturePath) : JSON.stringify({
     head: { vars: ['g', 's', 'p', 'o'] },
-    results: { bindings: Array.from({ length: 1000 }, (_, i) => ({
-      g: uri(`did:dkg:context-graph:0x${'a'.repeat(40)}/benchmark/_shared_memory/0x${'b'.repeat(40)}/${Math.floor(i / 30)}`),
+    results: { bindings: Array.from({ length: shape === 'single' ? 1 : 1000 }, (_, i) => ({
+      g: uri(shape === 'unique' ? `urn:benchmark:graph:${i}` : `did:dkg:context-graph:0x${'a'.repeat(40)}/benchmark/_shared_memory/0x${'b'.repeat(40)}/${Math.floor(i / 30)}`),
       s: uri(`urn:bb:benchmark:swm:${Math.floor(i / 30)}:r${i}`),
-      p: uri('http://example.org/bb#note'),
-      o: { type: 'literal', value: `row ${Math.floor(i / 30)} triple ${i} of run benchmark` },
+      p: uri(shape === 'unique' ? `urn:benchmark:predicate:${i}` : 'http://example.org/bb#note'),
+      o: shape === 'unique' ? uri(`urn:benchmark:object:${i}`) : { type: 'literal', value: `row ${Math.floor(i / 30)} triple ${i} of run benchmark` },
     })) },
   }));
   const variants = {};
