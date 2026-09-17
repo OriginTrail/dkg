@@ -20,6 +20,15 @@ export interface Rfc64AuthorityReadCoordinatorOptionsV1 {
 }
 
 export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
+  /**
+   * `closed` — no exhaustion is outstanding and reads run normally.
+   * `open` — an exhaustion is outstanding and the retry deadline is ahead, so
+   * governed reads are refused without reaching a provider.
+   * `half-open` — an exhaustion is still outstanding but the retry deadline
+   * has passed. This does NOT imply a probe is currently in flight: the
+   * circuit reports half-open from the deadline onward, including while it
+   * sits idle, and clears only once some read proves it reached the pool.
+   */
   readonly state: 'closed' | 'open' | 'half-open';
   readonly consecutiveExhaustions: number;
   readonly retryAtMs: number | null;
@@ -28,6 +37,22 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
 export interface Rfc64AuthorityRpcProbeEvidenceV1 {
   /** Record that this operation actually exercised the governed RPC pool. */
   markRpcAttempt(): void;
+}
+
+export interface Rfc64AuthorityReadRunOptionsV1 {
+  /**
+   * Admit this read even while the circuit is open.
+   *
+   * The circuit exists to stop a fanned-out refresh pass from stampeding an
+   * exhausted pool. It is not a general availability switch: a rare,
+   * caller-initiated read whose result cannot be reconstructed later must not
+   * be silently downgraded for the length of one backoff window. Such a read
+   * still queues behind the same serializer, so at most one of them reaches
+   * the pool at a time; it still trips the circuit on exhaustion, and its
+   * success still counts as recovery evidence. In effect it behaves as an
+   * additional half-open probe rather than as a bypass.
+   */
+  readonly admitWhileOpen?: boolean;
 }
 
 /**
@@ -82,9 +107,16 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * Work is serialized even while the circuit is closed. This covers authority
  * bootstrap calls that do not pass through the periodic loop's permit pool and
  * guarantees that, after one full-pool exhaustion, queued graphs observe the
- * open circuit instead of stampeding the same endpoints. At the retry deadline
- * the serializer admits exactly one half-open probe; its success closes the
- * circuit and its exhaustion reopens it with the next backoff step.
+ * open circuit instead of stampeding the same endpoints. Past the retry
+ * deadline the serializer admits reads again one at a time; a success that
+ * reached the pool closes the circuit and an exhaustion reopens it with the
+ * next backoff step.
+ *
+ * Recovery needs evidence, not merely a fulfilled callback. A read that was
+ * answered from local or cached state says nothing about the pool it never
+ * contacted, so only an operation that calls `markRpcAttempt` can clear an
+ * outstanding exhaustion. Until then the circuit stays half-open, which is a
+ * statement about eligibility to probe rather than about a probe in flight.
  *
  * Only a typed `RPC_ENDPOINTS_EXHAUSTED` result trips the circuit. Contract
  * reverts and graph-specific validation failures retain their normal behavior.
@@ -131,6 +163,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       signal: AbortSignal,
       evidence: Rfc64AuthorityRpcProbeEvidenceV1,
     ) => Promise<T>,
+    options: Rfc64AuthorityReadRunOptionsV1 = {},
   ): Promise<T> {
     const runSignal = signal === undefined
       ? this.#lifecycleAbort.signal
@@ -142,7 +175,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       try {
         throwIfAborted(runSignal);
         const now = this.#now();
-        if (now < this.#retryAtMs) {
+        if (options.admitWhileOpen !== true && now < this.#retryAtMs) {
           throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
             this.#retryAtMs,
             this.#retryAtMs - now,

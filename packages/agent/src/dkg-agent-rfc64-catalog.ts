@@ -162,8 +162,10 @@ import {
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/catalog-rollout-authority-v1.js';
-import type { Rfc64AuthorityReadCoordinatorSnapshotV1 } from
-  './rfc64/authority-rpc-circuit-breaker-v1.js';
+import type {
+  Rfc64AuthorityReadCoordinatorSnapshotV1,
+  Rfc64AuthorityReadRunOptionsV1,
+} from './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -1808,6 +1810,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
+    runOptions: Rfc64AuthorityReadRunOptionsV1 = {},
   ) {
     if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
     return this.rfc64AuthorityReadCoordinatorV1.run(
@@ -1838,6 +1841,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
         }
       },
+      runOptions,
     );
   }
 
@@ -1849,8 +1853,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
+    // A curator binding is stamped into a one-shot join decision whose payload
+    // the outbox replays verbatim. Deferring the read here does not postpone
+    // the send, it ships a decision permanently missing its binding, so this
+    // lane is admitted while the circuit is open. See `admitWhileOpen`.
     const registeredAuthority = await this.readRfc64RegisteredAuthoritySnapshotV1(
       contextGraphId,
+      undefined,
+      { admitWhileOpen: true },
     );
     if (registeredAuthority !== null) {
       const { expectedNameHash, snapshot } = registeredAuthority;
