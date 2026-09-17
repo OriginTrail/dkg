@@ -1760,6 +1760,37 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     }
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
+    // Read authority. `contextGraphId` arrives from the request body and
+    // `validateRequiredContextGraphId` only checks its SHAPE, so without this
+    // gate any holder of a valid token — including an agent-scoped token whose
+    // agent is in no roster for this CG — could name a private context graph
+    // and have both fan-outs below serve its content back:
+    //
+    //   - fan-out 1 queries the vector store, whose rows are filtered by
+    //     `context_graph_id` in SQL (see `VectorStore.search`) — so the CG the
+    //     caller names IS the CG whose embeddings, labels and snippets are
+    //     ranked and returned,
+    //   - fan-out 2 calls `agent.store.query` DIRECTLY, bypassing
+    //     `DKGQueryEngine`'s graph-scope rewrites and `DKGAgent.query`'s
+    //     `canReadContextGraph` check, with hand-built `STRSTARTS` filters
+    //     pinned to the caller-supplied CG URI.
+    //
+    // Mirror the gate `/api/profile/query-catalog/read` already applies
+    // (`daemon/routes/query-catalog.ts`): node operators keep the cross-CG
+    // view they rely on, and every other principal must prove read authority
+    // for this CG. Fail with an explicit 403 rather than an empty 200 — the
+    // caller named a CG, so refusing it leaks nothing that the 403 does not.
+    const callerAgentAddress = authenticatedAgentAddress(authentication);
+    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
+    if (
+      !isNodeAdmin
+      && !(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))
+    ) {
+      return jsonResponse(res, 403, {
+        error: `Not authorized to search context graph "${contextGraphId}".`,
+      });
+    }
+
     const resultLimit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
     const requestedLayers = Array.isArray(parsed.memoryLayers)
       ? parsed.memoryLayers

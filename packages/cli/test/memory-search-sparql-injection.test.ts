@@ -27,6 +27,9 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
   const res = fakeRes();
   const url = new URL('http://127.0.0.1/api/memory/search');
   const agent = {
+    // The route gates on read authority before either fan-out runs; these
+    // injection tests exercise the SPARQL builder, so grant it.
+    canReadContextGraph: async () => true,
     store: {
       query: async (sparql: string) => {
         captureSparql(sparql);
