@@ -95,7 +95,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, isChainRpcTransportError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, classifyContextGraphRegistrationFailure, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -410,37 +410,6 @@ interface ContextGraphAgentInviteMutationPlan {
 
 export type PreparedContextGraphAgentInviteMutation =
   PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
-
-const DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES = new Set([
-  'ACTION_REJECTED',
-  'CALL_EXCEPTION',
-  'INSUFFICIENT_FUNDS',
-  'INVALID_ARGUMENT',
-  'UNPREDICTABLE_GAS_LIMIT',
-]);
-
-/** True only when the chain boundary proves no successful registration committed. */
-function isDefinitiveContextGraphRegistrationFailure(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const record = error as {
-    code?: unknown;
-    txHash?: unknown;
-    receipt?: { status?: unknown };
-    contextGraphRegistrationSubmitted?: unknown;
-  };
-  if (record.contextGraphRegistrationSubmitted === false) return true;
-  if (record.receipt?.status === 0) return true;
-  const code = typeof record.code === 'string' ? record.code : '';
-  if (DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES.has(code)) return true;
-  // Transport failure before the adapter has a signed/broadcast transaction
-  // hash is pre-submission. Once a hash exists, or receipt lookup itself
-  // failed, the outcome remains ambiguous and the durable pending fence stays.
-  if (isChainRpcTransportError(error)) {
-    return error.code !== 'RPC_RECEIPT_LOOKUP_FAILED'
-      && typeof error.txHash !== 'string';
-  }
-  return false;
-}
 
 export class ContextGraphMethods extends DKGAgentBase {
   async createContextGraph(this: DKGAgent, opts: {
@@ -1175,6 +1144,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     let ownerAddress = ethers.getAddress(owner.replace(/^did:dkg:agent:/, ''));
     // Check if already registered
     const cgMetaGraph = contextGraphMetaUri(id);
+    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${id}`;
     const registrationStatuses = new LocalContextGraphRegistrationStatusStore({
       store: this.store,
@@ -1190,10 +1160,110 @@ export class ContextGraphMethods extends DKGAgentBase {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
+    if (registrationStatus === 'pending') {
+      // The previous process may have exited after the transaction was mined
+      // but before the local binding and final status were committed. Reconcile
+      // read-only from the immutable name commitment and require an independently
+      // live slot before adopting it. Any absence, unsupported liveness probe,
+      // or RPC/store failure keeps the fail-closed pending fence in place and
+      // must never submit another registration transaction.
+      let reconciledOnChainId: string | null = null;
+      let reconciledNameHash: string | null = null;
+      try {
+        const nameHash = this.contextGraphNameCommitment(id).toLowerCase();
+        const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
+        const resolved = typeof resolveByNameHash === 'function'
+          ? await resolveByNameHash.call(this.chain, nameHash)
+          : null;
+        const resolvedOnChainId = resolved !== null
+          && resolved > 0n
+          && resolved < (1n << 256n)
+          ? resolved.toString()
+          : null;
+        const isActive = this.chain.isContextGraphActiveOnChain;
+        if (
+          resolvedOnChainId !== null
+          && typeof isActive === 'function'
+          && await isActive.call(this.chain, BigInt(resolvedOnChainId))
+        ) {
+          await deleteByPatternWithoutCount(this.store, {
+            graph: ontologyGraph,
+            subject: contextGraphUri,
+            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          });
+          await deleteByPatternWithoutCount(this.store, {
+            graph: cgMetaGraph,
+            subject: contextGraphUri,
+            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          });
+          await this.store.insert([
+            {
+              subject: contextGraphUri,
+              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+              object: `"${resolvedOnChainId}"`,
+              graph: ontologyGraph,
+            },
+            {
+              subject: contextGraphUri,
+              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+              object: `"${resolvedOnChainId}"`,
+              graph: cgMetaGraph,
+            },
+            {
+              subject: contextGraphUri,
+              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
+              object: `"${nameHash}"`,
+              graph: cgMetaGraph,
+            },
+          ]);
+          await this.store.flush?.();
+          await persistRegistrationStatus('registered');
+          reconciledOnChainId = resolvedOnChainId;
+          reconciledNameHash = nameHash;
+        }
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Context graph "${id}" pending registration could not be reconciled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (reconciledOnChainId === null || reconciledNameHash === null) {
+        throw new Error(
+          `Context graph "${id}" has a pending registration outcome. ` +
+          'Refusing to submit another transaction until chain reconciliation resolves it.',
+        );
+      }
+
+      this.invalidateListContextGraphsCache();
+      this.contextGraphMetaProjection.markDirty(id);
+      const sub = this.subscribedContextGraphs.get(id);
+      if (sub) {
+        const next = { ...sub, onChainHash: reconciledNameHash };
+        this.bindSubscriptionOnChainId(id, next, reconciledOnChainId);
+        this.setContextGraphSubscription(id, next, { persist: false });
+        this.subscribeToContextGraph(id, {
+          trackSyncScope: true,
+          syncMode: 'always-on',
+        });
+        this.persistContextGraphSubscription(id);
+      }
+      try {
+        this.scheduleRfc64CatalogResponsibilityReconciliationV1(id);
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Context graph "${id}" was reconciled, but its RFC-64 responsibility refresh could not be scheduled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      this.log.info(
+        ctx,
+        `Context graph "${id}" pending registration reconciled to live on-chain ID ${reconciledOnChainId}`,
+      );
+      return { onChainId: reconciledOnChainId, txHash: undefined };
+    }
 
     // Read existing description and access policy. Curated CGs store
     // definition in _meta rather than ONTOLOGY, so check both locations.
-    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const descResult = await this.store.query(
       `SELECT ?desc WHERE {
         { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
@@ -1641,7 +1711,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           nameHash,
         });
       } catch (error) {
-        if (isDefinitiveContextGraphRegistrationFailure(error)) {
+        if (classifyContextGraphRegistrationFailure(error) === 'definitive-failure') {
           try {
             await persistRegistrationStatus('unregistered');
           } catch (recoveryError) {
