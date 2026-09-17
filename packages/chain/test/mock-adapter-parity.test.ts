@@ -801,4 +801,12 @@ describe('NoChainAdapter completeness [CH-9]', () => {
     const missing = required.filter((n) => !NO_CHAIN_METHODS.has(n));
     expect(missing).toEqual([]);
   });
+
+  it('answers the enforceability probe, since it always has its context-graph table', async () => {
+    // Parity that matters in behaviour, not just in method presence: a caller must be able to
+    // ask BOTH questions of any adapter that answers either, or it cannot tell an authorized
+    // wallet from an adapter that enforces nothing.
+    const adapter = new MockChainAdapter();
+    await expect(adapter.isPublishAuthorityEnforceable()).resolves.toBe(true);
+  });
 });

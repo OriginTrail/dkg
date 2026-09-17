@@ -4227,6 +4227,20 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     await expect(a.isAuthorizedPublisher(CG, walletB.address)).resolves.toBe(true);
   });
 
+  it('reports whether publish authority is ENFORCEABLE at all, separately from the verdict', async () => {
+    // `isAuthorizedPublisher` answers `true` both for "authorized" and for "no contract to ask",
+    // so a caller that folds the second into a per-wallet verdict routes jobs to wallets the
+    // graph never admitted. This is the question that separates them.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = connectable({
+      isAuthorizedPublisher: recorder(async () => true),
+    });
+    await expect(a.isPublishAuthorityEnforceable()).resolves.toBe(true);
+
+    (a as any).contracts.contextGraphs = undefined;
+    await expect(a.isPublishAuthorityEnforceable()).resolves.toBe(false);
+  });
+
   it('lets a failed authority read THROW rather than reporting an unauthorized verdict', async () => {
     // "Could not tell" must stay distinguishable from "refused": the lift claim scan holds the
     // job in `accepted` on a throw, where a `false` would condemn it terminally.
