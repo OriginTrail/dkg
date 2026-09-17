@@ -30,6 +30,7 @@ export default defineConfig({
       "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",
       "test/generic-sql-source.test.ts",
+      "test/sqlite-module-loader.test.ts",
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
