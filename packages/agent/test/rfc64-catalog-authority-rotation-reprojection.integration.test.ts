@@ -526,6 +526,30 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
     ).toBeNull();
   }, 60_000);
 
+  it('stays quiet on a replica, which can never re-project', async () => {
+    // Only the AUTHOR re-projects (`hasLocalCreate`). On a replica the withheld-head warning
+    // could never clear, so it would be exactly the permanent stream the conditional exists to
+    // avoid — the actionable signal belongs on the node that can act on it.
+    const replica = await startRotationAuthorV1('authority-rotation-replica-quiet');
+    vi.spyOn(replica.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(false);
+    const warn = vi.spyOn(replica.log, 'warn');
+
+    await seedInventoryAssetV1(replica, 'authority-rotation-replica-quiet', 48n);
+    await expect(replica.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({ status: 'advanced' });
+    await rotateToFinalizedChainV1(replica);
+    warn.mockClear();
+
+    await replica.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWReplicaProbe').catch(() => {});
+
+    const withheldWarnings = warn.mock.calls.filter(
+      ([, message]) => typeof message === 'string' && message.includes('catalog replay withheld'),
+    );
+    expect(withheldWarnings).toEqual([]);
+  }, 60_000);
+
   it('never fabricates a lineage for a graph this node did not author', async () => {
     const replica = await startRotationAuthorV1('authority-rotation-replica');
     vi.spyOn(replica.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(false);

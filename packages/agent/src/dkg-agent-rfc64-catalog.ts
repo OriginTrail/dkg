@@ -4164,7 +4164,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           }),
       operation: async (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
-        const superseded: Readonly<{ authorAddress: EvmAddressV1; detail: string }>[] = [];
+        const superseded: Readonly<{
+          contextGraphId: ContextGraphIdV1;
+          authorAddress: EvmAddressV1;
+          detail: string;
+        }>[] = [];
         for (const { head } of replayEntries) {
           const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
             head.payload.contextGraphId,
@@ -4202,6 +4206,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             // which stored lane was withheld and which one replaced it -- that pair is what
             // someone debugging a stuck Context Graph on the fleet needs.
             superseded.push(Object.freeze({
+              contextGraphId: head.payload.contextGraphId,
               authorAddress: head.payload.authorAddress,
               detail: `${head.payload.authorAddress} scope `
                 + `${computeAuthorCatalogScopeDigestV1(
@@ -4233,27 +4238,40 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // pre-rotation lineage is deliberately retained on disk. Warning unconditionally turned
           // a real, actionable signal into a permanent stream indistinguishable from the healthy
           // state, which is strictly worse than the retry warnings it replaced.
-          const announcedAuthors = new Set(manifest.map((entry) => entry.authorAddress));
-          const stranded = superseded.filter(({ authorAddress }) =>
-            !announcedAuthors.has(authorAddress));
+          //
+          // Keyed on (contextGraphId, authorAddress), NOT authorAddress alone: the unscoped
+          // replay path selects heads across every Context Graph, so an author with an announced
+          // head in CG-X would otherwise demote its genuinely stranded head in CG-Y to debug —
+          // defeating the whole point on any multi-CG node.
+          const announcedAuthors = new Set(manifest.map(
+            (entry) => `${entry.contextGraphId}\u0000${entry.authorAddress}`,
+          ));
+          const stranded = superseded.filter(({ contextGraphId, authorAddress }) =>
+            !announcedAuthors.has(`${contextGraphId}\u0000${authorAddress}`));
           const context = createOperationContext('system');
-          if (stranded.length > 0) {
+          // Only the AUTHOR re-projects (`hasLocalCreate`). On a replica no re-projection will
+          // ever run, so a warning here could never clear and would be the permanent stream this
+          // block exists to avoid — the actionable signal belongs on the node that can act.
+          const authored = stranded.filter(({ contextGraphId }) =>
+            this.localContextGraphProvenance.hasLocalCreate(contextGraphId));
+          if (authored.length > 0) {
             this.log.warn(
               context,
-              `RFC-64 catalog replay withheld ${stranded.length} head(s) from `
+              `RFC-64 catalog replay withheld ${authored.length} head(s) from `
               + `${peerId.slice(-8)} that belong to a superseded authority generation `
-              + `[${stranded.map(({ detail }) => detail).join('; ')}]; the author has NOT `
-              + 're-projected those rows onto the accepted generation, so they are unreachable '
-              + 'through the catalog path for this peer',
+              + `[${authored.map(({ detail }) => detail).join('; ')}]; this node authored those `
+              + 'Context Graphs and has NOT re-projected the rows onto the accepted generation, '
+              + 'so they are unreachable through the catalog path for this peer',
             );
           }
-          const reprojected = superseded.length - stranded.length;
-          if (reprojected > 0) {
+          const quiet = superseded.length - authored.length;
+          if (quiet > 0) {
             this.log.debug(
               context,
-              `RFC-64 catalog replay withheld ${reprojected} re-projected superseded head(s) `
-              + `from ${peerId.slice(-8)}; their rows reach this peer through the accepted `
-              + 'generation',
+              `RFC-64 catalog replay withheld ${quiet} superseded head(s) from `
+              + `${peerId.slice(-8)} that are either already re-projected or authored elsewhere; `
+              + 'their rows reach this peer through the accepted generation when the author '
+              + 're-projects them',
             );
           }
         }

@@ -378,14 +378,31 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     // unreachable" for a row that is perfectly reachable. Coordinate-level
     // presence is the honest question: is this assertion already in the
     // accepted generation at this version?
-    const alreadyServed = new Set(acceptedRows.map(
-      (row) => `${row.assertionCoordinate}\u0000${row.assertionVersion}`,
-    ));
+    // Keyed by coordinate, holding the HIGHEST version the accepted generation
+    // already serves. A KA re-shared after the rotation lands here at the same
+    // version (different `shareOperationId`, so row identity misses); a KA
+    // UPDATED after the rotation lands at a newer one and must not mask the
+    // pre-rotation version, which still has to cross.
+    const servedVersion = new Map<string, bigint>();
+    for (const row of acceptedRows) {
+      const version = BigInt(row.assertionVersion);
+      const seen = servedVersion.get(row.assertionCoordinate);
+      if (seen === undefined || version > seen) {
+        servedVersion.set(row.assertionCoordinate, version);
+      }
+    }
     const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
+    let aborted = false;
     for (const row of params.rows) {
-      if (params.signal?.aborted === true) return;
+      // BREAK, never return: the projection request below is what keeps carried
+      // rows from sitting in the accepted generation with no applied head, and
+      // returning here would recreate exactly the state its comment describes.
+      if (params.signal?.aborted === true) {
+        aborted = true;
+        break;
+      }
       if (alreadyCarried.has(rfc64AuthorInventoryRowIdentityV1(row))) continue;
-      if (alreadyServed.has(`${row.assertionCoordinate}\u0000${row.assertionVersion}`)) continue;
+      if (servedVersion.get(row.assertionCoordinate) === BigInt(row.assertionVersion)) continue;
       // Route through the shadow runtime rather than calling the recorder
       // directly. Going around it left this write untracked by
       // `drain()`/`closeAndDrain()` — persistence could close mid-write — and
@@ -424,9 +441,21 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         + 'unreachable through the catalog path',
       );
     }
-    // Requested even when every row was already carried: a crash between the
-    // inventory carry and its catalog successor would otherwise leave the
-    // accepted generation with rows and no applied head.
+    if (aborted) {
+      // Named, not silent: the remaining rows did not cross, and the acceptance
+      // gate does not re-fire in-process, so an operator needs to know this
+      // graph is only partially carried until the next restart.
+      this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
+        params.contextGraphId,
+        'the re-projection was aborted before every row crossed; the remaining '
+        + 'rows stay addressed by the superseded generation until the next restart',
+        params.authorAddress,
+      ));
+    }
+    // Requested even when every row was already carried, and even after an
+    // abort: a crash — or a stop — between the inventory carry and its catalog
+    // successor would otherwise leave the accepted generation with rows and no
+    // applied head.
     if (!this.requestRfc64SwmCatalogProjectionV1({
       contextGraphId: params.contextGraphId as ContextGraphIdV1,
       authorAddress: params.authorAddress,
