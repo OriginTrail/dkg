@@ -382,6 +382,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  ContextGraphReadAuthorityUnavailableError,
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -525,24 +526,37 @@ export class QueryMethods extends DKGAgentBase {
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
 
+    let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
+    if (opts.contextGraphId) {
+      scopedReadAuthority = await this.resolveContextGraphReadAuthority(opts.contextGraphId, {
+        callerAgentAddress: callerAgentAddressStr,
+        allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
+        signal: opts.signal,
+      });
+      if (scopedReadAuthority.outcome === 'unavailable') {
+        throw new ContextGraphReadAuthorityUnavailableError(
+          opts.contextGraphId,
+          scopedReadAuthority,
+        );
+      }
+      if (scopedReadAuthority.outcome === 'denied') {
+        this.log.info(ctx, `Query denied for context graph "${opts.contextGraphId}"`);
+        // A-1 follow-up review: synthetic deny must match the SPARQL form
+        // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
+        // instead of a SELECT-shaped `{ bindings: [] }`.
+        return emptyQueryResultForKind(sparql);
+      }
+    }
+
     if (
       opts.contextGraphId
       && targetsSharedMemory
       && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
         callerAgentAddress: callerAgentAddressStr,
+        readAuthority: scopedReadAuthority,
       }))
     ) {
       this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
-      return emptyQueryResultForKind(sparql);
-    }
-
-    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId, {
-      callerAgentAddress: callerAgentAddressStr,
-    }))) {
-      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      // A-1 follow-up review: synthetic deny must match the SPARQL form
-      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
-      // instead of a SELECT-shaped `{ bindings: [] }`.
       return emptyQueryResultForKind(sparql);
     }
 
