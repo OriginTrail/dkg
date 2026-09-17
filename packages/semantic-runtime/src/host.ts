@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { SemanticProgramPolicy } from './program-policy.js';
+import type { SemanticProgramPolicy, SemanticProgramBinding } from './program-policy.js';
 
 import {
   MESSAGE_TYPE,
@@ -42,6 +42,8 @@ export interface SemanticRuntimeConfig {
   operatorPolicyIri?: string;
   /** Optional operator-owned local Program pins and LLM disclosure rules. */
   programPolicy?: SemanticProgramPolicy;
+  /** Tenant-approved fixed query operations with invoke-only caller grants. */
+  programBindings?: SemanticProgramBinding[];
   watchdogMs?: number;
   startupTimeoutMs?: number;
   maxEvents?: number;

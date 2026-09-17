@@ -1,5 +1,6 @@
 import {
   forkStoredSemanticProgram,
+  invokeBoundSemanticProgram,
   isSemanticMemoryLayer,
   resolveStoredSemanticProgram,
   SemanticProgramError,
@@ -11,7 +12,7 @@ import type { RequestContext } from './context.js';
 export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path, url, agent, config, semanticRuntimeHost } = ctx;
   const isResolve = req.method === 'GET' && path === '/api/semantic-runtime/resolve';
-  const isInvoke = req.method === 'POST' && path === '/api/semantic-runtime/invoke';
+  const isInvoke = req.method === 'POST' && path === '/api/programs/execute';
   const isFork = req.method === 'POST' && path === '/api/semantic-runtime/programs/fork';
   if (!isResolve && !isInvoke && !isFork) return;
 
@@ -77,6 +78,26 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       if (error instanceof SemanticProgramError) {
         return jsonResponse(res, error.status, { code: error.code, error: error.message });
       }
+      throw error;
+    }
+  }
+  // A configured operation never falls back to the caller's general graph rights.
+  if (config.semanticRuntime?.programBindings?.some((binding) => binding.operationIri === body.programIri)) {
+    const binding = config.semanticRuntime.programBindings.find((item) =>
+      item.operationIri === body.programIri && item.contextGraphId === body.contextGraphId);
+    if (typeof body.contextGraphId !== 'string' || typeof body.invocationId !== 'string'
+      || Object.keys(body).some((key) => !['contextGraphId', 'programIri', 'invocationId', 'programLayer', 'executionLayer'].includes(key))
+      || (body.programLayer !== undefined && body.programLayer !== binding?.program.programLayer)
+      || (body.executionLayer !== undefined && body.executionLayer !== 'wm')) {
+      return jsonResponse(res, 400, { error: 'Provide contextGraphId, programIri and invocationId; the tenant fixes the Program and execution layers' });
+    }
+    try {
+      return jsonResponse(res, 200, await invokeBoundSemanticProgram(
+        agent, semanticRuntimeHost, body.contextGraphId, body.programIri, body.invocationId,
+        config.semanticRuntime, ctx.actor.authenticatedAgentAddress,
+      ));
+    } catch (error) {
+      if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message });
       throw error;
     }
   }

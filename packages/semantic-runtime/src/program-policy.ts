@@ -41,3 +41,20 @@ export interface SemanticProgramPolicy {
   /** Without a disclosure policy, model effects are unavailable in pinned mode. */
   disclosure?: SemanticDisclosurePolicy;
 }
+
+/** Tenant-owned invoke grant. Only the host may select the executor and data graph. */
+export interface SemanticProgramBinding {
+  operationIri: string;
+  contextGraphId: string;
+  enabled: boolean;
+  allowedCallerAgentAddresses: string[];
+  executorAgentAddress: string;
+  program: {
+    contextGraphId: string;
+    programIri: string;
+    programLayer: 'wm' | 'swm' | 'vm';
+    authorAgentAddress: string;
+    sourceHash: string;
+  };
+  query: SemanticQueryPin;
+}
