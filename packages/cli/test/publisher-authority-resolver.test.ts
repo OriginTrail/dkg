@@ -134,6 +134,42 @@ describe('createPublishAuthorityResolver', () => {
     ])).toBeUndefined();
   });
 
+  it('resolves enforceability once and keeps it off the per-call path', async () => {
+    // The binding is established during `init()` and never rebound, so asking per call bought
+    // nothing and put an `await init()` per wallet on the claim scan's hot path — inside the
+    // coordinator's global claim lock.
+    const probe = vi.fn(async () => true);
+    const resolve = createPublishAuthorityResolver([
+      wallet(AUTHORIZED, async () => true, probe),
+      wallet(REFUSED, async () => true, probe),
+    ]);
+    if (!resolve) throw new Error('expected a resolver');
+
+    await resolve(CG);
+    await resolve(454n);
+    await resolve(455n);
+
+    expect(probe).toHaveBeenCalledTimes(2); // once per wallet, not per call
+  });
+
+  it('does not memoize an enforceability probe that threw', async () => {
+    // A throw established nothing. Caching it would disable the filter for the whole process
+    // after one transient error — exactly the behaviour this resolver replaces.
+    let failing = true;
+    const probe = vi.fn(async () => {
+      if (failing) throw new Error('rpc down');
+      return true;
+    });
+    const resolve = createPublishAuthorityResolver([
+      wallet(AUTHORIZED, async (_cg, address) => address === AUTHORIZED, probe),
+    ]);
+    if (!resolve) throw new Error('expected a resolver');
+
+    await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
+    failing = false;
+    await expect(resolve(CG)).resolves.toMatchObject({ kind: 'resolved' });
+  });
+
   it('asks every wallet about the context graph it was given', async () => {
     const probe = vi.fn(async () => true);
     const resolve = createPublishAuthorityResolver([

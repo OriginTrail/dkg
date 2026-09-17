@@ -247,22 +247,37 @@ export function createPublishAuthorityResolver(
     return undefined;
   }
   const candidateWalletIds = wallets.map((wallet) => wallet.address);
-  return async (contextGraphId: bigint): Promise<AsyncLiftPublishAuthority> => {
-    // `isAuthorizedPublisher` answers `true` both for "authorized" and for "no ContextGraphs
-    // surface to ask". Folding the second into `authorizedWalletIds` reports an UNENFORCEABLE
-    // adapter as an affirmative per-wallet verdict, and mixes it with truthful answers from the
-    // other adapters — so a lane claims jobs its wallet was never admitted for and the
-    // transaction reverts on chain. `initContracts()` swallows a transient failure while still
-    // marking the adapter initialized, so a lost binding is sticky for the process lifetime.
-    const enforceable = await Promise.all(wallets.map(async (wallet) => {
+  // `isAuthorizedPublisher` answers `true` both for "authorized" and for "no ContextGraphs
+  // surface to ask". Folding the second into `authorizedWalletIds` reports an UNENFORCEABLE
+  // adapter as an affirmative per-wallet verdict, and mixes it with truthful answers from the
+  // other adapters — so a lane claims jobs its wallet was never admitted for and the
+  // transaction reverts on chain.
+  //
+  // Resolved ONCE and reused. The binding is established during `init()` and never rebound
+  // afterwards — `initContracts()` swallows a transient failure while still setting
+  // `initialized`, which is precisely why a lost binding is sticky for the process lifetime —
+  // so asking per call bought nothing and put an `await init()` per wallet on the claim scan's
+  // hot path, inside the coordinator's global claim lock.
+  let enforceable: boolean | undefined;
+  const resolveEnforceable = async (): Promise<boolean> => {
+    // A probe that THREW established nothing, so it is answered `false` for this pass but not
+    // memoized — otherwise one transient error would disable the filter for the process, which
+    // is the very behaviour this resolver exists to replace.
+    let definitive = true;
+    const answers = await Promise.all(wallets.map(async (wallet) => {
       try {
         return await wallet.chain.isPublishAuthorityEnforceable!();
       } catch {
-        // A probe that cannot answer is not evidence of enforceability.
+        definitive = false;
         return false;
       }
     }));
-    if (enforceable.includes(false)) return { kind: 'unenforced' };
+    const result = !answers.includes(false);
+    if (definitive) enforceable = result;
+    return result;
+  };
+  return async (contextGraphId: bigint): Promise<AsyncLiftPublishAuthority> => {
+    if (!(enforceable ?? await resolveEnforceable())) return { kind: 'unenforced' };
     const verdicts = await Promise.all(wallets.map(async (wallet) => {
       try {
         return await wallet.chain.isAuthorizedPublisher!(contextGraphId, wallet.address)
