@@ -81,7 +81,7 @@ export function finalizationRecoveryRowToEntry(
   }
   if (
     !evidenceState
-    && (state === 'RECEIVED' || state === 'REORGED' || state === 'UNSUPPORTED')
+    && (state === 'RECEIVED' || state === 'REORGED')
     && verifiedEvidence
   ) throw new Error('Finalization inbox unverified row has verified evidence');
   const evidenceColumns = [
@@ -165,7 +165,12 @@ export function finalizationRecoveryRowToEntry(
       verifiedEvidence: verifiedEvidence!,
     };
   }
-  if (state === 'SUPERSEDED' || state === 'REJECTED') {
+  if (state === 'SUPERSEDED' || state === 'REJECTED' || state === 'UNSUPPORTED') {
+    // UNSUPPORTED is terminal and evidence-bearing: `transition()` admits it
+    // from VERIFIED and clears only `publisher_upgrade_pending`, so the row
+    // keeps whatever evidence it had. Carry it through instead of dropping it,
+    // or the audit trail the retained column exists for is invisible to every
+    // reader.
     return {
       ...base,
       state,
