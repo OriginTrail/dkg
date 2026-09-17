@@ -130,6 +130,8 @@ import {
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
+import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
+  './rfc64/authority-rpc-circuit-breaker-v1.js';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -403,7 +405,8 @@ export type ContextGraphRegistrationBinding =
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'finalized-name-absence-unaccepted'
-        | 'chain-name-binding-unavailable';
+        | 'chain-name-binding-unavailable'
+        | 'authority-circuit-open';
       detail?: string;
     };
 
@@ -1065,13 +1068,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const finalizedBinding = await runBoundedOperation(async (ownerSignal) => (
           // Registration discovery reads the same finalized authority index as
           // the catalog refresh pass and the VM reconcile lane, so it shares
-          // the one governor instead of opening the last ungoverned lane into
-          // the pool: its exhaustion now trips the shared circuit for every
-          // other reader, and a real provider read here proves recovery for
-          // them too. Deferral is fail-closed exactly like every other failure
-          // of this boundary — the caller already treats it as `unavailable`
-          // and retries — and the bounded operation above still caps the wait.
-          this.rfc64AuthorityReadCoordinatorV1.run(ownerSignal, async (readSignal, evidence) => {
+          // the one circuit instead of staying the last ungoverned lane into
+          // the pool: its exhaustion now trips the circuit for every other
+          // reader, and a real provider read here proves recovery for them too.
+          //
+          // It takes the circuit WITHOUT the serializer. This boundary backs
+          // query, crypto and Context Graph operations, it fails closed, and
+          // its budget here is `CHAIN_POLICY_READ_TIMEOUT_MS` whenever the
+          // graph has a local binding candidate — queued behind a cold
+          // whole-contract scan it would spend that budget waiting and deny a
+          // policy decision on a node whose pool is healthy. FIFO admission
+          // exists to stop bulk per-graph passes from stampeding an exhausted
+          // pool; one caller-driven read is not that.
+          this.rfc64AuthorityReadCoordinatorV1.runUnqueued(ownerSignal, async (readSignal, evidence) => {
             try {
               const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
                 [contextGraphId],
@@ -1125,7 +1134,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       } catch (err) {
         return {
           kind: 'unavailable',
-          reason: 'chain-name-binding-unavailable',
+          // A cooldown is a deferral, not a failed chain read: nothing was
+          // asked of the pool. Reporting it as a binding failure would have a
+          // caller and its telemetry treat an unrelated graph's exhaustion as
+          // this graph's chain problem.
+          reason: isRfc64AuthorityRpcCircuitOpenErrorV1(err)
+            ? 'authority-circuit-open'
+            : 'chain-name-binding-unavailable',
           detail: err instanceof Error ? err.message : String(err),
         };
       }

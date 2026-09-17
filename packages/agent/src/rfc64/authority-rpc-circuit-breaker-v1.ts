@@ -130,6 +130,8 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   #consecutiveExhaustions = 0;
   #retryAtMs = 0;
   #tail: Promise<void> = Promise.resolve();
+  /** In-flight reads admitted without the serializer, retired by `whenIdle`. */
+  readonly #unqueued = new Set<Promise<unknown>>();
   #lifecycleAbort = new AbortController();
 
   constructor(options: Rfc64AuthorityReadCoordinatorOptionsV1 = {}) {
@@ -224,15 +226,82 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     }
   }
 
-  whenIdle(): Promise<void> {
-    return this.#tail;
+  /**
+   * Circuit state for one caller-driven read, without queue admission.
+   *
+   * FIFO admission is the anti-stampede mechanism for bulk per-graph passes:
+   * it is what stops a hundred graphs from each walking an exhausted pool. A
+   * latency-bounded foreground read that fails closed must not inherit it —
+   * queued behind a cold whole-contract scan it would spend its entire budget
+   * waiting and deny a policy decision on a node whose pool is healthy. Such a
+   * read still refuses while the circuit is open, still trips the circuit on
+   * provider exhaustion, and still closes it on proven recovery; it only skips
+   * the serializer.
+   *
+   * Retirement still covers it: `whenIdle` and `close` wait for these reads
+   * too, so shutdown cannot leave one in flight.
+   */
+  async runUnqueued<T>(
+    signal: AbortSignal | undefined,
+    operation: (
+      signal: AbortSignal,
+      evidence: Rfc64AuthorityRpcProbeEvidenceV1,
+    ) => Promise<T>,
+    options: Rfc64AuthorityReadRunOptionsV1 = {},
+  ): Promise<T> {
+    const runSignal = signal === undefined
+      ? this.#lifecycleAbort.signal
+      : AbortSignal.any([signal, this.#lifecycleAbort.signal]);
+    throwIfAborted(runSignal);
+    const now = this.#now();
+    if (options.admitWhileOpen !== true && now < this.#retryAtMs) {
+      throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
+        this.#retryAtMs,
+        this.#retryAtMs - now,
+      );
+    }
+
+    let rpcAttempted = false;
+    const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
+      markRpcAttempt: () => { rpcAttempted = true; },
+    });
+    const active = (async () => {
+      try {
+        const result = await operation(runSignal, evidence);
+        // Same evidence rule as the serialized lane: a local or cached answer
+        // cannot prove that an exhausted provider pool came back.
+        if (this.#consecutiveExhaustions === 0 || rpcAttempted) {
+          this.#consecutiveExhaustions = 0;
+          this.#retryAtMs = 0;
+        }
+        return result;
+      } catch (error) {
+        if (isRpcEndpointsExhaustedError(error)) this.#open(error);
+        throw error;
+      }
+    })();
+    this.#unqueued.add(active);
+    const untrack = (): void => { this.#unqueued.delete(active); };
+    void active.then(untrack, untrack);
+    return active;
+  }
+
+  async whenIdle(): Promise<void> {
+    // Unqueued reads retire independently of the serializer, so quiescence is
+    // only reached when neither lane admitted new work while this waited.
+    for (;;) {
+      const tail = this.#tail;
+      const unqueued = [...this.#unqueued];
+      await Promise.allSettled([tail, ...unqueued]);
+      if (this.#tail === tail && this.#unqueued.size === 0) return;
+    }
   }
 
   close(): Promise<void> {
     if (!this.#lifecycleAbort.signal.aborted) {
       this.#lifecycleAbort.abort(new Error('RFC-64 authority read coordinator is closing'));
     }
-    return this.#tail;
+    return this.whenIdle();
   }
 
   reopen(): void {

@@ -263,6 +263,89 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     expect(cancelledCalls).toBe(0);
   });
 
+  it('admits an unqueued read while the serializer is busy', async () => {
+    // The queue is the anti-stampede mechanism for bulk per-graph passes. A
+    // latency-bounded foreground read must not inherit it, or it spends its
+    // whole budget waiting behind a cold scan.
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+    });
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    let queuedReleased = false;
+    const queued = breaker.run(undefined, async () => {
+      entered.resolve();
+      await release.promise;
+      queuedReleased = true;
+      return 'queued';
+    });
+    await entered.promise;
+
+    await expect(breaker.runUnqueued(undefined, async () => 'unqueued'))
+      .resolves.toBe('unqueued');
+    expect(queuedReleased).toBe(false);
+
+    release.resolve();
+    await expect(queued).resolves.toBe('queued');
+  });
+
+  it('applies circuit state and evidence to an unqueued read', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+
+    // Skipping the queue does not skip the circuit: exhaustion still trips it.
+    await expect(breaker.runUnqueued(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toMatchObject({ state: 'open', consecutiveExhaustions: 1 });
+    await expect(breaker.runUnqueued(undefined, async () => 'must-not-run'))
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+
+    now = 100;
+    await expect(breaker.runUnqueued(undefined, async () => 'local-only'))
+      .resolves.toBe('local-only');
+    expect(breaker.snapshot().state).toBe('half-open');
+
+    await expect(breaker.runUnqueued(undefined, async (_signal, evidence) => {
+      evidence.markRpcAttempt();
+      return 'provider-recovered';
+    })).resolves.toBe('provider-recovered');
+    expect(breaker.snapshot()).toEqual({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+      retryAtMs: null,
+    });
+  });
+
+  it('retires an unqueued read before close settles', async () => {
+    const breaker = new Rfc64AuthorityReadCoordinatorV1();
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<AbortSignal>();
+    const read = breaker.runUnqueued(undefined, async (signal) => {
+      entered.resolve(signal);
+      await release.promise;
+      return 'done';
+    });
+    const signal = await entered.promise;
+
+    let settled = false;
+    const closing = breaker.close().then(() => { settled = true; });
+    expect(signal.aborted).toBe(true);
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+    expect(settled).toBe(false);
+
+    release.resolve();
+    await expect(read).resolves.toBe('done');
+    await closing;
+    expect(settled).toBe(true);
+  });
+
   it('rejects unsafe timing configuration', () => {
     expect(() => new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 1_000,
