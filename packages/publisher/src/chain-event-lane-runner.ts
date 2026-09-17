@@ -280,9 +280,12 @@ export class ChainEventLaneRunner {
 
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
+        signal?.throwIfAborted();
         await lane.spec.dispatch(event, ctx, signal);
+        signal?.throwIfAborted();
       }
 
+      signal?.throwIfAborted();
       state.lastBlock = upperBound;
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
