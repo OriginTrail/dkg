@@ -484,6 +484,10 @@ export async function startOxigraphServer(
           listenerPid: verifiedListenerPid,
           generation,
         });
+        // The replacement generation is healthy. Only now may WAL maintenance
+        // reopen admission and start its cooldown; accepting a kill request is
+        // not completion because ownership verification can still cancel it.
+        walMaintenance.restartCompleted();
         restarts = 0;
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
         return;
@@ -554,6 +558,7 @@ export async function startOxigraphServer(
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
+      walMaintenance.restartCancelled();
       return;
     }
     try {
@@ -574,6 +579,7 @@ export async function startOxigraphServer(
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
+      walMaintenance.restartCancelled();
     }
   };
 
@@ -603,7 +609,8 @@ export async function startOxigraphServer(
     walMaintenance.registerActivity();
 
   const getRecoveryState = (): OxigraphRecoveryState => ({
-    recovering: lifecycle.phase === 'restart-verifying'
+    recovering: walMaintenance.admissionsPaused()
+      || lifecycle.phase === 'restart-verifying'
       || lifecycle.phase === 'recovering'
       || lifecycle.phase === 'stopping'
       || lifecycle.phase === 'restart-signalled',

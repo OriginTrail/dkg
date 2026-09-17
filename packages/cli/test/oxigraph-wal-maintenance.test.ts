@@ -58,7 +58,7 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     expect(resolveWalRestartThresholdBytes(1234)).toBe(1234);
   });
 
-  it('starts a fresh continuous-idle window after activity reaches zero', () => {
+  it('measures under continuous traffic, pauses admission, and waits for active work to drain', () => {
     const measureRetainedWalBytes = vi.fn(() => 101);
     const requestRestart = vi.fn(() => true);
     const controlled = controlledCoordinator({ measureRetainedWalBytes, requestRestart });
@@ -69,18 +69,19 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     controlled.coordinator.reportActivity(1);
     controlled.setNow(100);
     controlled.tick();
-    expect(measureRetainedWalBytes).not.toHaveBeenCalled();
+    expect(measureRetainedWalBytes).toHaveBeenCalledOnce();
+    expect(controlled.coordinator.admissionsPaused()).toBe(true);
+    expect(requestRestart).not.toHaveBeenCalled();
 
     controlled.coordinator.reportActivity(0);
     controlled.setNow(179);
     controlled.tick();
-    expect(measureRetainedWalBytes).not.toHaveBeenCalled();
+    expect(requestRestart).not.toHaveBeenCalled();
 
     controlled.setNow(180);
     controlled.tick();
-    expect(measureRetainedWalBytes).toHaveBeenCalledOnce();
     expect(requestRestart).toHaveBeenCalledWith(
-      expect.stringContaining('101 B retained WAL reached the 100 B maintenance threshold'),
+      expect.stringContaining('retained WAL reached the 100 B maintenance threshold'),
     );
   });
 
@@ -110,16 +111,37 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     expect(requestRestart).toHaveBeenCalledOnce();
 
     controlled.setNow(90);
+    controlled.coordinator.restartCompleted();
+    expect(controlled.coordinator.admissionsPaused()).toBe(false);
     controlled.setServerAvailable(true);
     controlled.setNow(170);
     controlled.tick();
     expect(requestRestart).toHaveBeenCalledOnce();
     expect(measureRetainedWalBytes).toHaveBeenCalledOnce();
 
-    controlled.setNow(180);
+    controlled.setNow(190);
     controlled.tick();
     expect(requestRestart).toHaveBeenCalledTimes(2);
     expect(measureRetainedWalBytes).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps admission paused and retries after a requested restart is cancelled', () => {
+    const requestRestart = vi.fn(() => true);
+    const controlled = controlledCoordinator({ requestRestart });
+    controlled.setServerAvailable(true);
+    controlled.setNow(80);
+    controlled.tick();
+    expect(requestRestart).toHaveBeenCalledOnce();
+    expect(controlled.coordinator.admissionsPaused()).toBe(true);
+
+    controlled.coordinator.restartCancelled();
+    controlled.setNow(159);
+    controlled.tick();
+    expect(requestRestart).toHaveBeenCalledOnce();
+    controlled.setNow(160);
+    controlled.tick();
+    expect(requestRestart).toHaveBeenCalledTimes(2);
+    expect(controlled.coordinator.admissionsPaused()).toBe(true);
   });
 
   it('aggregates activity from independent store leases', () => {

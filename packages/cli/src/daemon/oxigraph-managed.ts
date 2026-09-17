@@ -435,7 +435,6 @@ export async function startManagedOxigraph(
     getRecoveryState: () => handle.getRecoveryState(),
     registerActivity: () => handle.registerStoreActivity(),
     onClientTimeout: (operation: string) => {
-      if (operation !== 'query' && operation !== 'construct') return;
       handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
     },
   });

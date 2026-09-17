@@ -44,7 +44,21 @@ function harness(managed = true) {
     caller.abort(reason);
     await rejected;
   }
-  return { store, recovery, recover, activity, abandon };
+  async function abandonMutation() {
+    started = new Promise<void>((resolve) => { dispatched = resolve; });
+    const caller = new AbortController();
+    const update = store.update(
+      'INSERT DATA { <urn:subject> <urn:predicate> "value" }',
+      { signal: caller.signal },
+    );
+    await started;
+    await vi.advanceTimersByTimeAsync(100);
+    const reason = new Error('caller cancelled mutation');
+    const rejected = expect(update).rejects.toBe(reason);
+    caller.abort(reason);
+    await rejected;
+  }
+  return { store, recovery, recover, activity, abandon, abandonMutation };
 }
 
 describe('managed abandoned read recovery', () => {
@@ -87,6 +101,23 @@ describe('managed abandoned read recovery', () => {
 
       await vi.advanceTimersByTimeAsync(1);
       expect(recover).toHaveBeenCalledOnce();
+      expect(activity.at(-1)).toBe(0);
+    } finally { await store.close(); }
+  });
+
+  it('keeps a caller-cancelled mutation fenced until supervised recovery can abandon it', async () => {
+    const { store, recover, activity, abandonMutation } = harness();
+    try {
+      await abandonMutation();
+      expect(recover).not.toHaveBeenCalled();
+      expect(activity.at(-1)).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(899);
+      expect(recover).not.toHaveBeenCalled();
+      expect(activity.at(-1)).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recover).toHaveBeenCalledExactlyOnceWith('update');
       expect(activity.at(-1)).toBe(0);
     } finally { await store.close(); }
   });

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { StoreOperation } from './store-operation-outcome.js';
+
 export interface ManagedReadRecoveryStateV1 {
   readonly recovering: boolean;
   readonly generation: number;
@@ -14,13 +16,13 @@ export interface ManagedReadRecoveryCoordinatorOptionsV1 {
   readonly enabled: boolean;
   readonly now: () => number;
   readonly readRecoveryState: () => ManagedReadRecoveryStateV1 | null;
-  readonly recover: (operation: 'query' | 'construct') => void;
+  readonly recover: (operation: StoreOperation) => void;
   /** Retained server work fences maintenance after caller-visible cancellation. */
   readonly onPendingChange?: (pending: boolean) => void;
 }
 
 /**
- * Own the retained deadline for a managed read whose HTTP request was
+ * Own the retained deadline for managed server work whose HTTP request was
  * dispatched before caller cancellation. Closing the store invalidates one
  * complete lifecycle generation; a later reusable generation starts cleanly.
  */
@@ -46,7 +48,7 @@ export class ManagedReadRecoveryCoordinatorV1 {
   }
 
   retain(
-    operation: 'query' | 'construct',
+    operation: StoreOperation,
     deadline: number,
     token: ManagedReadRecoveryTokenV1 | null,
   ): void {

@@ -30,7 +30,10 @@ export interface OxigraphWalMaintenanceActivityLease {
 export interface OxigraphWalMaintenanceCoordinator {
   reportActivity(activeOperations: number): void;
   registerActivity(): OxigraphWalMaintenanceActivityLease;
+  admissionsPaused(): boolean;
   serverLifecycleChanged(): void;
+  restartCancelled(): void;
+  restartCompleted(): void;
   stop(): void;
 }
 
@@ -61,6 +64,7 @@ export function createOxigraphWalMaintenanceCoordinator(
   const activitySources = new Map<symbol, number>();
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
+  let maintenancePending = false;
   let stopped = false;
 
   const totalActiveOperations = (): number => legacyActiveOperations
@@ -69,7 +73,40 @@ export function createOxigraphWalMaintenanceCoordinator(
   const evaluate = (): void => {
     const observedAt = now();
     const activeOperations = totalActiveOperations();
-    if (!options.serverAvailable() || activeOperations !== 0) {
+    if (!options.serverAvailable()) {
+      idleSince = null;
+      return;
+    }
+
+    // Measure while the server is busy. Waiting to observe an idle tick before
+    // looking at disk means a continuously loaded node can grow past the
+    // threshold forever. Once the threshold is crossed, close admission and
+    // let already-admitted operations drain before opening the idle window.
+    if (!maintenancePending && observedAt - lastRestartAt >= cooldownMs) {
+      let walBytes: number;
+      try {
+        walBytes = options.measureRetainedWalBytes(options.location);
+      } catch (error) {
+        options.log(
+          `[oxigraph] retained WAL maintenance measurement failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
+      if (walBytes < thresholdBytes) return;
+      maintenancePending = true;
+      options.log(
+        `[oxigraph] ${formatWalBytes(walBytes)} retained WAL reached the `
+        + `${formatWalBytes(thresholdBytes)} maintenance threshold; `
+        + `pausing new store work until ${activeOperations} active operation(s) drain`,
+      );
+    }
+
+    if (!maintenancePending) {
+      if (activeOperations !== 0) idleSince = null;
+      else if (idleSince === null) idleSince = observedAt;
+      return;
+    }
+    if (activeOperations !== 0) {
       idleSince = null;
       return;
     }
@@ -77,27 +114,12 @@ export function createOxigraphWalMaintenanceCoordinator(
       idleSince = observedAt;
       return;
     }
-    if (
-      observedAt - idleSince < idleMs
-      || observedAt - lastRestartAt < cooldownMs
-    ) return;
-    let walBytes: number;
-    try {
-      walBytes = options.measureRetainedWalBytes(options.location);
-    } catch (error) {
-      options.log(
-        `[oxigraph] retained WAL maintenance measurement failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return;
-    }
-    if (walBytes < thresholdBytes) return;
+    if (observedAt - idleSince < idleMs) return;
     const accepted = options.requestRestart(
-      `${formatWalBytes(walBytes)} retained WAL reached the `
-      + `${formatWalBytes(thresholdBytes)} maintenance threshold `
+      `retained WAL reached the ${formatWalBytes(thresholdBytes)} maintenance threshold `
       + `after ${Math.round((observedAt - idleSince) / 1_000)}s idle`,
     );
     if (accepted) {
-      lastRestartAt = observedAt;
       idleSince = null;
     }
   };
@@ -136,14 +158,28 @@ export function createOxigraphWalMaintenanceCoordinator(
         },
       };
     },
+    admissionsPaused(): boolean {
+      return !stopped && maintenancePending;
+    },
     serverLifecycleChanged(): void {
       if (stopped) return;
       idleSince = options.serverAvailable() && totalActiveOperations() === 0 ? now() : null;
+    },
+    restartCancelled(): void {
+      if (stopped || !maintenancePending) return;
+      idleSince = options.serverAvailable() && totalActiveOperations() === 0 ? now() : null;
+    },
+    restartCompleted(): void {
+      if (stopped || !maintenancePending) return;
+      lastRestartAt = now();
+      maintenancePending = false;
+      idleSince = null;
     },
     stop(): void {
       if (stopped) return;
       stopped = true;
       idleSince = null;
+      maintenancePending = false;
       activitySources.clear();
       cancel(timer);
     },

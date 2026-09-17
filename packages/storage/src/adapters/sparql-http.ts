@@ -299,9 +299,9 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
   private readonly workLifecycle: AbortableStoreWorkLifecycle;
-  private readonly managedReadRecovery: ManagedReadRecoveryCoordinatorV1;
+  private readonly managedAbandonedWorkRecovery: ManagedReadRecoveryCoordinatorV1;
   private activeStoreOperations = 0;
-  private retainedManagedReads = 0;
+  private retainedManagedWork = 0;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -356,13 +356,13 @@ export class SparqlHttpStore implements TripleStore {
       DEFAULT_SLOW_QUERY_SAMPLE_RATE,
     );
     this.onSlowQuery = options.onSlowQuery;
-    this.managedReadRecovery = new ManagedReadRecoveryCoordinatorV1({
+    this.managedAbandonedWorkRecovery = new ManagedReadRecoveryCoordinatorV1({
       enabled: this.managedOxigraph,
       now: this.now,
       readRecoveryState: () => this.readRecoveryState(),
       recover: (operation) => this.notifyClientTimeout(operation),
       onPendingChange: (pending) => {
-        this.retainedManagedReads = pending ? 1 : 0;
+        this.retainedManagedWork = pending ? 1 : 0;
         this.reportManagedRuntimeActivity(managedRuntimeHooks);
       },
     });
@@ -389,7 +389,7 @@ export class SparqlHttpStore implements TripleStore {
     hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
   ): void {
     try {
-      const activeOperations = this.activeStoreOperations + this.retainedManagedReads;
+      const activeOperations = this.activeStoreOperations + this.retainedManagedWork;
       if (hooks?.registerActivity) {
         this.managedActivityLease ??= this.openManagedActivityLease(hooks);
         this.managedActivityLease?.report(activeOperations);
@@ -574,7 +574,7 @@ export class SparqlHttpStore implements TripleStore {
     // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     const deadline = this.now() + this.timeout;
-    const recoveryToken = this.managedReadRecovery.begin(recoveryAtStart);
+    const recoveryToken = this.managedAbandonedWorkRecovery.begin(recoveryAtStart);
     const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
     const signal = signalScope.signal ?? timeoutSignal;
     let dispatched = false;
@@ -612,7 +612,7 @@ export class SparqlHttpStore implements TripleStore {
         // Closing the HTTP connection does not cancel Oxigraph 0.5
         // evaluation. Hand the dispatched read to the lifecycle-owned
         // retained-deadline coordinator instead of extending the caller wait.
-        this.managedReadRecovery.retain(operation, deadline, recoveryToken);
+        this.managedAbandonedWorkRecovery.retain(operation, deadline, recoveryToken);
       }
       if (this.recoveryInterrupted(recoveryAtStart)) {
         throw this.recoveryError(storeOperation, 'indeterminate', error);
@@ -998,14 +998,18 @@ export class SparqlHttpStore implements TripleStore {
           throw this.recoveryError(opts.operation, 'not_started');
         }
         const timeoutSignal = AbortSignal.timeout(this.timeout);
+        const deadline = this.now() + this.timeout;
+        const recoveryToken = this.managedAbandonedWorkRecovery.begin(recoveryAtStart);
         const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
         const signal = signalScope.signal ?? timeoutSignal;
+        let dispatched = false;
         try {
           // The lifecycle begins after every pre-dispatch refusal and directly
           // before fetch. From this point onward the server may have committed.
           throwIfAborted(signal);
           lifecycle = this.writeGen.beginWrite(opts.scope);
           this.invalidateListGraphsCache();
+          dispatched = true;
           const res = await fetch(this.updateEndpoint, {
             method: 'POST',
             headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
@@ -1035,6 +1039,16 @@ export class SparqlHttpStore implements TripleStore {
               timeoutMs: this.timeout,
               cause: error,
             });
+          }
+          if (dispatched && signal.aborted) {
+            // Oxigraph may continue an update after its HTTP client disconnects.
+            // Fence maintenance until the original deadline, then force a
+            // supervised restart if the same server generation is still live.
+            this.managedAbandonedWorkRecovery.retain(
+              opts.operation,
+              deadline,
+              recoveryToken,
+            );
           }
           if (this.recoveryInterrupted(recoveryAtStart)) {
             throw this.recoveryError(opts.operation, 'indeterminate', error);
@@ -1309,7 +1323,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
-    this.managedReadRecovery.close();
+    this.managedAbandonedWorkRecovery.close();
     // A managed endpoint is stopped immediately after store.close(). The
     // lifecycle owns one complete generation, aborting and draining every
     // operation admitted before close while rejecting work attempted during

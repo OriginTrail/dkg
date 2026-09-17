@@ -529,7 +529,7 @@ describe('startOxigraphServer (real child processes)', () => {
     expect(await portAnswers(port)).toBe(false);
   });
 
-  it('reopens above the retained-WAL threshold only after store work stays idle', async () => {
+  it('measures retained WAL under load and reopens only after store work stays idle', async () => {
     const port = await freePort();
     const logs: string[] = [];
     let measurements = 0;
@@ -551,12 +551,12 @@ describe('startOxigraphServer (real child processes)', () => {
       handle.reportStoreActivity(1);
       await sleep(180);
       expect(await fetchPid(port)).toBe(firstPid);
-      expect(measurements).toBe(1);
+      expect(measurements).toBeGreaterThanOrEqual(2);
+      expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
 
       handle.reportStoreActivity(0);
       await sleep(40);
       expect(await fetchPid(port)).toBe(firstPid);
-      expect(measurements).toBe(1);
       let replacementPid = firstPid;
       for (let i = 0; i < 100; i++) {
         await sleep(30);
@@ -585,6 +585,7 @@ describe('startOxigraphServer (real child processes)', () => {
       const port = await freePort();
       const logs: string[] = [];
       let rejectOwnership = false;
+      let rejectSignal = false;
       let signalAttempts = 0;
       const handle = await startOxigraphServer(startOpts(port, {
         log: (line: string) => logs.push(line),
@@ -600,14 +601,16 @@ describe('startOxigraphServer (real child processes)', () => {
               ? actual + 100_000
               : actual;
           },
-          killProcess: vi.fn(() => {
+          killProcess: vi.fn((pid: number, signal: NodeJS.Signals) => {
             signalAttempts += 1;
-            return failureMode === 'signal' ? false : true;
+            if (failureMode === 'signal' && rejectSignal) return false;
+            return process.kill(pid, signal);
           }) as unknown as typeof process.kill,
         },
       }));
       try {
         rejectOwnership = true;
+        rejectSignal = true;
         const initialPid = await fetchPid(port);
         for (let i = 0; i < 100; i += 1) {
           const cancellations = logs.filter((line) => line.includes(
@@ -625,8 +628,28 @@ describe('startOxigraphServer (real child processes)', () => {
         )).length;
         expect(cancellations).toBeGreaterThanOrEqual(2);
         expect(await fetchPid(port)).toBe(initialPid);
-        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+        // The threshold remains armed: new store work stays fail-closed while
+        // the coordinator retries the verified restart.
+        expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
         if (failureMode === 'signal') expect(signalAttempts).toBeGreaterThanOrEqual(2);
+
+        rejectOwnership = false;
+        rejectSignal = false;
+        let replacementPid = initialPid;
+        for (let i = 0; i < 100; i += 1) {
+          await sleep(30);
+          try {
+            replacementPid = await fetchPid(port);
+            if (replacementPid !== initialPid) break;
+          } catch {
+            /* supervised reopen is between processes */
+          }
+        }
+        expect(replacementPid).not.toBe(initialPid);
+        for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i += 1) {
+          await sleep(20);
+        }
+        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
       } finally {
         await handle.stop();
       }

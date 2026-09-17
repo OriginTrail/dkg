@@ -649,7 +649,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
     }
   });
 
-  it('wires query and construct timeouts to recovery while filtering mutations', async () => {
+  it('wires read and mutation timeouts to supervised recovery', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();
     const result = await startManagedOxigraph({
@@ -686,18 +686,8 @@ describe('startManagedOxigraph (real download + real server)', () => {
       const pid1 = await fetchManagedPid(port);
 
       await expect(store.update(
-        'INSERT DATA { <urn:mutation> <urn:does-not-restart> "true" }',
+        'INSERT DATA { <urn:mutation> <urn:must-restart> "true" }',
       )).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(await fetchManagedPid(port)).toBe(pid1);
-      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
-
-      await expect(store.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
-        code: 'STORE_OPERATION_TIMEOUT',
-        operation: 'query',
-      });
-      // Close store admission while ownership verification is in flight. The
-      // generation advances only after the verified listener is signalled.
       expect(result!.handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
@@ -716,11 +706,13 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
 
-      await expect(store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
-        .rejects.toMatchObject({
-          code: 'STORE_OPERATION_TIMEOUT',
-          operation: 'construct',
-        });
+      await expect(store.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+      });
+      // Close store admission while ownership verification is in flight. The
+      // generation advances only after the verified listener is signalled.
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: true, generation: 1 });
       let pid3 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -737,6 +729,28 @@ describe('startManagedOxigraph (real download + real server)', () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 2 });
+
+      await expect(store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+        .rejects.toMatchObject({
+          code: 'STORE_OPERATION_TIMEOUT',
+          operation: 'construct',
+        });
+      let pid4 = 0;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          pid4 = await fetchManagedPid(port);
+          if (pid4 !== pid3) break;
+        } catch {
+          /* server is between processes */
+        }
+      }
+      expect(pid4).toBeGreaterThan(0);
+      expect(pid4).not.toBe(pid3);
+      for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 3 });
     } finally {
       globalThis.fetch = originalFetch;
       await store?.close();
