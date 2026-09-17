@@ -162,9 +162,10 @@ describe('createPublishAuthorityResolver', () => {
       if (failing) throw new Error('rpc down');
       return true;
     });
+    // Zero window: the negative answer is re-probed on the next call.
     const resolve = createPublishAuthorityResolver([
       wallet(AUTHORIZED, async (_cg, address) => address === AUTHORIZED, probe),
-    ]);
+    ], 0);
     if (!resolve) throw new Error('expected a resolver');
 
     await expect(resolve(CG)).resolves.toEqual({ kind: 'unknown' });
@@ -181,12 +182,28 @@ describe('createPublishAuthorityResolver', () => {
     const probe = vi.fn(async () => bound);
     const resolve = createPublishAuthorityResolver([
       wallet(AUTHORIZED, async (_cg, address) => address === AUTHORIZED, probe),
-    ]);
+    ], 0);
     if (!resolve) throw new Error('expected a resolver');
 
     await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
     bound = true;
     await expect(resolve(CG)).resolves.toMatchObject({ kind: 'resolved' });
+  });
+
+  it('does not re-probe a negative answer within its retry window', async () => {
+    // The probe awaits `init()` per wallet and this runs per graph, per poll, per lane inside
+    // the coordinator's global claim lock, so an unbounded re-probe is its own hazard.
+    const probe = vi.fn(async () => false);
+    const resolve = createPublishAuthorityResolver([
+      wallet(AUTHORIZED, async () => true, probe),
+    ], 60_000);
+    if (!resolve) throw new Error('expected a resolver');
+
+    await expect(resolve(CG)).resolves.toEqual({ kind: 'unenforced' });
+    await expect(resolve(454n)).resolves.toEqual({ kind: 'unenforced' });
+    await expect(resolve(455n)).resolves.toEqual({ kind: 'unenforced' });
+
+    expect(probe).toHaveBeenCalledTimes(1);
   });
 
   it('asks every wallet about the context graph it was given', async () => {

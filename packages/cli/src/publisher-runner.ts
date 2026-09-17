@@ -238,6 +238,8 @@ interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
  */
 export function createPublishAuthorityResolver(
   wallets: readonly ConfiguredPublisherWallet[],
+  /** Re-probe window for a NEGATIVE answer; injectable so tests need no wall clock. */
+  negativeRetryMs: number = PUBLISH_AUTHORITY_ENFORCEABILITY_RETRY_MS,
 ): ((contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>) | undefined {
   if (wallets.length === 0) return undefined;
   if (!wallets.every((wallet) => (
@@ -259,14 +261,22 @@ export function createPublishAuthorityResolver(
   // so asking per call bought nothing and put an `await init()` per wallet on the claim scan's
   // hot path, inside the coordinator's global claim lock.
   //
-  // Only `true` is memoized. A `false` cannot be told apart from "the binding was lost to a
-  // swallowed `initContracts()` error" — the very stickiness described above — so caching it
-  // would let one startup 429 disable lane routing for the whole process. Since this PR makes
-  // the refusal terminal (`authority_forbidden`, `autoRetry:false`), that would silently
-  // DESTROY every curated-CG lift job until restart rather than merely misroute it.
+  // `true` is memoized permanently: a bound `ContextGraphs` surface is never unbound.
+  //
+  // A negative answer is memoized only BRIEFLY. It cannot be told apart from "the binding was
+  // lost to a swallowed `initContracts()` error" — the stickiness described above — so caching
+  // it for the process would let one startup 429 disable lane routing until restart, and with
+  // the refusal terminal (`authority_forbidden`, `autoRetry:false`) that destroys every
+  // curated-CG lift job rather than misrouting it. Re-probing on EVERY call is the other wrong
+  // answer: the probe awaits `init()` per wallet, and this runs per graph, per poll, per lane
+  // inside the coordinator's global claim lock. A short window bounds both.
   let enforceable: true | undefined;
+  let negativeUntil = 0;
+  let negative: 'unenforceable' | 'unreadable' | undefined;
   type EnforceabilityV1 = 'enforceable' | 'unenforceable' | 'unreadable';
   const resolveEnforceable = async (): Promise<EnforceabilityV1> => {
+    if (enforceable === true) return 'enforceable';
+    if (negative !== undefined && Date.now() < negativeUntil) return negative;
     let unreadable = false;
     const answers = await Promise.all(wallets.map(async (wallet) => {
       try {
@@ -275,22 +285,29 @@ export function createPublishAuthorityResolver(
         // A probe that THREW established nothing. `init()` rethrows
         // `RpcEndpointsExhaustedError`, so this is an ordinary RPC blip, and answering
         // `unenforced` here would make every lane eligible — fail-OPEN into permanent job
-        // loss. Hold the job instead and ask again next poll.
+        // loss. Hold the job instead and ask again once the window lapses.
         unreadable = true;
         return false;
       }
     }));
-    if (unreadable) return 'unreadable';
-    const result = !answers.includes(false);
-    if (result) enforceable = true;
-    return result ? 'enforceable' : 'unenforceable';
+    if (unreadable) {
+      negative = 'unreadable';
+      negativeUntil = Date.now() + negativeRetryMs;
+      return negative;
+    }
+    if (!answers.includes(false)) {
+      enforceable = true;
+      negative = undefined;
+      return 'enforceable';
+    }
+    negative = 'unenforceable';
+    negativeUntil = Date.now() + negativeRetryMs;
+    return negative;
   };
   return async (contextGraphId: bigint): Promise<AsyncLiftPublishAuthority> => {
-    if (enforceable !== true) {
-      const state = await resolveEnforceable();
-      if (state === 'unreadable') return { kind: 'unknown' };
-      if (state === 'unenforceable') return { kind: 'unenforced' };
-    }
+    const state = await resolveEnforceable();
+    if (state === 'unreadable') return { kind: 'unknown' };
+    if (state === 'unenforceable') return { kind: 'unenforced' };
     const verdicts = await Promise.all(wallets.map(async (wallet) => {
       try {
         return await wallet.chain.isAuthorizedPublisher!(contextGraphId, wallet.address)
@@ -312,6 +329,15 @@ export function createPublishAuthorityResolver(
     };
   };
 }
+
+/**
+ * How long a NEGATIVE publish-authority enforceability answer is reused before re-probing.
+ *
+ * Bounds two opposite failures: caching it for the process would make one swallowed
+ * `initContracts()` error permanent, while re-probing every call puts an `await init()` per
+ * wallet on the claim scan's hot path, inside the coordinator's global claim lock.
+ */
+const PUBLISH_AUTHORITY_ENFORCEABILITY_RETRY_MS = 30_000;
 
 /** Sentinel for "this wallet's authority read failed", distinct from a `null` refusal. */
 const UNREADABLE_PUBLISH_AUTHORITY = Symbol('unreadable-publish-authority');
