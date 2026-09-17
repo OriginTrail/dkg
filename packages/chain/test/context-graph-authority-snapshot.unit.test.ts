@@ -48,6 +48,7 @@ function makeEvmAuthorityAdapter(
     reorg?: boolean;
     providerRangeLimit?: number;
     finalityConfirmations?: number;
+    malformedCreationNameHash?: boolean;
   } = {},
 ): EvmAuthorityHarness {
   // The scenario needs the depth too: it derives the anchor height to tell an
@@ -127,7 +128,14 @@ function makeEvmAuthorityAdapter(
           },
         };
       }
-      return scenario.renderQueryFilter(filter.name, fromBlock, toBlock);
+      const events = scenario.renderQueryFilter(filter.name, fromBlock, toBlock);
+      if (options.malformedCreationNameHash && filter.name === 'ContextGraphCreated') {
+        for (const event of events) {
+          event.args.nameHash = undefined;
+          event.args[2] = undefined;
+        }
+      }
+      return events;
     },
     getContextGraph: {
       staticCall: async (contextGraphId: bigint, readOptions: { blockTag: number }) => {
@@ -331,6 +339,12 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     expect(evidence.headReads).toEqual([30]);
     expect(evidence.blockReads).toContain(27);
     expect(evidence.blockReads).not.toContain(30);
+  });
+
+  it('rejects a malformed creation-event name hash at the adapter boundary', async () => {
+    await expect(makeEvmAuthorityAdapter({ malformedCreationNameHash: true }).adapter
+      .getContextGraphAuthoritySnapshot(9n))
+      .rejects.toThrow('invalid ContextGraphCreated name hash');
   });
 
   it('rechecks the anchor after a delayed concurrent current-state read', async () => {

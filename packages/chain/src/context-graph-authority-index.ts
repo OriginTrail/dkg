@@ -14,7 +14,7 @@ import {
 } from './context-graph-authority-generation.js';
 import {
   reduceContextGraphAuthorityIndexPage,
-  type ContextGraphAuthorityIndexEvent,
+  type RawContextGraphAuthorityIndexEvent,
 } from './context-graph-authority-index-reducer.js';
 import {
   admitContextGraphAuthorityIndexCheckpoint,
@@ -50,7 +50,7 @@ export interface ContextGraphAuthorityIndexScanInput {
     fromBlockNumber: number,
     throughBlockNumber: number,
     lifecycleSignal: AbortSignal,
-  ) => Promise<readonly ContextGraphAuthorityIndexEvent[]>;
+  ) => Promise<readonly RawContextGraphAuthorityIndexEvent[]>;
 }
 
 export interface ContextGraphAuthorityIndexResolveInput

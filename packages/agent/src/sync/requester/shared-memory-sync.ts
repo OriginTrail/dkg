@@ -1,5 +1,6 @@
 import {
   composeSyncWorkAdmission,
+  createSyncFetchSharingIdentity,
   type SyncWorkAdmission,
 } from '../work-admission.js';
 import {
@@ -54,6 +55,8 @@ import {
 } from './recovery-execution-guard.js';
 import { canonicalQuadKey } from './quad-key.js';
 
+const sharedMemorySyncFetchSharingIdentity = createSyncFetchSharingIdentity();
+const directSnapshotWalkFetchSharingIdentity = createSyncFetchSharingIdentity();
 const DKG = 'http://dkg.io/ontology/';
 
 /**
@@ -601,7 +604,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
       const workAdmission = composeSyncWorkAdmission({
         deadline,
-        scope: { sharing: 'coalescible', key: 'shared-memory-sync' },
+        fetchSharingIdentity: sharedMemorySyncFetchSharingIdentity,
       });
 
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
@@ -1566,7 +1569,7 @@ export async function syncPublicSnapshotsForMeta(params: {
 }> {
   const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({
     deadline: params.deadline,
-    scope: { sharing: 'coalescible', key: 'direct-snapshot-walk' },
+    fetchSharingIdentity: directSnapshotWalkFetchSharingIdentity,
   });
   const executionBoundary = params.executionBoundary
     ?? createRecoveryExecutionAdmission();

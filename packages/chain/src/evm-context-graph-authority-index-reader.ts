@@ -22,7 +22,7 @@ import {
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import {
   contextGraphAuthorityEventTopics,
-  normalizeContextGraphAuthorityIndexLog,
+  decodeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
@@ -160,7 +160,7 @@ function authorityIndexScanInputV1(
         toBlock,
         signal: lifecycleSignal,
       });
-      return logs.map((log) => normalizeContextGraphAuthorityIndexLog(
+      return logs.map((log) => decodeContextGraphAuthorityIndexLog(
         input.contract.interface,
         log,
       ));

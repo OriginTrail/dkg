@@ -35,6 +35,8 @@ import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
+import { markContextGraphRegistrationNotSubmitted } from
+  './context-graph-registration-error.js';
 import { contextGraphAuthorityIndexIdFromBigInt } from
   './context-graph-authority-index-id.js';
 import {
@@ -43,6 +45,8 @@ import {
   readEvmContextGraphAuthorityStateV1,
 } from
   './evm-context-graph-authority-index-reader.js';
+import { normalizeContextGraphAuthorityHash } from
+  './context-graph-authority-generation.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -112,6 +116,24 @@ function buildPublicContextGraphRegistryScanPlan(
     | (ContextGraphChainScanOptions & { mode?: string })
     | undefined;
   const mode = runtimeOptions?.mode;
+  const legacy = runtimeOptions as {
+    incremental?: boolean;
+    seedIncrementalWatermark?: boolean;
+    resumeFromCursor?: boolean;
+  } | undefined;
+  if (
+    mode !== undefined &&
+    [legacy?.incremental, legacy?.seedIncrementalWatermark, legacy?.resumeFromCursor]
+      .some((value) => value !== undefined)
+  ) {
+    throw new Error('Context graph list mode cannot be combined with legacy scan flags');
+  }
+  if (legacy?.incremental === true && legacy.seedIncrementalWatermark === true) {
+    throw new Error('Context graph list cannot be both incremental and a watermark seed');
+  }
+  if (legacy?.resumeFromCursor === true && legacy.seedIncrementalWatermark !== true) {
+    throw new Error('resumeFromCursor requires seedIncrementalWatermark');
+  }
 
   if (fromBlock !== undefined) {
     return {
@@ -332,11 +354,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     fromBlock?: number,
     options?: ContextGraphChainScanOptions,
   ): Promise<ContextGraphOnChain[]> {
+    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     await this.init();
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     return this._collectContextGraphRegistryScan(registry, registryAddress, fromBlock, scanPlan);
   }
 
@@ -778,21 +800,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           // the approval receipt itself is ambiguous, it cannot have created
           // the Context Graph. Preserve that distinction for the agent's
           // durable registration state machine.
-          const failure = approvalError instanceof Error
-            ? approvalError
-            : new Error(String(approvalError));
-          if (Object.isExtensible(failure)) {
-            Object.defineProperty(failure, 'contextGraphRegistrationSubmitted', {
-              configurable: true,
-              enumerable: false,
-              value: false,
-            });
-            throw failure;
-          }
-          throw Object.assign(
-            new Error(failure.message, { cause: approvalError }),
-            { contextGraphRegistrationSubmitted: false as const },
-          );
+          throw markContextGraphRegistrationNotSubmitted(approvalError);
         }
         return submitCreate();
       }
@@ -1307,12 +1315,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                   targetContextGraphId,
                   fromBlock,
                   toBlock,
-                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => ({
-                  blockNumber: event.blockNumber,
-                  blockHash: event.blockHash,
-                  index: event.index,
-                  nameHash: String(event.args.nameHash ?? event.args[2]).toLowerCase(),
-                })))
+                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => {
+                  const nameHash = normalizeContextGraphAuthorityHash(
+                    event.args.nameHash ?? event.args[2],
+                  );
+                  if (nameHash === undefined) {
+                    throw new Error(
+                      'ContextGraphStorage returned an invalid ContextGraphCreated name hash',
+                    );
+                  }
+                  return {
+                    blockNumber: event.blockNumber,
+                    blockHash: event.blockHash,
+                    index: event.index,
+                    nameHash,
+                  };
+                }))
               ),
               readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
                 const { name } = query;
