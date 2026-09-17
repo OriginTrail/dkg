@@ -137,6 +137,119 @@ describe('selected SWM metadata retention contention', () => {
     expect(deleteCheckpoint).not.toHaveBeenCalledWith('cg-waiter:checkpoint');
   });
 
+  it('returns a stalled prefix to the pool so a saturated sibling can advance', async () => {
+    // Yielding frees the reservation, never the committed prefix — and the
+    // prefix is what occupies the pool. With every lease below its own ceiling
+    // and the pool full of retained prefixes, waiting is a mutual stall that
+    // only the retention TTL would break. A bounded number of yields is
+    // absorbed; after that this lease hands its rows back.
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 2,
+      maxBytesEstimate: 1024 * 1024,
+      maxPrefixRows: 4,
+      maxPrefixBytesEstimate: 1024 * 1024,
+    });
+    const deleteCheckpoint = vi.fn();
+    const page = async (req: { contextGraphId: string }) => ({
+      quads: [row(req.contextGraphId)],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: `${req.contextGraphId}:checkpoint`,
+      completed: false,
+      timedOut: true,
+    });
+    const stalledFetch = vi.fn(page);
+    const stalled = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-stalled',
+      requesterScope: 'selected-swm-meta:retained:stalled',
+      retentionBudget: budget,
+      deleteCheckpoint,
+      fetchPage: stalledFetch,
+    });
+    const holderFetch = vi.fn(page);
+    const holder = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-holder',
+      requesterScope: 'selected-swm-meta:retained:holder',
+      retentionBudget: budget,
+      deleteCheckpoint,
+      fetchPage: holderFetch,
+    });
+
+    // Both leases earn one row: the pool is now saturated by retained prefixes
+    // while each lease still has three rows of its own headroom left.
+    await stalled.strategy.fetch(request('cg-stalled', 'peer-stalled'));
+    await holder.strategy.fetch(request('cg-holder', 'peer-holder'));
+    expect(stalled.continuation('cg-stalled').progress).toBe(1);
+    expect(holder.continuation('cg-holder').progress).toBe(1);
+    stalledFetch.mockClear();
+    holderFetch.mockClear();
+    deleteCheckpoint.mockClear();
+
+    // Transient contention is absorbed first: the prefix survives, exactly as
+    // it must when a sibling is mid-transfer and about to commit.
+    for (let pass = 0; pass < 2; pass += 1) {
+      await stalled.strategy.fetch(request('cg-stalled', 'peer-stalled'));
+      expect(stalled.continuation('cg-stalled').progress).toBe(1);
+    }
+    expect(stalledFetch).not.toHaveBeenCalled();
+    expect(deleteCheckpoint).not.toHaveBeenCalledWith('cg-stalled:checkpoint');
+
+    // The next yield gives the rows back instead of freezing both leases.
+    const outcome = await stalled.strategy.fetch(request('cg-stalled', 'peer-stalled'));
+    expect(stalledFetch).not.toHaveBeenCalled();
+    expect(outcome.result.quads).toEqual([]);
+    expect(outcome.result.nextOffset).toBe(0);
+    expect(outcome.result.timedOut).toBe(true);
+    expect(stalled.continuation('cg-stalled').progress).toBe(0);
+    expect(deleteCheckpoint).toHaveBeenCalledWith('cg-stalled:checkpoint');
+
+    // The freed row admits the sibling on its very next pass.
+    await holder.strategy.fetch(request('cg-holder', 'peer-holder'));
+    expect(holderFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the retained-prefix ceiling when the lease is at its own limit', async () => {
+    // The responder rejecting a zero allowance is the symptom; the operator
+    // needs the local limit that caused it.
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 8,
+      maxBytesEstimate: 1024 * 1024,
+      maxPrefixRows: 1,
+      maxPrefixBytesEstimate: 1024 * 1024,
+    });
+    const fetchPage = vi.fn(async (req: { contextGraphId: string; maxAcceptedQuads: number }) => {
+      if (req.maxAcceptedQuads === 0) {
+        throw new SyncPageAccumulationLimitError('quads', 1, 0);
+      }
+      return {
+        quads: [row(req.contextGraphId)],
+        bytesReceived: 1,
+        resumedFromOffset: 0,
+        nextOffset: 1,
+        checkpointKey: `${req.contextGraphId}:checkpoint`,
+        completed: false,
+        timedOut: true,
+      };
+    });
+    const fetcher = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-ceiling-message',
+      requesterScope: 'selected-swm-meta:retained:ceiling-message',
+      retentionBudget: budget,
+      deleteCheckpoint: vi.fn(),
+      fetchPage,
+    });
+
+    await fetcher.strategy.fetch(request('cg-ceiling-message', 'peer-ceiling-message'));
+    await expect(fetcher.strategy.fetch(request('cg-ceiling-message', 'peer-ceiling-message')))
+      .rejects.toThrowError(expect.objectContaining({
+        code: 'SYNC_PAGE_ACCUMULATION_LIMIT',
+        message: expect.stringContaining('per-Context-Graph ceiling (1 rows'),
+      }));
+    await expect(fetcher.strategy.fetch(request('cg-ceiling-message', 'peer-ceiling-message')))
+      .resolves.toBeDefined();
+  });
+
   it('keeps failing closed when the lease is at its own prefix ceiling', async () => {
     // Own-ceiling exhaustion is not transient: yielding would loop forever, so
     // the fetch still goes out and the accumulation limit stays authoritative.
