@@ -1845,22 +1845,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     );
   }
 
-  /** Read the exact current owner generation used to bind a curator peer. */
+  /**
+   * Read the exact current owner generation used to bind a curator peer.
+   *
+   * `admitWhileOpen` belongs only to a caller that stamps the binding into a
+   * one-shot join decision: the substrate outbox replays the payload bytes it
+   * was given, so a deferral there does not postpone the send, it ships a
+   * decision permanently missing its binding. Repeatable callers — notably the
+   * per-message catalog admission hook — leave it off, because admitting one
+   * probe per inbound message for the length of an outage is the stampede the
+   * circuit exists to prevent.
+   */
   async readRfc64CurrentCuratorAuthorityBindingV1(
     this: DKGAgent,
     contextGraphId: string,
+    options: { admitWhileOpen?: boolean } = {},
   ): Promise<Readonly<{
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
-    // A curator binding is stamped into a one-shot join decision whose payload
-    // the outbox replays verbatim. Deferring the read here does not postpone
-    // the send, it ships a decision permanently missing its binding, so this
-    // lane is admitted while the circuit is open. See `admitWhileOpen`.
     const registeredAuthority = await this.readRfc64RegisteredAuthoritySnapshotV1(
       contextGraphId,
       undefined,
-      { admitWhileOpen: true },
+      options.admitWhileOpen === true ? { admitWhileOpen: true } : {},
     );
     if (registeredAuthority !== null) {
       const { expectedNameHash, snapshot } = registeredAuthority;

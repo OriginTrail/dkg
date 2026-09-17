@@ -47,6 +47,7 @@ import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 import type { Rfc64CatalogRuntimeV1 } from '../src/rfc64/catalog-runtime-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
@@ -2091,6 +2092,60 @@ describe('RFC-64 rollout authority integration', () => {
     });
   }
 
+  it('degrades Context Graph listing instead of failing it while the circuit is open', async () => {
+    const readTargets = vi.fn(async () => {
+      throw new Error('listing enrichment must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'listing-enrichment-open-circuit',
+      config: { chainAdapter: new NoChainAdapter() },
+    });
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Listing enrichment open circuit',
+      callerAgentAddress: AUTHOR,
+    });
+    vi.spyOn(edge, 'resolveFinalizedContextGraphAuthorityTargetsV1')
+      .mockImplementation(readTargets);
+    await openSharedAuthorityCircuit(edge);
+
+    // The enrichment fan-out is exactly what the circuit holds back, so it is
+    // deferred — but a deferral must degrade the listing, never reject it.
+    const rows = await edge.listContextGraphs();
+
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: CONTEXT_GRAPH_ID }),
+    ]));
+    expect(readTargets).not.toHaveBeenCalled();
+  });
+
+  it('defers VM reconcile binding resolution while the circuit is open', async () => {
+    const resolveSnapshots = vi.fn(async () => {
+      throw new Error('VM reconcile must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'vm-reconcile-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    await expect(edge.resolveFinalizedVmReconcileBinding(CONTEXT_GRAPH_ID, () => true))
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+    // A deferral is not a closed queue: the reconcile lane must keep the target
+    // and retry on its own cadence rather than treat it as permanently gone.
+    await expect(edge.resolveFinalizedVmReconcileBinding(CONTEXT_GRAPH_ID, () => true))
+      .rejects.not.toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+  });
+
   it('still resolves a curator binding while the shared circuit is open', async () => {
     const curatorSnapshot = Object.freeze({
       ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
@@ -2113,11 +2168,19 @@ describe('RFC-64 rollout authority integration', () => {
       `${AUTHOR}/deferred-while-open` as ContextGraphIdV1,
     )).rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
 
-    // The curator binding is stamped into a one-shot join decision that the
-    // outbox replays verbatim, so it must not be downgraded to "absent" for a
-    // whole backoff window. It is admitted as one more serialized probe.
+    // A repeatable caller — the per-message catalog admission hook — stays
+    // governed, so it cannot turn every inbound message into a probe.
     await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
-      .resolves.toEqual({ agentAddress: AUTHOR, authorityEra: '0' });
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+    expect(readAuthority).not.toHaveBeenCalled();
+
+    // The join-decision caller is admitted: its binding is stamped into a
+    // payload the outbox replays verbatim, so it must not be downgraded to
+    // "absent" for a whole backoff window. It is one more serialized probe.
+    await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(
+      CONTEXT_GRAPH_ID,
+      { admitWhileOpen: true },
+    )).resolves.toEqual({ agentAddress: AUTHOR, authorityEra: '0' });
     expect(readAuthority).toHaveBeenCalledOnce();
 
     // Reaching the pool is also what clears the outstanding exhaustion.
