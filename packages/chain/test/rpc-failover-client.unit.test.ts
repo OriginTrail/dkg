@@ -33,7 +33,11 @@
  * over REAL providers in multi-rpc-{read,write}-failover.test.ts.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { resolveCapMs, type SignPopulatedFn } from '../src/rpc-failover-client.js';
+import {
+  createRpcReadDescriptor,
+  resolveCapMs,
+  type SignPopulatedFn,
+} from '../src/rpc-failover-client.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
@@ -112,6 +116,33 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
   it('failOpenFundingRead: caps EVERY attempt incl. single-RPC at RPC_READ_STALL_TIMEOUT_MS', () => {
     expect(resolveCapMs('failOpenFundingRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('failOpenFundingRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+  });
+});
+
+describe('RpcReadDescriptor — explicit read attribution ownership', () => {
+  it('freezes the human label and consumer owner together', () => {
+    const descriptor = createRpcReadDescriptor('human read label', 'stable.consumer');
+
+    expect(descriptor).toEqual({ label: 'human read label', consumer: 'stable.consumer' });
+    expect(Object.isFrozen(descriptor)).toBe(true);
+  });
+
+  it('supports a deliberate unattributed read', () => {
+    const descriptor = createRpcReadDescriptor('health probe', null);
+    const provider = { read: recorder(async () => 'OK') };
+    const client = makeClient([provider], ['https://health.example']);
+
+    return expect(client.read(descriptor, (p: any) => p.read())).resolves.toBe('OK');
+  });
+
+  it('rejects a compatibility option that conflicts with the descriptor owner', () => {
+    const descriptor = createRpcReadDescriptor('human read label', 'stable.consumer');
+    const provider = { read: recorder(async () => 'OK') };
+    const client = makeClient([provider], ['https://health.example']);
+
+    expect(() => client.read(descriptor, (p: any) => p.read(), {
+      rpcUsageConsumer: 'different.consumer',
+    })).toThrow(/consumer conflict/);
   });
 });
 
