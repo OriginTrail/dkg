@@ -40,6 +40,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          hasEnvironmentOverrides: true,
           configured: true,
           ready: false,
           reachable: false,
@@ -78,6 +79,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          hasEnvironmentOverrides: false,
           configured: false,
           ready: false,
           reachable: false,
@@ -101,6 +103,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: false,
+          hasEnvironmentOverrides: false,
           configured: false,
           ready: false,
           reachable: true,
@@ -124,6 +127,7 @@ describe('DKG Local LLM Node UI surface', () => {
       if (url.endsWith('/api/local-llm/health')) {
         return json({
           ok: true,
+          hasEnvironmentOverrides: false,
           configured: false,
           ready: true,
           reachable: true,
@@ -140,6 +144,38 @@ describe('DKG Local LLM Node UI surface', () => {
       id: 'local-llm',
       chatReady: true,
       status: 'chat_ready',
+    });
+  });
+
+  it('keeps an auto-detected local LLM visible after runtime initialization fails', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/local-agent-integrations')) {
+        return json({ integrations: [localLlmRecord()] });
+      }
+      if (url.endsWith('/api/local-llm/health')) {
+        return json({
+          ok: false,
+          hasEnvironmentOverrides: false,
+          configured: false,
+          ready: false,
+          reachable: true,
+          offline: false,
+          readOnly: true,
+          error: 'Failed to initialize the local DKG LLM runtime',
+          initFailure: 'Failed to initialize the local DKG LLM runtime',
+        });
+      }
+      return json({ error: `Unexpected request: ${url}` }, 500);
+    }) as typeof globalThis.fetch;
+
+    const { integrations } = await fetchLocalAgentIntegrations();
+    expect(integrations).toHaveLength(1);
+    expect(integrations[0]).toMatchObject({
+      id: 'local-llm',
+      chatReady: false,
+      status: 'bridge_offline',
+      error: 'Failed to initialize the local DKG LLM runtime',
     });
   });
 

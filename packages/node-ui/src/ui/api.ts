@@ -1962,6 +1962,9 @@ export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 
 export interface LocalAgentHealthResponse {
   ok: boolean;
+  /** Daemon local-LLM signal; distinct from registry enablement. */
+  hasEnvironmentOverrides?: boolean;
+  /** Compatibility field used by older daemon local-LLM responses. */
   configured?: boolean;
   ready?: boolean;
   reachable?: boolean;
@@ -2506,6 +2509,10 @@ export interface LocalAgentHistoryMessage {
 interface LocalAgentSurface {
   connectSupported: boolean;
   chatSupported: boolean;
+  visible?: (args: {
+    record: LocalAgentIntegrationRecord;
+    health: LocalAgentHealthResponse | null;
+  }) => boolean;
   defaultSessionId?: (args: {
     integrationId: string;
     record?: LocalAgentIntegrationRecord;
@@ -2525,6 +2532,12 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   'local-llm': {
     connectSupported: false,
     chatSupported: true,
+    visible: ({ health }) => {
+      const hasEnvironmentOverrides = health?.hasEnvironmentOverrides ?? health?.configured;
+      return hasEnvironmentOverrides !== false
+        || health?.ready === true
+        || Boolean(health?.initFailure);
+    },
     defaultSessionId: () => 'local-llm:dkg-ui',
     resolveChatContext: () => ({}),
     fetchHealth: fetchLocalLlmHealth,
@@ -2817,13 +2830,7 @@ async function mapLocalAgentIntegrationRecord(
   const health = configured && hasChatBridge && surface?.fetchHealth
     ? normalizeLocalAgentHealth(await surface.fetchHealth().catch(() => null))
     : null;
-  // The daemon-owned integration exists in the registry on every node. Keep it
-  // out of the UI when the operator supplied no local-LLM configuration and
-  // the conventional local endpoint did not pass the LLM readiness probe.
-  // Reachability alone is insufficient: an unrelated HTTP service can occupy
-  // the default port. An explicit but temporarily offline configuration
-  // remains visible so its error is useful.
-  if (id === 'local-llm' && health?.configured === false && health.ready !== true) {
+  if (surface?.visible?.({ record, health }) === false) {
     return null;
   }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
