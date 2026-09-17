@@ -199,10 +199,10 @@ describe('runSyncOnConnect callbacks', () => {
 
   it('preserves typed backpressure from post-durable shared-memory sync', async () => {
     // `ordinarySharedMemoryWork.syncFromPeer()` is awaited outside
-    // `runNonTransportStep`, after `durableSyncCompleted = true`. Before the
-    // conversion this was the one site that wrapped a bare busy error as a
-    // `backoffEligible: true` post-sync error, so purely local admission
-    // pressure grew peer backoff.
+    // `runNonTransportStep`, after `durableSyncCompleted = true`. It is the one
+    // site where removing the attempt boundary's cause walk would otherwise let
+    // a bare busy error reach the `backoffEligible: true` wrap and grow peer
+    // backoff for purely local admission pressure.
     const remotePeer = freshPeerIdString();
     const busy = new SyncBackpressureBusyError('shared queue full', 'queue_full');
 

@@ -616,13 +616,22 @@ async function runSessionSyncOnConnect(
     if (err instanceof SyncOnConnectBackpressureError) {
       throw err;
     }
-    // Local admission pressure is not a peer failure. Without this conversion a
-    // bare busy error reaching here after `durableSyncCompleted` was wrapped
-    // `backoffEligible: true`, so the attempt boundary recorded retry
-    // accounting and grew peer backoff for purely local pressure — the exact
-    // outcome this typed marker exists to prevent. The two already-converted
-    // sites use `backoffEligible: false`, which the boundary handles without
-    // accounting, so this was the only harmful one.
+    // Local admission pressure is not a peer failure.
+    //
+    // This conversion is required BY this change, not a pre-existing bug it
+    // fixes. Before it, `executeSyncOnConnectAttempt`'s catch called
+    // `getSyncBackpressureBusyError()` first, and `SyncOnConnectPostSyncError`
+    // sets `{ cause }` — so a bare busy escaping post-durable was found at
+    // depth 1 in the cause chain and already yielded `deferred-backpressure`
+    // with no accounting. Removing that cause walk is what would make the
+    // `backoffEligible: true` wrap below reachable for local pressure, so the
+    // marker has to be raised here instead.
+    //
+    // Note the invariant this relies on: the attempt boundary now matches only
+    // DIRECT instances. Any future site that wraps a busy error (an
+    // `AggregateError`, a new `{ cause }` rethrow in the shared-memory lane)
+    // falls through to `backoffEligible: true` and grows peer backoff for local
+    // pressure. A busy error must reach this boundary bare.
     if (err instanceof SyncBackpressureBusyError) {
       throw new SyncOnConnectBackpressureError(err);
     }
