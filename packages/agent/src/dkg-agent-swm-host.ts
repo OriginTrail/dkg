@@ -3052,10 +3052,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string,
     kaId: bigint,
     ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<string | null> {
+    signal?.throwIfAborted();
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
     const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && !signal?.aborted
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) return null;
@@ -3085,6 +3088,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> schedule reverse-candidate revalidation for "${lcg}"`,
             );
             if (this.vmReconcileScheduling && isLifecycleCurrent()) {
+              signal?.throwIfAborted();
               void this.vmReconcileScheduling.triggerLive(lcg);
             }
             return lcg;
@@ -3101,6 +3105,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!isLifecycleCurrent() || (!sub?.subscribed && !sub?.coreHosted)) return null;
     this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> reconcile "${localCgId}"`);
     if (this.vmReconcileScheduling && isLifecycleCurrent()) {
+      signal?.throwIfAborted();
       void this.vmReconcileScheduling.triggerLive(localCgId);
     }
     return localCgId;

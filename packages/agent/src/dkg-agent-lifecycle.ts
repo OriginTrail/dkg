@@ -3153,7 +3153,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         chain: this.chain,
         publishHandler,
         cursorPersistence: this.config.chainEventCursorStore,
-        onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber }) => {
+        onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber, signal }) => {
+          signal?.throwIfAborted();
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy}, publishPolicy ${publishPolicy ?? '?'}, nameHash ${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'})`);
 
           // The finalized event can arrive before or after the explicit local
@@ -3234,6 +3235,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // doesn't need any of those gates beyond the event-side hash
           // presence and the curated flag.
           if (nameHash && accessPolicy === 1 && eventLocalId !== null) {
+            signal?.throwIfAborted();
             // Register the wire id → numeric id mapping so the receive
             // path's chain fallback resolver (Scope A) can take a hash
             // input and find the on-chain participant agents without an
@@ -3263,10 +3265,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // sweep is the safety net if this is missed. Only wired when reconciliation
         // is actually possible (chain + ordinal reads present).
         onKARegisteredToContextGraph: this.vmReconcileEnabled()
-          ? async ({ contextGraphId: onChainId, kaId }) => {
+          ? async ({ contextGraphId: onChainId, kaId, signal }) => {
               // GH #1098 — body extracted to `handleKARegisteredNudge` so the
               // bind-only-the-matching-CG branch is directly testable.
-              await this.handleKARegisteredNudge(onChainId, kaId, ctx);
+              await this.handleKARegisteredNudge(onChainId, kaId, ctx, signal);
             }
           : undefined,
       });
