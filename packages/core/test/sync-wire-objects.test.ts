@@ -60,6 +60,29 @@ describe('RFC-64 sync wire object helpers', () => {
     );
   });
 
+  it('validates exact keys independently of insertion/schema order and freezes the snapshot', () => {
+    const snapshot = snapshotExactDataRecord({ z: 1, a: 2 }, ['a', 'z'], 'fixture');
+    expect(snapshot).toEqual({ a: 2, z: 1 });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.getPrototypeOf(snapshot)).toBe(null);
+    expect(() => snapshotExactDataRecord({ a: 1, z: 2 }, ['a', 'a'], 'fixture'))
+      .toThrow(/unknown or missing fields/);
+  });
+
+  it('keeps wide-schema validation exact, including duplicate schema keys', () => {
+    const keys = Array.from({ length: 32 }, (_, index) => `field${index}`);
+    const record = Object.fromEntries(keys.map((key, index) => [key, index]));
+    expect(snapshotExactDataRecord(record, [...keys].reverse(), 'fixture')).toEqual(record);
+    const duplicate = [...keys];
+    duplicate[31] = duplicate[0];
+    expect(() => snapshotExactDataRecord(record, duplicate, 'fixture'))
+      .toThrow(/unknown or missing fields/);
+    const substituted = { ...record, extra: true };
+    delete substituted.field0;
+    expect(() => snapshotExactDataRecord(substituted, keys, 'fixture'))
+      .toThrow(/unknown or missing fields/);
+  });
+
   it('rejects non-enumerable and accessor property descriptors', () => {
     const nonEnumerable = {} as Record<string, unknown>;
     Object.defineProperty(nonEnumerable, 'value', {
