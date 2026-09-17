@@ -701,6 +701,7 @@ import {
 } from
   './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
@@ -10982,7 +10983,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async canUseSharedMemoryForContextGraph(this: DKGAgent,
     contextGraphId: string,
-    opts: { callerAgentAddress?: string } = {},
+    opts: {
+      callerAgentAddress?: string;
+      readAuthority?: ContextGraphReadAuthorityDecision;
+    } = {},
   ): Promise<boolean> {
     const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
       contextGraphId,
@@ -10995,10 +10999,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }
-    return this.canReadContextGraph(contextGraphId, {
-      callerAgentAddress: opts.callerAgentAddress,
-      allowSubscriptionFallback: false,
-    });
+    return opts.readAuthority !== undefined
+      ? opts.readAuthority.outcome === 'allowed'
+      : this.canReadContextGraph(contextGraphId, {
+          callerAgentAddress: opts.callerAgentAddress,
+          allowSubscriptionFallback: false,
+        });
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,
