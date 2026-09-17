@@ -147,7 +147,7 @@ membership for that immediate caller before executing the replicated Program
 as its own node operator. This makes composition transitive without propagating
 the root caller's wallet authority across hops.
 
-Private Context Graph membership intentionally grants the right to request
+For direct invocation, private Context Graph membership intentionally grants the right to request
 Program execution; there is no mandatory caller-to-Program ACL. Final execution
 authority remains with the target operator: every tool requested by the
 Wasm-admitted Program must be offered by that operator, allowed by its
@@ -258,4 +258,4 @@ still requires reconciliation/manual review and is never blindly replayed. Provi
 idempotency/status protocols, paid-call receipts, billing and seller transport belong to
 the adapter/application that supplies those guarantees.
 
-Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation.
+Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation. These query-only operations derive execution authority from the trusted local binding and installed query adapter, without requiring VM policy or tool-offer publication. Direct invocation retains its VM policy requirements.

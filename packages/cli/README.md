@@ -80,7 +80,7 @@ before continuing graph activation:
 }
 ```
 
-The operator must also select one DKG-published execution policy. For example:
+For direct Program invocation, the operator must also select one DKG-published execution policy. Tenant-approved `programBindings` use their local binding as authority and do not require a published policy or tool offer; see [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md). For direct invocation:
 
 ```json
 {
