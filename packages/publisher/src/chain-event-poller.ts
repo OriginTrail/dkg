@@ -8,6 +8,8 @@ import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 import {
   ChainEventLaneRunner,
+  chainEventPollerLaneSpecs,
+  type ChainEventPollerLaneDeclarations,
   type ChainEventPollerLaneSpec,
 } from './chain-event-lane-runner.js';
 import type { CursorPersistence as RunnerCursorPersistence } from './chain-event-lane-cursor-store.js';
@@ -175,6 +177,20 @@ export class ChainEventPoller {
     });
   }
 
+  /**
+   * Seed every lane this poller declares at `blockNumber`, before it starts.
+   *
+   * An explicit administrative operation for an operator (or a fixture) that
+   * wants a poller to begin at a known block instead of replaying history. It
+   * goes through the same lane specifications polling uses, so a lane added
+   * later is seeded without a second inventory, and it is deliberately
+   * poller-scoped: a legacy aggregate cursor cannot represent full-history
+   * lanes on its own, so the seed also lives in this runner's lane state.
+   */
+  async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
+    await this.laneRunner.seedConfiguredLaneCursors(blockNumber);
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     if (this.pollLifecycle.signal.aborted) {
@@ -263,9 +279,11 @@ export class ChainEventPoller {
   }
 
   private laneSpecs(): ChainEventPollerLaneSpec[] {
-    return [
-      {
-        name: 'publish',
+    // The lane union in `chain-event-lanes.ts` is the only list of lane names:
+    // this declaration is exhaustive by type, and both the runner's ordered
+    // specifications and cursor seeding derive from that one order.
+    const lanes: ChainEventPollerLaneDeclarations = {
+      publish: {
         enabled: () => this.publishHandler.hasPendingPublishes,
         eventTypes: () => ['KCCreated'],
         requiresFullHistory: () => this.publishHandler.hasRestoredPendingPublishes,
@@ -277,8 +295,7 @@ export class ChainEventPoller {
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleBatchCreated(event, ctx),
       },
-      {
-        name: 'allocatorReconcile',
+      allocatorReconcile: {
         enabled: () => !!this.onKnowledgeAssetCreated,
         eventTypes: () => ['KCCreated'],
         requiresFullHistory: () => true,
@@ -290,8 +307,7 @@ export class ChainEventPoller {
           this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');
         },
       },
-      {
-        name: 'contextGraphDiscovery',
+      contextGraphDiscovery: {
         enabled: () => !!this.onContextGraphCreated,
         eventTypes: () => ['NameClaimed', 'ContextGraphCreated'],
         // This poller is the low-latency live tail for new context graphs.
@@ -302,39 +318,36 @@ export class ChainEventPoller {
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleContextGraphCreated(event, ctx),
       },
-      {
-        name: 'vmReconcile',
+      vmReconcile: {
         enabled: () => !!this.onKARegisteredToContextGraph,
         eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleKARegistered(event, ctx),
       },
-      {
-        name: 'collectionUpdates',
+      collectionUpdates: {
         enabled: () => !!this.onCollectionUpdated,
         eventTypes: () => ['KnowledgeAssetUpdated'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleCollectionUpdated(event, ctx),
       },
-      {
-        name: 'allowListUpdates',
+      allowListUpdates: {
         enabled: () => !!this.onAllowListUpdated,
         eventTypes: () => ['AllowListUpdated'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleAllowListUpdated(event, ctx),
       },
-      {
-        name: 'profileEvents',
+      profileEvents: {
         enabled: () => !!this.onProfileEvent,
         eventTypes: () => ['ProfileCreated', 'ProfileUpdated'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleProfileEvent(event, ctx),
       },
-    ];
+    };
+    return chainEventPollerLaneSpecs(lanes);
   }
 
   private async poll(): Promise<void> {

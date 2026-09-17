@@ -23,9 +23,11 @@ import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-m
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from
   '../src/rfc64/background-work-dispatcher-v1.js';
+import { createVmReconcileLifecycleFixture } from './_helpers/vm-reconcile-lifecycle.js';
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  Object.assign(agent, createVmReconcileLifecycleFixture());
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();

@@ -40,13 +40,27 @@ class RuntimePositiveIntegerCursorStore {
 
   save(scope: string, key: string, value: number): void {
     if (!Number.isSafeInteger(value) || value <= 0) return;
-    this.db.prepare(`
+    this.upsert().run(this.namespace, scope, key, value, Date.now());
+  }
+
+  /** Commit every key at one value, or none of them. */
+  saveAll(scope: string, keys: readonly string[], value: number): void {
+    if (!Number.isSafeInteger(value) || value <= 0) return;
+    const upsert = this.upsert();
+    const updatedAt = Date.now();
+    this.db.transaction(() => {
+      for (const key of keys) upsert.run(this.namespace, scope, key, value, updatedAt);
+    })();
+  }
+
+  private upsert(): Database.Statement {
+    return this.db.prepare(`
       INSERT INTO runtime_cursors (namespace, scope, key, value, updated_at)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(namespace, scope, key) DO UPDATE SET
         value = excluded.value,
         updated_at = excluded.updated_at
-    `).run(this.namespace, scope, key, value, Date.now());
+    `);
   }
 }
 
@@ -73,6 +87,11 @@ export class SqliteChainEventCursorStore {
 
   async saveLane(lane: string, blockNumber: number): Promise<void> {
     this.cursors.save(this.scope, lane, blockNumber);
+  }
+
+  /** Seed several lanes at one block in a single transaction, or none of them. */
+  async saveLanes(lanes: readonly string[], blockNumber: number): Promise<void> {
+    this.cursors.saveAll(this.scope, lanes, blockNumber);
   }
 
   private legacyKey(lane: string): string {
