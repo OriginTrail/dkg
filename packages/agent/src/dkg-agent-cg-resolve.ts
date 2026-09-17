@@ -1564,6 +1564,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       allowCachedRoster?: boolean;
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /** Query authority proved exact accepted RFC-64 finalized absence. */
+      allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
@@ -1571,6 +1573,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       {
         signal: options.signal,
         registrationTimeoutMs: options.registrationTimeoutMs,
+        allowAcceptedRfc64FinalizedAbsence:
+          options.allowAcceptedRfc64FinalizedAbsence,
       },
     );
     if (registration.kind !== 'registered') return registration;
@@ -1935,7 +1939,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async resolveCurrentNameHashContextGraphBinding(
     this: DKGAgent,
     requestedId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
   ): Promise<(
     | { onChainId: string; provenance: 'authoritative' }
     | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
@@ -1982,6 +1986,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const resolved = options.signal === undefined
       ? await resolve.call(this.chain, target.nameHash)
       : await resolve.call(this.chain, target.nameHash, { signal: options.signal });
+    // Adapters answer a repeated miss from a short negative cache, so an
+    // absence proves nothing about the provider pool. Only a positive binding
+    // is guaranteed to have crossed the wire: the resolver deliberately keeps
+    // no positive entries, because ContextGraphStorage does not enforce
+    // name-hash uniqueness and a later duplicate slot must stay observable.
+    if (resolved !== null) options.onRpcRead?.();
     if (resolved === null) {
       if (cachedReverse) {
         throw new Error(
@@ -2745,14 +2755,25 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       throw entry.reason;
     });
 
+    // Listing fans one authority read out over every discovered row, which is
+    // exactly the shape the shared governor exists to hold back. Resolve the
+    // governor here rather than inside the callback: enrichment turns any
+    // throw into a degraded listing, so a missing owner would silently drop
+    // on-chain ids instead of failing.
+    const authorityReads = this.rfc64AuthorityReadCoordinatorV1;
     // Discovery establishes row identity; this collaborator owns the complete
     // finalized/legacy/degraded authority-enrichment state machine.
     const authorityEnrichment = await enrichContextGraphListAuthorityV1({
       rows,
+      // An open circuit degrades enrichment for this listing instead of adding
+      // a whole-corpus fan-out to an exhausted pool; the next listing recomputes.
       readFinalizedTargets: (contextGraphIds) => withBudget(
-        (signal) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
-          contextGraphIds,
-          { signal },
+        (signal) => authorityReads.run(
+          signal,
+          (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+            contextGraphIds,
+            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+          ),
         ),
         'batched finalized on-chain id enrichment',
         scanBudgetMs,

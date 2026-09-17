@@ -162,6 +162,7 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
+import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
   exitAfterFatalLogDrain,
@@ -1201,6 +1202,9 @@ async function runDaemonInnerWithStartupOwnership(
     if (foreground) origStdoutWrite(line + "\n");
     daemonLogFileWriter.push(line + "\n");
   }
+  if (!assertNodeRuntimeSupported(log)) {
+    throw new Error('Node runtime preflight failed; see the preceding fatal message.');
+  }
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
   });
@@ -2024,17 +2028,19 @@ async function runDaemonInnerWithStartupOwnership(
           updatedAt: row.updated_at,
         };
       }),
-      loadLocalOrigins: async () => dashDb.listLocalContextGraphOrigins().map((row) => ({
-        contextGraphId: row.context_graph_id,
-        source: row.source,
-        createdAt: row.created_at,
-      })),
-      recordLocalOrigin: async (record) => {
-        dashDb.recordLocalContextGraphOrigin({
-          context_graph_id: record.contextGraphId,
-          source: record.source,
-          created_at: record.createdAt,
-        });
+      localOrigins: {
+        loadLocalOrigins: async () => dashDb.listLocalContextGraphOrigins().map((row) => ({
+          contextGraphId: row.context_graph_id,
+          source: row.source,
+          createdAt: row.created_at,
+        })),
+        recordLocalOrigin: async (record) => {
+          dashDb.recordLocalContextGraphOrigin({
+            context_graph_id: record.contextGraphId,
+            source: record.source,
+            created_at: record.createdAt,
+          });
+        },
       },
       upsert: async (record) => {
         dashDb.upsertContextGraphMember({

@@ -7,7 +7,7 @@ import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 import {
   reduceContextGraphAuthorityIndexPage,
-  type ContextGraphAuthorityIndexEvent,
+  type RawContextGraphAuthorityIndexEvent as ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
@@ -94,6 +94,49 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     pageSize: 5,
     readBlockHash: async (blockNumber: number) => blockHash(blockNumber),
     readPage,
+  });
+
+  it('holds the durable cursor below the reorg horizon while still projecting to the anchor', async () => {
+    // The anchor is the operator's and at the default depth it is the HEAD, so a
+    // cursor written AT the anchor lives on a reorgable block: `admit…Checkpoint`
+    // re-reads the hash there, a single-block tip reorg mismatches, and the whole
+    // materialized index is discarded and rescanned from the deployment block.
+    // The cursor is a memo, not a finality decision, so it stops below a
+    // reorg-safe horizon while the READ still projects all the way to the anchor.
+    const store = new MemoryAuthorityIndexStore();
+    const index = new ContextGraphAuthorityIndex(store);
+    const scanned: Array<readonly [number, number]> = [];
+
+    const state = await index.resolve({
+      ...makeInput(9n, {}, async (from, to) => {
+        scanned.push([from, to]);
+        return allEvents.filter((e) => e.blockNumber >= from && e.blockNumber <= to);
+      }, 25),
+      durableReorgHoldbackBlocks: 8,
+    });
+
+    // The projection still reflects every event up to the anchor.
+    expect(state.owner).toBe(NEXT_OWNER.toLowerCase());
+    expect(scanned.at(-1)?.[1]).toBe(25);
+    // But nothing at or above the horizon was written down.
+    const persisted = (store.record?.value as { cursor: { throughBlockNumber: number } });
+    expect(persisted.cursor.throughBlockNumber).toBe(17);
+    expect(persisted.cursor.throughBlockNumber).toBeLessThanOrEqual(25 - 8);
+  });
+
+  it('writes the cursor at the anchor when no holdback is configured', async () => {
+    // Default 0 is the behaviour before the horizon existed, so a caller that
+    // omits it is unchanged rather than newly exposed.
+    const store = new MemoryAuthorityIndexStore();
+    const index = new ContextGraphAuthorityIndex(store);
+
+    await index.resolve(makeInput(9n, {}, async (from, to) => (
+      allEvents.filter((e) => e.blockNumber >= from && e.blockNumber <= to)
+    ), 25));
+
+    const persisted = store.record?.value as
+      { cursor: { throughBlockNumber: number } } | undefined;
+    expect(persisted?.cursor.throughBlockNumber).toBe(25);
   });
 
   it('keeps raw persisted checkpoints private behind purpose-specific views', () => {

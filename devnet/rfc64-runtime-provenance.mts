@@ -6,7 +6,11 @@ import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 
 import { canonicalize, type CanonicalValue } from './rfc64-runtime-canonical.mts';
-import { validateFixedRuntimeProcessEvidenceV1 } from './rfc64-runtime-process-evidence.mts';
+import {
+  assertRuntimeProcessIdentityV1,
+  type RuntimeProcessIdentityV1,
+  validateFixedRuntimeProcessEvidenceV1,
+} from './rfc64-runtime-process-evidence.mts';
 
 export const RUNTIME_MANIFEST_SCHEMA_VERSION =
   'dkg-rfc64-runtime-manifest-v1' as const;
@@ -60,6 +64,8 @@ export interface RuntimeEvidenceProfileV1<
   readonly cleanArgs: readonly string[];
   readonly executedManifestDigestDomain: string;
   readonly executedManifestSchemaVersion: ExecutedManifestSchema;
+  /** Exact executable module every process in this profile must load. */
+  readonly requiredEntrypoint?: string;
   readonly mandatoryEntrypoints: readonly string[];
   readonly manifestDigestDomain: string;
   readonly manifestSchemaVersion: ManifestSchema;
@@ -84,6 +90,66 @@ export const RFC64_RUNTIME_EVIDENCE_PROFILE_V1 = Object.freeze({
     manifestSchemaVersion: RUNTIME_MANIFEST_SCHEMA_VERSION,
     packageClosure: RUNTIME_PACKAGE_CLOSURE,
   } as const satisfies RuntimeEvidenceProfileV1);
+
+/** Canonical clean-build profile for daemons launched through the release CLI. */
+export const RELEASE_CLI_RUNTIME_MANIFEST_SCHEMA_VERSION =
+  'dkg-rfc64-release-cli-runtime-manifest-v1' as const;
+export const RELEASE_CLI_RUNTIME_MANIFEST_DIGEST_DOMAIN =
+  'dkg-rfc64-release-cli-runtime-manifest-v1\n' as const;
+export const RELEASE_CLI_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION =
+  'dkg-rfc64-release-cli-executed-runtime-manifest-v1' as const;
+export const RELEASE_CLI_EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN =
+  'dkg-rfc64-release-cli-executed-runtime-manifest-v1\n' as const;
+export const RELEASE_CLI_RUNTIME_CLEAN_ARGS = Object.freeze([
+  '-r',
+  '--filter',
+  '@origintrail-official/dkg...',
+  '--filter',
+  '!@origintrail-official/dkg-evm-module',
+  'run',
+  'clean',
+] as const);
+export const RELEASE_CLI_RUNTIME_BUILD_ARGS = Object.freeze([
+  '-r',
+  '--filter',
+  '@origintrail-official/dkg...',
+  '--filter',
+  '!@origintrail-official/dkg-evm-module',
+  'run',
+  'build',
+] as const);
+export const RELEASE_CLI_RUNTIME_PACKAGE_CLOSURE = Object.freeze([
+  { name: '@origintrail-official/dkg', path: 'packages/cli/dist' },
+  { name: '@origintrail-official/dkg-adapter-hermes', path: 'packages/adapter-hermes/dist' },
+  { name: '@origintrail-official/dkg-adapter-openclaw', path: 'packages/adapter-openclaw/dist' },
+  { name: '@origintrail-official/dkg-adapter-prime-agent', path: 'packages/adapter-prime-agent/dist' },
+  { name: '@origintrail-official/dkg-agent', path: 'packages/agent/dist' },
+  { name: '@origintrail-official/dkg-chain', path: 'packages/chain/dist' },
+  { name: '@origintrail-official/dkg-core', path: 'packages/core/dist' },
+  { name: '@origintrail-official/dkg-epcis', path: 'packages/epcis/dist' },
+  { name: '@origintrail-official/dkg-graph-viz', path: 'packages/graph-viz/dist' },
+  { name: '@origintrail-official/dkg-http-utils', path: 'packages/http-utils/dist' },
+  { name: '@origintrail-official/dkg-local-llm', path: 'packages/local-llm/dist' },
+  { name: '@origintrail-official/dkg-mcp', path: 'packages/mcp-dkg/dist' },
+  { name: '@origintrail-official/dkg-node-ui', path: 'packages/node-ui/dist' },
+  { name: '@origintrail-official/dkg-okf', path: 'packages/okf/dist' },
+  { name: '@origintrail-official/dkg-publisher', path: 'packages/publisher/dist' },
+  { name: '@origintrail-official/dkg-query', path: 'packages/query/dist' },
+  { name: '@origintrail-official/dkg-random-sampling', path: 'packages/random-sampling/dist' },
+  { name: '@origintrail-official/dkg-rdf-utils', path: 'packages/rdf-utils/dist' },
+  { name: '@origintrail-official/dkg-storage', path: 'packages/storage/dist' },
+] as const);
+export const RFC64_RELEASE_CLI_RUNTIME_EVIDENCE_PROFILE_V1 = Object.freeze({
+  buildArgs: RELEASE_CLI_RUNTIME_BUILD_ARGS,
+  cleanArgs: RELEASE_CLI_RUNTIME_CLEAN_ARGS,
+  executedManifestDigestDomain: RELEASE_CLI_EXECUTED_RUNTIME_MANIFEST_DIGEST_DOMAIN,
+  executedManifestSchemaVersion: RELEASE_CLI_EXECUTED_RUNTIME_MANIFEST_SCHEMA_VERSION,
+  mandatoryEntrypoints: Object.freeze(['packages/cli/dist/cli.js']),
+  manifestDigestDomain: RELEASE_CLI_RUNTIME_MANIFEST_DIGEST_DOMAIN,
+  manifestSchemaVersion: RELEASE_CLI_RUNTIME_MANIFEST_SCHEMA_VERSION,
+  packageClosure: RELEASE_CLI_RUNTIME_PACKAGE_CLOSURE,
+  requiredEntrypoint: 'packages/cli/dist/cli.js',
+} as const satisfies RuntimeEvidenceProfileV1);
 
 const SOURCE_COMMIT = /^[0-9a-f]{40,64}$/u;
 const DIGEST = /^0x[0-9a-f]{64}$/u;
@@ -115,6 +181,7 @@ export interface RuntimeManifestV1<SchemaVersion extends string = string> {
 }
 
 export interface ExecutedRuntimeManifestV1<SchemaVersion extends string = string> {
+  readonly entrypoint?: string;
   readonly manifestDigest: string;
   readonly runtimeFiles: readonly RuntimeFileEvidenceV1[];
   readonly schemaVersion: SchemaVersion;
@@ -123,6 +190,7 @@ export interface ExecutedRuntimeManifestV1<SchemaVersion extends string = string
 
 export interface RuntimeProcessEvidenceV1<ProcessId extends string> {
   readonly id: ProcessId;
+  readonly identity: RuntimeProcessIdentityV1;
   readonly loaded: ExecutedRuntimeManifestV1;
 }
 
@@ -146,6 +214,7 @@ export interface RuntimeEvidenceV1<Profile extends RuntimeEvidenceProfileV1> {
   readonly buildExecutedRuntimeManifest: (
     sourceCommit: string,
     entries: readonly RuntimeFileEvidenceV1[],
+    entrypoint?: string,
   ) => Readonly<ExecutedRuntimeManifestForProfileV1<Profile>>;
   readonly assertExecutedRuntimeMatchesBuild: (
     executed: ExecutedRuntimeManifestForProfileV1<Profile>,
@@ -171,7 +240,8 @@ export function createRuntimeEvidenceV1<const Profile extends RuntimeEvidencePro
     buildExecutedRuntimeManifest: (
       sourceCommit: string,
       entries: readonly RuntimeFileEvidenceV1[],
-    ) => buildExecutedRuntimeManifestForProfileV1(sourceCommit, entries, profile),
+      entrypoint?: string,
+    ) => buildExecutedRuntimeManifestForProfileV1(sourceCommit, entries, profile, entrypoint),
     assertExecutedRuntimeMatchesBuild: (
       executed: ExecutedRuntimeManifestForProfileV1<Profile>,
       cleanBuild: RuntimeManifestForProfileV1<Profile>,
@@ -343,13 +413,27 @@ function buildExecutedRuntimeManifestForProfileV1<Profile extends RuntimeEvidenc
   sourceCommit: string,
   inputEntries: readonly RuntimeFileEvidenceV1[],
   profile: Readonly<Profile>,
+  entrypointInput?: string,
 ): Readonly<ExecutedRuntimeManifestForProfileV1<Profile>> {
   const validated = buildRuntimeManifestFromEntriesForProfileV1(
     sourceCommit,
     inputEntries,
     profile,
   );
+  const entrypoint = entrypointInput ?? profile.requiredEntrypoint;
+  if (profile.requiredEntrypoint !== undefined && entrypoint !== profile.requiredEntrypoint) {
+    throw new Error(`runtime entrypoint must be ${profile.requiredEntrypoint}`);
+  }
+  if (entrypoint !== undefined) {
+    if (!/^packages\/[^/]+\/dist\/.+\.(?:js|json|node|wasm)$/u.test(entrypoint)) {
+      throw new TypeError('runtime entrypoint is not a bounded workspace artifact');
+    }
+    if (!validated.runtimeFiles.some((entry) => entry.path === entrypoint)) {
+      throw new Error(`runtime manifest did not load required entrypoint: ${entrypoint}`);
+    }
+  }
   const payload = Object.freeze({
+    ...(entrypoint === undefined ? {} : { entrypoint }),
     runtimeFiles: validated.runtimeFiles,
     schemaVersion: profile.executedManifestSchemaVersion,
     sourceCommit,
@@ -386,6 +470,7 @@ function assertExecutedRuntimeMatchesBuildForProfileV1<
     executed.sourceCommit,
     executed.runtimeFiles,
     profile,
+    executed.entrypoint,
   );
   if (canonicalize(rebuilt as unknown as CanonicalValue)
     !== canonicalize(executed as unknown as CanonicalValue)) {
@@ -430,7 +515,8 @@ export function buildRuntimeProcessProvenanceV1<
   readonly schema: Schema;
   readonly sourceBuild: RuntimeManifestV1;
 }): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
-  const profile = input.profile ?? RFC64_RUNTIME_EVIDENCE_PROFILE_V1;
+  const profile: RuntimeEvidenceProfileV1 =
+    input.profile ?? RFC64_RUNTIME_EVIDENCE_PROFILE_V1;
   const canonicalSourceBuild = buildRuntimeManifestFromEntriesForProfileV1(
     input.sourceBuild.sourceCommit,
     input.sourceBuild.runtimeFiles,
@@ -510,6 +596,10 @@ export function assertPersistedRuntimeProcessProvenanceV1<
     }
     return Object.freeze({
       id: expectedId,
+      identity: parseRuntimeProcessIdentityV1(
+        readDataField(processRecord, 'identity', `runtime process ${index}`),
+        `runtime process ${index} identity`,
+      ),
       loaded: parseExecutedRuntimeManifestV1(
         readDataField(processRecord, 'loaded', `runtime process ${index}`),
         `runtime process ${index} loaded manifest`,
@@ -569,13 +659,28 @@ export function parseExecutedRuntimeManifestV1(
   label = 'executed runtime manifest',
 ): Readonly<ExecutedRuntimeManifestV1> {
   const record = parsePlainRecord(value, label);
+  const entrypoint = record.entrypoint === undefined
+    ? undefined
+    : parseStringField(record, 'entrypoint', label);
   return Object.freeze({
+    ...(entrypoint === undefined ? {} : { entrypoint }),
     manifestDigest: parseStringField(record, 'manifestDigest', label),
     runtimeFiles: Object.freeze(parseArrayField(record, 'runtimeFiles', label).map(
       (entry, index) => parseRuntimeFileEvidenceV1(entry, `${label} file ${index}`),
     )),
     schemaVersion: parseStringField(record, 'schemaVersion', label),
     sourceCommit: parseStringField(record, 'sourceCommit', label),
+  });
+}
+
+function parseRuntimeProcessIdentityV1(
+  value: unknown,
+  label: string,
+): Readonly<RuntimeProcessIdentityV1> {
+  assertRuntimeProcessIdentityV1(value, label);
+  return Object.freeze({
+    hostIdentity: value.hostIdentity,
+    pid: value.pid,
   });
 }
 

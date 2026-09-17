@@ -48,6 +48,7 @@ type AssertionPromotePreCommitResult = {
 };
 
 const CONTEXT_GRAPH_AUTHORITY_PROMOTE_RETRY = {
+  'finalized-name-absence-unaccepted': true,
   'chain-name-binding-unavailable': true,
   'local-chain-binding-unavailable': true,
   'local-existence-unavailable': true,

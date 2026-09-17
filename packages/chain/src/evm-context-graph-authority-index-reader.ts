@@ -9,6 +9,7 @@ import type {
 import { CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS } from './chain-adapter.js';
 import {
   ContextGraphAuthorityIndex,
+  ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
   type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
@@ -18,16 +19,92 @@ import {
   assertContextGraphAuthorityIndexId,
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import {
   contextGraphAuthorityEventTopics,
-  normalizeContextGraphAuthorityIndexLog,
+  decodeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
+  withOwnedRpcRequestContext,
   withRpcRequestContext,
+  withRpcRequestTimeout,
 } from './rpc-request-transport.js';
+
+/**
+ * Keep authority-index eth_getLogs requests inside the strictest production
+ * provider limit currently supported. The configured registry page size can
+ * still be smaller, while stricter providers remain covered by the adaptive
+ * range reader below.
+ */
+const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
+
+/** Bound one physical authority-index RPC without capping the durable scan. */
+export function readEvmContextGraphAuthorityIndexRpcV1<T>(
+  operation: string,
+  read: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const bounded = () => withRpcRequestTimeout(
+    RPC_LOG_SCAN_TIMEOUT_MS,
+    operation,
+    read,
+  );
+  return signal === undefined
+    ? bounded()
+    : withRpcRequestContext({ signal }, bounded);
+}
+
+/**
+ * The single fail-closed error both authority-anchor resolvers raise.
+ *
+ * The message is preserved verbatim as a prefix: it is the contract callers
+ * (and operators reading logs) already recognize. The detail only says which
+ * step of the anchor resolution failed.
+ *
+ * RETRYABLE by type, not by message. Every condition it reports — a head an
+ * endpoint could not answer, an anchor below the configured depth, a block that
+ * came back at the wrong height — is one that a different endpoint or a later
+ * attempt can satisfy, so it must fail over rather than abort the authority
+ * read that gates catalog admission. Typing it also keeps it away from
+ * `classifyRpcRetryDisposition`'s message regex, which alternates bare
+ * `429|503|502|500` with no word boundaries: the details here interpolate block
+ * numbers, so a head of 31500123 would classify as `failover` and 31499123 as
+ * `fail` purely on its digits.
+ */
+export function contextGraphAuthorityAnchorUnavailableV1(
+  detail: string,
+): ContextGraphAuthorityIndexRetryableError {
+  return new ContextGraphAuthorityIndexRetryableError(
+    `finalized Context Graph authority block is unavailable: ${detail}`,
+  );
+}
+
+/**
+ * Shared page/hash work belongs to the authority-index lifecycle, not to the
+ * first caller whose AsyncLocalStorage context starts the single flight.
+ */
+function readOwnedAuthorityIndexRpcV1<T>(
+  lifecycleSignal: AbortSignal,
+  operation: string,
+  read: () => Promise<T>,
+): Promise<T> {
+  return withOwnedRpcRequestContext(
+    { signal: lifecycleSignal },
+    () => readEvmContextGraphAuthorityIndexRpcV1(operation, read),
+  );
+}
+
+function boundedAuthorityIndexPageSizeV1(pageSize: number): number {
+  return Number.isSafeInteger(pageSize)
+    && pageSize > CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1
+    ? CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1
+    : pageSize;
+}
 
 interface EvmContextGraphAuthorityIndexReadV1<T> {
   readonly value: T;
@@ -44,9 +121,42 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   deploymentBlockNumber: number;
   finalized: Readonly<{ number: number; hash: string }>;
   pageSize: number;
+  /** Operator depth; bounds how far the DURABLE cursor may ratchet. */
+  finalityConfirmations: number;
   stabilizationOperation: string;
   signal?: AbortSignal;
 }>;
+
+/**
+ * How far below the anchor the durable cursor is held back, for one depth.
+ *
+ * Matches `CG_REGISTRY_REORG_BUFFER_BLOCKS`, the depth the Context Graph
+ * registry scan already treats as reorg-safe. A configured
+ * `chain.finalityConfirmations` already buys `finalityConfirmations - 1` blocks
+ * of exactly this protection, so only the remainder is held back; past that
+ * depth the cursor tracks the anchor exactly, as it did before.
+ */
+export function contextGraphAuthorityIndexDurableHoldbackV1(
+  finalityConfirmations: number,
+  historySpanBlocks: number,
+): number {
+  // The holdback exists to stop a tip reorg from discarding a memo that is
+  // EXPENSIVE to rebuild. On a history shorter than this, a full rebuild is a
+  // handful of `eth_getLogs` calls, so holding anything back would cost the
+  // durable index its whole purpose on short chains (a fresh devnet, or a
+  // contract deployed minutes ago) to avoid a rescan that is already cheap.
+  const HOLDBACK_WORTHWHILE_HISTORY_BLOCKS = CG_REGISTRY_REORG_BUFFER_BLOCKS * 10;
+  if (
+    !Number.isSafeInteger(historySpanBlocks)
+    || historySpanBlocks < HOLDBACK_WORTHWHILE_HISTORY_BLOCKS
+  ) {
+    return 0;
+  }
+  const depth = Number.isSafeInteger(finalityConfirmations) && finalityConfirmations >= 1
+    ? finalityConfirmations
+    : 1;
+  return Math.max(0, CG_REGISTRY_REORG_BUFFER_BLOCKS - (depth - 1));
+}
 
 function authorityIndexScanInputV1(
   input: EvmContextGraphAuthorityIndexReadInputV1,
@@ -57,18 +167,26 @@ function authorityIndexScanInputV1(
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
     finalized: input.finalized,
-    pageSize: input.pageSize,
+    // Preserve invalid values for ContextGraphAuthorityIndex's fail-closed
+    // bounds validation; only a valid oversized configured page is clamped.
+    pageSize: boundedAuthorityIndexPageSizeV1(input.pageSize),
+    durableReorgHoldbackBlocks: contextGraphAuthorityIndexDurableHoldbackV1(
+      input.finalityConfirmations,
+      input.finalized.number - input.deploymentBlockNumber,
+    ),
     signal: input.signal,
     readBlockHash: async (blockNumber, lifecycleSignal) => (
-      (await withRpcRequestContext(
-        { signal: lifecycleSignal },
+      (await readOwnedAuthorityIndexRpcV1(
+        lifecycleSignal,
+        `${input.stabilizationOperation} block ${blockNumber}`,
         () => input.provider.getBlock(blockNumber),
       ))?.hash ?? null
     ),
     readPage: async (fromBlock, toBlock, lifecycleSignal) => {
       const logs = await readAdaptiveEvmLogRange({
-        read: (rangeFrom, rangeTo) => withRpcRequestContext(
-          { signal: lifecycleSignal },
+        read: (rangeFrom, rangeTo) => readOwnedAuthorityIndexRpcV1(
+          lifecycleSignal,
+          `${input.stabilizationOperation} logs ${rangeFrom}-${rangeTo}`,
           () => input.provider.getLogs({
             address: input.contractAddress,
             topics: [[...authorityTopics]],
@@ -80,7 +198,7 @@ function authorityIndexScanInputV1(
         toBlock,
         signal: lifecycleSignal,
       });
-      return logs.map((log) => normalizeContextGraphAuthorityIndexLog(
+      return logs.map((log) => decodeContextGraphAuthorityIndexLog(
         input.contract.interface,
         log,
       ));
@@ -98,14 +216,18 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
     value,
     stabilize: async () => {
       input.signal?.throwIfAborted();
-      const stable = input.signal === undefined
-        ? await input.provider.getBlock(input.finalized.number)
-        : await withRpcRequestContext(
-            { signal: input.signal },
-            () => input.provider.getBlock(input.finalized.number),
-          );
+      const stable = await readEvmContextGraphAuthorityIndexRpcV1(
+        `${input.stabilizationOperation} stabilization block`,
+        () => input.provider.getBlock(input.finalized.number),
+        input.signal,
+      );
       if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
-        throw new Error(
+        // Anchored at the operator's depth the anchor can be the head, so a
+        // routine single-block tip reorg reaches here during the 1-3s a page
+        // scan plus `readCurrentState` takes. That is a re-read, not a broken
+        // node: retryable, so the caller re-resolves against the new tip
+        // instead of failing the authority read that gates catalog admission.
+        throw new ContextGraphAuthorityIndexRetryableError(
           `finalized Context Graph authority anchor changed during ${input.stabilizationOperation}`,
         );
       }
@@ -141,6 +263,12 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
     contractLabel: string,
   ) => Promise<Readonly<{ fromBlock: number }>>;
   readonly pageSize: () => number;
+  /**
+   * `chain.finalityConfirmations` — the node's SINGLE definition of finality.
+   * Read per call so an adapter that re-resolves its configuration cannot leave
+   * this reader pinned to a stale depth.
+   */
+  readonly finalityConfirmations: () => number;
 }
 
 function snapshotAuthorityRevisionTargetsV1(
@@ -245,10 +373,27 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return dependencies.readTipProvider(
       operationLabel,
       (provider) => lifecycle.run(async () => {
-        const finalized = await provider.getBlock('finalized');
-        if (finalized === null || finalized.hash === null) {
-          throw new Error('finalized Context Graph authority block is unavailable');
-        }
+        // Anchor the whole projection at the operator-configured finality depth,
+        // NOT at the endpoint's `finalized` tag. The tag lags head by ~600
+        // blocks / ~20 minutes on Base Sepolia, which made a freshly registered
+        // Context Graph invisible to the authority index for that entire window
+        // — both peers fenced each other's catalog traffic and the replica lost
+        // rows while reporting itself complete. Head and anchor come from the
+        // same provider, so the pair can never be spliced across endpoints.
+        const finalized = await resolveEvmFinalityAnchorBlockV1({
+          finalityConfirmations: dependencies.finalityConfirmations(),
+          readHead: () => readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} chain head`,
+            () => provider.getBlock('latest'),
+            options.signal,
+          ),
+          readBlockAt: (anchorBlockNumber) => readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} anchor block ${anchorBlockNumber}`,
+            () => provider.getBlock(anchorBlockNumber),
+            options.signal,
+          ),
+          unavailable: contextGraphAuthorityAnchorUnavailableV1,
+        });
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
@@ -266,6 +411,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             deploymentBlockNumber,
             finalized: { number: finalized.number, hash: finalized.hash },
             pageSize: dependencies.pageSize(),
+            finalityConfirmations: dependencies.finalityConfirmations(),
             stabilizationOperation: operationLabel,
           },
           (scan) => project(scan, { provider, contractAddress }),
@@ -281,7 +427,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             || isRpcEndpointFailoverEligible(error)
           )
         ),
-        policy: 'wideLogScan',
+        policy: 'durablePagedLogScan',
       },
     );
   };
@@ -336,7 +482,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       operationLabel,
       options,
       async (scan, { provider, contractAddress }) => {
-        const chainId = (await provider.getNetwork()).chainId.toString(10);
+        const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
+          `${operationLabel} network`,
+          () => provider.getNetwork(),
+          options.signal,
+        )).chainId.toString(10);
         const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
         for (
           let offset = 0;
@@ -369,8 +519,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   return Object.freeze({
-    whenIdle(): Promise<void> {
-      return lifecycle.whenIdle();
+    async whenIdle(): Promise<void> {
+      await Promise.all([
+        lifecycle.whenIdle(),
+        dependencies.index.whenIdle(),
+      ]);
     },
     async resolveFinalizedContextGraphIdByNameHash(
       nameHash: string,
@@ -460,7 +613,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         'readContextGraphAuthorityIndexSnapshots',
         options,
         async (scan, { provider, contractAddress }) => {
-          const chainId = (await provider.getNetwork()).chainId.toString(10);
+          const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
+            'readContextGraphAuthorityIndexSnapshots network',
+            () => provider.getNetwork(),
+            options.signal,
+          )).chainId.toString(10);
           const snapshots = new Map<
             ContextGraphAuthorityIndexId,
             ContextGraphAuthoritySnapshot
