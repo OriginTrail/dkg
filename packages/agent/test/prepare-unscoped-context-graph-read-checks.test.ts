@@ -454,6 +454,39 @@ describe('prepared unscoped Context Graph read checks', () => {
     expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
   });
 
+  it('observes a concurrent metadata rejection when registration preparation fails first', async () => {
+    const deps = dependencies();
+    const registrationError = new Error('malformed registration response');
+    const metadataError = new Error('metadata preparation aborted');
+    let rejectMetadata!: (reason: Error) => void;
+    let metadataStarted!: () => void;
+    const started = new Promise<void>((resolve) => { metadataStarted = resolve; });
+    deps.prepareReadAuthorityFactsSnapshot.mockImplementation(() => {
+      metadataStarted();
+      return new Promise((_resolve, reject) => { rejectMetadata = reject; });
+    });
+    deps.prepareRegistrationReadPlan.mockResolvedValue({
+      contextGraphIds: ['a'],
+      prepare: async () => {
+        await started;
+        throw registrationError;
+      },
+    });
+    const unhandled: unknown[] = [];
+    const recordUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', recordUnhandled);
+    try {
+      await expect(prepareUnscopedContextGraphReadChecks(
+        deps, ['a'], new AbortController().signal,
+      )).rejects.toBe(registrationError);
+      rejectMetadata(metadataError);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', recordUnhandled);
+    }
+  });
+
   it('models an unavailable bulk provider as an explicit prepared result', async () => {
     const deps = dependencies();
     deps.resolveContextGraphIdsByNameHashes.mockRejectedValue(new Error('RPC unavailable'));

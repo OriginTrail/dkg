@@ -153,6 +153,11 @@ export async function prepareUnscopedContextGraphReadChecks(
       const metadataPromise = Promise.resolve().then(() => (
         deps.prepareReadAuthorityFactsSnapshot(plan.contextGraphIds, preparationSignal)
       ));
+      // Registration preparation may reject before this task is otherwise
+      // awaited. Observe metadata failures from creation so aborting that
+      // concurrent task cannot surface as an unhandled rejection; the
+      // original promise still rejects when the ready path awaits it below.
+      void metadataPromise.catch(() => undefined);
       const prepared = await plan.prepare(preparationSignal);
       registration = prepared.prepared;
       if (prepared.kind === 'ready') {
