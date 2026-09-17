@@ -1,16 +1,17 @@
 # Tenant-approved Program operations
 
-A tenant can grant IDENER permission to invoke a fixed read operation without granting IDENER general access to its Context Graph. The Program may be stored in a different Context Graph and authored by Trace Labs. The tenant's local custodial agent executes it against the tenant graph under the tenant's existing execution policy.
+A tenant can grant IDENER permission to invoke a fixed read operation without granting IDENER general access to its Context Graph. The Program may be stored in a different Context Graph and authored by Trace Labs. The tenant's local custodial agent executes it against the tenant graph under the tenant's approved local binding.
 
 This is a manually configured, query-only path. `programBindings` grants are independent of the optional `programPolicy` used for direct local Program composition; both may be configured, but a bound operation still admits only its fixed query and cannot invoke an LLM. The source Program must already be available and readable by the executor on the tenant node. It does not fetch Programs from another node or replicate the tenant data to the Program author's node.
 
 ## Setup and activation
 
-1. Trace Labs publishes a versioned `sr:Program` in the source graph. Its source calls one fixed saved-query selector through `dkg/query@1`; its tool declaration must match that import. No child Programs, LLM calls or remote execution are admitted through this path.
+1. Trace Labs supplies a versioned `sr:Program` in the source graph, in any supported memory layer (`wm`, `swm`, or `vm`) that the tenant executor can read. Its source calls one fixed saved-query selector through `dkg/query@1` and declares exactly one tool IRI; the host maps that declaration exclusively to its installed query adapter. No child Programs, LLM calls or remote execution are admitted through this path.
 2. The tenant installs/reviews the named query in its own query catalog and defines a closed, bounded result schema. The query's projection is the data disclosure being approved; a schema alone does not decide which rows are appropriate to disclose.
-3. The tenant configures its executor's `sr:ExecutionPolicy` and `sr:offersTool` for `dkg/query@1` in the tenant graph's Verifiable Memory, using the existing runtime policy mechanism.
-4. The tenant adds a `semanticRuntime.programBindings` entry: stable operation IRI, tenant graph, allowed caller identities, local executor, exact source graph/Program/layer/author/source hash, and query definition/schema pins. Only the tenant operator edits this local configuration. There is no installation or approval API in this version.
-5. Apply the configuration through the daemon's normal restart procedure. IDENER uses an agent-bound credential issued by the tenant node; the authenticated address must be in the binding's caller list. A node-default/implicit operator identity is not an invoke-only credential.
+3. The tenant adds a `semanticRuntime.programBindings` entry: stable operation IRI, tenant graph, allowed caller identities, local executor, exact source graph/Program/layer/author/source hash, and query definition/schema pins. Only the tenant operator edits this local configuration. There is no installation or approval API in this version.
+4. Apply the configuration through the daemon's normal restart procedure. IDENER uses an agent-bound credential issued by the tenant node; the authenticated address must be in the binding's caller list. A node-default/implicit operator identity is not an invoke-only credential.
+
+The loaded binding supplies the execution policy and authorizes only the host's `dkg/query@1` adapter. No `operatorPolicyIri`, VM policy, or VM tool offer is required for this bound operation. The host still checks the installed/enabled adapter, graph access, source/author pins, exact query definition, result schema and current grant. Direct invocation outside `programBindings` still requires its operator-authored VM policy and tool offers. This does not bypass the storage layer's access or graph-authority checks: a locally stored Program must still be readable through the selected memory view.
 
 This configuration template uses illustrative DMaaST identities and measurement vocabulary, not a claim about the deployed Kamstrup dataset. Replace addresses, IRIs and hash placeholders with reviewed values before enabling it. `sourceHash` is lowercase SHA-256 of the exact UTF-8 S-expression source. Generate `query` using `createSemanticQueryPin(selector, decodedCatalogItem, outputSchema)` from `packages/cli/src/semantic-runtime-query-pins.ts`; it hashes the complete saved-query definition, including SPARQL, parameters/defaults, scope and view.
 
@@ -18,7 +19,6 @@ This configuration template uses illustrative DMaaST identities and measurement 
 {
   "semanticRuntime": {
     "enabled": true,
-    "operatorPolicyIri": "urn:sr:policy:kamstrup",
     "programBindings": [{
       "operationIri": "urn:dmaast:operation:read-w10",
       "contextGraphId": "dmaast-kamstrup",
@@ -109,7 +109,7 @@ An illustrative successful response preserves the existing runtime response shap
 }
 ```
 
-Execution records remain in the executor's private Working Memory. They record the source Program, stable operation, source and data graph IDs, binding/source hashes, original caller and tenant executor. The execution IRI is a reference, not a grant to read that private graph. IDENER receives only the approved query outputs through the invocation response; raw `/api/query`, Program resolve/fork and inbox authorization remain unchanged.
+Execution records remain in the executor's private Working Memory. They record the source Program, stable operation, source and data graph IDs, binding/source hashes, original caller and tenant executor. `appliedPolicy` is the local identifier `urn:dkg:program-binding:<bindingHash>`; `policyHash` binds that approval to the executor and fixed tool descriptor, and broker decisions use `TENANT_PROGRAM_BINDING_ALLOW`. These identify local approval, not a VM publication or on-chain attestation. The execution IRI is a reference, not a grant to read that private graph. IDENER receives only the approved query outputs through the invocation response; raw `/api/query`, Program resolve/fork and inbox authorization remain unchanged.
 
 ## Updates, retries and revocation
 

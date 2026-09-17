@@ -38,7 +38,7 @@ import {
 
 export interface SemanticRuntimeConfig {
   enabled?: boolean;
-  /** Operator-owned policy selected locally; Programs cannot override it. */
+  /** VM policy for direct invocation. Tenant programBindings supply their own local authority. */
   operatorPolicyIri?: string;
   /** Optional operator-owned local Program pins and LLM disclosure rules. */
   programPolicy?: SemanticProgramPolicy;

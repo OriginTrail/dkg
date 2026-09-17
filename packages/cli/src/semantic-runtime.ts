@@ -634,69 +634,108 @@ async function resolveInternal(
   }
   if (bound && (compilation.plan.adapterVersions.size !== 1
     || compilation.plan.adapterVersions.get('dkg/query') !== 1
-    || compilation.plan.effectUpperBound.some((effect) => effect !== 'read'))) {
+    || compilation.plan.effectUpperBound.some((effect) => effect !== 'read')
+    || program.requiredTools.length !== 1)) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Invoke-only Programs may only use dkg/query@1', 403);
   }
   const operatorAddress = executingAgentAddress
     ? checksumAgentAddress(executingAgentAddress, 'INVALID_EXECUTING_WALLET')
     : program.authorAgentAddress;
   const operatorIri = `did:dkg:agent:${operatorAddress}`;
-  const policyIri = config?.operatorPolicyIri;
-  if (!policyIri) {
-    throw new SemanticProgramError('OPERATOR_POLICY_NOT_CONFIGURED', 'No operator execution policy is configured', 409);
-  }
-  let safePolicyIri: string;
-  let safeOperatorIri: string;
-  try {
-    safePolicyIri = sparqlIri(policyIri);
-    safeOperatorIri = sparqlIri(operatorIri);
-  } catch {
-    throw new SemanticProgramError('INVALID_OPERATOR_POLICY', 'Configured operator policy IRI is invalid', 409);
-  }
-
-  const policyResult = await agent.query(`
-    SELECT DISTINCT ?g ?policyVersion ?tool WHERE {
-      GRAPH ?g {
-        ${safeOperatorIri} <${SR}usesExecutionPolicy> ${safePolicyIri} .
-        ${safePolicyIri} <${RDF_TYPE}> <${SR}ExecutionPolicy> ;
-          <${SR}version> ?policyVersion ;
-          <${SR}allowsTool> ?tool .
-      }
+  type ToolDefinition = { operation: string; version: string; wit: string };
+  const toolDefinitions = new Map<string, Map<string, ToolDefinition>>();
+  let policyIri: string;
+  let policyVersion: string;
+  let policyHashHex: string;
+  let allowedTools: Set<string>;
+  if (bound) {
+    // The trusted local binding is the operator's approval. Its sole tool IRI
+    // names this fixed host adapter; RDF cannot select a different operation.
+    // Include the descriptor in the policy hash so metadata changes cannot
+    // reuse a capability or a completed invocation under another tool identity.
+    const toolIri = program.requiredTools[0];
+    const definition = {
+      operation: 'dkg/query', version: '1',
+      wit: 'origintrail:semantic-runtime/query-catalog@0.1.0',
+    };
+    toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
+    allowedTools = new Set([toolIri]);
+    policyIri = `urn:dkg:program-binding:${bound.digest}`;
+    policyVersion = '1';
+    policyHashHex = hashParts([
+      policyIri, operatorIri, policyVersion, toolIri,
+      definition.operation, definition.version, definition.wit,
+    ]);
+  } else {
+    policyIri = config?.operatorPolicyIri ?? '';
+    if (!policyIri) {
+      throw new SemanticProgramError('OPERATOR_POLICY_NOT_CONFIGURED', 'No operator execution policy is configured', 409);
     }
-  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-policy-load', readPrincipal));
-  const policyRows = resultRows(policyResult).filter((row) =>
-    isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
-  const policyGraphs = new Set(policyRows.map((row) => iriValue(row.g)));
-  const policyVersions = new Set(policyRows.map((row) => literalValue(row.policyVersion)));
-  if (policyRows.length === 0 || policyGraphs.size !== 1 || policyVersions.size !== 1) {
-    throw new SemanticProgramError(
-      'OPERATOR_POLICY_UNTRUSTED',
-      'Operator policy is missing, ambiguous, or not authored by this node operator',
-      409,
-    );
-  }
-  const [policyVersion] = policyVersions;
-  const allowedTools = new Set(policyRows.map((row) => iriValue(row.tool)));
-  const policyHashHex = hashParts([
-    policyIri,
-    operatorIri,
-    policyVersion,
-    ...[...allowedTools].sort(),
-  ]);
-
-  const offerResult = await agent.query(`
-    SELECT DISTINCT ?g ?tool ?operation ?toolVersion ?witInterface WHERE {
-      GRAPH ?g {
-        ${safeOperatorIri} <${SR}offersTool> ?tool .
-        ?tool <${RDF_TYPE}> <${SR}Tool> ;
-          <${SR}operation> ?operation ;
-          <${SR}version> ?toolVersion ;
-          <${SR}witInterface> ?witInterface .
-      }
+    let safePolicyIri: string;
+    let safeOperatorIri: string;
+    try {
+      safePolicyIri = sparqlIri(policyIri);
+      safeOperatorIri = sparqlIri(operatorIri);
+    } catch {
+      throw new SemanticProgramError('INVALID_OPERATOR_POLICY', 'Configured operator policy IRI is invalid', 409);
     }
-  `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-tool-offers', readPrincipal));
-  const offerRows = resultRows(offerResult).filter((row) =>
-    isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
+
+    const policyResult = await agent.query(`
+      SELECT DISTINCT ?g ?policyVersion ?tool WHERE {
+        GRAPH ?g {
+          ${safeOperatorIri} <${SR}usesExecutionPolicy> ${safePolicyIri} .
+          ${safePolicyIri} <${RDF_TYPE}> <${SR}ExecutionPolicy> ;
+            <${SR}version> ?policyVersion ;
+            <${SR}allowsTool> ?tool .
+        }
+      }
+    `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-policy-load', readPrincipal));
+    const policyRows = resultRows(policyResult).filter((row) =>
+      isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
+    const policyGraphs = new Set(policyRows.map((row) => iriValue(row.g)));
+    const policyVersions = new Set(policyRows.map((row) => literalValue(row.policyVersion)));
+    if (policyRows.length === 0 || policyGraphs.size !== 1 || policyVersions.size !== 1) {
+      throw new SemanticProgramError(
+        'OPERATOR_POLICY_UNTRUSTED',
+        'Operator policy is missing, ambiguous, or not authored by this node operator',
+        409,
+      );
+    }
+    [policyVersion] = policyVersions;
+    allowedTools = new Set(policyRows.map((row) => iriValue(row.tool)));
+    policyHashHex = hashParts([
+      policyIri,
+      operatorIri,
+      policyVersion,
+      ...[...allowedTools].sort(),
+    ]);
+
+    const offerResult = await agent.query(`
+      SELECT DISTINCT ?g ?tool ?operation ?toolVersion ?witInterface WHERE {
+        GRAPH ?g {
+          ${safeOperatorIri} <${SR}offersTool> ?tool .
+          ?tool <${RDF_TYPE}> <${SR}Tool> ;
+            <${SR}operation> ?operation ;
+            <${SR}version> ?toolVersion ;
+            <${SR}witInterface> ?witInterface .
+        }
+      }
+    `, queryOptions(contextGraphId, 'vm', 'semantic-runtime-tool-offers', readPrincipal));
+    const offerRows = resultRows(offerResult).filter((row) =>
+      isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
+
+    for (const row of offerRows) {
+      const toolIri = iriValue(row.tool);
+      const definitions = toolDefinitions.get(toolIri) ?? new Map<string, ToolDefinition>();
+      const definition = {
+        operation: literalValue(row.operation),
+        version: literalValue(row.toolVersion),
+        wit: literalValue(row.witInterface),
+      };
+      definitions.set(JSON.stringify(definition), definition);
+      toolDefinitions.set(toolIri, definitions);
+    }
+  }
 
   const childPrograms = await Promise.all(program.permittedPrograms.map(async (childIri) => {
     if (childIri === programIri) {
@@ -754,19 +793,10 @@ async function resolveInternal(
     ));
   }
   const tools = program.requiredTools.map((toolIri): SemanticToolResolution => {
-    const rows = offerRows.filter((row) => iriValue(row.tool) === toolIri);
-    const definitions = new Map<string, { operation: string; version: string; wit: string }>();
-    for (const row of rows) {
-      const definition = {
-        operation: literalValue(row.operation),
-        version: literalValue(row.toolVersion),
-        wit: literalValue(row.witInterface),
-      };
-      definitions.set(JSON.stringify(definition), definition);
-    }
+    const definitions = toolDefinitions.get(toolIri) ?? new Map<string, ToolDefinition>();
     const definition = definitions.size === 1 ? [...definitions.values()][0] : null;
     const adapter = definition ? registry.describe(definition.operation, definition.version) : null;
-    const offered = rows.length > 0;
+    const offered = definitions.size > 0;
     const policyAllowed = allowedTools.has(toolIri);
     const locallyInstalled = adapter !== null && adapter.witInterface === definition?.wit;
     const locallyEnabled = locallyInstalled && adapter.enabled;
@@ -1051,7 +1081,7 @@ async function invokeResolved(
           policyId: resolved.public.selectedPolicy.iri,
           policyEpoch: 1n,
           factsDigest: policyFactsDigest,
-          reasonCode: 'OPERATOR_POLICY_ALLOW',
+          reasonCode: bound ? 'TENANT_PROGRAM_BINDING_ALLOW' : 'OPERATOR_POLICY_ALLOW',
         };
       },
     },

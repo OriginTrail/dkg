@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { decodeQueryCatalogBindings } from '@origintrail-official/dkg-core/query-catalog';
-import { SemanticRuntimeStore, type SemanticProgramBinding, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
+import { RuntimeAdapterRegistry, SemanticRuntimeStore, type SemanticProgramBinding, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { invokeBoundSemanticProgram, startConfiguredSemanticRuntime, validateSemanticRuntimeConfig } from '../src/semantic-runtime.js';
+import { invokeBoundSemanticProgram, resolveStoredSemanticProgram, startConfiguredSemanticRuntime, validateSemanticRuntimeConfig } from '../src/semantic-runtime.js';
+import { programBindingDigest } from '../src/semantic-runtime-program-bindings.js';
 import { createSemanticQueryPin } from '../src/semantic-runtime-query-pins.js';
 
 const caller = '0x2222222222222222222222222222222222222222';
@@ -26,9 +27,13 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const invocationId = '123e4567-e89b-42d3-a456-426614174099';
 const runtimes: NonNullable<Awaited<ReturnType<typeof startConfiguredSemanticRuntime>>>[] = [];
 
-afterEach(async () => { for (const runtime of runtimes.splice(0)) await runtime.stop(); });
+afterEach(async () => {
+  for (const runtime of runtimes.splice(0)) await runtime.stop();
+  vi.restoreAllMocks();
+});
 
-function fixture() {
+function fixture(layer: 'wm' | 'swm' | 'vm' = 'swm') {
+  const programAuthor = layer === 'wm' ? executor : author;
   const catalogRows = [{
     q: 'urn:dkg:profile:dmaast-kamstrup:query:read-w10', name: 'Read W10',
     scopeGraph: `did:dkg:context-graph:${dataGraph}/equipment`,
@@ -39,7 +44,7 @@ function fixture() {
   const binding: SemanticProgramBinding = {
     operationIri: operation, contextGraphId: dataGraph, enabled: true,
     allowedCallerAgentAddresses: [caller, otherCaller], executorAgentAddress: executor,
-    program: { contextGraphId: sourceGraph, programIri, programLayer: 'vm', authorAgentAddress: author, sourceHash: hash(source) },
+    program: { contextGraphId: sourceGraph, programIri, programLayer: layer, authorAgentAddress: programAuthor, sourceHash: hash(source) },
     query: createSemanticQueryPin('read-w10', decodeQueryCatalogBindings(catalogRows, { contextGraphId: dataGraph })[0], {
       type: 'object', additionalProperties: false, required: ['bindings'], properties: {
         bindings: { type: 'array', maxItems: 1, items: {
@@ -53,13 +58,14 @@ function fixture() {
   };
   const config: SemanticRuntimeConfig = {
     enabled: true, watchdogMs: 1_000, startupTimeoutMs: 30_000,
-    operatorPolicyIri: 'urn:sr:policy:tenant', programBindings: [binding],
+    programBindings: [binding],
   };
-  const sourceVm = `did:dkg:context-graph:${sourceGraph}/_verifiable_memory/${author}/7`;
+  const sourceDirectory = { wm: '_working_memory', swm: '_shared_memory', vm: '_verifiable_memory' }[layer];
+  const sourceMemory = `did:dkg:context-graph:${sourceGraph}/${sourceDirectory}/${programAuthor}/7`;
   const dataVm = `did:dkg:context-graph:${dataGraph}/_verifiable_memory/${executor}/7`;
   const written: Array<{ subject: string; predicate: string; object: string }> = [];
   const histories = new Set<string>();
-  const state = { source, author, child: undefined as string | undefined };
+  const state = { source, author: programAuthor, tools: [tool] as Array<string | undefined>, visible: true, child: undefined as string | undefined };
   const readData = vi.fn(async (): Promise<{ bindings: Array<Record<string, string>> }> => ({
     bindings: [{ device: 'urn:kamstrup:device:W10', temperature: '21.5' }],
   }));
@@ -82,15 +88,12 @@ function fixture() {
         .map((quad) => ({ g: dataVm.replace('_verifiable_memory', '_working_memory'),
           ...(quad.predicate === SR + 'output' ? { output: quad.object } : { orderedOutputs: quad.object }),
         })) };
-      if (sparql.includes('?language')) return { bindings: [{
-        g: sourceVm.replace(author, state.author), language: '"sexpr-v1"', version: '"1.0.0"',
-        source: JSON.stringify(state.source), tool: `<${tool}>`, ...(state.child ? { permittedProgram: `<${state.child}>` } : {}),
-      }] };
-      if (sparql.includes('usesExecutionPolicy')) return { bindings: [{ g: dataVm, policyVersion: '"1"', tool: `<${tool}>` }] };
-      if (sparql.includes('offersTool')) return { bindings: [{
-        g: dataVm, tool: `<${tool}>`, operation: '"dkg/query"', toolVersion: '"1"',
-        witInterface: '"origintrail:semantic-runtime/query-catalog@0.1.0"',
-      }] };
+      if (sparql.includes('?language')) return { bindings: state.visible ? state.tools.map((declaredTool) => ({
+        g: sourceMemory.replace(programAuthor, state.author), language: '"sexpr-v1"', version: '"1.0.0"',
+        source: JSON.stringify(state.source), ...(declaredTool ? { tool: `<${declaredTool}>` } : {}),
+        ...(state.child ? { permittedProgram: `<${state.child}>` } : {}),
+      })) : [] };
+      // No VM execution policy or tool offers exist in this fixture.
       return { bindings: [] };
     }),
     assertion: {
@@ -126,13 +129,73 @@ describe('tenant Program bindings', () => {
       expect.objectContaining({ predicate: SR + 'invokedBy', object: `did:dkg:agent:${caller}` }),
       expect.objectContaining({ predicate: SR + 'executedBy', object: `did:dkg:agent:${executor}` }),
       expect.objectContaining({ predicate: SR + 'operation', object: operation }),
+      expect.objectContaining({ predicate: SR + 'appliedPolicy', object: `urn:dkg:program-binding:${programBindingDigest(f.binding)}` }),
+      expect.objectContaining({ predicate: SR + 'policyHash', object: expect.stringMatching(/^"sha256:[0-9a-f]{64}"$/) }),
     ]));
     await expect(f.agent.query(f.catalogRows[0].sparql, { contextGraphId: dataGraph, callerAgentAddress: caller })).resolves.toMatchObject({ bindings: [] });
     await expect(f.invoke(runtime)).resolves.toEqual(result);
     expect(f.readData).toHaveBeenCalledOnce();
+    expect(f.agent.query.mock.calls.some(([, opts]) =>
+      ['semantic-runtime-policy-load', 'semantic-runtime-tool-offers'].includes(String(opts.source)))).toBe(false);
     await expect(f.invoke(runtime, otherCaller)).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
     f.binding.enabled = false;
     await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'PROGRAM_INVOCATION_FORBIDDEN' });
+    expect(f.readData).toHaveBeenCalledOnce();
+  });
+
+  it.each(['wm', 'swm', 'vm'] as const)('executes readable %s source even when the configured direct VM policy is unpublished', async (layer) => {
+    const f = fixture(layer);
+    // A stale or unrelated direct-execution policy must not become a dependency.
+    f.config.operatorPolicyIri = 'urn:policy:unpublished-direct-policy';
+    const runtime = await f.start();
+    await expect(f.invoke(runtime)).resolves.toMatchObject({ persisted: true });
+    expect(f.agent.query.mock.calls.some(([, opts]) =>
+      ['semantic-runtime-policy-load', 'semantic-runtime-tool-offers'].includes(String(opts.source)))).toBe(false);
+    expect(f.readData).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])('still requires trusted VM policy for direct resolution (configured: %s)', async (configured) => {
+    const f = fixture();
+    if (configured) f.config.operatorPolicyIri = 'urn:policy:unpublished';
+    await expect(resolveStoredSemanticProgram(f.agent as any, sourceGraph, programIri, 'swm', f.config, undefined, executor))
+      .rejects.toMatchObject({ code: configured ? 'OPERATOR_POLICY_UNTRUSTED' : 'OPERATOR_POLICY_NOT_CONFIGURED' });
+    expect(f.readData).not.toHaveBeenCalled();
+  });
+
+  it.each([[undefined], [tool, 'urn:tool:unapproved']])('rejects missing or multiple tool declarations: %j', async (...tools) => {
+    const f = fixture();
+    f.state.tools = tools;
+    const runtime = await f.start();
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'PROGRAM_BINDING_TOOL_FORBIDDEN' });
+    expect(f.readData).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'disabled'])('retains the %s local adapter check', async (change) => {
+    const f = fixture();
+    const runtime = await f.start();
+    const describeAdapter = RuntimeAdapterRegistry.prototype.describe;
+    vi.spyOn(RuntimeAdapterRegistry.prototype, 'describe').mockImplementation(function (operation, version) {
+      const adapter = describeAdapter.call(this, operation, version);
+      return change === 'missing' || !adapter ? null : { ...adapter, enabled: false };
+    });
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'REQUIRED_TOOL_UNAVAILABLE' });
+    expect(f.readData).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass a source graph read denial', async () => {
+    const f = fixture();
+    f.state.visible = false;
+    const runtime = await f.start();
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'PROGRAM_NOT_FOUND' });
+    expect(f.readData).not.toHaveBeenCalled();
+  });
+
+  it('rejects replay after a tool declaration changes even when the source and binding are unchanged', async () => {
+    const f = fixture();
+    const runtime = await f.start();
+    await f.invoke(runtime);
+    f.state.tools = ['urn:tool:renamed-query'];
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
     expect(f.readData).toHaveBeenCalledOnce();
   });
 
@@ -165,7 +228,7 @@ describe('tenant Program bindings', () => {
     if (change === 'source') f.state.source += '\n; changed';
     if (change === 'author') f.state.author = caller;
     if (change === 'child') f.state.child = 'urn:program:unapproved-child';
-    if (change === 'tool') f.state.source = source.replace('(grant dkg.query) (call dkg/query@1 "read-w10")', '(grant llm.safe) (call llm/safe@1 "exfiltrate")');
+    if (change === 'tool') f.state.source = source.replace('(grant dkg.query) (call dkg/query@1 "read-w10")', '(grant llm.invoke.safe) (call llm/safe@1 "exfiltrate")');
     if (change === 'selector') f.state.source = source.replace('"read-w10"', '"unapproved-query"');
     if (['tool', 'selector'].includes(change)) f.binding.program.sourceHash = hash(f.state.source);
     if (change === 'query definition') f.catalogRows[0].sparql = 'SELECT ?secret WHERE { ?s <urn:salary> ?secret }';
