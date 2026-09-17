@@ -751,10 +751,10 @@ function verifyReadyEvent(
   exact(ready.startupRepair, null, `${path}.startupRepair`);
   try {
     assertRuntimeProcessIdentityV1(ready.processIdentity, `${path}.processIdentity`);
-    exactJson(ready.processIdentity, expectedProcessIdentity, `${path}.processIdentity`);
   } catch (cause) {
     fail(path, cause instanceof Error ? cause.message : String(cause));
   }
+  exactJson(ready.processIdentity, expectedProcessIdentity, `${path}.processIdentity`);
   return boundedString(ready.peerId, `${path}.peerId`);
 }
 
