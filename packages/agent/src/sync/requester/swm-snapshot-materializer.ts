@@ -311,6 +311,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   // unchanged descriptor. The short TTL limits the stale-read window when a
   // second process can mutate the same backing store.
   const graphWriteRevision = asGraphWriteRevisionSource(deps.store);
+  // A durable witness can seed the in-process memo only when the revision
+  // source observes every writer. With process-local coverage, another
+  // process can replace equal-count content without changing our generation;
+  // every memo miss (including TTL expiry and LRU eviction) must therefore
+  // re-bind the content digest with CONSTRUCT before the memo is refreshed.
+  const witnessCanSeedMemo = graphWriteRevision?.writeRevisionCoverage !== 'process-local';
   const materializationMemo = new Map<string, MaterializationMemoEntry>();
   const readWriteRevision = (assertionGraph: string) => {
     try {
@@ -728,6 +734,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       // which is not worth trading self-healing for. Do not reorder these.
       if (
         witnessUsable
+        && witnessCanSeedMemo
         && await readSwmMaterializationWitness(
           deps.store,
           descriptor.assertionGraph,

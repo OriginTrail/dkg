@@ -12,7 +12,7 @@
  *   3. an equal-count v1 → v2 replace is NOT certified by the v1 witness (the one
  *      case the count cannot catch).
  */
-import { describe, expect, it, afterEach } from 'vitest';
+import { describe, expect, it, afterEach, vi } from 'vitest';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   readSwmMaterializationWitness,
@@ -27,6 +27,7 @@ const GRAPH = 'did:dkg:context-graph:witness-cg/ka/1';
 
 const stores: OxigraphStore[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {})));
 });
 
@@ -72,6 +73,20 @@ function countingStore(inner: TripleStore) {
     },
   }) as TripleStore;
   return { store: proxy, constructs: () => constructs, countQueries: () => countQueries };
+}
+
+function processLocalCountingStore(inner: TripleStore) {
+  const counted = countingStore(inner);
+  const store = new Proxy(counted.store, {
+    get(target, prop, receiver) {
+      if (prop === 'writeRevisionCoverage') return 'process-local';
+      if (prop === 'getWriteRevision') {
+        return () => ({ generation: 0, stable: true });
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as TripleStore;
+  return { ...counted, store };
 }
 
 describe('#2079 witness module', () => {
@@ -157,6 +172,34 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
     expect(await readSwmMaterializationWitness(store, GRAPH, d.publicQuadsDigest)).toBe(true);
 
     expect(await mat.isGraphAssetMaterialized(d)).toBe(false);
+  });
+
+  it('rehashes equal-count out-of-band replacements after the process-local memo expires', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const inner = newStore();
+    const v1 = payload('v1', 6);
+    const v2 = payload('v2', 6);
+    await inner.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+    const { store, constructs } = processLocalCountingStore(inner);
+    const mat = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const d1 = descriptorFor(v1);
+
+    expect(await mat.isGraphAssetMaterialized(d1)).toBe(true);
+    expect(constructs()).toBe(1);
+    expect(await readSwmMaterializationWitness(inner, GRAPH, d1.publicQuadsDigest)).toBe(true);
+
+    // Simulate a second process replacing the backing graph. The process-local
+    // revision above deliberately remains stable, the count is unchanged, and
+    // the durable v1 witness remains present.
+    await inner.replaceGraph(GRAPH, v2.map((q) => ({ ...q, graph: GRAPH })));
+    now.mockReturnValue(1_031_000);
+
+    expect(await mat.isGraphAssetMaterialized(d1)).toBe(false);
+    expect(constructs()).toBe(2);
   });
 
   it('writes NO witness when the digest does NOT match, and stays false on re-check', async () => {
