@@ -105,6 +105,16 @@ export const MIN_RPC_RECEIPT_TIMEOUT_MS = 1_000;
 export const DEFAULT_FINALITY_CONFIRMATIONS = 1;
 
 /**
+ * Blocks below the chain tip that this node treats as reorg-safe.
+ *
+ * Lives here, in the leaf constants module, because BOTH the Context Graph
+ * registry scan and the authority index's durable cursor need it, and the
+ * authority-index reader cannot import it from `evm-adapter-base` — that module
+ * imports the reader.
+ */
+export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
+/**
  * Normalize the operator-selected finality depth — the node's SINGLE definition
  * of chain finality, not a write-side knob.
  *

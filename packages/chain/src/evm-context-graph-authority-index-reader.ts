@@ -19,6 +19,7 @@ import {
   assertContextGraphAuthorityIndexId,
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import {
   contextGraphAuthorityEventTopics,
@@ -120,9 +121,42 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   deploymentBlockNumber: number;
   finalized: Readonly<{ number: number; hash: string }>;
   pageSize: number;
+  /** Operator depth; bounds how far the DURABLE cursor may ratchet. */
+  finalityConfirmations: number;
   stabilizationOperation: string;
   signal?: AbortSignal;
 }>;
+
+/**
+ * How far below the anchor the durable cursor is held back, for one depth.
+ *
+ * Matches `CG_REGISTRY_REORG_BUFFER_BLOCKS`, the depth the Context Graph
+ * registry scan already treats as reorg-safe. A configured
+ * `chain.finalityConfirmations` already buys `finalityConfirmations - 1` blocks
+ * of exactly this protection, so only the remainder is held back; past that
+ * depth the cursor tracks the anchor exactly, as it did before.
+ */
+export function contextGraphAuthorityIndexDurableHoldbackV1(
+  finalityConfirmations: number,
+  historySpanBlocks: number,
+): number {
+  // The holdback exists to stop a tip reorg from discarding a memo that is
+  // EXPENSIVE to rebuild. On a history shorter than this, a full rebuild is a
+  // handful of `eth_getLogs` calls, so holding anything back would cost the
+  // durable index its whole purpose on short chains (a fresh devnet, or a
+  // contract deployed minutes ago) to avoid a rescan that is already cheap.
+  const HOLDBACK_WORTHWHILE_HISTORY_BLOCKS = CG_REGISTRY_REORG_BUFFER_BLOCKS * 10;
+  if (
+    !Number.isSafeInteger(historySpanBlocks)
+    || historySpanBlocks < HOLDBACK_WORTHWHILE_HISTORY_BLOCKS
+  ) {
+    return 0;
+  }
+  const depth = Number.isSafeInteger(finalityConfirmations) && finalityConfirmations >= 1
+    ? finalityConfirmations
+    : 1;
+  return Math.max(0, CG_REGISTRY_REORG_BUFFER_BLOCKS - (depth - 1));
+}
 
 function authorityIndexScanInputV1(
   input: EvmContextGraphAuthorityIndexReadInputV1,
@@ -136,6 +170,10 @@ function authorityIndexScanInputV1(
     // Preserve invalid values for ContextGraphAuthorityIndex's fail-closed
     // bounds validation; only a valid oversized configured page is clamped.
     pageSize: boundedAuthorityIndexPageSizeV1(input.pageSize),
+    durableReorgHoldbackBlocks: contextGraphAuthorityIndexDurableHoldbackV1(
+      input.finalityConfirmations,
+      input.finalized.number - input.deploymentBlockNumber,
+    ),
     signal: input.signal,
     readBlockHash: async (blockNumber, lifecycleSignal) => (
       (await readOwnedAuthorityIndexRpcV1(
@@ -373,6 +411,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             deploymentBlockNumber,
             finalized: { number: finalized.number, hash: finalized.hash },
             pageSize: dependencies.pageSize(),
+            finalityConfirmations: dependencies.finalityConfirmations(),
             stabilizationOperation: operationLabel,
           },
           (scan) => project(scan, { provider, contractAddress }),

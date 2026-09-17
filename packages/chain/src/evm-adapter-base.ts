@@ -285,7 +285,8 @@ const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 /** Default pre-10.0.4 fallback eth_getLogs window — the smallest common cap. */
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
 
-export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+export { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 
 // Keep generic Hub binding invalidation responsive for read paths while still
 // replacing four hidden ethers subscription pollers with one owned log poller.

@@ -1250,6 +1250,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             deploymentBlockNumber,
             finalized: { number: finalized.number, hash: finalizedHash },
             pageSize: this.cgRegistryScanPageSize,
+            finalityConfirmations: this.finalityConfirmations,
             stabilizationOperation: 'resolution',
             contextGraphId: authorityIndexId,
             signal: options.signal,

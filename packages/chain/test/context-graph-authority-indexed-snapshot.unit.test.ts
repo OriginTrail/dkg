@@ -343,12 +343,17 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
 
     expect(evidence.indexRanges).toEqual([
       [7, 10_006],
-      [10_007, 20_006],
-      [20_007, 20_020],
+      // Clamped to the durable horizon (head 20_020 less the reorg holdback)
+      // so the persisted cursor never lands on a reorgable block.
+      [10_007, 19_970],
+      // The remainder is projected to the anchor but NOT written down.
+      [19_971, 20_020],
     ]);
     expect(evidence.rejectedIndexRanges).toEqual([]);
     expect(evidence.headReads).toEqual([20_020]);
-    expect(evidence.blockReads).toEqual([10_006, 20_006, 20_020]);
+    // The tail's own boundary is the anchor, whose hash is already in hand, so
+    // it costs no extra block read — only the horizon and the fence do.
+    expect(evidence.blockReads).toEqual([10_006, 19_970, 20_020]);
   });
 
   it('does not turn an invalid authority page size into a valid bounded page', async () => {
@@ -377,14 +382,17 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       ]]));
 
     expect(evidence.indexRanges).toEqual([
-      [7, 10_006],
-      [7, 5_006],
-      [5_007, 10_006],
-      [10_007, 10_020],
+      // The committing page stops at the durable horizon (10_020 less the
+      // holdback), and the provider's stricter cap splits THAT range.
+      [7, 9_970],
+      [7, 4_988],
+      [4_989, 9_970],
+      // Tail above the horizon: projected, never persisted.
+      [9_971, 10_020],
     ]);
-    expect(evidence.rejectedIndexRanges).toEqual([[7, 10_006]]);
+    expect(evidence.rejectedIndexRanges).toEqual([[7, 9_970]]);
     expect(evidence.headReads).toEqual([10_020]);
-    expect(evidence.blockReads).toEqual([10_006, 10_020]);
+    expect(evidence.blockReads).toEqual([9_970, 10_020]);
   });
 
   it('gives each sequential adaptive split its own physical RPC deadline', async () => {
@@ -426,14 +434,20 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
         turn < 100 && harness.evidence.indexRanges.length < 1;
         turn += 1
       ) await Promise.resolve();
-      expect(harness.evidence.indexRanges).toEqual([[7, 10_006]]);
+      expect(harness.evidence.indexRanges).toEqual([[7, 9_956]]);
 
-      await vi.advanceTimersByTimeAsync(60_001);
+      // One advance per physical leg. The durable horizon adds a fourth: the
+      // tail above it is projected on every read and never resumed from a
+      // cursor, so it is a real extra `eth_getLogs` per authority scan.
+      await vi.advanceTimersByTimeAsync(100_001);
       await expect(pending).resolves.toMatchObject({ contextGraphId: '9' });
       expect(harness.evidence.indexRanges).toEqual([
-        [7, 10_006],
-        [7, 5_006],
-        [5_007, 10_006],
+        // The committing page stops at the durable horizon and the provider's
+        // stricter cap splits it; the fourth leg is the tail above the horizon.
+        [7, 9_956],
+        [7, 4_981],
+        [4_982, 9_956],
+        [9_957, 10_006],
       ]);
       expect(backupReads).toEqual([]);
     } finally {
@@ -445,7 +459,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     const { adapter, evidence } = makeIndexedAuthorityAdapter({
       finalizedNumber: 20_020,
       authorityIndexPageSize: 25_000,
-      transientFailIndexRangeOnce: [10_007, 20_006],
+      transientFailIndexRangeOnce: [10_007, 19_970],
     });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
@@ -459,11 +473,15 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
 
     expect(evidence.indexRanges).toEqual([
       [7, 10_006],
-      [10_007, 20_006],
-      [10_007, 20_006],
-      [20_007, 20_020],
+      [10_007, 19_970],
+      [10_007, 19_970],
+      // 19_970 is the durable horizon (head 20_020 less the reorg holdback), so
+      // the last range is the TAIL: projected to the anchor, never written down,
+      // and therefore re-read on the retry rather than resumed from a cursor
+      // sitting on a block a reorg could take away.
+      [19_971, 20_020],
     ]);
-    expect(evidence.transientFailedIndexRanges).toEqual([[10_007, 20_006]]);
+    expect(evidence.transientFailedIndexRanges).toEqual([[10_007, 19_970]]);
   });
 
   it('resumes a new authority-index instance at the first unfinished durable page', async () => {
