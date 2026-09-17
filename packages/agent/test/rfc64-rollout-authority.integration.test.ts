@@ -84,6 +84,15 @@ import {
 
 const MEMBER = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const NONMEMBER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const AUTHOR_CHAIN_CONFIG = Object.freeze({
+  rpcUrl: 'http://127.0.0.1:1',
+  hubAddress: '0x3333333333333333333333333333333333333333',
+  operationalKeys: Object.freeze([AUTHOR_WALLET.privateKey]),
+});
+
+function custodialAuthorConfig(chainAdapter: ChainAdapter = new NoChainAdapter()) {
+  return { chainAdapter, chainConfig: AUTHOR_CHAIN_CONFIG };
+}
 
 const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
   Object.freeze({
@@ -916,11 +925,14 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 0, failed: 2 });
+    // Unreachable providers say nothing about this node's applied rows: they
+    // stay visible as retried provider failures, never as CG incompleteness.
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
-        phase: 'blocked',
-        stableReason: 'catalog-replay-incomplete',
+        phase: 'bootstrapping',
+        stableReason: null,
+        providerHealth: expect.objectContaining({ unresolvedReplayPeers: 2 }),
       }),
     );
   });
@@ -948,8 +960,9 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
-        phase: 'blocked',
-        stableReason: 'catalog-replay-incomplete',
+        phase: 'bootstrapping',
+        stableReason: null,
+        providerHealth: expect.objectContaining({ unresolvedReplayPeers: 1 }),
       }),
     );
 
@@ -971,6 +984,7 @@ describe('RFC-64 rollout authority integration', () => {
     ))).toEqual(new Set([failedPeer, newPeer]));
     const [recoveredStatus] = await edge.readRfc64CatalogOperationalStatusV1();
     expect(recoveredStatus?.stableReason).not.toBe('catalog-replay-incomplete');
+    expect(recoveredStatus?.providerHealth.unresolvedReplayPeers).toBe(0);
   });
 
   it('bounds unresolved provider attribution and retains an aggregate churn witness', async () => {
@@ -1001,7 +1015,7 @@ describe('RFC-64 rollout authority integration', () => {
     queueGeneration(1);
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ requested: 0, failed: 65 });
+    )).resolves.toEqual({ requested: 0, failed: 64 });
 
     requestReplay.mockClear();
     requestReplay.mockResolvedValue(Object.freeze({
@@ -1014,7 +1028,7 @@ describe('RFC-64 rollout authority integration', () => {
     )).not.toBeNull();
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ requested: 64, failed: 1 });
+    )).resolves.toEqual({ requested: 64, failed: 0 });
     expect(requestReplay).toHaveBeenCalledTimes(64);
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
@@ -1553,6 +1567,7 @@ describe('RFC-64 rollout authority integration', () => {
     const edge = await startAgent({
       name: 'profile-only-accepted-swm-authority',
       config: {
+        ...custodialAuthorConfig(),
         rfc64CatalogDeploymentProfile: DEPLOYMENT,
         rfc64CatalogAccessPolicyAuthority: {
           localAgentAddress: AUTHOR,
@@ -1596,7 +1611,10 @@ describe('RFC-64 rollout authority integration', () => {
     const remotePeerId = '12D3KooWAuthorityCatchupPeer';
     const edge = await startAgent({
       name: 'authority-accepted-peer-catchup',
-      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+      config: {
+        ...custodialAuthorConfig(),
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+      },
     });
     (edge as any).defaultAgentAddress = AUTHOR;
     vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
@@ -1644,7 +1662,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
 
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
-      .rejects.toThrow(/no canonical owner address/u);
+      .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
     expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
       NETWORK_ID,
       contextGraphId,
@@ -2176,7 +2194,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
 
-    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
         active: true,
@@ -2189,7 +2207,8 @@ describe('RFC-64 rollout authority integration', () => {
         mode: 'legacy',
         selectionSource: 'operator-override',
       }),
-    ]);
+    ]));
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toHaveLength(2);
     expect(edge.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)).toMatchObject({
       mode: 'shadow',
       legacySyncAllowed: true,
@@ -2255,7 +2274,7 @@ describe('RFC-64 rollout authority integration', () => {
     const edge = await startAgent({
       name: 'authority-refresh-lifecycle',
       config: {
-        chainAdapter,
+        ...custodialAuthorConfig(chainAdapter),
         rfc64CatalogActivation: {
           deploymentProfile: DEPLOYMENT,
           rollout: { contextGraphModes: { [legacyContextGraphId]: 'legacy' } },
@@ -3497,6 +3516,140 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
     expect(legacyPolicy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A freshly registered graph is invisible to the FINALIZED authority index
+   * until chain finality catches up (~600 blocks / ~20 min on Base Sepolia).
+   * That lag used to be reported as `registered-authority-binding-mismatch`
+   * and parked the graph as `blocked`, which silenced the AUTHOR of a public
+   * graph (no heads authored, served or announced) for the whole finality
+   * window after every registration. It is retryable, and the author of
+   * record keeps its already-accepted authority through it.
+   */
+  it('treats a registered graph the finalized index has not indexed yet as retryable, retaining the author\'s accepted authority', async () => {
+    const contextGraphId = `${AUTHOR}/unfinalized-author`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a private graph; this scenario is a PUBLIC one.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      accessPolicy: 0 as const,
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const author = await startAgent({
+      name: 'unfinalized-author',
+      config: { chainAdapter },
+    });
+    (author as any).localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    author.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    // A responsibility (not just a discovered binding) is what the fence,
+    // the refresh workload and the operational status all key on.
+    author.subscribeToContextGraph(contextGraphId);
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+
+    // Accepted while the index carries the entry.
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+    const accepted = (author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    expect(accepted).not.toBeNull();
+
+    // The finalized index no longer carries the bound id (finality lag).
+    readSnapshots.mockResolvedValue(new Map());
+    const request = (await author.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({
+      code: 'registered-authority-unfinalized',
+      message: expect.stringContaining('no finalized indexed authority'),
+    });
+
+    // Retryable, not a denial: authority retained, fence open, not parked.
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
+    expect(author.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true });
+    const status = (await author.readRfc64CatalogOperationalStatusV1())
+      .find((entry) => entry.contextGraphId === contextGraphId);
+    expect(status?.authorityState).toBe('resolving');
+    expect(status?.authorityState).not.toBe('blocked');
+  });
+
+  it('keeps a replica fail-closed but retryable through the same finality lag (no retained seed, not parked)', async () => {
+    const contextGraphId = `${AUTHOR}/unfinalized-replica`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a private graph; this scenario is a PUBLIC one.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      accessPolicy: 0 as const,
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const replica = await startAgent({
+      name: 'unfinalized-replica',
+      config: { chainAdapter },
+    });
+    // NOT the author of record: no recordLocalCreate.
+    replica.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    replica.subscribeToContextGraph(contextGraphId);
+    await replica.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+    await expect(replica.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+
+    readSnapshots.mockResolvedValue(new Map());
+    const request = (await replica.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(replica.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({ code: 'registered-authority-unfinalized' });
+
+    // A replica does not get to keep serving on a stale acceptance ...
+    expect(replica.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false });
+    // ... but it is left retryable rather than parked as blocked.
+    const status = (await replica.readRfc64CatalogOperationalStatusV1())
+      .find((entry) => entry.contextGraphId === contextGraphId);
+    expect(status?.authorityState).toBe('resolving');
   });
 
   it('gates indexed private responsibility and authority on verified membership', async () => {
@@ -5272,6 +5425,7 @@ describe('RFC-64 rollout authority integration', () => {
     const shadow = await startAgent({
       name: 'lifecycle-shadow-receiver',
       config: {
+        ...custodialAuthorConfig(),
         rfc64CatalogActivation: {
           deploymentProfile: DEPLOYMENT,
           rollout: {

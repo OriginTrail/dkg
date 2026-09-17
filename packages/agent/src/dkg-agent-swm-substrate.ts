@@ -397,8 +397,22 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     persist?: boolean;
     deferSharedMemoryGossipSubscribe?: boolean;
     syncMode?: 'on-demand' | 'always-on';
+    /** Authoritative numeric slot established by the admission owner. */
+    onChainId?: string;
   }): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
+    const nextSubscription = (): ContextGraphSub => {
+      const next = {
+        ...existing,
+        subscribed: true,
+        synced: existing?.synced ?? false,
+        syncMode,
+      } as ContextGraphSub;
+      if (options?.onChainId !== undefined) {
+        this.bindSubscriptionOnChainId(contextGraphId, next, options.onChainId);
+      }
+      return next;
+    };
     // Opening an already durable graph must never silently downgrade it to a
     // process-local subscription. An explicit always-on request may promote an
     // existing on-demand subscription, while an omitted mode preserves the
@@ -418,12 +432,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (syncSet.delete(contextGraphId)) this.config.syncContextGraphs = [...syncSet];
       const subscription = this.setContextGraphSubscription(
         contextGraphId,
-        {
-          ...existing,
-          subscribed: true,
-          synced: existing?.synced ?? false,
-          syncMode,
-        },
+        nextSubscription(),
         { persist },
       );
       if (options?.deferSharedMemoryGossipSubscribe !== true) {
@@ -453,15 +462,14 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!deferSwmGossip) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
-      if (!existing?.subscribed || existing.syncMode !== syncMode) {
+      if (
+        !existing?.subscribed
+        || existing.syncMode !== syncMode
+        || (options?.onChainId !== undefined && existing.onChainId !== options.onChainId)
+      ) {
         return this.setContextGraphSubscription(
           contextGraphId,
-          {
-            ...existing,
-            subscribed: true,
-            synced: existing?.synced ?? false,
-            syncMode,
-          },
+          nextSubscription(),
           { persist },
         );
       }
@@ -477,12 +485,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
     const subscription = this.setContextGraphSubscription(
       contextGraphId,
-      {
-        ...existing,
-        subscribed: true,
-        synced: existing?.synced ?? false,
-        syncMode,
-      },
+      nextSubscription(),
       { persist },
     );
 
