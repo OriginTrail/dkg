@@ -1918,7 +1918,12 @@ export class FinalizationRecovery<
     if (!entry || (!this.isLiveEntry(entry) && entry.state !== 'SETTLED')) {
       return 'none';
     }
-    let activeEntry = entry;
+    // `isLiveEntry` is a type predicate, so `entry` is narrowed to the live
+    // states here. `activeEntry` is later reassigned from
+    // `ensureVerifiedReplayEntry`, which returns the broad union, and it is
+    // only ever read for `.ual` and handed to `recordDeferred`, which accepts
+    // the broad union too.
+    let activeEntry: FinalizationRecoveryEntry = entry;
     try {
       // Only autonomous replay observes its persisted deadline. Chain
       // reconciliation remains an immediate, authoritative recovery trigger.
