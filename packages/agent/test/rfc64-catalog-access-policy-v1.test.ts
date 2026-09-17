@@ -610,6 +610,87 @@ describe('RFC-64 D26 catalog access authorization', () => {
     expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(finalizedDigest);
   });
 
+  it('replaces orphaned finalized-chain provenance only for the same logical generation', async () => {
+    const finalized = {
+      ...policy(1, 1),
+      governanceChainId: '31337',
+      governanceContractAddress: '0x6666666666666666666666666666666666666666',
+      ownershipTransitionDigest: `0x${'77'.repeat(32)}` as Digest32V1,
+      source: {
+        kind: 'finalized-chain' as const,
+        chainId: '31337',
+        contractAddress: '0x6666666666666666666666666666666666666666',
+        blockNumber: '42',
+        blockHash: `0x${'88'.repeat(32)}` as Digest32V1,
+      },
+    } satisfies ContextGraphPolicyV1;
+    const finalizedDigest = digestFor(finalized);
+    const finalizedRoster = {
+      ...roster(finalizedDigest),
+      ownershipTransitionDigest: finalized.ownershipTransitionDigest,
+    };
+    const rederived = {
+      ...finalized,
+      source: {
+        ...finalized.source,
+        blockNumber: '43',
+        blockHash: `0x${'99'.repeat(32)}` as Digest32V1,
+      },
+    } satisfies ContextGraphPolicyV1;
+    const rederivedDigest = digestFor(rederived);
+    const rederivedRoster = { ...finalizedRoster, policyDigest: rederivedDigest };
+    const subject = registry();
+
+    subject.acceptAuthoritativeCurrent({
+      policy: finalized,
+      policyDigest: finalizedDigest,
+      roster: finalizedRoster,
+    });
+    const mismatchedDigest = `0x${'bb'.repeat(32)}` as Digest32V1;
+    expect(() => subject.acceptAuthoritativeCurrent({
+      policy: finalized,
+      policyDigest: mismatchedDigest,
+      roster: { ...finalizedRoster, policyDigest: mismatchedDigest },
+    })).toThrow(/does not advance its high-water/u);
+    expect(rederivedDigest).not.toBe(finalizedDigest);
+    expect(subject.acceptAuthoritativeCurrent({
+      policy: rederived,
+      policyDigest: rederivedDigest,
+      roster: rederivedRoster,
+    }).policyDigest).toBe(rederivedDigest);
+    await expect(subject.authorize(authInput('fetch-inbound', finalizedDigest)))
+      .resolves.toBeNull();
+    await expect(subject.authorize(authInput('fetch-inbound', rederivedDigest)))
+      .resolves.toEqual({ accessPolicy: 1, policyDigest: rederivedDigest });
+
+    const changedPolicy = {
+      ...rederived,
+      publishPolicy: 0 as const,
+      publishAuthority: CURATOR,
+    } satisfies ContextGraphPolicyV1;
+    const changedPolicyDigest = digestFor(changedPolicy);
+    expect(() => subject.acceptAuthoritativeCurrent({
+      policy: changedPolicy,
+      policyDigest: changedPolicyDigest,
+      roster: { ...rederivedRoster, policyDigest: changedPolicyDigest },
+    })).toThrow(/does not advance its high-water/u);
+    const changedRosterPolicy = {
+      ...rederived,
+      source: { ...rederived.source, blockHash: `0x${'aa'.repeat(32)}` as Digest32V1 },
+    };
+    const changedRosterDigest = digestFor(changedRosterPolicy);
+    expect(() => subject.acceptAuthoritativeCurrent({
+      policy: changedRosterPolicy,
+      policyDigest: changedRosterDigest,
+      roster: {
+        ...rederivedRoster,
+        policyDigest: changedRosterDigest,
+        members: rederivedRoster.members.filter(({ agentAddress }) => agentAddress !== REMOTE),
+      },
+    })).toThrow(/does not advance its high-water/u);
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(rederivedDigest);
+  });
+
   it('rejects a stale unregistered roster after a newer curator generation', () => {
     const privatePolicy = policy(1, 0);
     const policyDigest = digestFor(privatePolicy);

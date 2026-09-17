@@ -176,6 +176,7 @@ interface HeldCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshot
 
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/u;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
+const ZERO_DIGEST = `0x${'0'.repeat(64)}` as Digest32V1;
 const MAX_PEER_ID_BYTES = 256;
 const UTF8 = new TextEncoder();
 
@@ -451,6 +452,15 @@ function assertAuthoritativeMonotonicPolicyTransition(
     // finalized chain state and its name commitment. Never allow the reverse.
     return;
   }
+  if (isFinalizedChainReorgReplacement(current, successor)) {
+    // A head-anchored authority event can be re-mined without advancing its
+    // event-derived era/version. The exact event block remains provenance in
+    // the policy object (and therefore changes policyDigest), but a periodic
+    // authoritative refresh must be able to replace the orphaned coordinates.
+    // Only provenance may differ: policy semantics and the roster generation
+    // must remain byte-identical after their digest backlink is neutralized.
+    return;
+  }
   const currentEra = BigInt(current.policy.era);
   const successorEra = BigInt(successor.policy.era);
   const currentVersion = BigInt(current.policy.version);
@@ -470,6 +480,55 @@ function assertAuthoritativeMonotonicPolicyTransition(
       'RFC-64 authoritative policy/roster transition does not advance its high-water',
     );
   }
+}
+
+function isFinalizedChainReorgReplacement(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): boolean {
+  const currentSource = current.policy.source;
+  const successorSource = successor.policy.source;
+  if (
+    current.policyDigest === successor.policyDigest
+    || currentSource.kind !== 'finalized-chain'
+    || successorSource.kind !== 'finalized-chain'
+    || (
+      currentSource.blockNumber === successorSource.blockNumber
+      && currentSource.blockHash === successorSource.blockHash
+    )
+    || current.policy.era !== successor.policy.era
+    || current.policy.version !== successor.policy.version
+    || !samePolicyWithoutFinalizedSourceCoordinates(current.policy, successor.policy)
+  ) return false;
+  if (current.roster === null || successor.roster === null) {
+    return current.roster === null && successor.roster === null;
+  }
+  return canonicalizeMemberRosterPayloadV1({
+    ...current.roster,
+    policyDigest: ZERO_DIGEST,
+  }) === canonicalizeMemberRosterPayloadV1({
+    ...successor.roster,
+    policyDigest: ZERO_DIGEST,
+  });
+}
+
+function samePolicyWithoutFinalizedSourceCoordinates(
+  current: Readonly<ContextGraphPolicyV1>,
+  successor: Readonly<ContextGraphPolicyV1>,
+): boolean {
+  if (
+    current.source.kind !== 'finalized-chain'
+    || successor.source.kind !== 'finalized-chain'
+  ) return false;
+  return canonicalizeContextGraphPolicyPayloadV1(current)
+    === canonicalizeContextGraphPolicyPayloadV1({
+      ...successor,
+      source: {
+        ...successor.source,
+        blockNumber: current.source.blockNumber,
+        blockHash: current.source.blockHash,
+      },
+    });
 }
 
 function authorization(
