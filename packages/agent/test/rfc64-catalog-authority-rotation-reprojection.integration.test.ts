@@ -238,7 +238,7 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
    * catalog-owned semantic closure, whose location is derived without the
    * governance tuple or era and is therefore shared with the new generation.
    */
-  it('still collides with the previous generation in the replay manifest', async () => {
+  it('serves only the accepted generation in the replay manifest after re-projection', async () => {
     const author = await startRotationAuthorV1('authority-rotation-manifest-collision');
     vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
 
@@ -258,20 +258,26 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
       .rfc64PersistenceV1;
     const applied = persistence.inventory.listAppliedCatalogHeadsV1()
       .filter((head: any) => head.authorAddress === AUTHOR);
-    // The pre-rotation lineage is not retired and does not age out.
+    // The pre-rotation lineage is RETAINED on disk. Re-projection carries the rows forward; it
+    // does not retire the old head, and retiring it with the existing row-removal primitive
+    // would be unsafe because that planner is governance-blind and both scopes now resolve to
+    // the same triples. Withholding it from the wire is the narrow fix.
     expect(applied).toHaveLength(2);
     expect(new Set(applied.map((head: any) => head.catalogScopeDigest)).size).toBe(2);
 
-    // Production path: the replay builder keys its index on
-    // `(networkId, contextGraphId)` and appends, so it really does emit BOTH
-    // generations into one peer's manifest -- neither shadows the other.
-    // No peer is reachable here, so each emitted head counts as one failure.
+    // The replay index is keyed on `(networkId, contextGraphId)`, so it returns BOTH heads.
+    // Only the accepted generation may be announced. No peer is reachable here, so the single
+    // attempted head counts as one failure -- and the superseded head is not attempted at all.
+    // Before the filter this was `failed: 2`.
     await expect(author.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWRotationProbe'))
-      .resolves.toMatchObject({ announced: 0, failed: 2 });
+      .resolves.toMatchObject({ announced: 0, failed: 1 });
 
     const policyDigest = author
       .readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)?.policyDigest;
-    const announcements = await Promise.all(applied.map(async (head: any) => {
+    const accepted = applied
+      .filter((head: any) => head.catalogScopeDigest === rotatedScopeDigest);
+    expect(accepted).toHaveLength(1);
+    const announcements = await Promise.all(accepted.map(async (head: any) => {
       const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
         objectDigest: head.currentCatalogHeadDigest,
         verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
@@ -293,26 +299,13 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
         ),
       };
     }));
-    // Both generations are era zero, which is exactly why they collide.
-    expect(announcements.map(({ catalogEra }) => catalogEra)).toEqual(['0', '0']);
-
-    const manifestKey = (head: any) => [
-      head.subGraphName ?? '',
-      head.authorAddress,
-      head.catalogEra,
-      head.catalogVersion,
-      head.catalogHeadObjectDigest,
-      head.signatureVariantDigest,
-    ].join('\u0000');
-    const heads = [...announcements].sort((left, right) => {
-      const leftKey = manifestKey(left);
-      const rightKey = manifestKey(right);
-      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
-    });
+    // Both generations are era zero, so serving both would collapse them onto one manifest
+    // uniqueness key and the encoder would refuse the WHOLE completion -- the peer would get
+    // nothing, not even the current generation. With one entry it encodes.
     expect(() => encodeRfc64PublicCatalogHeadReplayCompletionV2({
       kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
-      heads,
-    } as never)).toThrow(/repeats a catalog scope/u);
+      heads: announcements,
+    } as never)).not.toThrow();
   }, 60_000);
 
   /**

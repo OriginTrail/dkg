@@ -4155,6 +4155,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           }),
       operation: async (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
+        const superseded: string[] = [];
         for (const { head } of replayEntries) {
           const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
             head.payload.contextGraphId,
@@ -4175,6 +4176,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ) {
             throw new Error('RFC-64 scoped catalog replay policy changed before snapshot');
           }
+          // The replay index is keyed on `(networkId, contextGraphId)` only, so after an
+          // authority rotation it holds one entry per generation. Serving a superseded one
+          // is wrong twice over. Every entry below is stamped with the CURRENT
+          // `accepted.policyDigest`, so a receiver admits the announcement, fetches the head
+          // and only then rejects it on scope binding -- pure churn it repeats on every
+          // connect. And two era-zero generations collapse to the same manifest uniqueness
+          // key, so `encodeRfc64PublicCatalogHeadReplayCompletionV2` refuses the whole
+          // completion and the peer gets nothing at all, including the current generation.
+          // Skipping is not silent loss: the author re-projects its rows onto the accepted
+          // scope, so the current entry serves them. It is reported for the case where that
+          // did not happen.
+          if (rfc64CatalogHeadIsSupersededGenerationV1(accepted, head.payload)) {
+            superseded.push(head.payload.authorAddress);
+            continue;
+          }
           manifest.push(Object.freeze({
             kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
             networkId: head.payload.networkId,
@@ -4190,6 +4206,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               head.signature,
             ) as Digest32V1,
           }));
+        }
+        if (superseded.length > 0) {
+          this.log.warn(
+            createOperationContext('system'),
+            `RFC-64 catalog replay withheld ${superseded.length} head(s) from `
+            + `${peerId.slice(-8)} that belong to a superseded authority generation `
+            + `(authors ${[...new Set(superseded)].join(', ')}); their rows reach this peer `
+            + 'through the accepted generation once the author has re-projected them',
+          );
         }
         if (manifest.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
           throw new Error('RFC-64 scoped catalog replay manifest exceeds the per-CG target cap');
@@ -4985,4 +5010,23 @@ export async function loadBoundedAuthorCatalogHistoryV1(
     previousDirectoryPath: Object.freeze([root]),
     previousBucket,
   });
+}
+
+/**
+ * True when an applied catalog head belongs to an authority generation this node no longer
+ * holds. The replay index is keyed on `(networkId, contextGraphId)`, which is deliberately
+ * governance-blind, so it returns every generation's head for a Context Graph; the accepted
+ * policy is what says which one is current. Mirrors the governance-and-era half of the
+ * service's own `assertAcceptedPolicyMatchesCatalogScope`. The author half is not re-checked
+ * here: the replay loop has already resolved the serving authority for this head.
+ */
+function rfc64CatalogHeadIsSupersededGenerationV1(
+  accepted: Readonly<AcceptedRfc64CatalogAccessSnapshotV1>,
+  payload: Parameters<typeof deriveAuthorCatalogScopeFromHeadV1>[0],
+): boolean {
+  const scope = deriveAuthorCatalogScopeFromHeadV1(payload);
+  return accepted.policy.governanceChainId !== scope.governanceChainId
+    || accepted.policy.governanceContractAddress !== scope.governanceContractAddress
+    || accepted.policy.ownershipTransitionDigest !== scope.ownershipTransitionDigest
+    || accepted.policy.era !== scope.era;
 }
