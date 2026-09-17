@@ -107,6 +107,15 @@ export interface SendOptions {
   parallelPaths?: number;
   /** Optional caller cancellation signal composed with timeout and node stop. */
   signal?: AbortSignal;
+  /**
+   * Per-call ceiling on the RESPONSE bytes read back from the peer. Clamped
+   * to the router-wide {@link ProtocolRouter.maxReadBytes} (it can only
+   * tighten that value, never widen it). Lets a small fixed-size protocol
+   * stop buffering the moment a peer exceeds its own v1 cap instead of
+   * reading up to the router-wide default first. Applies to the one-shot and
+   * multi-path wires; the pooled wire keeps its own frame ceiling.
+   */
+  maxReadBytes?: number;
 }
 
 export interface AdmissionCheckOptions {
@@ -661,6 +670,7 @@ export class ProtocolRouter {
     if (singleUsePayload && parallelPaths > 1) {
       throw new Error('single-use payloads cannot use parallelPaths > 1');
     }
+    const maxReadBytes = resolveSendMaxReadBytes(opts.maxReadBytes, this.maxReadBytes);
     const overallStartedAt = Date.now();
     const overallDeadline = AbortSignal.timeout(timeoutMs);
     const stopSignal = this.node.stopSignal;
@@ -823,7 +833,7 @@ export class ProtocolRouter {
         data,
         parallelPaths,
         signal: multipathSignalWithStop,
-        maxReadBytes: this.maxReadBytes,
+        maxReadBytes,
       });
       if (multipathResult !== null) {
         const totalDurationMs = Date.now() - startedAt;
@@ -1053,7 +1063,7 @@ export class ProtocolRouter {
         // PR-6: attemptSignal composes the per-attempt deadline with
         // node.stopSignal, so shutdown aborts the resolver, dial,
         // stream close, and final read consistently.
-        const readResponse = await readAllWithSignal(stream, this.maxReadBytes, attemptSignal);
+        const readResponse = await readAllWithSignal(stream, maxReadBytes, attemptSignal);
         const response = readResponse;
         const readDurationMs = Date.now() - readStartedAt;
         const totalDurationMs = Date.now() - startedAt;
@@ -1578,6 +1588,18 @@ export async function raceMultiPath(args: {
   }
 
   return { response: winnerResponse, attemptedPaths: picked.length };
+}
+
+/**
+ * Effective response read ceiling for one `send`: the caller's per-call
+ * `maxReadBytes` when given, never above the router-wide limit.
+ */
+function resolveSendMaxReadBytes(requested: number | undefined, routerMax: number): number {
+  if (requested === undefined) return routerMax;
+  if (!Number.isInteger(requested) || requested <= 0) {
+    throw new RangeError('SendOptions.maxReadBytes must be a positive integer');
+  }
+  return Math.min(requested, routerMax);
 }
 
 /**
