@@ -43,6 +43,9 @@ import {
 } from './rfc64/abort-v1.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
+import { rfc64SwmInventoryAssetKeyV1 } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import type { Rfc64SwmAuthorInventoryShadowMutationResultV1 } from
+  './dkg-agent-rfc64-catalog-auto-publish.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from
@@ -183,6 +186,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     ctx: OperationContext = createOperationContext('system'),
+    signal?: AbortSignal,
   ): Promise<void> | null {
     let admitted: Readonly<{
       lane: ResolvedRfc64CatalogAuthoringLaneV1;
@@ -199,6 +203,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       contextGraphId,
       ctx,
       origins: admitted.origins,
+      ...(signal === undefined ? {} : { signal }),
     });
   }
 
@@ -255,7 +260,25 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ));
       return null;
     }
-    return Object.freeze({ lane, origins });
+    // The GENERATION question belongs here, not inside the async carry. The mere
+    // presence of unregistered-origin rows is not evidence that anything is
+    // stranded: until the graph is registered the accepted generation IS the
+    // unregistered origin, so the ordinary projection already reads exactly
+    // these rows. Deciding that downstream meant every locally-created,
+    // still-unregistered Context Graph with at least one inventory row returned
+    // a promise and suspended the acceptance path for a no-op — on the FIRST
+    // acceptance in every fresh process — and logged "rows published under the
+    // previous authority generation stay unreachable" for graphs that never
+    // rotated. The lane is already resolved synchronously above, so the
+    // comparison costs nothing here.
+    const stranded = origins.filter(({ authorAddress, originDigest }) => (
+      computeSwmAuthorInventoryScopeDigestV1(Object.freeze({
+        ...lane!.scopeBase,
+        authorAddress,
+      }) as SwmAuthorInventoryScopeV1) !== originDigest
+    ));
+    if (stranded.length === 0) return null;
+    return Object.freeze({ lane, origins: stranded });
   }
 
   private async runRfc64CatalogReprojectionV1(
@@ -265,13 +288,21 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       readonly contextGraphId: string;
       readonly ctx: OperationContext;
       readonly origins: readonly Rfc64PreRotationAuthorInventoryV1[];
+      readonly signal?: AbortSignal;
     }>,
   ): Promise<void> {
     for (const origin of params.origins) {
+      // The caller awaits this inside `runBoundedOperation`. Without the signal a
+      // large stranded inventory kept doing store reads and durable writes long
+      // after the budget expired or the node began shutting down, and the
+      // caller's post-await abort check could never fire because this promise
+      // never rejects.
+      if (params.signal?.aborted === true) return;
       try {
         await this.carryRfc64AuthorInventoryIntoAcceptedGenerationV1(lane, {
           contextGraphId: params.contextGraphId,
           ctx: params.ctx,
+          ...(params.signal === undefined ? {} : { signal: params.signal }),
           ...origin,
         });
       } catch (cause) {
@@ -298,6 +329,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       readonly originDigest: Digest32V1;
       readonly rows: readonly Readonly<SwmAuthorInventoryRowV1>[];
       readonly ctx: OperationContext;
+      readonly signal?: AbortSignal;
     }>,
   ): Promise<void> {
     const persistence = this.rfc64PersistenceV1;
@@ -306,10 +338,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ...lane.scopeBase,
       authorAddress: params.authorAddress,
     }) as SwmAuthorInventoryScopeV1;
+    // Admission has already established that this origin differs from the
+    // accepted generation; see `admitRfc64CatalogReprojectionV1`.
     const acceptedDigest = computeSwmAuthorInventoryScopeDigestV1(acceptedScope);
-    // The accepted generation still is the unregistered origin: the ordinary
-    // projection already reads exactly these rows and nothing was orphaned.
-    if (acceptedDigest === params.originDigest) return;
     const acceptedCatalogScope = Object.freeze({
       ...acceptedScope,
       bucketCount: '1',
@@ -335,20 +366,51 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ));
       return;
     }
-    const alreadyCarried = new Set(
-      (persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
-        acceptedDigest,
-        params.authorAddress,
-      )?.rows ?? []).map(rfc64AuthorInventoryRowIdentityV1),
-    );
+    const acceptedRows = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+      acceptedDigest,
+      params.authorAddress,
+    )?.rows ?? [];
+    const alreadyCarried = new Set(acceptedRows.map(rfc64AuthorInventoryRowIdentityV1));
+    // Row identity includes `shareOperationId`, so a KA RE-SHARED after the
+    // rotation has a different identity here even though the accepted
+    // generation already serves it. Carrying the pre-rotation operation id
+    // would then fail the confirmation fence and be reported as "stays
+    // unreachable" for a row that is perfectly reachable. Coordinate-level
+    // presence is the honest question: is this assertion already in the
+    // accepted generation at this version?
+    const alreadyServed = new Set(acceptedRows.map(
+      (row) => `${row.assertionCoordinate}\u0000${row.assertionVersion}`,
+    ));
+    const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
     for (const row of params.rows) {
+      if (params.signal?.aborted === true) return;
       if (alreadyCarried.has(rfc64AuthorInventoryRowIdentityV1(row))) continue;
-      const carried = await this.recordRfc64SwmAuthorInventoryShadowV1({
-        contextGraphId: params.contextGraphId,
-        assertionCoordinate: row.assertionCoordinate,
-        lifecycleAgentAddress: params.authorAddress,
-        shareOperationId: row.shareOperationId,
-      });
+      if (alreadyServed.has(`${row.assertionCoordinate}\u0000${row.assertionVersion}`)) continue;
+      // Route through the shadow runtime rather than calling the recorder
+      // directly. Going around it left this write untracked by
+      // `drain()`/`closeAndDrain()` — persistence could close mid-write — and
+      // unserialized against `observeRfc64ConfirmedVmV1`, whose retraction of a
+      // VM-confirmed row could be undone by a carry that read its fences before
+      // the confirmation landed and wrote after it.
+      // `runExclusive` serializes but does not relay a return value.
+      let carried: Rfc64SwmAuthorInventoryShadowMutationResultV1 | undefined;
+      await shadowRuntime.runExclusive(
+        rfc64SwmInventoryAssetKeyV1({
+          contextGraphId: params.contextGraphId,
+          subGraphName: null,
+          authorAddress: params.authorAddress,
+          assertionCoordinate: row.assertionCoordinate,
+        }),
+        async () => {
+          carried = await this.recordRfc64SwmAuthorInventoryShadowV1({
+            contextGraphId: params.contextGraphId,
+            assertionCoordinate: row.assertionCoordinate,
+            lifecycleAgentAddress: params.authorAddress,
+            shareOperationId: row.shareOperationId,
+          });
+        },
+      );
+      if (carried === undefined) continue;
       if (carried.status === 'applied' || carried.status === 'existing') continue;
       // A durable VM confirmation retires the SWM-only row deliberately; the
       // finalized lane owns it and this rotation did not orphan it.
@@ -365,16 +427,18 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     // Requested even when every row was already carried: a crash between the
     // inventory carry and its catalog successor would otherwise leave the
     // accepted generation with rows and no applied head.
-    if (this.requestRfc64SwmCatalogProjectionV1({
+    if (!this.requestRfc64SwmCatalogProjectionV1({
       contextGraphId: params.contextGraphId as ContextGraphIdV1,
       authorAddress: params.authorAddress,
       ctx: params.ctx,
-    })) return;
-    this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
-      params.contextGraphId,
-      'the projection supervisor refused the request',
-      params.authorAddress,
-    ));
+    })) {
+      this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
+        params.contextGraphId,
+        'the projection supervisor refused the request',
+        params.authorAddress,
+      ));
+      return;
+    }
   }
 
   /**

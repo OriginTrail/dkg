@@ -116,7 +116,12 @@ export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
 } from './dkg-agent-rfc64-swm-catalog-projection.js';
 
-function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
+/**
+ * The shadow runtime's per-asset serialization key. Exported so the catalog
+ * re-projection carry fences on the SAME key as the confirmation observer
+ * rather than writing around the runtime.
+ */
+export function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
   contextGraphId: string;
   subGraphName?: string | null;
   authorAddress: string;

@@ -501,6 +501,31 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
     ))).toBe(true);
   }, 60_000);
 
+  it('does not suspend acceptance for a graph that has not rotated', async () => {
+    // Admission decided "is anything stranded" from the mere PRESENCE of
+    // unregistered-origin rows, and left the generation comparison inside the
+    // async carry. Until a graph is registered the accepted generation IS the
+    // unregistered origin, so every locally-created, still-unregistered Context
+    // Graph with at least one inventory row returned a promise and suspended the
+    // acceptance path for a guaranteed no-op — on the FIRST acceptance in every
+    // fresh process, which is exactly the ordering hazard the call site's own
+    // comment says cannot happen.
+    const author = await startRotationAuthorV1('authority-rotation-unrotated');
+    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+
+    await seedInventoryAssetV1(author, 'authority-rotation-unrotated', 47n);
+    await expect(author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({ status: 'advanced' });
+
+    // Rows exist under the unregistered origin, but no rotation has happened.
+    // Admission must yield null so the acceptance path never suspends.
+    expect(
+      author.beginRfc64CatalogReprojectionForAuthorityRotationV1(CONTEXT_GRAPH_ID),
+    ).toBeNull();
+  }, 60_000);
+
   it('never fabricates a lineage for a graph this node did not author', async () => {
     const replica = await startRotationAuthorV1('authority-rotation-replica');
     vi.spyOn(replica.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(false);
