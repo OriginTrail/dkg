@@ -180,6 +180,8 @@ import type { Rfc64CatalogMutationCoordinatorV1 } from
 import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
+import { isRfc64CatalogHeadOfAcceptedGenerationV1 } from
+  './rfc64/catalog-replay-generation-v1.js';
 import {
   Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
   type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
@@ -4157,6 +4159,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             && accepted.policyDigest !== requestedScope.policyDigest
           ) {
             throw new Error('RFC-64 scoped catalog replay policy changed before snapshot');
+          }
+          // A CG authored before its registration keeps owner-signed heads
+          // alongside the finalized-chain heads that follow. Both are durable
+          // and current for their own catalog scope, but the announcement
+          // carries neither the governance binding nor the ownership
+          // transition, so on the wire they are one scope — and a manifest
+          // that repeats a scope cannot encode. Replaying a superseded
+          // generation under the current policy digest is unusable to the
+          // receiver anyway: its catalog scope digest no longer matches.
+          if (!isRfc64CatalogHeadOfAcceptedGenerationV1(head.payload, accepted.policy)) {
+            continue;
           }
           manifest.push(Object.freeze({
             kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
