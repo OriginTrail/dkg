@@ -27,6 +27,14 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
   const res = fakeRes();
   const url = new URL('http://127.0.0.1/api/memory/search');
   const agent = {
+    // The route gates on read authority before either fan-out runs; these
+    // injection tests exercise the SPARQL builder, so grant it. The reason
+    // must be a CALLER-scoped one — node-scoped reasons are refused for
+    // agent principals (see memory-search-read-authority.test.ts).
+    resolveContextGraphReadAuthority: async () => ({
+      outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant',
+    }),
+    canUseSharedMemoryForContextGraph: async () => true,
     store: {
       query: async (sparql: string) => {
         captureSparql(sparql);

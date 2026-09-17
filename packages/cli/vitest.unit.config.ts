@@ -52,6 +52,9 @@ export default defineConfig({
           'test/daemon-local-llm-service.test.ts',
           'test/local-llm-runtime-factory.test.ts',
           'test/memory-graph-events.test.ts',
+          // Read-authority gate on POST /api/memory/search — a pure route-handler
+          // test (fake req/res, stubbed agent + vector store), no hardhat.
+          'test/memory-search-read-authority.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',

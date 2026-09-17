@@ -490,6 +490,25 @@ function uniquePeerIds(peerIds: readonly string[]): string[] {
   return out;
 }
 
+/**
+ * Read-authority reasons that answer "may this NODE read the context graph?"
+ * rather than "may this AGENT read it?".
+ *
+ * `resolveContextGraphReadAuthorityDecision` only consults `callerAgentAddress`
+ * on its chain-registered, RFC-64 and agent-gated-local branches. Everything
+ * below falls through to node-scoped facts (peer allowlist, local subscription,
+ * the node's own default agent), so an agent-scoped caller must NOT inherit
+ * them — doing so is the cross-CG read hole `/api/memory/search` is gated for.
+ */
+const NODE_SCOPED_READ_AUTHORITY_REASONS: ReadonlySet<string> = new Set([
+  'legacy-peer-allowlist',
+  'legacy-peer-invitation',
+  'legacy-local-agent-participant',
+  'legacy-local-identity-participant',
+  'legacy-subscription',
+  'legacy-edge-subscription',
+]);
+
 export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -1769,6 +1788,103 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: 'memoryLayers must contain only "wm", "swm", or "vm"' });
     }
     const memoryLayers = [...new Set(requestedLayers)] as Array<'wm' | 'swm' | 'vm'>;
+
+    // ── Read authority ────────────────────────────────────────────────
+    // `contextGraphId` arrives from the request body and
+    // `validateRequiredContextGraphId` only checks its SHAPE, so without this
+    // gate any holder of a valid token — including an agent-scoped token whose
+    // agent is in no roster for this CG — could name a private context graph
+    // and have both fan-outs below serve its content back:
+    //
+    //   - fan-out 1 queries the vector store, whose rows are filtered by
+    //     `context_graph_id` in SQL (see `VectorStore.search`) — so the CG the
+    //     caller names IS the CG whose embeddings, labels and snippets are
+    //     ranked and returned,
+    //   - fan-out 2 calls `agent.store.query` DIRECTLY, bypassing
+    //     `DKGQueryEngine`'s graph-scope rewrites and `DKGAgent.query`'s
+    //     `canReadContextGraph` check, with hand-built `STRSTARTS` filters
+    //     pinned to the caller-supplied CG URI.
+    //
+    // This resolves the FULL authority decision rather than the
+    // `canReadContextGraph` boolean, because the boolean collapses three
+    // outcomes into two and loses the one fact an agent-scoped caller needs:
+    // WHY the read was allowed.
+    const callerAgentAddress = authenticatedAgentAddress(authentication);
+    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
+    if (!isNodeAdmin) {
+      const authority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
+        callerAgentAddress,
+      });
+
+      // `unavailable` means the authority itself could not be established
+      // (chain RPC failed, metadata not yet synced) — NOT that the caller is
+      // forbidden. Collapsing it into 403 turns a transient blip into a
+      // terminal error on a route that previously had no chain dependency at
+      // all, and no sane client retries a 403.
+      if (authority.outcome === 'unavailable') {
+        // Response shape follows issue #2641 / PR #2649, which establishes the
+        // convention for this outcome on `/api/query`: a retryable 503 with
+        // `Retry-After`, and deliberately NO context-graph id, authority
+        // source or internal reason in the body — those would turn an
+        // outage response into the same enumeration oracle the denial path
+        // is careful about. The reason stays in the daemon log.
+        res.setHeader('Retry-After', '3');
+        return jsonResponse(res, 503, {
+          error: 'Context graph read authority is temporarily unavailable. Retry shortly.',
+          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+          retryable: true,
+        });
+      }
+
+      // An `allowed` outcome is not automatically a CALLER-scoped allow.
+      // `resolveContextGraphReadAuthorityDecision` only consults
+      // `callerAgentAddress` on the chain-registered, RFC-64 and
+      // agent-gated-local branches. For an unregistered legacy private CG
+      // whose `_meta` carries a peer allowlist but no agent gate,
+      // `getContextGraphAgentGateAddresses` returns null (`ungated`), both
+      // caller-consulting branches are skipped, and the resolver allows on
+      // NODE-scoped facts — this node's peerId is in the allowlist, this node
+      // holds a subscription, this node's own default agent is a participant.
+      // Those are answers to "may this NODE read?", not "may this AGENT read?".
+      // Honouring them for an agent-scoped token is exactly the cross-CG hole
+      // this route is being fixed for.
+      const boundToCaller = !(
+        callerAgentAddress !== undefined
+        && NODE_SCOPED_READ_AUTHORITY_REASONS.has(authority.reason)
+      );
+      if (authority.outcome !== 'allowed' || !boundToCaller) {
+        // On the 403-vs-empty-200 choice: `DKGAgent.query` denies private-CG
+        // reads with a form-matched EMPTY result so denial is indistinguishable
+        // from no-match. This route deliberately differs, and the tradeoff is
+        // real rather than absent: a 403 does disclose "this node knows that
+        // id, and you are excluded", which an empty 200 would not. We accept
+        // that here because the caller supplied an explicit `contextGraphId`
+        // (so it already asserted the id) and because an operator debugging a
+        // roster misconfiguration otherwise gets a silent empty result with no
+        // signal. Flip this to `jsonResponse(res, 200, { results: [] })` if the
+        // enumeration oracle is judged to outweigh the operability.
+        return jsonResponse(res, 403, {
+          error: `Not authorized to search context graph "${contextGraphId}".`,
+        });
+      }
+
+      // Shared memory carries a SECOND gate. `DKGAgent.query` requires
+      // `canUseSharedMemoryForContextGraph` — which additionally demands
+      // confirmed SWM metadata — for any shared-memory-targeting read
+      // (`dkg-agent-query.ts`). Reading `_shared_memory` graphs under
+      // `canReadContextGraph` alone would leave this route measurably more
+      // permissive than `/api/query` for that layer. Drop the layer rather
+      // than failing the whole request: that matches the engine's own
+      // empty-result semantics for an SWM denial, and the other requested
+      // layers remain legitimately readable.
+      if (
+        memoryLayers.includes('swm')
+        && !(await agent.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress }))
+      ) {
+        const idx = memoryLayers.indexOf('swm');
+        if (idx >= 0) memoryLayers.splice(idx, 1);
+      }
+    }
 
     const results: Array<{
       entityUri: string;
