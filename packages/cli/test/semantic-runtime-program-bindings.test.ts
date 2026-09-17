@@ -75,6 +75,7 @@ function fixture(layer: 'wm' | 'swm' | 'vm' = 'swm') {
     listLocalAgents: () => [{ agentAddress: executor }],
     getCustodialAgentPrivateKey: () => '0x01',
     canReadContextGraph,
+    canUseSharedMemoryForContextGraph: vi.fn(async () => true),
     store: { query: vi.fn(async () => ({ type: 'bindings', bindings: [] })) },
     query: vi.fn(async (sparql: string, opts: Record<string, unknown>) => {
       if (opts.callerAgentAddress !== executor) {
@@ -180,6 +181,19 @@ describe('tenant Program bindings', () => {
     });
     await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'REQUIRED_TOOL_UNAVAILABLE' });
     expect(f.readData).not.toHaveBeenCalled();
+  });
+
+  it('reports SWM graph authority unavailability only after binding authorization', async () => {
+    const f = fixture('swm');
+    const runtime = await f.start();
+    f.agent.canUseSharedMemoryForContextGraph.mockResolvedValue(false);
+    await expect(f.invoke(runtime, author)).rejects.toMatchObject({ code: 'PROGRAM_INVOCATION_FORBIDDEN', status: 403 });
+    expect(f.agent.canUseSharedMemoryForContextGraph).not.toHaveBeenCalled();
+    await expect(f.invoke(runtime)).rejects.toMatchObject({ code: 'PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE', status: 503 });
+    expect(f.agent.canUseSharedMemoryForContextGraph).toHaveBeenCalledWith(sourceGraph, { callerAgentAddress: executor });
+    expect(f.agent.query).not.toHaveBeenCalled();
+    expect(f.readData).not.toHaveBeenCalled();
+    expect(f.written).toHaveLength(0);
   });
 
   it('does not bypass a source graph read denial', async () => {

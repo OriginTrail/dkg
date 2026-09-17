@@ -601,6 +601,19 @@ async function resolveInternal(
 ): Promise<InternalResolution> {
   await bound?.assertAuthorized();
   const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
+  // Only an already-authorized bound caller gets this readiness diagnostic.
+  // Otherwise the query API's empty-on-denial behavior would look like a
+  // missing Program. This preflight never substitutes for query-time checks.
+  if (bound && programLayer === 'swm'
+    && !await agent.canUseSharedMemoryForContextGraph(bound.binding.program.contextGraphId, {
+      callerAgentAddress: readPrincipal,
+    })) {
+    throw new SemanticProgramError(
+      'PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE',
+      'The approved Program graph is not ready for Shared Working Memory reads by the tenant executor',
+      503,
+    );
+  }
   const program = await loadStoredSemanticProgram(
     agent,
     bound?.binding.program.contextGraphId ?? contextGraphId,
