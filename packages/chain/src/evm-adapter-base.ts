@@ -1320,6 +1320,7 @@ export class EVMChainAdapterBase {
             this.resolveContractDeployBlock(address, operationLabel, contractLabel)
           ),
           pageSize: () => this.cgRegistryScanPageSize,
+          finalityConfirmations: () => this.finalityConfirmations,
         });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;

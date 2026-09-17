@@ -9,6 +9,7 @@ import {
 } from '@origintrail-official/dkg-http-utils';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
+import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
   anchorDependentResourceLimited,
   resourceLimited,
@@ -119,6 +120,77 @@ export function parseStrictFinalizedChainIdV1(input: unknown): ChainIdV1 {
     throw unavailable('eth_chainId returned a malformed chain ID', cause);
   }
   return parsed.toString(10) as ChainIdV1;
+}
+
+/**
+ * Resolve the strict transports' anchor at the node's SINGLE definition of
+ * finality — `chain.finalityConfirmations` — instead of the endpoint's
+ * `finalized` block tag.
+ *
+ * The tag is the RPC provider's own consensus-finality marker; on Base Sepolia
+ * it trails head by ~600 blocks / ~20 minutes and no operator setting can move
+ * it. `latest` is read instead, and the shared resolver turns that head into the
+ * anchor with the SAME arithmetic every other subsystem uses. Confirmation 1 —
+ * the default — makes the head itself the anchor, so the common case still costs
+ * exactly ONE header read, which matters on a path with a non-queueing admission
+ * gate and a hard total deadline.
+ *
+ * The anchor DISCIPLINE these transports are named for is unchanged: every read
+ * runs against the same endpoint inside one attempt, the deeper anchor is
+ * fetched by NUMBER and must come back as exactly that height, and its canonical
+ * quantity is the endpoint's own echo, so the EIP-1898 / hash-sandwich pinning
+ * downstream still compares like for like.
+ */
+export async function readStrictFinalityAnchorV1(
+  rpc: (method: string, params: readonly unknown[]) => Promise<unknown>,
+  finalityConfirmations: number,
+  label: string,
+): Promise<FinalizedAnchorV1> {
+  let head: FinalizedAnchorV1 | undefined;
+  const resolved = await resolveEvmFinalityAnchorBlockV1({
+    finalityConfirmations,
+    readHeadBlockNumber: async () => {
+      head = parseStrictFinalizedAnchorV1(
+        await rpc('eth_getBlockByNumber', Object.freeze(['latest', false])),
+        label,
+      );
+      return anchorHeightV1(head);
+    },
+    readBlockAt: async (anchorBlockNumber) => {
+      const pinned = head;
+      if (pinned === undefined) throw new Error('unreachable: head read did not run');
+      const anchor = anchorHeightV1(pinned) === anchorBlockNumber
+        ? pinned
+        : parseStrictFinalizedAnchorV1(
+          await rpc(
+            'eth_getBlockByNumber',
+            Object.freeze([`0x${anchorBlockNumber.toString(16)}`, false]),
+          ),
+          label,
+        );
+      return Object.freeze({
+        number: anchorHeightV1(anchor),
+        hash: anchor.blockHash as string,
+        anchor,
+      });
+    },
+    unavailable: (detail) => new CurrentFinalizedEvmCallErrorV1(
+      'finalized-state-unavailable',
+      `${label}: ${detail}`,
+    ),
+  });
+  return resolved.anchor;
+}
+
+/**
+ * A height the finality arithmetic can use, or `NaN` for one it cannot.
+ *
+ * `NaN` never equals the requested anchor and is never a safe integer, so the
+ * shared resolver rejects it instead of comparing rounded values.
+ */
+function anchorHeightV1(anchor: FinalizedAnchorV1): number {
+  const height = Number(anchor.blockNumber);
+  return Number.isSafeInteger(height) ? height : Number.NaN;
 }
 
 export function parseStrictFinalizedAnchorV1(

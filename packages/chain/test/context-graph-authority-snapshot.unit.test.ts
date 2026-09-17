@@ -25,6 +25,9 @@ interface AuthorityEvidence {
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly deploymentReads: Array<readonly [string, string, string]>;
   readonly readOptions: Array<Readonly<{ policy?: string; signal?: AbortSignal }>>;
+  /** Every block tag the reader asked for, so `finalized` cannot creep back. */
+  readonly blockReads: Array<string | number>;
+  readonly headReads: number[];
 }
 
 interface EvmAuthorityHarness {
@@ -44,15 +47,25 @@ function makeEvmAuthorityAdapter(
   options: {
     reorg?: boolean;
     providerRangeLimit?: number;
+    finalityConfirmations?: number;
   } = {},
 ): EvmAuthorityHarness {
   const scenario = createAuthorityScenario({ reorg: options.reorg });
+  // The anchor the reader must pin: `chain.finalityConfirmations` applied to the
+  // CURRENT chain head. Confirmation 1 is the head itself, and the head moves
+  // (advanceAuthorityHead), so this is resolved per read, not captured once.
+  const anchorNumber = () => (
+    scenario.finalizedNumber - (options.finalityConfirmations ?? 1) + 1
+  );
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
     privateKey: `0x${'11'.repeat(32)}`,
     allowNoAdminSigner: true,
     chainId: 'evm:31337',
+    ...(options.finalityConfirmations === undefined
+      ? {}
+      : { finalityConfirmations: options.finalityConfirmations }),
   });
   adapter.initialized = true;
   adapter.init = async () => {};
@@ -63,6 +76,8 @@ function makeEvmAuthorityAdapter(
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
     deploymentReads: [] as Array<readonly [string, string, string]>,
     readOptions: [],
+    blockReads: [],
+    headReads: [],
   };
 
   const contract = {
@@ -110,14 +125,22 @@ function makeEvmAuthorityAdapter(
       staticCall: async (contextGraphId: bigint, readOptions: { blockTag: number }) => {
         evidence.staticCalls.push([contextGraphId, readOptions]);
         expect(contextGraphId).toBe(9n);
-        expect(readOptions).toEqual({ blockTag: scenario.finalizedNumber });
+        expect(readOptions).toEqual({ blockTag: anchorNumber() });
         return scenario.readCurrentState();
       },
     },
     getAddress: async () => GOVERNANCE,
   };
   const provider = {
-    getBlock: (tag: string | number) => scenario.getBlock(tag),
+    getBlockNumber: async () => {
+      const head = await scenario.getBlockNumber();
+      evidence.headReads.push(head);
+      return head;
+    },
+    getBlock: (tag: string | number) => {
+      evidence.blockReads.push(tag);
+      return scenario.getBlock(tag);
+    },
     getNetwork: async () => ({ chainId: 31337n }),
   };
   adapter.contracts = {
@@ -251,6 +274,27 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     ]));
   });
 
+  it('anchors the legacy authority read at chain.finalityConfirmations', async () => {
+    // The `finalized` RPC tag is the ENDPOINT's consensus marker — ~600 blocks
+    // (~20 minutes) behind head on Base Sepolia and not operator-configurable.
+    // A freshly registered Context Graph stayed absent from the authority view
+    // for that whole window, so both peers fenced each other's catalog traffic.
+    // The anchor is now head - confirmations + 1, and the tag is never asked for.
+    const { adapter, evidence } = makeEvmAuthorityAdapter({ finalityConfirmations: 4 });
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n))
+      .resolves.toMatchObject({ contextGraphId: '9', owner: OWNER.toLowerCase() });
+
+    expect(evidence.headReads).toEqual([30]);
+    // head 30 at depth 4 pins 30 - 4 + 1 = 27, and that is the FIRST block read.
+    expect(evidence.blockReads[0]).toBe(27);
+    expect(evidence.blockReads).not.toContain('finalized');
+    // The current-state read is pinned to the same anchor, not to the head.
+    expect(evidence.staticCalls.map(([, at]) => at)).toEqual([{ blockTag: 27 }]);
+    // Nothing above the anchor is ever scanned.
+    expect(evidence.ranges.every(([, toBlock]) => toBlock <= 27)).toBe(true);
+  });
+
   it('rejects a finalized anchor that changes while the generation is read', async () => {
     await expect(makeEvmAuthorityAdapter({ reorg: true }).adapter
       .getContextGraphAuthoritySnapshot(9n))
@@ -277,6 +321,7 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     const historyEntered = Promise.withResolvers<void>();
     const stalledHistory = new Promise<never>(() => {});
     const makeProvider = () => ({
+      getBlockNumber: async () => 30,
       getBlock: async (tag: string | number) => ({
         number: tag === 'finalized' ? 30 : Number(tag),
         hash: FINALIZED_HASH,

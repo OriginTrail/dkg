@@ -275,7 +275,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
         case 'eth_getBlockByNumber':
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: rpcCall.params[0] === 'finalized' ? BLOCK_HASH : OTHER_BLOCK_HASH,
+            hash: rpcCall.params[0] === 'latest' ? BLOCK_HASH : OTHER_BLOCK_HASH,
           });
           return;
         case 'eth_getCode':
@@ -310,11 +310,11 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
           return;
         case 'eth_getBlockByNumber': {
-          const finalizedLookup = rpcCall.params[0] === 'finalized';
-          if (!finalizedLookup) numberedHeaderReads += 1;
+          const headLookup = rpcCall.params[0] === 'latest';
+          if (!headLookup) numberedHeaderReads += 1;
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: finalizedLookup || numberedHeaderReads !== 2 ? BLOCK_HASH : OTHER_BLOCK_HASH,
+            hash: headLookup || numberedHeaderReads !== 2 ? BLOCK_HASH : OTHER_BLOCK_HASH,
           });
           return;
         }
@@ -371,11 +371,11 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
               sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
               return;
             case 'eth_getBlockByNumber': {
-              const finalizedLookup = rpcCall.params[0] === 'finalized';
-              if (!finalizedLookup) numberedHeaderReads += 1;
+              const headLookup = rpcCall.params[0] === 'latest';
+              if (!headLookup) numberedHeaderReads += 1;
               sendJsonRpcResult(response, rpcCall, {
                 number: '0x7b',
-                hash: finalizedLookup || numberedHeaderReads === 1 ? BLOCK_HASH : postHash,
+                hash: headLookup || numberedHeaderReads === 1 ? BLOCK_HASH : postHash,
               });
               return;
             }
@@ -432,11 +432,11 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
           sendJsonRpcResult(response, rpcCall, CHAIN_QUANTITY);
           return;
         case 'eth_getBlockByNumber': {
-          const finalizedLookup = rpcCall.params[0] === 'finalized';
-          if (!finalizedLookup) numberedHeaderReads += 1;
+          const headLookup = rpcCall.params[0] === 'latest';
+          if (!headLookup) numberedHeaderReads += 1;
           sendJsonRpcResult(response, rpcCall, {
             number: '0x7b',
-            hash: finalizedLookup || numberedHeaderReads <= 2
+            hash: headLookup || numberedHeaderReads <= 2
               ? BLOCK_HASH
               : OTHER_BLOCK_HASH,
           });

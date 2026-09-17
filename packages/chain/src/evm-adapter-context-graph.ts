@@ -32,11 +32,13 @@ import {
   type EvmContextGraphAuthoritySource,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { contextGraphAuthorityIndexIdFromBigInt } from
   './context-graph-authority-index-id.js';
 import {
+  contextGraphAuthorityAnchorUnavailableV1,
   readEvmContextGraphAuthorityIndexRpcV1,
   readEvmContextGraphAuthorityStateV1,
 } from
@@ -1169,8 +1171,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   /**
    * Resolve policy, membership, and their stable event-derived generations at
-   * one finalized block. The event generation (rather than the observation
-   * block) keeps independently booted RFC-64 peers on the same policy digest.
+   * ONE anchor block, selected by `chain.finalityConfirmations` — the node's
+   * single definition of finality (see evm-finality-anchor.ts). The event
+   * generation (rather than the observation block) keeps independently booted
+   * RFC-64 peers on the same policy digest: every field the digest is built
+   * from is event-derived, so peers agree once they have observed the same
+   * events, and never needed to agree on an observation bound.
    */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
@@ -1183,16 +1189,30 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       'getContextGraphAuthoritySnapshot',
       async (provider) => {
         options.signal?.throwIfAborted();
-        const finalized = this.contextGraphAuthorityIndex === undefined
-          ? await provider.getBlock('finalized')
-          : await readEvmContextGraphAuthorityIndexRpcV1(
-              'getContextGraphAuthoritySnapshot finalized head',
-              () => provider.getBlock('finalized'),
-              options.signal,
-            );
-        if (finalized === null || finalized.hash === null) {
-          throw new Error('finalized Context Graph authority block is unavailable');
-        }
+        // One anchor for the whole snapshot, at the operator-configured finality
+        // depth rather than at the endpoint's `finalized` tag. The docstring's
+        // "one finalized block" buys INTRA-snapshot coherence; peer agreement
+        // comes from the event-derived generations below, never from the
+        // observation bound (two peers reading the `finalized` tag at different
+        // wall-clock times never shared a bound either).
+        const finalized = await resolveEvmFinalityAnchorBlockV1({
+          finalityConfirmations: this.finalityConfirmations,
+          readHeadBlockNumber: () => (this.contextGraphAuthorityIndex === undefined
+            ? provider.getBlockNumber()
+            : readEvmContextGraphAuthorityIndexRpcV1(
+                'getContextGraphAuthoritySnapshot chain head',
+                () => provider.getBlockNumber(),
+                options.signal,
+              )),
+          readBlockAt: (anchorBlockNumber) => (this.contextGraphAuthorityIndex === undefined
+            ? provider.getBlock(anchorBlockNumber)
+            : readEvmContextGraphAuthorityIndexRpcV1(
+                `getContextGraphAuthoritySnapshot anchor block ${anchorBlockNumber}`,
+                () => provider.getBlock(anchorBlockNumber),
+                options.signal,
+              )),
+          unavailable: contextGraphAuthorityAnchorUnavailableV1,
+        });
         const finalizedHash = finalized.hash;
         const contract = base.connect(provider) as Contract;
         const filters = contract.filters as unknown as Record<

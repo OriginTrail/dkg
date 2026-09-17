@@ -174,6 +174,11 @@ export interface AuthorityScenarioOptions {
   readonly zeroHashContextGraphs?: number;
   readonly lateContextGraphNameHash?: string;
   readonly finalizedNumber?: number;
+  /**
+   * The head block's own hash. Needed when the head carries events: the page
+   * reducer requires an event AT the page anchor to match the anchor's hash.
+   */
+  readonly finalizedHash?: string;
 }
 
 export interface AuthorityScenarioGate {
@@ -187,8 +192,18 @@ export interface AuthorityScenarioGate {
  */
 export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) {
   let finalizedNumber = options.finalizedNumber ?? 30;
-  let finalizedHash = FINALIZED_HASH;
+  let finalizedHash = options.finalizedHash ?? FINALIZED_HASH;
   let cachedAnchorReplaced = false;
+  /**
+   * The reader now derives its anchor from the HEAD height and
+   * `chain.finalityConfirmations`, so the anchor-resolution read and the
+   * stabilization fence both land on `getBlock(finalizedNumber)`. The head read
+   * that precedes each anchor resolution marks the next read at that height as
+   * the anchor read, which keeps two scenario behaviours exact:
+   *  - `reorg` still means "the anchor was replaced AFTER it was resolved";
+   *  - `holdBlockRead(finalizedNumber)` still gates the STABILIZATION fence.
+   */
+  let pendingAnchorResolutions = 0;
   let replacementAuthorityFork = false;
   let currentReadGate: Readonly<{
     entered: PromiseWithResolvers<void>;
@@ -196,6 +211,10 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
   }> | undefined;
   let blockReadGate: Readonly<{
     tag: string | number;
+    entered: PromiseWithResolvers<void>;
+    release: PromiseWithResolvers<void>;
+  }> | undefined;
+  let headReadGate: Readonly<{
     entered: PromiseWithResolvers<void>;
     release: PromiseWithResolvers<void>;
   }> | undefined;
@@ -399,14 +418,39 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
       }
       return renderCurrentState(current, malformedPublishAuthorityAccountId);
     },
+    /**
+     * The chain head. The reader derives its anchor from this height and
+     * `chain.finalityConfirmations` — it must never ask for the `finalized` tag.
+     */
+    async getBlockNumber() {
+      const gate = headReadGate;
+      if (gate !== undefined) {
+        headReadGate = undefined;
+        gate.entered.resolve();
+        await gate.release.promise;
+      }
+      pendingAnchorResolutions += 1;
+      return finalizedNumber;
+    },
     async getBlock(tag: string | number) {
+      const anchorResolution = tag === finalizedNumber && pendingAnchorResolutions > 0;
+      if (anchorResolution) pendingAnchorResolutions -= 1;
       const gate = blockReadGate;
-      if (gate?.tag === tag) {
+      if (gate?.tag === tag && !anchorResolution) {
         blockReadGate = undefined;
         gate.entered.resolve();
         await gate.release.promise;
       }
-      if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
+      if (typeof tag === 'string') {
+        // The endpoint's `finalized` marker is NOT this node's definition of
+        // finality — that is `chain.finalityConfirmations` applied to the head.
+        // A reader that reaches for a tip TAG here has reintroduced the second
+        // notion of finality this scenario exists to keep out, so the fixture
+        // refuses rather than quietly answering with the head.
+        throw new Error(
+          `Context Graph authority reads must not use the '${tag}' block tag`,
+        );
+      }
       const historicalHash = tag === 30 && cachedAnchorReplaced
         ? REPLACEMENT_FINALIZED_HASH
         : tag === 30
@@ -414,7 +458,7 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
           : finalizedHash;
       return {
         number: Number(tag),
-        hash: options.reorg && tag === finalizedNumber
+        hash: options.reorg && tag === finalizedNumber && !anchorResolution
           ? REPLACEMENT_FINALIZED_HASH
           : historicalHash,
       };
@@ -448,6 +492,13 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       blockReadGate = { tag, entered, release };
+      return { entered: entered.promise, release: release.resolve };
+    },
+    /** Gate the head read that opens every anchor resolution. */
+    holdHeadRead(): AuthorityScenarioGate {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      headReadGate = { entered, release };
       return { entered: entered.promise, release: release.resolve };
     },
     setPublishAuthorityAccountId(value: unknown): void {

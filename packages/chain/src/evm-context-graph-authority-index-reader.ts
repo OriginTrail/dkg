@@ -25,6 +25,7 @@ import {
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
   withOwnedRpcRequestContext,
@@ -54,6 +55,19 @@ export function readEvmContextGraphAuthorityIndexRpcV1<T>(
   return signal === undefined
     ? bounded()
     : withRpcRequestContext({ signal }, bounded);
+}
+
+/**
+ * The single fail-closed error both authority-anchor resolvers raise.
+ *
+ * The message is preserved verbatim as a prefix: it is the contract callers
+ * (and operators reading logs) already recognize. The detail only says which
+ * step of the anchor resolution failed.
+ */
+export function contextGraphAuthorityAnchorUnavailableV1(detail: string): Error {
+  return new Error(
+    `finalized Context Graph authority block is unavailable: ${detail}`,
+  );
 }
 
 /**
@@ -193,6 +207,12 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
     contractLabel: string,
   ) => Promise<Readonly<{ fromBlock: number }>>;
   readonly pageSize: () => number;
+  /**
+   * `chain.finalityConfirmations` — the node's SINGLE definition of finality.
+   * Read per call so an adapter that re-resolves its configuration cannot leave
+   * this reader pinned to a stale depth.
+   */
+  readonly finalityConfirmations: () => number;
 }
 
 function snapshotAuthorityRevisionTargetsV1(
@@ -297,14 +317,27 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return dependencies.readTipProvider(
       operationLabel,
       (provider) => lifecycle.run(async () => {
-        const finalized = await readEvmContextGraphAuthorityIndexRpcV1(
-          `${operationLabel} finalized head`,
-          () => provider.getBlock('finalized'),
-          options.signal,
-        );
-        if (finalized === null || finalized.hash === null) {
-          throw new Error('finalized Context Graph authority block is unavailable');
-        }
+        // Anchor the whole projection at the operator-configured finality depth,
+        // NOT at the endpoint's `finalized` tag. The tag lags head by ~600
+        // blocks / ~20 minutes on Base Sepolia, which made a freshly registered
+        // Context Graph invisible to the authority index for that entire window
+        // — both peers fenced each other's catalog traffic and the replica lost
+        // rows while reporting itself complete. Head and anchor come from the
+        // same provider, so the pair can never be spliced across endpoints.
+        const finalized = await resolveEvmFinalityAnchorBlockV1({
+          finalityConfirmations: dependencies.finalityConfirmations(),
+          readHeadBlockNumber: () => readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} chain head`,
+            () => provider.getBlockNumber(),
+            options.signal,
+          ),
+          readBlockAt: (anchorBlockNumber) => readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} anchor block ${anchorBlockNumber}`,
+            () => provider.getBlock(anchorBlockNumber),
+            options.signal,
+          ),
+          unavailable: contextGraphAuthorityAnchorUnavailableV1,
+        });
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
