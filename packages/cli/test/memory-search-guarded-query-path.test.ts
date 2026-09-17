@@ -22,6 +22,10 @@ function fakeRes() {
   };
   res.setHeader = (k: string, v: string) => { res.headers[k] = v; };
   res.end = (body: string) => { res.body = body; };
+  res.once = (_e: string, _fn: () => void) => res;
+  res.removeListener = (_e: string, _fn: () => void) => res;
+  res.off = (_e: string, _fn: () => void) => res;
+  res.destroyed = false;
   return res;
 }
 
@@ -29,6 +33,10 @@ function fakeReq(method: string, body: unknown) {
   return {
     method,
     headers: {},
+    once: (_e: string, _fn: () => void) => undefined,
+    removeListener: (_e: string, _fn: () => void) => undefined,
+    off: (_e: string, _fn: () => void) => undefined,
+    aborted: false,
     __dkgPrebufferedBody: Buffer.from(JSON.stringify(body)),
   } as any;
 }
@@ -39,6 +47,9 @@ interface QueryCall {
   agentAddress?: string;
   callerAgentAddress?: string;
   contextGraphId?: string;
+  signal?: unknown;
+  priority?: unknown;
+  source?: string;
 }
 
 function buildCtx(opts: {
@@ -56,7 +67,10 @@ function buildCtx(opts: {
     req: fakeReq('POST', opts.body),
     res,
     agent: {
-      canReadContextGraph: async () => true,
+      resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant',
+      }),
+      canUseSharedMemoryForContextGraph: async () => true,
       listLocalAgents: () => (opts.localAgents ?? []).map((agentAddress) => ({ agentAddress })),
       query: async (sparql: string, o: Record<string, any> = {}) => {
         const call: QueryCall = {
@@ -65,6 +79,9 @@ function buildCtx(opts: {
           agentAddress: o.agentAddress,
           callerAgentAddress: o.callerAgentAddress,
           contextGraphId: o.contextGraphId,
+          signal: o.signal,
+          priority: o.priority,
+          source: o.source,
         };
         calls.push(call);
         return { bindings: opts.bindingsFor ? opts.bindingsFor(call) : [] };
@@ -181,6 +198,16 @@ describe('POST /api/memory/search — guarded query path', () => {
     for (const call of calls) {
       // Graph resolution belongs to the engine now; re-introducing a layer
       // prefix here would re-introduce the drift this change removes.
+      //
+      // NB: the absence of `/assertion/` here asserts only that the ROUTE
+      // stops hand-building that prefix — it is NOT a claim that
+      // name-keyed working memory is out of scope. Coverage for
+      // `<cg>/assertion/{addr}/{name}` moved into `resolveViewGraphs`'
+      // working-memory branch (see packages/query/test/query-extra.test.ts,
+      // "prefix scoped to that agent, both families"), because the engine is
+      // what knows the writer-side layout. An earlier revision of this file
+      // asserted the same absence while nothing else covered the family,
+      // which pinned a real coverage regression as the contract.
       expect(call.sparql).not.toContain('_working_memory');
       expect(call.sparql).not.toContain('_shared_memory');
       expect(call.sparql).not.toContain('_verifiable_memory');
@@ -190,6 +217,27 @@ describe('POST /api/memory/search — guarded query path', () => {
     }
     // Identical caller query across views — only the routing differs.
     expect(new Set(calls.map((c) => c.sparql)).size).toBe(1);
+  });
+
+  it('runs every view on the background lane and cancels on caller disconnect', async () => {
+    // Untrusted API reads must not occupy the store slots promotion,
+    // reconciliation and SWM catch-up need, and a disconnected caller must not
+    // leave orphan work behind (issue #1989). `/api/query` gets this from
+    // `createStoreQueryRequestLifecycle`; this route fans out per view, so it
+    // needs the same treatment strictly more.
+    const { ctx, calls } = buildCtx({
+      body: { query: 'anything', contextGraphId: CG, memoryLayers: ['wm', 'swm', 'vm'] },
+      authentication: requestAuthentication({ kind: 'agent', agentAddress: CALLER }),
+    });
+
+    await handleMemoryRoutes(ctx);
+
+    expect(calls.length).toBe(3);
+    for (const call of calls) {
+      expect(call.signal).toBeDefined();
+      expect(call.priority).toBeDefined();
+      expect(call.source).toBe('api.memory.search');
+    }
   });
 
   it('dedupes an entity returned by more than one view', async () => {
@@ -220,7 +268,10 @@ describe('POST /api/memory/search — guarded query path', () => {
       }),
       res,
       agent: {
-        canReadContextGraph: async () => true,
+        resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant',
+      }),
+      canUseSharedMemoryForContextGraph: async () => true,
         listLocalAgents: () => [],
         query: async (_sparql: string, o: Record<string, any> = {}) => {
           if (o.view === 'working-memory') throw new Error('store unavailable');

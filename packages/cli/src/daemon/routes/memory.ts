@@ -343,6 +343,10 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import {
+  API_QUERY_CALLER_DISCONNECTED,
+  createStoreQueryRequestLifecycle,
+} from '../store-query-lifecycle.js';
 import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-assertion-helpers.js';
 
 /**
@@ -1989,6 +1993,15 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
+    // Untrusted, planner-heavy API reads belong on the BACKGROUND admission
+    // lane, and must be cancelled when the HTTP caller goes away — otherwise a
+    // disconnected search leaves orphan store work occupying slots that
+    // promotion, reconciliation and SWM catch-up need (issue #1989).
+    // `/api/query` gets this from `createStoreQueryRequestLifecycle`; this
+    // route now multiplies store work by the number of views, so it needs it
+    // strictly more than `/api/query` does.
+    const searchLifecycle = createStoreQueryRequestLifecycle(req, res, 'api.memory.search');
+    try {
     for (const plan of searchPlans) {
       try {
         const viewResult = await agent.query(searchSparql, {
@@ -1996,7 +2009,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           view: plan.view,
           agentAddress: plan.agentAddress,
           callerAgentAddress,
-          source: 'api.memory.search',
+          signal: searchLifecycle.signal,
+          priority: searchLifecycle.priority,
+          source: searchLifecycle.source,
         });
         for (const binding of viewResult.bindings ?? []) {
           const uri = binding.entity;
@@ -2022,11 +2037,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
             });
           }
         }
-      } catch {
-        // A single view failing is non-fatal, as the single combined query
-        // was before. The read-authority gate above has already run, so this
-        // cannot turn a denial into an empty 200.
+      } catch (err) {
+        // A caller disconnect aborts the WHOLE search — continuing would keep
+        // scheduling store work for a response nobody will read.
+        if ((err as { code?: string } | undefined)?.code === API_QUERY_CALLER_DISCONNECTED) throw err;
+        // Otherwise a single view failing stays non-fatal, as the single
+        // combined query was before.
+        //
+        // Note on what this can and cannot mask: the read-authority gate near
+        // the top of this handler has already run, so a caller with no
+        // authority for the CG got a 403 and never reached here. What CAN
+        // still produce an empty layer without an error is `DKGAgent.query`'s
+        // own per-view checks — in particular `canUseSharedMemoryForContextGraph`
+        // for the `shared-working-memory` view, which additionally requires
+        // confirmed SWM metadata. That is a deliberate tightening (the
+        // replaced direct store read applied neither check), but it means an
+        // `swm` layer can come back empty for authorization reasons rather
+        // than for lack of matches.
       }
+    }
+    } finally {
+      searchLifecycle.dispose();
     }
 
     // Sort: vector-matched results first (by similarity), then SPARQL-only

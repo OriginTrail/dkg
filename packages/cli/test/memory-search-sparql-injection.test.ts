@@ -12,6 +12,10 @@ function fakeRes() {
   };
   res.setHeader = (k: string, v: string) => { res.headers[k] = v; };
   res.end = (body: string) => { res.body = body; };
+  res.once = (_e: string, _fn: () => void) => res;
+  res.removeListener = (_e: string, _fn: () => void) => res;
+  res.off = (_e: string, _fn: () => void) => res;
+  res.destroyed = false;
   return res;
 }
 
@@ -19,6 +23,10 @@ function fakeReq(method: string, body: unknown) {
   return {
     method,
     headers: {},
+    once: (_e: string, _fn: () => void) => undefined,
+    removeListener: (_e: string, _fn: () => void) => undefined,
+    off: (_e: string, _fn: () => void) => undefined,
+    aborted: false,
     __dkgPrebufferedBody: Buffer.from(JSON.stringify(body)),
   } as any;
 }

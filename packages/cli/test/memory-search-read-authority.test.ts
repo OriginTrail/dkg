@@ -27,6 +27,10 @@ function fakeRes() {
   };
   res.setHeader = (k: string, v: string) => { res.headers[k] = v; };
   res.end = (body: string) => { res.body = body; };
+  res.once = (_e: string, _fn: () => void) => res;
+  res.removeListener = (_e: string, _fn: () => void) => res;
+  res.off = (_e: string, _fn: () => void) => res;
+  res.destroyed = false;
   return res;
 }
 
@@ -34,6 +38,10 @@ function fakeReq(method: string, body: unknown) {
   return {
     method,
     headers: {},
+    once: (_e: string, _fn: () => void) => undefined,
+    removeListener: (_e: string, _fn: () => void) => undefined,
+    off: (_e: string, _fn: () => void) => undefined,
+    aborted: false,
     __dkgPrebufferedBody: Buffer.from(JSON.stringify(body)),
   } as any;
 }
@@ -55,6 +63,8 @@ interface Probe {
   vectorSearched: boolean;
   /** The SPARQL the route built, if it got that far. */
   sparql: string;
+  /** Memory-layer views the route actually fanned out to. */
+  readonly views: string[];
 }
 
 function buildCtx(opts: {
@@ -67,6 +77,7 @@ function buildCtx(opts: {
   const url = new URL('http://127.0.0.1/api/memory/search');
   const probe: Probe = {
     authorityChecks: [], swmChecks: [], storeQueried: false, vectorSearched: false, sparql: '',
+    views: [],
   };
 
   const agent = {
@@ -86,8 +97,10 @@ function buildCtx(opts: {
     },
     // The route fans the text search out per memory-layer view through the
     // guarded `DKGAgent.query` path.
-    query: async () => {
+    query: async (sparql: string, o: Record<string, any> = {}) => {
       probe.storeQueried = true;
+      probe.sparql = sparql;
+      if (o.view) probe.views.push(o.view);
       return {
         bindings: [{ entity: 'urn:secret', name: 'secret-entity', desc: 'secret-desc' }],
       };
@@ -338,9 +351,9 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(probe.swmChecks).toEqual([
       { contextGraphId: 'cg1', callerAgentAddress: '0x123' },
     ]);
-    // The wm layer still runs; only the swm graph prefix is gone.
-    expect(probe.sparql).toContain('_working_memory');
-    expect(probe.sparql).not.toContain('_shared_memory');
+    // The wm layer still runs; only the shared-memory view is gone.
+    expect(probe.views).toContain('working-memory');
+    expect(probe.views).not.toContain('shared-working-memory');
   });
 
   it('keeps the swm layer when the shared-memory gate allows it', async () => {
@@ -353,7 +366,7 @@ describe('POST /api/memory/search — context-graph read authority', () => {
 
     await handleMemoryRoutes(ctx);
 
-    expect(probe.sparql).toContain('_shared_memory');
+    expect(probe.views).toEqual(['shared-working-memory']);
   });
 
   it('does not consult the shared-memory gate for a node operator', async () => {
@@ -367,6 +380,6 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     await handleMemoryRoutes(ctx);
 
     expect(probe.swmChecks).toEqual([]);
-    expect(probe.sparql).toContain('_shared_memory');
+    expect(probe.views).toEqual(['shared-working-memory']);
   });
 });
