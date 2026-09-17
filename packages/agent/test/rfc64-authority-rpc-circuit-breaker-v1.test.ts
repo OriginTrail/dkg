@@ -118,8 +118,9 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     })).rejects.toBeInstanceOf(ChainRpcTransportError);
     now = 100;
 
-    const recovered = breaker.run(undefined, async () => {
+    const recovered = breaker.run(undefined, async (_signal, evidence) => {
       calls += 1;
+      evidence.markRpcAttempt();
       return 'recovered';
     });
     const next = breaker.run(undefined, async () => {
@@ -130,6 +131,37 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     await expect(recovered).resolves.toBe('recovered');
     await expect(next).resolves.toBe('next-graph');
     expect(calls).toBe(3);
+    expect(breaker.snapshot()).toEqual({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+      retryAtMs: null,
+    });
+  });
+
+  it('does not let a local result close a half-open provider circuit', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    now = 100;
+
+    await expect(breaker.run(undefined, async () => 'local-only'))
+      .resolves.toBe('local-only');
+    expect(breaker.snapshot()).toEqual({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+      retryAtMs: null,
+    });
+
+    await expect(breaker.run(undefined, async (_signal, evidence) => {
+      evidence.markRpcAttempt();
+      return 'provider-recovered';
+    })).resolves.toBe('provider-recovered');
     expect(breaker.snapshot()).toEqual({
       state: 'closed',
       consecutiveExhaustions: 0,
