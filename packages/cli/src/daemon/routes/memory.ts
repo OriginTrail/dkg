@@ -657,6 +657,21 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         return true;
       }
     };
+    const usesSelectedPublicCatalogRecovery = async (cgId: string): Promise<boolean> => {
+      try {
+        if (await agent.isPrivateContextGraph(cgId)) return false;
+        const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(cgId);
+        return authority.active
+          && authority.mode === 'catalog'
+          && authority.reconciliationLane === 'catalog-apply'
+          && !authority.killSwitchActive;
+      } catch {
+        // Older/compatibility agents do not expose RFC-64 receiver authority.
+        // Preserve their ordinary catch-up behavior rather than guessing that
+        // an arbitrary public graph belongs to the selected catalog lane.
+        return false;
+      }
+    };
     const unsupportedPeersForContextGraph = async (cgId: string, peers: readonly string[]): Promise<Set<string>> => {
       const unsupported = new Set<string>();
       await Promise.all(peers.map(async (peerId) => {
@@ -725,6 +740,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     type PerCgLeg = {
       contextGraphId: string;
       perPeer: PerPeerLeg[];
+      /** True when RFC-64 owns this public graph's complete ROOT recovery. */
+      selectedPublicCatalog?: boolean;
       /** Graph-owner outcome used for terminal request classification. */
       durableAttempts?: DurableCatchupAttempt[];
       insertedTriples: number;
@@ -734,6 +751,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     for (const cgId of cgIds) {
       const canUseSharedMemory = includeSharedMemory
         && await canUseSharedMemoryForContextGraph(cgId);
+      const selectedPublicCatalog = canUseSharedMemory
+        && await usesSelectedPublicCatalogRecovery(cgId);
       if (!canUseSharedMemory && !includeDurable) {
         perCgLegs.push({
           contextGraphId: cgId,
@@ -796,13 +815,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           let durableError: string | undefined;
           if (swmSelected.has(candidate)) {
             try {
-              const syncResult = await withTimeout(
-                typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
-                  ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
-                  : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
+              const syncExecution = await withTimeout(
+                selectedPublicCatalog
+                  ? agent.syncSelectedSharedMemoryFromPeerDetailed(candidate, [cgId], {
+                      selectedSwmPriority: true,
+                      requestedScope: {
+                        kind: 'selected-public',
+                        targets: [{ contextGraphId: cgId, lane: 'selected-public' }],
+                      },
+                      source: 'catchup-foreground',
+                    })
+                  : typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
+                    ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
+                    : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
                 PER_PEER_SWM_BUDGET_MS,
                 `SWM catchup from ${candidate} for ${cgId}`,
-              ) as SwmCatchupDetailedResult;
+              );
+              // Selected recovery has a typed terminal wrapper; the route's
+              // existing accounting consumes the underlying SWM diagnostics.
+              const syncResult = (selectedPublicCatalog
+                ? (syncExecution as Awaited<ReturnType<typeof agent.syncSelectedSharedMemoryFromPeerDetailed>>).shared
+                : syncExecution) as SwmCatchupDetailedResult;
               swm = Number(syncResult.insertedTriples ?? 0);
               recordSwmCatchupPeerOutcome(
                 cgId,
@@ -938,6 +971,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       perCgLegs.push({
         contextGraphId: cgId,
         perPeer,
+        ...(selectedPublicCatalog ? { selectedPublicCatalog: true } : {}),
         ...(durableAttempts ? { durableAttempts } : {}),
         insertedTriples: perPeer.reduce((sum, p) => sum + p.insertedTriples, 0),
         durableInsertedTriples: coordinatedDurableInsertedTriples
@@ -974,7 +1008,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const hostCatchup: HostCatchupLeg[] = [];
     if (hostCatchupOpted && hostCatchupSupported) {
       for (const cg of perCgLegs) {
-        if (cg.insertedTriples > 0) continue;
+        if (cg.insertedTriples > 0 || cg.selectedPublicCatalog === true) continue;
         try {
           const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cg.contextGraphId, {
             peers: peerIdParam ? [peerIdParam] : undefined,

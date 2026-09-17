@@ -147,6 +147,34 @@ function verifiedEvidence(
   };
 }
 
+function recoveryEntry(
+  overrides: Partial<FinalizationRecoveryEntry> = {},
+): FinalizationRecoveryEntry {
+  const rawMessage = encodeFinalizationMessage(message());
+  return {
+    key: 'recovery-entry',
+    state: 'REORGED',
+    chainId: 'base:84532',
+    contextGraphId: CONTEXT_GRAPH,
+    publisherUpgradePending: false,
+    ual: UAL,
+    txHash: message().txHash,
+    assertionVersion: '1',
+    merkleRoot: `0x${'00'.repeat(32)}`,
+    kaId: PACKED_KA_ID.toString(),
+    batchId: PACKED_KA_ID.toString(),
+    targetContextGraphId: '42',
+    envelopeSha256: createHash('sha256').update(rawMessage).digest('hex'),
+    rawMessage,
+    generation: 0,
+    attemptCount: 0,
+    failureStreak: 0,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
 describe('graph-scoped finalization recovery admission', () => {
   it('classifies receipt placement independently of the recovery generation', () => {
     const candidate = parsedMessage();
@@ -212,10 +240,10 @@ describe('graph-scoped finalization recovery admission', () => {
 
   it('retries publisher authority on a promoted row and reports store refusal', async () => {
     const prepared = { publisherPeerId: '12D3KooWPublisher' };
-    const promoted = {
-      state: 'REORGED',
+    const promoted = recoveryEntry({
+      key: 'promoted-entry',
       generation: 7,
-    } as FinalizationRecoveryEntry;
+    });
     const recordPendingTrustedPublisher = vi.fn(async () => false);
     const recordTrustedPublisher = vi.fn(async () => false);
     const get = vi.fn(async () => promoted);
@@ -229,16 +257,12 @@ describe('graph-scoped finalization recovery admission', () => {
       recordPendingTrustedPublisher,
       recordTrustedPublisher,
       get,
-    } as unknown as FinalizationRecoveryStore;
+    };
 
     await expect(observer.observe({
       store,
-      identity: {
-        entryKey: 'promoted-entry',
-        generation: 'pending',
-        sourcePeerId: prepared.publisherPeerId,
-      },
-      ual: UAL,
+      target: { kind: 'pending', key: 'promoted-entry', ual: UAL },
+      sourcePeerId: prepared.publisherPeerId,
       prepareInput: undefined,
     })).resolves.toEqual({ prepared });
 

@@ -831,6 +831,10 @@ describe('startManagedOxigraph (real download + real server)', () => {
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
+            managedRecovery: {
+              readState: expect.any(Function),
+              recover: expect.any(Function),
+            },
           },
         });
         const activityReports: number[] = [];

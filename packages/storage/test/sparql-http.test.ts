@@ -786,6 +786,35 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it.each(['readState', 'recover'] as const)(
+    'keeps a managed recovery capability without %s inert',
+    async (missing) => {
+      const originalFetch = globalThis.fetch;
+      const recover = vi.fn();
+      const readState = vi.fn(() => ({ recovering: true, generation: 1 }));
+      globalThis.fetch = (async () => new Response(
+        '{"head":{"vars":["s"]},"results":{"bindings":[The SPARQL operation has been cancelled',
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )) as typeof fetch;
+      try {
+        const managed = createManagedOxigraphSparqlStoreV1({
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          managedRecovery: (missing === 'readState' ? { recover } : { readState }) as never,
+        });
+        await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+          name: 'TimeoutError',
+          code: 'STORE_OPERATION_TIMEOUT',
+          backend: 'oxigraph-server',
+          operation: 'query',
+        });
+        expect(readState).not.toHaveBeenCalled();
+        expect(recover).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+
   it('preserves managed Oxigraph timeout semantics behind GraphSetIndexStore', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response(

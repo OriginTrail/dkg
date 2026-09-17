@@ -39,10 +39,10 @@ export function collectEvmErrorText(err: unknown): string {
     if (typeof value !== 'object') return;
     seen.add(value);
     const record = value as Record<string, unknown>;
-    for (const key of ['message', 'shortMessage', 'reason', 'body']) {
+    for (const key of ['message', 'shortMessage', 'reason', 'body', 'responseBody']) {
       if (typeof record[key] === 'string') parts.push(record[key]);
     }
-    for (const key of ['error', 'info', 'cause', 'data']) {
+    for (const key of ['error', 'info', 'cause', 'data', 'response']) {
       visit(record[key], depth + 1);
     }
   };

@@ -197,6 +197,37 @@ export interface SparqlHttpSlowQueryEvent {
   queryBytes: number;
 }
 
+export interface SparqlHttpRecoveryState {
+  recovering: boolean;
+  generation: number;
+}
+
+/** Compatibility shape for the runtime-only managed recovery capability. */
+export interface SparqlHttpManagedRecoveryV1 {
+  readonly readState: () => SparqlHttpRecoveryState;
+  readonly recover: (operation: StoreOperation) => void;
+}
+
+function snapshotManagedRecoveryCapability(
+  input: SparqlHttpManagedRecoveryV1 | undefined,
+): SparqlHttpManagedRecoveryV1 | undefined {
+  if (input === undefined || input === null || typeof input !== 'object') return undefined;
+  const readState = Object.getOwnPropertyDescriptor(input, 'readState');
+  const recover = Object.getOwnPropertyDescriptor(input, 'recover');
+  if (
+    readState === undefined
+    || recover === undefined
+    || !Object.prototype.hasOwnProperty.call(readState, 'value')
+    || !Object.prototype.hasOwnProperty.call(recover, 'value')
+    || typeof readState.value !== 'function'
+    || typeof recover.value !== 'function'
+  ) return undefined;
+  return Object.freeze({
+    readState: readState.value as () => SparqlHttpRecoveryState,
+    recover: recover.value as (operation: StoreOperation) => void,
+  });
+}
+
 export type SparqlHttpConsistencyProfile =
   | 'best-effort'
   | 'atomic-update'
@@ -238,6 +269,11 @@ export interface SparqlHttpStoreOptions {
   getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
   /** @deprecated See onClientTimeout. */
   onActivityChange?: (activeOperations: number) => void;
+  /**
+   * Runtime-only compatibility capability for a DKG-managed Oxigraph
+   * supervisor. Generic stores cannot use it to grant managed authority.
+   */
+  managedRecovery?: SparqlHttpManagedRecoveryV1;
   /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
@@ -288,7 +324,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
   private readonly managedOxigraph: boolean;
-  private readonly onClientTimeout?: (operation: string) => void;
+  private readonly onClientTimeout?: (operation: StoreOperation) => void;
   private readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
   private managedActivityLease: ManagedOxigraphRuntimeActivityLeaseV1 | null = null;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
@@ -326,6 +362,9 @@ export class SparqlHttpStore implements TripleStore {
       constructionAuthority,
     );
     const managedRuntimeHooks = getManagedOxigraphRuntimeHooksV1(constructionAuthority);
+    const managedRecovery = this.managedOxigraph
+      ? snapshotManagedRecoveryCapability(options.managedRecovery)
+      : undefined;
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
@@ -333,8 +372,11 @@ export class SparqlHttpStore implements TripleStore {
     // hooks take precedence only when authenticated authority was supplied;
     // the ordinary adapter must not lose its callback merely because daemon
     // hooks now travel through the opaque construction context.
-    this.onClientTimeout = managedRuntimeHooks?.onClientTimeout ?? options.onClientTimeout;
-    this.getRecoveryState = managedRuntimeHooks?.getRecoveryState;
+    this.onClientTimeout = managedRuntimeHooks?.onClientTimeout
+      ?? managedRecovery?.recover
+      ?? options.onClientTimeout;
+    this.getRecoveryState = managedRuntimeHooks?.getRecoveryState
+      ?? managedRecovery?.readState;
     this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
     this.workLifecycle = new AbortableStoreWorkLifecycle({
       onActivityChange: (activeOperations) => {
@@ -357,10 +399,13 @@ export class SparqlHttpStore implements TripleStore {
     );
     this.onSlowQuery = options.onSlowQuery;
     this.managedAbandonedWorkRecovery = new ManagedReadRecoveryCoordinatorV1({
-      enabled: this.managedOxigraph,
       now: this.now,
-      readRecoveryState: () => this.readRecoveryState(),
-      recover: (operation) => this.notifyClientTimeout(operation),
+      capability: this.managedOxigraph && this.getRecoveryState && this.onClientTimeout
+        ? {
+            readState: this.getRecoveryState,
+            recover: this.onClientTimeout,
+          }
+        : undefined,
       onPendingChange: (pending) => {
         this.retainedManagedWork = pending ? 1 : 0;
         this.reportManagedRuntimeActivity(managedRuntimeHooks);

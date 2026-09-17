@@ -420,23 +420,32 @@ export async function startManagedOxigraph(
     io: opts.serverIo,
   });
 
+  const readRecoveryState = () => handle.getRecoveryState();
+  const recoverTimedOutOperation = (operation: string) => {
+    handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
+  };
   const runtimeStoreConfig: TripleStoreConfig = {
     backend: 'sparql-http',
     options: {
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
+      // Compatibility with the runtime capability shape already accepted on
+      // testnet-canary. The authenticated context below remains authoritative
+      // and additionally carries the activity lease.
+      managedRecovery: {
+        readState: readRecoveryState,
+        recover: recoverTimedOutOperation,
+      },
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
     runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
   const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
-    getRecoveryState: () => handle.getRecoveryState(),
+    getRecoveryState: readRecoveryState,
     registerActivity: () => handle.registerStoreActivity(),
-    onClientTimeout: (operation: string) => {
-      handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
-    },
+    onClientTimeout: recoverTimedOutOperation,
   });
 
   return {
