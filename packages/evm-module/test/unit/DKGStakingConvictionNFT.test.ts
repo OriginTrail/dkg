@@ -14,6 +14,7 @@ import {
   ParametersStorage,
   Profile,
   RandomSamplingStorage,
+  StakingRewardSettlement,
   StakingStorage,
   StakingV10,
   Token,
@@ -1796,12 +1797,11 @@ describe('@unit DKGStakingConvictionNFT', () => {
     // Bounds check — rewardTotal cast guard
     // -----------------------------------------------------------------
 
-    it('reverts RewardOverflow when accumulated reward exceeds uint96 max', async () => {
+    it('rejects a score-derived delegator liability above the node net reward', async () => {
       const { identityId } = await createProfile();
-      // We need to push `rewardTotal` past `type(uint96).max` (~7.92e28)
-      // through the TRAC formula. With a massive epoch pool and the
-      // delegator being the only staker on the only node, the full pool
-      // flows to the delegator. We need epochPool > 2^96.
+      // Deliberately inject an impossible RSS state where the delegator score
+      // exceeds its node score. The receipt ledger must reject the resulting
+      // liability before it can compound against somebody else's principal.
       //
       // amount = 1e22 (10000 TRAC), effStake = 6e22 at 6x
       // nodeScore = allNodesScore = 100e18
@@ -1809,8 +1809,6 @@ describe('@unit DKGStakingConvictionNFT', () => {
       //   => delegatorScore18 = effStake * scorePerStake36 / 1e18 = 100e18
       //   => scorePerStake36 = 100e18 * 1e18 / 6e22 = 1e18 * 100 / 6e4
       //      = 1e18 / 600 ~ 1.666e15 (but doesn't need to be exact)
-      // With delegatorScore = nodeScore, reward = netNodeRewards = epochPool.
-      // Set epochPool = 1e29 > 2^96 (~7.92e28) — overflow.
       const amount = hre.ethers.parseEther('10000'); // 1e22
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
@@ -1820,15 +1818,8 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       const nodeScore18 = hre.ethers.parseEther('100'); // 1e20
       const allNodesScore18 = nodeScore18;
-      // Make delegatorScore18 = nodeScore18 so reward = epochPool exactly.
-      // delegatorScore18 = effStake * scorePerStake36 / 1e18
-      // effStake = 6e22. We need scorePerStake36 = nodeScore18 * 1e18 / effStake
-      //   = 1e20 * 1e18 / 6e22 = 1e38 / 6e22 = 1e16 / 6 ~ 1.666e15
-      // Use a round value that gets close enough to overflow.
+      // This produces a delegator score far above nodeScore18.
       const scorePerStake36 = 10n ** 25n;
-      // epochPool must be huge to force overflow. The epoch pool is uint96,
-      // but addTokensToEpochRange takes uint96. So we need to set it near
-      // the uint96 max. 2^96 - 1 ~ 7.92e28.
       const hugePool = (1n << 96n) - 1n; // max uint96
       await injectEpochRewardState(
         creationEpoch,
@@ -1839,9 +1830,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
         hugePool,
       );
 
-      await expect(
-        NFT.connect(accounts[0]).claim(1),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'RewardOverflow');
+      const settlement = await hre.ethers.getContract<StakingRewardSettlement>(
+        'StakingRewardSettlement',
+      );
+      await expect(NFT.connect(accounts[0]).claim(1)).to.be.revertedWithCustomError(
+        settlement,
+        'DelegatorRewardInvariant',
+      );
     });
 
     // -----------------------------------------------------------------
@@ -2613,13 +2608,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
   });
 
   describe('version()', () => {
-    it('wrapper reverts to 10.0.3 (no redeploy); StakingV10 bumps to 10.0.6 (late settlement)', async () => {
+    it('wrapper reverts to 10.0.3 (no redeploy); StakingV10 bumps to 10.0.7 (late settlement)', async () => {
       // Permissionless claim now lives on StakingV10.claimFor, so the ERC-721
       // wrapper is unchanged from 10.0.0 (10.0.3) — it does NOT get redeployed
       // and existing position NFTs are never orphaned. StakingV10 carries the
-      // new entry point (+ the #1297 boost-expiry and late-settlement fixes) at 10.0.6.
+      // new entry point (+ the #1297 boost-expiry and late-settlement fixes) at 10.0.7.
       expect(await NFT.version()).to.equal('10.0.3');
-      expect(await StakingV10Contract.version()).to.equal('10.0.6');
+      expect(await StakingV10Contract.version()).to.equal('10.0.7');
     });
   });
 
