@@ -173,6 +173,7 @@ export interface AuthorityScenarioOptions {
   readonly secondContextGraph?: boolean;
   readonly zeroHashContextGraphs?: number;
   readonly lateContextGraphNameHash?: string;
+  readonly finalizedNumber?: number;
 }
 
 export interface AuthorityScenarioGate {
@@ -185,7 +186,7 @@ export interface AuthorityScenarioGate {
  * Renderers below deliberately differ only at their RPC boundary shape.
  */
 export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) {
-  let finalizedNumber = 30;
+  let finalizedNumber = options.finalizedNumber ?? 30;
   let finalizedHash = FINALIZED_HASH;
   let cachedAnchorReplaced = false;
   let replacementAuthorityFork = false;

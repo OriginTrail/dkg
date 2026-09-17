@@ -65,6 +65,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DKGAgent,
   Rfc64CatalogReconciliationTerminalErrorV1,
+  type ContextGraphMembershipStore,
+  type LocalContextGraphOriginRecord,
 } from '../src/index.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
@@ -141,17 +143,16 @@ import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
 const RFC64_NATIVE_RECONCILE_HEAD_IMPLEMENTATION_V1 =
   Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype.reconcileHead;
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
+const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const REPLAY_AUTHOR_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
-const CONTEXT_GRAPH_ID =
-  '0x1111111111111111111111111111111111111111/native-wiring' as ContextGraphIdV1;
+const CONTEXT_GRAPH_ID = `${AUTHOR}/native-wiring` as ContextGraphIdV1;
 const FIXED_HEAD_ISSUED_AT = '1773900000000' as TimestampMsV1;
 const DELEGATION_EFFECTIVE_AT = '1773899999999' as TimestampMsV1;
 const DELEGATION_EXPIRES_AT = '1773900000001' as TimestampMsV1;
 const MULTI_DELEGATION_EXPIRES_AT = '1774000000000' as TimestampMsV1;
 const SUCCESSOR_ISSUED_AT = '1773900001000' as TimestampMsV1;
 const SECOND_SUCCESSOR_ISSUED_AT = '1773900002000' as TimestampMsV1;
-const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
 const KA_STORAGE = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const CONTEXT_GRAPH_STORAGE =
@@ -288,8 +289,10 @@ interface NativeAgentStartOptionsV1 {
   readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
+  readonly sharedMemoryTtlMs?: number;
   readonly networkIdentityChainId?: NetworkIdV1;
   readonly syncContextGraphs?: readonly string[];
+  readonly contextGraphMembershipStore?: ContextGraphMembershipStore;
   /** Normal daemon identity input; intentionally independent of RFC-64 controls. */
   readonly operationalPrivateKey?: string;
   readonly omitLegacyDeployment?: boolean;
@@ -310,8 +313,10 @@ async function startNativeAgentWithOptions(
     catalogActivation,
     activation,
     persistentStorePath,
+    sharedMemoryTtlMs,
     beforeStart,
     syncContextGraphs,
+    contextGraphMembershipStore,
     operationalPrivateKey,
     omitLegacyDeployment = false,
     networkIdentityChainId = activation === undefined && catalogActivation === undefined
@@ -329,6 +334,7 @@ async function startNativeAgentWithOptions(
     bootstrapPeers: [],
     nodeRole: 'edge',
     store: new OxigraphStore(persistentStorePath),
+    ...(sharedMemoryTtlMs === undefined ? {} : { sharedMemoryTtlMs }),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     syncOnConnectEnabled: false,
@@ -343,6 +349,7 @@ async function startNativeAgentWithOptions(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
         : []),
+    contextGraphMembershipStore,
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
     ...(networkIdentityChainId === undefined ? {} : {
       networkIdentity: {
@@ -3421,6 +3428,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           reconciliationLane: 'catalog-apply',
         }),
         resolveRecoveryConfig: () => normalizedSnapshot,
+        resolveDynamicallyAcceptedPolicy: () => null,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
@@ -5837,7 +5845,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   it('keeps status incomplete until a replayed successor is durably applied', async () => {
     const [provider, receiver] = await Promise.all([
       startNativeAgent('replay-completion-provider'),
-      startNativeAgent('replay-completion-receiver'),
+      startNativeAgentWithOptions({
+        name: 'replay-completion-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     await receiver.createContextGraph({
       id: CONTEXT_GRAPH_ID,
@@ -5950,7 +5961,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   it('keeps multi-author replay applying after one promised head lands', async () => {
     const [provider, receiver] = await Promise.all([
       startNativeAgent('multi-head-replay-provider'),
-      startNativeAgent('multi-head-replay-receiver'),
+      startNativeAgentWithOptions({
+        name: 'multi-head-replay-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     await receiver.createContextGraph({
       id: CONTEXT_GRAPH_ID,
@@ -6111,7 +6125,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const [author, provider, receiver] = await Promise.all([
       startNativeAgent('status-target-author'),
       startNativeAgent('status-target-provider'),
-      startNativeAgent('status-target-receiver'),
+      startNativeAgentWithOptions({
+        name: 'status-target-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     await receiver.createContextGraph({
       id: CONTEXT_GRAPH_ID,
@@ -6512,7 +6529,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const [author, provider, receiver] = await Promise.all([
       startNativeAgent('late-activation-author'),
       startNativeAgent('late-activation-provider'),
-      startNativeAgent('late-activation-receiver'),
+      startNativeAgentWithOptions({
+        name: 'late-activation-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     provider.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -6584,6 +6604,20 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-legacy-reconcile-'));
     tempDirs.push(dataDir);
     const persistentStorePath = join(dataDir, 'oxigraph');
+    const originRecords: LocalContextGraphOriginRecord[] = [];
+    const contextGraphMembershipStore: ContextGraphMembershipStore = {
+      loadAll: async () => [],
+      upsert: async () => undefined,
+      delete: async () => undefined,
+      localOrigins: {
+        loadLocalOrigins: async () => originRecords.map((record) => ({ ...record })),
+        recordLocalOrigin: async (record) => {
+          if (!originRecords.some(({ contextGraphId }) => contextGraphId === record.contextGraphId)) {
+            originRecords.push({ ...record });
+          }
+        },
+      },
+    };
     const assertionCoordinate = 'legacy-boundary-republish';
     const shareOperationId = 'legacy-boundary-share';
     let seeded!: Awaited<ReturnType<typeof seedSignedSwmWorkspaceV1>>;
@@ -6591,6 +6625,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       name: 'legacy-boundary-author',
       existingDataDir: dataDir,
       persistentStorePath,
+      sharedMemoryTtlMs: 0,
+      operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      contextGraphMembershipStore,
       beforeStart: async (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -6647,6 +6684,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
+      sharedMemoryTtlMs: 0,
+      contextGraphMembershipStore,
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -6686,6 +6725,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
+      sharedMemoryTtlMs: 0,
+      contextGraphMembershipStore,
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,

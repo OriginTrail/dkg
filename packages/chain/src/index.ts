@@ -198,6 +198,11 @@ export {
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
+  createRpcReadDescriptor,
+  type RpcReadDescriptor,
+  type RpcReadDescriptorInput,
+} from './rpc-failover-client.js';
+export {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
   isChainRpcTransportError,
@@ -208,6 +213,11 @@ export {
   type RpcEndpointExhaustionKind,
   type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
+export {
+  classifyContextGraphRegistrationFailure,
+  markContextGraphRegistrationNotSubmitted,
+  type ContextGraphRegistrationFailureDisposition,
+} from './context-graph-registration-error.js';
 export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.
   // Test-only hook exported so cross-package route tests can reset the exact

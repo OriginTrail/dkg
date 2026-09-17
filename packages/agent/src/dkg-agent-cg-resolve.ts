@@ -1564,6 +1564,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       allowCachedRoster?: boolean;
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /** Query authority proved exact accepted RFC-64 finalized absence. */
+      allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
@@ -1571,6 +1573,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       {
         signal: options.signal,
         registrationTimeoutMs: options.registrationTimeoutMs,
+        allowAcceptedRfc64FinalizedAbsence:
+          options.allowAcceptedRfc64FinalizedAbsence,
       },
     );
     if (registration.kind !== 'registered') return registration;

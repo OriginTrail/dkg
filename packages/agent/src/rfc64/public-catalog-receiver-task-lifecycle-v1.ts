@@ -14,6 +14,12 @@ export type Rfc64ReceiverSchedulingClassV1 =
 export interface Rfc64ReceiverSchedulingPolicyV1 {
   readonly schedulingClass: Rfc64ReceiverSchedulingClassV1;
   readonly placement: 'tail' | 'before-same-scope';
+  /**
+   * Version dominance over strictly older AMBIENT work for the same scope, in
+   * two halves: on admission, abort the active task holding the scope lock;
+   * after this task's durable success, retire the queued heads.
+   */
+  readonly preemptsOlderActiveAmbient: boolean;
   readonly retiresOlderAmbientAfterDurableSuccess: boolean;
 }
 
@@ -21,16 +27,19 @@ const RFC64_RECEIVER_SCHEDULING_POLICIES_V1 = Object.freeze({
   ambient: Object.freeze({
     schedulingClass: 'ambient',
     placement: 'tail',
+    preemptsOlderActiveAmbient: false,
     retiresOlderAmbientAfterDurableSuccess: false,
   }),
   isolated: Object.freeze({
     schedulingClass: 'isolated',
     placement: 'tail',
+    preemptsOlderActiveAmbient: false,
     retiresOlderAmbientAfterDurableSuccess: false,
   }),
   'verified-current-head': Object.freeze({
     schedulingClass: 'verified-current-head',
     placement: 'before-same-scope',
+    preemptsOlderActiveAmbient: true,
     retiresOlderAmbientAfterDurableSuccess: true,
   }),
 } satisfies Record<Rfc64ReceiverSchedulingClassV1, Rfc64ReceiverSchedulingPolicyV1>);
@@ -71,7 +80,8 @@ export class Rfc64ReceiverTaskLifecycleV1<
   readonly #pendingByKey = new Map<string, TTask>();
   readonly #deferred = new Set<TTask>();
   readonly #active = new Set<TTask>();
-  readonly #activeScopeKeys = new Set<string>();
+  /** One semantic writer per scope: the task currently holding that scope's lock. */
+  readonly #activeByScopeKey = new Map<string, TTask>();
   readonly #deferredTimers = new Map<TTask, ReturnType<typeof setTimeout>>();
 
   constructor(
@@ -146,7 +156,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
   }
 
   takeNextRunnable(): TTask | undefined {
-    const index = this.#queue.findIndex((task) => !this.#activeScopeKeys.has(task.scopeKey));
+    const index = this.#queue.findIndex((task) => !this.#activeByScopeKey.has(task.scopeKey));
     if (index < 0) return undefined;
     const [task] = this.#queue.splice(index, 1);
     return task;
@@ -154,14 +164,21 @@ export class Rfc64ReceiverTaskLifecycleV1<
 
   begin(task: TTask): void {
     this.#active.add(task);
-    this.#activeScopeKeys.add(task.scopeKey);
+    this.#activeByScopeKey.set(task.scopeKey, task);
     task.running = true;
   }
 
   finishRunning(task: TTask): void {
     task.running = false;
     this.#active.delete(task);
-    this.#activeScopeKeys.delete(task.scopeKey);
+    if (this.#activeByScopeKey.get(task.scopeKey) === task) {
+      this.#activeByScopeKey.delete(task.scopeKey);
+    }
+  }
+
+  /** The task currently holding one scope's semantic writer lock, if any. */
+  activeForScope(scopeKey: string): TTask | undefined {
+    return this.#activeByScopeKey.get(scopeKey);
   }
 
   cancelContextGraph(

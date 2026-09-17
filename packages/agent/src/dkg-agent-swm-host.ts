@@ -97,7 +97,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -540,6 +540,10 @@ type VmReconcileSelectedTarget = VmReconcileTargetBase & {
   selectedState: VmReconcileSelectedCursorState;
 };
 type VmReconcileTarget = VmReconcileSubscriptionTarget | VmReconcileSelectedTarget;
+type FinalizedVmReconcileBinding =
+  | { kind: 'legacy-current' }
+  | { kind: 'absent' }
+  | { kind: 'resolved'; nameHash: string; onChainId: string; onChainCgId: bigint };
 
 function requireVmReconcileDeploymentId(value: unknown): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -3048,10 +3052,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string,
     kaId: bigint,
     ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<string | null> {
+    signal?.throwIfAborted();
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
     const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && !signal?.aborted
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) return null;
@@ -3081,6 +3088,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> schedule reverse-candidate revalidation for "${lcg}"`,
             );
             if (this.vmReconcileScheduling && isLifecycleCurrent()) {
+              signal?.throwIfAborted();
               void this.vmReconcileScheduling.triggerLive(lcg);
             }
             return lcg;
@@ -3097,6 +3105,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!isLifecycleCurrent() || (!sub?.subscribed && !sub?.coreHosted)) return null;
     this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> reconcile "${localCgId}"`);
     if (this.vmReconcileScheduling && isLifecycleCurrent()) {
+      signal?.throwIfAborted();
       void this.vmReconcileScheduling.triggerLive(localCgId);
     }
     return localCgId;
@@ -3143,22 +3152,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!subscription?.subscribed && !subscription?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
-    // Exact-asset recovery is another VM materialization entry point and must
-    // not trust the persisted subscription bit as membership proof.
-    const canRead = await this.canReadContextGraph(localCgId, {
-      allowSubscriptionFallback: false,
-    }).catch(() => false);
-    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
-    if (
-      typeof this.chain.getKAContextGraphId !== 'function'
-      || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
-    ) {
-      throw new VmReconcileUnavailableError();
-    }
-    const getKAContextGraphId = this.chain.getKAContextGraphId.bind(this.chain);
-    const readKnowledgeAssetVersionSnapshot =
-      this.chain.readKnowledgeAssetVersionSnapshot.bind(this.chain);
-
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
     const signal = this.vmReconcileLifecycleController?.signal;
     const isCurrent = (): boolean => {
@@ -3171,6 +3164,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && Boolean(current?.subscribed || current?.coreHosted);
     };
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
+    // Exact-asset recovery is another VM materialization entry point and must
+    // not trust the persisted subscription bit as membership proof.
+    const authorityRead = (async () => {
+      try {
+        return await this.canReadContextGraph(localCgId, {
+          allowSubscriptionFallback: false,
+          signal,
+        });
+      } finally {
+        // A bounded caller may return while shared durable index work remains.
+        // Keep that physical read in the VM lifecycle drain before releasing
+        // the exact-asset worker.
+        await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
+      }
+    })();
+    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
+    const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
+    if (!isCurrent()) throw new VmReconcileQueueClosedError();
+    if (!canRead) throw new ContextGraphNotFoundError(localCgId);
+    if (
+      typeof this.chain.getKAContextGraphId !== 'function'
+      || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
+    ) {
+      throw new VmReconcileUnavailableError();
+    }
+    const getKAContextGraphId = this.chain.getKAContextGraphId.bind(this.chain);
+    const readKnowledgeAssetVersionSnapshot =
+      this.chain.readKnowledgeAssetVersionSnapshot.bind(this.chain);
 
     const ctx = createOperationContext('system');
     const finalizer = this.getOrCreateFinalizationHandler();
@@ -3441,6 +3462,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw new VmReconcileUnavailableError();
     }
     let sub = existingSubscription;
+    const existingBinding = sub === undefined
+      ? undefined
+      : this.contextGraphBindingState.currentBindingFor(localCgId, sub);
+    const acceptedUnregistered = existingBinding?.bindingKind !== 'authoritative'
+      && this.hasAcceptedRfc64UnregisteredAuthorityV1(localCgId);
+    if (
+      acceptedUnregistered
+      && this.chain.contextGraphAuthorityIndexRevisionReader === undefined
+    ) {
+      throw new ContextGraphNotFoundError(localCgId);
+    }
     if (!sub?.subscribed && !sub?.coreHosted) {
       if (!this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
         throw new ContextGraphNotFoundError(localCgId);
@@ -3450,6 +3482,40 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // that could have been poisoned. Resolve it through the dedicated
       // selected target path without doing a second general read probe.
       return this.resolveSelectedVmReconcileTarget(localCgId, isCurrent, signal);
+    }
+    if (existingBinding?.bindingKind !== 'authoritative') {
+      const bindingGeneration = this.contextGraphBindingState.capture(localCgId);
+      const finalized = await this.resolveFinalizedVmReconcileBinding(
+        localCgId,
+        isCurrent,
+        signal,
+      );
+      if (finalized.kind === 'absent') {
+        if (acceptedUnregistered) throw new ContextGraphNotFoundError(localCgId);
+        throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+      }
+      if (finalized.kind === 'legacy-current' && acceptedUnregistered) {
+        throw new ContextGraphNotFoundError(localCgId);
+      }
+      if (finalized.kind === 'resolved') {
+        const currentNameHash = sub.onChainHash === undefined
+          ? this.contextGraphNameCommitment(localCgId)
+          : this.contextGraphWireId(sub.onChainHash);
+        if (
+          !isCurrent()
+          || this.subscribedContextGraphs.get(localCgId) !== sub
+          || currentNameHash !== finalized.nameHash
+          || !this.contextGraphBindingState.isGenerationCurrent(
+            localCgId,
+            bindingGeneration,
+          )
+        ) {
+          throw new VmReconcileQueueClosedError();
+        }
+        const boundSubscription = { ...sub, onChainHash: finalized.nameHash };
+        this.bindSubscriptionOnChainId(localCgId, boundSubscription, finalized.onChainId);
+        sub = this.setContextGraphSubscription(localCgId, boundSubscription);
+      }
     }
     // Central defense for periodic, live-chain, and manual reconciliation.
     // Every dispatcher entry point converges here and must independently prove
@@ -3524,34 +3590,105 @@ export class SwmHostModeMethods extends DKGAgentBase {
     };
   }
 
+  /** Resolve one VM binding from the adapter's finalized authority-index horizon. */
+  async resolveFinalizedVmReconcileBinding(
+    this: DKGAgent,
+    localCgId: string,
+    isCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<FinalizedVmReconcileBinding> {
+    const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
+    if (indexReader === undefined) return { kind: 'legacy-current' };
+    try {
+      const resolution = await raceVmReconcileAbort(
+        this.resolveFinalizedContextGraphAuthorityTargetsV1([localCgId], { signal }),
+        signal,
+      );
+      if (!isCurrent()) throw new VmReconcileQueueClosedError();
+      if (resolution.kind === 'legacy-current') return resolution;
+      const target = resolution.targets.get(localCgId);
+      if (target === undefined) return { kind: 'absent' };
+      let snapshot: ContextGraphAuthoritySnapshot;
+      if (target.kind === 'resolved-snapshot') {
+        snapshot = target.finalizedSnapshot;
+      } else {
+        if (this.contextGraphAuthorityReaderCapability.status !== 'supported') {
+          throw new Error('Finalized VM authority target has no snapshot reader');
+        }
+        snapshot = await raceVmReconcileAbort(
+          this.contextGraphAuthorityReaderCapability.reader
+            .getContextGraphAuthoritySnapshot(target.expectedOnChainId, { signal }),
+          signal,
+        );
+      }
+      if (!isCurrent()) throw new VmReconcileQueueClosedError();
+      const expectedNameHash = this.contextGraphWireId(target.expectedNameHash);
+      const expectedOnChainId = target.expectedOnChainId.toString(10);
+      if (
+        target.expectedOnChainId <= 0n
+        || target.expectedOnChainId > ethers.MaxUint256
+        || snapshot.active !== true
+        || snapshot.contextGraphId !== expectedOnChainId
+        || this.contextGraphWireId(snapshot.nameHash) !== expectedNameHash
+      ) {
+        throw new Error(`Invalid finalized VM authority evidence for "${localCgId}"`);
+      }
+      return {
+        kind: 'resolved',
+        nameHash: expectedNameHash,
+        onChainId: expectedOnChainId,
+        onChainCgId: target.expectedOnChainId,
+      };
+    } catch (err) {
+      if (err instanceof VmReconcileQueueClosedError || signal?.aborted || !isCurrent()) {
+        throw new VmReconcileQueueClosedError();
+      }
+      throw err;
+    } finally {
+      await indexReader.whenIdle();
+    }
+  }
+
   async resolveSelectedVmReconcileTarget(
     this: DKGAgent,
     localCgId: string,
     isCurrent: () => boolean,
     signal?: AbortSignal,
   ): Promise<VmReconcileSelectedTarget> {
-    const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
-    if (typeof resolveByNameHash !== 'function') {
-      throw new ContextGraphOnChainIdUnresolvedError(localCgId);
-    }
     const nameHash = this.contextGraphNameCommitment(localCgId);
     let resolved: bigint | null = null;
-    try {
-      resolved = await raceVmReconcileAbort(
-        resolveByNameHash.call(this.chain, nameHash, { signal }),
-        signal,
-      );
-    } catch (err) {
-      if (
-        err instanceof VmReconcileQueueClosedError
-        || signal?.aborted
-        || !isCurrent()
-      ) throw new VmReconcileQueueClosedError();
-      // A resolver rejection can carry chain-integrity evidence (for example,
-      // two current numeric slots claiming the same name hash) or an RPC
-      // consistency failure. Preserve it for callers and operators; only a
-      // genuine `null` result below means that no current binding exists.
-      throw err;
+    const finalized = await this.resolveFinalizedVmReconcileBinding(
+      localCgId,
+      isCurrent,
+      signal,
+    );
+    if (finalized.kind === 'absent') {
+      throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+    }
+    if (finalized.kind === 'resolved') {
+      resolved = finalized.onChainCgId;
+    } else {
+      const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
+      if (typeof resolveByNameHash !== 'function') {
+        throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+      }
+      try {
+        resolved = await raceVmReconcileAbort(
+          resolveByNameHash.call(this.chain, nameHash, { signal }),
+          signal,
+        );
+      } catch (err) {
+        if (
+          err instanceof VmReconcileQueueClosedError
+          || signal?.aborted
+          || !isCurrent()
+        ) throw new VmReconcileQueueClosedError();
+        // A resolver rejection can carry chain-integrity evidence (for example,
+        // two current numeric slots claiming the same name hash) or an RPC
+        // consistency failure. Preserve it for callers and operators; only a
+        // genuine `null` result below means that no current binding exists.
+        throw err;
+      }
     }
     if (!isCurrent() || !this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
       throw new VmReconcileQueueClosedError();
@@ -3653,6 +3790,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (target.kind === 'subscription') {
       if (target.bindingKind === 'authoritative') return true;
       try {
+        const finalized = await this.resolveFinalizedVmReconcileBinding(
+          localCgId,
+          () => this.isVmReconcileTargetCurrent(
+            localCgId,
+            target,
+            lifecycleGeneration,
+          ),
+          signal,
+        );
+        if (finalized.kind !== 'legacy-current') {
+          return finalized.kind === 'resolved'
+            && finalized.onChainId === target.onChainId
+            && finalized.nameHash === target.nameHash
+            && this.isVmReconcileTargetCurrent(localCgId, target, lifecycleGeneration);
+        }
         const resolved = await this.resolveCurrentNameHashContextGraphBinding(localCgId, {
           signal,
         });
@@ -3664,9 +3816,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return false;
       }
     }
-    const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
-    if (typeof resolveByNameHash !== 'function') return false;
     try {
+      const finalized = await this.resolveFinalizedVmReconcileBinding(
+        localCgId,
+        () => this.isVmReconcileTargetCurrent(
+          localCgId,
+          target,
+          lifecycleGeneration,
+        ),
+        signal,
+      );
+      if (finalized.kind !== 'legacy-current') {
+        return finalized.kind === 'resolved'
+          && finalized.onChainId === target.onChainId
+          && finalized.nameHash === target.nameHash
+          && this.isVmReconcileTargetCurrent(localCgId, target, lifecycleGeneration);
+      }
+      const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
+      if (typeof resolveByNameHash !== 'function') return false;
       const resolved = await raceVmReconcileAbort(
         resolveByNameHash.call(this.chain, target.nameHash, { signal }),
         signal,

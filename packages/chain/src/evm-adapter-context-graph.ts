@@ -34,10 +34,17 @@ import {
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
+import { markContextGraphRegistrationNotSubmitted } from
+  './context-graph-registration-error.js';
 import { contextGraphAuthorityIndexIdFromBigInt } from
   './context-graph-authority-index-id.js';
-import { readEvmContextGraphAuthorityStateV1 } from
+import {
+  readEvmContextGraphAuthorityIndexRpcV1,
+  readEvmContextGraphAuthorityStateV1,
+} from
   './evm-context-graph-authority-index-reader.js';
+import { normalizeContextGraphAuthorityHash } from
+  './context-graph-authority-generation.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -107,6 +114,24 @@ function buildPublicContextGraphRegistryScanPlan(
     | (ContextGraphChainScanOptions & { mode?: string })
     | undefined;
   const mode = runtimeOptions?.mode;
+  const legacy = runtimeOptions as {
+    incremental?: boolean;
+    seedIncrementalWatermark?: boolean;
+    resumeFromCursor?: boolean;
+  } | undefined;
+  if (
+    mode !== undefined &&
+    [legacy?.incremental, legacy?.seedIncrementalWatermark, legacy?.resumeFromCursor]
+      .some((value) => value !== undefined)
+  ) {
+    throw new Error('Context graph list mode cannot be combined with legacy scan flags');
+  }
+  if (legacy?.incremental === true && legacy.seedIncrementalWatermark === true) {
+    throw new Error('Context graph list cannot be both incremental and a watermark seed');
+  }
+  if (legacy?.resumeFromCursor === true && legacy.seedIncrementalWatermark !== true) {
+    throw new Error('resumeFromCursor requires seedIncrementalWatermark');
+  }
 
   if (fromBlock !== undefined) {
     return {
@@ -327,11 +352,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     fromBlock?: number,
     options?: ContextGraphChainScanOptions,
   ): Promise<ContextGraphOnChain[]> {
+    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     await this.init();
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     return this._collectContextGraphRegistryScan(registry, registryAddress, fromBlock, scanPlan);
   }
 
@@ -773,21 +798,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           // the approval receipt itself is ambiguous, it cannot have created
           // the Context Graph. Preserve that distinction for the agent's
           // durable registration state machine.
-          const failure = approvalError instanceof Error
-            ? approvalError
-            : new Error(String(approvalError));
-          if (Object.isExtensible(failure)) {
-            Object.defineProperty(failure, 'contextGraphRegistrationSubmitted', {
-              configurable: true,
-              enumerable: false,
-              value: false,
-            });
-            throw failure;
-          }
-          throw Object.assign(
-            new Error(failure.message, { cause: approvalError }),
-            { contextGraphRegistrationSubmitted: false as const },
-          );
+          throw markContextGraphRegistrationNotSubmitted(approvalError);
         }
         return submitCreate();
       }
@@ -1180,7 +1191,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       'getContextGraphAuthoritySnapshot',
       async (provider) => {
         options.signal?.throwIfAborted();
-        const finalized = await provider.getBlock('finalized');
+        const finalized = this.contextGraphAuthorityIndex === undefined
+          ? await provider.getBlock('finalized')
+          : await readEvmContextGraphAuthorityIndexRpcV1(
+              'getContextGraphAuthoritySnapshot finalized head',
+              () => provider.getBlock('finalized'),
+              options.signal,
+            );
         if (finalized === null || finalized.hash === null) {
           throw new Error('finalized Context Graph authority block is unavailable');
         }
@@ -1278,12 +1295,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                   targetContextGraphId,
                   fromBlock,
                   toBlock,
-                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => ({
-                  blockNumber: event.blockNumber,
-                  blockHash: event.blockHash,
-                  index: event.index,
-                  nameHash: String(event.args.nameHash ?? event.args[2]).toLowerCase(),
-                })))
+                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => {
+                  const nameHash = normalizeContextGraphAuthorityHash(
+                    event.args.nameHash ?? event.args[2],
+                  );
+                  if (nameHash === undefined) {
+                    throw new Error(
+                      'ContextGraphStorage returned an invalid ContextGraphCreated name hash',
+                    );
+                  }
+                  return {
+                    blockNumber: event.blockNumber,
+                    blockHash: event.blockHash,
+                    index: event.index,
+                    nameHash,
+                  };
+                }))
               ),
               readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
                 const { name } = query;
@@ -1318,7 +1345,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         })();
         const authority = await resolveEvmContextGraphAuthoritySource(authoritySource);
         options.signal?.throwIfAborted();
-        const chainId = (await provider.getNetwork()).chainId.toString(10);
+        const chainId = (await (this.contextGraphAuthorityIndex === undefined
+          ? provider.getNetwork()
+          : readEvmContextGraphAuthorityIndexRpcV1(
+              'getContextGraphAuthoritySnapshot network',
+              () => provider.getNetwork(),
+              options.signal,
+            ))).chainId.toString(10);
         const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
           chainId,
           governanceContract: contractAddress,
@@ -1350,10 +1383,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             )
           ),
         }),
-        // A cold authority resolution performs a bounded historical log scan;
-        // the default 4s point-read cap aborts healthy fallback providers before
-        // they can finish. Warm checkpoint suffixes remain fast under this cap.
-        policy: 'wideLogScan',
+        // A durable index gives every physical request its own 30s deadline and
+        // checkpoints each page, so its complete projection has no aggregate
+        // cap. The legacy history scan retains the ordinary wide-scan policy.
+        policy: this.contextGraphAuthorityIndex === undefined
+          ? 'wideLogScan'
+          : 'durablePagedLogScan',
       },
     );
   }

@@ -469,9 +469,10 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     await captureCreateArg({}, async (createArg) => {
       const store = createArg.contextGraphMembershipStore;
       expect(store).toBeDefined();
-      await expect(store.loadLocalOrigins()).resolves.toEqual([]);
-      await store.recordLocalOrigin(record);
-      await expect(store.loadLocalOrigins()).resolves.toEqual([record]);
+      expect(store?.localOrigins).toBeDefined();
+      await expect(store.localOrigins?.loadLocalOrigins()).resolves.toEqual([]);
+      await store.localOrigins?.recordLocalOrigin(record);
+      await expect(store.localOrigins?.loadLocalOrigins()).resolves.toEqual([record]);
     });
   });
 
