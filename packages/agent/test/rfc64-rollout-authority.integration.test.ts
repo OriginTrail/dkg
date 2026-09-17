@@ -976,7 +976,7 @@ describe('RFC-64 rollout authority integration', () => {
       newPeer,
     )).not.toBeNull();
 
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 2, failed: 0 });
     expect(new Set(requestReplay.mock.calls.map(
@@ -1009,11 +1009,11 @@ describe('RFC-64 rollout authority integration', () => {
     };
 
     queueGeneration(0);
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 0, failed: 64 });
     queueGeneration(1);
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 0, failed: 64 });
 
@@ -1026,7 +1026,7 @@ describe('RFC-64 rollout authority integration', () => {
       CONTEXT_GRAPH_ID,
       '12D3KooWReplayFailedGenerationRecoveryPeer',
     )).not.toBeNull();
-    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+    await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 64, failed: 0 });
     expect(requestReplay).toHaveBeenCalledTimes(64);

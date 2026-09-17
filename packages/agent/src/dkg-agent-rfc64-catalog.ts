@@ -4176,11 +4176,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
+  /** Continue only already-owned recovery demand without reseeding peers. */
+  async continueRfc64CatalogHeadReplayRecoveryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<Readonly<{ requested: number; failed: number }>> {
+    return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
+      kind: 'pending-recovery',
+    });
+  }
+
   private async requestRfc64CatalogHeadReplayV1(
     this: DKGAgent,
     contextGraphId: string,
     request: Readonly<
       | { kind: 'connected-peers' }
+      | { kind: 'pending-recovery' }
       | {
           kind: 'connection-demand';
           replayDemand: Rfc64CatalogReplayPeerDemandV1;
@@ -4216,6 +4227,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ...scope,
           kind: 'full-connected-peers',
           connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
+        });
+      case 'pending-recovery':
+        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+          ...scope,
+          kind: 'pending-recovery',
         });
       case 'connection-demand':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
