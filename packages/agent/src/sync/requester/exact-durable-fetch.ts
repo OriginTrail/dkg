@@ -86,6 +86,7 @@ export function filterExactAssetDurablePayload(
   dataQuads: Quad[];
   metaQuads: Quad[];
   descriptorCoverageComplete: boolean;
+  returnedDescriptorCount: number;
   missingDescriptorUals: string[];
   mismatchedDescriptorUals: string[];
 } {
@@ -128,6 +129,7 @@ export function filterExactAssetDurablePayload(
     dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
     descriptorCoverageComplete:
       missingDescriptorUals.length === 0 && mismatchedDescriptorUals.length === 0,
+    returnedDescriptorCount: returnedDescriptors.size,
     missingDescriptorUals,
     mismatchedDescriptorUals,
   };
@@ -159,8 +161,8 @@ export function classifyExactDurableFetch(params: {
 }
 
 /**
- * Detect the rolling-upgrade case where an older responder ignored a singleton
- * exact filter and returned a clean bounded prefix that omitted the requested
+ * Detect the rolling-upgrade case where an older responder ignored an exact
+ * filter and returned a clean bounded prefix that omitted every requested
  * descriptor. A partial batched hit is not negative capability evidence: a
  * capable responder may legitimately hold only some requested assets. Fresh
  * empty exact responses remain ordinary clean absence; incomplete, rejected,
@@ -172,11 +174,13 @@ export function classifyExactAssetResponderCapability(params: {
   dataResult: SyncPageResult;
   metaFetched: boolean;
   descriptorCoverageComplete: boolean;
+  returnedDescriptorCount: number;
   rejectedKcs: number;
   dataRejectedMissingMeta: number;
 }): ExactAssetResponderCapability | undefined {
   if (
-    params.requestedAssetCount !== 1
+    params.requestedAssetCount === 0
+    || params.returnedDescriptorCount > 0
     || !params.metaFetched
     || !isCleanExactPhase(params.metaResult)
     || !isCleanExactPhase(params.dataResult)

@@ -294,6 +294,7 @@ function prepareDurableVerificationPayload(input: {
   readonly dataResult: SyncPageResult;
   readonly metaResult: SyncPageResult;
   readonly exactDescriptorCoverageComplete: boolean;
+  readonly exactReturnedDescriptorCount: number;
 } {
   if (input.exactAssetSelection === undefined) {
     return {
@@ -301,6 +302,7 @@ function prepareDurableVerificationPayload(input: {
       metaResult: input.preparedMeta.metaForManifest,
       exactDescriptorCoverageComplete:
         input.preparedMeta.exactDescriptorCoverageComplete,
+      exactReturnedDescriptorCount: 0,
     };
   }
   const exact = filterExactAssetDurablePayload(
@@ -322,6 +324,7 @@ function prepareDurableVerificationPayload(input: {
         : { quadRawOffsets: undefined }),
     },
     exactDescriptorCoverageComplete: exact.descriptorCoverageComplete,
+    exactReturnedDescriptorCount: exact.returnedDescriptorCount,
   };
 }
 
@@ -1044,6 +1047,8 @@ async function runDurableSyncWithBudget(
       const effectiveMetaResult = preparedPayload.metaResult;
       const exactAssetDescriptorCoverageComplete =
         preparedPayload.exactDescriptorCoverageComplete;
+      const exactAssetReturnedDescriptorCount =
+        preparedPayload.exactReturnedDescriptorCount;
       if (exactAssetUals !== undefined && !exactAssetDescriptorCoverageComplete) {
         logWarn(
           ctx,
@@ -1303,6 +1308,7 @@ async function runDurableSyncWithBudget(
           dataResult: rawDataResult,
           metaFetched: !skipAgentsMeta,
           descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
+          returnedDescriptorCount: exactAssetReturnedDescriptorCount,
           rejectedKcs: processed.rejectedKcs,
           dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
         });

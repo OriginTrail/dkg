@@ -1586,6 +1586,19 @@ describe('exact durable fetch disposition', () => {
     expect(detailed).not.toHaveProperty('exactResponderCapability');
   });
 
+  it('infers legacy capability when a batched request misses every requested descriptor', async () => {
+    const detailed = await runExact({
+      exactUals: [EXACT_UAL, MISSING_EXACT_UAL],
+      rawMeta: [quad('did:dkg:legacy-prefix-asset')],
+      rawData: [quad('http://example.com/legacy-prefix-data')],
+      meta: { nextOffset: 1 },
+      data: { nextOffset: 1 },
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed.exactResponderCapability).toBe('legacy-filter-unsupported');
+  });
+
   it('does not verify or store an exact phase rejected by its accumulation limit', async () => {
     const processDurableBatchInWorker = recorder(async () => durableProcessResult());
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
