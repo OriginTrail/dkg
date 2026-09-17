@@ -1822,10 +1822,16 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       // terminal error on a route that previously had no chain dependency at
       // all, and no sane client retries a 403.
       if (authority.outcome === 'unavailable') {
+        // Response shape follows issue #2641 / PR #2649, which establishes the
+        // convention for this outcome on `/api/query`: a retryable 503 with
+        // `Retry-After`, and deliberately NO context-graph id, authority
+        // source or internal reason in the body — those would turn an
+        // outage response into the same enumeration oracle the denial path
+        // is careful about. The reason stays in the daemon log.
+        res.setHeader('Retry-After', '3');
         return jsonResponse(res, 503, {
-          error:
-            `Read authority for context graph "${contextGraphId}" is temporarily `
-            + `unavailable (${authority.reason}). Retry shortly.`,
+          error: 'Context graph read authority is temporarily unavailable. Retry shortly.',
+          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
           retryable: true,
         });
       }
