@@ -13,6 +13,7 @@ import {
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 import {
+  getSyncBackpressureBusyError,
   resolveSyncGlobalBackpressure,
   SyncBackpressureBusyError,
   withGlobalSyncBackpressure,
@@ -194,6 +195,48 @@ describe('runSyncOnConnect callbacks', () => {
       'durable:ordinary',
       'shared:ordinary:ordinary',
     ]);
+  });
+
+  it('preserves typed backpressure from post-durable shared-memory sync', async () => {
+    // `ordinarySharedMemoryWork.syncFromPeer()` is awaited outside
+    // `runNonTransportStep`, after `durableSyncCompleted = true`. Before the
+    // conversion this was the one site that wrapped a bare busy error as a
+    // `backoffEligible: true` post-sync error, so purely local admission
+    // pressure grew peer backoff.
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('shared queue full', 'queue_full');
+
+    await expect(runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => ['first'], async () => { throw busy; }),
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['first'],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
+  it('keeps the busy error as the cause so admission detectors still see it', async () => {
+    // `getSyncBackpressureBusyError()` walks `cause`; dropping it degraded
+    // `syncOperationRejectionReason` to 'aborted_before_start'.
+    const busy = new SyncBackpressureBusyError('queue full', 'queue_full');
+    const typed = new SyncOnConnectBackpressureError(busy);
+
+    expect(typed.cause).toBe(busy);
+    expect(getSyncBackpressureBusyError(typed)).toBe(busy);
   });
 
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {

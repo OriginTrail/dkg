@@ -197,7 +197,12 @@ export class SyncOnConnectBackpressureError extends Error {
   readonly reason: SyncBackpressureBusyReason;
 
   constructor(error: SyncBackpressureBusyError) {
-    super(error.message);
+    // Keep the cause: `getSyncBackpressureBusyError()` is documented as THE
+    // admission-pressure detector and is still live in ordered-sync,
+    // attempt-telemetry and lifecycle. Dropping it would degrade
+    // `syncOperationRejectionReason` to 'aborted_before_start' for any
+    // consumer that becomes reachable.
+    super(error.message, { cause: error });
     this.name = 'SyncOnConnectBackpressureError';
     this.reason = error.reason;
   }
@@ -610,6 +615,16 @@ async function runSessionSyncOnConnect(
   } catch (err) {
     if (err instanceof SyncOnConnectBackpressureError) {
       throw err;
+    }
+    // Local admission pressure is not a peer failure. Without this conversion a
+    // bare busy error reaching here after `durableSyncCompleted` was wrapped
+    // `backoffEligible: true`, so the attempt boundary recorded retry
+    // accounting and grew peer backoff for purely local pressure — the exact
+    // outcome this typed marker exists to prevent. The two already-converted
+    // sites use `backoffEligible: false`, which the boundary handles without
+    // accounting, so this was the only harmful one.
+    if (err instanceof SyncBackpressureBusyError) {
+      throw new SyncOnConnectBackpressureError(err);
     }
     if (err instanceof SyncOnConnectPostSyncError) {
       throw err;
