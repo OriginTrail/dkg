@@ -27,6 +27,7 @@ import {
   type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
+  type FinalizedChainPolicySourceV1,
   type MemberRosterEntryV1,
   type MemberRosterV1,
   type NetworkIdV1,
@@ -498,35 +499,57 @@ function isFinalizedChainReorgReplacement(
     )
     || current.policy.era !== successor.policy.era
     || current.policy.version !== successor.policy.version
-    || !samePolicyWithoutFinalizedSourceCoordinates(current.policy, successor.policy)
+    || !samePolicyWithoutFinalizedSourceCoordinates(
+      current.policy,
+      successor.policy,
+      currentSource,
+      successorSource,
+    )
   ) return false;
   if (current.roster === null || successor.roster === null) {
+    // Public catalogs carry no roster. Both sides must agree on that: a
+    // roster appearing or disappearing is a generation change, not a re-mine.
     return current.roster === null && successor.roster === null;
   }
-  return canonicalizeMemberRosterPayloadV1({
-    ...current.roster,
-    policyDigest: ZERO_DIGEST,
-  }) === canonicalizeMemberRosterPayloadV1({
-    ...successor.roster,
-    policyDigest: ZERO_DIGEST,
-  });
+  if (
+    canonicalizeMemberRosterPayloadV1({
+      ...current.roster,
+      policyDigest: ZERO_DIGEST,
+    }) === canonicalizeMemberRosterPayloadV1({
+      ...successor.roster,
+      policyDigest: ZERO_DIGEST,
+    })
+  ) return true;
+  // The event block can be re-mined in the same refresh window in which the
+  // roster legitimately advances. That combination reaches none of the three
+  // acceptance paths otherwise: the byte-identical roster check above rejects
+  // it, `policyAdvanced` needs an era/version bump the re-mine does not
+  // produce, and `rosterAdvanced` requires an unchanged policyDigest that the
+  // new block coordinates have already changed. The node would stay wedged on
+  // the orphaned digest until restart — the exact failure this gate exists to
+  // recover from. Only a strict advance within the same era is admitted, so a
+  // roster rollback still fails closed.
+  return BigInt(successor.roster.version) > BigInt(current.roster.version);
 }
 
+/**
+ * The caller has already narrowed both sources to `finalized-chain`, so they
+ * are passed in rather than re-checked: a redundant kind guard here would be
+ * unreachable from the single call site.
+ */
 function samePolicyWithoutFinalizedSourceCoordinates(
   current: Readonly<ContextGraphPolicyV1>,
   successor: Readonly<ContextGraphPolicyV1>,
+  currentSource: FinalizedChainPolicySourceV1,
+  successorSource: FinalizedChainPolicySourceV1,
 ): boolean {
-  if (
-    current.source.kind !== 'finalized-chain'
-    || successor.source.kind !== 'finalized-chain'
-  ) return false;
   return canonicalizeContextGraphPolicyPayloadV1(current)
     === canonicalizeContextGraphPolicyPayloadV1({
       ...successor,
       source: {
-        ...successor.source,
-        blockNumber: current.source.blockNumber,
-        blockHash: current.source.blockHash,
+        ...successorSource,
+        blockNumber: currentSource.blockNumber,
+        blockHash: currentSource.blockHash,
       },
     });
 }
