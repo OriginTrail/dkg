@@ -4,7 +4,7 @@ import { collectEvmErrorText } from './evm-adapter-errors.js';
 
 /** Provider-declared eth_getLogs range caps that are safe to retry by splitting. */
 export function isEvmLogRangeLimitError(err: unknown): boolean {
-  return /(?:block range too large|exceeds? (?:the )?(?:max(?:imum)? )?block range|maximum allowed is \d+ blocks|limited to (?:a )?\d+ blocks?)/i
+  return /(?:block range too large|exceeds? (?:the )?(?:max(?:imum)? )?block range|maximum allowed is \d+ blocks|limited to (?:a )?\d+ blocks?|ranges? over \d+ blocks? (?:are|is) not supported)/i
     .test(collectEvmErrorText(err));
 }
 

@@ -134,10 +134,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     expect(onRetry).toHaveBeenCalledTimes(budget === 0 ? 0 : 1);
     if (budget > 0) {
       expect(windows[1]).not.toBe(windows[0]);
-      expect(windows.map(window => window.scope)).toEqual([
-        { sharing: 'exclusive', owner: `private-swm:${CG}:peer-source:round-1` },
-        { sharing: 'exclusive', owner: `private-swm:${CG}:peer-source:round-2` },
-      ]);
+      expect(windows.every(window => window.fetchSharingIdentity === undefined)).toBe(true);
     }
   });
 
@@ -236,7 +233,6 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       deadline: Number.MAX_SAFE_INTEGER,
       workAdmission: createSyncWorkAdmission(
         () => canAdmit ? 1_000 : 0,
-        { sharing: 'exclusive', owner: 'retained-revalidation-test' },
       ),
       fetchSyncPages: async (_ctx, _peer, _cg, _swm, phase) => {
         if (phase !== 'meta') throw new Error('Budget yield must precede snapshot transport');

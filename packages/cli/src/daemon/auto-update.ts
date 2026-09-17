@@ -88,10 +88,14 @@ export {
 export { deriveUpdateCheckState } from '../update/npm-version.js';
 export type { NpmVersionResult, NpmVersionStatus } from '../update/npm-version.js';
 
-/** Updater-owned dependency seam for inactive-slot preparation. */
-export const _autoUpdateDependencies = {
+/** Per-invocation updater dependencies for inactive-slot preparation. */
+export interface PerformUpdateDependencies {
+  readonly cleanStaleWorkspacePackages: typeof cleanStaleWorkspacePackages;
+}
+
+const DEFAULT_PERFORM_UPDATE_DEPENDENCIES: PerformUpdateDependencies = Object.freeze({
   cleanStaleWorkspacePackages,
-};
+});
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -895,6 +899,8 @@ export interface PerformUpdateOptions {
    * should set this explicitly.
    */
   forceClean?: boolean;
+  /** Typed per-run seam for updater workflow tests and embedded callers. */
+  dependencies?: PerformUpdateDependencies;
 }
 
 export async function performUpdate(
@@ -934,6 +940,7 @@ async function _performUpdateInner(
   log: (msg: string) => void,
   opts: PerformUpdateOptions,
 ): Promise<UpdateStatus> {
+  const dependencies = opts.dependencies ?? DEFAULT_PERFORM_UPDATE_DEPENDENCIES;
   const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
   const activeDir = join(rDir, (await activeSlot()) ?? "a");
@@ -1160,7 +1167,7 @@ async function _performUpdateInner(
   const timeouts = resolveBuildTimeouts(au);
 
   try {
-    await _autoUpdateDependencies.cleanStaleWorkspacePackages(targetDir, log);
+    await dependencies.cleanStaleWorkspacePackages(targetDir, log);
     await runBuildStep(execAsync, "pnpm install --frozen-lockfile", {
       cwd: targetDir,
       timeoutMs: timeouts.install,

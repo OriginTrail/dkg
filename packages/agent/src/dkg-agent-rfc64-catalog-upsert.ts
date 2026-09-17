@@ -10,6 +10,7 @@ import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
+  createOperationContext,
   decodeOpaqueKaBundleV1,
   parseCanonicalGraphScopedAuthorSealV1,
   type AssertionCoordinateV1,
@@ -37,6 +38,7 @@ import {
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './rfc64/catalog-peers-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from './rfc64/public-catalog-inventory-completeness-v1.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from './rfc64/public-catalog-successor-producer-v1.js';
+import type { AnnounceRfc64PublicCatalogHeadResultV1 } from './rfc64/public-catalog-service-v1.js';
 import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
@@ -533,17 +535,40 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       ? Object.freeze({ appliedHead: commit(), sourceCurrent: true })
       : await commitAppliedHead(commit);
     if (!signal?.aborted) {
-      await this.announceRfc64PublicCatalogHeadV1({
+      this.warnRfc64CatalogAnnounceFailuresV1(await this.announceRfc64PublicCatalogHeadV1({
         announcement: successor.announcement,
         peers,
         signal,
-      });
+      }));
     }
     return Object.freeze({
       applied: committed.appliedHead,
       successor,
       sourceCurrent: committed.sourceCurrent,
     });
+  }
+
+  /**
+   * Author-side announce delivery is best-effort, but a silently failed
+   * fan-out leaves every replica waiting on connect-time replay churn. Surface
+   * the per-peer outcome so a slow convergence can be traced to its cause.
+   */
+  warnRfc64CatalogAnnounceFailuresV1(
+    this: DKGAgent,
+    delivery: AnnounceRfc64PublicCatalogHeadResultV1,
+  ): void {
+    const failed = delivery.failedPeers;
+    if (failed.length === 0) return;
+    const total = failed.length + delivery.announcedPeers.length;
+    this.log.warn(
+      createOperationContext('system'),
+      `RFC-64 catalog head announce failed for ${failed.length}/${total} peer(s)`
+        + ` head=${delivery.announcement.catalogHeadObjectDigest}`
+        + ` cg=${delivery.announcement.contextGraphId}`
+        + ` version=${delivery.announcement.catalogVersion}`
+        + ` peers=${failed.map(({ peerId }) => peerId.slice(-8)).join(',')}`
+        + ` error=${failed[0]!.error.slice(0, 160)}`,
+    );
   }
 
 }
