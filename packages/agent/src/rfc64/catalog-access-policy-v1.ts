@@ -27,6 +27,7 @@ import {
   type ContextGraphPolicyV1,
   type Digest32V1,
   type EvmAddressV1,
+  type FinalizedChainPolicySourceV1,
   type MemberRosterEntryV1,
   type MemberRosterV1,
   type NetworkIdV1,
@@ -176,6 +177,7 @@ interface HeldCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshot
 
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/u;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
+const ZERO_DIGEST = `0x${'0'.repeat(64)}` as Digest32V1;
 const MAX_PEER_ID_BYTES = 256;
 const UTF8 = new TextEncoder();
 
@@ -451,6 +453,15 @@ function assertAuthoritativeMonotonicPolicyTransition(
     // finalized chain state and its name commitment. Never allow the reverse.
     return;
   }
+  if (isFinalizedChainReorgReplacement(current, successor)) {
+    // A head-anchored authority event can be re-mined without advancing its
+    // event-derived era/version. The exact event block remains provenance in
+    // the policy object (and therefore changes policyDigest), but a periodic
+    // authoritative refresh must be able to replace the orphaned coordinates.
+    // Only provenance may differ: policy semantics and the roster generation
+    // must remain byte-identical after their digest backlink is neutralized.
+    return;
+  }
   const currentEra = BigInt(current.policy.era);
   const successorEra = BigInt(successor.policy.era);
   const currentVersion = BigInt(current.policy.version);
@@ -470,6 +481,77 @@ function assertAuthoritativeMonotonicPolicyTransition(
       'RFC-64 authoritative policy/roster transition does not advance its high-water',
     );
   }
+}
+
+function isFinalizedChainReorgReplacement(
+  current: HeldCatalogAccessSnapshotV1,
+  successor: HeldCatalogAccessSnapshotV1,
+): boolean {
+  const currentSource = current.policy.source;
+  const successorSource = successor.policy.source;
+  if (
+    current.policyDigest === successor.policyDigest
+    || currentSource.kind !== 'finalized-chain'
+    || successorSource.kind !== 'finalized-chain'
+    || (
+      currentSource.blockNumber === successorSource.blockNumber
+      && currentSource.blockHash === successorSource.blockHash
+    )
+    || current.policy.era !== successor.policy.era
+    || current.policy.version !== successor.policy.version
+    || !samePolicyWithoutFinalizedSourceCoordinates(
+      current.policy,
+      successor.policy,
+      currentSource,
+      successorSource,
+    )
+  ) return false;
+  if (current.roster === null || successor.roster === null) {
+    // Public catalogs carry no roster. Both sides must agree on that: a
+    // roster appearing or disappearing is a generation change, not a re-mine.
+    return current.roster === null && successor.roster === null;
+  }
+  if (
+    canonicalizeMemberRosterPayloadV1({
+      ...current.roster,
+      policyDigest: ZERO_DIGEST,
+    }) === canonicalizeMemberRosterPayloadV1({
+      ...successor.roster,
+      policyDigest: ZERO_DIGEST,
+    })
+  ) return true;
+  // The event block can be re-mined in the same refresh window in which the
+  // roster legitimately advances. That combination reaches none of the three
+  // acceptance paths otherwise: the byte-identical roster check above rejects
+  // it, `policyAdvanced` needs an era/version bump the re-mine does not
+  // produce, and `rosterAdvanced` requires an unchanged policyDigest that the
+  // new block coordinates have already changed. The node would stay wedged on
+  // the orphaned digest until restart — the exact failure this gate exists to
+  // recover from. Only a strict advance within the same era is admitted, so a
+  // roster rollback still fails closed.
+  return BigInt(successor.roster.version) > BigInt(current.roster.version);
+}
+
+/**
+ * The caller has already narrowed both sources to `finalized-chain`, so they
+ * are passed in rather than re-checked: a redundant kind guard here would be
+ * unreachable from the single call site.
+ */
+function samePolicyWithoutFinalizedSourceCoordinates(
+  current: Readonly<ContextGraphPolicyV1>,
+  successor: Readonly<ContextGraphPolicyV1>,
+  currentSource: FinalizedChainPolicySourceV1,
+  successorSource: FinalizedChainPolicySourceV1,
+): boolean {
+  return canonicalizeContextGraphPolicyPayloadV1(current)
+    === canonicalizeContextGraphPolicyPayloadV1({
+      ...successor,
+      source: {
+        ...successorSource,
+        blockNumber: currentSource.blockNumber,
+        blockHash: currentSource.blockHash,
+      },
+    });
 }
 
 function authorization(
