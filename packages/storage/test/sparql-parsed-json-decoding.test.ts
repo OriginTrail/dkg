@@ -4,6 +4,20 @@ import { decodeSparqlJsonQueryResult, parseSparqlJsonSelectResponse, SparqlJsonR
 const response = (term: unknown) => ({ head: { vars: ['value'] }, results: { bindings: [{ value: term }] } });
 
 describe('privately parsed JSON SELECT decoding', () => {
+  it('uses its captured JSON parser even if application code replaces the global parser', () => {
+    const original = JSON.parse;
+    let calls = 0;
+    const foreign = { type: 'uri' };
+    Object.defineProperty(foreign, 'value', { enumerable: true, get() { calls++; return 'urn:foreign'; } });
+    const text = JSON.stringify(response({ type: 'uri', value: 'urn:test:owned' }));
+    let result;
+    try {
+      JSON.parse = () => response(foreign);
+      result = decodeSparqlJsonQueryResult(text, 'select');
+    } finally { JSON.parse = original; }
+    expect(result).toMatchObject({ bindings: [{ value: 'urn:test:owned' }] });
+    expect(calls).toBe(0);
+  });
   it.each([
     { type: 'uri', value: 'urn:test:value' },
     { type: 'bnode', value: 'node' },

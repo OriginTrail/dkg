@@ -8,6 +8,10 @@ import {
 } from './closed-data-snapshot.js';
 import type { AskResult, QueryResult, SelectResult } from './triple-store.js';
 
+// Keep the parser provenance stable if application code later replaces the
+// global JSON.parse. No reviver/callback can introduce foreign object graphs.
+const parseJsonText: (text: string) => unknown = JSON.parse;
+
 type SparqlJsonLiteralTerm = {
   type: 'literal' | 'typed-literal';
   value: string;
@@ -114,7 +118,7 @@ export class SparqlJsonResultsShapeError extends Error {
 /** Decode one successful SPARQL JSON response into the same shape-error domain. */
 export function parseSparqlJsonResponseText(text: string): unknown {
   try {
-    return JSON.parse(text) as unknown;
+    return parseJsonText(text);
   } catch (cause) {
     throw new SparqlJsonResultsShapeError('SPARQL JSON response is not valid JSON', { cause });
   }
