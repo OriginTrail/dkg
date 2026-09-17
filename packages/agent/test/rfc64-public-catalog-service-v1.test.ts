@@ -1507,9 +1507,13 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
 
     await service.whenReceiverIdle();
     expect(reconciledVersions).toEqual(['1', '40']);
+    // The stale ACTIVE head (v1) is preempted for the verified current head
+    // instead of holding the scope until its own failure; the stale QUEUED
+    // heads (v2, v3) are retired once the verified head is durable.
     expect(service.stats().receiver).toMatchObject({
       applied: 1,
-      failed: 1,
+      failed: 0,
+      preemptedActive: 1,
       supersededQueued: 2,
       queued: 0,
       inFlight: 0,

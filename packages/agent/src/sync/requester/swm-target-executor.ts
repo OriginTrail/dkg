@@ -205,7 +205,6 @@ export class SwmTargetExecutorV1 {
     };
     const result = await recoverContextGraphSwmWithProgressRetries({
       window,
-      owner: `private-swm:${target.contextGraphId}:${target.remotePeerId}`,
       createRoundDeadline: () => this.#ports.createContextGraphSyncDeadline(1),
       onRetry: target.onRetry,
       snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
