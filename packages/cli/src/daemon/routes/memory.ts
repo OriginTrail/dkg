@@ -1972,12 +1972,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     // Working memory is per-agent, so the `wm` view needs an address:
     //   - an agent-scoped caller reads its OWN working memory, and
     //     `DKGAgent.query`'s A-1 check rejects anything else;
-    //   - a node operator administers the box and keeps the cross-agent view
-    //     it had before, by spanning every agent registered on this node;
+    //   - a node operator spans every agent registered on this node;
     //   - an anonymous / auth-disabled caller supplies no address, so the
     //     engine falls back to the node's default agent — the same contract
     //     `/api/query` applies.
     // `swm` and `vm` are context-graph-wide by design and take no address.
+    //
+    // IMPORTANT — what the node-operator exemption does NOT buy. Skipping the
+    // route's own gate above only skips THIS route's 403. Every `agent.query`
+    // below still runs `DKGAgent.query`'s own `canReadContextGraph`
+    // (`dkg-agent-query.ts`), and a node token resolves `callerAgentAddress`
+    // to `undefined`, so that check falls back to NODE-LOCAL authority —
+    // whether any agent registered here is in the CG's roster. There is no
+    // admin bypass inside the engine.
+    //
+    // So for a context graph this node HOLDS but none of its agents are
+    // rostered for, the route admits the request and the engine returns an
+    // empty result. A node operator therefore gets a cross-AGENT view within
+    // the context graphs this node may read — not an unconditional cross-CG
+    // one. An earlier revision of this comment claimed the latter; it was
+    // wrong, and the tests could not catch it because the fake `agent.query`
+    // has no authority check of its own.
     const workingMemoryAddresses: Array<string | undefined> = callerAgentAddress
       ? [callerAgentAddress]
       : isNodeAdmin

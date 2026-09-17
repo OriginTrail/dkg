@@ -158,7 +158,13 @@ describe('POST /api/memory/search — guarded query path', () => {
     expect(calls[0].agentAddress).toBe(CALLER);
   });
 
-  it('spans every local agent for a node operator, preserving the cross-agent view', async () => {
+  it('spans every local agent for a node operator (cross-AGENT, not cross-CG)', async () => {
+    // Scope note: this pins the FAN-OUT shape only. It does not — and cannot —
+    // show that a node operator can read a context graph this node is not
+    // rostered for: the fake `agent.query` below has no authority check,
+    // whereas the real `DKGAgent.query` re-gates every call on node-local
+    // authority. See the IMPORTANT note in the route.
+
     const OTHER = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
     const { ctx, calls } = buildCtx({
       body: { query: 'anything', contextGraphId: CG, memoryLayers: ['wm'] },
