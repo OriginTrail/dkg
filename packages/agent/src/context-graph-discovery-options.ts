@@ -56,7 +56,7 @@ export function normalizeContextGraphDiscoveryScan(
       'Context graph discovery cannot be both incremental and a watermark seed',
     );
   }
-  if (options.resumeFromCursor === true && options.seedIncrementalWatermark === undefined) {
+  if (options.resumeFromCursor === true && options.seedIncrementalWatermark !== true) {
     throw new Error(
       'resumeFromCursor requires seedIncrementalWatermark',
     );

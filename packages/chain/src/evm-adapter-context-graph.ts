@@ -127,7 +127,7 @@ function buildPublicContextGraphRegistryScanPlan(
   if (legacy?.incremental === true && legacy.seedIncrementalWatermark === true) {
     throw new Error('Context graph list cannot be both incremental and a watermark seed');
   }
-  if (legacy?.resumeFromCursor === true && legacy.seedIncrementalWatermark === undefined) {
+  if (legacy?.resumeFromCursor === true && legacy.seedIncrementalWatermark !== true) {
     throw new Error('resumeFromCursor requires seedIncrementalWatermark');
   }
 

@@ -215,7 +215,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     const seedOptions = (seedIncrementalWatermark: boolean): ContextGraphChainScanOptions => ({
       seedIncrementalWatermark,
-      resumeFromCursor: true,
+      resumeFromCursor: false,
       pageBudget: 1,
     });
 
@@ -726,6 +726,7 @@ describe('context graph list compatibility validation (#1485)', () => {
     { mode: 'incremental', seedIncrementalWatermark: true },
     { incremental: true, seedIncrementalWatermark: true },
     { resumeFromCursor: true },
+    { seedIncrementalWatermark: false, resumeFromCursor: true },
   ])('rejects contradictory options before adapter initialization: %j', async (options) => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry);

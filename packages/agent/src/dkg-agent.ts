@@ -96,6 +96,7 @@ import {
   normalizeContextGraphDiscoveryScan,
   legacyChainListScanOptions,
   type DiscoverContextGraphsFromChainOptions,
+  type NormalizedContextGraphDiscoveryScan,
 } from './context-graph-discovery-options.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
@@ -2131,8 +2132,21 @@ export class DKGAgent extends DKGAgentBase {
     minimumIntervalMs?: number;
     signal?: AbortSignal;
   }): Promise<number> {
-    const progress: ContextGraphRegistryRepairProgress = {
+    return this.repairContextGraphRegistryNormalized({
+      mode: 'repair',
       pageBudget: options.pageBudget,
+      ...(options.minimumIntervalMs !== undefined
+        ? { minimumIntervalMs: options.minimumIntervalMs }
+        : {}),
+    }, options.signal);
+  }
+
+  private async repairContextGraphRegistryNormalized(
+    scanMode: Extract<NormalizedContextGraphDiscoveryScan, { mode: 'repair' }>,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const progress: ContextGraphRegistryRepairProgress = {
+      pageBudget: scanMode.pageBudget,
       startedAt: Date.now(),
       observedPages: 0,
       acknowledgedPages: 0,
@@ -2141,10 +2155,9 @@ export class DKGAgent extends DKGAgentBase {
     let outcome: 'succeeded' | 'failed' = 'failed';
     try {
       const discovered = await this.discoverContextGraphsFromChainInternal({
-        mode: 'repair',
         throwOnChainScanFailure: true,
-        ...options,
-      }, progress);
+        ...(signal ? { signal } : {}),
+      }, scanMode, progress);
       outcome = 'succeeded';
       return discovered;
     } finally {
@@ -2176,26 +2189,24 @@ export class DKGAgent extends DKGAgentBase {
   async discoverContextGraphsFromChain(
     options: DiscoverContextGraphsFromChainOptions = {},
   ): Promise<number> {
-    if (options.mode === 'repair') {
-      return this.repairContextGraphRegistry({
-        pageBudget: options.pageBudget ?? 1,
-        ...(options.minimumIntervalMs !== undefined
-          ? { minimumIntervalMs: options.minimumIntervalMs }
-          : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+    const scanMode = normalizeContextGraphDiscoveryScan(options);
+    if (scanMode.mode === 'repair') {
+      return this.repairContextGraphRegistryNormalized(scanMode, options.signal);
     }
-    return this.discoverContextGraphsFromChainInternal(options);
+    return this.discoverContextGraphsFromChainInternal(options, scanMode);
   }
 
   /** Shared page application primitive; repair owns its orchestration above. */
   private async discoverContextGraphsFromChainInternal(
-    options: DiscoverContextGraphsFromChainOptions,
+    options: Pick<
+      DiscoverContextGraphsFromChainOptions,
+      'signal' | 'throwOnChainScanFailure'
+    >,
+    scanMode: NormalizedContextGraphDiscoveryScan,
     repairProgress?: ContextGraphRegistryRepairProgress,
   ): Promise<number> {
     options.signal?.throwIfAborted();
     const ctx = createOperationContext('system');
-    const scanMode = normalizeContextGraphDiscoveryScan(options);
     const scanFailureLane = repairProgress ? 'repair' : 'live';
     const scanFailureLabel = scanFailureLane === 'repair'
       ? 'Chain context graph repair scan'
