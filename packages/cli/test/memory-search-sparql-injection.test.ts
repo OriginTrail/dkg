@@ -30,12 +30,14 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
     // The route gates on read authority before either fan-out runs; these
     // injection tests exercise the SPARQL builder, so grant it.
     canReadContextGraph: async () => true,
-    store: {
-      query: async (sparql: string) => {
-        captureSparql(sparql);
-        return { type: 'bindings' as const, bindings: [] };
-      },
+    // The text search fans out per memory-layer view through the guarded
+    // `DKGAgent.query` path; the literal-escaping contract under test lives
+    // in the caller query either way.
+    query: async (sparql: string) => {
+      captureSparql(sparql);
+      return { bindings: [] };
     },
+    listLocalAgents: () => [],
   };
   const ctx = {
     req: fakeReq('POST', body),

@@ -9,9 +9,10 @@ import { requestAuthentication } from './_helpers/request-authentication.js';
 //
 //   - the vector fan-out filters rows by `context_graph_id` in SQL
 //     (`VectorStore.search`), so the named CG is the CG that gets ranked,
-//   - the SPARQL fan-out calls `agent.store.query` DIRECTLY — no
-//     `DKGQueryEngine` graph-scope rewrite, no `DKGAgent.query`
-//     `canReadContextGraph` check.
+//   - the SPARQL fan-out queries that CG's memory-layer views. It runs
+//     through the guarded `DKGAgent.query` path, whose own authority check
+//     denies with an EMPTY result rather than a status — so the explicit
+//     gate here is what produces a 403, and what covers the vector fan-out.
 //
 // Agent-scoped tokens are in the daemon's `validTokens` set
 // (`daemon/lifecycle.ts`), so an agent token reaches this route. Without a
@@ -40,7 +41,7 @@ function fakeReq(method: string, body: unknown) {
 interface Probe {
   /** CG ids passed to the read-authority check, in call order. */
   readonly authorityChecks: Array<{ contextGraphId: string; callerAgentAddress?: string }>;
-  /** True once the SPARQL fan-out reached the triple store. */
+  /** True once the SPARQL fan-out ran, via either the guarded or raw path. */
   storeQueried: boolean;
   /** True once the vector fan-out reached the vector store. */
   vectorSearched: boolean;
@@ -66,6 +67,17 @@ function buildCtx(opts: {
       });
       return opts.readableContextGraphs.includes(contextGraphId);
     },
+    // The route fans the text search out per memory-layer view through the
+    // guarded `DKGAgent.query` path.
+    query: async () => {
+      probe.storeQueried = true;
+      return {
+        bindings: [{ entity: 'urn:secret', name: 'secret-entity', desc: 'secret-desc' }],
+      };
+    },
+    listLocalAgents: () => [{ agentAddress: '0xnode-default-agent' }],
+    // Retained so a regression back to the raw-store path is still observed
+    // as "retrieval ran" by the deny assertions below.
     store: {
       query: async () => {
         probe.storeQueried = true;

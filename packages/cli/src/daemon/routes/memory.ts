@@ -1770,10 +1770,12 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     //     `context_graph_id` in SQL (see `VectorStore.search`) — so the CG the
     //     caller names IS the CG whose embeddings, labels and snippets are
     //     ranked and returned,
-    //   - fan-out 2 calls `agent.store.query` DIRECTLY, bypassing
-    //     `DKGQueryEngine`'s graph-scope rewrites and `DKGAgent.query`'s
-    //     `canReadContextGraph` check, with hand-built `STRSTARTS` filters
-    //     pinned to the caller-supplied CG URI.
+    //   - fan-out 2 queries the memory-layer views for that CG. It now runs
+    //     through `DKGAgent.query`, which applies its own
+    //     `canReadContextGraph` check — but that check resolves per VIEW
+    //     call and returns an empty result rather than a status, so the
+    //     explicit gate here is what turns a refusal into a 403 and what
+    //     also covers the vector fan-out above.
     //
     // Mirror the gate `/api/profile/query-catalog/read` already applies
     // (`daemon/routes/query-catalog.ts`): node operators keep the cross-CG
@@ -1840,44 +1842,86 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       }
     }
 
-    // Fan-out 2: SPARQL text search (scoped to the requested CG + layers).
+    // Fan-out 2: text search over the memory layers, through the GUARDED
+    // query path.
+    //
+    // This used to call `agent.store.query` directly with hand-built
+    // `STRSTARTS(STR(?g), "<cg>/_working_memory")`-style filters. That
+    // bypassed `DKGQueryEngine`'s graph-scope rewrites AND `DKGAgent.query`'s
+    // per-view resolution, which meant two things had to be re-implemented
+    // here and could drift from the writer-side layout: which named graphs
+    // belong to a memory layer, and which of them the caller may read.
+    // Notably the `wm` prefixes matched EVERY agent's drafts in the context
+    // graph, so the A-1 working-memory isolation `DKGAgent.query` enforces on
+    // the `working-memory` view did not apply to this route.
+    //
+    // Fan out per view instead and let the engine own graph resolution. The
+    // caller query keeps only the text predicate; `GRAPH ?g` stays, and
+    // `constrainGraphVariablesToAllowedSet` pins it to the view's allow-set.
+    //
     // escapeSparqlLiteral escapes backslashes, quotes, and CR/LF/TAB per the
     // SPARQL STRING_LITERAL2 grammar -- a simple `replace(/"/g, '\\"')` would
     // still allow `\` to escape the closing quote and break out of the literal.
     const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
-    const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-    const graphFilters = memoryLayers.map((l) => {
-      if (l === 'wm') {
-        return `(STRSTARTS(STR(?g), "${cgUri}/_working_memory") || STRSTARTS(STR(?g), "${cgUri}/assertion/"))`;
-      }
-      if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
-      // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
-      // contextGraphVerifiableMemoryUri in dkg-core). The pre-rc.16
-      // "_verified" prefix matched nothing, so memory layer "vm" could
-      // never return SPARQL hits.
-      return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
-    }).join(' || ') || 'false';
-    try {
-      // #1096: accept both http:// and https:// schema.org forms -- real
-      // payloads overwhelmingly use https://schema.org, which the previous
-      // http-only property path silently excluded.
-      const sparqlResult = await agent.store.query(`
+    // #1096: accept both http:// and https:// schema.org forms -- real
+    // payloads overwhelmingly use https://schema.org, which the previous
+    // http-only property path silently excluded.
+    const searchSparql = `
         SELECT DISTINCT ?entity ?name ?desc WHERE {
           GRAPH ?g {
             ?entity <http://schema.org/name>|<https://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
             OPTIONAL { ?entity <http://schema.org/description>|<https://schema.org/description> ?desc }
           }
-          FILTER(${graphFilters})
           FILTER(
             CONTAINS(LCASE(STR(?name)), "${escapedQuery}")
             || (BOUND(?desc) && CONTAINS(LCASE(STR(?desc)), "${escapedQuery}"))
           )
         }
         LIMIT ${resultLimit}
-      `);
-      if (sparqlResult.type === 'bindings') {
-        for (const binding of sparqlResult.bindings) {
+      `;
+
+    // Working memory is per-agent, so the `wm` view needs an address:
+    //   - an agent-scoped caller reads its OWN working memory, and
+    //     `DKGAgent.query`'s A-1 check rejects anything else;
+    //   - a node operator administers the box and keeps the cross-agent view
+    //     it had before, by spanning every agent registered on this node;
+    //   - an anonymous / auth-disabled caller supplies no address, so the
+    //     engine falls back to the node's default agent — the same contract
+    //     `/api/query` applies.
+    // `swm` and `vm` are context-graph-wide by design and take no address.
+    const workingMemoryAddresses: Array<string | undefined> = callerAgentAddress
+      ? [callerAgentAddress]
+      : isNodeAdmin
+        ? (agent.listLocalAgents().map((a) => a.agentAddress) as string[])
+        : [undefined];
+    const searchPlans: Array<{ view: 'working-memory' | 'shared-working-memory' | 'verifiable-memory'; agentAddress?: string }> = [];
+    for (const layer of memoryLayers) {
+      if (layer === 'wm') {
+        // A node operator with no registered agents still gets the engine
+        // default rather than silently skipping the whole layer.
+        const addresses = workingMemoryAddresses.length > 0 ? workingMemoryAddresses : [undefined];
+        for (const agentAddress of addresses) {
+          searchPlans.push({ view: 'working-memory', agentAddress });
+        }
+        continue;
+      }
+      searchPlans.push({
+        view: layer === 'swm' ? 'shared-working-memory' : 'verifiable-memory',
+      });
+    }
+
+    for (const plan of searchPlans) {
+      try {
+        const viewResult = await agent.query(searchSparql, {
+          contextGraphId,
+          view: plan.view,
+          agentAddress: plan.agentAddress,
+          callerAgentAddress,
+          source: 'api.memory.search',
+        });
+        for (const binding of viewResult.bindings ?? []) {
           const uri = binding.entity;
+          if (!uri) continue;
           const label = binding.name ?? null;
           const snippet = binding.desc ?? null;
           if (seen.has(uri)) {
@@ -1899,9 +1943,11 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
             });
           }
         }
+      } catch {
+        // A single view failing is non-fatal, as the single combined query
+        // was before. The read-authority gate above has already run, so this
+        // cannot turn a denial into an empty 200.
       }
-    } catch {
-      // SPARQL search failure is non-fatal
     }
 
     // Sort: vector-matched results first (by similarity), then SPARQL-only
