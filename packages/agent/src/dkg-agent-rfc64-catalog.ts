@@ -4188,7 +4188,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // scope, so the current entry serves them. It is reported for the case where that
           // did not happen.
           if (rfc64CatalogHeadIsSupersededGenerationV1(accepted, head.payload)) {
-            superseded.push(head.payload.authorAddress);
+            // Carry both digests. Withholding a head is the one place this path can lose data
+            // silently if the author never re-projected, so the warning has to name exactly
+            // which stored lane was withheld and which one replaced it -- that pair is what
+            // someone debugging a stuck Context Graph on the fleet needs.
+            superseded.push(
+              `${head.payload.authorAddress} scope `
+              + `${computeAuthorCatalogScopeDigestV1(
+                deriveAuthorCatalogScopeFromHeadV1(head.payload),
+              )} superseded by policy ${accepted.policyDigest}`,
+            );
             continue;
           }
           manifest.push(Object.freeze({
@@ -4212,8 +4221,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             createOperationContext('system'),
             `RFC-64 catalog replay withheld ${superseded.length} head(s) from `
             + `${peerId.slice(-8)} that belong to a superseded authority generation `
-            + `(authors ${[...new Set(superseded)].join(', ')}); their rows reach this peer `
-            + 'through the accepted generation once the author has re-projected them',
+            + `[${superseded.join('; ')}]; their rows reach this peer through the accepted `
+            + 'generation once the author has re-projected them',
           );
         }
         if (manifest.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
