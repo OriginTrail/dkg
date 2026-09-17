@@ -67,6 +67,7 @@ export * from './rfc64/swm-author-inventory-producer-v1.js';
 export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
+export * from './rfc64/unregistered-authority-transport-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
 export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';
@@ -211,6 +212,10 @@ export type {
 export type {
   Rfc64PublicCatalogBootstrapStatusV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+export type {
+  PersistVerifiedRfc64UnregisteredAuthoritySeedInputV1,
+  ReadRfc64UnregisteredAuthoritySeedInputV1,
+} from './dkg-agent-rfc64-seed-store.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';

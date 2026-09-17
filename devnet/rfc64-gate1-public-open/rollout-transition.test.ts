@@ -569,6 +569,7 @@ function assertVmReconciled(value: Gate1VmReconcileResult, label: string): void 
 function assertVmAuthorityRejected(value: Gate1VmReconcileResult, label: string): void {
   assert.equal(value.chainReadDelta.active >= 1, true);
   assert.equal(value.chainReadDelta.accessPolicy >= 1, true);
+  assert.equal(value.chainReadDelta.nameHashResolution, 0);
   assert.equal(
     value.replicationEvents.some((event) => event.action === 'promote'),
     false,

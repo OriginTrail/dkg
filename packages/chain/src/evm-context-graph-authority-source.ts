@@ -6,11 +6,11 @@ import type { ContextGraphAuthorityHistoryResolution } from './context-graph-aut
 import type {
   ContextGraphAuthorityIndexState,
 } from './context-graph-authority-index-checkpoint.js';
-import type { ContextGraphAuthorityIndexEvent } from './context-graph-authority-index-reducer.js';
+import type { RawContextGraphAuthorityIndexEvent } from
+  './context-graph-authority-index-reducer.js';
 import {
   normalizeContextGraphAuthorityAccessPolicy,
   normalizeContextGraphAuthorityPublishDomain,
-  normalizeContextGraphAuthorityPublishReference,
   type ContextGraphAuthorityState,
 } from './context-graph-authority-state.js';
 
@@ -137,11 +137,11 @@ export function contextGraphAuthorityEventTopics(
   }));
 }
 
-/** Convert one real ethers log into the index's closed event union. */
-export function normalizeContextGraphAuthorityIndexLog(
+/** Decode one real ethers log into an untrusted DTO for page admission. */
+export function decodeContextGraphAuthorityIndexLog(
   contractInterface: ethers.Interface,
   log: ethers.Log,
-): ContextGraphAuthorityIndexEvent {
+): RawContextGraphAuthorityIndexEvent {
   const parsed = contractInterface.parseLog(log);
   if (parsed === null) throw new Error('ContextGraphStorage returned an unknown authority event');
   const base = {
@@ -150,83 +150,59 @@ export function normalizeContextGraphAuthorityIndexLog(
     index: log.index,
   };
   switch (parsed.name) {
-    case 'ContextGraphCreated': {
-      const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(
-        Number(BigInt(parsed.args.accessPolicy ?? parsed.args[5])),
-      );
-      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
-        Number(BigInt(parsed.args.publishPolicy ?? parsed.args[6])),
-        String(parsed.args.publishAuthority ?? parsed.args[7]),
-        BigInt(parsed.args.publishAuthorityAccountId ?? parsed.args[8]),
-      );
-      if (accessPolicy === undefined || publishDomain === undefined) {
-        throw new Error('ContextGraphStorage returned an invalid creation authority domain');
-      }
+    case 'ContextGraphCreated':
       return {
         ...base,
         name: parsed.name,
-        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
-        owner: String(parsed.args.owner ?? parsed.args[1]),
-        nameHash: String(parsed.args.nameHash ?? parsed.args[2]),
-        participantAgents: [
-          ...(parsed.args.participantAgents ?? parsed.args[3]),
-        ].map((address) => String(address)),
-        accessPolicy,
-        ...publishDomain,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        owner: parsed.args.owner ?? parsed.args[1],
+        nameHash: parsed.args.nameHash ?? parsed.args[2],
+        participantAgents: parsed.args.participantAgents ?? parsed.args[3],
+        accessPolicy: parsed.args.accessPolicy ?? parsed.args[5],
+        publishPolicy: parsed.args.publishPolicy ?? parsed.args[6],
+        publishAuthority: parsed.args.publishAuthority ?? parsed.args[7],
+        publishAuthorityAccountId:
+          parsed.args.publishAuthorityAccountId ?? parsed.args[8],
       };
-    }
     case 'Transfer':
       return {
         ...base,
         name: parsed.name,
-        contextGraphId: BigInt(parsed.args.tokenId ?? parsed.args[2]),
-        from: String(parsed.args.from ?? parsed.args[0]),
-        to: String(parsed.args.to ?? parsed.args[1]),
+        contextGraphId: parsed.args.tokenId ?? parsed.args[2],
+        from: parsed.args.from ?? parsed.args[0],
+        to: parsed.args.to ?? parsed.args[1],
       };
-    case 'PublishPolicyUpdated': {
-      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
-        Number(BigInt(parsed.args.publishPolicy ?? parsed.args[1])),
-        String(parsed.args.publishAuthority ?? parsed.args[2]),
-        BigInt(parsed.args.publishAuthorityAccountId ?? parsed.args[3]),
-      );
-      if (publishDomain === undefined) {
-        throw new Error('ContextGraphStorage returned an invalid publish-policy domain');
-      }
+    case 'PublishPolicyUpdated':
       return {
         ...base,
         name: parsed.name,
-        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
-        ...publishDomain,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        publishPolicy: parsed.args.publishPolicy ?? parsed.args[1],
+        publishAuthority: parsed.args.publishAuthority ?? parsed.args[2],
+        publishAuthorityAccountId:
+          parsed.args.publishAuthorityAccountId ?? parsed.args[3],
       };
-    }
-    case 'PublishAuthorityUpdated': {
-      const publishReference = normalizeContextGraphAuthorityPublishReference(
-        String(parsed.args.newAuthority ?? parsed.args[1]),
-        BigInt(parsed.args.newAuthorityAccountId ?? parsed.args[2]),
-      );
-      if (publishReference === undefined) {
-        throw new Error('ContextGraphStorage returned an invalid publish-authority reference');
-      }
+    case 'PublishAuthorityUpdated':
       return {
         ...base,
         name: parsed.name,
-        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
-        ...publishReference,
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        publishAuthority: parsed.args.newAuthority ?? parsed.args[1],
+        publishAuthorityAccountId: parsed.args.newAuthorityAccountId ?? parsed.args[2],
       };
-    }
     case 'AgentParticipantAdded':
     case 'AgentParticipantRemoved':
       return {
         ...base,
         name: parsed.name,
-        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
-        agent: String(parsed.args.agent ?? parsed.args[1]),
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
+        agent: parsed.args.agent ?? parsed.args[1],
       };
     case 'ContextGraphDeactivated':
       return {
         ...base,
         name: parsed.name,
-        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        contextGraphId: parsed.args.contextGraphId ?? parsed.args[0],
       };
     default:
       throw new Error(`Unsupported ContextGraphStorage authority event ${parsed.name}`);

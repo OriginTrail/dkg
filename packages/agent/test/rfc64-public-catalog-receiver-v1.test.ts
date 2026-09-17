@@ -245,9 +245,13 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     await expect(current).resolves.toMatchObject({ outcome: 'applied' });
     await receiver.whenIdle();
     expect(versions).toEqual(['1', '100']);
+    // The strictly older ACTIVE ambient head is preempted (aborted -> closed)
+    // so the verified head does not wait behind it; the older QUEUED heads
+    // are retired only after the verified head became durable.
     expect(receiver.stats()).toMatchObject({
       applied: 1,
-      failed: 1,
+      failed: 0,
+      preemptedActive: 1,
       supersededQueued: 2,
       queued: 0,
       inFlight: 0,
@@ -256,7 +260,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       head.catalogVersion,
       outcome,
     ]).sort()).toEqual([
-      ['1', 'failed'],
+      ['1', 'closed'],
       ['100', 'applied'],
       ['2', 'closed'],
       ['3', 'closed'],
@@ -362,10 +366,14 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
     await expect(current).resolves.toMatchObject({ outcome: 'failed' });
     await receiver.whenIdle();
+    // The queued history (v2) survives the failed jump untouched. Only the
+    // strictly older ACTIVE ambient head (v1) was preempted for the verified
+    // head, so it settles as closed rather than running to its own failure.
     expect(versions).toEqual(['1', '3', '2']);
     expect(receiver.stats()).toMatchObject({
       applied: 1,
-      failed: 2,
+      failed: 1,
+      preemptedActive: 1,
       supersededQueued: 0,
     });
   });
@@ -1228,6 +1236,34 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ notFound: 1, failed: 1 });
     expect(notFound).toMatchObject({ outcome: 'not-found', error: null });
     expect(failed).toMatchObject({ outcome: 'failed', error: terminalFailure });
+  });
+
+  it('reports the not-found terminal through onNotFound with the provider tally', async () => {
+    const onNotFound = vi.fn();
+    const onError = vi.fn();
+    const onCompletion = vi.fn();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => 'not-found'),
+      {
+        maxAttempts: 1,
+        retryBackoffMs: 0,
+        onNotFound,
+        onError,
+        onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion),
+      },
+    );
+    const head = announcement();
+
+    receiver.schedule(head, 'peerA');
+    receiver.schedule(head, 'peerB');
+    await receiver.whenIdle();
+
+    // Every retained provider denied the head: no thrown error exists on this
+    // path, so the dedicated observer is the only operator-visible signal.
+    expect(onNotFound).toHaveBeenCalledExactlyOnceWith(head, 2, 2);
+    expect(onError).not.toHaveBeenCalled();
+    expect(onCompletion).toHaveBeenCalledExactlyOnceWith(head, 'not-found');
+    expect(receiver.stats()).toMatchObject({ notFound: 1, applied: 0, failed: 0 });
   });
 
   it('serializes different heads in one catalog scope', async () => {
