@@ -639,6 +639,17 @@ create_node_config() {
       # replacement, so without this nodes 5-6 refuse every graph-scoped
       # materialization with VM_ATOMIC_REPLACE_UNSUPPORTED and converge nothing
       # while nodes 1-2 pass — a matrix hole that looks like a product failure.
+      #
+      # `atomic-update` is the minimum that lifts that refusal
+      # (SparqlHttpStore.replaceGraphAndSubject gates on it). `atomic-readback`
+      # is declared deliberately instead: one Oxigraph process does guarantee
+      # read-after-write, and it additionally exercises the receipt-bearing
+      # author-commit CAS lane (rfc64AuthorCommitCasV1) over sparql-http, which
+      # this matrix otherwise never covers. A failure in that lane on nodes 5-6
+      # is therefore a real finding, not devnet drift. Note the certifications
+      # reserved for the daemon-spawned runtime (shared projection stream,
+      # exact-bindings and semantic reads) stay off here by design, so these
+      # nodes remain an external-endpoint cell rather than a managed twin.
       store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\", \"consistencyProfile\": \"atomic-readback\" } },"
     else
       store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
