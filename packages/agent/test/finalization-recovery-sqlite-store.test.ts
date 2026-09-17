@@ -267,6 +267,42 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
+  it('keeps a VERIFIED entry readable after it is downgraded to UNSUPPORTED', async () => {
+    // `transition()` admits UNSUPPORTED from VERIFIED and clears only
+    // `publisher_upgrade_pending`, so the row keeps the evidence it had
+    // acquired. Classifying UNSUPPORTED as evidence-free made every later read
+    // throw — and because open sweeps every row through the codec, the whole
+    // inbox became permanently unopenable. Reachable on any restart with no
+    // chain adapter, chainId 'none', or an adapter without
+    // `resolveCanonicalFinalizationReceipt`.
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      expect((await store.receive(received())).status).toBe('inserted');
+      expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status)
+        .toBe('verified');
+      expect(await store.transition('entry-1', 0, 'UNSUPPORTED')).toBe(true);
+
+      // The audit evidence is deliberately retained, not nulled.
+      await expect(store.get('entry-1')).resolves.toMatchObject({
+        state: 'UNSUPPORTED',
+        verifiedEvidence: { blockHash: BLOCK_HASH, txIndex: 4 },
+      });
+      await expect(store.list()).resolves.toBeDefined();
+      await store.close();
+
+      // The open-time sweep must not throw on that row.
+      const reopened = await openSqliteFinalizationRecoveryStore(directory);
+      await expect(reopened.get('entry-1')).resolves.toMatchObject({
+        state: 'UNSUPPORTED',
+        verifiedEvidence: { blockHash: BLOCK_HASH },
+      });
+      await reopened.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('atomically commits recovered evidence after a canonical receipt moves', async () => {
     const directory = await temporaryDirectory();
     try {

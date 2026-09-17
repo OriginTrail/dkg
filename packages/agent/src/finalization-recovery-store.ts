@@ -42,7 +42,7 @@ interface FinalizationRecoveryEntryFields {
 
 /** Entries that have not acquired chain-verified finalization evidence. */
 export type UnverifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
-  state: 'RECEIVED' | 'REORGED' | 'UNSUPPORTED';
+  state: 'RECEIVED' | 'REORGED';
   verifiedEvidence?: never;
 };
 
@@ -52,9 +52,18 @@ export type VerifiedFinalizationRecoveryEntry = FinalizationRecoveryEntryFields 
   verifiedEvidence: VerifiedGraphScopedFinalizationEvidence;
 };
 
-/** Terminal rows retain optional evidence for bounded diagnostics and audit. */
+/**
+ * Terminal rows retain optional evidence for bounded diagnostics and audit.
+ *
+ * UNSUPPORTED belongs here, not with the evidence-free states: `transition()`
+ * admits it from RECEIVED, VERIFIED and REORGED and clears only
+ * `publisher_upgrade_pending`, so a VERIFIED row downgraded by
+ * `markUnsupported()` keeps the evidence it had acquired. Classifying it as
+ * evidence-free made every later read of such a row throw — including the
+ * open-time sweep, which made the whole inbox unopenable.
+ */
 export type HistoricalFinalizationRecoveryEntry = FinalizationRecoveryEntryFields & {
-  state: 'SUPERSEDED' | 'REJECTED';
+  state: 'SUPERSEDED' | 'REJECTED' | 'UNSUPPORTED';
   verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
 };
 
