@@ -52,6 +52,8 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     expect(runtime.status('public-cg', 'new-policy')).toEqual({
       active: true,
       failed: false,
+      unresolvedPeerCount: 0,
+      unverified: false,
     });
 
     release();
@@ -61,6 +63,8 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     expect(runtime.status('public-cg', 'new-policy')).toEqual({
       active: false,
       failed: false,
+      unresolvedPeerCount: 0,
+      unverified: false,
     });
     newLease?.release();
   });

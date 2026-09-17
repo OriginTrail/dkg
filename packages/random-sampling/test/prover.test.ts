@@ -388,11 +388,97 @@ describe('RandomSamplingProver — mid-period update (content pinning)', () => {
       { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"MUTATED"', graph: dataGraph },
     ]);
 
+    // A chain-rejected root mismatch also enters the bounded corruption
+    // cooldown, so the next three ticks give sync a chance to repair the KA
+    // without re-extracting it.
+    for (let tick = 0; tick < 3; tick += 1) {
+      await expect(prover.tick()).resolves.toEqual({
+        kind: 'kc-not-synced',
+        kaId: fixture.kaId,
+        cgId: fixture.cgId,
+      });
+    }
+
     await expect(prover.tick()).resolves.toMatchObject({
       kind: 'data-corrupted',
       reason: 'root-mismatch',
     });
     expect(submitProof).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+});
+
+describe('RandomSamplingProver — data-corruption retry cooldown', () => {
+  let store: OxigraphStore;
+  beforeEach(() => {
+    store = new OxigraphStore();
+  });
+
+  it('suppresses repeated full extracts after a leaf-count mismatch, then retries', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 7n,
+      ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1', 'urn:e:2', 'urn:e:3'],
+      publicTriples: [
+        { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' },
+        { subject: 'urn:e:2', predicate: 'urn:p:k', object: '"b"' },
+        { subject: 'urn:e:3', predicate: 'urn:p:k', object: '"c"' },
+      ],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+    const challenge = makeChallenge({
+      knowledgeAssetId: fixture.kaId,
+      challengeRoot: root,
+      // Deliberately disagree with the locally extracted leaf count so the
+      // builder returns the same deterministic mismatch seen in the issue.
+      challengeLeafCount: BigInt(leafCount + 1),
+      activeProofPeriodStartBlock: 1000n,
+      solved: false,
+    });
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: challenge,
+      createChallenge: async () => ({
+        challenge,
+        contextGraphId: fixture.cgId,
+        hash: '0xchallenge',
+        blockNumber: 1000,
+        success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: vi.fn(async () => ({ hash: '0xunused', blockNumber: 1001, success: true })),
+    });
+    const querySpy = vi.spyOn(store, 'query');
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'data-corrupted',
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
+      reason: 'leaf-count-mismatch',
+    });
+    const firstExtractQueries = querySpy.mock.calls.length;
+    expect(firstExtractQueries).toBeGreaterThan(0);
+
+    for (let tick = 0; tick < 3; tick += 1) {
+      await expect(prover.tick()).resolves.toEqual({
+        kind: 'kc-not-synced',
+        kaId: fixture.kaId,
+        cgId: fixture.cgId,
+      });
+    }
+    expect(querySpy.mock.calls.length).toBe(firstExtractQueries);
+
+    // The cooldown is finite: the next tick attempts extraction again and
+    // surfaces the mismatch instead of suppressing it forever.
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'data-corrupted',
+      reason: 'leaf-count-mismatch',
+    });
+    expect(querySpy.mock.calls.length).toBeGreaterThan(firstExtractQueries);
     await prover.close();
   });
 });
