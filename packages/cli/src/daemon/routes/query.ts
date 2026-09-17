@@ -371,6 +371,41 @@ export type PublicApiQueryResult = import('@origintrail-official/dkg-core').Publ
   { subject: string; predicate: string; object: string; graph: string }
 >;
 
+// Kept structural for the same package-boundary reason as
+// CALLER_SPARQL_REJECTED in query-error.ts: the agent emits this internal
+// marker, while the daemon owns its public HTTP representation.
+const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE';
+
+function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return false;
+  try {
+    return Reflect.get(err, 'code') === CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE
+      && Reflect.get(err, 'retryable') === true;
+  } catch {
+    return false;
+  }
+}
+
+function respondIfContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  err: unknown,
+): boolean {
+  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  jsonResponse(
+    res,
+    503,
+    {
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '3' },
+  );
+  return true;
+}
+
 /** Normalize the legacy engine shape at the public daemon boundary. */
 export function normalizePublicApiQueryResult(
   sparql: string,
@@ -651,6 +686,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
         tracker.cancel(ctx, err);
         if (!res.writableEnded) res.end();
+        return;
+      }
+      if (respondIfContextGraphReadAuthorityUnavailable(res, err)) {
+        tracker.fail(ctx, err);
         return;
       }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
