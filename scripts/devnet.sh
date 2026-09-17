@@ -631,7 +631,15 @@ create_node_config() {
     if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then
       local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
       local ox_port="${!ox_port_var}"
-      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+      # Declare the transactional guarantee this endpoint actually has. The
+      # container is the same Oxigraph the managed path spawns (which
+      # self-declares `atomic-readback`), but an explicitly configured
+      # sparql-http endpoint defaults to `best-effort` — it cannot know what is
+      # behind it. RFC-64 durable sync requires atomic data/metadata
+      # replacement, so without this nodes 5-6 refuse every graph-scoped
+      # materialization with VM_ATOMIC_REPLACE_UNSUPPORTED and converge nothing
+      # while nodes 1-2 pass — a matrix hole that looks like a product failure.
+      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\", \"consistencyProfile\": \"atomic-readback\" } },"
     else
       store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
     fi
