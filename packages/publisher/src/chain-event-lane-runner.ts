@@ -35,7 +35,7 @@ export interface ChainEventPollerLaneSpec {
   canUseLegacyAggregateCursor?(): boolean;
   liveSeedLookbackBlocks?: number;
   cadenceMs: number;
-  dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
+  dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
 
@@ -280,9 +280,12 @@ export class ChainEventLaneRunner {
 
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
-        await lane.spec.dispatch(event, ctx);
+        signal?.throwIfAborted();
+        await lane.spec.dispatch(event, ctx, signal);
+        signal?.throwIfAborted();
       }
 
+      signal?.throwIfAborted();
       state.lastBlock = upperBound;
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });

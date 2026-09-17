@@ -12,6 +12,7 @@ export type LiveOnChainAccessPolicyUnavailable = {
 
 export type RegisteredContextGraphAuthorityUnavailableReason =
   | LiveOnChainAccessPolicyUnavailableReason
+  | 'finalized-name-absence-unaccepted'
   | 'chain-name-binding-unavailable'
   | 'local-chain-binding-unavailable'
   | 'local-existence-unavailable'

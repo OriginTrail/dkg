@@ -242,7 +242,6 @@ export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
   readonly window: PrivateSwmRecoveryWindow;
-  readonly owner: string;
   readonly createRoundDeadline: (round: number) => number;
   readonly recover: (
     round: number,
@@ -267,9 +266,7 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
     const deadline = params.createRoundDeadline(round);
     // The driver owns both round gating and page/transport admission from the
     // same window. Callers receive the composed capability with its deadline.
-    const workAdmission = params.window.admitRound(deadline, {
-      sharing: 'exclusive', owner: `${params.owner}:round-${round}`,
-    });
+    const workAdmission = params.window.admitRound(deadline);
     result = await params.recover(round, workAdmission, deadline);
     if (result.completed) return result;
 
@@ -371,7 +368,6 @@ export async function recoverContextGraphSwm(
     ...deps,
     workAdmission: deps.workAdmission ?? composeSyncWorkAdmission({
       deadline: deps.deadline,
-      scope: { sharing: 'exclusive', owner: 'direct-private-swm-round' },
     }),
   };
   const boundary = createRecoveryExecutionAdmission(deps.recoveryGuard);

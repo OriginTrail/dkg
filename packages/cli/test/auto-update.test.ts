@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
-import { _autoUpdateDependencies, _autoUpdateIo } from '../src/daemon.js';
+import { _autoUpdateIo } from '../src/daemon.js';
 
 const MARKITDOWN_TARGETS_JSON = JSON.stringify([
   { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
@@ -52,7 +52,6 @@ function mockReadFileSyncValue(path: unknown): string {
 
 // Save original _autoUpdateIo values for restoration
 const origIo = { ..._autoUpdateIo };
-const origDependencies = { ..._autoUpdateDependencies };
 
 // Tracking arrays
 let readFileCalls: [any, ...any[]][] = [];
@@ -135,7 +134,6 @@ function resetMocks() {
 }
 
 function installMocks() {
-  _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {};
   _autoUpdateIo.readFile = (async (path: any, ...rest: any[]) => {
     readFileCalls.push([path, ...rest]);
     return readFileImpl(path, ...rest);
@@ -194,7 +192,6 @@ function installMocks() {
 
 function restoreIo() {
   Object.assign(_autoUpdateIo, origIo);
-  Object.assign(_autoUpdateDependencies, origDependencies);
 }
 
 import {
@@ -1624,6 +1621,17 @@ describe('performNpmUpdate', () => {
     )).toBe(true);
   });
 
+  it('refuses slot activation when the runtime cannot provide node:sqlite', async () => {
+    (_autoUpdateIo as any).runtime = { version: 'v22.12.0' };
+    const logCalls: string[] = [];
+    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', (message) => {
+      logCalls.push(message);
+    });
+    expect(result).toBe('failed');
+    expect(swapSlotCalls).toEqual([]);
+    expect(logCalls.join('\n')).toContain('node:sqlite');
+  });
+
   it('returns failed when npm install throws', async () => {
     execImpl = async () => { throw new Error('npm ERR! 404'); };
     const result = await performNpmUpdate('9.99.0', () => {});
@@ -2232,25 +2240,31 @@ describe('autoupdater hardening', () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
     const events: string[] = [];
-    _autoUpdateDependencies.cleanStaleWorkspacePackages = async (slot) => {
-      expect(slot).toMatch(/\/releases\/b$/);
-      events.push('clean');
-    };
     execImpl = async (cmd) => {
       if (cmd.includes('pnpm install')) events.push('install');
       return { stdout: '', stderr: '' };
     };
-    await performUpdate(AU, () => {});
+    await performUpdate(AU, () => {}, {
+      dependencies: {
+        cleanStaleWorkspacePackages: async (slot) => {
+          expect(slot).toMatch(/\/releases\/b$/);
+          events.push('clean');
+        },
+      },
+    });
     expect(events).toEqual(['clean', 'install']);
   });
 
   it('does not install or activate when stale workspace cleanup fails', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
-    _autoUpdateDependencies.cleanStaleWorkspacePackages = async () => {
-      throw new Error('quarantine failed');
-    };
-    expect(await performUpdate(AU, () => {})).toBe(false);
+    expect(await performUpdate(AU, () => {}, {
+      dependencies: {
+        cleanStaleWorkspacePackages: async () => {
+          throw new Error('quarantine failed');
+        },
+      },
+    })).toBe(false);
     expect(execCalls.some(({ cmd }) => cmd.includes('pnpm install'))).toBe(false);
     expect(swapSlotCalls).toEqual([]);
   });

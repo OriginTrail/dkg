@@ -781,14 +781,10 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     ).toBe(false);
   }, 20_000);
 
-  it('promote fails fast when the draft was edited after finalize (stale seal, not a silent publish mismatch)', async () => {
-    // Regression for the #1004 review: the old auto-finalize only checked whether
-    // a seal EXISTED, not whether it matched the current WM. A finalize → edit →
-    // promote sequence skipped re-finalize, promoted the new content under the
-    // STALE seal, and failed only later at publish with a confusing merkleRoot
-    // mismatch. promote now ALWAYS calls assertionFinalize, which detects the
-    // post-finalize mutation and throws — so promote fails fast, BEFORE emptying
-    // WM, with an actionable "already finalized with a different merkleRoot" error.
+  it('rejects a post-finalize edit before it can make the active seal stale', async () => {
+    // A finalized WM graph is immutable. The write itself must fail before any
+    // content can diverge from the seal; callers reopen through pullFrom when
+    // they intend to author a new version.
     const agent = await createAgent('StaleSealBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Stale Seal E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -799,20 +795,14 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     ]);
     await agent.assertion.finalize(CG_ID, 'stale');
 
-    // Edit the draft AFTER finalize — the seal is now stale.
-    await agent.assertion.write(CG_ID, 'stale', [
+    await expect(agent.assertion.write(CG_ID, 'stale', [
       { subject: `${ENTITY_BASE}:s2`, predicate: 'http://schema.org/name', object: '"Added after finalize"' },
-    ]);
+    ])).rejects.toMatchObject({ code: 'KA_ASSERTION_ALREADY_FINALIZED' });
 
-    // promote must fail fast (assertionFinalize detects the mutation), NOT
-    // silently promote the stale-sealed content.
-    await expect(agent.assertion.promote(CG_ID, 'stale')).rejects.toThrow(
-      /differs from its existing seal|different merkleRoot/i,
-    );
-
-    // WM is intact — the failed promote did not empty it.
+    // WM remains the exact sealed version and is still shareable.
     const wm = await agent.assertion.query(CG_ID, 'stale');
-    expect(wm.length).toBeGreaterThan(0);
+    expect(wm.map((candidate) => candidate.subject)).toEqual([`${ENTITY_BASE}:s1`]);
+    expect((await agent.assertion.promote(CG_ID, 'stale')).sealed).toBe(true);
   }, 20_000);
 
   it('WM is empty after promote; SWM clear after publishFromSWM with flag', async () => {
@@ -1350,7 +1340,23 @@ describe('rootless graph-scoped KA lifecycle', () => {
       ...recoveryInput,
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
     } as any);
+    const recoveredRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    expect(recoveredRfc64Confirmation).toHaveBeenCalledTimes(1);
+    expect(recoveredRfc64Confirmation).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CG_ID,
+      assertionCoordinate: name,
+      shareOperationId: intent.shareOperationId,
+      assertionUri,
+      publicationLabel: 'queued publish',
+      seal: expect.objectContaining({
+        kaUal: intent.kaUal,
+        assertionVersion: intent.assertionVersion,
+        authorAddress: intent.seal.authorAddress,
+      }),
+    }));
+    recoveredRfc64Confirmation.mockRestore();
     // RFC-64 catalog retirement may independently clear this exact published
     // scope under a system operation while the recovery pass is running. Keep
     // this assertion scoped to the recovery lane so unrelated, valid cleanup
@@ -1506,8 +1512,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
 
     const currentFinalizer = agent.getOrCreateFinalizationHandler();
     const supersededReconcile = vi.spyOn(currentFinalizer, 'handleChainReconciledKC');
+    const supersededRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(supersededReconcile).not.toHaveBeenCalled();
+    expect(supersededRfc64Confirmation).not.toHaveBeenCalled();
+    supersededRfc64Confirmation.mockRestore();
     supersededReconcile.mockRestore();
     const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);
     expect(afterSupersededRecovery?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
@@ -2598,11 +2608,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const full = await agent.assertion.promote(CG_ID, name);
     expect(full.sealed).toBe(true);
 
-    // 2. Re-open the SAME name WITHOUT a discard — the full-share marker survives
-    // this clean-slate via A2_PRESERVE (the exact carry-over that strands a stale
-    // marker if the subset-clear branch is absent).
+    // 2. A selective retry is rejected before touching the already-sealed
+    // full-share state.
     await agent.assertion.create(CG_ID, name);
-    await writeAB();
 
     await expect(
       agent.assertion.promote(CG_ID, name, { entities: [`${ENTITY_BASE}:a`] }),
@@ -2692,16 +2700,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
     ]);
     await agent.assertion.promote(CG_ID, name);
 
-    // 2. Re-open the SAME name WITHOUT discard, write {A, B}.
+    // 2. A create retry is a no-op and an overwrite is rejected while sealed.
     await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
+    await expect(agent.assertion.write(CG_ID, name, [
       { subject: A, predicate: 'http://schema.org/name', object: '"Entity A v2"' },
       { subject: B, predicate: 'http://schema.org/name', object: '"Entity B"' },
-    ]);
-
-    await expect(agent.assertion.promote(CG_ID, name)).rejects.toThrow(
-      /differs from its existing seal|different merkleRoot/i,
-    );
+    ])).rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
 
     const recovered = await agent.assertion.pullFrom(CG_ID, name, 'swm', { onConflict: 'replace' });
     expect(recovered.seeded).toBe(2);
@@ -2727,12 +2731,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const full = await agent.assertion.promote(CG_ID, name);
     expect(full.sealed).toBe(true);
 
-    // 2. Re-open the SAME name WITHOUT discard, write {A, B} again.
+    // 2. A selective retry against the sealed asset is rejected before
+    // touching the exact SWM recovery source.
     await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
-      { subject: A, predicate: 'http://schema.org/name', object: '"Entity A v2"' },
-      { subject: B, predicate: 'http://schema.org/name', object: '"Entity B"' },
-    ]);
 
     await expect(
       agent.assertion.promote(CG_ID, name, { entities: [A] }),
@@ -2774,12 +2775,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(full.sealed).toBe(true);
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
 
-    // Re-open (no discard) + subset {A} re-share — non-sealing → clears the seal.
+    // A create retry plus a subset request is read-only and cannot clear the seal.
     await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
-      { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
-      { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
-    ]);
     await expect(
       agent.assertion.promote(CG_ID, name, { entities: [A] }),
     ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
@@ -2808,12 +2805,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.assertion.promote(CG_ID, name);
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
 
-    // Re-open (no discard) and attempt the removed unsealed mutation path.
+    // Retry the removed unsealed share path without mutating the sealed graph.
     await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
-      { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
-      { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
-    ]);
     await expect(
       agent.assertion.promote(CG_ID, name, { skipSeal: true }),
     ).rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
@@ -3037,12 +3030,8 @@ describe('rootless graph-scoped KA lifecycle', () => {
     await agent.assertion.promote(CG_ID, name);
     expect(await sealExists(agent, CG_ID, name)).toBe(true);
 
-    // Re-open + a selective request. Atomic v2 rejects it before commit.
+    // A create retry plus a selective request is rejected before commit.
     await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
-      { subject: A, predicate: 'http://schema.org/name', object: '"A2"' },
-      { subject: B, predicate: 'http://schema.org/name', object: '"B2"' },
-    ]);
     await expect(
       agent.assertion.promote(CG_ID, name, { entities: [A] }),
     ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });

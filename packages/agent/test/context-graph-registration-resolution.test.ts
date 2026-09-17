@@ -120,11 +120,34 @@ describe('Context Graph registration resolution deadlines', () => {
     }
   });
 
-  it('keeps the hot deadline for an existing authoritative binding candidate', async () => {
+  it('keeps an existing authoritative binding on the zero-RPC fast path', async () => {
+    const fixture = selectedFixture();
+    fixture.subscription.onChainId = '42';
+    const resolveDirect = vi.spyOn(
+      fixture.agent,
+      'resolveContextGraphOnChainIdBinding',
+    );
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({
+        kind: 'registered',
+        onChainId: 42n,
+        provenance: 'authoritative',
+      });
+    expect(resolveDirect).not.toHaveBeenCalled();
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('keeps the hot deadline for an existing reverse binding candidate', async () => {
     vi.useFakeTimers();
     try {
       const fixture = selectedFixture();
-      fixture.subscription.onChainId = '42';
+      fixture.agent.bindSubscriptionReverseNameHashOnChainId(
+        LOCAL_ID,
+        fixture.subscription,
+        '42',
+        NAME_HASH,
+      );
       const resolveDirect = vi.spyOn(fixture.agent, 'resolveContextGraphOnChainIdBinding')
         .mockImplementation((_contextGraphId, options) => new Promise((_, reject) => {
           options?.signal?.addEventListener(

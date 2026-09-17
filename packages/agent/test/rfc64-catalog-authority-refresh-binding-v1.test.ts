@@ -21,7 +21,7 @@ const REVISION_9 = `0x${'09'.repeat(32)}`;
 
 async function runAuthorityRead<T>(
   signal: AbortSignal,
-  read: (signal: AbortSignal | undefined) => Promise<T>,
+  read: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   return read(signal);
 }
@@ -156,7 +156,13 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
     const source = createRfc64CatalogAuthorityRevisionSourceV1({
       revisionReader: reader,
       resolveBinding: () => '9',
-      runAuthorityRead: (signal, read) => coordinator.run(signal, read),
+      runAuthorityRead: (signal, read) => coordinator.run(
+        signal,
+        (readSignal, evidence) => {
+          evidence.markRpcAttempt();
+          return read(readSignal);
+        },
+      ),
     })!;
 
     const first = source.read(['first'], controller.signal);
