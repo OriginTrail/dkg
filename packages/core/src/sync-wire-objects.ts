@@ -103,11 +103,16 @@ export function snapshotExactDataRecord<const Keys extends readonly string[]>(
   if (actual.some((key) => typeof key !== 'string')) {
     reject(`${label} must not contain symbol properties`);
   }
-  const strings = actual as string[];
-  const sortedExpected = [...expected].sort();
+  // Wire records normally have only 2–8 fields. Sorting and copying both
+  // key lists for every RDF term is unnecessary: own keys are unique, so
+  // equal cardinality plus membership proves exact equality. Use a Set for
+  // wider schemas to avoid quadratic membership checks.
+  const expectedSet = expected.length > 8 ? new Set(expected) : undefined;
   if (
-    strings.length !== sortedExpected.length
-    || [...strings].sort().some((key, index) => key !== sortedExpected[index])
+    actual.length !== expected.length
+    || actual.some((key) => expectedSet
+      ? !expectedSet.has(key as string)
+      : !expected.includes(key as string))
   ) {
     reject(`${label} has unknown or missing fields`);
   }
