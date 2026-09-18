@@ -773,6 +773,14 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
   // `mock.updateKnowledgeAssets` itself (issue 0004 of
   // `archive-non-v10-contracts`); V10 update attribution is covered by
   // the `updateKnowledgeCollectionV10` test above.
+
+  it('answers the enforceability probe, since it always has its context-graph table', async () => {
+    // Parity that matters in behaviour, not just in method presence: a caller must be able to
+    // ask BOTH questions of any adapter that answers either, or it cannot tell an authorized
+    // wallet from an adapter that enforces nothing.
+    const adapter = new MockChainAdapter();
+    await expect(adapter.isPublishAuthorityEnforceable()).resolves.toBe(true);
+  });
 });
 
 describe('NoChainAdapter completeness [CH-9]', () => {
@@ -802,11 +810,13 @@ describe('NoChainAdapter completeness [CH-9]', () => {
     expect(missing).toEqual([]);
   });
 
-  it('answers the enforceability probe, since it always has its context-graph table', async () => {
-    // Parity that matters in behaviour, not just in method presence: a caller must be able to
-    // ask BOTH questions of any adapter that answers either, or it cannot tell an authorized
-    // wallet from an adapter that enforces nothing.
-    const adapter = new MockChainAdapter();
-    await expect(adapter.isPublishAuthorityEnforceable()).resolves.toBe(true);
+  it('answers NEITHER publish-authority question, which is what disables the lift routing filter', () => {
+    // GH#2648 — `createPublishAuthorityResolver` (packages/cli/src/publisher-runner.ts) returns
+    // `undefined`, disabling the authority filter for the WHOLE runtime, as soon as any wallet's
+    // adapter is missing either method. `NoChainAdapter` having neither is the invariant that
+    // rule leans on: an offline node keeps claiming every lane's work as before. Adding one of
+    // the two here without the other would leave the resolver asking a half-answering adapter.
+    expect(NO_CHAIN_METHODS.has('isAuthorizedPublisher')).toBe(false);
+    expect(NO_CHAIN_METHODS.has('isPublishAuthorityEnforceable')).toBe(false);
   });
 });
