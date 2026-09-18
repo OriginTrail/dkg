@@ -83,8 +83,12 @@ import type {
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
   getManagedOxigraphRuntimeConstructionAuthorityV1,
+  getManagedOxigraphRuntimeHooksV1,
   isManagedOxigraphRuntimeConstructionAuthorityV1,
   snapshotManagedOxigraphRuntimeOptionsV1,
+  type ManagedOxigraphRuntimeActivityLeaseV1,
+  type ManagedOxigraphRuntimeHooksV1,
+  type ManagedOxigraphRuntimeStateV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
@@ -96,9 +100,7 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import {
-  ManagedReadRecoveryCoordinatorV1,
-} from
+import { ManagedReadRecoveryCoordinatorV1 } from
   '../managed-read-recovery-coordinator.js';
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -196,11 +198,14 @@ export interface SparqlHttpSlowQueryEvent {
 }
 
 export interface SparqlHttpRecoveryState {
+  /** The managed process was or is being terminated. */
   recovering: boolean;
+  /** Maintenance refuses new work while the live process drains. */
+  admissionsPaused?: boolean;
   generation: number;
 }
 
-/** Runtime-only recovery capability supplied by a DKG-managed Oxigraph supervisor. */
+/** Compatibility shape for the runtime-only managed recovery capability. */
 export interface SparqlHttpManagedRecoveryV1 {
   readonly readState: () => SparqlHttpRecoveryState;
   readonly recover: (operation: StoreOperation) => void;
@@ -258,8 +263,25 @@ export interface SparqlHttpStoreOptions {
    */
   managedOxigraph?: boolean;
   /**
-   * Runtime-only managed-server recovery capability. Both operations must be
-   * present; incomplete runtime configurations are treated as unavailable.
+   * @deprecated Pass managed hooks as the second argument to
+   * createManagedOxigraphSparqlStoreV1, which supersede this one. It remains
+   * supported for generic stores: the plain SparqlHttpStore constructor still
+   * fires it on a client deadline, so an ordinary adapter does not lose its
+   * timeout observer. It grants no managed authority.
+   */
+  onClientTimeout?: (operation: string) => void;
+  /**
+   * @deprecated Read only by createManagedOxigraphSparqlStoreV1, which lifts
+   * it into the authenticated runtime hooks. The generic SparqlHttpStore
+   * constructor ignores it — recovery state is authority the daemon grants,
+   * never something a plain options bag can claim.
+   */
+  getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
+  /** @deprecated Read only by createManagedOxigraphSparqlStoreV1. See getRecoveryState. */
+  onActivityChange?: (activeOperations: number) => void;
+  /**
+   * Runtime-only compatibility capability for a DKG-managed Oxigraph
+   * supervisor. Generic stores cannot use it to grant managed authority.
    */
   managedRecovery?: SparqlHttpManagedRecoveryV1;
   /**
@@ -312,7 +334,9 @@ export class SparqlHttpStore implements TripleStore {
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
   private readonly managedOxigraph: boolean;
-  private readonly managedRecovery?: SparqlHttpManagedRecoveryV1;
+  private readonly onClientTimeout?: (operation: StoreOperation) => void;
+  private readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
+  private managedActivityLease: ManagedOxigraphRuntimeActivityLeaseV1 | null = null;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
@@ -320,8 +344,10 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQueryThresholdMs: number;
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
-  private readonly workLifecycle = new AbortableStoreWorkLifecycle();
-  private readonly managedReadRecovery: ManagedReadRecoveryCoordinatorV1;
+  private readonly workLifecycle: AbortableStoreWorkLifecycle;
+  private readonly managedAbandonedWorkRecovery: ManagedReadRecoveryCoordinatorV1;
+  private activeStoreOperations = 0;
+  private retainedManagedWork = 0;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -345,12 +371,29 @@ export class SparqlHttpStore implements TripleStore {
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
+    const managedRuntimeHooks = getManagedOxigraphRuntimeHooksV1(constructionAuthority);
+    const managedRecovery = this.managedOxigraph
+      ? snapshotManagedRecoveryCapability(options.managedRecovery)
+      : undefined;
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
-    this.managedRecovery = this.managedOxigraph
-      ? snapshotManagedRecoveryCapability(options.managedRecovery)
-      : undefined;
+    // Preserve the long-standing generic timeout observer. Managed runtime
+    // hooks take precedence only when authenticated authority was supplied;
+    // the ordinary adapter must not lose its callback merely because daemon
+    // hooks now travel through the opaque construction context.
+    this.onClientTimeout = managedRuntimeHooks?.onClientTimeout
+      ?? managedRecovery?.recover
+      ?? options.onClientTimeout;
+    this.getRecoveryState = managedRuntimeHooks?.getRecoveryState
+      ?? managedRecovery?.readState;
+    this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
+    this.workLifecycle = new AbortableStoreWorkLifecycle({
+      onActivityChange: (activeOperations) => {
+        this.activeStoreOperations = activeOperations;
+        this.reportManagedRuntimeActivity(managedRuntimeHooks);
+      },
+    });
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
       : resolveConsistencyProfile(options);
@@ -365,9 +408,18 @@ export class SparqlHttpStore implements TripleStore {
       DEFAULT_SLOW_QUERY_SAMPLE_RATE,
     );
     this.onSlowQuery = options.onSlowQuery;
-    this.managedReadRecovery = new ManagedReadRecoveryCoordinatorV1({
+    this.managedAbandonedWorkRecovery = new ManagedReadRecoveryCoordinatorV1({
       now: this.now,
-      capability: this.managedRecovery,
+      capability: this.managedOxigraph && this.getRecoveryState && this.onClientTimeout
+        ? {
+            readState: this.getRecoveryState,
+            recover: this.onClientTimeout,
+          }
+        : undefined,
+      onPendingChange: (pending) => {
+        this.retainedManagedWork = pending ? 1 : 0;
+        this.reportManagedRuntimeActivity(managedRuntimeHooks);
+      },
     });
     // Content-Type is set per-request by the query/mutation transports (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
@@ -385,6 +437,33 @@ export class SparqlHttpStore implements TripleStore {
           excerpt,
         ),
       }, RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
+    }
+  }
+
+  private reportManagedRuntimeActivity(
+    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
+  ): void {
+    try {
+      const activeOperations = this.activeStoreOperations + this.retainedManagedWork;
+      if (hooks?.registerActivity) {
+        this.managedActivityLease ??= this.openManagedActivityLease(hooks);
+        this.managedActivityLease?.report(activeOperations);
+      } else {
+        hooks?.onActivityChange?.(activeOperations);
+      }
+    } catch {
+      // Runtime observation cannot alter store operation semantics.
+    }
+  }
+
+  private openManagedActivityLease(
+    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
+  ): ManagedOxigraphRuntimeActivityLeaseV1 | null {
+    if (!hooks?.registerActivity) return null;
+    try {
+      return hooks.registerActivity();
+    } catch {
+      return null;
     }
   }
 
@@ -446,7 +525,7 @@ export class SparqlHttpStore implements TripleStore {
     work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
     const recovery = this.readRecoveryState();
-    if (recovery?.recovering) {
+    if (this.admissionRefused(recovery)) {
       return Promise.reject(this.recoveryError(operation, 'not_started'));
     }
     return this.workLifecycle.run(
@@ -463,10 +542,10 @@ export class SparqlHttpStore implements TripleStore {
     );
   }
 
-  private readRecoveryState(): SparqlHttpRecoveryState | null {
-    if (this.managedRecovery === undefined) return null;
+  private readRecoveryState(): ManagedOxigraphRuntimeStateV1 | null {
+    if (!this.managedOxigraph || !this.getRecoveryState) return null;
     try {
-      const state = this.managedRecovery.readState();
+      const state = this.getRecoveryState();
       if (
         typeof state?.recovering === 'boolean'
         && Number.isSafeInteger(state.generation)
@@ -494,8 +573,19 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
+  /**
+   * Pre-dispatch admission gate. A terminated generation and a maintenance
+   * drain both refuse new work, but only termination can invalidate work that
+   * was already dispatched — `recoveryInterrupted` therefore stays on
+   * `recovering` alone, so a paused admission window never reclassifies a
+   * definite failure as `indeterminate`.
+   */
+  private admissionRefused(state: ManagedOxigraphRuntimeStateV1 | null): boolean {
+    return state !== null && (state.recovering || state.admissionsPaused === true);
+  }
+
   private recoveryInterrupted(
-    started: SparqlHttpRecoveryState | null,
+    started: ManagedOxigraphRuntimeStateV1 | null,
   ): boolean {
     const current = this.readRecoveryState();
     return current !== null && (
@@ -506,7 +596,7 @@ export class SparqlHttpStore implements TripleStore {
 
   private notifyClientTimeout(operation: StoreOperation): void {
     try {
-      this.managedRecovery?.recover(operation);
+      this.onClientTimeout?.(operation);
     } catch {
       // Recovery notification must never replace the typed timeout contract.
     }
@@ -534,7 +624,7 @@ export class SparqlHttpStore implements TripleStore {
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
     const recoveryAtStart = this.readRecoveryState();
-    if (recoveryAtStart?.recovering) {
+    if (this.admissionRefused(recoveryAtStart)) {
       throw this.recoveryError(storeOperation, 'not_started');
     }
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
@@ -550,7 +640,7 @@ export class SparqlHttpStore implements TripleStore {
     // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     const deadline = this.now() + this.timeout;
-    const recoveryToken = this.managedReadRecovery.begin(recoveryAtStart);
+    const recoveryToken = this.managedAbandonedWorkRecovery.begin(recoveryAtStart);
     const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
     const signal = signalScope.signal ?? timeoutSignal;
     let dispatched = false;
@@ -588,7 +678,7 @@ export class SparqlHttpStore implements TripleStore {
         // Closing the HTTP connection does not cancel Oxigraph 0.5
         // evaluation. Hand the dispatched read to the lifecycle-owned
         // retained-deadline coordinator instead of extending the caller wait.
-        this.managedReadRecovery.retain(operation, deadline, recoveryToken);
+        this.managedAbandonedWorkRecovery.retain(operation, deadline, recoveryToken);
       }
       if (this.recoveryInterrupted(recoveryAtStart)) {
         throw this.recoveryError(storeOperation, 'indeterminate', error);
@@ -610,7 +700,7 @@ export class SparqlHttpStore implements TripleStore {
     // data. See postQuery for why form encoding breaks large payloads.
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const recoveryAtStart = this.readRecoveryState();
-      if (recoveryAtStart?.recovering) {
+      if (this.admissionRefused(recoveryAtStart)) {
         throw this.recoveryError(operation, 'not_started');
       }
       const timeoutSignal = AbortSignal.timeout(this.timeout);
@@ -970,18 +1060,22 @@ export class SparqlHttpStore implements TripleStore {
     try {
       await this.runStoreWork(opts.operation, opts.options, async (lifecycleSignal) => {
         const recoveryAtStart = this.readRecoveryState();
-        if (recoveryAtStart?.recovering) {
+        if (this.admissionRefused(recoveryAtStart)) {
           throw this.recoveryError(opts.operation, 'not_started');
         }
         const timeoutSignal = AbortSignal.timeout(this.timeout);
+        const deadline = this.now() + this.timeout;
+        const recoveryToken = this.managedAbandonedWorkRecovery.begin(recoveryAtStart);
         const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
         const signal = signalScope.signal ?? timeoutSignal;
+        let dispatched = false;
         try {
           // The lifecycle begins after every pre-dispatch refusal and directly
           // before fetch. From this point onward the server may have committed.
           throwIfAborted(signal);
           lifecycle = this.writeGen.beginWrite(opts.scope);
           this.invalidateListGraphsCache();
+          dispatched = true;
           const res = await fetch(this.updateEndpoint, {
             method: 'POST',
             headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
@@ -1011,6 +1105,16 @@ export class SparqlHttpStore implements TripleStore {
               timeoutMs: this.timeout,
               cause: error,
             });
+          }
+          if (dispatched && signal.aborted) {
+            // Oxigraph may continue an update after its HTTP client disconnects.
+            // Fence maintenance until the original deadline, then force a
+            // supervised restart if the same server generation is still live.
+            this.managedAbandonedWorkRecovery.retain(
+              opts.operation,
+              deadline,
+              recoveryToken,
+            );
           }
           if (this.recoveryInterrupted(recoveryAtStart)) {
             throw this.recoveryError(opts.operation, 'indeterminate', error);
@@ -1285,12 +1389,18 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
-    this.managedReadRecovery.close();
+    this.managedAbandonedWorkRecovery.close();
     // A managed endpoint is stopped immediately after store.close(). The
     // lifecycle owns one complete generation, aborting and draining every
     // operation admitted before close while rejecting work attempted during
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
+    try {
+      this.managedActivityLease?.dispose();
+    } catch {
+      // Runtime observation cannot alter store close semantics.
+    }
+    this.managedActivityLease = null;
   }
 }
 
@@ -1300,15 +1410,43 @@ export class SparqlHttpStore implements TripleStore {
  */
 export function createManagedOxigraphSparqlStoreV1(
   options: SparqlHttpStoreOptions,
+  hooks: ManagedOxigraphRuntimeHooksV1 = {},
 ): SparqlHttpStore {
+  const legacyHooks = extractLegacyManagedOxigraphRuntimeHooksV1(options);
   const config = createManagedOxigraphRuntimeStoreConfigV1({
     backend: 'sparql-http',
-    options: snapshotManagedOxigraphRuntimeOptionsV1(options, true),
-  });
+    options: snapshotManagedOxigraphRuntimeOptionsV1(
+      options,
+      true,
+      ['onClientTimeout', 'getRecoveryState', 'onActivityChange'],
+    ),
+  }, { ...legacyHooks, ...hooks });
   return new SparqlHttpStore(
     config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
+}
+
+function extractLegacyManagedOxigraphRuntimeHooksV1(
+  options: SparqlHttpStoreOptions,
+): ManagedOxigraphRuntimeHooksV1 {
+  const hooks: {
+    -readonly [K in keyof ManagedOxigraphRuntimeHooksV1]?: ManagedOxigraphRuntimeHooksV1[K];
+  } = {};
+  for (const key of ['onClientTimeout', 'getRecoveryState', 'onActivityChange'] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (descriptor === undefined) continue;
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new Error(`managed Oxigraph option ${key} must be a data property`);
+    }
+    const value = descriptor.value;
+    if (value === undefined) continue;
+    if (typeof value !== 'function') {
+      throw new Error(`managed Oxigraph option ${key} must be a function`);
+    }
+    hooks[key] = value;
+  }
+  return hooks;
 }
 
 function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {

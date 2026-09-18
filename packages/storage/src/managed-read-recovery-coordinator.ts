@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { StoreOperation } from './store-operation-outcome.js';
+
 export interface ManagedReadRecoveryStateV1 {
   readonly recovering: boolean;
   readonly generation: number;
@@ -12,18 +14,24 @@ export interface ManagedReadRecoveryTokenV1 {
 
 export interface ManagedReadRecoveryCapabilityV1 {
   readonly readState: () => ManagedReadRecoveryStateV1;
-  readonly recover: (operation: 'query' | 'construct') => void;
+  readonly recover: (operation: StoreOperation) => void;
 }
 
 export interface ManagedReadRecoveryCoordinatorOptionsV1 {
   readonly now: () => number;
   readonly capability?: ManagedReadRecoveryCapabilityV1;
+  /** Retained server work fences maintenance after caller-visible cancellation. */
+  readonly onPendingChange?: (pending: boolean) => void;
 }
 
 /**
- * Own the retained deadline for a managed read whose HTTP request was
+ * Own the retained deadline for managed server work whose HTTP request was
  * dispatched before caller cancellation. Closing the store invalidates one
  * complete lifecycle generation; a later reusable generation starts cleanly.
+ *
+ * Despite the `Read` in these names the fence covers every managed store
+ * operation — queries, constructs and updates alike. The names predate that
+ * widening and are internal to this package; renaming them is a follow-up.
  */
 export class ManagedReadRecoveryCoordinatorV1 {
   readonly #options: ManagedReadRecoveryCoordinatorOptionsV1;
@@ -47,26 +55,26 @@ export class ManagedReadRecoveryCoordinatorV1 {
   }
 
   retain(
-    operation: 'query' | 'construct',
+    operation: StoreOperation,
     deadline: number,
     token: ManagedReadRecoveryTokenV1 | null,
   ): void {
     if (token === null || token.lifecycleGeneration !== this.#lifecycleGeneration) return;
+    // Do not let a token captured before a completed restart replace the timer
+    // for work admitted in the current server generation.
     const current = this.#readState();
     if (
       current === null
       || current.recovering
       || current.generation !== token.storeGeneration
-    ) {
-      return;
-    }
+    ) return;
     const pending = this.#pending;
     if (pending?.storeGeneration === token.storeGeneration && pending.deadline <= deadline) {
       return;
     }
     clearTimeout(pending?.timer);
     const timer = setTimeout(() => {
-      if (this.#pending?.timer === timer) this.#pending = undefined;
+      if (this.#pending?.timer !== timer) return;
       const current = this.#readState();
       if (
         token.lifecycleGeneration === this.#lifecycleGeneration
@@ -80,15 +88,30 @@ export class ManagedReadRecoveryCoordinatorV1 {
           // Recovery notification must never escape a retained timer callback.
         }
       }
+      if (this.#pending?.timer === timer) {
+        this.#pending = undefined;
+        this.#reportPending(false);
+      }
     }, Math.max(0, deadline - this.#options.now()));
     timer.unref?.();
     this.#pending = { timer, deadline, storeGeneration: token.storeGeneration };
+    if (pending === undefined) this.#reportPending(true);
   }
 
   close(): void {
     this.#lifecycleGeneration += 1;
     clearTimeout(this.#pending?.timer);
+    const hadPending = this.#pending !== undefined;
     this.#pending = undefined;
+    if (hadPending) this.#reportPending(false);
+  }
+
+  #reportPending(pending: boolean): void {
+    try {
+      this.#options.onPendingChange?.(pending);
+    } catch {
+      // Observation cannot alter retained recovery semantics.
+    }
   }
 
   #readState(): ManagedReadRecoveryStateV1 | null {

@@ -492,8 +492,42 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   });
 
   it.each([false, true])(
-    'preserves managed RFC-64 store authority through DKGAgent.create when changelog=%s',
+    'fences direct managed-store boot work and preserves RFC-64 authority when changelog=%s',
     async (changelog) => {
+      let bootActivity = 0;
+      const reportBootActivity = vi.fn((active: number) => { bootActivity = active; });
+      const disposeBootActivity = vi.fn(() => { bootActivity = 0; });
+      const observeBootActivity = () => {
+        expect(bootActivity).toBe(1);
+      };
+      mocks.checkExternalStoreReachable.mockImplementationOnce(async () => {
+        observeBootActivity();
+        return {
+          ok: true,
+          backend: 'sparql-http',
+          endpoint: 'http://127.0.0.1:7878/query',
+        };
+      });
+      mocks.checkOrSetStoreIdentity.mockImplementationOnce(async () => {
+        observeBootActivity();
+        return {
+          ok: true,
+          action: 'matched',
+          nodeName: 'storage-ack-timing-core-test',
+        };
+      });
+      mocks.chainResetWipe.mockImplementationOnce(async () => {
+        observeBootActivity();
+        return {
+          status: 'inactive',
+          attempted: false,
+          requiresStoreRetag: false,
+          prevMarker: null,
+          removedFiles: [],
+          backedUpFiles: [],
+          failedFiles: [],
+        };
+      });
       const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
         backend: 'sparql-http',
         options: {
@@ -508,6 +542,10 @@ describe('runDaemonInner StorageACK timing wiring', () => {
           queryEndpoint: 'http://127.0.0.1:7878/query',
           updateEndpoint: 'http://127.0.0.1:7878/update',
           getRecoveryState: () => ({ recovering: false }),
+          registerStoreActivity: () => ({
+            report: reportBootActivity,
+            dispose: disposeBootActivity,
+          }),
           killSync: vi.fn(),
         },
         storeConfig: managedStore,
@@ -524,6 +562,9 @@ describe('runDaemonInner StorageACK timing wiring', () => {
           changelog,
         },
       }, async (createArg) => {
+        expect(bootActivity).toBe(0);
+        expect(reportBootActivity).toHaveBeenCalledExactlyOnceWith(1);
+        expect(disposeBootActivity).toHaveBeenCalledOnce();
         const originalFetch = globalThis.fetch;
         globalThis.fetch = (async (_input, init) => {
           const body = String(init?.body ?? '');

@@ -19,16 +19,27 @@ function harness(managed = true) {
   }) as typeof fetch;
   const recovery = { recovering: false, generation: 0 };
   const recover = vi.fn();
+  const activity: number[] = [];
   const options = {
     queryEndpoint: 'http://127.0.0.1:7878/query',
     timeout: 1_000,
     now: () => performance.now(),
-    managedRecovery: {
-      readState: () => ({ ...recovery }),
-      recover,
-    },
   };
-  const store = managed ? createManagedOxigraphSparqlStoreV1(options) : new SparqlHttpStore(options);
+  const hooks = {
+    getRecoveryState: () => ({ ...recovery }),
+    onClientTimeout: recover,
+    onActivityChange: (activeOperations: number) => activity.push(activeOperations),
+  };
+  // The generic store is handed the full legacy capability shape on purpose:
+  // the 'external' case only proves the "generic stores cannot gain managed
+  // authority" boundary if the adapter had something to ignore.
+  const store = managed
+    ? createManagedOxigraphSparqlStoreV1(options, hooks)
+    : new SparqlHttpStore({
+      ...options,
+      onClientTimeout: recover,
+      managedRecovery: { readState: hooks.getRecoveryState, recover },
+    });
   async function abandon(sparql = 'SELECT ?s WHERE { ?s ?p ?o }') {
     started = new Promise<void>((resolve) => { dispatched = resolve; });
     const caller = new AbortController();
@@ -40,7 +51,21 @@ function harness(managed = true) {
     caller.abort(reason);
     await rejected;
   }
-  return { store, recovery, recover, abandon };
+  async function abandonMutation() {
+    started = new Promise<void>((resolve) => { dispatched = resolve; });
+    const caller = new AbortController();
+    const update = store.update(
+      'INSERT DATA { <urn:subject> <urn:predicate> "value" }',
+      { signal: caller.signal },
+    );
+    await started;
+    await vi.advanceTimersByTimeAsync(100);
+    const reason = new Error('caller cancelled mutation');
+    const rejected = expect(update).rejects.toBe(reason);
+    caller.abort(reason);
+    await rejected;
+  }
+  return { store, recovery, recover, activity, abandon, abandonMutation };
 }
 
 describe('managed abandoned read recovery', () => {
@@ -69,6 +94,38 @@ describe('managed abandoned read recovery', () => {
       expect(recover).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(2_000);
       expect(recover).toHaveBeenCalledTimes(1);
+    } finally { await store.close(); }
+  });
+
+  it('keeps cancelled server work active until its retained deadline is handled', async () => {
+    const { store, recover, activity, abandon } = harness();
+    try {
+      await abandon();
+      expect(activity.at(-1)).toBe(1);
+      await vi.advanceTimersByTimeAsync(899);
+      expect(activity.at(-1)).toBe(1);
+      expect(recover).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recover).toHaveBeenCalledOnce();
+      expect(activity.at(-1)).toBe(0);
+    } finally { await store.close(); }
+  });
+
+  it('keeps a caller-cancelled mutation fenced until supervised recovery can abandon it', async () => {
+    const { store, recover, activity, abandonMutation } = harness();
+    try {
+      await abandonMutation();
+      expect(recover).not.toHaveBeenCalled();
+      expect(activity.at(-1)).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(899);
+      expect(recover).not.toHaveBeenCalled();
+      expect(activity.at(-1)).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recover).toHaveBeenCalledExactlyOnceWith('update');
+      expect(activity.at(-1)).toBe(0);
     } finally { await store.close(); }
   });
 
