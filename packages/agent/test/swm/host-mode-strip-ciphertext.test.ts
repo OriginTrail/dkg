@@ -203,6 +203,32 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(wired).toEqual([{ id: cgId, curated: false }]);
   });
 
+  it('WITHOUT the hostPublic opt-in a confirmed public CG is NOT wired (dark by default)', async () => {
+    // Codex review #2614 — every other test that reaches the non-curated admit
+    // branch sets `hostPublic: true`, and the "default (no flag) DECLINES" case
+    // uses a CURATED CG, so it is refused one branch earlier. Nothing pinned
+    // the opt-in being off by default — the property the config doc promises.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-public-no-opt-in';
+    g.config.swmHostMode = { enabled: true, stripCiphertext: true }; // no hostPublic
+    g.onChainAccessPolicyCache.set('2', 0);
+    g.subscribedContextGraphs.set(cgId, { subscribed: false, synced: false, onChainId: '2' });
+    g.isPrivateContextGraph = async () => false;
+    const confirmed: string[] = [];
+    g.isConfirmedPublicForHostMode = async (id: string) => { confirmed.push(id); return true; };
+    const wired: string[] = [];
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+
+    await g.reconcileSwmHostModeSubscription(cgId);
+
+    expect(wired).toEqual([]);
+    expect(g.swmHostModeHandlers.size).toBe(0);
+    // The opt-in check returns BEFORE the chain probe — no RPC is spent on a
+    // core that is not serving the public tier at all.
+    expect(confirmed).toEqual([]);
+  });
+
   it('hostPublic refuses an unconfirmed or restricted CG', async () => {
     const core = await makeCore(true);
     const g = core as unknown as StripInternals;
@@ -819,6 +845,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     );
     expect(unknownResp.denied ?? '').toMatch(/strip is on/i);
     expect(confirmed).toEqual([publicCg]);
+
   });
 
   it('strip ON RETIRES handleGetCiphertextChunk — serves nothing private (incl. RFC-39 operator branch)', async () => {
