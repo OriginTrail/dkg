@@ -643,8 +643,15 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
 
     // No `.catch()`: an absence-only assertion could not tell "the replica stayed quiet"
     // from "the call threw before the filter ever ran".
-    await expect(replica.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWReplicaProbe'))
-      .resolves.toMatchObject({ announced: 0, failed: 0 });
+    // `withheld` is pinned here because this is the only place a real agent reaches the
+    // fully-withheld state the transport keys on: `withheld > 0 && manifest.length === 0`
+    // is what answers REPLAY_INCOMPLETE instead of `completed` with nothing. The debug
+    // assertion below cannot stand in for it -- that line is computed from
+    // `superseded.length`, so the RETURNED counter could be zeroed with it still green.
+    const replayResult = await replica
+      .reannounceRfc64CatalogHeadsToPeerV1('12D3KooWReplicaProbe');
+    expect(replayResult).toMatchObject({ announced: 0, failed: 0, withheld: 1 });
+    expect(replayResult.manifest).toEqual([]);
 
     const withheldWarnings = warn.mock.calls.filter(
       ([, message]) => typeof message === 'string' && message.includes('catalog replay withheld'),
