@@ -13,7 +13,9 @@ import {
   enrichEvmError,
   EVMChainAdapter,
   InsufficientPublisherFundsError,
+  PublisherNotAuthorizedError,
   isNoFundedPublisherWalletError,
+  isPublisherNotAuthorizedError,
   isTooLowAllowanceError,
   resolveRpcUrls,
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
@@ -41,6 +43,7 @@ import {
   RPC_RECEIPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
+import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
 // so a failover/exhaustion warning emitted by one test can't suppress (via the
@@ -1048,6 +1051,37 @@ describe('isNoFundedPublisherWalletError (code-first + shared message marker)', 
     expect(isNoFundedPublisherWalletError(new Error('insufficient funds for gas'))).toBe(false);
     expect(isNoFundedPublisherWalletError(undefined)).toBe(false);
     expect(isNoFundedPublisherWalletError(null)).toBe(false);
+  });
+});
+
+describe('isPublisherNotAuthorizedError (code-first + shared message marker) [GH#2648]', () => {
+  const ADDR = '0xd896f0E677b5648cd727794C5e0334966264b40F';
+
+  it('matches the typed error thrown by the adapter', () => {
+    expect(isPublisherNotAuthorizedError(new PublisherNotAuthorizedError(ADDR, 7n))).toBe(true);
+  });
+
+  it('matches the bare structured code', () => {
+    expect(isPublisherNotAuthorizedError({ code: 'PUBLISHER_NOT_AUTHORIZED' })).toBe(true);
+  });
+
+  it('matches the shared message marker when a wrapper dropped .code', () => {
+    // The re-wrap path is the one that matters: an Error rebuilt across a transport keeps the
+    // text and loses the class. Built from the dkg-core formatter, so a re-wording that broke
+    // this classification would break this assertion first.
+    const rewrapped = new Error(`publish failed: ${new PublisherNotAuthorizedError(ADDR, 7n).message}`);
+    expect((rewrapped as { code?: unknown }).code).toBeUndefined();
+    expect(isPublisherNotAuthorizedError(rewrapped)).toBe(true);
+  });
+
+  it('does NOT match unrelated errors', () => {
+    // Each of these must stay RETRYABLE. Answering true here would condemn a job that a later
+    // attempt could still finalize, which is the mirror image of the forever-retry trap.
+    expect(isPublisherNotAuthorizedError({ code: 'CALL_EXCEPTION' })).toBe(false);
+    expect(isPublisherNotAuthorizedError(new Error('rpc down'))).toBe(false);
+    expect(isPublisherNotAuthorizedError(new Error('No operational wallet has enough funds to publish.'))).toBe(false);
+    expect(isPublisherNotAuthorizedError(undefined)).toBe(false);
+    expect(isPublisherNotAuthorizedError(null)).toBe(false);
   });
 });
 
@@ -4146,6 +4180,124 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     (a as any).convictionAccountCanCover = recorder(async () => false); // but can't cover
     const chosen = await (a as any).nextAuthorizedSigner(CG);
     expect(chosen.address).toBe(walletB.address); // squat PCA head skipped for the funded wallet
+  });
+
+  it('refuses a PINNED publisherAddress with a TYPED PublisherNotAuthorizedError (GH#2648)', async () => {
+    // The refusal is PERMANENT for this wallet: on a curated context graph
+    // `ContextGraphs.isAuthorizedPublisher` admits exactly one address. It used to be a bare
+    // Error, so the async-lift classifier — which reads `.code` and otherwise sniffs the message
+    // for keywords this text contains none of — fell through to the RETRYABLE `rpc_unavailable`
+    // default and the queue re-claimed the job forever.
+    const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
+
+    let caught: any;
+    try {
+      await a.createKnowledgeAssets(makeV10PublishParams(walletA.address));
+    } catch (e) { caught = e; }
+
+    expect(caught).toBeInstanceOf(PublisherNotAuthorizedError);
+    expect(caught.code).toBe('PUBLISHER_NOT_AUTHORIZED');
+    expect(caught.publisherAddress).toBe(walletA.address);
+    expect(caught.contextGraphId).toBe('7');
+    // The message keeps the shared dkg-core marker, so a re-wrap that drops `.code` still
+    // classifies. The pre-GH#2648 wording is preserved verbatim.
+    expect(caught.message).toBe(
+      `Configured publisherAddress ${walletA.address} is not authorized to publish to context graph 7.`,
+    );
+  });
+
+  it('answers the narrow isAuthorizedPublisher probe from the ContextGraphs policy read', async () => {
+    const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = connectable({
+      isAuthorizedPublisher: recorder(async (_cg: bigint, addr: string) =>
+        lc(addr) === lc(walletA.address)),
+    });
+
+    await expect(a.isAuthorizedPublisher(CG, walletA.address)).resolves.toBe(true);
+    await expect(a.isAuthorizedPublisher(CG, walletB.address)).resolves.toBe(false);
+  });
+
+  it('treats a missing ContextGraphs surface as UNENFORCEABLE authority, not a refusal', async () => {
+    // Mirrors `_authorizedPublisherSigners` / `poolHasFundableSigner`: with no policy contract
+    // every operational wallet stays a candidate. Answering `false` here would strand publishing
+    // on partially-deployed and no-ContextGraphs nodes.
+    const { a, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = undefined;
+
+    await expect(a.isAuthorizedPublisher(CG, walletB.address)).resolves.toBe(true);
+  });
+
+  it('reports whether publish authority is ENFORCEABLE at all, separately from the verdict', async () => {
+    // `isAuthorizedPublisher` answers `true` both for "authorized" and for "no contract to ask",
+    // so a caller that folds the second into a per-wallet verdict routes jobs to wallets the
+    // graph never admitted. This is the question that separates them.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = connectable({
+      isAuthorizedPublisher: recorder(async () => true),
+    });
+    await expect(a.isPublishAuthorityEnforceable()).resolves.toBe(true);
+
+    (a as any).contracts.contextGraphs = undefined;
+    await expect(a.isPublishAuthorityEnforceable()).resolves.toBe(false);
+  });
+
+  it('answers `false` only for an absence the Hub itself declares', async () => {
+    // `initContracts()` swallows this one, and it is a FACT about the deployment: nothing to
+    // enforce here, so every operational wallet stays a candidate.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = undefined;
+    (a as any).contextGraphsBindingFailure = new HubContractNotFoundError(
+      'ContextGraphs',
+      '0x0000000000000000000000000000000000000abc',
+    );
+
+    await expect(a.isPublishAuthorityEnforceable()).resolves.toBe(false);
+  });
+
+  it('THROWS when the binding was lost to a failed resolution, not to a missing registration', async () => {
+    // GH#2648 — `initContracts()` swallows a transient failure too, while `init()` still marks
+    // the adapter initialized and nothing rebinds, so one startup 429 makes the unset binding
+    // permanent. Answering `false` there reports `unenforced` for the whole process: every lane
+    // eligible, and with the refusal terminal each wrong-lane claim destroys the job. A throw is
+    // mapped to `unknown` by the resolver, which holds the job instead.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = undefined;
+    (a as any).contextGraphsBindingFailure = new Error('429 Too Many Requests');
+
+    await expect(a.isPublishAuthorityEnforceable()).rejects.toThrow(/429 Too Many Requests/);
+  });
+
+  it('records WHY the ContextGraphs binding is unset when initContracts cannot resolve it', async () => {
+    // The probe above can only tell the two apart because `initContracts()` keeps the error it
+    // swallows. Without this the distinction is unreachable in production.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    const failure = new Error('429 Too Many Requests');
+    (a as any).resolveContract = recorder(async (name: string) => {
+      if (name === 'ContextGraphs') throw failure;
+      return connectable({});
+    });
+    (a as any).resolveAssetStorage = recorder(async () => connectable({}));
+    (a as any).resolveAndAssignRandomSamplingPair = recorder(async () => undefined);
+    (a as any).startHubRotationListener = recorder(async () => undefined);
+    (a as any).readContract = recorder(async () => ethers.ZeroAddress);
+    (a as any).contracts.contextGraphs = undefined;
+
+    await (a as any).initContracts();
+
+    expect((a as any).contextGraphsBindingFailure).toBe(failure);
+    await expect(a.isPublishAuthorityEnforceable()).rejects.toThrow(/429 Too Many Requests/);
+  });
+
+  it('lets a failed authority read THROW rather than reporting an unauthorized verdict', async () => {
+    // "Could not tell" must stay distinguishable from "refused": the lift claim scan holds the
+    // job in `accepted` on a throw, where a `false` would condemn it terminally.
+    const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = connectable({
+      isAuthorizedPublisher: recorder(async () => { throw new Error('rpc down'); }),
+    });
+
+    await expect(a.isAuthorizedPublisher(CG, walletA.address)).rejects.toThrow();
   });
 
   it('still throws "no authorized publisher" when no wallet is authorized (unchanged)', async () => {

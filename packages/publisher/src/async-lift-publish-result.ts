@@ -1,8 +1,10 @@
 import {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISHER_NOT_AUTHORIZED_CODE,
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
+  messageIndicatesPublisherNotAuthorized,
 } from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
 import { isQuorumUnmetError } from './ack-errors.js';
@@ -179,6 +181,29 @@ export function isPermanentAuthorCapabilityFailure(error: unknown): boolean {
     || messageIndicatesPublishAuthorNotCustodial(lowerMessage);
 }
 
+/**
+ * GH#2648 — is this a PERMANENT publish-authority refusal? The context graph's on-chain
+ * policy does not admit the wallet this publish was pinned to.
+ *
+ * The THIRD instance of the forever-retry trap (#1013 unfundable publishes, #1121/GH#1786
+ * non-custodial authors). `ContextGraphs.isAuthorizedPublisher` on a CURATED graph
+ * (publishPolicy 0) in EOA mode admits EXACTLY ONE address, so the refusal is final for this
+ * wallet: re-sending can only be refused again. Left unrecognized, the message matches none of
+ * `classifyPublishFailureCode`'s keywords (no 'timeout' / 'insufficient funds' / 'nonce' /
+ * 'revert' / 'reorg' / 'mismatch') and falls through to the retryable `rpc_unavailable`
+ * default, whose `reset_to_accepted` resolution re-queues the job forever — which is how a
+ * permanent refusal surfaced to the harness as `errorClass: "timeout"` after ~30 minutes.
+ *
+ * Code-first via the chain adapter's typed `PublisherNotAuthorizedError`, with the SHARED core
+ * message marker as the fallback for a re-wrap that dropped `.code` — the same two-signal
+ * shape as the two precedents above, and read through the same throw-safe extractor.
+ */
+export function isPermanentPublishAuthorityRefusal(error: unknown): boolean {
+  const { code, lowerMessage } = readPublishErrorFacts(error);
+  return code === PUBLISHER_NOT_AUTHORIZED_CODE
+    || messageIndicatesPublisherNotAuthorized(lowerMessage);
+}
+
 export function mapPublishExceptionToLiftJobFailure(
   input: AsyncLiftPublishFailureInput,
 ): LiftJobFailureMetadata {
@@ -205,9 +230,18 @@ export function mapPublishExceptionToLiftJobFailure(
   // re-wrapped errors that lost `.code` — via the SHARED core matcher, so the agent's
   // message formatter and this classifier cannot drift apart.
   const isAuthorNotCustodial = isPermanentAuthorCapabilityFailure(input.error);
+  // GH#2648 — the same trap, a third class. The context graph's on-chain publish policy
+  // refuses the pinned wallet; nothing was signed and nothing was sent, and no retry can
+  // change the answer. Forced from 'broadcast' for the same reason as the two above: that is
+  // where the executor raises it (pre-signing, inside the publish call), and it is the state
+  // whose default is the RETRYABLE `rpc_unavailable`. Any other state keeps the classifier,
+  // where `classifyKnowledgeAssetVmPublishPreconditionCode` already owns pre-send codes.
+  const isPublisherNotAuthorized = isPermanentPublishAuthorityRefusal(input.error);
   const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(lower);
   const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'
+    ? 'authority_forbidden'
+    : isPublisherNotAuthorized && input.failedFromState === 'broadcast'
     ? 'authority_forbidden'
     : isNoFundedWallet && input.failedFromState === 'broadcast'
     ? 'insufficient_funds'

@@ -30,7 +30,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PublisherNotAuthorizedError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -738,6 +738,16 @@ export class EVMChainAdapterBase {
 
   protected contracts: ContractCache;
 
+  /**
+   * GH#2648 — why `contracts.contextGraphs` is unset, when it is.
+   *
+   * `undefined` once the binding resolved. Otherwise the error `initContracts()` swallowed:
+   * a {@link HubContractNotFoundError} means the Hub genuinely does not register ContextGraphs,
+   * anything else means the resolution FAILED and the absence proves nothing. Read by
+   * {@link ContextGraphMethods.isPublishAuthorityEnforceable}.
+   */
+  protected contextGraphsBindingFailure: unknown;
+
   protected initialized = false;
 
   /**
@@ -1423,10 +1433,11 @@ export class EVMChainAdapterBase {
         selected.address,
       );
       if (!authorized) {
-        throw new Error(
-          `Configured publisherAddress ${selected.address} is not authorized to publish ` +
-          `to context graph ${contextGraphId.toString()}.`,
-        );
+        // GH#2648 — TYPED, because this refusal is permanent for this wallet and the async-lift
+        // classifier reads `.code`. As a bare Error its message matched no classifier keyword
+        // and fell through to the retryable `rpc_unavailable` default, so the lift queue reset
+        // and re-claimed the job forever (#1013/#1121, third recurrence).
+        throw new PublisherNotAuthorizedError(selected.address, contextGraphId);
       }
     }
     return selected;
@@ -2980,8 +2991,14 @@ export class EVMChainAdapterBase {
     try {
       this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
       this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
-    } catch {
-      // ContextGraphs not deployed — context graph operations unavailable
+      this.contextGraphsBindingFailure = undefined;
+    } catch (err) {
+      // ContextGraphs not deployed — context graph operations unavailable.
+      // GH#2648 — but WHY it is unset is not interchangeable, so keep the error. `init()` marks
+      // the adapter initialized either way and nothing rebinds, so a binding lost to a transient
+      // RPC failure here is sticky for the process lifetime; `isPublishAuthorityEnforceable`
+      // must be able to tell that apart from a Hub that simply has no ContextGraphs.
+      if (this.contracts.contextGraphs === undefined) this.contextGraphsBindingFailure = err;
     }
 
     try {

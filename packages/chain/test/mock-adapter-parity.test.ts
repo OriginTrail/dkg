@@ -514,6 +514,59 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(addr).toMatch(/^0x[0-9a-fA-F]{40}$/);
   });
 
+  it('mirrors ContextGraphs.isAuthorizedPublisher for open, curated and unknown graphs (GH#2648)', async () => {
+    // The async lift claim scan routes lanes on this answer, so a mock that always said `true`
+    // would make every offline test of that routing vacuous. The curated row is the defect that
+    // motivated it: exactly ONE address is admitted, so a node running many wallets has one lane
+    // that can publish and the rest that never can.
+    const mock = new MockChainAdapter();
+    const CURATOR = ethers.getAddress('0xd896f0e6000000000000000000000000000000aa');
+    const OTHER = ethers.getAddress('0x3bcceed2000000000000000000000000000000bb');
+
+    const open = await mock.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1 });
+    expect(await mock.isAuthorizedPublisher(open.contextGraphId, OTHER)).toBe(true);
+    expect(await mock.isAuthorizedPublisher(open.contextGraphId, ethers.ZeroAddress)).toBe(false);
+
+    const curated = await mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 0,
+      publishAuthority: CURATOR,
+    });
+    expect(await mock.isAuthorizedPublisher(curated.contextGraphId, CURATOR)).toBe(true);
+    expect(await mock.isAuthorizedPublisher(curated.contextGraphId, OTHER)).toBe(false);
+
+    // Unknown / out-of-bounds ids fail CLOSED, matching the contract's bounds + liveness gate.
+    expect(await mock.isAuthorizedPublisher(0n, CURATOR)).toBe(false);
+    expect(await mock.isAuthorizedPublisher(999_999n, CURATOR)).toBe(false);
+  });
+
+  it('resolves a CURATED graph in PCA mode live, admitting the owner and its agents (GH#2648)', async () => {
+    // The EOA row above stops at line `publishAuthorityAccountId === 0n`. This is the other
+    // branch: when the graph names a Publishing Conviction Account, the stored authority
+    // snapshot is IGNORED and the answer is resolved live, so registering an agent grants it
+    // publish rights without rewriting the graph. publishPolicy stays 0 — an open graph short
+    // -circuits before either branch is reached.
+    const mock = new MockChainAdapter();
+    const OWNER = ethers.getAddress(mock.signerAddress); // createPublishingConvictionAccount mints to the signer
+    const AGENT = ethers.getAddress('0x11ce5510000000000000000000000000000000cc');
+    const STRANGER = ethers.getAddress('0x9d0f0e11000000000000000000000000000000dd');
+
+    const { accountId } = await mock.createPublishingConvictionAccount(10_000n * 10n ** 18n);
+    await mock.registerPublishingConvictionAgent(accountId, AGENT);
+    const cg = await mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 0,
+      publishAuthority: OWNER,
+      publishAuthorityAccountId: accountId,
+    });
+
+    expect(await mock.isAuthorizedPublisher(cg.contextGraphId, OWNER)).toBe(true);
+    expect(await mock.isAuthorizedPublisher(cg.contextGraphId, AGENT)).toBe(true);
+    // A wallet registered to no account at all resolves to account id 0 and is refused — this is
+    // the arm that keeps the two admitting assertions above from being vacuous.
+    expect(await mock.isAuthorizedPublisher(cg.contextGraphId, STRANGER)).toBe(false);
+  });
+
   it('rejects participant agent configs that would revert on-chain', async () => {
     const mock = new MockChainAdapter();
 
@@ -720,6 +773,14 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
   // `mock.updateKnowledgeAssets` itself (issue 0004 of
   // `archive-non-v10-contracts`); V10 update attribution is covered by
   // the `updateKnowledgeCollectionV10` test above.
+
+  it('answers the enforceability probe, since it always has its context-graph table', async () => {
+    // Parity that matters in behaviour, not just in method presence: a caller must be able to
+    // ask BOTH questions of any adapter that answers either, or it cannot tell an authorized
+    // wallet from an adapter that enforces nothing.
+    const adapter = new MockChainAdapter();
+    await expect(adapter.isPublishAuthorityEnforceable()).resolves.toBe(true);
+  });
 });
 
 describe('NoChainAdapter completeness [CH-9]', () => {
@@ -747,5 +808,15 @@ describe('NoChainAdapter completeness [CH-9]', () => {
     ];
     const missing = required.filter((n) => !NO_CHAIN_METHODS.has(n));
     expect(missing).toEqual([]);
+  });
+
+  it('answers NEITHER publish-authority question, which is what disables the lift routing filter', () => {
+    // GH#2648 — `createPublishAuthorityResolver` (packages/cli/src/publisher-runner.ts) returns
+    // `undefined`, disabling the authority filter for the WHOLE runtime, as soon as any wallet's
+    // adapter is missing either method. `NoChainAdapter` having neither is the invariant that
+    // rule leans on: an offline node keeps claiming every lane's work as before. Adding one of
+    // the two here without the other would leave the resolver asking a half-answering adapter.
+    expect(NO_CHAIN_METHODS.has('isAuthorizedPublisher')).toBe(false);
+    expect(NO_CHAIN_METHODS.has('isPublishAuthorityEnforceable')).toBe(false);
   });
 });

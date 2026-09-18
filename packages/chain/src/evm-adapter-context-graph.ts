@@ -16,8 +16,10 @@ import {
   type ScanProvider,
 } from './evm-adapter-base.js';
 import {
+  errorMessage,
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -266,6 +268,61 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getAuthorizedPublisherAddress(contextGraphId: bigint): Promise<string> {
     await this.init();
     return (await this.nextAuthorizedSigner(contextGraphId)).address;
+  }
+
+  /**
+   * GH#2648 — may `publisherAddress` publish to `contextGraphId`, per on-chain policy?
+   *
+   * A NARROW read, deliberately unlike {@link getAuthorizedPublisherAddress}: no funding reads,
+   * no PCA quote, no signer-pool rotation, and it answers about an address rather than picking
+   * one. The async-lift claim scan asks this per accepted job before a lane claims it, so it
+   * has to be cheap and it must not fail for reasons other than authority.
+   *
+   * No `ContextGraphs` surface ⇒ `true`: authority is UNENFORCEABLE here, not denied. This
+   * mirrors `_authorizedPublisherSigners` and `poolHasFundableSigner`, both of which treat a
+   * missing contract as "every operational wallet is a candidate". A read FAILURE is not
+   * absorbed — it throws, so the caller can tell "unknown" from "refused" (the lift scan holds
+   * the job in `accepted` rather than either claiming or condemning it).
+   */
+  /**
+   * The binding is resolved once during `init()` and `initContracts()` swallows every failure
+   * there — including a transient RPC error — while still marking the adapter initialized. A
+   * lost binding is therefore sticky for the process lifetime, which is exactly why callers
+   * must be able to see it rather than infer authorization from a permissive `true`.
+   *
+   * Which is also why an unset binding is not, on its own, an answer. `false` is reserved for the
+   * one absence that is a FACT about the deployment — the Hub does not register `ContextGraphs`
+   * ({@link HubContractNotFoundError}) — because that is what "nothing to enforce" means. A
+   * binding lost to a startup 429 establishes nothing and THROWS instead: the caller maps a throw
+   * to `unknown` and holds the job, whereas `false` there would answer `unenforced` for the whole
+   * process, make every lane eligible, and — the refusal now being terminal — destroy each
+   * wrong-lane job rather than resetting it.
+   */
+  async isPublishAuthorityEnforceable(): Promise<boolean> {
+    await this.init();
+    if (this.contracts.contextGraphs !== undefined) return true;
+    const failure = this.contextGraphsBindingFailure;
+    if (failure !== undefined && !(failure instanceof HubContractNotFoundError)) {
+      throw new Error(
+        'ContextGraphs binding is unresolved after init, and not because the Hub lacks it: '
+        + `${errorMessage(failure)}. Publish authority cannot be answered.`,
+        { cause: failure },
+      );
+    }
+    return false;
+  }
+
+  async isAuthorizedPublisher(contextGraphId: bigint, publisherAddress: string): Promise<boolean> {
+    await this.init();
+    const contextGraphs = this.contracts.contextGraphs;
+    if (!contextGraphs) return true;
+    return Boolean(await this.readContract(
+      contextGraphs,
+      'contextGraphs.isAuthorizedPublisher',
+      'isAuthorizedPublisher',
+      contextGraphId,
+      ethers.getAddress(publisherAddress),
+    ));
   }
 
   // =====================================================================

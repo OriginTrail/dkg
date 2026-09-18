@@ -13,7 +13,10 @@ import { ethers, Interface } from 'ethers';
 import {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  PUBLISHER_NOT_AUTHORIZED_CODE,
+  formatPublisherNotAuthorizedMessage,
   messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublisherNotAuthorized,
 } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 
@@ -410,7 +413,7 @@ export function isInsufficientFundsError(err: unknown): boolean {
 /** Machine-readable code carried by {@link InsufficientPublisherFundsError}.
  *  Defined in dkg-core (UI-safe shared package) and re-exported here so chain
  *  consumers can keep importing it from dkg-chain. */
-export { NO_FUNDED_PUBLISHER_WALLET_CODE };
+export { NO_FUNDED_PUBLISHER_WALLET_CODE, PUBLISHER_NOT_AUTHORIZED_CODE };
 
 /** Per-operational-wallet balance snapshot for the no-funded-wallet diagnostic. */
 export interface PublisherWalletBalance {
@@ -448,6 +451,43 @@ export function isNoFundedPublisherWalletError(err: unknown): boolean {
   const e = err as { code?: unknown; message?: unknown } | null | undefined;
   return e?.code === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(e?.message);
+}
+
+/**
+ * GH#2648 — thrown when the wallet a publish is PINNED to is refused by the target context
+ * graph's on-chain publish authority. PERMANENT for that wallet: on a curated graph
+ * (publishPolicy 0) in EOA mode `ContextGraphs.isAuthorizedPublisher` admits exactly one
+ * address, so re-sending from the same wallet can only be refused again.
+ *
+ * Typed (rather than a bare `Error`) for one reason: the async-lift failure classifier reads
+ * `.code`. Before this class the refusal was a plain `new Error` whose message matched none of
+ * the classifier's keywords, so it fell through to the retryable `rpc_unavailable` default and
+ * the queue reset and re-claimed the job until the run deadline killed it — the forever-retry
+ * trap #1013/#1121, third recurrence. The message still carries the shared core marker, so a
+ * re-wrap that drops `.code` is classified anyway.
+ */
+export class PublisherNotAuthorizedError extends Error {
+  readonly code = PUBLISHER_NOT_AUTHORIZED_CODE;
+  readonly publisherAddress: string;
+  readonly contextGraphId: string;
+  constructor(publisherAddress: string, contextGraphId: bigint, options?: { cause?: unknown }) {
+    super(formatPublisherNotAuthorizedMessage(publisherAddress, contextGraphId), options);
+    this.name = 'PublisherNotAuthorizedError';
+    this.publisherAddress = publisherAddress;
+    this.contextGraphId = contextGraphId.toString();
+  }
+}
+
+/**
+ * True iff `err` is the publisher-not-authorized refusal — code-first, with a message-marker
+ * fallback for a wrapper that dropped `.code`. Mirrors
+ * {@link isNoFundedPublisherWalletError}, and shares the same dkg-core contract as the
+ * publisher-side classifier so the two cannot drift.
+ */
+export function isPublisherNotAuthorizedError(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown } | null | undefined;
+  return e?.code === PUBLISHER_NOT_AUTHORIZED_CODE
+    || messageIndicatesPublisherNotAuthorized(e?.message);
 }
 
 function formatWeiOrUnknown(wei: bigint | null): string {

@@ -712,6 +712,30 @@ export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
   options?: { readonly signal?: AbortSignal },
 ) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
+/**
+ * GH#2648 — the on-chain publish-authority verdict for one context graph, over the wallets a
+ * publisher runtime operates. See {@link AsyncLiftPublisherConfig.publishAuthorityResolver} for
+ * why each case is a distinct policy statement rather than a boolean with a default.
+ */
+export type AsyncLiftPublishAuthority =
+  /** No authority to read (no chain adapter, no `ContextGraphs` surface) — every lane eligible. */
+  | { readonly kind: 'unenforced' }
+  /** Authority exists but could not be read now — no lane claims; the job waits for the next poll. */
+  | { readonly kind: 'unknown' }
+  | {
+      readonly kind: 'resolved';
+      /**
+       * The wallets the graph's on-chain authority admits, out of {@link candidateWalletIds}.
+       * EMPTY is authoritative and terminal: no wallet this node operates may ever publish here.
+       */
+      readonly authorizedWalletIds: readonly string[];
+      /**
+       * Every publisher wallet that was asked. Carried so the empty-authorized case can name
+       * what was tried — the one thing an operator needs in order to act on it.
+       */
+      readonly candidateWalletIds: readonly string[];
+    };
+
 export interface AsyncLiftPublisherConfig {
   graphUri?: string;
   maxRetries?: number;
@@ -783,6 +807,40 @@ export interface AsyncLiftPublisherConfig {
     walletId: string,
     operationKind: 'create' | 'update' | undefined,
   ) => boolean;
+  /**
+   * GH#2648 — which of this runtime's publisher wallets may publish to `contextGraphId`, per the
+   * context graph's ON-CHAIN publish policy?
+   *
+   * The lift lanes are one-wallet-each: a lane's publisher pins its own `publisherPrivateKey`,
+   * and its chain adapter's signer pool holds exactly that wallet (`createPublisherWalletChain`
+   * passes a single `privateKey`, and `RuntimeEvmChainConfig` carries no `additionalKeys`). On a
+   * CURATED context graph `ContextGraphs.isAuthorizedPublisher` admits exactly ONE address, so a
+   * lane whose wallet is not that address can never publish the job it claimed — it can only
+   * fail, reset, and claim it again. This resolver is what lets the claim scan skip such a job
+   * and leave it for the lane that CAN sign it.
+   *
+   * OPT-IN: absent, the scan is unfiltered and behaviour is exactly what it was before this
+   * existed. Direct library consumers and tests keep the historical contract.
+   *
+   * The three verdicts are three different policy statements and must not be collapsed:
+   *  - `unenforced` — there is no authority to read (no chain, no `ContextGraphs` surface).
+   *    Every lane stays eligible; this mirrors `_authorizedPublisherSigners`, which treats a
+   *    missing contract as "every operational wallet is a candidate".
+   *  - `unknown` — authority EXISTS but could not be read right now (RPC failure). No lane
+   *    claims the job; it stays `accepted` and the next poll asks again. Deliberately NOT
+   *    fail-open: with the permanent-refusal classification in place, letting an unauthorized
+   *    lane claim on a transient blip would end the job terminally instead of retrying it.
+   *  - `resolved` — the authoritative answer. An EMPTY `authorizedWalletIds` means no wallet
+   *    this node operates may ever publish to that graph, which is a terminal condition for the
+   *    job rather than a reason to leave it circulating.
+   */
+  publishAuthorityResolver?: (contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>;
+  /**
+   * GH#2648 — how long an AUTHORITATIVE {@link publishAuthorityResolver} answer is reused, in ms.
+   * Defaults to `PUBLISH_AUTHORITY_CACHE_TTL_MS`. Only meaningful alongside the resolver; a
+   * failed ('unknown') read is never cached whatever this says.
+   */
+  publishAuthorityCacheTtlMs?: number;
   knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   /**
    * Return a named-KA queue job as soon as the RPC has accepted its signed transaction, leaving

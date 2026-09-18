@@ -1582,7 +1582,16 @@ async function resolveLegacyWorkspaceOperationPublicQuads(params: {
   };
 }
 
-async function resolveOnChainContextGraphId(params: {
+/**
+ * The numeric `ContextGraphs` id a locally-registered context graph NAME maps to, from the local
+ * ontology graph. A local read: the daemon stamps this when it learns the on-chain id, so nothing
+ * here touches the chain.
+ *
+ * Exported for the async-lift publish-authority scan (GH#2648), which must turn a queued job's
+ * context graph name into the id `ContextGraphs.isAuthorizedPublisher` takes — before the job is
+ * claimed, and therefore long before workspace resolution would do it.
+ */
+export async function resolveOnChainContextGraphId(params: {
   store: TripleStore;
   contextGraphId: string;
 }): Promise<string | undefined> {

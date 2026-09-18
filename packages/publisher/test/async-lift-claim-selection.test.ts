@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  PUBLISHER_NOT_AUTHORIZED_CODE,
+} from '@origintrail-official/dkg-core';
 import {
   createLiftJobFailureMetadata,
   TripleStoreAsyncLiftPublisher,
+  type AsyncLiftPublishAuthority,
 } from '../src/index.js';
 import type {
   LiftJobFailedFromAccepted,
@@ -17,6 +21,11 @@ import {
   serializeJob,
 } from '../src/async-lift-control-plane.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
+import {
+  KA_VM_BROADCAST_TX,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 describe('async-lift accepted-job selection', () => {
   let store: OxigraphStore;
@@ -142,5 +151,319 @@ describe('async-lift accepted-job selection', () => {
 
     expect((await publisher.claimNext('wallet-1'))?.jobId).toBe(oldestId);
     expect(selectedBindingCount).toBe(2);
+  });
+});
+
+describe('async-lift claim selection respects context-graph publish authority (GH#2648)', () => {
+  let store: OxigraphStore;
+
+  const AUTHORIZED = '0xd896f0E6000000000000000000000000000000aa';
+  const REFUSED = '0x3bccEeD2000000000000000000000000000000bb';
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    // These rows use numeric NAMES. The scan resolves a name through this mapping exactly as the
+    // publish path does, so the binding has to exist for the job to be routed at all.
+    await bindOnChainId('453', '453');
+    await bindOnChainId('999', '999');
+  });
+
+  /**
+   * Bind a queue-level context graph NAME to its on-chain id, the way the publish path resolves
+   * it. The scan used to shortcut an all-digit name straight to a bigint, which meant these rows
+   * never exercised the production name -> id lookup — and a graph whose name happened to be
+   * numeric was probed as a DIFFERENT on-chain graph than the publish would use.
+   */
+  async function bindOnChainId(contextGraphName: string, onChainId: string): Promise<void> {
+    await store.insert([{
+      subject: `did:dkg:context-graph:${contextGraphName}`,
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+      object: literal(onChainId),
+      graph: 'did:dkg:context-graph:ontology',
+    }]);
+  }
+
+  /** A queued request whose contextGraphId is a name bound to an on-chain id via the store. */
+  function curatedRequest(shareOperationId: string, contextGraphId = '453'): RawLiftRequest {
+    return {
+      swmId: 'swm-1',
+      namespace: 'default',
+      contextGraphId,
+      shareOperationId,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7',
+      assertionVersion: '1',
+      publicTripleCount: 2,
+      privateTripleCount: 0,
+      scope: 'full',
+      transitionType: 'CREATE',
+      authority: { type: 'owner', proofRef: 'proof:owner:1' },
+    };
+  }
+
+  function publisherWithAuthority(
+    resolver: (contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>,
+    options: { now?: () => number; publishAuthorityCacheTtlMs?: number } = {},
+  ): TripleStoreAsyncLiftPublisher {
+    return new TripleStoreAsyncLiftPublisher(store, {
+      now: options.now ?? (() => 1_000),
+      claimTokenGenerator: () => 'claim-token',
+      publishAuthorityResolver: resolver,
+      ...(options.publishAuthorityCacheTtlMs !== undefined
+        ? { publishAuthorityCacheTtlMs: options.publishAuthorityCacheTtlMs }
+        : {}),
+    });
+  }
+
+  /** The observed production shape: one curated CG, exactly one of the node's wallets admitted. */
+  function curatedAuthority(): (contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority> {
+    return async () => ({
+      kind: 'resolved',
+      authorizedWalletIds: [AUTHORIZED],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    });
+  }
+
+  it('does not let a lane claim a job its wallet is refused for, and hands it to the one that is', async () => {
+    // The whole defect: ten lanes claimed round-robin without asking, so nine of them took work
+    // only the tenth could sign — each failing, resetting, and re-claiming until the deadline.
+    const publisher = publisherWithAuthority(curatedAuthority());
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+  });
+
+  it('passes over a refused job to reach one the same lane can publish', async () => {
+    // Skipping must not be head-of-line blocking: the refused job stays for its own lane while
+    // this lane keeps draining the work it CAN sign.
+    const publisher = publisherWithAuthority(async (contextGraphId) =>
+      contextGraphId === 453n
+        ? { kind: 'resolved', authorizedWalletIds: [AUTHORIZED], candidateWalletIds: [AUTHORIZED, REFUSED] }
+        : { kind: 'resolved', authorizedWalletIds: [AUTHORIZED, REFUSED], candidateWalletIds: [AUTHORIZED, REFUSED] });
+    await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-curated', '453'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+    const openJobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-open', '999'), {
+      idGenerator: () => 'job-open',
+      now: () => 2,
+    });
+
+    // 'job-curated' is strictly older, so the unfiltered selector would return it.
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe(openJobId);
+  });
+
+  it('claims nothing while authority cannot be read, leaving the job accepted for the next poll', async () => {
+    // A transient RPC failure must NOT open the gate: with the refusal now classified permanent,
+    // an unauthorized lane claiming on a blip would END the job instead of retrying it.
+    let verdict: AsyncLiftPublishAuthority = { kind: 'unknown' };
+    const publisher = publisherWithAuthority(async () => verdict);
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(AUTHORIZED)).toBeNull();
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+
+    // 'unknown' is never cached, so the very next poll sees the recovered answer.
+    verdict = {
+      kind: 'resolved',
+      authorizedWalletIds: [AUTHORIZED],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    };
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+  });
+
+  it('leaves the selector unfiltered when authority is unenforceable', async () => {
+    const publisher = publisherWithAuthority(async () => ({ kind: 'unenforced' }));
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe(jobId);
+  });
+
+  it('resolves a context graph NAME through the local on-chain id mapping', async () => {
+    // Production queues a NAME; the numeric id lives in the local ontology graph.
+    const seen: bigint[] = [];
+    const publisher = publisherWithAuthority(async (contextGraphId) => {
+      seen.push(contextGraphId);
+      return { kind: 'resolved', authorizedWalletIds: [AUTHORIZED], candidateWalletIds: [AUTHORIZED, REFUSED] };
+    });
+    await store.insert([{
+      subject: 'did:dkg:context-graph:music-social',
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+      object: literal('453'),
+      graph: 'did:dkg:context-graph:ontology',
+    }]);
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1', 'music-social'), {
+      idGenerator: () => 'job-named',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+    expect(seen).toContain(453n);
+  });
+
+  it('falls back to a numeric NAME when the store has no mapping, exactly as publish does', async () => {
+    // `DKGPublisher` uses `BigInt(onChainContextGraphId ?? contextGraphId)` — stored mapping
+    // first, then the name. Resolving store-ONLY here reported `unenforced` (every lane
+    // eligible) for a CG named by its numeric id with no local stamp, while publish still
+    // targeted that id and could be refused — and the refusal is terminal, so that is permanent
+    // job loss rather than a retry.
+    const seen: bigint[] = [];
+    const publisher = publisherWithAuthority(async (contextGraphId) => {
+      seen.push(contextGraphId);
+      return { kind: 'resolved', authorizedWalletIds: [AUTHORIZED], candidateWalletIds: [AUTHORIZED, REFUSED] };
+    });
+    // Deliberately NO bindOnChainId for '777'.
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-unstamped', '777'), {
+      idGenerator: () => 'job-unstamped',
+      now: () => 1,
+    });
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+    expect(seen).toContain(777n);
+  });
+
+  it('fails a job NO configured wallet can publish terminally instead of leaving it queued', async () => {
+    // The starvation half. Skipping alone would rebuild the original bug quietly: the job would
+    // sit in `accepted` forever with nothing to explain it.
+    const clock = { now: 1_000 };
+    const publisher = publisherWithAuthority(async () => ({
+      kind: 'resolved',
+      authorizedWalletIds: [],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    }), { now: () => clock.now, publishAuthorityCacheTtlMs: 1_000 });
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-unpublishable',
+      now: () => 1,
+    });
+
+    // The FIRST empty read only HOLDS the job — the contract returns an empty set for a graph a
+    // lagging replica has not caught up to yet, and condemning on that would be job loss.
+    expect(await publisher.processNext(REFUSED)).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+    clock.now += 1_000;
+
+    const processed = await publisher.processNext(REFUSED);
+
+    expect(processed?.jobId).toBe(jobId);
+    const job = await publisher.getStatus(jobId);
+    if (job?.status !== 'failed') throw new Error(`expected failed job, got ${job?.status}`);
+    expect(job.failure.code).toBe('authority_forbidden');
+    expect(job.failure.retryable).toBe(false);
+    expect(job.failure.resolution).toBe('fail_job');
+    expect(job.failure.failedFromState).toBe('claimed');
+    // Actionable: names the graph and every wallet that was asked.
+    expect(job.failure.message).toContain('453');
+    expect(job.failure.message).toContain(AUTHORIZED);
+    expect(job.failure.message).toContain(REFUSED);
+    // Terminal means terminal — nothing reschedules it.
+    expect(job.timestamps.nextRetryAt).toBeUndefined();
+  });
+
+  it('routes a KNOWLEDGE-ASSET VM publish job by authority too — the cohort that failed', async () => {
+    // The harness cell that lost 15 of 20 assets was {"cohort":"vm","phase":"vm-lift"}, and the
+    // VM-publish request nests its context graph under a different key than raw lift. Without a
+    // row on THIS shape, a wrong field path would silently return `undefined` — read as "nothing
+    // to ask about" — and disable the filter for exactly the cohort the defect was reported on.
+    const publisher = publisherWithAuthority(curatedAuthority());
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ contextGraphId: '453' }),
+    );
+
+    expect(await publisher.claimNext(REFUSED)).toBeNull();
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+  });
+
+  it('fails an unpublishable KNOWLEDGE-ASSET VM publish job terminally from claimed', async () => {
+    const clock = { now: 1_000 };
+    const publisher = publisherWithAuthority(async () => ({
+      kind: 'resolved',
+      authorizedWalletIds: [],
+      candidateWalletIds: [AUTHORIZED, REFUSED],
+    }), { now: () => clock.now, publishAuthorityCacheTtlMs: 1_000 });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ contextGraphId: '453' }),
+    );
+
+    // Terminal only once a second read a TTL later confirms the empty set.
+    expect(await publisher.processNext(REFUSED)).toBeNull();
+    clock.now += 1_000;
+    await publisher.processNext(REFUSED);
+
+    const job = await publisher.getStatus(jobId);
+    if (job?.status !== 'failed') throw new Error(`expected failed job, got ${job?.status}`);
+    expect(job.failure.code).toBe('authority_forbidden');
+    expect(job.failure.failedFromState).toBe('claimed');
+    expect(job.failure.retryable).toBe(false);
+    expect(job.failure.message).toContain('453');
+  });
+
+  it('forgets a memoized verdict the CHAIN then refuses, so the next job is routed on a fresh read', async () => {
+    // The memo said this lane was admitted and the chain said otherwise. Reusing it for the rest
+    // of the TTL routes every other job queued for the same graph the same wrong way — and the
+    // refusal is terminal (`fail_job`, `autoRetry:false`), so each one is lost, not retried.
+    let reads = 0;
+    let clock = 1_000;
+    let admitted = AUTHORIZED;
+    const publisher = publisherWithAuthority(async () => {
+      reads += 1;
+      return { kind: 'resolved', authorizedWalletIds: [admitted], candidateWalletIds: [AUTHORIZED, REFUSED] };
+    }, { now: () => ++clock });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ contextGraphId: '453' }),
+    );
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+    expect(reads).toBe(1);
+
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { ...KA_VM_BROADCAST_TX, walletId: AUTHORIZED },
+    });
+    const failed = await publisher.recordPublishFailure(jobId, {
+      error: Object.assign(new Error('publisher not authorized for this context graph'), {
+        code: PUBLISHER_NOT_AUTHORIZED_CODE,
+      }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:publisher:error:authority',
+    });
+    if (failed.status !== 'failed') throw new Error(`expected failed job, got ${failed.status}`);
+    expect(failed.failure.code).toBe('authority_forbidden');
+
+    // What the chain refusal actually meant: authority had rotated to the other wallet. A second
+    // job on the SAME graph must reach that lane NOW, not after the memo's TTL lapses.
+    admitted = REFUSED;
+    await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-2'), {
+      idGenerator: () => 'job-second',
+      now: () => 1,
+    });
+
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe('job-second');
+    expect(reads).toBe(2);
+  });
+
+  it('is byte-for-byte unfiltered when no authority resolver is configured', async () => {
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => 1_000,
+      claimTokenGenerator: () => 'claim-token',
+    });
+    const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
+      idGenerator: () => 'job-curated',
+      now: () => 1,
+    });
+
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe(jobId);
   });
 });

@@ -1691,6 +1691,32 @@ export interface ChainAdapter {
   getAuthorizedPublisherAddress?(contextGraphId: bigint): Promise<string>;
 
   /**
+   * GH#2648 — may `publisherAddress` publish to `contextGraphId`, per on-chain policy?
+   *
+   * OPTIONAL, and its absence means authority is UNENFORCEABLE through this adapter (no chain,
+   * no `ContextGraphs` surface), never that publishing is denied — callers must leave every
+   * wallet eligible when it is missing. An implementation returns `true` for the same reason
+   * when it has no policy contract to ask, and THROWS rather than answering `false` when the
+   * read itself fails, so a caller can distinguish "refused" from "could not tell".
+   *
+   * Narrower than {@link getAuthorizedPublisherAddress}: no funding, no pricing, no rotation.
+   * The async-lift claim scan calls it per accepted job to keep a lane from claiming work its
+   * one wallet is permanently refused for.
+   */
+  isAuthorizedPublisher?(contextGraphId: bigint, publisherAddress: string): Promise<boolean>;
+
+  /**
+   * Can {@link isAuthorizedPublisher} actually ENFORCE anything through this adapter?
+   *
+   * `isAuthorizedPublisher` answers `true` both for "this wallet is authorized" and for "there
+   * is no policy contract to ask", and a caller that folds the second into a per-wallet verdict
+   * routes jobs to wallets the graph never admitted. This separates the two: `false` means the
+   * adapter has no `ContextGraphs` surface, so authority is UNENFORCEABLE and every lane must
+   * stay eligible. Implemented wherever `isAuthorizedPublisher` is.
+   */
+  isPublishAuthorityEnforceable?(): Promise<boolean>;
+
+  /**
    * Resolve authorization, candidate-specific PCA lifetime/pricing, strict
    * fundability, and signer-pool rotation as one adapter-owned operation.
    * Publishers call this before ACK collection or encrypted staging so no

@@ -21,6 +21,7 @@ import {
   ACKCollector,
   AsyncLiftRunner,
   type AsyncLiftRunnerConfig,
+  type AsyncLiftPublishAuthority,
   DKGPublisher,
   FileWorkspacePublicSnapshotStore,
   TripleStoreAsyncLiftPublisher,
@@ -215,6 +216,131 @@ interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
   /** The wallet's own chain adapter — also the wallet's RpcUsageDrainable source. */
   readonly chain: ChainAdapter;
 }
+
+/**
+ * GH#2648 — the publish-authority resolver the async lift claim scan routes on.
+ *
+ * Every lane is a ONE-WALLET lane: `createPublisherWalletChain` builds each adapter with a single
+ * `privateKey`, and `RuntimeEvmChainConfig` carries no `additionalKeys`, so each lane's signer pool
+ * holds exactly its own wallet. On a CURATED context graph `ContextGraphs.isAuthorizedPublisher`
+ * admits exactly ONE address, so the other lanes cannot publish that graph by any route — there is
+ * no in-adapter rotation for them to fall back to. This answers, for the whole runtime, which
+ * lane can.
+ *
+ * Returns `undefined` — disabling the filter entirely — when any wallet's adapter cannot answer
+ * (a `NoChainAdapter`, or a build predating the probe). Authority that cannot be asked is
+ * UNENFORCEABLE, not denied, and a partial answer across a mixed adapter set would be worse than
+ * none: it would route on a subset while claiming to speak for the pool.
+ *
+ * The same reasoning applies per call, not just at construction: an adapter that HAS the probe
+ * but lost its `ContextGraphs` binding answers `unenforced` for the whole pool rather than
+ * contributing a permissive `true` to `authorizedWalletIds`.
+ */
+export function createPublishAuthorityResolver(
+  wallets: readonly ConfiguredPublisherWallet[],
+  /** Re-probe window for a NEGATIVE answer; injectable so tests need no wall clock. */
+  negativeRetryMs: number = PUBLISH_AUTHORITY_ENFORCEABILITY_RETRY_MS,
+): ((contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>) | undefined {
+  if (wallets.length === 0) return undefined;
+  if (!wallets.every((wallet) => (
+    typeof wallet.chain.isAuthorizedPublisher === 'function'
+    && typeof wallet.chain.isPublishAuthorityEnforceable === 'function'
+  ))) {
+    return undefined;
+  }
+  const candidateWalletIds = wallets.map((wallet) => wallet.address);
+  // `isAuthorizedPublisher` answers `true` both for "authorized" and for "no ContextGraphs
+  // surface to ask". Folding the second into `authorizedWalletIds` reports an UNENFORCEABLE
+  // adapter as an affirmative per-wallet verdict, and mixes it with truthful answers from the
+  // other adapters — so a lane claims jobs its wallet was never admitted for and the
+  // transaction reverts on chain.
+  //
+  // Resolved ONCE and reused. The binding is established during `init()` and never rebound
+  // afterwards — `initContracts()` swallows a transient failure while still setting
+  // `initialized`, which is precisely why a lost binding is sticky for the process lifetime —
+  // so asking per call bought nothing and put an `await init()` per wallet on the claim scan's
+  // hot path, inside the coordinator's global claim lock.
+  //
+  // `true` is memoized permanently: a bound `ContextGraphs` surface is never unbound.
+  //
+  // A negative answer is memoized only BRIEFLY. It cannot be told apart from "the binding was
+  // lost to a swallowed `initContracts()` error" — the stickiness described above — so caching
+  // it for the process would let one startup 429 disable lane routing until restart, and with
+  // the refusal terminal (`authority_forbidden`, `autoRetry:false`) that destroys every
+  // curated-CG lift job rather than misrouting it. Re-probing on EVERY call is the other wrong
+  // answer: the probe awaits `init()` per wallet, and this runs per graph, per poll, per lane
+  // inside the coordinator's global claim lock. A short window bounds both.
+  let enforceable: true | undefined;
+  let negativeUntil = 0;
+  let negative: 'unenforceable' | 'unreadable' | undefined;
+  type EnforceabilityV1 = 'enforceable' | 'unenforceable' | 'unreadable';
+  const resolveEnforceable = async (): Promise<EnforceabilityV1> => {
+    if (enforceable === true) return 'enforceable';
+    if (negative !== undefined && Date.now() < negativeUntil) return negative;
+    let unreadable = false;
+    const answers = await Promise.all(wallets.map(async (wallet) => {
+      try {
+        return await wallet.chain.isPublishAuthorityEnforceable!();
+      } catch {
+        // A probe that THREW established nothing. `init()` rethrows
+        // `RpcEndpointsExhaustedError`, so this is an ordinary RPC blip, and answering
+        // `unenforced` here would make every lane eligible — fail-OPEN into permanent job
+        // loss. Hold the job instead and ask again once the window lapses.
+        unreadable = true;
+        return false;
+      }
+    }));
+    if (unreadable) {
+      negative = 'unreadable';
+      negativeUntil = Date.now() + negativeRetryMs;
+      return negative;
+    }
+    if (!answers.includes(false)) {
+      enforceable = true;
+      negative = undefined;
+      return 'enforceable';
+    }
+    negative = 'unenforceable';
+    negativeUntil = Date.now() + negativeRetryMs;
+    return negative;
+  };
+  return async (contextGraphId: bigint): Promise<AsyncLiftPublishAuthority> => {
+    const state = await resolveEnforceable();
+    if (state === 'unreadable') return { kind: 'unknown' };
+    if (state === 'unenforceable') return { kind: 'unenforced' };
+    const verdicts = await Promise.all(wallets.map(async (wallet) => {
+      try {
+        return await wallet.chain.isAuthorizedPublisher!(contextGraphId, wallet.address)
+          ? wallet.address
+          : null;
+      } catch {
+        // One unreadable wallet poisons the WHOLE verdict rather than being dropped from it.
+        // Treating a failed read as "not authorized" would shrink the authorized set, and an
+        // empty set is the terminal answer — a transient RPC error must never be able to
+        // condemn a job. 'unknown' simply defers the decision to the next poll.
+        return UNREADABLE_PUBLISH_AUTHORITY;
+      }
+    }));
+    if (verdicts.includes(UNREADABLE_PUBLISH_AUTHORITY)) return { kind: 'unknown' };
+    return {
+      kind: 'resolved',
+      authorizedWalletIds: verdicts.filter((address): address is string => typeof address === 'string'),
+      candidateWalletIds,
+    };
+  };
+}
+
+/**
+ * How long a NEGATIVE publish-authority enforceability answer is reused before re-probing.
+ *
+ * Bounds two opposite failures: caching it for the process would make one swallowed
+ * `initContracts()` error permanent, while re-probing every call puts an `await init()` per
+ * wallet on the claim scan's hot path, inside the coordinator's global claim lock.
+ */
+const PUBLISH_AUTHORITY_ENFORCEABILITY_RETRY_MS = 30_000;
+
+/** Sentinel for "this wallet's authority read failed", distinct from a `null` refusal. */
+const UNREADABLE_PUBLISH_AUTHORITY = Symbol('unreadable-publish-authority');
 
 /** Resolve the operator maintenance switch once at a CLI/daemon boundary. */
 export function resolvePublisherStartPaused(value: string | undefined): boolean {
@@ -641,6 +767,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   // GH#2270 PR-3 r2 — the recovery factories take adapters, not publishers. Built here, from the
   // wallets, where `chain` is a public field rather than something to assert through.
   const chainAdapters = chainAdaptersForWallets(wallets);
+  const publishAuthorityResolver = createPublishAuthorityResolver(wallets);
   const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
   // GH#2270 follow-up (🟡 3823952723) — ONE closure, used by both the runtime's own publisher and
   // the runtime handle the daemon's admission instance asks. These two answers are required to be
@@ -666,6 +793,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     // contract is per JOB, so admission must ask about the wallet that actually signs it rather
     // than inherit the node-wide answer.
     chainProofCapableForWallet: canSettleHeldJob,
+    // GH#2648 — the lane-routing input. Built from the SAME wallet list the runner drives, so a
+    // lane can never be offered a job whose context graph refuses its one wallet. Undefined on a
+    // runtime that cannot ask (no chain), which leaves the claim scan exactly as it was.
+    ...(publishAuthorityResolver ? { publishAuthorityResolver } : {}),
     knowledgeAssetVmPublishRecoveryResolver: hasChainRecovery
       ? createKnowledgeAssetVmPublishRecoveryResolver(chainAdapters)
       : undefined,
