@@ -25,6 +25,7 @@ describe('ChainEventPoller allow-list and profile lanes', () => {
       agent: string;
       added: boolean;
       blockNumber: number;
+      signal?: AbortSignal;
     }> = [];
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -39,7 +40,9 @@ describe('ChainEventPoller allow-list and profile lanes', () => {
     await poller.stop();
 
     expect(filters[0].eventTypes).toEqual(['AllowListUpdated']);
-    expect(seen).toEqual([{
+    // The poller also hands the callback its poll-lifecycle abort signal; the
+    // event payload contract asserted here is the four fields below.
+    expect(seen).toMatchObject([{
       contextGraphId: 'cg-42',
       agent: '0x' + 'ab'.repeat(20),
       added: false,
@@ -54,7 +57,7 @@ describe('ChainEventPoller allow-list and profile lanes', () => {
       { type: 'ProfileUpdated', blockNumber: 80, data: { identityId: '9' } },
     ];
     const { adapter, filters } = makeChain({ head: 100, events });
-    const seen: Array<{ identityId: bigint; blockNumber: number }> = [];
+    const seen: Array<{ identityId: bigint; blockNumber: number; signal?: AbortSignal }> = [];
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -67,7 +70,7 @@ describe('ChainEventPoller allow-list and profile lanes', () => {
     await poller.stop();
 
     expect(filters[0].eventTypes).toEqual(['ProfileCreated', 'ProfileUpdated']);
-    expect(seen).toEqual([
+    expect(seen).toMatchObject([
       { identityId: 7n, blockNumber: 40 },
       { identityId: 9n, blockNumber: 80 },
     ]);
