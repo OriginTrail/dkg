@@ -86,8 +86,32 @@ export type RpcEndpointSlotLabel = TrackedRpcEndpointSlotLabel | 'other';
 const RPC_ENDPOINT_SLOT_LABEL_SET: ReadonlySet<string> = new Set(RPC_ENDPOINT_SLOT_LABELS);
 
 /** Canonical method-aware diagnostic attribution carried by a usage window. */
+/**
+ * Label recorded when a request reaches the transport with no consumer scope.
+ * It is deliberately a visible bucket rather than a dropped count: a silent gap
+ * reads as "nobody asked" when it means "we could not say who".
+ */
+export const RPC_USAGE_UNATTRIBUTED_CONSUMER = 'unattributed' as const;
+
+/**
+ * A JSON-RPC method name as this node ever records one. Attribution inputs can
+ * arrive from outside the process (merged windows), and a method that is not a
+ * plain token is dropped rather than sanitized: a sanitized line would still
+ * be a line the sender chose to inject.
+ */
+const RPC_USAGE_METHOD_TOKEN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u;
+
+function isRpcUsageMethodToken(value: unknown): value is string {
+  return typeof value === 'string' && RPC_USAGE_METHOD_TOKEN.test(value);
+}
+
 export type RpcUsageAttribution =
-  | { readonly method: 'eth_call'; readonly consumer: string; readonly count: number }
+  | {
+      readonly method: string;
+      readonly consumer: string;
+      readonly count: number;
+      readonly endpointSlot?: undefined;
+    }
   | {
       readonly method: 'eth_getLogs';
       readonly consumer: string;
@@ -110,9 +134,9 @@ function normalizeRpcUsageAttribution(value: unknown): RpcUsageAttribution | und
   if (typeof candidate.consumer !== 'string' || typeof candidate.count !== 'number') {
     return undefined;
   }
-  if (candidate.method === 'eth_call') {
+  if (isRpcUsageMethodToken(candidate.method) && candidate.method !== 'eth_getLogs') {
     return {
-      method: 'eth_call',
+      method: candidate.method,
       consumer: candidate.consumer,
       count: candidate.count,
     };
@@ -162,6 +186,7 @@ export function normalizeRpcUsageWindow(window: RpcUsageWindow): ConcreteRpcUsag
   const ethCallByConsumer: Record<string, number> = {};
   for (const attribution of attributions) {
     if (attribution.method !== 'eth_call') continue;
+    if (attribution.consumer === RPC_USAGE_UNATTRIBUTED_CONSUMER) continue;
     ethCallByConsumer[attribution.consumer] =
       (ethCallByConsumer[attribution.consumer] ?? 0) + attribution.count;
   }
@@ -207,9 +232,9 @@ export function mergeRpcUsageWindows(
     const w = normalizeRpcUsageWindow(input);
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
     for (const attribution of w.attributions) {
-      const key = attribution.method === 'eth_call'
-        ? `${attribution.method}\0${attribution.consumer}`
-        : `${attribution.method}\0${attribution.consumer}\0${attribution.endpointSlot}`;
+      const key = attribution.method === 'eth_getLogs'
+        ? `${attribution.method}\0${attribution.consumer}\0${attribution.endpointSlot}`
+        : `${attribution.method}\0${attribution.consumer}`;
       const current = attributions.get(key);
       attributions.set(key, {
         ...attribution,
@@ -222,6 +247,7 @@ export function mergeRpcUsageWindows(
   const ethCallByConsumer: Record<string, number> = {};
   for (const attribution of mergedAttributions) {
     if (attribution.method !== 'eth_call') continue;
+    if (attribution.consumer === RPC_USAGE_UNATTRIBUTED_CONSUMER) continue;
     ethCallByConsumer[attribution.consumer] = attribution.count;
   }
   return {
@@ -315,7 +341,7 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
 }
 
 /** Current diagnostic consumer label, if a caller established one. */
-function activeRpcUsageConsumer(): string | undefined {
+export function activeRpcUsageConsumer(): string | undefined {
   return rpcUsageConsumerContext.getStore();
 }
 
@@ -350,7 +376,8 @@ export function boundedRpcEndpointSlotLabel(
  */
 export class RpcUsageTracker {
   private window = new Map<string, number>();
-  private ethCallConsumers = new Map<string, number>();
+  /** `${method}\0${consumer}` -> count, for every method except eth_getLogs. */
+  private methodConsumers = new Map<string, number>();
   private ethGetLogsAttributions = new Map<
     string,
     { consumer: string; endpointSlot: RpcEndpointSlotLabel; count: number }
@@ -386,18 +413,22 @@ export class RpcUsageTracker {
     const raw = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
     const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
     this.window.set(key, (this.window.get(key) ?? 0) + 1);
-    if (raw === 'eth_call') {
-      const normalizedConsumer = activeRpcUsageConsumer();
-      if (normalizedConsumer) {
-        const consumerKey = this.ethCallConsumers.has(normalizedConsumer) ||
-          this.ethCallConsumers.size < RpcUsageTracker.MAX_WINDOW_CONSUMERS
-          ? normalizedConsumer
-          : 'other';
-        this.ethCallConsumers.set(consumerKey, (this.ethCallConsumers.get(consumerKey) ?? 0) + 1);
-      }
+    if (raw !== 'eth_getLogs') {
+      // Every non-log method is attributed, and an unlabelled call is recorded
+      // as such rather than dropped. Before this, only eth_call carried a
+      // consumer and an unlabelled eth_call vanished from the by-consumer
+      // view - which is how the whole block/transaction tier (~20% of a
+      // publish burst) became invisible to attribution.
+      const consumer = activeRpcUsageConsumer() ?? RPC_USAGE_UNATTRIBUTED_CONSUMER;
+      const rawKey = `${key}\0${consumer}`;
+      const pairKey = this.methodConsumers.has(rawKey)
+        || this.methodConsumers.size < RpcUsageTracker.MAX_WINDOW_CONSUMERS
+        ? rawKey
+        : `${key}\0other`;
+      this.methodConsumers.set(pairKey, (this.methodConsumers.get(pairKey) ?? 0) + 1);
     }
     if (raw === 'eth_getLogs') {
-      const consumer = activeRpcUsageConsumer() ?? 'unattributed';
+      const consumer = activeRpcUsageConsumer() ?? RPC_USAGE_UNATTRIBUTED_CONSUMER;
       const slot = boundedRpcEndpointSlotLabel(endpointSlot);
       const rawKey = `${consumer}\0${slot}`;
       const overflowKey = 'other\0other';
@@ -440,12 +471,20 @@ export class RpcUsageTracker {
     for (const [method, count] of this.window) byMethod[method] = count;
     this.window.clear();
     const ethCallByConsumer: Record<string, number> = {};
-    for (const [consumer, count] of this.ethCallConsumers) ethCallByConsumer[consumer] = count;
-    this.ethCallConsumers.clear();
+    const methodAttributions: RpcUsageAttribution[] = [];
+    for (const [pairKey, count] of this.methodConsumers) {
+      const separator = pairKey.indexOf('\0');
+      const method = pairKey.slice(0, separator);
+      const consumer = pairKey.slice(separator + 1);
+      methodAttributions.push({ method, consumer, count });
+      // The legacy eth_call projection keeps its meaning: labelled consumers only.
+      if (method === 'eth_call' && consumer !== RPC_USAGE_UNATTRIBUTED_CONSUMER) {
+        ethCallByConsumer[consumer] = count;
+      }
+    }
+    this.methodConsumers.clear();
     const attributions: RpcUsageAttribution[] = [
-      ...Object.entries(ethCallByConsumer).map(
-        ([consumer, count]): RpcUsageAttribution => ({ method: 'eth_call', consumer, count }),
-      ),
+      ...methodAttributions,
       ...[...this.ethGetLogsAttributions.values()].map(
         ({ consumer, endpointSlot, count }): RpcUsageAttribution => ({
           method: 'eth_getLogs',

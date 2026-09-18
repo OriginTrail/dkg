@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { activeRpcUsageConsumer, withRpcUsageConsumer } from './rpc-usage.js';
 import {
   FetchRequest,
   JsonRpcProvider,
@@ -364,7 +365,17 @@ function configuredProviderOptions(
  * debug/error events, destruction checks, response matching, and RPC errors.
  */
 class RequestContextJsonRpcProvider extends JsonRpcProvider {
-  readonly #pendingRequestContexts: Array<{ readonly context: RpcRequestContext }> = [];
+  readonly #pendingRequestContexts: Array<{
+    readonly context: RpcRequestContext;
+    /**
+     * The issuer's diagnostic consumer label. It lives in a SECOND async
+     * context that the request context does not carry, so without capturing
+     * it here every payload drained by a foreign caller's timer was billed to
+     * whatever label that caller happened to hold - point-view consumers were
+     * charged for eth_getLogs, and unlabelled bursts vanished from attribution.
+     */
+    readonly consumer: string | undefined;
+  }> = [];
 
   override _detectNetwork(): Promise<Network> {
     // Network discovery belongs to the provider lifecycle. It can be triggered
@@ -381,7 +392,10 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
     method: string,
     params: Array<unknown> | Record<string, unknown>,
   ): Promise<unknown> {
-    const pending = { context: activeRpcRequestContext() };
+    const pending = {
+      context: activeRpcRequestContext(),
+      consumer: activeRpcUsageConsumer(),
+    };
     // JsonRpcProvider.send performs this same lazy start before delegating. Do
     // it first so bootstrap network detection cannot consume a user payload's
     // queued context, then delegate the complete request lifecycle unchanged.
@@ -401,7 +415,11 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
   ): Promise<Array<JsonRpcResult>> {
     const pending = this.#pendingRequestContexts.shift();
     if (!pending) return super._send(payload);
-    return rpcRequestContext.run(pending.context, () => super._send(payload));
+    return rpcRequestContext.run(pending.context, () => (
+      pending.consumer === undefined
+        ? super._send(payload)
+        : withRpcUsageConsumer(pending.consumer, () => super._send(payload))
+    ));
   }
 }
 

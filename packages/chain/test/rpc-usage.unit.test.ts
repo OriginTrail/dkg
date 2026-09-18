@@ -257,7 +257,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
         [],
         { method: 'eth_call', consumer: 7, count: 1 },
         { method: 'eth_call', consumer: 'invalid-count', count: '1' },
-        { method: 'net_version', consumer: 'unsupported', count: 1 },
+        { method: 42, consumer: 'invalid-method', count: 1 },
+        // Every method is attributable now; this one is retained, not dropped.
+        { method: 'net_version', consumer: 'ops.probe', count: 1 },
       ],
       lifetimeTotal: 4,
     } as unknown as Parameters<typeof normalizeRpcUsageWindow>[0]);
@@ -279,6 +281,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
           endpointSlot: 'other',
           count: 1,
         },
+        { method: 'net_version', consumer: 'ops.probe', count: 1 },
       ],
       lifetimeTotal: 4,
     });
@@ -304,6 +307,62 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(w.byMethod['eth_call']).toBe(1);
     expect(w.byMethod['debug_traceTransaction']).toBe(1); // NOT sanitized to 'other'
     expect(w.byMethod['other']).toBe(2);
+  });
+
+  it('attributes every non-log method to the current consumer, not only eth_call', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('finality.receiptGate', () => {
+      t.record('eth_blockNumber');
+      t.record('eth_getBlockByNumber');
+      t.record('eth_getTransactionReceipt');
+    });
+
+    const w = t.drainWindow();
+    expect(w.attributions).toEqual(expect.arrayContaining([
+      { method: 'eth_blockNumber', consumer: 'finality.receiptGate', count: 1 },
+      { method: 'eth_getBlockByNumber', consumer: 'finality.receiptGate', count: 1 },
+      { method: 'eth_getTransactionReceipt', consumer: 'finality.receiptGate', count: 1 },
+    ]));
+    // The legacy eth_call projection is untouched by other methods.
+    expect(w.ethCallByConsumer).toEqual({});
+  });
+
+  it('records an unlabelled call as "unattributed" instead of dropping it', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    t.record('eth_call');
+    t.record('eth_blockNumber');
+
+    const w = t.drainWindow();
+    expect(w.attributions).toEqual(expect.arrayContaining([
+      { method: 'eth_call', consumer: 'unattributed', count: 1 },
+      { method: 'eth_blockNumber', consumer: 'unattributed', count: 1 },
+    ]));
+    // ...while the legacy projection still means "labelled consumers only".
+    expect(w.ethCallByConsumer).toEqual({});
+    expect(rpcUsageWindowTotal(w)).toBe(2);
+  });
+
+  it('normalizes and merges attributions for any method', () => {
+    const merged = mergeRpcUsageWindows(
+      {
+        byMethod: { eth_getBlockByNumber: 2 },
+        lifetimeTotal: 2,
+        attributions: [{ method: 'eth_getBlockByNumber', consumer: 'finality.receiptGate', count: 2 }],
+      },
+      {
+        byMethod: { eth_getBlockByNumber: 3 },
+        lifetimeTotal: 3,
+        attributions: [{ method: 'eth_getBlockByNumber', consumer: 'finality.receiptGate', count: 3 }],
+      },
+    );
+    expect(merged.attributions).toEqual([
+      { method: 'eth_getBlockByNumber', consumer: 'finality.receiptGate', count: 5 },
+    ]);
+    expect(normalizeRpcUsageWindow({
+      byMethod: {},
+      lifetimeTotal: 0,
+      attributions: [{ method: 'eth_estimateGas', consumer: 'publish', count: 1 }],
+    }).attributions).toEqual([{ method: 'eth_estimateGas', consumer: 'publish', count: 1 }]);
   });
 
   it('attributes eth_call to the current bounded consumer without changing aggregate totals', () => {
@@ -493,7 +552,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(primaryHits).toBe(1);
     expect(backupHits).toBe(1);
     expect(usage.byMethod.eth_getLogs).toBe(primaryHits + backupHits);
-    expect(usage.attributions).toEqual([
+    // Bootstrap reads (eth_chainId) are attributed too now; this pins the log slots.
+    expect(usage.attributions.filter((a) => a.method === 'eth_getLogs')).toEqual([
       { method: 'eth_getLogs', consumer: 'unit.getLogs.failover', endpointSlot: 'primary', count: primaryHits },
       { method: 'eth_getLogs', consumer: 'unit.getLogs.failover', endpointSlot: 'fallback_1', count: backupHits },
     ]);
@@ -501,6 +561,38 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       .not.toContain(primary.url);
     expect(JSON.stringify(usage.attributions))
       .not.toContain(backup.url);
+  }, 30_000);
+
+  it('bills a payload to ITS issuer, not to whichever caller drains the provider queue', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const tracker = new RpcUsageTracker(() => 'evm:31337');
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 1,
+      providerOptions: { batchMaxCount: 1 },
+      endpointSlot: 0,
+      onRequest: (method, slot) => tracker.record(method, slot),
+    });
+    try {
+      // Two issuers enqueue in the same drain window. The physical _send runs
+      // from ONE shared drain timer, under the first issuer's async context -
+      // so without an explicit capture the second payload was billed to the
+      // first issuer's label. This is the leak that charged point-view
+      // consumers for eth_getLogs and hid unlabelled bursts.
+      await Promise.all([
+        withRpcUsageConsumer('issuer.alpha', () => provider.send('eth_blockNumber', [])),
+        withRpcUsageConsumer('issuer.beta', () => provider.send('eth_blockNumber', [])),
+      ]);
+      const usage = tracker.drainWindow();
+      const billed = usage.attributions.filter((a) => a.method === 'eth_blockNumber');
+      expect(billed).toEqual(expect.arrayContaining([
+        { method: 'eth_blockNumber', consumer: 'issuer.alpha', count: 1 },
+        { method: 'eth_blockNumber', consumer: 'issuer.beta', count: 1 },
+      ]));
+      expect(billed.some((a) => a.consumer === 'unattributed')).toBe(false);
+    } finally {
+      provider.destroy();
+    }
   }, 30_000);
 
   it('attributes ethers-internal eth_getLogs retries to the same endpoint slot', async () => {
@@ -524,7 +616,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       const hits = rpc.hits('eth_getLogs');
       expect(hits).toBe(2);
       expect(usage.byMethod.eth_getLogs).toBe(hits);
-      expect(usage.attributions).toEqual([
+      expect(usage.attributions.filter((a) => a.method === 'eth_getLogs')).toEqual([
         { method: 'eth_getLogs', consumer: 'unit.getLogs.retry', endpointSlot: 'fallback_3', count: hits },
       ]);
     } finally {
