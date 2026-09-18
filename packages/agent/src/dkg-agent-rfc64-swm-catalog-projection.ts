@@ -271,12 +271,28 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     // previous authority generation stay unreachable" for graphs that never
     // rotated. The lane is already resolved synchronously above, so the
     // comparison costs nothing here.
-    const stranded = origins.filter(({ authorAddress, originDigest }) => (
-      computeSwmAuthorInventoryScopeDigestV1(Object.freeze({
+    //
+    // The digest comparison alone never CONVERGES, though. Nothing retires the
+    // origin-scope rows -- the carry only ever writes under `acceptedDigest`,
+    // and no path removes rows under an origin digest -- so once a graph has
+    // rotated the comparison stays true for its whole life. Every later
+    // acceptance (a roster add/remove bumps `roster.version`, which
+    // `rfc64CatalogAuthorityGenerationChangedV1` reports as a generation change)
+    // then returned a promise and suspended the acceptance path for work that
+    // was already done. The accepted generation's own row set is the durable
+    // carry marker: ask it, with exactly the predicate the carry uses, and
+    // narrow each origin to the rows that still have to cross.
+    const stranded = origins.flatMap((origin) => {
+      const acceptedDigest = computeSwmAuthorInventoryScopeDigestV1(Object.freeze({
         ...lane!.scopeBase,
-        authorAddress,
-      }) as SwmAuthorInventoryScopeV1) !== originDigest
-    ));
+        authorAddress: origin.authorAddress,
+      }) as SwmAuthorInventoryScopeV1);
+      if (acceptedDigest === origin.originDigest) return [];
+      const acceptedRows = persistence.swmAuthorInventory
+        .readSwmAuthorInventorySnapshotV1(acceptedDigest, origin.authorAddress)?.rows ?? [];
+      const rows = rfc64UncarriedOriginRowsV1(origin.rows, acceptedRows);
+      return rows.length === 0 ? [] : [Object.freeze({ ...origin, rows })];
+    });
     if (stranded.length === 0) return null;
     return Object.freeze({ lane, origins: stranded });
   }
