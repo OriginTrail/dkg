@@ -323,6 +323,44 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
   });
 
+  it('does not let a read admitted before a trip erase the fresh exhaustion', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    // Admitted against a healthy pool and still in flight when the pool fails:
+    // it reached the providers, but says nothing about the state they are in
+    // now, so it must not count as recovery from the newer exhaustion.
+    const stale = breaker.runUnqueued(undefined, async (_signal, evidence) => {
+      evidence.markRpcAttempt();
+      entered.resolve();
+      await release.promise;
+      return 'stale-success';
+    });
+    await entered.promise;
+
+    await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    release.resolve();
+    await expect(stale).resolves.toBe('stale-success');
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+  });
+
   it('retires an unqueued read before close settles', async () => {
     const breaker = new Rfc64AuthorityReadCoordinatorV1();
     const release = Promise.withResolvers<void>();

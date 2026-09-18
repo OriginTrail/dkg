@@ -129,6 +129,12 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   readonly #random: () => number;
   #consecutiveExhaustions = 0;
   #retryAtMs = 0;
+  /**
+   * Bumped by every trip. A read carries the generation it was admitted under,
+   * so a result that predates a trip cannot be mistaken for evidence about the
+   * pool state that trip established.
+   */
+  #tripGeneration = 0;
   #tail: Promise<void> = Promise.resolve();
   /** In-flight reads admitted without the serializer, retired by `whenIdle`. */
   readonly #unqueued = new Set<Promise<unknown>>();
@@ -184,18 +190,14 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           );
         }
 
+        const admittedGeneration = this.#tripGeneration;
         let rpcAttempted = false;
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
           markRpcAttempt: () => { rpcAttempted = true; },
         });
         try {
           const result = await operation(runSignal, evidence);
-          // A local/cache-only answer is useful to its caller, but cannot
-          // prove that a previously exhausted provider pool has recovered.
-          if (this.#consecutiveExhaustions === 0 || rpcAttempted) {
-            this.#consecutiveExhaustions = 0;
-            this.#retryAtMs = 0;
-          }
+          this.#recordSuccess(rpcAttempted, admittedGeneration);
           return result;
         } catch (error) {
           if (isRpcEndpointsExhaustedError(error)) this.#open(error);
@@ -261,6 +263,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       );
     }
 
+    const admittedGeneration = this.#tripGeneration;
     let rpcAttempted = false;
     const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
       markRpcAttempt: () => { rpcAttempted = true; },
@@ -268,12 +271,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     const active = (async () => {
       try {
         const result = await operation(runSignal, evidence);
-        // Same evidence rule as the serialized lane: a local or cached answer
-        // cannot prove that an exhausted provider pool came back.
-        if (this.#consecutiveExhaustions === 0 || rpcAttempted) {
-          this.#consecutiveExhaustions = 0;
-          this.#retryAtMs = 0;
-        }
+        this.#recordSuccess(rpcAttempted, admittedGeneration);
         return result;
       } catch (error) {
         if (isRpcEndpointsExhaustedError(error)) this.#open(error);
@@ -322,7 +320,27 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     });
   }
 
+  /**
+   * Clear an outstanding exhaustion once a read proves the pool answered.
+   *
+   * A local or cached answer cannot prove that an exhausted pool came back, so
+   * it never clears. Neither can a read that was admitted before the trip it
+   * would be clearing: `runUnqueued` overlaps `run`, so a read that reached the
+   * pool while it was still healthy can settle after a later read exhausted it,
+   * and honoring that as evidence would discard a live cooldown and restart the
+   * backoff ladder. Only evidence gathered under the current generation counts.
+   */
+  #recordSuccess(rpcAttempted: boolean, admittedGeneration: number): void {
+    if (
+      this.#consecutiveExhaustions !== 0
+      && !(rpcAttempted && this.#tripGeneration === admittedGeneration)
+    ) return;
+    this.#consecutiveExhaustions = 0;
+    this.#retryAtMs = 0;
+  }
+
   #open(error: RpcEndpointsExhaustedErrorLike): void {
+    this.#tripGeneration += 1;
     this.#consecutiveExhaustions += 1;
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);
     const exponential = Math.min(
