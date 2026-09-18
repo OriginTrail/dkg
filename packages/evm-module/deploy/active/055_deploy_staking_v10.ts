@@ -46,5 +46,4 @@ func.dependencies = [
   // withdrawal request/finalize/cancel API.
   'IdentityStorage',
   'Token',
-  'EpochStorage',
 ];

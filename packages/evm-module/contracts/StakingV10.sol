@@ -12,7 +12,6 @@ import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {StakingRewardSettlement} from "./StakingRewardSettlement.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
-import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
@@ -164,9 +163,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`.
     uint256 public constant SCALE18 = 1e18;
 
-    /// @notice EpochStorage shard ID for the reward pool.
-    uint256 private constant EPOCH_POOL_INDEX = 1;
-
     // ========================================================================
     // Hub-wired dependencies
     // ========================================================================
@@ -189,7 +185,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         (operator-fee withdrawal request / finalize / cancel).
     IdentityStorage public identityStorage;
     IERC20 public token;
-    EpochStorage public epochStorage;
 
     // ========================================================================
     // Events
@@ -255,7 +250,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         token = IERC20(hub.getContractAddress("Token"));
-        epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
     }
 
     function name() external pure virtual override returns (string memory) {
