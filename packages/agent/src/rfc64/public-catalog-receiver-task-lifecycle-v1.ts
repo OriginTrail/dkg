@@ -118,7 +118,10 @@ export class Rfc64ReceiverTaskLifecycleV1<
    * while it is parked, A latches its own replay-active flag, and the status
    * projection withholds A's catalog parity for as long as that lasts. Every
    * task already carries its own `contextGraphId` — `cancelContextGraph` fences
-   * on exactly this predicate — so scoping the question costs nothing.
+   * on the same field — so scoping the question needs no new state. It is a
+   * linear scan where `isIdle` is O(1), bounded by the receiver's admission
+   * caps; an id that matches no task reads idle, so callers must pass the
+   * exact id their tasks were filed under.
    *
    * Deferred tasks count as busy, matching `isIdle`: a task waiting on its
    * retry timer is work this context graph has not finished.

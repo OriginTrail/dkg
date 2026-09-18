@@ -318,6 +318,15 @@ interface ReceiverProviderV1 {
   hintRevision: bigint;
 }
 
+/**
+ * A parked idle wait. `isIdle` is the waiter's OWN scope — the whole node, or
+ * one context graph — so settlement never has to know which kind it is waking.
+ */
+interface ReceiverIdleWaiterV1 {
+  readonly isIdle: () => boolean;
+  readonly resolve: () => void;
+}
+
 type ReceiverTaskOutcomeV1 =
   | { readonly kind: 'defer-admission' }
   | { readonly kind: 'aborted' }
@@ -431,7 +440,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #active = new Set<Promise<void>>();
   readonly #closing = new AbortController();
   #closed = false;
-  #idleWaiters: Array<{ contextGraphId: string | null; resolve: () => void }> = [];
+  #idleWaiters: ReceiverIdleWaiterV1[] = [];
 
   readonly #admissionDeferralMs: number;
   readonly #maxAdmissionDeferrals: number;
@@ -728,6 +737,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     this.#scheduled += inputs.length;
     const first = inputs[0]!;
+    let evictedAmbient = false;
     if (
       schedulingClass === 'verified-current-head'
       && !this.#hasAdmissionCapacity()
@@ -741,7 +751,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       const finalizeAmbient = this.#tasks.queuedCount >= this.#maxQueue
         ? this.#tasks.finalizeOneQueuedWhere.bind(this.#tasks)
         : this.#tasks.finalizeOneNonRunningWhere.bind(this.#tasks);
-      const evicted = finalizeAmbient(
+      evictedAmbient = finalizeAmbient(
         (task) => task.schedulingPolicy.schedulingClass === 'ambient',
         (task) => createRfc64PublicCatalogReceiverCompletionV1({
           outcome: 'dropped',
@@ -749,7 +759,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         }),
         (waiter) => this.#safeNotify(waiter),
       );
-      if (evicted) this.#droppedQueueFull += 1;
+      if (evictedAmbient) this.#droppedQueueFull += 1;
     }
     if (!this.#hasAdmissionCapacity()) {
       this.#droppedQueueFull += 1;
@@ -766,6 +776,9 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'dropped',
         providerAttempts: 0,
       }));
+      // Requeued deferrals can leave the queue over its bound, so one eviction
+      // does not always buy admission; the evicted graph may be idle regardless.
+      if (evictedAmbient) this.#settleIdleWaiters();
       return;
     }
     this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
@@ -790,27 +803,31 @@ export class Rfc64PublicCatalogReceiverV1 {
       });
     }
     this.#pump();
+    // The evicted ambient task can belong to ANY context graph and may have
+    // been that graph's last one. Settle only now that the admitted task is
+    // scheduled: evicting and admitting within one graph must not wake its
+    // waiter in the gap between the two.
+    if (evictedAmbient) this.#settleIdleWaiters();
   }
 
   /** Resolve once no work is queued or in-flight. */
   whenIdle(): Promise<void> {
-    if (this.#isIdle()) return Promise.resolve();
-    return new Promise<void>((resolve) => this.#idleWaiters.push({
-      contextGraphId: null,
-      resolve,
-    }));
+    return this.#whenIdle(() => this.#tasks.isIdle);
   }
 
   /**
    * Resolve once ONE context graph has no work queued, deferred, or in-flight,
-   * regardless of what other context graphs are still doing.
+   * without waiting for other context graphs to drain theirs. Scoped is not
+   * unqueued: this graph's own tasks still take their turn in the shared FIFO
+   * queue and slot pool, so other graphs' work ahead of them delays this too.
    */
   whenIdleForContextGraph(contextGraphId: string): Promise<void> {
-    if (this.#tasks.isIdleForContextGraph(contextGraphId)) return Promise.resolve();
-    return new Promise<void>((resolve) => this.#idleWaiters.push({
-      contextGraphId,
-      resolve,
-    }));
+    return this.#whenIdle(() => this.#tasks.isIdleForContextGraph(contextGraphId));
+  }
+
+  #whenIdle(isIdle: () => boolean): Promise<void> {
+    if (isIdle()) return Promise.resolve();
+    return new Promise<void>((resolve) => this.#idleWaiters.push({ isIdle, resolve }));
   }
 
   /** Fence queued, deferred, and active work for one no-longer-selected CG. */
@@ -824,8 +841,10 @@ export class Rfc64PublicCatalogReceiverV1 {
       }),
       (waiter) => this.#safeNotify(waiter),
     );
-    // Unconditional: this context graph's tasks are gone even when the node as
-    // a whole is still busy, and a scoped waiter for it must not outlive them.
+    // Unconditional: this context graph's queued and deferred tasks are gone
+    // even when the node as a whole is still busy, and a scoped waiter for it
+    // must not outlive them. Running tasks are only aborted here; they leave
+    // through their run's `.finally`, which settles again.
     this.#settleIdleWaiters();
   }
 
@@ -841,6 +860,21 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#closed = true;
     this.#tasks.abortAll(new Error('RFC-64 public catalog receiver closing'));
     this.#tasks.clearDeferredTimers();
+    this.#finalizeNonRunningAsClosed();
+    this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
+    await Promise.allSettled([...this.#active]);
+    // A run whose `.then` had already deferred or requeued its task was still
+    // `running` when the fence above ran, so that pass skipped it; its timer is
+    // cleared and a closed receiver never pumps, so nothing else would finalize
+    // it. Sweep again now that every run has drained.
+    this.#finalizeNonRunningAsClosed();
+    // Only now has every task settled, so per-waiter evaluation releases all
+    // waiters, scoped or not. That matters: the graceful-close fence awaits
+    // this same wait, and a waiter left parked here would hang shutdown.
+    this.#settleIdleWaiters();
+  }
+
+  #finalizeNonRunningAsClosed(): void {
     this.#tasks.finalizeNonRunning(
       (task) => createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
@@ -848,12 +882,6 @@ export class Rfc64PublicCatalogReceiverV1 {
       }),
       (waiter) => this.#safeNotify(waiter),
     );
-    this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
-    await Promise.allSettled([...this.#active]);
-    // Every task has settled by now, so per-waiter evaluation releases all of
-    // them, scoped or not. That matters: the graceful-close fence awaits this
-    // same wait, and a waiter left parked here would hang shutdown.
-    this.#settleIdleWaiters();
   }
 
   stats(): Rfc64PublicCatalogReceiverStatsV1 {
@@ -1028,7 +1056,8 @@ export class Rfc64PublicCatalogReceiverV1 {
         providerAttempts: task.providerAttempts ?? 0,
         error: new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
       }));
-      this.#settleIdleWaiters();
+      // No settle here: this only runs from the run's `.then`, where the task
+      // is still active, and that run's `.finally` settles right after.
       return;
     }
     // Registered BEFORE the timer is armed: between these two statements the
@@ -1357,10 +1386,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     ));
   }
 
-  #isIdle(): boolean {
-    return this.#tasks.isIdle;
-  }
-
   #hasAdmissionCapacity(): boolean {
     return this.#tasks.queuedCount < this.#maxQueue
       && this.#tasks.pendingCount < this.#maxQueue + this.#maxConcurrent;
@@ -1370,22 +1395,21 @@ export class Rfc64PublicCatalogReceiverV1 {
    * Wake every waiter whose OWN scope has gone idle. Global waiters still wait
    * for global idle; a waiter scoped to one context graph wakes as soon as that
    * graph's work has drained, even while other graphs keep the node busy.
+   *
+   * Call sites run this unconditionally: a task leaving the lifecycle can idle
+   * ONE graph while the node stays busy, so "is the node idle?" is no longer a
+   * usable shortcut, and a site that skips it strands that graph's waiter
+   * until some unrelated run happens to finish.
    */
   #settleIdleWaiters(): void {
-    const globalIdle = this.#isIdle();
-    const waiting: Array<{ contextGraphId: string | null; resolve: () => void }> = [];
-    const woken: Array<() => void> = [];
-    for (const waiter of this.#idleWaiters) {
-      const satisfied = waiter.contextGraphId === null
-        ? globalIdle
-        : this.#tasks.isIdleForContextGraph(waiter.contextGraphId);
-      if (satisfied) woken.push(waiter.resolve);
-      else waiting.push(waiter);
+    if (this.#idleWaiters.length === 0) return;
+    const parked = this.#idleWaiters;
+    this.#idleWaiters = [];
+    for (const waiter of parked) {
+      if (waiter.isIdle()) waiter.resolve();
+      else this.#idleWaiters.push(waiter);
     }
-    this.#idleWaiters = waiting;
-    for (const resolve of woken) resolve();
   }
-
 }
 
 function parseCatalogVersionV1(value: string): bigint {
