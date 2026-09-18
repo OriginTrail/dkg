@@ -1144,6 +1144,62 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * OT-RFC-38 / LU-6 Phase B — should a `ContextGraphCreated` chain event
+   * auto-engage host mode for the CG it announces?
+   *
+   * Two tiers, and only two:
+   *   - `accessPolicy === 1` (curated) — the original Phase B tier, always
+   *     eligible; the reconciler applies the WS-A strip afterwards.
+   *   - `accessPolicy === 0 && publishPolicy === 1` (public AND open-publish)
+   *     with `swmHostMode.hostPublic` on — the explicit GH #1611 operator
+   *     opt-in for subscribers that cannot reach a member.
+   *
+   * `publishPolicy === 0` (PCA: publicly readable, curated publish) is NOT the
+   * public tier: it restricts WHO may write, so it keeps the conservative
+   * ciphertext path. Extracted from the chain-event handler so the operator
+   * matrix is testable — the periodic sweep cannot heal a miss here, because
+   * `reconcileHostModeSubscriptions` only enumerates LOCAL store graphs and a
+   * hash-only core has none.
+   */
+  /**
+   * OT-RFC-38 / LU-6 Phase B — should a `ContextGraphCreated` chain event
+   * auto-engage host mode for the CG it announces?
+   *
+   * Two tiers, and only two:
+   *   - `accessPolicy === 1` (curated) — the original Phase B tier, always
+   *     eligible; the reconciler applies the WS-A strip afterwards.
+   *   - `accessPolicy === 0 && publishPolicy === 1` (public AND open-publish)
+   *     with `swmHostMode.hostPublic` on — the explicit GH #1611 operator
+   *     opt-in for subscribers that cannot reach a member.
+   *
+   * `publishPolicy === 0` (PCA: publicly readable, curated publish) is NOT the
+   * public tier: it restricts WHO may write, so it keeps the conservative
+   * ciphertext path. Extracted from the chain-event handler so the operator
+   * matrix is testable — the periodic sweep cannot heal a miss here, because
+   * `reconcileHostModeSubscriptions` only enumerates LOCAL store graphs and a
+   * hash-only core has none.
+   */
+  /**
+   * Does this core host at least ONE explicitly non-curated CG — i.e. is the
+   * GH #1611 public host tier served here at all? Answers the pre-decode
+   * blanket gate in {@link handleSwmHostCatchup}, so it short-circuits on the
+   * first hit instead of materialising the whole classification map.
+   */
+  hasPublicHostTier(this: DKGAgent): boolean {
+    for (const curated of this.swmHostModeCurated.values()) {
+      if (curated === false) return true;
+    }
+    return false;
+  }
+
+  hostModeAutoHostEligible(this: DKGAgent, accessPolicy?: number, publishPolicy?: number): boolean {
+    if (accessPolicy === 1) return true;
+    return this.config.swmHostMode?.hostPublic === true
+      && accessPolicy === 0
+      && publishPolicy === 1;
+  }
+
+  /**
    * Is this CG already claimed by MEMBER mode on this node?
    *
    * `sharedMemoryGossipRegistered` is keyed by the CALLER-supplied cleartext

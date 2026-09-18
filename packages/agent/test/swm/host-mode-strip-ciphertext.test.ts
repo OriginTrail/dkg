@@ -203,6 +203,39 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(wired).toEqual([{ id: cgId, curated: false }]);
   });
 
+  it('chain-event auto-host eligibility covers the full operator matrix', async () => {
+    // Codex review #2614 — `onContextGraphCreated` is defined inline in
+    // `start()` and no harness drives the chain-event poller, so this decision
+    // was unverified. It matters: `reconcileHostModeSubscriptions` enumerates
+    // `GraphManager.listContextGraphs()`, which only holds LOCAL store graphs,
+    // so for a hash-only core the chain event is the ONLY automatic path into
+    // the GH #1611 public tier and a miss here never heals.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const eligible = (accessPolicy?: number, publishPolicy?: number): boolean =>
+      (g as any).hostModeAutoHostEligible(accessPolicy, publishPolicy) as boolean;
+
+    // Without the opt-in: only the curated tier auto-hosts.
+    g.config.swmHostMode = { enabled: true, stripCiphertext: true };
+    expect(eligible(1, 1)).toBe(true);
+    expect(eligible(1, 0)).toBe(true);
+    expect(eligible(0, 1)).toBe(false);
+    expect(eligible(0, 0)).toBe(false);
+
+    // With the opt-in: public AND open-publish joins it. accessPolicy 0 +
+    // publishPolicy 0 is PCA — publicly readable but CURATED publish — and
+    // stays OUT of the public host tier.
+    g.config.swmHostMode = { enabled: true, hostPublic: true, stripCiphertext: true };
+    expect(eligible(1, 1)).toBe(true);
+    expect(eligible(1, 0)).toBe(true);
+    expect(eligible(0, 1)).toBe(true);
+    expect(eligible(0, 0)).toBe(false);
+    // An event that carried no publishPolicy proves nothing about write
+    // authority, so it is not the public tier either.
+    expect(eligible(0, undefined)).toBe(false);
+    expect(eligible(undefined, 1)).toBe(false);
+  });
+
   it('WITHOUT the hostPublic opt-in a confirmed public CG is NOT wired (dark by default)', async () => {
     // Codex review #2614 — every other test that reaches the non-curated admit
     // branch sets `hostPublic: true`, and the "default (no flag) DECLINES" case

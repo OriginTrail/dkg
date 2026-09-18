@@ -3234,10 +3234,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // disabled, off-sharding-table, etc.), so the call below
           // doesn't need any of those gates beyond the event-side hash
           // presence and the curated flag.
-          const publicHostEnabled = this.config.swmHostMode?.hostPublic === true;
-          const autoHostEligible = accessPolicy === 1
-            || (publicHostEnabled && accessPolicy === 0 && publishPolicy === 1);
-          if (nameHash && autoHostEligible && eventLocalId !== null) {
+          if (nameHash && this.hostModeAutoHostEligible(accessPolicy, publishPolicy) && eventLocalId !== null) {
             // Register the wire id → numeric id mapping so the receive
             // path's chain fallback resolver (Scope A) can take a hash
             // input and find the on-chain participant agents without an
