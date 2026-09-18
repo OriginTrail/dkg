@@ -41,9 +41,10 @@ import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
-import { rfc64SwmInventoryShadowRuntimeV1 } from
-  './rfc64/swm-inventory-shadow-runtime-v1.js';
-import { rfc64SwmInventoryAssetKeyV1 } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import {
+  rfc64SwmInventoryAssetKeyV1,
+  rfc64SwmInventoryShadowRuntimeV1,
+} from './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from

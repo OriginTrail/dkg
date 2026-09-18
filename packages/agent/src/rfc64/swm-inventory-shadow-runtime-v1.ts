@@ -258,3 +258,22 @@ export function rfc64SwmInventoryShadowRuntimeV1(
   }
   return runtime;
 }
+
+/**
+ * The shadow runtime's per-asset serialization key. Owned here so every caller
+ * fences on the SAME key as the confirmation observer rather than writing
+ * around the runtime.
+ */
+export function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
+  contextGraphId: string;
+  subGraphName?: string | null;
+  authorAddress: string;
+  assertionCoordinate: string;
+}>): string {
+  return JSON.stringify([
+    input.contextGraphId,
+    input.subGraphName ?? null,
+    input.authorAddress.toLowerCase(),
+    input.assertionCoordinate,
+  ]);
+}
