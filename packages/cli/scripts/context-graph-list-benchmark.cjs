@@ -20,78 +20,150 @@ function makeRows() {
   }));
 }
 
+/** Minimal ServerResponse stand-in: the route only writes a head and a body. */
+function responseRecorder() {
+  const state = {};
+  const res = {
+    writeHead(status, headers = {}) {
+      state.status = status;
+      state.headers = headers;
+      return this;
+    },
+    end(body) {
+      state.body = body ?? '';
+      return this;
+    },
+  };
+  return { state, res };
+}
+
+async function callRoute(handleContextGraphListRoute, rows, query, ifNoneMatch) {
+  const recorder = responseRecorder();
+  await handleContextGraphListRoute({
+    req: { headers: ifNoneMatch === undefined ? {} : { 'if-none-match': ifNoneMatch } },
+    res: recorder.res,
+    agent: { listContextGraphs: async () => rows },
+    url: new URL(`http://127.0.0.1/api/context-graph/list?${query}`),
+    requestAgentAddress: null,
+  });
+  return {
+    status: recorder.state.status,
+    headers: recorder.state.headers ?? {},
+    body: recorder.state.body ?? '',
+    bodyBytes: Buffer.byteLength(recorder.state.body ?? ''),
+  };
+}
+
 async function main() {
   const {
     CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
-    buildContextGraphListPage,
-    parseContextGraphListQuery,
+    handleContextGraphListRoute,
   } = await import('../dist/daemon/routes/context-graph-list.js');
   const { serializeContextGraphListOptions } = await import(
     '@origintrail-official/dkg-core/context-graph-list-wire'
   );
   const rows = makeRows();
-  const legacyBody = JSON.stringify({ contextGraphs: rows });
 
-  const initialOptions = {
-    limit: '100',
-    projection: 'summary',
-  };
-  const parsedQuery = parseContextGraphListQuery(new URLSearchParams(initialOptions));
-  if (!parsedQuery.ok || parsedQuery.mode !== 'paged') {
-    throw new Error('Unable to create the benchmark pagination query');
+  const limit = 100;
+  const projection = 'summary';
+  const firstPageQuery = serializeContextGraphListOptions({ limit, projection });
+  const pageQuery = (cursor) => serializeContextGraphListOptions({ limit, projection, cursor });
+
+  // --- Refresh 1: the full page walk, every page issued through the route. ---
+  const pageSizes = [];
+  const walkedRows = [];
+  let transferredBodyBytes = 0;
+  let query = firstPageQuery;
+  let firstPageEtag;
+  for (;;) {
+    const response = await callRoute(handleContextGraphListRoute, rows, query);
+    if (response.status !== 200) {
+      throw new Error(`The initial page walk returned HTTP ${response.status}`);
+    }
+    if (firstPageEtag === undefined) firstPageEtag = response.headers.ETag;
+    pageSizes.push(response.bodyBytes);
+    transferredBodyBytes += response.bodyBytes;
+    const payload = JSON.parse(response.body);
+    walkedRows.push(...payload.contextGraphs);
+    if (!payload.nextCursor) break;
+    query = pageQuery(payload.nextCursor);
   }
 
-  const pageBodies = [];
-  let pageQuery = parsedQuery.query;
-  do {
-    const built = buildContextGraphListPage(rows, pageQuery);
-    if (!built.ok) throw new Error(built.error);
-    pageBodies.push(built.body);
-    if (!built.payload.nextCursor) {
-      pageQuery = undefined;
-      continue;
-    }
-    const serialized = serializeContextGraphListOptions({
-      limit: Number(initialOptions.limit),
-      projection: initialOptions.projection,
-      cursor: built.payload.nextCursor,
-    });
-    const nextQuery = parseContextGraphListQuery(new URLSearchParams(serialized));
-    if (!nextQuery.ok || nextQuery.mode !== 'paged') {
-      throw new Error('Unable to parse the benchmark continuation query');
-    }
-    pageQuery = nextQuery.query;
-  } while (pageQuery);
-
-  const pageSizes = pageBodies.map((body) => Buffer.byteLength(body));
   const maxPageBytes = Math.max(...pageSizes);
   if (maxPageBytes > CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES) {
     throw new Error(`Page exceeded ${CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES} bytes`);
   }
-
-  const cachedRows = pageBodies.flatMap((body) => JSON.parse(body).contextGraphs);
-  if (cachedRows.length !== ROWS) {
-    throw new Error(`Expected ${ROWS} cached rows, received ${cachedRows.length}`);
+  if (walkedRows.length !== ROWS) {
+    throw new Error(`Expected ${ROWS} cached rows, received ${walkedRows.length}`);
   }
+  if (!firstPageEtag) throw new Error('The initial page walk returned no ETag');
+
+  // --- Refreshes 2..N: each one really issued, with the cached ETag. ---
+  // This mirrors the UI client (`fetchContextGraphPages`), where a 304 on the
+  // first page serves the whole cached walk: an unchanged registry costs one
+  // conditional request per refresh and no response body at all. Because the
+  // requests are executed rather than assumed, a regression in ETag stability
+  // or in per-refresh re-serialization shows up in these counters.
+  let conditionalRefreshes = 0;
+  let notModifiedResponses = 0;
+  let revalidationBodyBytes = 0;
+  for (let refresh = 1; refresh < REFRESHES; refresh += 1) {
+    const response = await callRoute(
+      handleContextGraphListRoute,
+      rows,
+      firstPageQuery,
+      firstPageEtag,
+    );
+    conditionalRefreshes += 1;
+    if (response.status === 304) notModifiedResponses += 1;
+    revalidationBodyBytes += response.bodyBytes;
+    transferredBodyBytes += response.bodyBytes;
+  }
+  if (conditionalRefreshes !== REFRESHES - 1) {
+    throw new Error(`Expected ${REFRESHES - 1} conditional refreshes, ran ${conditionalRefreshes}`);
+  }
+  if (notModifiedResponses !== conditionalRefreshes) {
+    throw new Error(
+      `ETag instability: ${conditionalRefreshes - notModifiedResponses} of `
+      + `${conditionalRefreshes} conditional refreshes re-sent a body`,
+    );
+  }
+
   const bounded = {
     pagesOnInitialRefresh: pageSizes.length,
     maxPageBytes,
-    transferredBodyBytes: pageSizes.reduce((total, bytes) => total + bytes, 0),
-    parsedRows: cachedRows.length,
+    transferredBodyBytes,
+    // Only the initial walk is parsed; every 304 is served from the client cache.
+    parsedRows: walkedRows.length,
+    conditionalRefreshes,
+    notModifiedResponses,
+    revalidationBodyBytes,
   };
 
-  const legacyTransferredBodyBytes = Buffer.byteLength(legacyBody) * REFRESHES;
+  // The legacy route has no conditional path: every refresh re-serializes and
+  // re-sends the whole registry, so one measured response times the refresh
+  // count is its cost by construction.
+  const legacy = await callRoute(handleContextGraphListRoute, rows, '');
+  if (legacy.status !== 200 || legacy.headers['X-DKG-List-Mode'] !== 'legacy') {
+    throw new Error('Unable to measure the legacy list response');
+  }
+  const legacyTransferredBodyBytes = legacy.bodyBytes * REFRESHES;
+
   const result = {
     scenario: `${REFRESHES} list refreshes over ${ROWS} context graphs`,
+    method: {
+      bounded: `measured: one ${pageSizes.length}-request page walk plus `
+        + `${conditionalRefreshes} If-None-Match requests, all issued through `
+        + 'handleContextGraphListRoute; the byte counts are the real response bodies',
+      legacy: 'measured: one legacy route response; the legacy route is unconditional, '
+        + `so its total is that response times ${REFRESHES}`,
+    },
     legacy: {
-      responseBytes: Buffer.byteLength(legacyBody),
+      responseBytes: legacy.bodyBytes,
       transferredBodyBytes: legacyTransferredBodyBytes,
       parsedRows: ROWS * REFRESHES,
     },
-    bounded: {
-      ...bounded,
-      conditionalRefreshes: REFRESHES - 1,
-    },
+    bounded,
     reduction: {
       transferredBodyPercent: Number((
         (1 - bounded.transferredBodyBytes / legacyTransferredBodyBytes) * 100
