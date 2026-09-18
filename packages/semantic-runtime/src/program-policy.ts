@@ -42,6 +42,17 @@ export interface SemanticProgramPolicy {
   disclosure?: SemanticDisclosurePolicy;
 }
 
+/** Raw reads use the tenant-selected graph, layer and closed result contract. */
+export interface SemanticSparqlReadGrant {
+  toolIri: string;
+  layer: 'wm' | 'swm' | 'vm';
+  timeoutMs: number;
+  maxResultItems: number;
+  maxOutputBytes: number;
+  outputSchema: SemanticQueryOutputSchema;
+  outputSchemaSha256: string;
+}
+
 /** Tenant-owned invoke grant. Only the host may select the executor and data graph. */
 export interface SemanticProgramBinding {
   operationIri: string;
@@ -57,6 +68,7 @@ export interface SemanticProgramBinding {
     sourceHash: string;
   };
   query?: SemanticQueryPin;
+  sparqlRead?: SemanticSparqlReadGrant;
   /** Explicit tenant-approved creation tool; never inferred from read permission. */
   assetCreation?: { toolIri: string };
   /** Output assets inherit this execution layer; defaults to wm for compatibility. */

@@ -39,6 +39,7 @@ describe('semantic runtime artifact integrity', () => {
       'origintrail:semantic-runtime/investigator@0.1.0',
       'origintrail:semantic-runtime/query-catalog@0.1.0',
       'origintrail:semantic-runtime/asset-create@0.1.0',
+      'origintrail:semantic-runtime/sparql-read@0.1.0',
       'origintrail:semantic-runtime/safe-llm@0.1.0',
       'origintrail:semantic-runtime/remote-execute@0.1.0',
     ]));

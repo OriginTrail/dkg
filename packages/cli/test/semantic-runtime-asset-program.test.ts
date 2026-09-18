@@ -7,7 +7,7 @@ import { decodeQueryCatalogBindings } from '@origintrail-official/dkg-core/query
 import { SemanticRuntimeStore, type SemanticProgramBinding, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createSemanticQueryPin } from '../src/semantic-runtime-query-pins.js';
+import { createSemanticQueryPin, queryOutputSchemaSha256 } from '../src/semantic-runtime-query-pins.js';
 import { createAssetCreationAdapter } from '../src/semantic-runtime-asset-adapter.js';
 import { invokeBoundSemanticProgram, startConfiguredSemanticRuntime, validateSemanticRuntimeConfig } from '../src/semantic-runtime.js';
 
@@ -66,7 +66,7 @@ function fixture(layer: Layer = 'wm') {
     query: vi.fn(async (sparql: string, opts: Record<string, unknown>) => {
       if (sparql.includes('?language')) return { bindings: state.tools.map((iri) => ({ g: memoryGraph('swm'), language: '"sexpr-v1"', version: '"1.0.0"', source: JSON.stringify(state.source), tool: `<${iri}>` })) };
       if (opts.source === 'semantic-runtime-query-catalog') return { bindings: opts.view === 'verifiable-memory' ? catalogRows : [] };
-      if (opts.source === 'semantic-runtime-dkg-query') return readData();
+      if (opts.source === 'semantic-runtime-dkg-query' || opts.source === 'semantic-runtime-sparql-read') return readData();
       if (opts.source === 'semantic-runtime-execution-output-load') return { bindings: [...assets.values()].flatMap((entry) => entry.quads
         .filter((q) => [SR + 'output', SR + 'orderedOutputs'].includes(q.predicate))
         .map((q) => ({ g: memoryGraph(layer), ...(q.predicate === SR + 'output' ? { output: q.object } : { orderedOutputs: q.object }) }))) };
@@ -140,6 +140,44 @@ describe('tenant-approved asset creation through real Wasm', () => {
     expect(JSON.parse(result.outputs![0]).kind).toBe('asset-created');
     expect(JSON.parse(result.outputs![1]).result.bindings[0].device).toBe('urn:kamstrup:device:W10');
     expect(f.created()).toHaveLength(1);
+    expect(f.readData).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])('executes a raw read through real Wasm without a catalog and replays (create asset: %s)', async (createAsset) => {
+    const f = fixture();
+    const query = 'SELECT ?device WHERE { VALUES ?device { <urn:kamstrup:device:W10> } }';
+    f.state.source = `(strategy dmaast/record-w10 (version "1.0.0") (scope graph:dmaast-kamstrup) (goal record-assessment)
+      (supervise one-for-one (max-restarts 1) (window-ms 60000)
+        (sequence
+          (delegate reader (grant dkg.sparql.read) (call dkg/sparql-read@1 ${JSON.stringify(query)}))
+          ${createAsset ? `(delegate recorder (grant dkg.asset.create) (call dkg/asset-create@1 ${JSON.stringify(JSON.stringify({ quads }))}))` : ''})))`;
+    f.binding.program.sourceHash = createHash('sha256').update(f.state.source).digest('hex');
+    if (!createAsset) { f.state.tools.length = 0; delete f.binding.assetCreation; }
+    f.state.tools.push('urn:sr:tool:sparql-read');
+    const outputSchema = { type: 'object' as const, additionalProperties: false as const, required: ['bindings'], properties: {
+      bindings: { type: 'array' as const, maxItems: 1, items: { type: 'object' as const, additionalProperties: false as const,
+        required: ['device'], properties: { device: { type: 'string' as const, maxLength: 128 } } } },
+    } };
+    f.binding.sparqlRead = { toolIri: 'urn:sr:tool:sparql-read', layer: 'swm', timeoutMs: 5000, maxResultItems: 10,
+      maxOutputBytes: 4096, outputSchema, outputSchemaSha256: queryOutputSchemaSha256(outputSchema) };
+    const runtime = await f.start();
+    const result = await f.invoke(runtime);
+    expect(result.persisted).toBe(true);
+    expect(result.outputs).toHaveLength(createAsset ? 2 : 1);
+    expect(JSON.parse(result.outputs![0])).toMatchObject({ kind: 'sparql-read', contextGraphId: graph, layer: 'swm',
+      result: { bindings: [{ device: 'urn:kamstrup:device:W10' }] } });
+    if (createAsset) expect(JSON.parse(result.outputs![1]).kind).toBe('asset-created');
+    expect(f.agent.query.mock.calls.some(([, opts]) => opts.source === 'semantic-runtime-query-catalog')).toBe(false);
+    expect(f.agent.query).toHaveBeenCalledWith(query, expect.objectContaining({ contextGraphId: graph,
+      view: 'shared-working-memory', callerAgentAddress: executor, signal: expect.any(AbortSignal) }));
+    await expect(f.invoke(runtime)).resolves.toEqual(result);
+    expect(f.readData).toHaveBeenCalledOnce();
+    const approved = f.binding.sparqlRead;
+    f.binding.assetCreation = { toolIri: tool };
+    delete f.binding.sparqlRead;
+    await expect(f.invoke(runtime, '123e4567-e89b-42d3-a456-426614174099')).rejects.toMatchObject({ code: 'PROGRAM_BINDING_TOOL_FORBIDDEN' });
+    f.binding.sparqlRead = { ...approved, layer: 'vm' };
+    await expect(f.invoke(runtime)).rejects.toThrow();
     expect(f.readData).toHaveBeenCalledOnce();
   });
 

@@ -259,6 +259,7 @@ function buildInto(outputRoot) {
     'origintrail:semantic-runtime/investigator@0.1.0#investigate',
     'origintrail:semantic-runtime/query-catalog@0.1.0#query',
     'origintrail:semantic-runtime/asset-create@0.1.0#create',
+    'origintrail:semantic-runtime/sparql-read@0.1.0#query',
     'origintrail:semantic-runtime/safe-llm@0.1.0#run',
     'origintrail:semantic-runtime/remote-execute@0.1.0#execute',
     '--instantiation', 'async',

@@ -57,6 +57,7 @@
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@origintrail-official/dkg-semantic-runtime": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@toml-tools/parser": "1.0.0",
@@ -70,6 +71,7 @@
     "typescript": "^5.7"
   },
   "devDependencies": {
+    "@origintrail-official/dkg-query": "workspace:*",
     "@types/better-sqlite3": "^7",
     "@types/js-yaml": "^4.0.9",
     "@types/n3": "^1.26.1",

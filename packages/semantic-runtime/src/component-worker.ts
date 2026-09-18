@@ -321,6 +321,19 @@ function componentImports(): object {
           },
         };
       }
+      if (name === 'origintrail:semantic-runtime/sparql-read' || name === 'origintrail:semantic-runtime/sparql-read@0.1.0') {
+        return {
+          query: async (resource: ExecutionCapability, request: { effectId: bigint; sparql: string }): Promise<string> => {
+            assertImportedTool(resource, 'dkg/sparql-read', 'origintrail:semantic-runtime/sparql-read@0.1.0');
+            if (typeof request?.effectId !== 'bigint' || request.effectId <= 0n || typeof request.sparql !== 'string') {
+              throw componentResultFailure('INVALID_SPARQL_ARGUMENT');
+            }
+            const result = await invokeHostTool({ kind: 'sparql-read', effectId: request.effectId, sparql: request.sparql });
+            if (result.kind !== 'sparql-read') throw componentResultFailure('COMPONENT_TOOL_RESULT_MISMATCH');
+            return result.json;
+          },
+        };
+      }
       if (name === 'origintrail:semantic-runtime/asset-create' || name === 'origintrail:semantic-runtime/asset-create@0.1.0') {
         return {
           create: async (resource: ExecutionCapability, request: { effectId: bigint; contentJson: string }): Promise<string> => {

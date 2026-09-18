@@ -2,16 +2,16 @@
 
 A tenant can grant IDENER permission to invoke an approved operation without granting IDENER general access to its Context Graph. The Program may be stored in a different Context Graph and authored by Trace Labs. The tenant's local custodial agent executes it against the tenant graph under the tenant's approved local binding.
 
-This is a manually configured path for fixed queries and explicitly approved asset creation. `programBindings` grants are independent of the optional `programPolicy` used for direct local Program composition; both may be configured, but a bound operation admits only its approved query and/or asset-creation tool and cannot invoke an LLM. The source Program must already be available and readable by the executor on the tenant node. It does not fetch Programs from another node or replicate the tenant data to the Program author's node.
+This is a manually configured path for fixed named queries, raw SPARQL reads, and explicitly approved asset creation. `programBindings` grants are independent of the optional `programPolicy` used for direct local Program composition; both may be configured, but a bound operation admits only its approved read and/or asset-creation tools and cannot invoke an LLM. The source Program must already be available and readable by the executor on the tenant node. It does not fetch Programs from another node or replicate the tenant data to the Program author's node.
 
 ## Setup and activation
 
-1. Trace Labs supplies a versioned `sr:Program` in the source graph, in any supported memory layer (`wm`, `swm`, or `vm`) that the tenant executor can read. Its source calls a fixed saved-query selector through `dkg/query@1` and/or creates an asset through `dkg/asset-create@1`. It declares exactly one tool IRI per operation; the host maps each declaration to its installed adapter. Asset creation requires the exact `assetCreation.toolIri` in the tenant binding. No child Programs, LLM calls or remote execution are admitted through this path.
-2. For query operations, the tenant installs/reviews the named query in its own query catalog and defines a closed, bounded result schema. The query's projection is the data disclosure being approved; a schema alone does not decide which rows are appropriate to disclose.
-3. The tenant adds a `semanticRuntime.programBindings` entry: stable operation IRI, tenant graph, allowed caller identities, local executor, exact source graph/Program/layer/author/source hash, query definition/schema pins when needed, and an explicit `assetCreation` grant when needed. `executionLayer` defaults to `wm`; the tenant may select `swm` or `vm`. Only the tenant operator edits this local configuration. There is no installation or approval API in this version.
+1. Trace Labs supplies a versioned `sr:Program` in the source graph, in any supported memory layer (`wm`, `swm`, or `vm`) that the tenant executor can read. Its source calls a fixed saved-query selector through `dkg/query@1`, runs a literal SPARQL read through `dkg/sparql-read@1`, and/or creates an asset through `dkg/asset-create@1`. It declares exactly one tool IRI per operation; the host maps each declaration to its installed adapter. Raw reads require the exact `sparqlRead.toolIri`; asset creation requires the exact `assetCreation.toolIri` in the tenant binding. No child Programs, LLM calls or remote execution are admitted through this path.
+2. For named-query operations, the tenant installs/reviews the named query in its own query catalog and defines a closed, bounded result schema. The query's projection is the data disclosure being approved; a schema alone does not decide which rows are appropriate to disclose.
+3. The tenant adds a `semanticRuntime.programBindings` entry: stable operation IRI, tenant graph, allowed caller identities, local executor, exact source graph/Program/layer/author/source hash, query definition/schema pins when needed, and explicit `sparqlRead` or `assetCreation` grants when needed. Raw reads require no catalog entry; the approved source hash pins their SPARQL text. `executionLayer` defaults to `wm`; the tenant may select `swm` or `vm`. Only the tenant operator edits this local configuration. There is no installation or approval API in this version.
 4. Apply the configuration through the daemon's normal restart procedure. The authenticated IDENER address must be in the binding's caller list. For signed inbox invocation, IDENER proves that address with its own signing key. For direct tenant HTTP calls, IDENER uses an agent-bound credential issued by the tenant node. A node-default/implicit operator identity is not an invoke-only credential.
 
-The loaded binding supplies the execution policy and authorizes only the approved host adapters (`dkg/query@1`, `dkg/asset-create@1`). No `operatorPolicyIri`, VM policy, or VM tool offer is required for this bound operation. The host still checks the installed/enabled adapter, graph access, source/author pins, exact query definition, result schema and current grant. Direct invocation outside `programBindings` still requires its operator-authored VM policy and tool offers. This does not bypass the storage layer's access or graph-authority checks: a locally stored Program must still be readable through the selected memory view.
+The loaded binding supplies the execution policy and authorizes only the approved host adapters (`dkg/query@1`, `dkg/sparql-read@1`, `dkg/asset-create@1`). No `operatorPolicyIri`, VM policy, or VM tool offer is required for this bound operation. The host still checks the installed/enabled adapter, graph access, source/author pins, exact query definition, result schema and current grant. Direct invocation outside `programBindings` still requires its operator-authored VM policy and tool offers. This does not bypass the storage layer's access or graph-authority checks: a locally stored Program must still be readable through the selected memory view.
 
 This configuration template uses illustrative DMaaST identities and measurement vocabulary, not a claim about the deployed Kamstrup dataset. Replace addresses, IRIs and hash placeholders with reviewed values before enabling it. `sourceHash` is lowercase SHA-256 of the exact UTF-8 S-expression source. Generate `query` using `createSemanticQueryPin(selector, decodedCatalogItem, outputSchema)` from `packages/cli/src/semantic-runtime-query-pins.ts`; it hashes the complete saved-query definition, including SPARQL, parameters/defaults, scope and view.
 
@@ -212,3 +212,60 @@ The returned `outputs` includes a JSON string with `kind: "asset-created"`, the 
 Each creation effect gets a deterministic asset name. Repeating the same invocation UUID uses the original effect and asset, including after a daemon restart. A different UUID requests a new asset even for identical content. The adapter checks stored content before filling missing triples and refuses to overwrite a conflicting asset. It checks the current grant and executor's graph write authority between lifecycle steps.
 
 An ambiguous share, seal or publication is not blindly resubmitted. A retry checks the original asset's assertion/layer and completes only after matching evidence; unresolved publication requires publisher/operator recovery. Earlier lifecycle stages may already have succeeded when an invocation fails; revocation stops subsequent stages, not completed writes. Keep the original UUID during recovery. This feature is asset creation only; it does not grant arbitrary SPARQL UPDATE, mutation of an existing asset, cross-tenant writes, or a new catalog-installation API.
+
+## Raw SPARQL reads without a query catalog
+
+`dkg/sparql-read@1` accepts one SPARQL string from the approved S-expression source. It supports `SELECT`, `ASK`, `CONSTRUCT`, and `DESCRIBE` through the existing DKG scoped-query engine. An unsupported query shape fails closed. It does not accept graph, layer, agent, endpoint, or dataset overrides. Ordinary SPARQL parameters/VALUES can be written into the approved source; this API does not yet interpolate invocation inputs, LLM output, or another delegate's result into the query.
+
+For example, Trace Labs can supply this Kamstrup W10 read Program (the device and measurement vocabulary are illustrative):
+
+```scheme
+(strategy dmaast/read-w10 (version "1.0.0")
+  (scope graph:dmaast-kamstrup) (goal read-w10-temperature)
+  (supervise one-for-one (max-restarts 1) (window-ms 60000)
+    (delegate reader
+      (grant dkg.sparql.read)
+      (call dkg/sparql-read@1
+        "SELECT ?temperature WHERE { <urn:kamstrup:device:W10> <urn:dmaast:temperature> ?temperature } LIMIT 10"))))
+```
+
+1. Store the versioned `sr:Program` with this exact source, declaring `sr:requiresTool <urn:sr:tool:sparql-read>`. Make it readable to the Kamstrup executor through the selected Program layer.
+2. Kamstrup reviews the actual query projection, filters and source hash. It adds this `sparqlRead` section to the tenant binding (along with the existing operation/caller/executor/Program pins). A named-query `query` section is unnecessary for this Program:
+
+```json
+{
+  "sparqlRead": {
+    "toolIri": "urn:sr:tool:sparql-read",
+    "layer": "swm",
+    "timeoutMs": 5000,
+    "maxResultItems": 10,
+    "maxOutputBytes": 16384,
+    "outputSchema": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bindings"],
+      "properties": {
+        "bindings": {
+          "type": "array", "maxItems": 10,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["temperature"],
+            "properties": { "temperature": { "type": "string", "maxLength": 128 } }
+          }
+        }
+      }
+    },
+    "outputSchemaSha256": "REPLACE_WITH_OUTPUT_SCHEMA_SHA256"
+  }
+}
+```
+
+3. Compute `outputSchemaSha256` with `queryOutputSchemaSha256(outputSchema)` from the CLI's `semantic-runtime-query-pins` module and compute `program.sourceHash` from the exact UTF-8 Program source. Apply the reviewed binding using the normal daemon restart procedure.
+4. IDENER invokes the same approved operation using `POST /api/programs/execute` or the existing signed bound-operation inbox path. The invocation payload remains `contextGraphId`, `operationIri`, and `invocationId`; it carries no SPARQL or storage-layer override. The existing agent-bound HTTP credential or signing identity remains unchanged.
+5. The tenant executes under its configured local executor. `sparqlRead.layer` selects the **data read layer** independently of `program.programLayer` (source location) and `executionLayer` (Execution records and newly created assets). Working Memory reads are limited to the executor's namespace; shared and verifiable views include only the selected CG's content allowed by the existing DKG view rules.
+6. The result is a bounded JSON string with `kind: "sparql-read"`, `contextGraphId`, `layer`, `querySha256` and `result`. The hash identifies the exact original SPARQL text. The adapter also produces a SHA-256 evidence reference for its output. The runtime persists the Execution and applies the approved output schema to fresh and replayed responses.
+
+The host checks current tenant approval and graph access before and after the query; SWM reads also require Shared Working Memory admission. Dataset overrides (`FROM`/`FROM NAMED`), external `SERVICE` calls, and all SPARQL writes are rejected. Unicode-escaped active keywords go through the existing lexical scanner. Explicit GRAPH IRIs and GRAPH variables are constrained by the query engine to the approved CG and layer, including nested query shapes.
+
+Limits are mandatory: at most 30,000 ms, 1,000 combined bindings/quads and 1 MiB of serialized output, with any tighter tenant values enforced. An overdue request fails and signals cancellation to the query engine; late results are discarded. Cancellation is cooperative with the storage backend, and the result cap is checked after the engine materializes the result. These limits are not a hard CPU/memory sandbox for the RDF engine. Use selective queries and the store's own resource controls; the WASM sandbox does not enclose the host database.
+
+An existing `dkg.query` grant does not authorize this tool. Arbitrary SPARQL UPDATE is still unavailable. A Program may compose raw reads, named reads and explicitly approved asset creation across delegates; each delegate makes one typed call. A raw read does not itself confer write authority or supply dynamic values to the asset-create call.
