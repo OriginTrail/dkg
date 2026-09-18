@@ -3,6 +3,7 @@
 import {
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
+  createOperationContext,
   type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -267,6 +268,36 @@ describe('RFC-64 catalog re-projection failure reporting', () => {
     // The row is named, so an operator can tell WHICH asset stayed behind.
     expect(warnings.filter((line) => /could not carry/u.test(line)
       && /policy-mismatch/u.test(line))).toHaveLength(1);
+  }, 60_000);
+
+  it('names every origin an already-aborted re-projection never attempted', async () => {
+    const author = await startRotationAuthorV1('authority-rotation-abort-origins');
+    // Rotate as a replica first, so nothing is carried and the rows stay
+    // addressed by the superseded generation.
+    const hasLocalCreate = vi
+      .spyOn(author.localContextGraphProvenance, 'hasLocalCreate')
+      .mockReturnValue(false);
+    await seedInventoryAssetV1(author, 'authority-rotation-abort-origins', 66n);
+    await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+    await rotateToFinalizedChainV1(author);
+    hasLocalCreate.mockReturnValue(true);
+
+    const warnings = captureWarningsV1(author);
+    await author.beginRfc64CatalogReprojectionForAuthorityRotationV1(
+      CONTEXT_GRAPH_ID,
+      createOperationContext('system'),
+      AbortSignal.abort(),
+    );
+
+    // The in-carry abort was already named; this outer one returned silently,
+    // so a signal already aborted on entry skipped EVERY origin with no log
+    // line at all -- and the acceptance gate cannot re-fire in this process.
+    expect(warnings.filter((line) => REPROJECTION_WARNING.test(line)
+      && line.includes(AUTHOR)
+      && /aborted before this author was attempted/u.test(line))).toHaveLength(1);
   }, 60_000);
 
   it('stays silent for a row a durable VM confirmation already retired', async () => {
