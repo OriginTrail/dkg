@@ -82,14 +82,18 @@ interface StripInternals {
   awaitHostModePersistence(contextGraphId: string): Promise<void>;
 }
 
-/** A curated CG: any `onChainHash` makes the three-source curation probe in
- * `reconcileSwmHostModeSubscription` resolve "curated" via its cheapest branch. */
+/** A CG with a curator-committed wire id. NOTE: after GH #1611 the
+ * `onChainHash` alone no longer proves curation — public CGs get one too — so
+ * this shape must be paired with one of the real curation proofs
+ * (`markCurated` for the cached chain access policy, or a verified beacon). */
 const CURATED = (id: string): { subscribed: boolean; synced: boolean; onChainHash: string } => ({
   subscribed: true,
   synced: true,
   onChainHash: ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase(),
 });
 
+/** Curation proof (a): a numeric on-chain binding whose cached access policy
+ * reads 1 (curated) — the chain-event-poller topology. */
 function markCurated(g: StripInternals, id: string): void {
   g.onChainAccessPolicyCache.set('1', 1);
   g.subscribedContextGraphs.set(id, { ...CURATED(id), onChainId: '1' });
@@ -440,20 +444,47 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(wired).toEqual([cgId]);
   });
 
-  it('strip ON CLOSES the operator hatch for a host-only core (curated via onChainHash, NO local _meta)', async () => {
-    // The WS-A target case: a core that learned of a curated CG via
-    // chain-event/beacon has NO local `_meta`, so `isPrivateContextGraph`
-    // returns false. The operator hatch must STILL refuse — it consults the
-    // same three-source curation probe (`onChainHash`) the auto-host path uses,
-    // not `isPrivateContextGraph` alone.
+  it('strip ON CLOSES the operator hatch for a host-only core (curated via the cached chain access policy, NO local _meta)', async () => {
+    // The WS-A target case: a core that learned of a curated CG via a chain
+    // event has NO local `_meta`, so `isPrivateContextGraph` returns false.
+    // The operator hatch must STILL refuse — it consults the same curation
+    // probe the auto-host path uses, not `isPrivateContextGraph` alone. Here
+    // the proof is source (a): `onChainId` + `onChainAccessPolicyCache === 1`.
     const core = await makeCore(true);
     const g = core as unknown as StripInternals;
     const cgId = 'cg-host-only-core';
-    markCurated(g, cgId); // curated via the chain policy cache
+    markCurated(g, cgId); // curated via the cached on-chain access policy
     g.isPrivateContextGraph = async () => false;        // no local _meta
     const wired: string[] = [];
     g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
 
+    const result = await g.enableSwmHostModeFor(cgId);
+
+    expect(result).toEqual({ subscribed: false, alreadySubscribed: false, hostingEnabled: true });
+    expect(wired).toEqual([]);
+  });
+
+  it('strip ON CLOSES the operator hatch for a beacon-discovered CG (onChainHash + verified beacon)', async () => {
+    // Curation probe source (b): a beacon-driven pre-reg auto-host has an
+    // `onChainHash` but NO numeric binding and no local `_meta`. Curation is
+    // proved by the VERIFIED beacon recorded for that wire id — after this PR
+    // the bare `onChainHash` is no longer sufficient on its own, so this branch
+    // is what keeps the hatch closed for the beacon topology.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-beacon-host-only';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(cgId)).toLowerCase();
+    g.subscribedContextGraphs.set(cgId, { subscribed: false, synced: false, onChainHash: wireId });
+    g.isPrivateContextGraph = async () => false;        // no local _meta
+    const wired: string[] = [];
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+
+    // Without the beacon the CG reads as NOT curated, so the hatch stays open.
+    expect(await (g as any).isCuratedForHostMode(cgId)).toBe(false);
+
+    g.beaconCuratorByWireId.set(wireId, '0x' + '11'.repeat(20));
+
+    expect(await (g as any).isCuratedForHostMode(cgId)).toBe(true);
     const result = await g.enableSwmHostModeFor(cgId);
 
     expect(result).toEqual({ subscribed: false, alreadySubscribed: false, hostingEnabled: true });
