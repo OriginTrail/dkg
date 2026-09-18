@@ -400,6 +400,97 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
   });
 
+  it('extends the shared deadline for an in-window provider hint without escalating', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+
+    await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    // A rare caller-initiated read is admitted mid-cooldown and is told by the
+    // provider to back off far longer than the round's own step. Coalescing
+    // owns the ladder, not the provider's instruction.
+    now = 50;
+    await expect(breaker.run(
+      undefined,
+      async () => { throw exhausted(600); },
+      { admitWhileOpen: true },
+    )).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 650,
+    });
+
+    // A later in-window sibling without a hint must not pull the deadline back.
+    now = 60;
+    await expect(breaker.run(
+      undefined,
+      async () => { throw exhausted(); },
+      { admitWhileOpen: true },
+    )).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 650,
+    });
+
+    // Nor may a shorter hint shorten it.
+    now = 70;
+    await expect(breaker.run(
+      undefined,
+      async () => { throw exhausted(10); },
+      { admitWhileOpen: true },
+    )).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot().retryAtMs).toBe(650);
+  });
+
+  it('keeps a concurrent unqueued sibling\'s provider hint on the shared deadline', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const releaseFirst = Promise.withResolvers<void>();
+    const releaseSecond = Promise.withResolvers<void>();
+
+    // Both siblings were admitted while the pool was healthy; the first trips
+    // the circuit, the second then learns the provider's own backoff.
+    const first = breaker.runUnqueued(undefined, async () => {
+      await releaseFirst.promise;
+      throw exhausted();
+    });
+    const second = breaker.runUnqueued(undefined, async () => {
+      await releaseSecond.promise;
+      throw exhausted(600);
+    });
+
+    releaseFirst.resolve();
+    await expect(first).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot().retryAtMs).toBe(100);
+
+    now = 50;
+    releaseSecond.resolve();
+    await expect(second).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 650,
+    });
+  });
+
   it('retires an unqueued read before close settles', async () => {
     const breaker = new Rfc64AuthorityReadCoordinatorV1();
     const release = Promise.withResolvers<void>();

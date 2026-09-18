@@ -360,7 +360,23 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     // so every read already in flight when the pool failed lands here with the
     // same outage. Escalation is the job of the read that fails after the
     // deadline has passed, not of that read's concurrent siblings.
-    if (this.#now() < this.#retryAtMs) return;
+    const providerDelay = typeof error.retryAfterMs === 'number'
+      && Number.isFinite(error.retryAfterMs)
+      && error.retryAfterMs >= 0
+      ? Math.round(error.retryAfterMs)
+      : 0;
+    if (this.#now() < this.#retryAtMs) {
+      // Coalescing suppresses the backoff ladder, not the provider's own
+      // backpressure: a sibling that was told to wait longer still moves the
+      // shared deadline out, without advancing the generation or the counter.
+      if (providerDelay > 0) {
+        this.#retryAtMs = Math.max(
+          this.#retryAtMs,
+          this.#now() + Math.min(this.#maxBackoffMs, providerDelay),
+        );
+      }
+      return;
+    }
     this.#tripGeneration += 1;
     this.#consecutiveExhaustions += 1;
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);
@@ -377,11 +393,6 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       : 0.5;
     const jitterMultiplier = 1 + ((random * 2) - 1) * this.#jitterRatio;
     const jittered = Math.round(exponential * jitterMultiplier);
-    const providerDelay = typeof error.retryAfterMs === 'number'
-      && Number.isFinite(error.retryAfterMs)
-      && error.retryAfterMs >= 0
-      ? Math.round(error.retryAfterMs)
-      : 0;
     const delay = Math.min(
       this.#maxBackoffMs,
       Math.max(1, jittered, providerDelay),
