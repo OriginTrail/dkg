@@ -264,13 +264,20 @@ export interface SparqlHttpStoreOptions {
   managedOxigraph?: boolean;
   /**
    * @deprecated Pass managed hooks as the second argument to
-   * createManagedOxigraphSparqlStoreV1. Retained for one-argument factory
-   * compatibility; the generic SparqlHttpStore constructor ignores it.
+   * createManagedOxigraphSparqlStoreV1, which supersede this one. It remains
+   * supported for generic stores: the plain SparqlHttpStore constructor still
+   * fires it on a client deadline, so an ordinary adapter does not lose its
+   * timeout observer. It grants no managed authority.
    */
   onClientTimeout?: (operation: string) => void;
-  /** @deprecated See onClientTimeout. */
+  /**
+   * @deprecated Read only by createManagedOxigraphSparqlStoreV1, which lifts
+   * it into the authenticated runtime hooks. The generic SparqlHttpStore
+   * constructor ignores it — recovery state is authority the daemon grants,
+   * never something a plain options bag can claim.
+   */
   getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
-  /** @deprecated See onClientTimeout. */
+  /** @deprecated Read only by createManagedOxigraphSparqlStoreV1. See getRecoveryState. */
   onActivityChange?: (activeOperations: number) => void;
   /**
    * Runtime-only compatibility capability for a DKG-managed Oxigraph
