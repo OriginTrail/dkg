@@ -206,20 +206,24 @@ function normalizeAuthorCatalogDirectoryPathNode(
   const level = BigInt(payload.level);
   const firstBucketId = BigInt(payload.firstBucketId);
   if (level === 0n) {
-    const entries = payload.entries.map((entry, index) => {
+    const entries: AuthorCatalogBucketDescriptorV1[] = [];
+    for (let index = 0; index < payload.entries.length; index += 1) {
+      const entry = payload.entries[index];
       if (!('bucketDigest' in entry)) {
         fail('catalog-directory-path', `leaf entry ${index} is not a bucket descriptor`);
       }
-      return entry;
-    });
+      entries[index] = entry;
+    }
     return { kind: 'leaf', envelope, payload, level: 0n, firstBucketId, entries };
   }
-  const entries = payload.entries.map((entry, index) => {
+  const entries: AuthorCatalogChildDescriptorV1[] = [];
+  for (let index = 0; index < payload.entries.length; index += 1) {
+    const entry = payload.entries[index];
     if (!('childDigest' in entry)) {
       fail('catalog-directory-path', `branch entry ${index} is not a child descriptor`);
     }
-    return entry;
-  });
+    entries[index] = entry;
+  }
   return { kind: 'branch', envelope, payload, level, firstBucketId, entries };
 }
 
@@ -370,7 +374,7 @@ export function verifyAuthorCatalogDirectoryPathV1(
   const seenDigests = new Set<string>();
   for (let pathIndex = 0; pathIndex < path.length; pathIndex += 1) {
     const node = normalizeAuthorCatalogDirectoryPathNode(path[pathIndex], scope);
-    nodes.push(node);
+    nodes[pathIndex] = node;
     const expectedLevel = expectedHeight - BigInt(pathIndex);
     if (node.level !== expectedLevel) {
       fail(
