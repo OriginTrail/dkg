@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  PUBLISHER_NOT_AUTHORIZED_CODE,
+} from '@origintrail-official/dkg-core';
 import {
   createLiftJobFailureMetadata,
   TripleStoreAsyncLiftPublisher,
@@ -18,7 +21,11 @@ import {
   serializeJob,
 } from '../src/async-lift-control-plane.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
-import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
+import {
+  KA_VM_BROADCAST_TX,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+} from '../../../scripts/testing/ka-vm-publish.js';
 
 describe('async-lift accepted-job selection', () => {
   let store: OxigraphStore;
@@ -402,6 +409,49 @@ describe('async-lift claim selection respects context-graph publish authority (G
     expect(job.failure.failedFromState).toBe('claimed');
     expect(job.failure.retryable).toBe(false);
     expect(job.failure.message).toContain('453');
+  });
+
+  it('forgets a memoized verdict the CHAIN then refuses, so the next job is routed on a fresh read', async () => {
+    // The memo said this lane was admitted and the chain said otherwise. Reusing it for the rest
+    // of the TTL routes every other job queued for the same graph the same wrong way — and the
+    // refusal is terminal (`fail_job`, `autoRetry:false`), so each one is lost, not retried.
+    let reads = 0;
+    let clock = 1_000;
+    let admitted = AUTHORIZED;
+    const publisher = publisherWithAuthority(async () => {
+      reads += 1;
+      return { kind: 'resolved', authorizedWalletIds: [admitted], candidateWalletIds: [AUTHORIZED, REFUSED] };
+    }, { now: () => ++clock });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(
+      kaVmPublishRequest({ contextGraphId: '453' }),
+    );
+    expect((await publisher.claimNext(AUTHORIZED))?.jobId).toBe(jobId);
+    expect(reads).toBe(1);
+
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { ...KA_VM_BROADCAST_TX, walletId: AUTHORIZED },
+    });
+    const failed = await publisher.recordPublishFailure(jobId, {
+      error: Object.assign(new Error('publisher not authorized for this context graph'), {
+        code: PUBLISHER_NOT_AUTHORIZED_CODE,
+      }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:publisher:error:authority',
+    });
+    if (failed.status !== 'failed') throw new Error(`expected failed job, got ${failed.status}`);
+    expect(failed.failure.code).toBe('authority_forbidden');
+
+    // What the chain refusal actually meant: authority had rotated to the other wallet. A second
+    // job on the SAME graph must reach that lane NOW, not after the memo's TTL lapses.
+    admitted = REFUSED;
+    await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-2'), {
+      idGenerator: () => 'job-second',
+      now: () => 1,
+    });
+
+    expect((await publisher.claimNext(REFUSED))?.jobId).toBe('job-second');
+    expect(reads).toBe(2);
   });
 
   it('is byte-for-byte unfiltered when no authority resolver is configured', async () => {

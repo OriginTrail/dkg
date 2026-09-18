@@ -2288,11 +2288,38 @@ export class TripleStoreAsyncLiftPublisher
     scope: LiftJobTransitionScope,
     failure: AsyncLiftPublishFailureInput,
   ): Promise<LiftJob> {
+    const mapped = mapPublishExceptionToLiftJobFailure(failure);
     const next = this.scheduleRetryIfEligible(this.buildTransitionJob(current, 'failed', {
-      failure: mapPublishExceptionToLiftJobFailure(failure),
+      failure: mapped,
     }));
     this.assertJobMatchesStatus(next);
+    this.forgetDisprovedPublishAuthority(current, mapped.code, failure.error);
     return await scope.commit(next, 'failed');
+  }
+
+  /**
+   * GH#2648 — a publish the CHAIN refused for authority has just disproved what the claim scan
+   * memoized about this job's context graph: the lane it routed the job to was not admitted after
+   * all.
+   *
+   * Without this, that answer is reused for the rest of its TTL, so every other job queued for
+   * the same graph in the window is routed the same wrong way — and the refusal is terminal
+   * (`fail_job`, `autoRetry:false`), so each one is lost rather than retried. Dropping the entry
+   * makes the next poll re-read; it is the one production route into the cache's invalidation.
+   *
+   * A `NoAuthorizedPublisherWalletError` is deliberately NOT treated as a disproof: that is the
+   * claim gate ACTING on the memoized verdict, not the chain contradicting it, and clearing on it
+   * would make the next job for the same graph re-confirm an answer already confirmed.
+   */
+  private forgetDisprovedPublishAuthority(
+    job: LiftJob,
+    code: LiftJobFailureCode,
+    error: unknown,
+  ): void {
+    if (code !== 'authority_forbidden' || !this.publishAuthority) return;
+    if (error instanceof NoAuthorizedPublisherWalletError) return;
+    const contextGraphName = liftJobContextGraphName(job.request);
+    if (contextGraphName !== undefined) this.publishAuthority.invalidate(contextGraphName);
   }
 
   async recover(): Promise<number> {
@@ -3317,6 +3344,7 @@ export class TripleStoreAsyncLiftPublisher
         this.buildTransitionJob(current, 'failed', { failure }),
       );
       this.assertJobMatchesStatus(failed);
+      this.forgetDisprovedPublishAuthority(current, code, error);
       return await scope.commit(failed, 'failed');
     }
 

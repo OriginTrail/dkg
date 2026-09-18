@@ -89,9 +89,26 @@ export class PublishAuthorityCache {
     this.readTimeoutMs = dependencies.readTimeoutMs ?? PUBLISH_AUTHORITY_READ_TIMEOUT_MS;
   }
 
-  /** Drop every memoized answer — for an operator-visible authority change, and for tests. */
-  invalidate(): void {
-    this.cached.clear();
+  /**
+   * Drop what this cache memoized, for one graph or for all of them.
+   *
+   * The production caller is the `authority_forbidden` recording path: a publish refused for
+   * AUTHORITY has just disproved whatever this cache answered about that job's context graph, and
+   * the answer would otherwise be reused for the rest of its TTL — routing every other job queued
+   * for the same graph the same wrong way. Dropping the entry makes the next poll re-read.
+   *
+   * The empty-set sighting is dropped with it: the refusal proves nothing about whether the set
+   * really is empty, so the confirmation in {@link emptyAuthorityIsConfirmed} starts over rather
+   * than letting a stale sighting condemn the next empty read on its own.
+   */
+  invalidate(contextGraphName?: string): void {
+    if (contextGraphName === undefined) {
+      this.cached.clear();
+      this.emptyAuthoritySeenAt.clear();
+      return;
+    }
+    this.cached.delete(contextGraphName);
+    this.emptyAuthoritySeenAt.delete(contextGraphName);
   }
 
   async verdictFor(
