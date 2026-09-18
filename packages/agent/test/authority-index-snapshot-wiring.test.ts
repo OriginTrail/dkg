@@ -118,7 +118,40 @@ describe('authority index snapshot production wiring', () => {
     return { agent, snapshots };
   }
 
-  it('transfers a complete checkpoint over authenticated P2P using core-only cached serving', async () => {
+  it('waits for foreground identity startup before starting background snapshot refresh', async () => {
+    const snapshots = capability();
+    const chain = Object.assign(new MockChainAdapter('mock:31337'), {
+      contextGraphAuthorityIndexSnapshots: snapshots,
+    });
+    const identityEntered = Promise.withResolvers<void>();
+    const identityRelease = Promise.withResolvers<void>();
+    const readIdentity = chain.getIdentityId.bind(chain);
+    vi.spyOn(chain, 'getIdentityId').mockImplementationOnce(async () => {
+      identityEntered.resolve();
+      await identityRelease.promise;
+      return readIdentity();
+    });
+    const agent = await DKGAgent.create({
+      name: 'SnapshotStartupOrder', nodeRole: 'core',
+      listenHost: '127.0.0.1', listenPort: 0,
+      chainAdapter: chain, store: new OxigraphStore(),
+      randomSamplingUseWorkerThread: false,
+    });
+    agents.push(agent);
+    const starting = agent.start();
+    try {
+      await identityEntered.promise;
+      expect(snapshots.refresh).not.toHaveBeenCalled();
+      identityRelease.resolve();
+      await starting;
+      await vi.waitFor(() => expect(snapshots.refresh).toHaveBeenCalledOnce());
+    } finally {
+      identityRelease.resolve();
+      await starting;
+    }
+  });
+
+  it('serves cached snapshots over authenticated P2P and limits the real router peer identity', async () => {
     const core = await startAgent('SnapshotCore', 'core');
     const edge = await startAgent('SnapshotEdge', 'edge');
 
@@ -133,11 +166,19 @@ describe('authority index snapshot production wiring', () => {
       expect(decodeContextGraphAuthorityIndexSnapshot(value, request)).toEqual(checkpoint);
     });
     const client = snapshotClient(edge.agent, core.agent);
+    // Hold only the wall clock constant: real libp2p I/O and its timers still
+    // run, while slow CI cannot roll the server's five-second quota window.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now());
     await expect(client.fetchSnapshot(request, undefined, validate)).resolves.toEqual(snapshot);
     await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    await expect(client.fetchSnapshot(request)).rejects.toMatchObject({
+      errors: [expect.objectContaining({ status: 'busy' })],
+    });
 
     expect(validate).toHaveBeenCalledOnce();
-    expect(core.snapshots.exportSnapshot).toHaveBeenCalledTimes(2);
+    expect(core.snapshots.exportSnapshot).toHaveBeenCalledTimes(4);
     expect(core.snapshots.exportSnapshot).toHaveBeenCalledWith(request);
     expect(core.snapshots.refresh).toHaveBeenCalledOnce();
     expect(edge.snapshots.exportSnapshot).not.toHaveBeenCalled();
@@ -146,6 +187,25 @@ describe('authority index snapshot production wiring', () => {
     await edge.agent.stop();
     expect(edge.snapshots.close).toHaveBeenCalledOnce();
   }, 25_000);
+
+  it('retains canonical peers across daemon and agent resolution without changing persisted config', () => {
+    const resolved = resolveAuthorityIndexConfig({
+      mode: 'core-snapshot', trustedCorePeers: [pinnedAddress, secondPinnedAddress], cacheEpoch: 2,
+    }, 'edge')!;
+    expect(resolved.snapshot.trustedCorePeers).toEqual([
+      { peerId: PINNED_PEER, multiaddr: pinnedAddress },
+      { peerId: SECOND_PINNED_PEER, multiaddr: secondPinnedAddress },
+    ]);
+    expect(resolveAuthorityIndexConfig(resolved, 'edge')).toBe(resolved);
+    expect(Object.isFrozen(resolved.snapshot.trustedCorePeers)).toBe(true);
+    const persisted = JSON.parse(JSON.stringify(resolved));
+    expect(persisted).toEqual({
+      mode: 'core-snapshot', trustedCorePeers: [pinnedAddress, secondPinnedAddress],
+      maxTailBlocks: 2_000, cacheEpoch: 2,
+    });
+    expect(resolveAuthorityIndexConfig(persisted, 'edge')?.snapshot).toEqual(resolved.snapshot);
+    expect(() => resolveAuthorityIndexConfig(resolved, 'core')).toThrow('only supported on edge nodes');
+  });
 
   it('keeps network admission on the bootstrap protocol even for a pinned reachable core', async () => {
     const core = await startAgent('ForeignSnapshotCore', 'core', capability(), 'gnosis-mainnet');
@@ -250,6 +310,36 @@ describe('authority index snapshot production wiring', () => {
       chain.destroy();
     }
   }, 20_000);
+
+  it('honors a custom 200-block tail in the constructed chain and production fetch closure', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'SnapshotCustomTail', listenHost: '127.0.0.1', listenPort: 0,
+      store, nodeRole: 'edge',
+      authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [pinnedAddress], maxTailBlocks: 200 },
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      chainConfig: evmChainConfig,
+    });
+    const chain = (agent as any).chain;
+    const bootstrap = chain.contextGraphAuthorityIndex.bootstrap as ContextGraphAuthorityIndexBootstrap;
+    const transport = vi.spyOn(agent.node, 'libp2p', 'get');
+    const send = vi.fn();
+    (agent as any).router = { send };
+    (agent as any).started = true;
+    try {
+      expect(bootstrap.maxTailBlocks).toBe(200);
+      await expect(bootstrap.fetchSnapshot({
+        ...request, minThroughBlockNumber: 900, maxThroughBlockNumber: 1_101,
+      }, new AbortController().signal, vi.fn())).rejects.toThrow('Invalid authority index snapshot request');
+      expect(transport).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      (agent as any).started = false;
+      await agent.node.stop();
+      await store.close();
+      chain.destroy();
+    }
+  });
 
   it('keeps snapshot fetch fenced until the agent transport has started', async () => {
     const store = new OxigraphStore();

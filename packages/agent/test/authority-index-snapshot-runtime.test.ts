@@ -32,14 +32,38 @@ describe('core authority index refresh lifecycle', () => {
   });
 
   it('uses background RPC capacity while rebuilding the core index', async () => {
+    let observed: ReturnType<typeof activeRpcRequestContext> | undefined;
     const refresh = vi.fn(async () => {
-      expect(activeRpcRequestContext()?.requestClass).toBe('background');
-      expect(activeRpcRequestContext()?.signal).toBeInstanceOf(AbortSignal);
+      observed = activeRpcRequestContext();
     });
-    const runtime = startAuthorityIndexSnapshotRuntime({ ...fixture(refresh), nodeRole: 'core' })!;
+    const ports = fixture(refresh);
+    const runtime = startAuthorityIndexSnapshotRuntime({ ...ports, nodeRole: 'core' })!;
     await Promise.resolve();
     await runtime.close();
+    expect(observed?.requestClass).toBe('background');
+    expect(observed?.signal).toBeInstanceOf(AbortSignal);
+    expect(ports.warn).not.toHaveBeenCalled();
     expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it('serves registered requests without starting another refresh and limits router PeerID objects', async () => {
+    vi.useFakeTimers();
+    const ports = fixture();
+    const runtime = startAuthorityIndexSnapshotRuntime({ ...ports, nodeRole: 'core' })!;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ports.snapshots.refresh).toHaveBeenCalledOnce();
+    const handler = ports.register.mock.calls[0][1];
+    const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, request: {
+      scope: 'base:84532:0x123456', deploymentBlockNumber: 100,
+      minThroughBlockNumber: 500, maxThroughBlockNumber: 2_500,
+    } }));
+    const peer = { toString: () => 'authenticated-peer', toBytes: () => new Uint8Array() };
+    const status = async () => JSON.parse(new TextDecoder().decode(await handler(bytes, peer))).status;
+    for (let i = 0; i < 4; i += 1) expect(await status()).toBe('not-ready');
+    expect(await status()).toBe('busy');
+    expect(ports.snapshots.exportSnapshot).toHaveBeenCalledTimes(4);
+    expect(ports.snapshots.refresh).toHaveBeenCalledOnce();
+    await runtime.close();
   });
 
   it('does not overlap slow cold builds and waits 30 seconds after completion', async () => {

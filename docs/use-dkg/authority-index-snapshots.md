@@ -34,10 +34,12 @@ snapshots over libp2p. Snapshot requests read the cached table; they do not star
 another historical rebuild. While the core is building its first index, a complete
 snapshot is not yet available.
 
-This background work starts automatically when an updated core with a durable
-EVM index starts, even if no edge has enabled snapshots. Budget for the initial
-historical scan and the following refreshes. Refreshes run at background RPC
-priority, with the next attempt scheduled 30 seconds after the previous one ends.
+This background work starts automatically after the core's identity and StorageACK
+startup steps, even if no edge has enabled snapshots. This
+keeps background chain initialization from delaying identity and ACK setup.
+Budget for the initial historical scan and the following refreshes. Refreshes
+run at background RPC priority, with the next attempt scheduled 30 seconds after
+the previous one ends.
 
 Make the core reachable from the edges and obtain its advertised multiaddr and
 PeerID. The `/p2p/` suffix identifies the core that the edge will trust. Preserve
@@ -154,6 +156,7 @@ sequenceDiagram
     participant C as Trusted core
     participant R as Chain RPC
     participant D as Edge index database
+    C->>R: Complete identity and StorageACK startup
     C->>R: Build or resume authority index in background
     C->>C: Retain recent completed durable checkpoints
     Note over C: Refresh again 30 seconds after completion
@@ -222,8 +225,9 @@ they do not make the data confidential.
 
 When all trusted cores are unavailable, still building, or serving snapshots too
 old for the tail limit, authority reads that need a new snapshot fail. Subsequent
-normal authority reads or caller retries try again after a five-second failed-fetch
-cooldown; there is no separate edge snapshot refresh timer. Reads recover when a
+normal authority reads or caller retries try again after a five-second bootstrap
+cooldown owned by the chain index; there is no separate transport cooldown or
+edge snapshot refresh timer. Reads recover when a
 suitable snapshot is available.
 There is no automatic fallback to a scan from contract deployment in
 `core-snapshot` mode. An edge whose persisted index is already within the tail

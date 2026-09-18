@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
-import { ContextGraphAuthorityIndexSnapshotExportError } from '@origintrail-official/dkg-chain';
+import {
+  ContextGraphAuthorityIndexSnapshotExportError,
+  createContextGraphAuthorityIndexCheckpoint,
+} from '@origintrail-official/dkg-chain';
 import {
   AUTHORITY_INDEX_SNAPSHOT_MAX_REQUEST_BYTES,
   AUTHORITY_INDEX_SNAPSHOT_MAX_RESPONSE_BYTES,
@@ -26,16 +29,11 @@ const request = {
 const snapshot = {
   version: 1,
   scope: request.scope,
-  checkpoint: {
-    version: 2,
-    integrity: `0x${'11'.repeat(32)}`,
-    cursor: {
-      deploymentBlockNumber: 100,
-      throughBlockNumber: 1_000,
-      throughBlockHash: `0x${'22'.repeat(32)}`,
-    },
-    states: [],
-  },
+  checkpoint: createContextGraphAuthorityIndexCheckpoint({
+    deploymentBlockNumber: 100,
+    throughBlockNumber: 1_000,
+    throughBlockHash: `0x${'22'.repeat(32)}`,
+  }, []),
 };
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const decode = (value: Uint8Array) => JSON.parse(new TextDecoder().decode(value));
@@ -97,6 +95,14 @@ describe('explicit authority-index snapshot trust', () => {
       timeoutMs: 10_000,
     });
   });
+
+  it('consumes previously normalized peers without reparsing their multiaddrs', async () => {
+    const normalizedConfig = normalizeAuthorityIndexSnapshotConfig(config);
+    const send = vi.fn().mockResolvedValue(response());
+    const client = createAuthorityIndexSnapshotClient({ normalizedConfig, request: send });
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    expect(send.mock.calls[0][0]).toBe(normalizedConfig.trustedCorePeers[0]);
+  });
 });
 
 describe('bounded snapshot client failover', () => {
@@ -104,6 +110,9 @@ describe('bounded snapshot client failover', () => {
     ['wrong scope', response({ ...snapshot, scope: 'other-deployment' })],
     ['wrong version', encode({ version: 2, status: 'ok', snapshot })],
     ['claimed responder identity', encode({ version: 1, status: 'ok', peerId: UNTRUSTED, snapshot })],
+    ['extra snapshot envelope field', response({ ...snapshot, peerId: UNTRUSTED })],
+    ['corrupt checkpoint integrity', response({ ...snapshot, checkpoint: { ...snapshot.checkpoint, integrity: `0x${'11'.repeat(32)}` } })],
+    ['invalid checkpoint schema', response({ ...snapshot, checkpoint: { ...snapshot.checkpoint, version: 0 } })],
     ['malformed JSON', new TextEncoder().encode('{')],
     ['not ready', encode({ version: 1, status: 'not-ready' })],
     ['stale checkpoint', response({ ...snapshot, checkpoint: { ...snapshot.checkpoint, cursor: { ...snapshot.checkpoint.cursor, throughBlockNumber: 499 } } })],
@@ -240,8 +249,7 @@ describe('bounded snapshot client failover', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('preserves per-peer statuses and causes, and cools down failed scopes before another walk', async () => {
-    vi.useFakeTimers();
+  it('preserves per-peer causes while leaving retry cooldown to the chain bootstrap owner', async () => {
     const transportFailure = new Error('connection refused');
     const send = vi.fn()
       .mockResolvedValueOnce(encode({ version: 1, status: 'below-range' }))
@@ -250,21 +258,18 @@ describe('bounded snapshot client failover', () => {
     const client = createAuthorityIndexSnapshotClient({ config, request: send });
     const failure = await client.fetchSnapshot(request).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
-    expect(failure).toMatchObject({ code: 'AUTHORITY_INDEX_SNAPSHOT_UNAVAILABLE', retryAfterMs: 5_000 });
+    expect(failure).toMatchObject({ code: 'AUTHORITY_INDEX_SNAPSHOT_UNAVAILABLE' });
+    expect(failure).not.toHaveProperty('retryAfterMs');
     const causes = (failure as AggregateError).errors;
     expect(causes[0]).toBeInstanceOf(AuthorityIndexSnapshotPeerStatusError);
     expect(causes[0]).toMatchObject({ peerId: FIRST, status: 'below-range' });
     expect(causes[1]).toBe(transportFailure);
-    await vi.advanceTimersByTimeAsync(2_000);
-    const cooldown = await client.fetchSnapshot(request).catch((error: unknown) => error);
-    expect(cooldown).toMatchObject({ retryAfterMs: 3_000, errors: causes });
     expect(send).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(3_000);
     await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
     expect(send).toHaveBeenCalledTimes(3);
   });
 
-  it('does not turn lifecycle cancellation into a provider cooldown', async () => {
+  it('allows a new request after lifecycle cancellation', async () => {
     const controller = new AbortController();
     const send = vi.fn()
       .mockImplementationOnce(() => new Promise(() => {}))
@@ -294,12 +299,11 @@ describe('bounded snapshot client failover', () => {
 });
 
 describe('cache-only snapshot serving', () => {
-  it('exports the cached checkpoint without invoking refresh or scanning', async () => {
-    const capabilities = { exportSnapshot: vi.fn().mockResolvedValue(snapshot), refresh: vi.fn() };
-    const handler = createAuthorityIndexSnapshotHandler(capabilities);
+  it('delegates a valid request to the cached checkpoint export', async () => {
+    const exportSnapshot = vi.fn().mockResolvedValue(snapshot);
+    const handler = createAuthorityIndexSnapshotHandler({ exportSnapshot });
     expect(decode(await handler(encode({ version: 1, request })))).toEqual({ version: 1, status: 'ok', snapshot });
-    expect(capabilities.exportSnapshot).toHaveBeenCalledExactlyOnceWith(request);
-    expect(capabilities.refresh).not.toHaveBeenCalled();
+    expect(exportSnapshot).toHaveBeenCalledExactlyOnceWith(request);
   });
 
   it('reports a cold core as not-ready without starting catchup', async () => {
@@ -331,6 +335,15 @@ describe('cache-only snapshot serving', () => {
       }),
     });
     expect(decode(await large(encode({ version: 1, request })))).toEqual({ version: 1, status: 'too-large' });
+  });
+
+  it.each([
+    { ...snapshot, peerId: UNTRUSTED },
+    { ...snapshot, checkpoint: { ...snapshot.checkpoint, integrity: `0x${'11'.repeat(32)}` } },
+    { ...snapshot, checkpoint: { ...snapshot.checkpoint, version: 0 } },
+  ])('refuses malformed or corrupt cached checkpoints without returning their contents', async (invalid) => {
+    const handler = createAuthorityIndexSnapshotHandler({ exportSnapshot: async () => invalid });
+    expect(decode(await handler(encode({ version: 1, request })))).toEqual({ version: 1, status: 'unavailable' });
   });
 
   it.each(['too-large', 'above-range', 'below-range', 'unavailable'] as const)(

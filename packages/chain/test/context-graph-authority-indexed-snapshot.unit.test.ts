@@ -329,6 +329,19 @@ function bindProductionRpcTipReader(
 }
 
 describe('RFC-64 indexed Context Graph authority snapshots', () => {
+  it('rejects trusted-core bootstrap without a durable index store at construction', () => {
+    const fetchSnapshot = vi.fn();
+    expect(() => new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: GOVERNANCE,
+      privateKey: `0x${'11'.repeat(32)}`,
+      allowNoAdminSigner: true,
+      chainId: 'evm:31337',
+      contextGraphAuthorityIndexBootstrap: { trustDomain: 'core-peer-A', maxTailBlocks: 200, fetchSnapshot },
+    })).toThrow('bootstrap requires a local durable index store');
+    expect(fetchSnapshot).not.toHaveBeenCalled();
+  });
+
   it('exports cached core state and bootstraps an edge authority read through the adapter capability', async () => {
     const core = makeIndexedAuthorityAdapter();
     const snapshots = core.adapter.contextGraphAuthorityIndexSnapshots!;

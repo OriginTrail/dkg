@@ -10,6 +10,8 @@ import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024;
 /** Includes room for the 50-block durable holdback and ordinary refresh/head skew. */
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS = 200;
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TAIL_BLOCKS = 10_000;
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS = 8;
 // The coupling the comment above asserts, enforced rather than described. The
 // read-time RangeError in ContextGraphAuthorityIndex only fires once the
 // holdback exceeds the tail budget, so raising CG_REGISTRY_REORG_BUFFER_BLOCKS

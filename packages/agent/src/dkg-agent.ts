@@ -1,11 +1,9 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { peerIdFromString } from '@libp2p/peer-id';
 import { resolveAuthorityIndexConfig } from './authority-index-config.js';
+import { createAuthorityIndexSnapshotTransport } from './authority-index-snapshot-transport.js';
 import {
   createAuthorityIndexSnapshotClient,
-  normalizeAuthorityIndexSnapshotConfig,
-  PROTOCOL_CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT,
 } from './authority-index-snapshot-service.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -285,7 +283,6 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
-import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -1190,25 +1187,12 @@ export class DKGAgent extends DKGAgentBase {
     }
     let agentRef: DKGAgent | undefined;
     const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
-      config: authorityIndex,
-      request: async (peer, bytes, options) => {
-        const agent = agentRef;
-        if (agent === undefined || !agent.started || agent.router === undefined) {
-          throw new Error('Authority index snapshot transport is not started');
-        }
-        options.signal.throwIfAborted();
-        // Pin the configured destination before admission/dialing. This path
-        // must not depend on the Agent Registry it is bootstrapping.
-        await agent.node.libp2p.peerStore.merge(peerIdFromString(peer.peerId), {
-          multiaddrs: [multiaddr(peer.multiaddr)],
-        });
-        options.signal.throwIfAborted();
-        // Establish the authenticated connection directly: PeerResolver's
-        // cold lookup otherwise visits the authority-dependent phonebook.
-        await agent.node.libp2p.dial(multiaddr(peer.multiaddr), { signal: options.signal });
-        options.signal.throwIfAborted();
-        return agent.router.send(peer.peerId, PROTOCOL_CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT, bytes, options);
-      },
+      normalizedConfig: authorityIndex.snapshot,
+      request: createAuthorityIndexSnapshotTransport(() => agentRef === undefined ? undefined : {
+        started: agentRef.started,
+        node: agentRef.node,
+        router: agentRef.router,
+      }),
     });
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
@@ -1234,7 +1218,7 @@ export class DKGAgent extends DKGAgentBase {
       throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
     }
     const trustedPeerIds = authorityIndex === undefined ? undefined
-      : normalizeAuthorityIndexSnapshotConfig(authorityIndex).trustedCorePeers.map((peer) => peer.peerId).sort();
+      : authorityIndex.snapshot.trustedCorePeers.map((peer) => peer.peerId).sort();
     const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(
       normalizedConfig,
       snapshotClient === undefined || authorityIndex === undefined ? undefined : {

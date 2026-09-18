@@ -77,6 +77,23 @@ describe('trusted core authority index bootstrap', () => {
       .toThrow('bootstrap configuration is invalid');
   });
 
+  it.each([
+    { maxTailBlocks: 10_001 },
+    { maxTailBlocks: 200.5 },
+    { maxTailBlocks: Number.NaN },
+    { trustDomain: '' },
+    { trustDomain: '   ' },
+    { trustDomain: 'x'.repeat(257) },
+    { trustDomain: 1 as unknown as string },
+    { fetchSnapshot: undefined as unknown as ContextGraphAuthorityIndexBootstrap['fetchSnapshot'] },
+  ])('rejects invalid bootstrap construction before store or transport activity: %j', (invalid) => {
+    const store = new ScopedStore();
+    const source = bootstrap(invalid);
+    expect(() => new ContextGraphAuthorityIndex(store, source)).toThrow('bootstrap configuration is invalid');
+    expect(store.load).not.toHaveBeenCalled();
+    expect(store.compareAndSwap).not.toHaveBeenCalled();
+  });
+
   it('imports a small prefix snapshot and reads only 100 tail blocks across 3.78m historical blocks', async () => {
     const store = new ScopedStore();
     const source = bootstrap();
@@ -266,6 +283,37 @@ describe('trusted core authority index bootstrap', () => {
       await vi.advanceTimersByTimeAsync(12_000);
       await expect(retry).resolves.toMatchObject({ owner: OWNER });
       expect(source.fetchSnapshot).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains the original seed deadline when a tail CAS loss requires another seed', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new ScopedStore();
+      const commit = store.compareAndSwap.getMockImplementation()!;
+      store.compareAndSwap.mockImplementationOnce(commit).mockImplementationOnce(async (scope) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 15_000));
+        store.records.set(scope, { token: 2, value: checkpoint(20) });
+        return undefined;
+      });
+      const source = bootstrap({ fetchSnapshot: vi.fn(async (_request, signal) => {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 12_000);
+          signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+        });
+        return envelope();
+      }) });
+      const scan = input();
+      const index = new ContextGraphAuthorityIndex(store, source);
+      const rejected = expect(index.resolve(scan)).rejects.toThrow('deadline exceeded');
+      await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS);
+      await rejected;
+      expect(source.fetchSnapshot).toHaveBeenCalledTimes(2);
+      expect(store.compareAndSwap).toHaveBeenCalledTimes(2);
+      expect(scan.readPage.mock.calls).toEqual([[HEAD - 99, HEAD - 50, expect.any(AbortSignal)]]);
+      await index.close();
     } finally {
       vi.useRealTimers();
     }

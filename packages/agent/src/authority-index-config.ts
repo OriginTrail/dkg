@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { normalizeAuthorityIndexSnapshotConfig } from './authority-index-snapshot-service.js';
+import {
+  normalizeAuthorityIndexSnapshotConfig,
+  type NormalizedAuthorityIndexSnapshotConfig,
+} from './authority-index-snapshot-service.js';
+
+const resolvedConfigs = new WeakSet<object>();
 
 /** Explicit trust in the history supplied by these core PeerIDs. */
 export interface AuthorityIndexConfig {
@@ -14,6 +19,8 @@ export interface AuthorityIndexConfig {
 export interface ResolvedAuthorityIndexConfig extends AuthorityIndexConfig {
   readonly maxTailBlocks: number;
   readonly cacheEpoch: number;
+  /** Canonical identities retained for transport and persistence namespacing. */
+  readonly snapshot: NormalizedAuthorityIndexSnapshotConfig;
 }
 
 /**
@@ -47,14 +54,24 @@ export function resolveAuthorityIndexConfig(
   if (nodeRole !== 'edge') {
     throw new TypeError('authorityIndex core-snapshot mode is only supported on edge nodes');
   }
+  // The daemon validates before allocating resources, then passes this same
+  // immutable value to DKGAgent.create. Only our own objects bypass re-parsing.
+  if (resolvedConfigs.has(config)) return config as ResolvedAuthorityIndexConfig;
   try {
-    const normalized = normalizeAuthorityIndexSnapshotConfig(value as AuthorityIndexConfig);
-    return Object.freeze({
-      mode: 'core-snapshot',
+    const normalized = normalizeAuthorityIndexSnapshotConfig(value);
+    const resolved = {
+      mode: 'core-snapshot' as const,
       trustedCorePeers: Object.freeze(normalized.trustedCorePeers.map((peer) => peer.multiaddr)),
       maxTailBlocks: normalized.maxTailBlocks,
       cacheEpoch,
-    });
+      snapshot: normalized,
+    };
+    // Persisted config keeps its public wire shape; parsed runtime metadata must
+    // not become an unknown field when a caller serializes a resolved config.
+    Object.defineProperty(resolved, 'snapshot', { enumerable: false });
+    Object.freeze(resolved);
+    resolvedConfigs.add(resolved);
+    return resolved;
   } catch (cause) {
     throw new TypeError(`authorityIndex: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
   }
