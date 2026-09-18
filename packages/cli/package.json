@@ -58,6 +58,7 @@
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@toml-tools/parser": "1.0.0",
     "better-sqlite3": "12.11.1",
@@ -67,7 +68,8 @@
     "jsonc-parser": "3.3.1",
     "n3": "^2.0.1",
     "semver": "^7.7.4",
-    "typescript": "^5.7"
+    "typescript": "^5.7",
+    "jsonld": "^8.3.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7",
@@ -76,7 +78,8 @@
     "@types/semver": "^7.8.0",
     "@vitest/coverage-v8": "^4.0.18",
     "esbuild": "0.27.7",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "@types/jsonld": "^1.5.15"
   },
   "publishConfig": {
     "access": "public"
