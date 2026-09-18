@@ -18,8 +18,41 @@ import { describe, it, expect } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { tagPromoteError, tagPromoteStep } from '../src/promote-step-tag.js';
+import {
+  isPromoteStepName,
+  PROMOTE_STEP_NAMES,
+  tagPromoteError,
+  tagPromoteStep,
+} from '../src/promote-step-tag.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+
+describe('#1464 promote step tagging — isPromoteStepName', () => {
+  // The guard is the producer-owned narrowing the CLI classifies against
+  // (`diagnosticPromoteStage`), so the publisher owns its coverage rather than
+  // leaning on the consumer's suite to exercise it.
+  //
+  // Deriving the accept cases from the tuple IS true by construction — but here
+  // that is the contract: the guard and the tuple are the same declaration in
+  // the same file, and "member of PROMOTE_STEP_NAMES" is all the predicate
+  // claims. A hand-written copy would duplicate the tuple with no second owner
+  // to disagree with it. (Contrast the CLI stage test, which spans an ownership
+  // boundary and therefore does keep an independent literal.) The assertions
+  // that can actually fail are the rejections below.
+  it.each(PROMOTE_STEP_NAMES)('accepts the producer-owned %s stage', (stage) => {
+    expect(isPromoteStepName(stage)).toBe(true);
+  });
+
+  it.each([
+    'resolveKaNumber', // a plausible-looking step that is NOT in the tuple
+    'wmGraphUri',
+    'callerControlled',
+    'ensureSubGraphRegistered ', // trailing space — no trimming
+    'EnsureSubGraphRegistered', // case-sensitive
+    '',
+  ])('rejects the unowned value %o', (value) => {
+    expect(isPromoteStepName(value)).toBe(false);
+  });
+});
 
 describe('#1464 promote step tagging — tagPromoteStep / tagPromoteError', () => {
   it('passes a resolved value through unchanged', async () => {
