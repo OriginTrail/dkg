@@ -84,8 +84,8 @@ const closedDataReader: ResponseDataReader = {
 // fully reflective decoder used for externally supplied object graphs.
 const parsedJsonReader: ResponseDataReader = {
   read(input, key, label) {
-    if (input === null || typeof input !== 'object'
-      || !Object.prototype.hasOwnProperty.call(input, key)) {
+    if (input === null || typeof input !== 'object') malformed(`${label} must be an object`);
+    if (!Object.prototype.hasOwnProperty.call(input, key)) {
       malformed(`${label}.${key} must be an enumerable data property; fields must use enumerable data properties`);
     }
     return (input as Record<string, unknown>)[key];

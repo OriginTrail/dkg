@@ -67,6 +67,15 @@ describe('privately parsed JSON SELECT decoding', () => {
     }
   });
 
+  it('reports a non-object response as such instead of a missing head field', () => {
+    for (const body of ['null', '3', '"text"']) {
+      expect(() => decodeSparqlJsonQueryResult(body, 'select'))
+        .toThrow('SPARQL JSON response must be an object');
+      expect(() => parseSparqlJsonSelectResponse(JSON.parse(body)))
+        .toThrow('SPARQL JSON response must be an object');
+    }
+  });
+
   it('does not borrow missing fields from Object.prototype', () => {
     let calls = 0;
     let failure: unknown;
