@@ -431,7 +431,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #active = new Set<Promise<void>>();
   readonly #closing = new AbortController();
   #closed = false;
-  #idleWaiters: Array<() => void> = [];
+  #idleWaiters: Array<{ contextGraphId: string | null; resolve: () => void }> = [];
 
   readonly #admissionDeferralMs: number;
   readonly #maxAdmissionDeferrals: number;
@@ -795,7 +795,22 @@ export class Rfc64PublicCatalogReceiverV1 {
   /** Resolve once no work is queued or in-flight. */
   whenIdle(): Promise<void> {
     if (this.#isIdle()) return Promise.resolve();
-    return new Promise<void>((resolve) => this.#idleWaiters.push(resolve));
+    return new Promise<void>((resolve) => this.#idleWaiters.push({
+      contextGraphId: null,
+      resolve,
+    }));
+  }
+
+  /**
+   * Resolve once ONE context graph has no work queued, deferred, or in-flight,
+   * regardless of what other context graphs are still doing.
+   */
+  whenIdleForContextGraph(contextGraphId: string): Promise<void> {
+    if (this.#tasks.isIdleForContextGraph(contextGraphId)) return Promise.resolve();
+    return new Promise<void>((resolve) => this.#idleWaiters.push({
+      contextGraphId,
+      resolve,
+    }));
   }
 
   /** Fence queued, deferred, and active work for one no-longer-selected CG. */
@@ -809,7 +824,9 @@ export class Rfc64PublicCatalogReceiverV1 {
       }),
       (waiter) => this.#safeNotify(waiter),
     );
-    if (this.#isIdle()) this.#resolveIdle();
+    // Unconditional: this context graph's tasks are gone even when the node as
+    // a whole is still busy, and a scoped waiter for it must not outlive them.
+    this.#settleIdleWaiters();
   }
 
   /**
@@ -833,7 +850,10 @@ export class Rfc64PublicCatalogReceiverV1 {
     );
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
     await Promise.allSettled([...this.#active]);
-    this.#resolveIdle();
+    // Every task has settled by now, so per-waiter evaluation releases all of
+    // them, scoped or not. That matters: the graceful-close fence awaits this
+    // same wait, and a waiter left parked here would hang shutdown.
+    this.#settleIdleWaiters();
   }
 
   stats(): Rfc64PublicCatalogReceiverStatsV1 {
@@ -978,7 +998,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         this.#tasks.finishRunning(task);
         this.#active.delete(run);
         if (!this.#closed) this.#pump();
-        if (this.#isIdle()) this.#resolveIdle();
+        this.#settleIdleWaiters();
       });
       this.#active.add(run);
     }
@@ -1008,7 +1028,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         providerAttempts: task.providerAttempts ?? 0,
         error: new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
       }));
-      if (this.#isIdle()) this.#resolveIdle();
+      this.#settleIdleWaiters();
       return;
     }
     // Registered BEFORE the timer is armed: between these two statements the
@@ -1023,7 +1043,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           outcome: 'closed',
           providerAttempts: task.providerAttempts ?? 0,
         }));
-        if (this.#isIdle()) this.#resolveIdle();
+        this.#settleIdleWaiters();
         return;
       }
       if (this.#tasks.requeue(task)) this.#pump();
@@ -1346,12 +1366,26 @@ export class Rfc64PublicCatalogReceiverV1 {
       && this.#tasks.pendingCount < this.#maxQueue + this.#maxConcurrent;
   }
 
-  #resolveIdle(): void {
-    if (!this.#isIdle()) return;
-    const waiters = this.#idleWaiters;
-    this.#idleWaiters = [];
-    for (const resolve of waiters) resolve();
+  /**
+   * Wake every waiter whose OWN scope has gone idle. Global waiters still wait
+   * for global idle; a waiter scoped to one context graph wakes as soon as that
+   * graph's work has drained, even while other graphs keep the node busy.
+   */
+  #settleIdleWaiters(): void {
+    const globalIdle = this.#isIdle();
+    const waiting: Array<{ contextGraphId: string | null; resolve: () => void }> = [];
+    const woken: Array<() => void> = [];
+    for (const waiter of this.#idleWaiters) {
+      const satisfied = waiter.contextGraphId === null
+        ? globalIdle
+        : this.#tasks.isIdleForContextGraph(waiter.contextGraphId);
+      if (satisfied) woken.push(waiter.resolve);
+      else waiting.push(waiter);
+    }
+    this.#idleWaiters = waiting;
+    for (const resolve of woken) resolve();
   }
+
 }
 
 function parseCatalogVersionV1(value: string): bigint {

@@ -141,6 +141,105 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     expect(receiver.stats()).toMatchObject({ scheduled: 1, applied: 1, notFound: 0, failed: 0 });
   });
 
+  it('a scoped idle wait wakes while another context graph is still busy', async () => {
+    const OTHER = '0x3333333333333333333333333333333333333333/other';
+    const busy = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
+      if (head.contextGraphId === OTHER) return busy.promise;
+      return 'applied';
+    }), { retryBackoffMs: 0 });
+
+    receiver.schedule(announcement({ contextGraphId: OTHER }), 'peerOther');
+    receiver.schedule(announcement(), 'peerMine');
+
+    // The node is NOT idle — the other graph is still in flight — but this
+    // graph's own work has drained, which is the whole point of the scope.
+    await receiver.whenIdleForContextGraph(announcement().contextGraphId);
+
+    let globalIdle = false;
+    void receiver.whenIdle().then(() => { globalIdle = true; });
+    await Promise.resolve();
+    expect(globalIdle).toBe(false);
+
+    busy.resolve('applied');
+    await receiver.whenIdle();
+    expect(globalIdle).toBe(true);
+  });
+
+  it('a scoped idle wait does not wake while its own context graph is busy', async () => {
+    const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => gate.promise),
+      { retryBackoffMs: 0 },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+
+    let woke = false;
+    void receiver.whenIdleForContextGraph(head.contextGraphId).then(() => { woke = true; });
+    await Promise.resolve();
+    // Fail-closed: a graph with work in flight must keep its waiter parked, or
+    // a replay pass would declare completion before admissions land.
+    expect(woke).toBe(false);
+
+    gate.resolve('applied');
+    await receiver.whenIdle();
+    expect(woke).toBe(true);
+  });
+
+  it('close drains a scoped waiter so a graceful close cannot hang', async () => {
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler((_peerId, _head, signal) => new Promise<Rfc64PublicCatalogReconcileResultV1>(
+        // Honour the abort the way a real reconciler does; a task that ignores
+        // it keeps close() itself waiting, which is separate behaviour.
+        (resolve) => signal.addEventListener('abort', () => resolve('not-found'), { once: true }),
+      )),
+      { retryBackoffMs: 0 },
+    );
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+
+    let woke = false;
+    void scoped.then(() => { woke = true; });
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // The graceful-close fence awaits this same wait: a waiter stranded here
+    // would park the replay pass forever and hang shutdown.
+    await receiver.close();
+    await expect(scoped).resolves.toBeUndefined();
+  });
+
+  it('cancelContextGraph releases the scoped waiter for that graph', async () => {
+    const OTHER = '0x3333333333333333333333333333333333333333/other';
+    const busy = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler((_peerId, head, signal) => (head.contextGraphId === OTHER
+        ? busy.promise
+        : new Promise<Rfc64PublicCatalogReconcileResultV1>((resolve) => {
+          signal.addEventListener('abort', () => resolve('not-found'), { once: true });
+        }))),
+      { retryBackoffMs: 0 },
+    );
+
+    const head = announcement();
+    receiver.schedule(announcement({ contextGraphId: OTHER }), 'peerOther');
+    receiver.schedule(head, 'peerA');
+    const scoped = receiver.whenIdleForContextGraph(head.contextGraphId);
+    let woke = false;
+    void scoped.then(() => { woke = true; });
+    await Promise.resolve();
+    expect(woke).toBe(false);
+
+    // Released even though the node is still busy with the other graph.
+    receiver.cancelContextGraph(head.contextGraphId);
+    await expect(scoped).resolves.toBeUndefined();
+
+    busy.resolve('applied');
+    await receiver.close();
+  });
+
   it('schedule returns synchronously without awaiting reconciliation', () => {
     const started = deferred<void>();
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async () => {

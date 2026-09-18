@@ -100,7 +100,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
         heads: Object.freeze([]),
       }));
     let idleCalls = 0;
-    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
+    vi.spyOn(service, 'whenReceiverIdleForContextGraph').mockImplementation(async () => {
       idleCalls += 1;
       if (idleCalls === 1) {
         edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
@@ -198,7 +198,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
           heads: Object.freeze([]),
         });
       });
-    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
+    vi.spyOn(service, 'whenReceiverIdleForContextGraph').mockImplementation(async () => {
       edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
     });
 

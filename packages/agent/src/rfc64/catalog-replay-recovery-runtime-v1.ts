@@ -79,7 +79,7 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
     contextGraphId: string,
     peerId: string,
   ): Promise<Rfc64CatalogReplayPeerResultV1<Target>>;
-  whenReceiverIdle(): Promise<void>;
+  whenReceiverIdle(contextGraphId: string): Promise<void>;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
 }
@@ -412,7 +412,10 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         }));
         // Completion-capable provider responses are returned only after every
         // promised announcement is synchronously admitted at this receiver.
-        await this.#ports.whenReceiverIdle();
+        // Scoped to THIS context graph: an unrelated graph's queued work would
+        // otherwise hold this pass open, latching its replay-active flag and
+        // withholding this graph's catalog parity for as long as that lasts.
+        await this.#ports.whenReceiverIdle(input.contextGraphId);
         if (progress.peerWorklist.exhausted) {
           requiresFullReplay = true;
           failed += 1;

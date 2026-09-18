@@ -1243,6 +1243,21 @@ export class Rfc64PublicCatalogServiceV1 {
     await this.#receiver.whenIdle();
   }
 
+  /**
+   * The same wait, but the receiver half is scoped to ONE context graph.
+   *
+   * The accelerator supervisor stays global on purpose: it is a coalescing task
+   * that empties its target map at the start of a pass, so there is a window in
+   * which a graph's outstanding target is recorded nowhere and a scoped wait
+   * would return before the admission lands. Waiting for the whole supervisor
+   * is bounded by one pass; waiting for the whole RECEIVER is not, because any
+   * other graph's queued or wedged work extends it without limit.
+   */
+  async whenReceiverIdleForContextGraph(contextGraphId: string): Promise<void> {
+    await this.#announcedCurrentHeadSupervisor?.whenIdle();
+    await this.#receiver.whenIdleForContextGraph(contextGraphId);
+  }
+
   stats(): Rfc64PublicCatalogServiceStatsV1 {
     return Object.freeze({
       started: this.#started,
