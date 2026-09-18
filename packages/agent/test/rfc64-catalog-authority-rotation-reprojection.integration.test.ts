@@ -497,6 +497,12 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
     // Only the accepted generation may be announced. No peer is reachable here, so the single
     // attempted head counts as one failure -- and the superseded head is not attempted at all.
     // Before the filter this was `failed: 2`.
+    const service = (author as unknown as {
+      rfc64PublicCatalogServiceV1: {
+        announceCatalogHead: (input: any) => Promise<unknown>;
+      };
+    }).rfc64PublicCatalogServiceV1;
+    const announceCatalogHead = vi.spyOn(service, 'announceCatalogHead');
     await expect(author.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWRotationProbe'))
       .resolves.toMatchObject({ announced: 0, failed: 1 });
 
@@ -505,6 +511,16 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
     const accepted = applied
       .filter((head: any) => head.catalogScopeDigest === rotatedScopeDigest);
     expect(accepted).toHaveLength(1);
+
+    // IDENTITY, not count. `{announced: 0, failed: 1}` only proves that ONE of the two
+    // stored heads was attempted: inverting the comparison in
+    // `rfc64CatalogHeadIsSupersededGenerationV1` so the responder announces the SUPERSEDED
+    // generation and withholds the accepted one leaves every count and every other
+    // assertion in this test unchanged. Pin which head the responder actually reached for.
+    expect(announceCatalogHead.mock.calls).toHaveLength(1);
+    expect(announceCatalogHead.mock.calls[0]![0].announcement.catalogHeadObjectDigest)
+      .toEqual(accepted[0].currentCatalogHeadDigest);
+    announceCatalogHead.mockRestore();
     const announcements = await Promise.all(accepted.map(async (head: any) => {
       const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
         objectDigest: head.currentCatalogHeadDigest,
