@@ -18,7 +18,26 @@ import {
 const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
 describe('diagnosticPromoteStage', () => {
-  it.each(PROMOTE_STEP_NAMES)('retains the producer-owned %s stage without its message', (stage) => {
+  // Independent expectation: the CLI's own contract for which stages it will
+  // echo verbatim into an operator log line. Deriving the cases below from
+  // PROMOTE_STEP_NAMES instead would make them true by construction — a stage
+  // added to the publisher tuple would silently add a passing case rather than
+  // fail. Hand-written here so drift in either direction fails THIS assertion,
+  // while the publisher stays the single owner of the runtime set.
+  const EXPECTED_STAGES = [
+    'ensureSubGraphRegistered',
+    'assertGraphScopedLifecycleWritable',
+    'knowledgeAssetPrivateQuads',
+    'assertionScopedQuads',
+    'assertTrustedCatalogTriplesAllowed',
+    'encodeWorkspaceGossipPayload',
+  ];
+
+  it('matches the publisher-owned stage tuple exactly', () => {
+    expect([...PROMOTE_STEP_NAMES].sort()).toEqual([...EXPECTED_STAGES].sort());
+  });
+
+  it.each(EXPECTED_STAGES)('retains the producer-owned %s stage without its message', (stage) => {
     expect(diagnosticPromoteStage(`[promote:${stage}] opaque secret-sentinel failure`)).toBe(stage);
   });
 

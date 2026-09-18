@@ -1,5 +1,8 @@
-import type { PromoteFailureDisposition } from '@origintrail-official/dkg-publisher';
-import type { ClassifiedPromoteError } from '../src/daemon/worker/async-promote-error-classification.js';
+import type { PromoteFailureDisposition, PromoteStepName } from '@origintrail-official/dkg-publisher';
+import type {
+  ClassifiedPromoteError,
+  diagnosticPromoteStage,
+} from '../src/daemon/worker/async-promote-error-classification.js';
 
 type AssertTrue<Value extends true> = Value;
 type AssertFalse<Value extends false> = Value;
@@ -21,3 +24,13 @@ export type FallbackHasNoPublisherDiagnostic = AssertFalse<{
 export type ProseFallbackRemainsSupported = AssertTrue<{
   classification: 'cap_exceeded'; retryable: false;
 } extends ClassifiedPromoteError ? true : false>;
+
+// The stage that reaches the operator log line is the producer-owned literal
+// union or the explicit fallback — never an open `string`. This is the CI-run
+// check (`pnpm --filter cli test:types`) that keeps the publisher tuple and the
+// CLI's diagnostic surface in lockstep at the type level.
+type DiagnosticStage = ReturnType<typeof diagnosticPromoteStage>;
+export type StageIsProducerOwnedOrUnknown = AssertTrue<
+  DiagnosticStage extends PromoteStepName | 'unknown' ? true : false
+>;
+export type StageIsNotOpenString = AssertFalse<string extends DiagnosticStage ? true : false>;

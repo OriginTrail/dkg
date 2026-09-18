@@ -2,11 +2,12 @@
  * Issue #1464 (PR1, diagnostic) — NAME the WM→SWM promote step that threw.
  *
  * The intermittent "root never lands in SWM" failure is masked: a pre-insert
- * awaited op in `assertionPromote` (a `resolveKaNumber` / `assertionScopedQuads`
- * SPARQL read, etc.) can reject — e.g. the 30s `AbortSignal.timeout` on the
- * sparql-http read fires under load — and the raw transport error surfaces in
- * the UI banner with no hint about WHICH step failed. That makes the recurrence
- * look like a silent migration gap rather than a named, actionable throw.
+ * awaited op in `assertionPromote` (an `ensureSubGraphRegistered` /
+ * `assertionScopedQuads` SPARQL read, etc.) can reject — e.g. the 30s
+ * `AbortSignal.timeout` on the sparql-http read fires under load — and the raw
+ * transport error surfaces in the UI banner with no hint about WHICH step
+ * failed. That makes the recurrence look like a silent migration gap rather
+ * than a named, actionable throw.
  *
  * `tagPromoteStep` wraps one awaited op so a rejection is re-surfaced as
  * `"[promote:<step>] <original message>"`. It is DIAGNOSTIC ONLY: it never
@@ -42,13 +43,24 @@ export const PROMOTE_STEP_NAMES = [
 
 export type PromoteStepName = (typeof PROMOTE_STEP_NAMES)[number];
 
+const PROMOTE_STEP_NAME_SET: ReadonlySet<string> = new Set(PROMOTE_STEP_NAMES);
+
+/**
+ * Narrow an arbitrary (possibly caller-influenced) string to a producer-owned
+ * stage. Exported so consumers classify against the tuple through one owned
+ * predicate instead of rebuilding their own membership set from it.
+ */
+export function isPromoteStepName(value: string): value is PromoteStepName {
+  return PROMOTE_STEP_NAME_SET.has(value);
+}
+
 /**
  * Return `err` re-labelled with the promote step that produced it. Idempotent:
  * an error already carrying a `[promote:…]` prefix (the innermost, most specific
  * step) is returned untouched, so nesting a tagged op inside another tagged op
  * keeps the deepest label rather than stacking prefixes.
  */
-export function tagPromoteError(step: string, err: unknown): unknown {
+export function tagPromoteError(step: PromoteStepName, err: unknown): unknown {
   const prefix = `[promote:${step}]`;
   if (err !== null && typeof err === 'object') {
     const e = err as { message?: unknown; name?: unknown; code?: unknown };
