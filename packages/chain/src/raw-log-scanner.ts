@@ -24,6 +24,16 @@ export interface RawLogScanBatch {
   readonly logs: readonly ethers.Log[];
 }
 
+export interface RawLogScanReadOptions {
+  /**
+   * Caller lifecycle signal, evaluated at the scan's CANCELLATION POINT between
+   * the head read and the wide `eth_getLogs`. A caller torn down while the head
+   * probe is in flight (`stop()` then `provider.destroy()`) must not still issue
+   * a `watchdogWideLogScan` against providers that are being closed.
+   */
+  readonly isAborted?: () => boolean;
+}
+
 type RawLogWithIdentity = ethers.Log & {
   blockHash?: unknown;
   transactionHash?: unknown;
@@ -57,13 +67,22 @@ export class RawLogScanner {
     this.#label = config.label;
   }
 
-  async read(filter: RawLogScanFilter): Promise<RawLogScanBatch> {
+  /**
+   * Reads one batch. Returns `undefined` when `options.isAborted` reports the
+   * caller was torn down during the head read, so the wide scan is never issued
+   * and there is no batch to dispatch or commit.
+   */
+  async read(
+    filter: RawLogScanFilter,
+    options?: RawLogScanReadOptions,
+  ): Promise<RawLogScanBatch | undefined> {
     const previousLastScannedBlock = this.#lastScannedBlock;
     const head = await this.readTip(
       `${this.#label} getBlockNumber`,
       (provider) => provider.getBlockNumber(),
       { policy: 'watchdogPointRead' },
     );
+    if (options?.isAborted?.()) return undefined;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
     const logs = await this.readTip<ethers.Log[]>(
       `${this.#label} getLogs`,

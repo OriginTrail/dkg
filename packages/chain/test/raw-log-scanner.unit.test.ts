@@ -59,7 +59,7 @@ describe('RawLogScanner', () => {
     });
 
     const firstBatch = await scanner.read({ address: ADDRESS, topics: [TOPIC_A, TOPIC_B] });
-    expect(firstBatch.logs).toEqual([first]);
+    expect(firstBatch?.logs).toEqual([first]);
     expect(calls.map((call) => call.label)).toEqual([
       'unit scan getBlockNumber',
       'unit scan getLogs',
@@ -72,10 +72,10 @@ describe('RawLogScanner', () => {
       policy: 'watchdogWideLogScan',
       skipPreferred: true,
     });
-    scanner.commit(firstBatch);
+    scanner.commit(firstBatch!);
 
     const secondBatch = await scanner.read({ address: ADDRESS, topics: [TOPIC_A, TOPIC_B] });
-    expect(secondBatch.logs).toEqual([second]);
+    expect(secondBatch?.logs).toEqual([second]);
   });
 
   it('does not advance cursor or dedupe state until the caller commits a batch', async () => {
@@ -89,10 +89,28 @@ describe('RawLogScanner', () => {
 
     const firstBatch = await scanner.read({ address: ADDRESS, topics: [] });
     const secondBatch = await scanner.read({ address: ADDRESS, topics: [] });
-    expect(secondBatch.logs).toEqual([entry]);
-    scanner.commit(firstBatch);
+    expect(secondBatch?.logs).toEqual([entry]);
+    scanner.commit(firstBatch!);
     const thirdBatch = await scanner.read({ address: ADDRESS, topics: [] });
-    expect(thirdBatch.logs).toEqual([]);
+    expect(thirdBatch?.logs).toEqual([]);
+  });
+
+  it('skips the wide scan and returns no batch when the caller aborts during the head read', async () => {
+    const entry = log(4, 0);
+    const provider = providerFor({ heads: [5], logs: [[entry]] });
+    const scanner = new RawLogScanner({
+      label: 'abort scan',
+      readProvider: provider.readProvider,
+      reorgBufferBlocks: 1,
+    });
+
+    const batch = await scanner.read(
+      { address: ADDRESS, topics: [] },
+      { isAborted: () => true },
+    );
+    expect(batch).toBeUndefined();
+    expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+    expect(provider.getLogs).not.toHaveBeenCalled();
   });
 
   it('prunes identities outside the reorg buffer so an old log can be observed again', async () => {
@@ -108,10 +126,10 @@ describe('RawLogScanner', () => {
     });
 
     const firstBatch = await scanner.read({ address: ADDRESS, topics: [] });
-    scanner.commit(firstBatch);
-    scanner.commit(await scanner.read({ address: ADDRESS, topics: [] }));
+    scanner.commit(firstBatch!);
+    scanner.commit((await scanner.read({ address: ADDRESS, topics: [] }))!);
     const reintroduced = await scanner.read({ address: ADDRESS, topics: [] });
-    expect(reintroduced.logs).toEqual([entry]);
+    expect(reintroduced?.logs).toEqual([entry]);
   });
 
   it('uses a deterministic fallback when provider log identity fields are absent', () => {

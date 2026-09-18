@@ -138,6 +138,52 @@ describe('HubRotationPoller', () => {
     }
   });
 
+  it('never issues the wide log scan when stop lands during the head read', async () => {
+    const iface = hubInterface();
+    const rotation = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_000, '71');
+    let releaseHead!: () => void;
+    let headEntered!: () => void;
+    const headGate = new Promise<void>((resolve) => { releaseHead = resolve; });
+    const headEnteredPromise = new Promise<void>((resolve) => { headEntered = resolve; });
+    let headReads = 0;
+    const provider = {
+      getBlockNumber: vi.fn(async () => {
+        headReads += 1;
+        // The first read is the poller's non-blocking startup baseline; gate the
+        // poll's own head probe so stop() can land while it is in flight.
+        if (headReads >= 2) {
+          headEntered();
+          await headGate;
+        }
+        return 1_000;
+      }),
+      getLogs: vi.fn(async () => [rotation]),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+      const pendingPoll = poller.pollOnce();
+      await headEnteredPromise;
+
+      poller.stop();
+      releaseHead();
+      await pendingPoll;
+
+      expect(provider.getLogs).not.toHaveBeenCalled();
+      expect(onContractName).not.toHaveBeenCalled();
+    } finally {
+      poller.stop();
+    }
+  });
+
   it('recovers after a failed periodic poll', async () => {
     vi.useFakeTimers({ now: 0 });
     const hub = hubContract();

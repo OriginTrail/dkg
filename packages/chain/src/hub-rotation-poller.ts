@@ -91,11 +91,11 @@ export class HubRotationPoller {
     const binding = this.binding;
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
-    const batch = await this.scanner.read({
-      address: binding.hubAddress,
-      topics: binding.topics,
-    });
-    if (!this.started || generation !== this.generation) return;
+    const batch = await this.scanner.read(
+      { address: binding.hubAddress, topics: binding.topics },
+      { isAborted: () => !this.started || generation !== this.generation },
+    );
+    if (!batch || !this.started || generation !== this.generation) return;
 
     this.dispatchLogs(binding.hub, batch.logs);
     this.scanner.commit(batch);
