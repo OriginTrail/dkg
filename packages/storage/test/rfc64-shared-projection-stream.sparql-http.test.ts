@@ -9,6 +9,8 @@ import {
   SyncSharedProjectionStoreV1,
   withManagedOxigraphRuntimeStoreConfigV1,
 } from '../src/index.js';
+// Not re-exported from src/index.js: the hook accessor is internal to the package.
+import { getManagedOxigraphRuntimeHooksV1 } from '../src/managed-oxigraph-runtime-store.js';
 import { runRfc64HttpProjectionCapabilityConformance } from './helpers/rfc64-http-projection-capability-conformance.js';
 import {
   createRfc64SharedProjectionTestFixture,
@@ -225,6 +227,12 @@ describe('managed Oxigraph RFC-64 shared-projection stream', () => {
     expect(updated.largeLiteralStorage).toEqual(config.largeLiteralStorage);
     expect(updated.graphSetIndex).toBe(config.graphSetIndex);
     expect(updated.changelog).toBe(true);
+    // Without this the test would pass even if the rewrite minted an empty
+    // hook set, which is the one thing its title claims to cover.
+    expect(getManagedOxigraphRuntimeHooksV1(updated)?.getRecoveryState?.()).toEqual({
+      recovering: false,
+      generation: 7,
+    });
 
     const copied = { ...config };
     expect(() => withManagedOxigraphRuntimeStoreConfigV1(copied, {})).toThrow(
