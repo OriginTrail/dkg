@@ -639,12 +639,20 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
     await rotateToFinalizedChainV1(replica);
     warn.mockClear();
 
-    await replica.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWReplicaProbe').catch(() => {});
+    const debug = vi.spyOn(replica.log, 'debug');
+
+    // No `.catch()`: an absence-only assertion could not tell "the replica stayed quiet"
+    // from "the call threw before the filter ever ran".
+    await expect(replica.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWReplicaProbe'))
+      .resolves.toMatchObject({ announced: 0, failed: 0 });
 
     const withheldWarnings = warn.mock.calls.filter(
       ([, message]) => typeof message === 'string' && message.includes('catalog replay withheld'),
     );
     expect(withheldWarnings).toEqual([]);
+    // The withhold DID happen, and was deliberately quiet: one head, reported at debug.
+    expect(debug.mock.calls.filter(([, message]) => typeof message === 'string'
+      && message.includes('catalog replay withheld 1 superseded head(s)'))).toHaveLength(1);
   }, 60_000);
 
   it('never fabricates a lineage for a graph this node did not author', async () => {
