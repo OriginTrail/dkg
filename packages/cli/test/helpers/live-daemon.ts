@@ -80,7 +80,21 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     ? { type: 'mock' as const }
     : (() => {
         const { rpcUrl, hubAddress } = getSharedContext();
-        return { type: 'evm' as const, rpcUrl, hubAddress, chainId: 'evm:31337' };
+        // The shipped default budget (10 rps, queue 256) exists to protect a
+        // SHARED, METERED public RPC. This harness points at a dedicated
+        // loopback Hardhat node with no such limit, so the default only makes
+        // the daemon throttle ITSELF. That matters because governor admission
+        // is awaited inside `request.getUrlFunc` (rpc-request-transport.ts),
+        // so queue wait is spent inside every RPC's own timeout window: a
+        // queued-but-healthy `eth_chainId` can burn its whole budget before it
+        // is ever dispatched. Same reasoning as status-route-rpc.test.ts.
+        return {
+          type: 'evm' as const,
+          rpcUrl,
+          hubAddress,
+          chainId: 'evm:31337',
+          rpcRequestBudget: { maxRequestsPerSecond: 1_000, burstRequests: 1_000 },
+        };
       })();
 
   await writeFile(
