@@ -122,6 +122,7 @@ export type KnownSwmSenderKeyPackageAckReasonCode =
   | 'revoked-key'
   | 'bad-signature'
   | 'agent-gate-pending'
+  | 'authority-unavailable'
   | 'not-agent-gated'
   | 'unknown';
 
@@ -138,12 +139,14 @@ export const SWM_SENDER_KEY_PACKAGE_ACK_REASON_CODES: readonly KnownSwmSenderKey
   'revoked-key',
   'bad-signature',
   'agent-gate-pending',
+  'authority-unavailable',
   'not-agent-gated',
   'unknown',
 ];
 
 export const SWM_SENDER_KEY_PACKAGE_ACK_RETRYABLE_REASON_CODES: readonly KnownSwmSenderKeyPackageAckReasonCode[] = [
   'agent-gate-pending',
+  'authority-unavailable',
 ];
 
 export const SWM_SENDER_KEY_PACKAGE_ACK_TERMINAL_REASON_CODES: readonly KnownSwmSenderKeyPackageAckReasonCode[] =
