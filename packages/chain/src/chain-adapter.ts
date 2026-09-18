@@ -531,16 +531,19 @@ export interface ContextGraphLiveAuthority {
 }
 
 /**
- * Rejection from `getContextGraphLiveAuthority` when the deployed contract does
- * not expose the combined getter, so callers fall back to the three point
- * reads. Distinct from a nonexistent id (which resolves `null`) and from a
- * transient transport failure (which rejects with the transport's own error).
+ * Rejection from `getContextGraphLiveAuthority` when the single read cannot
+ * answer and retrying it will not help - a tuple that does not decode, a revert
+ * that proves nothing about this id. Callers fall back to the three point
+ * reads, which do not share the tuple. Distinct from a nonexistent id (which
+ * resolves `null`) and from a transient failure, local governor saturation
+ * included (which rejects with the transport's own error and is NOT a cue to
+ * issue more reads).
  */
 export class ContextGraphLiveAuthorityUnsupportedError extends Error {
   readonly code = 'CONTEXT_GRAPH_LIVE_AUTHORITY_UNSUPPORTED' as const;
 
   constructor(detail: string) {
-    super(`ContextGraphStorage.getContextGraph is unavailable on this deployment: ${detail}`);
+    super(`ContextGraphStorage.getContextGraph cannot answer here: ${detail}`);
     this.name = 'ContextGraphLiveAuthorityUnsupportedError';
   }
 }
@@ -2325,9 +2328,9 @@ export interface ChainAdapter {
    * Resolves `null` ONLY when the chain proved the id nonexistent
    * (`ERC721NonexistentToken`); callers must treat that exactly as a liveness
    * probe returning `false` — terminal, never retried. Rejects with
-   * `ContextGraphLiveAuthorityUnsupportedError` when the deployed contract
-   * lacks the getter (callers fall back to the three point reads) and with the
-   * transport's own error on transient failure. Optional, like the point reads
+   * `ContextGraphLiveAuthorityUnsupportedError` on a deterministic failure of
+   * the single read (callers fall back to the three point reads) and with the
+   * transport's own error on a transient one. Optional, like the point reads
    * it composes.
    */
   getContextGraphLiveAuthority?(

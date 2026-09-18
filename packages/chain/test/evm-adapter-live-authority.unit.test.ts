@@ -30,14 +30,29 @@ describe('EVM adapter: one-read live context graph authority', () => {
     expect(readContractWithOptions.mock.calls[0][2]).toBe('getContextGraph');
   });
 
+  it('forwards the id and the caller signal to the read, so cancellation is not silently dropped', async () => {
+    const { adapter, readContractWithOptions } = fixture();
+    readContractWithOptions.mockResolvedValue({ active: true, accessPolicy: 0n, participantAgents: [] });
+    const { signal } = new AbortController();
+
+    await adapter.getContextGraphLiveAuthority(7n, { signal });
+    const [, label, method, args, options] = readContractWithOptions.mock.calls[0];
+    expect(label).toBe('cgStorage.getContextGraph');
+    expect(method).toBe('getContextGraph');
+    expect(args).toEqual([7n]);
+    expect(options).toEqual({ signal });
+  });
+
   it('decodes the positional tuple shape ethers may hand back', async () => {
     const { adapter, readContractWithOptions } = fixture();
-    // (owner, participantAgents, metadataBatchId, active, createdAt, accessPolicy, ...)
-    readContractWithOptions.mockResolvedValue([OTHER, [MEMBER, OTHER], 0n, false, 0n, 0n, 1n, OTHER, 0n]);
+    // (owner, participantAgents, metadataBatchId, active, createdAt, accessPolicy, publishPolicy, ...)
+    // Every slot holds a DIFFERENT value, so reading a neighbouring index
+    // cannot produce the right answer by coincidence.
+    readContractWithOptions.mockResolvedValue([OTHER, [MEMBER, OTHER], 9n, true, 1234n, 1n, 0n, OTHER, 77n]);
 
     await expect(adapter.getContextGraphLiveAuthority(7n)).resolves.toEqual({
-      active: false,
-      accessPolicy: 0,
+      active: true,
+      accessPolicy: 1,
       participantAgents: [MEMBER, OTHER],
     });
   });
@@ -55,36 +70,57 @@ describe('EVM adapter: one-read live context graph authority', () => {
     );
     await expect(byBytes.adapter.getContextGraphLiveAuthority(7n)).resolves.toBeNull();
 
-    // The same error for a DIFFERENT id is not proof about this one.
+    // The same error for a DIFFERENT id is not proof about this one: never
+    // `null`. It is a revert that answers nothing, so the point reads decide.
     const otherId = fixture();
     otherId.readContractWithOptions.mockRejectedValue(
       callException({ data: NONEXISTENT.encodeErrorResult('ERC721NonexistentToken', [8n]) }),
     );
-    await expect(otherId.adapter.getContextGraphLiveAuthority(7n)).rejects.toThrow('execution reverted');
+    await expect(otherId.adapter.getContextGraphLiveAuthority(7n))
+      .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
   });
 
-  it('reports an absent selector as unsupported so callers fall back to the point reads', async () => {
-    const bare = fixture();
-    bare.readContractWithOptions.mockRejectedValue(
+  it('sends every DETERMINISTIC failure of the single read to the point reads', async () => {
+    // No private reading of provider strings: whatever the package classifies
+    // as non-retryable for a view lands here, whichever node produced it.
+    for (const failure of [
+      // geth: no revert payload at all
       Object.assign(new Error('missing revert data'), { code: 'CALL_EXCEPTION', data: null, reason: null }),
-    );
-    await expect(bare.adapter.getContextGraphLiveAuthority(7n))
-      .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
-
-    const badData = fixture();
-    badData.readContractWithOptions.mockRejectedValue(
+      // Hardhat / nodes that echo empty revert data
+      Object.assign(new Error('execution reverted (no data present; likely require(false) occurred'), {
+        code: 'CALL_EXCEPTION', data: '0x', reason: 'require(false)',
+      }),
+      // a revert that carries a reason but says nothing about this id
+      callException({ reason: 'Paused' }),
+      // empty return
       Object.assign(new Error('could not decode result data (value="0x", info=...)'), { code: 'BAD_DATA' }),
-    );
-    await expect(badData.adapter.getContextGraphLiveAuthority(7n))
-      .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+      // the shape a real tuple-layout mismatch produces: a NON-empty payload
+      Object.assign(new Error('could not decode result data (value="0x0000000000000001", info=...)'), {
+        code: 'BAD_DATA',
+      }),
+    ]) {
+      const f = fixture();
+      f.readContractWithOptions.mockRejectedValue(failure);
+      await expect(f.adapter.getContextGraphLiveAuthority(7n))
+        .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+    }
   });
 
-  it('propagates a transient failure unchanged', async () => {
-    const transient = fixture();
-    transient.readContractWithOptions.mockRejectedValue(
+  it('propagates every TRANSIENT failure as the very same error, never as a cue for more reads', async () => {
+    // Identity, not message: the unsupported wrapper quotes the original
+    // message, so a message match would pass on a wrongly wrapped error too.
+    for (const failure of [
       Object.assign(new Error('socket hang up'), { code: 'SERVER_ERROR' }),
-    );
-    await expect(transient.adapter.getContextGraphLiveAuthority(7n)).rejects.toThrow('socket hang up');
+      Object.assign(new Error('request timed out'), { code: 'TIMEOUT' }),
+      // Local governor saturation and an exhausted endpoint set are
+      // retry-LATER: three more reads is the one wrong answer to them.
+      Object.assign(new Error('rpc request queue is full'), { code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' }),
+      Object.assign(new Error('all endpoints failed'), { code: 'RPC_ENDPOINTS_EXHAUSTED' }),
+    ]) {
+      const f = fixture();
+      f.readContractWithOptions.mockRejectedValue(failure);
+      await expect(f.adapter.getContextGraphLiveAuthority(7n)).rejects.toBe(failure);
+    }
   });
 
   it('never reclassifies a CANCELLED read, even when its error looks classifiable', async () => {
@@ -116,14 +152,16 @@ describe('EVM adapter: one-read live context graph authority', () => {
       callException({ revert: { name: 'ERC721NonexistentToken', args: [8n] } }),
     );
     // Resolving null here would be TERMINAL: a live graph reported as gone forever.
-    await expect(otherIdByName.adapter.getContextGraphLiveAuthority(7n)).rejects.toThrow('execution reverted');
+    await expect(otherIdByName.adapter.getContextGraphLiveAuthority(7n))
+      .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
 
     for (const args of [undefined, [], ['not-a-number']]) {
       const malformed = fixture();
       malformed.readContractWithOptions.mockRejectedValue(
         callException({ revert: { name: 'ERC721NonexistentToken', args } }),
       );
-      await expect(malformed.adapter.getContextGraphLiveAuthority(7n)).rejects.toThrow('execution reverted');
+      await expect(malformed.adapter.getContextGraphLiveAuthority(7n))
+        .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
     }
   });
 

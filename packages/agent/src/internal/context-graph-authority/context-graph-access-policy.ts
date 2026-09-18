@@ -47,8 +47,8 @@ export interface LiveOnChainAccessPolicyDependencies {
   /**
    * Optional one-read live authority (liveness, policy, roster from a single
    * `getContextGraph` call). `null` = the chain proved the id nonexistent.
-   * Rejects with `ContextGraphLiveAuthorityUnsupportedError` when the deployed
-   * contract lacks the getter; any other rejection is transient.
+   * Rejects with `ContextGraphLiveAuthorityUnsupportedError` when the single
+   * read deterministically cannot answer; any other rejection is transient.
    */
   readLiveAuthority?:
     | ((onChainId: bigint, signal?: AbortSignal) => Promise<ContextGraphLiveAuthority | null>)
@@ -80,7 +80,7 @@ export async function resolveLiveOnChainAccessPolicyState(
       dependencies, readLiveAuthority, numericId, onChainId, opCtx, options,
     );
     if (resolved !== 'unsupported') return resolved;
-    // An older deployment without the combined getter: the three-read path below.
+    // The single read cannot answer: the three-read path below decides.
   }
 
   const readLiveness = dependencies.isContextGraphActiveOnChain;
@@ -187,6 +187,13 @@ async function resolveFromLiveAuthority(
       error instanceof ContextGraphLiveAuthorityUnsupportedError
       || (error instanceof Error && error.name === 'ContextGraphLiveAuthorityUnsupportedError')
     ) {
+      // Never silent: this resolution now costs four reads where the path it
+      // replaces cost three, and on a permanent fault it does so every time.
+      dependencies.warn(
+        opCtx ?? createOperationContext('share'),
+        `readLiveOnChainAccessPolicy(${onChainId}): single-read authority unavailable, ` +
+        `falling back to the point reads — ${error.message}`,
+      );
       return 'unsupported';
     }
     // Transient: propagates exactly as a rejected liveness read does today.

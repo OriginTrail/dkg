@@ -588,6 +588,20 @@ async function evaluateContextGraphSlotBinding(
   );
 }
 
+/**
+ * Bind an optional chain point read. Options are passed ONLY when a signal is
+ * present, so the call keeps the arity callers and spies have always observed.
+ */
+function bindOptionalChainRead<T>(
+  chain: unknown,
+  read: ((numericId: bigint, options?: { signal?: AbortSignal }) => Promise<T>) | undefined,
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => signal
+    ? read.call(chain, numericId, { signal })
+    : read.call(chain, numericId);
+}
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -879,21 +893,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const readLiveAuthority = this.chain.getContextGraphLiveAuthority;
     return resolveLiveAccessPolicyState(
       {
-        readLiveAuthority: typeof readLiveAuthority === 'function'
-          ? (numericId, signal) => signal
-            ? readLiveAuthority.call(this.chain, numericId, { signal })
-            : readLiveAuthority.call(this.chain, numericId)
-          : undefined,
-        isContextGraphActiveOnChain: typeof readLiveness === 'function'
-          ? (numericId, signal) => signal
-            ? readLiveness.call(this.chain, numericId, { signal })
-            : readLiveness.call(this.chain, numericId)
-          : undefined,
-        getContextGraphAccessPolicy: typeof readAccessPolicy === 'function'
-          ? (numericId, signal) => signal
-            ? readAccessPolicy.call(this.chain, numericId, { signal })
-            : readAccessPolicy.call(this.chain, numericId)
-          : undefined,
+        readLiveAuthority: bindOptionalChainRead(this.chain, readLiveAuthority),
+        isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
+        getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
         runBoundedRead: async (start, label, signal) => {
           const value = await this.raceChainPolicyRead(start, label, signal);
           return value === TIMEOUT_SENTINEL

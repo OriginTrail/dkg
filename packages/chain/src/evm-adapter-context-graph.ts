@@ -38,7 +38,7 @@ import {
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
-import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
+import { isRetryableRpcError, isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { markContextGraphRegistrationNotSubmitted } from
   './context-graph-registration-error.js';
@@ -734,10 +734,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     } catch (err) {
       if (options.signal?.aborted) throw err;
       if (isNonexistentContextGraphRevert(err, contextGraphId)) return null;
-      if (isLiveAuthorityViewUnsupported(err)) {
-        throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err));
-      }
-      throw err;
+      if (isLiveAuthorityReadTransient(err)) throw err;
+      throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err));
     }
     return decodeContextGraphLiveAuthority(raw, contextGraphId);
   }
@@ -1142,7 +1140,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         );
         const raw =
           cg?.accessPolicy
-          ?? (Array.isArray(cg) ? cg[5] : undefined);
+          ?? (Array.isArray(cg) ? cg[CONTEXT_GRAPH_TUPLE_INDEX.accessPolicy] : undefined);
         if (raw === undefined || raw === null) {
           throw new Error('ContextGraphStorage.getContextGraph returned no accessPolicy field');
         }
@@ -1502,6 +1500,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   }
 }
 
+/**
+ * Positional layout of `ContextGraphStorage.getContextGraph`, for the one shape
+ * ethers may hand back without names. One map, so the two decoders that fall
+ * back to positions cannot drift apart.
+ */
+const CONTEXT_GRAPH_TUPLE_INDEX = { participantAgents: 1, active: 3, accessPolicy: 5 } as const;
+
 const ERC721_NONEXISTENT_TOKEN_INTERFACE = new ethers.Interface([
   'error ERC721NonexistentToken(uint256 tokenId)',
 ]);
@@ -1538,25 +1543,22 @@ function isNonexistentContextGraphRevert(err: unknown, contextGraphId: bigint): 
 }
 
 /**
- * The shapes an absent selector produces: a bare CALL_EXCEPTION with no revert
- * payload ("missing revert data"), BAD_DATA on an empty return, or an explicit
- * selector message. A bare revert cannot mean "nonexistent" here — that path
- * always carries a payload — so reading it as unsupported is fail-safe: the
- * caller falls back to the three point reads, which answer either way.
+ * Transient for this view: another attempt may succeed, and the three point
+ * reads would fail the same way, so the error propagates. The package's own
+ * disposition decides, not a private reading of provider error strings. That
+ * covers local governor saturation and an exhausted endpoint set
+ * (`retry-later`) — answering those with three MORE reads would be exactly
+ * wrong. `BAD_DATA` is excluded for the reason `isContractViewRetryable`
+ * gives: on a view it is a deterministic client-side decode, not an outage.
+ *
+ * Everything else is a deterministic failure of THIS view. `getContextGraph`
+ * has shipped beside the point reads since v10.0.0, so it is never "selector
+ * absent"; it is a tuple that does not decode, or a revert that proves nothing
+ * about this id. The point reads do not share the tuple and already own the
+ * established disposition of every such fault, so they decide.
  */
-function isLiveAuthorityViewUnsupported(err: unknown): boolean {
-  const code = rpcErrorCode(err);
-  const msg = rpcErrorMessage(err).toLowerCase();
-  if (code === 'BAD_DATA') {
-    return msg.includes('could not decode result data') && msg.includes('value="0x"');
-  }
-  if (code === 'CALL_EXCEPTION') {
-    const e = err as { data?: unknown; reason?: unknown };
-    const hasPayload = (e.data != null && e.data !== '0x')
-      || (typeof e.reason === 'string' && e.reason.length > 0);
-    if (!hasPayload && msg.includes('missing revert data')) return true;
-  }
-  return msg.includes('function selector') || msg.includes('selector not recognized');
+function isLiveAuthorityReadTransient(err: unknown): boolean {
+  return isRetryableRpcError(err) && rpcErrorCode(err) !== 'BAD_DATA';
 }
 
 function decodeContextGraphLiveAuthority(
@@ -1565,15 +1567,16 @@ function decodeContextGraphLiveAuthority(
 ): ContextGraphLiveAuthority {
   const named = (raw ?? {}) as { active?: unknown; accessPolicy?: unknown; participantAgents?: unknown };
   const positional = Array.isArray(raw) ? (raw as unknown[]) : [];
-  const active = named.active ?? positional[3];
-  const accessPolicy = named.accessPolicy ?? positional[5];
-  const agents = named.participantAgents ?? positional[1];
-  // A tuple that does not decode is an ABI/layout mismatch, not a transient
-  // fault and not an answer. Report it as UNSUPPORTED so the caller falls back
-  // to the three point reads, which already own the established disposition of
-  // every malformed value (a bad policy is terminal `unknown`, a bad roster is
-  // terminal `invalid`). Throwing a plain error instead would resurface as the
-  // RETRYABLE policy-unavailable reason and retry a permanent fault forever.
+  const active = named.active ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.active];
+  const accessPolicy = named.accessPolicy ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.accessPolicy];
+  const agents = named.participantAgents ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.participantAgents];
+  // Boundary check on an `unknown`. ethers itself never hands back a wrongly
+  // typed field - a real ABI mismatch arrives as BAD_DATA and takes the same
+  // exit through the catch in the caller - so this guards the seam (a rebound
+  // or substituted read), not the wire. Either way the answer is UNSUPPORTED:
+  // the three point reads own the established disposition of every malformed
+  // value, where a plain throw would resurface as the RETRYABLE
+  // policy-unavailable reason and retry a permanent fault forever.
   let policy: number;
   try {
     if (typeof active !== 'boolean' || !Array.isArray(agents)) throw new Error('tuple layout');

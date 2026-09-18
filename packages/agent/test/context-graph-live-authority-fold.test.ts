@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ContextGraphLiveAuthorityUnsupportedError,
   MockChainAdapter,
+  type ContextGraphLiveAuthority,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import {
@@ -61,9 +62,9 @@ describe('folding liveness + policy + roster into one live authority read', () =
     expect(deps.isContextGraphActiveOnChain).not.toHaveBeenCalled();
   });
 
-  it('falls back to the three point reads when the deployment lacks the getter', async () => {
+  it('falls back to the three point reads when the single read cannot answer, and says so', async () => {
     const deps = dependencies({
-      readLiveAuthority: vi.fn(async () => { throw new ContextGraphLiveAuthorityUnsupportedError('old deployment'); }),
+      readLiveAuthority: vi.fn(async () => { throw new ContextGraphLiveAuthorityUnsupportedError('tuple layout'); }),
     });
     await expect(resolveLiveOnChainAccessPolicyState(deps, '7')).resolves.toEqual({
       kind: 'available',
@@ -71,6 +72,21 @@ describe('folding liveness + policy + roster into one live authority read', () =
     });
     expect(deps.isContextGraphActiveOnChain).toHaveBeenCalledTimes(1);
     expect(deps.getContextGraphAccessPolicy).toHaveBeenCalledTimes(1);
+    // Never silent: on a permanent fault this path costs four reads per
+    // resolution, and an operator has to be able to see that and why.
+    expect(deps.warn).toHaveBeenCalledTimes(1);
+    expect(deps.warn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/readLiveOnChainAccessPolicy\(7\).*falling back to the point reads.*tuple layout/),
+    );
+  });
+
+  it('stays quiet on the normal single-read path', async () => {
+    const deps = dependencies({
+      readLiveAuthority: vi.fn(async () => ({ active: true, accessPolicy: 0, participantAgents: [] })),
+    });
+    await resolveLiveOnChainAccessPolicyState(deps, '7');
+    expect(deps.warn).not.toHaveBeenCalled();
   });
 
   it('propagates a transient failure exactly like a rejected liveness read', async () => {
@@ -101,6 +117,20 @@ describe('folding liveness + policy + roster into one live authority read', () =
       readLiveAuthority: vi.fn(async () => ({ active: true, accessPolicy: 0, participantAgents: [MEMBER] })),
     });
     // A public graph has no roster consumer; nothing should travel with it.
+    await expect(resolveLiveOnChainAccessPolicyState(deps, '7')).resolves.toEqual({
+      kind: 'available',
+      accessPolicy: 0,
+    });
+  });
+
+  it('answers a public graph even when the adapter sent no roster at all', async () => {
+    const deps = dependencies({
+      // The roster is irrelevant to a public answer, so its absence must not
+      // turn that answer into a throw (and from there into a retryable fault).
+      readLiveAuthority: vi.fn(async () => (
+        { active: true, accessPolicy: 0 } as unknown as ContextGraphLiveAuthority
+      )),
+    });
     await expect(resolveLiveOnChainAccessPolicyState(deps, '7')).resolves.toEqual({
       kind: 'available',
       accessPolicy: 0,
@@ -189,7 +219,7 @@ describe('registered authority resolution uses the roster from the single read',
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
     vi.spyOn(chain, 'getContextGraphLiveAuthority')
-      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('old deployment'));
+      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('tuple layout'));
     vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
     vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(1);
     vi.spyOn(chain, 'getContextGraphParticipantAgents')
@@ -208,7 +238,7 @@ describe('registered authority resolution uses the roster from the single read',
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
     vi.spyOn(chain, 'getContextGraphLiveAuthority')
-      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('old deployment'));
+      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('tuple layout'));
     vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
     vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(1);
     const roster = vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([MEMBER]);
