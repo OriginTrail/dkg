@@ -33,6 +33,11 @@ import {
   withRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
 import {
+  buildRfc64CatalogStatusSnapshotV1,
+  type Rfc64CatalogStatusRuntimeV1,
+  type ResolvedRfc64CatalogActivationsV1,
+} from '@origintrail-official/dkg-agent';
+import {
   createDaemonRpcRuntime,
   type DaemonRouteRpcTransport,
 } from '../src/daemon/rpc-runtime.js';
@@ -52,6 +57,11 @@ import {
 } from '../src/daemon/routes/status.js';
 import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
   '../src/daemon/routes/rfc64-status-contract.js';
+import {
+  buildRfc64StatusBlocksV1,
+  sanitizeRfc64CatalogStatusSnapshotV1,
+} from
+  '../src/daemon/routes/rfc64-status-block.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
@@ -77,6 +87,33 @@ function resolveStatusActivationState(config: Record<string, unknown>) {
     config as never,
     resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
   ).activationState;
+}
+
+function readDisabledRfc64CatalogStatusSnapshotV1() {
+  const activations = resolveRfc64CatalogActivations(
+    {} as never,
+    resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+  );
+  return buildRfc64CatalogStatusSnapshotV1({
+    activations,
+    runtime: {
+      service: null,
+      bootstrap: null,
+      runtimeSelection: {
+        subscriptionDriven: false,
+        eligibleContextGraphs: [],
+        selectedContextGraphs: [],
+      },
+      responsibilities: [],
+      authorityRpcCircuit: {
+        state: 'closed',
+        consecutiveExhaustions: 0,
+        retryAtMs: null,
+      },
+      contextGraphs: [],
+      shadowExecution: null,
+    },
+  });
 }
 
 describe('daemon direct RPC probe admission', () => {
@@ -199,6 +236,55 @@ async function requestStatusWithAgent(
       chain: { type: 'mock' },
       ...configOverrides,
     };
+    const resolvedActivations = resolveRfc64CatalogActivations(
+      config as never,
+      resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+    );
+    const statusActivations = {
+      ...resolvedActivations,
+      catalog: rfc64CatalogOverride ?? resolvedActivations.catalog,
+      publicCatalog: rfc64PublicCatalogOverride ?? resolvedActivations.publicCatalog,
+    } as ResolvedRfc64CatalogActivationsV1;
+    const runtimeEnabled = rfc64CatalogOverride?.enabled
+      ?? rfc64PublicCatalogOverride?.enabled
+      ?? (
+        Object.hasOwn(configOverrides, 'rfc64Catalog')
+        || Object.hasOwn(configOverrides, 'rfc64PublicCatalog')
+          ? resolvedActivations.catalog.enabled
+          : false
+      );
+    const runtime = {
+      service: runtimeEnabled
+        && typeof agentOverrides.rfc64PublicCatalogStatsV1 === 'function'
+        ? agentOverrides.rfc64PublicCatalogStatsV1()
+        : null,
+      bootstrap: runtimeEnabled
+        && typeof agentOverrides.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
+        ? agentOverrides.readRfc64PublicCatalogBootstrapStatusV1()
+        : null,
+      runtimeSelection: typeof agentOverrides.readRfc64CatalogRuntimeSelectionV1 === 'function'
+        ? agentOverrides.readRfc64CatalogRuntimeSelectionV1()
+        : {
+            subscriptionDriven: false,
+            eligibleContextGraphs: statusActivations.catalog.selectedContextGraphs,
+            selectedContextGraphs: statusActivations.catalog.selectedContextGraphs,
+          },
+      responsibilities: typeof agentOverrides.readRfc64CatalogResponsibilitiesV1 === 'function'
+        ? agentOverrides.readRfc64CatalogResponsibilitiesV1()
+        : [],
+      authorityRpcCircuit:
+        typeof agentOverrides.readRfc64AuthorityRpcCircuitSnapshotV1 === 'function'
+          ? agentOverrides.readRfc64AuthorityRpcCircuitSnapshotV1()
+          : { state: 'closed', consecutiveExhaustions: 0, retryAtMs: null },
+      contextGraphs: typeof agentOverrides.readRfc64CatalogOperationalStatusV1 === 'function'
+        ? await agentOverrides.readRfc64CatalogOperationalStatusV1()
+        : [],
+      shadowExecution:
+        runtimeEnabled
+        && typeof agentOverrides.readRfc64CatalogShadowExecutionStatusV1 === 'function'
+          ? agentOverrides.readRfc64CatalogShadowExecutionStatusV1()
+          : null,
+    } as Rfc64CatalogStatusRuntimeV1;
     await handleStatusRoutes({
       req,
       res,
@@ -226,6 +312,12 @@ async function requestStatusWithAgent(
         },
         publisher: { getIdentityId: () => 0n },
         getSyncContextGraphIds: () => [],
+        readRfc64CatalogStatusSnapshotV1: async () => (
+          buildRfc64CatalogStatusSnapshotV1({
+            activations: statusActivations,
+            runtime,
+          })
+        ),
         ...agentOverrides,
       },
       nodeVersion: '0.0.0-test',
@@ -304,6 +396,39 @@ describe('/api/chain/rpc-health partial adapter configuration', () => {
 });
 
 describe('/api/status RFC-64 private recovery privacy', () => {
+  it('rejects a version-skewed aggregate RFC-64 snapshot', () => {
+    expect(sanitizeRfc64CatalogStatusSnapshotV1({
+      schemaVersion: 2,
+      rfc64PublicCatalog: {},
+      rfc64Catalog: {},
+      privateProvider: 'must-not-cross-http',
+    })).toBeNull();
+  });
+
+  it('fails closed when the aggregate snapshot capability is absent or version-skewed', async () => {
+    await expect(buildRfc64StatusBlocksV1({ agent: {} }))
+      .rejects.toThrow(/capability is unavailable/u);
+    await expect(buildRfc64StatusBlocksV1({
+      agent: {
+        readRfc64CatalogStatusSnapshotV1: async () => ({ schemaVersion: 2 }) as never,
+      },
+    })).rejects.toThrow(/schema is unsupported or malformed/u);
+  });
+
+  it('invokes the aggregate snapshot capability with the agent receiver', async () => {
+    const agent = {
+      async readRfc64CatalogStatusSnapshotV1() {
+        expect(this).toBe(agent);
+        return readDisabledRfc64CatalogStatusSnapshotV1();
+      },
+    };
+
+    await expect(buildRfc64StatusBlocksV1({ agent })).resolves.toMatchObject({
+      rfc64Catalog: { enabled: true },
+      rfc64PublicCatalog: { enabled: false },
+    });
+  });
+
   it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {
     const readCircuit = vi.fn(() => ({
       state: 'open' as const,
@@ -1594,6 +1719,7 @@ describe('/api/status selected overlay details', () => {
             getRelayStats: () => null,
           },
           publisher: { getIdentityId: () => 0n },
+          readRfc64CatalogStatusSnapshotV1: readDisabledRfc64CatalogStatusSnapshotV1,
         },
         nodeVersion: '0.0.0-test',
         nodeCommit: '',
@@ -1665,6 +1791,7 @@ describe('/api/status selected overlay details', () => {
             getSyncContextGraphIds: () => [],
             node: { libp2p: { getConnections: () => [] }, getRelayStats: () => null },
             publisher: { getIdentityId: () => 0n },
+            readRfc64CatalogStatusSnapshotV1: readDisabledRfc64CatalogStatusSnapshotV1,
           },
           nodeVersion: '0.0.0-test',
           nodeCommit: '',

@@ -1,293 +1,194 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createHash } from 'node:crypto';
-
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
-  rfc64CatalogRolloutModeForContextGraphV1,
-} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
+  buildRfc64CatalogConfigurationEvidenceV1,
+  type DKGAgent,
+  type Rfc64CatalogStatusSnapshotV1,
+} from '@origintrail-official/dkg-agent';
 
-import type {
-  Rfc64CatalogNormalizedActivationState,
-  ResolvedRfc64CatalogActivationConfig,
-  ResolvedRfc64PublicCatalogActivationConfig,
-} from '../../config.js';
 import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from './rfc64-status-contract.js';
 
-/** Narrow read-only agent capability used by the public RFC-64 status facade. */
+export { buildRfc64CatalogConfigurationEvidenceV1 };
+
+/** One package-boundary capability; subsystem topology remains agent-owned. */
 export interface Rfc64StatusReaderV1 {
-  readonly rfc64PublicCatalogStatsV1?:
-    OmitThisParameter<DKGAgent['rfc64PublicCatalogStatsV1']>;
-  readonly readRfc64PublicCatalogBootstrapStatusV1?:
-    OmitThisParameter<DKGAgent['readRfc64PublicCatalogBootstrapStatusV1']>;
-  readonly readRfc64CatalogRuntimeSelectionV1?:
-    OmitThisParameter<DKGAgent['readRfc64CatalogRuntimeSelectionV1']>;
-  readonly readRfc64CatalogResponsibilitiesV1?:
-    OmitThisParameter<DKGAgent['readRfc64CatalogResponsibilitiesV1']>;
-  readonly readRfc64AuthorityRpcCircuitSnapshotV1?:
-    OmitThisParameter<DKGAgent['readRfc64AuthorityRpcCircuitSnapshotV1']>;
-  readonly readRfc64CatalogOperationalStatusV1?:
-    OmitThisParameter<DKGAgent['readRfc64CatalogOperationalStatusV1']>;
-  readonly readRfc64CatalogShadowExecutionStatusV1?:
-    OmitThisParameter<DKGAgent['readRfc64CatalogShadowExecutionStatusV1']>;
+  readonly readRfc64CatalogStatusSnapshotV1?:
+    OmitThisParameter<DKGAgent['readRfc64CatalogStatusSnapshotV1']>;
 }
 
-export interface Rfc64CatalogConfigurationEvidenceV1 {
-  readonly schemaVersion: 1;
-  readonly source:
-    | 'default-omitted'
-    | 'operator-override'
-    | 'compatibility-seed'
-    | 'explicit-disabled';
-  readonly catalogControlPresent: boolean;
-  readonly deprecatedPublicControlPresent: boolean;
-  readonly activationManifestPresent: boolean;
-  readonly deprecatedDisabledOverride: boolean;
-  readonly killSwitch: boolean;
-  readonly defaultMode: 'legacy' | 'shadow' | 'catalog';
-  readonly legacyOverrideCount: number;
-  readonly shadowOverrideCount: number;
-  readonly digest: string;
-}
+const RFC64_STATUS_SNAPSHOT_FIELDS_V1 = Object.freeze([
+  'rfc64Catalog',
+  'rfc64PublicCatalog',
+  'schemaVersion',
+]);
+const RFC64_PUBLIC_STATUS_FIELDS_V1 = Object.freeze([
+  'autoPublishEnabled',
+  'bootstrap',
+  'completeSwmProviders',
+  'enabled',
+  'rollout',
+  'runtimeSelection',
+  'selectedContextGraphs',
+  'service',
+]);
+const RFC64_CATALOG_STATUS_FIELDS_V1 = Object.freeze([
+  'authorityRpcCircuit',
+  'autoPublishEnabled',
+  'configuration',
+  'contextGraphs',
+  'enabled',
+  'privateAuthorityConfigured',
+  'privateRecovery',
+  'resourceTelemetry',
+  'responsibilities',
+  'rollout',
+  'runtimeSelection',
+  'selectedContextGraphs',
+  'selectedPrivateContextGraphs',
+  'selectedPublicContextGraphs',
+  'shadowExecution',
+]);
 
 /**
- * Privacy-safe attestation of the startup controls that selected RFC-64.
- * Private graph ids and policy material participate in the digest but never
- * leave the node; a release harness can still prove the clean omission case.
+ * Validate the version and rebuild the HTTP boundary from an explicit
+ * allow-list. Unknown top-level fields or block fields indicate package skew
+ * and fail closed instead of being serialized accidentally.
  */
-export function buildRfc64CatalogConfigurationEvidenceV1(
-  activationState: Rfc64CatalogNormalizedActivationState,
-): Rfc64CatalogConfigurationEvidenceV1 {
-  const { configuration, execution } = activationState;
-  const catalogControlPresent = configuration.source === 'unified';
-  const deprecatedPublicControlPresent = configuration.source === 'deprecated-public'
-    || (
-      configuration.source === 'unified'
-      && configuration.deprecatedPublicControlPresent
-    );
-  const activationManifestPresent = configuration.source === 'unified'
-    || configuration.source === 'deprecated-public'
-    ? configuration.activationManifestPresent
-    : false;
-  const deprecatedDisabledOverride = execution.mode === 'compatibility-rollback';
-  const modes = Object.entries(execution.rollout.contextGraphModes)
-    .sort(([left], [right]) => left.localeCompare(right));
-  const defaultMode = execution.rollout.defaultMode;
-  const source = deprecatedDisabledOverride
-    ? 'explicit-disabled'
-    : configuration.source === 'omitted'
-      ? 'default-omitted'
-      : activationManifestPresent
-        ? 'compatibility-seed'
-        : 'operator-override';
-  const digestPayload = {
-    schemaVersion: 1,
-    catalogControlPresent,
-    deprecatedPublicControlPresent,
-    activationManifestPresent,
-    deprecatedDisabledOverride,
-    killSwitch: execution.rollout.killSwitch,
-    defaultMode,
-    contextGraphModes: modes,
-  };
+export function sanitizeRfc64CatalogStatusSnapshotV1(
+  input: unknown,
+): Rfc64CatalogStatusSnapshotV1 | null {
+  if (!isRecordV1(input) || input.schemaVersion !== 1) return null;
+  if (!hasExactFieldsV1(input, RFC64_STATUS_SNAPSHOT_FIELDS_V1)) return null;
+  const publicCatalog = input.rfc64PublicCatalog;
+  const catalog = input.rfc64Catalog;
+  if (
+    !isRecordV1(publicCatalog)
+    || !hasExactFieldsV1(publicCatalog, RFC64_PUBLIC_STATUS_FIELDS_V1)
+    || !isRecordV1(catalog)
+    || !hasExactFieldsV1(catalog, RFC64_CATALOG_STATUS_FIELDS_V1)
+  ) return null;
+  const authorityRpcCircuit = sanitizeRfc64AuthorityRpcCircuitSnapshotV1(
+    catalog.authorityRpcCircuit,
+  );
+  const shadowExecution = catalog.shadowExecution === null
+    ? null
+    : sanitizeRfc64CatalogShadowExecutionStatusV1(catalog.shadowExecution);
+  const selectedPublicContextGraphs = stringArrayV1(catalog.selectedPublicContextGraphs);
+
   return Object.freeze({
     schemaVersion: 1,
-    source,
-    catalogControlPresent,
-    deprecatedPublicControlPresent,
-    activationManifestPresent,
-    deprecatedDisabledOverride,
-    killSwitch: execution.rollout.killSwitch,
-    defaultMode,
-    legacyOverrideCount:
-      defaultMode === 'legacy' ? 0 : modes.filter(([, mode]) => mode === 'legacy').length,
-    shadowOverrideCount:
-      defaultMode === 'shadow' ? 0 : modes.filter(([, mode]) => mode === 'shadow').length,
-    digest: `sha256:${createHash('sha256')
-      .update(JSON.stringify(digestPayload))
-      .digest('hex')}`,
-  });
+    rfc64PublicCatalog: Object.freeze({
+      enabled: publicCatalog.enabled,
+      selectedContextGraphs: stringArrayV1(publicCatalog.selectedContextGraphs),
+      runtimeSelection: projectRecordV1(publicCatalog.runtimeSelection, [
+        'selectedContextGraphs',
+        'subscriptionDriven',
+      ]),
+      rollout: projectRecordV1(publicCatalog.rollout, [
+        'contextGraphModes',
+        'killSwitch',
+      ]),
+      autoPublishEnabled: publicCatalog.autoPublishEnabled,
+      completeSwmProviders: projectRecordArrayV1(publicCatalog.completeSwmProviders, [
+        'accessPolicy',
+        'contextGraphId',
+        'providers',
+        'publishPolicy',
+      ]),
+      service: sanitizeRfc64ServiceStatsV1(publicCatalog.service),
+      bootstrap: sanitizeRfc64PublicBootstrapV1(
+        publicCatalog.bootstrap,
+        new Set(selectedPublicContextGraphs),
+      ),
+    }),
+    rfc64Catalog: Object.freeze({
+      enabled: catalog.enabled,
+      selectedContextGraphs: stringArrayV1(catalog.selectedContextGraphs),
+      selectedPublicContextGraphs,
+      selectedPrivateContextGraphs: stringArrayV1(catalog.selectedPrivateContextGraphs),
+      runtimeSelection: projectRecordV1(catalog.runtimeSelection, [
+        'eligibleContextGraphs',
+        'selectedContextGraphs',
+        'subscriptionDriven',
+      ]),
+      responsibilities: projectRecordArrayV1(catalog.responsibilities, [
+        'active',
+        'contextGraphId',
+        'mode',
+        'responsibilityReason',
+        'responsible',
+        'selectionSource',
+      ]),
+      authorityRpcCircuit,
+      contextGraphs: sanitizeRfc64OperationalStatusesV1(catalog.contextGraphs),
+      shadowExecution,
+      configuration: projectRecordV1(catalog.configuration, [
+        'activationManifestPresent',
+        'catalogControlPresent',
+        'defaultMode',
+        'deprecatedDisabledOverride',
+        'deprecatedPublicControlPresent',
+        'digest',
+        'killSwitch',
+        'legacyOverrideCount',
+        'schemaVersion',
+        'shadowOverrideCount',
+        'source',
+      ]),
+      autoPublishEnabled: catalog.autoPublishEnabled,
+      rollout: projectRecordV1(catalog.rollout, [
+        'contextGraphModes',
+        'defaultMode',
+        'killSwitch',
+      ]),
+      privateAuthorityConfigured: catalog.privateAuthorityConfigured,
+      privateRecovery: projectRecordArrayV1(catalog.privateRecovery, [
+        'accessPolicy',
+        'completionReasons',
+        'contextGraphId',
+        'mode',
+        'outcomeCounts',
+        'publishPolicy',
+        'targetCount',
+        'vmRequired',
+      ]),
+      resourceTelemetry: projectNullableRecordV1(catalog.resourceTelemetry, [
+        'controlObjectCacheHits',
+        'controlObjectNetworkFetches',
+        'kaBundleCacheBytes',
+        'kaBundleCacheHits',
+        'kaBundleNetworkBytes',
+        'kaBundleNetworkFetches',
+        'providerAttempts',
+        'providerBackoffMs',
+        'providerSuccesses',
+        'providerSwitches',
+      ]),
+    }),
+  }) as unknown as Rfc64CatalogStatusSnapshotV1;
 }
 
 /**
- * Collect and project both RFC-64 status surfaces behind one compatibility and
- * privacy boundary. HTTP routes insert these completed blocks without probing
- * feature-specific agent methods or forwarding provider-owned objects.
+ * Read the agent-owned DTO and unwrap it into the two legacy HTTP blocks.
  */
 export async function buildRfc64StatusBlocksV1(input: Readonly<{
-  activationState: Rfc64CatalogNormalizedActivationState;
-  catalogActivation?: ResolvedRfc64CatalogActivationConfig;
-  publicCatalogActivation: ResolvedRfc64PublicCatalogActivationConfig;
   agent: Rfc64StatusReaderV1;
 }>) {
-  const {
-    publicCatalogActivation,
-    agent,
-  } = input;
-  const catalogActivation = input.catalogActivation ?? {
-    enabled: publicCatalogActivation.enabled,
-    selectedContextGraphs: publicCatalogActivation.selectedContextGraphs,
-    selectedPublicContextGraphs: publicCatalogActivation.selectedContextGraphs,
-    selectedPrivateContextGraphs: [],
-    selectedCatalogAuthoringControls: [],
-    accessPolicyAuthority: undefined,
-    bootstrap: undefined,
-    autoPublish: publicCatalogActivation.autoPublish,
-    rollout: publicCatalogActivation.rollout,
-  };
-  const rollout = input.activationState.execution.rollout;
-  const configuration = buildRfc64CatalogConfigurationEvidenceV1(input.activationState);
-  const service = catalogActivation.enabled
-    && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
-    ? agent.rfc64PublicCatalogStatsV1()
-    : null;
-  const bootstrapStatus = catalogActivation.enabled
-    && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
-    ? agent.readRfc64PublicCatalogBootstrapStatusV1()
-    : null;
-  const runtimeSelection = typeof agent.readRfc64CatalogRuntimeSelectionV1 === 'function'
-    ? agent.readRfc64CatalogRuntimeSelectionV1()
-    : {
-        subscriptionDriven: false,
-        eligibleContextGraphs: catalogActivation.selectedContextGraphs,
-        selectedContextGraphs: catalogActivation.selectedContextGraphs,
-      };
-  const responsibilities = typeof agent.readRfc64CatalogResponsibilitiesV1 === 'function'
-    ? agent.readRfc64CatalogResponsibilitiesV1()
-    : [];
-  const authorityRpcCircuit =
-    typeof agent.readRfc64AuthorityRpcCircuitSnapshotV1 === 'function'
-      ? sanitizeRfc64AuthorityRpcCircuitSnapshotV1(
-          agent.readRfc64AuthorityRpcCircuitSnapshotV1(),
-        )
-      : null;
-  const contextGraphs = typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
-    ? await agent.readRfc64CatalogOperationalStatusV1()
-    : [];
-  const shadowExecution = catalogActivation.enabled
-    && typeof agent.readRfc64CatalogShadowExecutionStatusV1 === 'function'
-    ? sanitizeRfc64CatalogShadowExecutionStatusV1(
-        agent.readRfc64CatalogShadowExecutionStatusV1(),
-      )
-    : null;
-  const selectedPublicContextGraphs = new Set(
-    catalogActivation.selectedPublicContextGraphs,
+  const readSnapshot = input.agent.readRfc64CatalogStatusSnapshotV1;
+  if (typeof readSnapshot !== 'function') {
+    throw new Error(
+      'RFC-64 status snapshot capability is unavailable; agent and CLI versions must match',
+    );
+  }
+  const snapshot = sanitizeRfc64CatalogStatusSnapshotV1(
+    await readSnapshot.call(input.agent),
   );
-  const publicBootstrap = publicCatalogActivation.enabled && bootstrapStatus !== null
-    ? {
-        ...bootstrapStatus,
-        // Keep the compatibility surface public-only. The shared runtime
-        // status also contains private targets and provider identities.
-        targets: bootstrapStatus.targets.filter(
-          ({ scope }) => selectedPublicContextGraphs.has(scope.contextGraphId),
-        ),
-      }
-    : null;
-  const privateRecovery = catalogActivation.selectedPrivateContextGraphs.map(
-    (contextGraphId) => {
-      const targets = bootstrapStatus?.targets.filter(
-        ({ scope }) => scope.contextGraphId === contextGraphId,
-      ) ?? [];
-      const outcomeCounts = Object.fromEntries(
-        [...new Set(targets.map(({ outcome }) => outcome))]
-          .sort()
-          .map((outcome) => [
-            outcome,
-            targets.filter((target) => target.outcome === outcome).length,
-          ]),
-      );
-      const completionReasons = [...new Set(targets.flatMap(
-        ({ completionReason }) => completionReason === null ? [] : [completionReason],
-      ))].sort();
-      const accepted = catalogActivation.bootstrap?.acceptedPolicies.find(
-        ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
-      );
-      return {
-        contextGraphId,
-        mode: rfc64CatalogRolloutModeForContextGraphV1(
-          catalogActivation,
-          contextGraphId,
-        ),
-        accessPolicy: accepted?.policyEnvelope.payload.accessPolicy,
-        publishPolicy: accepted?.policyEnvelope.payload.publishPolicy,
-        vmRequired:
-          accepted?.policyEnvelope.payload.accessPolicy === 1
-          && accepted.policyEnvelope.payload.source.kind === 'finalized-chain',
-        targetCount: targets.length,
-        outcomeCounts,
-        completionReasons,
-      };
-    },
-  );
-  const completeSwmProviders = publicCatalogActivation.enabled
-    ? (publicCatalogActivation.bootstrap?.acceptedPublicPolicies ?? [])
-      .filter((accepted) => (accepted.completeSwmProviders?.length ?? 0) > 0)
-      .map((accepted) => ({
-        contextGraphId: accepted.policyEnvelope.payload.contextGraphId,
-        accessPolicy: accepted.policyEnvelope.payload.accessPolicy,
-        publishPolicy: accepted.policyEnvelope.payload.publishPolicy,
-        providers: accepted.completeSwmProviders,
-      }))
-    : [];
-
+  if (snapshot === null) {
+    throw new Error('RFC-64 status snapshot schema is unsupported or malformed');
+  }
   return Object.freeze({
-    rfc64PublicCatalog: Object.freeze({
-      enabled: publicCatalogActivation.enabled,
-      selectedContextGraphs: publicCatalogActivation.selectedContextGraphs,
-      runtimeSelection: {
-        subscriptionDriven: runtimeSelection.subscriptionDriven,
-        selectedContextGraphs: runtimeSelection.selectedContextGraphs.filter(
-          (contextGraphId) => selectedPublicContextGraphs.has(contextGraphId),
-        ),
-      },
-      rollout: {
-        killSwitch: rollout.killSwitch,
-        contextGraphModes: Object.fromEntries(
-          publicCatalogActivation.selectedContextGraphs.map((contextGraphId) => [
-            contextGraphId,
-            rfc64CatalogRolloutModeForContextGraphV1(catalogActivation, contextGraphId),
-          ]),
-        ),
-      },
-      autoPublishEnabled: publicCatalogActivation.autoPublish !== undefined,
-      completeSwmProviders,
-      service,
-      bootstrap: publicBootstrap,
-    }),
-    // Local operator projection only. Never expose roster members, peer-to-
-    // wallet bindings, or private provider identities through status.
-    rfc64Catalog: Object.freeze({
-      enabled: catalogActivation.enabled,
-      selectedContextGraphs: catalogActivation.selectedContextGraphs,
-      selectedPublicContextGraphs: catalogActivation.selectedPublicContextGraphs,
-      selectedPrivateContextGraphs: catalogActivation.selectedPrivateContextGraphs,
-      runtimeSelection,
-      responsibilities,
-      authorityRpcCircuit,
-      contextGraphs,
-      shadowExecution,
-      configuration,
-      autoPublishEnabled: catalogActivation.autoPublish !== undefined,
-      rollout,
-      privateAuthorityConfigured: catalogActivation.accessPolicyAuthority !== undefined,
-      privateRecovery,
-      resourceTelemetry:
-        catalogActivation.selectedPrivateContextGraphs.length === 0 || service === null
-          ? null
-          : {
-              providerAttempts: service.receiver.providerAttempts,
-              providerSwitches: service.receiver.providerSwitches,
-              providerSuccesses: service.receiver.providerSuccesses,
-              providerBackoffMs: service.receiver.providerBackoffMs,
-              controlObjectCacheHits: service.nativeReceiver?.controlObjectCacheHits ?? 0,
-              controlObjectNetworkFetches:
-                service.nativeReceiver?.controlObjectNetworkFetches ?? 0,
-              kaBundleCacheHits: service.nativeReceiver?.kaBundleCacheHits ?? 0,
-              kaBundleNetworkFetches: service.nativeReceiver?.kaBundleNetworkFetches ?? 0,
-              kaBundleCacheBytes: service.nativeReceiver?.kaBundleCacheBytes ?? 0,
-              kaBundleNetworkBytes: service.nativeReceiver?.kaBundleNetworkBytes ?? 0,
-            },
-    }),
+    rfc64PublicCatalog: snapshot.rfc64PublicCatalog,
+    rfc64Catalog: snapshot.rfc64Catalog,
   });
 }
 
@@ -297,7 +198,7 @@ const RFC64_AUTHORITY_RPC_CIRCUIT_STATES_V1 = new Set([
   'half-open',
 ]);
 
-/** Allow-list the public circuit DTO so version-skew cannot leak provider data. */
+/** Allow-list the public circuit DTO so provider details cannot cross HTTP. */
 export function sanitizeRfc64AuthorityRpcCircuitSnapshotV1(
   input: unknown,
 ): Readonly<{
@@ -305,23 +206,207 @@ export function sanitizeRfc64AuthorityRpcCircuitSnapshotV1(
   consecutiveExhaustions: number;
   retryAtMs: number | null;
 }> | null {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) return null;
-  const value = input as Record<string, unknown>;
-  if (!RFC64_AUTHORITY_RPC_CIRCUIT_STATES_V1.has(value.state as string)) return null;
-  if (
-    !Number.isSafeInteger(value.consecutiveExhaustions)
-    || (value.consecutiveExhaustions as number) < 0
-  ) return null;
-  if (
-    value.retryAtMs !== null
-    && (
-      !Number.isSafeInteger(value.retryAtMs)
-      || (value.retryAtMs as number) < 0
-    )
-  ) return null;
+  if (!isRecordV1(input)) return null;
+  if (!RFC64_AUTHORITY_RPC_CIRCUIT_STATES_V1.has(input.state as string)) return null;
+  if (!isNonNegativeSafeIntegerV1(input.consecutiveExhaustions)) return null;
+  if (input.retryAtMs !== null && !isNonNegativeSafeIntegerV1(input.retryAtMs)) return null;
   return Object.freeze({
-    state: value.state as 'closed' | 'open' | 'half-open',
-    consecutiveExhaustions: value.consecutiveExhaustions as number,
-    retryAtMs: value.retryAtMs as number | null,
+    state: input.state as 'closed' | 'open' | 'half-open',
+    consecutiveExhaustions: input.consecutiveExhaustions,
+    retryAtMs: input.retryAtMs as number | null,
   });
+}
+
+function isRecordV1(value: unknown): value is Readonly<Record<string, unknown>> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isNonNegativeSafeIntegerV1(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function hasExactFieldsV1(
+  value: Readonly<Record<string, unknown>>,
+  expected: readonly string[],
+): boolean {
+  const fields = Object.keys(value).sort();
+  return fields.length === expected.length
+    && fields.every((field, index) => field === expected[index]);
+}
+
+function stringArrayV1(input: unknown): readonly string[] {
+  return Array.isArray(input)
+    ? Object.freeze(input.filter((value): value is string => typeof value === 'string'))
+    : Object.freeze([]);
+}
+
+function projectRecordV1(
+  input: unknown,
+  fields: readonly string[],
+): Readonly<Record<string, unknown>> | null {
+  if (!isRecordV1(input)) return null;
+  return Object.freeze(Object.fromEntries(fields.flatMap((field) => (
+    Object.hasOwn(input, field) ? [[field, input[field]]] : []
+  ))));
+}
+
+function projectNullableRecordV1(
+  input: unknown,
+  fields: readonly string[],
+): Readonly<Record<string, unknown>> | null {
+  return input === null ? null : projectRecordV1(input, fields);
+}
+
+function projectRecordArrayV1(
+  input: unknown,
+  fields: readonly string[],
+): readonly Readonly<Record<string, unknown>>[] {
+  if (!Array.isArray(input)) return Object.freeze([]);
+  return Object.freeze(input.flatMap((value) => {
+    const projected = projectRecordV1(value, fields);
+    return projected === null ? [] : [projected];
+  }));
+}
+
+function sanitizeRfc64ServiceStatsV1(input: unknown): Readonly<Record<string, unknown>> | null {
+  if (input === null || !isRecordV1(input)) return null;
+  const projected = projectRecordV1(input, ['acceptedPolicies', 'started'])!;
+  return Object.freeze({
+    ...projected,
+    ...(Object.hasOwn(input, 'receiver')
+      ? {
+          receiver: projectRecordV1(input.receiver, [
+            'admissionDeferred',
+            'applied',
+            'dedupedAlreadyApplied',
+            'dedupedInFlight',
+            'deferred',
+            'droppedProviders',
+            'droppedQueueFull',
+            'failed',
+            'inFlight',
+            'notFound',
+            'providerAttempts',
+            'providerBackoffMs',
+            'providerSuccesses',
+            'providerSwitches',
+            'queued',
+            'scheduled',
+            'stagedOnly',
+            'supersededQueued',
+          ]),
+        }
+      : {}),
+    ...(Object.hasOwn(input, 'nativeReceiver')
+      ? {
+          nativeReceiver: projectNullableRecordV1(input.nativeReceiver, [
+            'controlObjectCacheHits',
+            'controlObjectNetworkFetches',
+            'kaBundleCacheBytes',
+            'kaBundleCacheHits',
+            'kaBundleNetworkBytes',
+            'kaBundleNetworkFetches',
+          ]),
+        }
+      : {}),
+  });
+}
+
+function sanitizeRfc64PublicBootstrapV1(
+  input: unknown,
+  selectedPublicContextGraphs: ReadonlySet<string>,
+): Readonly<Record<string, unknown>> | null {
+  if (input === null || !isRecordV1(input)) return null;
+  const projected = projectRecordV1(input, [
+    'lastPassCompletedAtMs',
+    'lastPassStartedAtMs',
+    'pass',
+    'retryIntervalMs',
+    'running',
+  ])!;
+  const targets = Array.isArray(input.targets)
+    ? input.targets.flatMap((target) => {
+        if (!isRecordV1(target) || !isRecordV1(target.scope)) return [];
+        const contextGraphId = target.scope.contextGraphId;
+        if (typeof contextGraphId !== 'string' || !selectedPublicContextGraphs.has(contextGraphId)) {
+          return [];
+        }
+        return [Object.freeze({
+          ...projectRecordV1(target, [
+            'appliedHeadDigest',
+            'attempts',
+            'catalogVersion',
+            'completionReason',
+            'inventoryRowCount',
+            'lastError',
+            'mode',
+            'outcome',
+            'providerPeerId',
+            'providers',
+            'stagedHeadDigest',
+            'updatedAtMs',
+          ]),
+          scope: projectRecordV1(target.scope, [
+            'authorAddress',
+            'catalogEra',
+            'contextGraphId',
+            'networkId',
+            'subGraphName',
+          ]),
+        })];
+      })
+    : [];
+  return Object.freeze({ ...projected, targets: Object.freeze(targets) });
+}
+
+function sanitizeRfc64OperationalStatusesV1(
+  input: unknown,
+): readonly Readonly<Record<string, unknown>>[] {
+  if (!Array.isArray(input)) return Object.freeze([]);
+  return Object.freeze(input.flatMap((status) => {
+    if (!isRecordV1(status)) return [];
+    return [Object.freeze({
+      ...projectRecordV1(status, [
+        'accessPolicy',
+        'appliedCatalogHeadDigest',
+        'appliedInventoryDigest',
+        'appliedRowCount',
+        'authorHeadCount',
+        'authorityEra',
+        'authorityFreshness',
+        'authorityState',
+        'catalogServiceStarted',
+        'catalogVersion',
+        'contextGraphId',
+        'effectiveMode',
+        'expectedCatalogHeadDigest',
+        'expectedInventoryDigest',
+        'expectedRowCount',
+        'lastSuccessfulAdvanceAt',
+        'legacyReadOnlyCount',
+        'legacySyncAllowed',
+        'missingRowCount',
+        'phase',
+        'policyDigest',
+        'policySource',
+        'publishPolicy',
+        'responsibilityReason',
+        'selectionSource',
+        'stableReason',
+      ]),
+      ...(Object.hasOwn(status, 'providerHealth')
+        ? {
+            providerHealth: projectRecordV1(status.providerHealth, [
+              'attempts',
+              'backoffMs',
+              'candidateCount',
+              'successes',
+              'switches',
+            ]),
+          }
+        : {}),
+    })];
+  }));
 }
