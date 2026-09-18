@@ -32,7 +32,8 @@ export class EventsMethods extends EVMChainAdapterBase {
    * runner would still persist `lastBlock = head`, and the events in
    * `(backendTip, head]` would be skipped forever. Scanning canonical-order keeps
    * the scan's tip coverage aligned with the head that advances the cursor
-   * (mirrors the hub-rotation poller's `skipPreferred` wide-log carve-out).
+   * (mirrors the hub-rotation poller's `skipPreferred` wide-log carve-out, now
+   * owned by `RawLogScanner.readTip`).
    */
   private queryFilterWithFailover(
     contract: ethers.Contract,
