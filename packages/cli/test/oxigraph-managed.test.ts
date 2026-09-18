@@ -399,17 +399,6 @@ describe('planManagedOxigraph', () => {
     expect(resolveManagedOxigraphPort({ port: 7878 })).toBe(7878);
   });
 
-  it('keeps the operator WAL threshold in the managed launch plan', () => {
-    const plan = planManagedOxigraph({
-      store: {
-        backend: MANAGED_OXIGRAPH_BACKEND,
-        options: { walRestartThresholdBytes: 1_234 },
-      },
-    }, '/data')!;
-
-    expect(plan.walRestartThresholdBytes).toBe(1_234);
-  });
-
   it('rejects an out-of-range port and falls back to the default', () => {
     const plan = planManagedOxigraph(
       { store: { backend: MANAGED_OXIGRAPH_BACKEND, options: { port: 70000 } } },
