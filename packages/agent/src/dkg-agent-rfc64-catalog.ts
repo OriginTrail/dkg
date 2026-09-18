@@ -1323,8 +1323,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           throw error;
         }
       },
-      whenReceiverIdle: async () => {
-        await this.rfc64PublicCatalogServiceV1?.whenReceiverIdle();
+      whenReceiverIdleForContextGraph: async (contextGraphId) => {
+        await this.rfc64PublicCatalogServiceV1
+          ?.whenReceiverIdleForContextGraph(contextGraphId);
       },
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
       parityFailed: async (contextGraphId, promised) => {

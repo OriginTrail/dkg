@@ -38,7 +38,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     });
     const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
       requestPeer,
-      whenReceiverIdle: async () => undefined,
+      whenReceiverIdleForContextGraph: async () => undefined,
       targetIdentity: (target) => target.id,
       parityFailed: async () => false,
     });
@@ -82,7 +82,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     });
     const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
       requestPeer,
-      whenReceiverIdle: async () => undefined,
+      whenReceiverIdleForContextGraph: async () => undefined,
       targetIdentity: (target) => target.id,
       parityFailed: async () => parityFails,
     });
@@ -104,5 +104,52 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     release();
     await expect(scoped).resolves.toEqual({ requested: 1, failed: 0 });
     expect(runtime.status('public-cg', 'policy')?.failed).toBe(false);
+  });
+
+  it('parks each pass on ITS OWN context graph and reads parity only after that wait', async () => {
+    const order: string[] = [];
+    const releases = new Map<string, () => void>();
+    const whenReceiverIdleForContextGraph = vi.fn((contextGraphId: string) => (
+      new Promise<void>((resolve) => {
+        order.push(`idle-wait:${contextGraphId}`);
+        releases.set(contextGraphId, resolve);
+      })
+    ));
+    const parityFailed = vi.fn(async (contextGraphId: string) => {
+      order.push(`parity:${contextGraphId}`);
+      return false;
+    });
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([{ id: 'target' }]),
+      }),
+      whenReceiverIdleForContextGraph,
+      targetIdentity: (target) => target.id,
+      parityFailed,
+    });
+    const request = (contextGraphId: string) => {
+      runtime.markPeerPending(contextGraphId, 'policy', 'peer-a');
+      return runtime.request({ contextGraphId, policyDigest: 'policy', kind: 'pending-recovery' });
+    };
+
+    const busy = request('busy-cg');
+    const converged = request('converged-cg');
+    await vi.waitFor(() => { expect(releases.size).toBe(2); });
+    // The id is the whole contract: a wait keyed by anything else reads idle
+    // for a graph with admissions still pending, or parks on a stranger's work.
+    expect(whenReceiverIdleForContextGraph.mock.calls).toEqual([['busy-cg'], ['converged-cg']]);
+    expect(parityFailed).not.toHaveBeenCalled();
+
+    // The converged graph's pass completes while the busy graph's stays parked.
+    releases.get('converged-cg')!();
+    await expect(converged).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('converged-cg', 'policy')?.active).toBe(false);
+    expect(runtime.status('busy-cg', 'policy')?.active).toBe(true);
+    expect(order).toEqual(['idle-wait:busy-cg', 'idle-wait:converged-cg', 'parity:converged-cg']);
+
+    releases.get('busy-cg')!();
+    await expect(busy).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('busy-cg', 'policy')?.active).toBe(false);
   });
 });
