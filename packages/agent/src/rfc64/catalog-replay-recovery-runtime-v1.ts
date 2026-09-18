@@ -79,7 +79,13 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
     contextGraphId: string,
     peerId: string,
   ): Promise<Rfc64CatalogReplayPeerResultV1<Target>>;
-  whenReceiverIdle(contextGraphId: string): Promise<void>;
+  /**
+   * Resolve once THIS context graph's admitted announcements have drained.
+   * Named for its scope on purpose: a node-wide wait satisfies the same
+   * signature, and wiring one in would let any other graph's work hold this
+   * graph's pass (and its replay-active flag) open again.
+   */
+  whenReceiverIdleForContextGraph(contextGraphId: string): Promise<void>;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
 }
@@ -412,10 +418,12 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         }));
         // Completion-capable provider responses are returned only after every
         // promised announcement is synchronously admitted at this receiver.
-        // Scoped to THIS context graph: an unrelated graph's queued work would
-        // otherwise hold this pass open, latching its replay-active flag and
+        // Scoped to THIS context graph: waiting for an unrelated graph to drain
+        // would hold this pass open, latching its replay-active flag and
         // withholding this graph's catalog parity for as long as that lasts.
-        await this.#ports.whenReceiverIdle(input.contextGraphId);
+        // The announcements admitted above still take their turn behind other
+        // graphs' tasks for the receiver's shared slots.
+        await this.#ports.whenReceiverIdleForContextGraph(input.contextGraphId);
         if (progress.peerWorklist.exhausted) {
           requiresFullReplay = true;
           failed += 1;

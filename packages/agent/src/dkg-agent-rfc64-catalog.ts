@@ -1323,7 +1323,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           throw error;
         }
       },
-      whenReceiverIdle: async (contextGraphId) => {
+      whenReceiverIdleForContextGraph: async (contextGraphId) => {
         await this.rfc64PublicCatalogServiceV1
           ?.whenReceiverIdleForContextGraph(contextGraphId);
       },
