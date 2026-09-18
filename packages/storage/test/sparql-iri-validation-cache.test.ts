@@ -53,10 +53,23 @@ describe('bounded response-local IRI validation reuse', () => {
 
   it('still validates long IRIs and columns beyond the bounded cache', () => {
     const long = `urn:test:${'a'.repeat(4096)}`;
-    for (const decode of decodeBoth(response([uri(long), uri(long)]))) expect(decode()).toMatchObject({ bindings: [{ v: long }, { v: long }] });
+    for (const decode of decodeBoth(response([uri(long), uri(long)]))) {
+      validations.mockClear();
+      expect(decode()).toMatchObject({ bindings: [{ v: long }, { v: long }] });
+      // Too long to retain, so the repeat cannot hit and pays the validator.
+      expect(validations.mock.calls.filter(([value]) => value === long)).toHaveLength(2);
+    }
     for (const decode of decodeBoth(response([uri(long), uri(`${long}>`)]))) expect(decode).toThrow(SparqlJsonResultsShapeError);
     const vars = Array.from({ length: 129 }, (_, i) => `v${i}`);
     const row = Object.fromEntries(vars.map(v => [v, uri()]));
+    const beyond = 'urn:test:beyond-cached-columns';
+    const beyondRow = { ...row, v128: uri(beyond) };
+    for (const decode of decodeBoth({ head: { vars }, results: { bindings: [beyondRow, beyondRow] } })) {
+      validations.mockClear();
+      decode();
+      // The 129th column gets no cache slot, so its repeat is revalidated too.
+      expect(validations.mock.calls.filter(([value]) => value === beyond)).toHaveLength(2);
+    }
     const input = { head: { vars }, results: { bindings: [row, { ...row, v128: uri('relative') }] } };
     for (const decode of decodeBoth(input)) expect(decode).toThrow(SparqlJsonResultsShapeError);
   });
