@@ -334,7 +334,7 @@ describe('authority index snapshot production wiring', () => {
         mode: 'core-snapshot',
         trustedCorePeers: [pinnedAddress],
         [unknownKey]: 2_000,
-      })).toThrow(`Unknown authorityIndex option(s): ${unknownKey}. Supported options:`);
+      }, 'edge')).toThrow(`Unknown authorityIndex option(s): ${unknownKey}. Supported options:`);
     },
   );
 
@@ -342,7 +342,7 @@ describe('authority index snapshot production wiring', () => {
     'rejects invalid authorityIndex.cacheEpoch %j', (cacheEpoch) => {
       expect(() => resolveAuthorityIndexConfig({
         mode: 'core-snapshot', trustedCorePeers: [pinnedAddress], cacheEpoch,
-      })).toThrow('authorityIndex.cacheEpoch must be a non-negative safe integer');
+      }, 'edge')).toThrow('authorityIndex.cacheEpoch must be a non-negative safe integer');
     },
   );
 });

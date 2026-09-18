@@ -16,9 +16,13 @@ export interface ResolvedAuthorityIndexConfig extends AuthorityIndexConfig {
   readonly cacheEpoch: number;
 }
 
+/**
+ * `nodeRole` is required: this resolver's job includes rejecting cores, so a
+ * default would silently opt an embedder's unlabelled core out of that rule.
+ */
 export function resolveAuthorityIndexConfig(
   config: unknown,
-  nodeRole: 'core' | 'edge' = 'edge',
+  nodeRole: 'core' | 'edge',
 ): ResolvedAuthorityIndexConfig | undefined {
   if (config === undefined) return undefined;
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {

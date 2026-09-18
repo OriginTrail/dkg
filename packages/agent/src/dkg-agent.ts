@@ -1177,7 +1177,10 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    const authorityIndex = resolveAuthorityIndexConfig(inputConfig.authorityIndex, inputConfig.nodeRole);
+    const authorityIndex = resolveAuthorityIndexConfig(
+      inputConfig.authorityIndex,
+      inputConfig.nodeRole ?? 'edge',
+    );
     if (authorityIndex !== undefined && (
       inputConfig.chainAdapter !== undefined
       || !inputConfig.chainConfig?.operationalKeys?.length
