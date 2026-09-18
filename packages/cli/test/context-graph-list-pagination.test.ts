@@ -148,6 +148,25 @@ describe('bounded context-graph listing', () => {
       .toEqual([firstLexical]);
   });
 
+  it('breaks text ties in locale-independent code-unit order', () => {
+    // 'b' < 'ä' by code unit, while every ICU collation this daemon may boot
+    // with ('en-US', 'de-DE', 'sv-SE', ...) orders 'ä' before 'b'. Pinning the
+    // code-unit winner keeps the surviving row — and the cursor digest built
+    // from it — independent of the process locale.
+    const base = {
+      ...rows(1)[0]!,
+      id: 'same-id',
+      onChainId: undefined,
+      callerInvolved: false,
+      subscribed: false,
+      synced: false,
+    };
+    const ascii = { ...base, name: 'b-name' };
+    const diacritic = { ...base, name: 'ä-name' };
+    expect(canonicalizeContextGraphRowsForPaging([ascii, diacritic])).toEqual([ascii]);
+    expect(canonicalizeContextGraphRowsForPaging([diacritic, ascii])).toEqual([ascii]);
+  });
+
   it('binds cursors to the filters and projection', () => {
     const first = buildContextGraphListPage(
       rows(20),

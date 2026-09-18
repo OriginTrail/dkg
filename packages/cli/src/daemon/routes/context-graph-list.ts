@@ -282,8 +282,13 @@ export function canonicalizeContextGraphRowsForPaging(
       if (comparison !== 0) return comparison;
     }
     for (const field of CANONICAL_ROW_TEXT_FIELDS) {
-      const comparison = String(left[field] ?? '').localeCompare(String(right[field] ?? ''));
-      if (comparison !== 0) return -comparison;
+      // Code-unit order, matching the id sort in `prepareRows`. `localeCompare`
+      // without an explicit locale resolves against the daemon's default ICU
+      // locale, which would make the surviving row — and with it the page body,
+      // the cursor digest and `q` matching — depend on the process `LANG`.
+      const leftText = String(left[field] ?? '');
+      const rightText = String(right[field] ?? '');
+      if (leftText !== rightText) return leftText < rightText ? 1 : -1;
     }
     return Number(left.isSystem) - Number(right.isSystem);
   };
