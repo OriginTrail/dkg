@@ -1639,7 +1639,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     // GH #1124 — make a CONFIRMED-PUBLIC host-only (non-member) core ACK-CAPABLE.
     // The opaque `append` below retains the raw envelope so this host can serve
-    // member host-catchup (LU-6 replay), but the StorageACKHandler a publisher
+    // member host-catchup (LU-6 replay) — reachable under the strip only via the
+    // confirmed-public exemption in `handleSwmHostCatchup`, and unconditionally
+    // with `stripCiphertext:false`. The #1611 reachability itself does NOT
+    // depend on that retention: it is carried by the plaintext apply below,
+    // which lands in `<cg>/_shared_memory` where the standard catchup leg reads.
+    // And that apply is required, because the StorageACKHandler a publisher
     // dials reads `<cg>/_shared_memory` from `this.store` (loadSWMQuads /
     // sharedMemoryReadBothFilter) — it has NO path into SwmHostModeStore. So
     // without ALSO applying the plaintext into that triple-store graph, a
@@ -2099,11 +2104,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     // OT-RFC-49 WS-A — RETIRE the host-mode catch-up egress. With the
     // private-ciphertext strip ON (default), a stripped core serves nothing
-    // private: this responder only ever returns private SWM ciphertext, so
-    // we deny BEFORE decoding the request. Members backfill from the curator
-    // (REPLACE-recovery), never from a core. Set `stripCiphertext:false` to
-    // restore legacy serving (kill-switch / A/B baseline).
-    if (this.swmHostModeStripCiphertext()) {
+    // PRIVATE. Members backfill from the curator (REPLACE-recovery), never
+    // from a core. Set `stripCiphertext:false` to restore legacy serving
+    // (kill-switch / A/B baseline).
+    //
+    // GH #1611 / Codex review #2614 — the ONE exception is the opt-in public
+    // host tier: with `hostPublic` on, `reconcileSwmHostModeSubscription`
+    // admits confirmed-public CGs and `wireSwmHostModeHandler(..., false)`
+    // keeps appending their envelopes. Those bytes are plaintext-readable by
+    // anyone, so denying them here would make that retention permanently
+    // unreadable — dead storage instead of the LU-6 replay leg it exists for.
+    // When this core hosts NO non-curated CG (the default topology) we still
+    // deny BEFORE decoding; otherwise we decode and re-check per CG below.
+    const hasPublicHostTier = [...this.swmHostModeCurated.values()].some((c) => c === false);
+    if (this.swmHostModeStripCiphertext() && !hasPublicHostTier) {
       this.log.debug(
         ctx,
         `host-catchup served NOTHING from=${fromPeerId}: private-ciphertext strip is ON ` +
@@ -2131,6 +2145,38 @@ export class SwmHostModeMethods extends DKGAgentBase {
         denied: `malformed request: ${reason}`,
         entries: [],
       });
+    }
+
+    // GH #1611 / Codex review #2614 — per-CG strip re-check. We only get here
+    // under the strip when this core hosts at least one non-curated CG, so
+    // confirm THIS request targets one of them before serving a byte. Both
+    // conditions are load-bearing and neither is redundant:
+    //   - `swmHostModeCurated.get(hostKey) === false` is the local, free gate.
+    //     It fails closed on an absent classification (legacy on-disk curated
+    //     ciphertext from before the strip rolled out has no entry here), and
+    //     it bounds the chain RPC below to CGs this core already hosts.
+    //   - `isConfirmedPublicForHostMode` re-derives accessPolicy===0 &&
+    //     publishPolicy===1 from chain state (short-TTL, fail-closed), so a CG
+    //     whose owner has since curated it stops being served within seconds
+    //     rather than for the life of the marker.
+    if (this.swmHostModeStripCiphertext()) {
+      const hostKey = this.canonicalSwmHostModeKey(req.contextGraphId);
+      const nonCurated = this.swmHostModeCurated.get(hostKey) === false;
+      if (!nonCurated || !await this.isConfirmedPublicForHostMode(req.contextGraphId)) {
+        this.log.debug(
+          ctx,
+          `host-catchup served NOTHING cg=${req.contextGraphId} from=${fromPeerId}: private-ciphertext ` +
+          `strip is ON and this CG is not a confirmed-public host-tier CG (OT-RFC-49 WS-A)`,
+        );
+        return encodeSwmHostCatchupResponse({
+          version: SWM_HOST_CATCHUP_WIRE_VERSION,
+          contextGraphId: '',
+          nextSeqno: 0,
+          truncated: false,
+          denied: 'private-ciphertext strip is on (OT-RFC-49 WS-A): host-mode custody retired',
+          entries: [],
+        });
+      }
     }
 
     // OT-RFC-38 LU-6 B1: signature + freshness + replay-defence +

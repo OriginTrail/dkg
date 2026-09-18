@@ -44,6 +44,8 @@ import {
 import type { CGMemberEnumeration } from '../../src/swm/enumerate-cg-members.js';
 import {
   decodeSwmHostCatchupResponse,
+  encodeSwmHostCatchupRequest,
+  SWM_HOST_CATCHUP_WIRE_VERSION,
 } from '../../src/swm/host-catchup-wire.js';
 import {
   decodeCiphertextChunkCatchupResponse,
@@ -537,11 +539,66 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
   it('strip ON RETIRES handleSwmHostCatchup — serves nothing private', async () => {
     const core = await makeCore(true);
     const g = core as unknown as StripInternals;
-    // Garbage request bytes are fine: the strip denies BEFORE decoding.
+    // Garbage request bytes are fine: with no public host tier on this core
+    // the strip still denies BEFORE decoding.
     const resp = await g.handleSwmHostCatchup(new Uint8Array([1, 2, 3]), '12D3KooWPeer');
     const decoded = decodeSwmHostCatchupResponse(resp);
     expect(decoded.entries).toEqual([]);
     expect(decoded.denied ?? '').toMatch(/strip is on/i);
+  });
+
+  it('strip ON EXEMPTS a confirmed-public host-tier CG from the catch-up retirement', async () => {
+    // GH #1611 — the public tier appends envelopes under the strip; denying
+    // every catch-up would make that retention permanently unreadable. The
+    // exemption is per CG and re-confirmed against chain state, so a curated
+    // (or unclassified) CG on the SAME core is still refused at the strip gate.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    installGossipStub(g);
+    const publicCg = 'cg-public-catchup';
+    const curatedCg = 'cg-curated-catchup';
+    g.wireSwmHostModeHandler(publicCg, undefined, false); // public host tier
+    g.wireSwmHostModeHandler(curatedCg, undefined, true);
+    const confirmed: string[] = [];
+    g.isConfirmedPublicForHostMode = async (id: string) => {
+      confirmed.push(id);
+      return id === publicCg;
+    };
+
+    const request = (cgId: string): Uint8Array => encodeSwmHostCatchupRequest({
+      version: SWM_HOST_CATCHUP_WIRE_VERSION,
+      contextGraphId: cgId,
+      sinceSeqno: 0,
+      requesterEoa: '0x' + '22'.repeat(20),
+      issuedAtMs: Date.now(),
+      nonce: '0x' + '33'.repeat(16),
+      sig: '0x' + '44'.repeat(65),
+    });
+
+    // The public CG gets PAST the strip gate — it fails later, on the ordinary
+    // LU-6 B1 authorization of an unsigned-by-anyone request, not on the strip.
+    const publicResp = decodeSwmHostCatchupResponse(
+      await g.handleSwmHostCatchup(request(publicCg), '12D3KooWPeer'),
+    );
+    expect(publicResp.denied ?? '').not.toMatch(/strip is on/i);
+    expect(confirmed).toEqual([publicCg]);
+
+    // The curated CG on the same core never reaches the chain re-confirmation:
+    // the free `swmHostModeCurated` gate refuses it first.
+    const curatedResp = decodeSwmHostCatchupResponse(
+      await g.handleSwmHostCatchup(request(curatedCg), '12D3KooWPeer'),
+    );
+    expect(curatedResp.entries).toEqual([]);
+    expect(curatedResp.denied ?? '').toMatch(/strip is on/i);
+    expect(confirmed).toEqual([publicCg]);
+
+    // An unclassified CG (e.g. legacy ciphertext left on disk from before the
+    // strip rolled out) fails closed the same way.
+    const unknownResp = decodeSwmHostCatchupResponse(
+      await g.handleSwmHostCatchup(request('cg-never-wired'), '12D3KooWPeer'),
+    );
+    expect(unknownResp.denied ?? '').toMatch(/strip is on/i);
+    expect(confirmed).toEqual([publicCg]);
   });
 
   it('strip ON RETIRES handleGetCiphertextChunk — serves nothing private (incl. RFC-39 operator branch)', async () => {
