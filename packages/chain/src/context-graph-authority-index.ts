@@ -40,6 +40,28 @@ export interface ContextGraphAuthorityIndexScanInput {
   readonly deploymentBlockNumber: number;
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly pageSize: number;
+  /**
+   * How far below the resolved anchor the DURABLE cursor may ratchet.
+   *
+   * The anchor is the operator's, and at the default depth it is the HEAD — a
+   * block a reorg can take away. The cursor is not a finality decision, it is a
+   * memo of "I have already reduced the log history to here", and a memo pinned
+   * to a reorgable block is worse than no memo: `admit…Checkpoint` re-reads the
+   * hash at the cursor height, and a single-block tip reorg makes it mismatch
+   * and throw the WHOLE materialized index away, rescanning from the contract
+   * deployment block. A cursor recorded at one endpoint's head also sits ABOVE
+   * a sibling endpoint's head, and nothing can lower it.
+   *
+   * So the anchor and the cursor are separated: reads still project all the way
+   * to the anchor — that is the window this hotfix exists to close — but only
+   * the part below this horizon is written down. The tail is re-reduced in
+   * memory each read, one bounded extra `readPage`.
+   *
+   * `0` (the default) writes the cursor at the anchor, which is the behaviour
+   * before this option existed. A caller that omits it is therefore unchanged,
+   * not newly exposed.
+   */
+  readonly durableReorgHoldbackBlocks?: number;
   readonly signal?: AbortSignal;
   readonly readBlockHash: (
     blockNumber: number,
@@ -265,11 +287,23 @@ export class ContextGraphAuthorityIndex {
       lifecycleSignal,
     });
 
+    // Highest block this scan may WRITE DOWN. Never below the deployment block:
+    // holding the cursor back past the start of history would persist nothing.
+    const holdback = normalizeNonNegativeSafeInteger(
+      input.durableReorgHoldbackBlocks ?? 0,
+    ) ?? 0;
+    const persistThroughBlockNumber = Math.max(
+      deploymentBlockNumber,
+      finalizedNumber - holdback,
+    );
+    // Set once the scan passes the horizon; from then on nothing is committed.
+    let tail: ContextGraphAuthorityIndexCheckpoint | undefined;
+
     for (;;) {
       lifecycleSignal.throwIfAborted();
-      const checkpoint = durable.kind === 'checkpoint'
+      const checkpoint = tail ?? (durable.kind === 'checkpoint'
         ? durable.checkpoint
-        : undefined;
+        : undefined);
       if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
         return checkpoint;
       }
@@ -277,10 +311,16 @@ export class ContextGraphAuthorityIndex {
       const fromBlockNumber = checkpoint === undefined
         ? deploymentBlockNumber
         : checkpoint.cursor.throughBlockNumber + 1;
-      const throughBlockNumber = Math.min(
+      // A page that straddles the horizon is clamped to it, so the durable part
+      // is still written down and the next iteration reduces the tail in memory.
+      const committing = tail === undefined && fromBlockNumber <= persistThroughBlockNumber;
+      const pageThroughBlockNumber = Math.min(
         fromBlockNumber + pageSize - 1,
         finalizedNumber,
       );
+      const throughBlockNumber = committing
+        ? Math.min(pageThroughBlockNumber, persistThroughBlockNumber)
+        : pageThroughBlockNumber;
       const throughBlockHash = throughBlockNumber === finalizedNumber
         ? finalizedHash
         : normalizeHash(await input.readBlockHash(throughBlockNumber, lifecycleSignal));
@@ -304,6 +344,12 @@ export class ContextGraphAuthorityIndex {
         events,
       });
       const next = reduction.checkpoint;
+
+      if (!committing) {
+        // Above the reorg horizon: project, do not persist.
+        tail = next;
+        continue;
+      }
 
       const commit = await repository.commitOrReloadWinner(
         durable,

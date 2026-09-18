@@ -14,6 +14,7 @@ import type {
 import {
   assertRfc64FinalizedPolicyAgentPrecommitSnapshotCurrentV1,
   resolveRfc64FinalizedPolicyAgentPrecommitV1,
+  strictFinalityConfirmationsOptionV1,
 } from './finalized-policy-agent-precommit-v1.js';
 import { createFinalizedVmRuntimeV1 } from './finalized-vm-runtime-v1.js';
 import type {
@@ -30,6 +31,12 @@ export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
   readonly rpcEndpoints: readonly string[] | null;
+  /**
+   * `chain.finalityConfirmations` — the node's SINGLE definition of finality,
+   * forwarded verbatim to the strict snapshot scope. Omitted means the shared
+   * default of 1 (anchor at head).
+   */
+  readonly finalityConfirmations?: number;
   readonly getOnChainContextGraphId:
     (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
   readonly getEvmChainId: () => Promise<bigint>;
@@ -134,6 +141,7 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
         chainId: resolved.chainId,
         endpoints: resolved.rpcEndpoints,
+        ...strictFinalityConfirmationsOptionV1(options.finalityConfirmations),
         // This scope is constructed PER precommit invocation, so its admission
         // must come from the process-wide per-chain registry — a gate private
         // to this instance would have contended with nothing, and two

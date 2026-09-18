@@ -501,6 +501,33 @@ export function contextGraphLayerUriCandidates(
   return canonical === legacy ? [canonical] : [canonical, legacy];
 }
 
+/**
+ * Canonical and caller-known legacy prefixes for the NAME-KEYED working-memory
+ * graph family, `…[/{sub}]/assertion/{addr}/{name}`.
+ *
+ * This is NOT a dead legacy shape. `DKGPublisher.wmGraphUri` falls back to
+ * {@link contextGraphAssertionUri} whenever `resolveKaGraphIdentity` returns
+ * null — i.e. whenever a per-author KA number cannot be resolved — so drafts
+ * still land here today. An unscoped working-memory read that only scans
+ * `…/_working_memory/{addr}/` therefore cannot see them.
+ *
+ * Mirrors {@link contextGraphLayerPrefixCandidates}: canonical (EVM-lowercased)
+ * address first, the caller's original casing second when it differs, because
+ * graphs written before address canonicalization are still addressed that way.
+ */
+export function contextGraphAssertionPrefixCandidates(
+  contextGraphId: string,
+  agentAddress: string,
+  subGraphName?: string,
+): string[] {
+  const base = subGraphName
+    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
+    : `did:dkg:context-graph:${contextGraphId}`;
+  const canonical = `${base}/assertion/${canonicalKnowledgeAssetAgentAddress(agentAddress)}/`;
+  const legacy = `${base}/assertion/${agentAddress}/`;
+  return canonical === legacy ? [canonical] : [canonical, legacy];
+}
+
 /** Canonical and caller-known legacy prefixes for an unscoped layer read. */
 export function contextGraphLayerPrefixCandidates(
   contextGraphId: string,
