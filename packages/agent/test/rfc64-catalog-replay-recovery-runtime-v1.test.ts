@@ -105,4 +105,46 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     await expect(scoped).resolves.toEqual({ requested: 1, failed: 0 });
     expect(runtime.status('public-cg', 'policy')?.failed).toBe(false);
   });
+
+  it('keeps the promise of a peer a full pass never heard from', async () => {
+    const targetsByPeer = new Map<string, readonly Target[]>([
+      ['peer-a', [{ id: 'head-a' }]],
+      ['peer-b', [{ id: 'head-b' }]],
+    ]);
+    let failingPeer: string | null = null;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async (_contextGraphId, peerId) => {
+        if (peerId === failingPeer) throw new Error('dial failed');
+        return Object.freeze({
+          status: 'completed' as const,
+          targets: targetsByPeer.get(peerId) ?? [],
+        });
+      },
+      whenReceiverIdle: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+    const fullPass = () => runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'policy',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-a', 'peer-b']),
+    });
+
+    await expect(fullPass()).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+    ]);
+
+    // The pass queued every connected peer, so it may clear a witness -- but
+    // peer-b never answered, so its promised head was not re-heard and is not
+    // evidence that peer-b retired it.
+    failingPeer = 'peer-b';
+    await expect(fullPass()).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+    ]);
+  });
 });

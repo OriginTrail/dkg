@@ -396,6 +396,13 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let requested = 0;
     let failed = 0;
     let providerFailures = 0;
+    /**
+     * Peers this pass queued and never heard an answer from -- a failed dial
+     * or a local precondition. Distinct from `providerFailures`, which is
+     * provider evidence only: both leave a peer's earlier promises unre-heard,
+     * which is what the snapshot-replacement decision below turns on.
+     */
+    let unansweredPeers = 0;
     let replayFailed = true;
     let requiresFullReplay = false;
     try {
@@ -411,6 +418,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 // attribute a failure to this peer nor clear the attribution an
                 // earlier provider failure recorded.
                 failed += 1;
+                unansweredPeers += 1;
                 return;
               }
               progress.unresolvedPeers.delete(peerId);
@@ -424,6 +432,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 if (!this.#retainPeerFailure(progress, peerId)) requiresFullReplay = true;
                 failed += 1;
                 providerFailures += 1;
+                unansweredPeers += 1;
               }
             }
           }
@@ -448,7 +457,15 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         const parityFailed = promisedOverflowed
           || await this.#ports.parityFailed(input.contextGraphId, promised);
         if (requested > 0) {
-          const replacesSnapshot = progress.requestedFullReplay;
+          // Replacement discards every promise this pass did not re-hear, so
+          // it needs more than the right to CLEAR a witness.
+          // `requestedFullReplay` only says the pass QUEUED every connected
+          // peer, and clearing is deliberately tolerant of a retained provider
+          // that never answered -- replacing a promise snapshot is not, because
+          // that peer's earlier promised head can still be durable and
+          // unapplied, and dropping it reports the very zero this snapshot
+          // exists to prevent. A pass that lost an answer may only ADD.
+          const replacesSnapshot = progress.requestedFullReplay && unansweredPeers === 0;
           if (promisedOverflowed) {
             progress.promisedTargets = null;
           } else if (replacesSnapshot || progress.promisedTargets === null) {
