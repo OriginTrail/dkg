@@ -332,18 +332,28 @@ export function createAuthorityIndexSnapshotHandler(options: {
   const peers = new Map<string, { until: number; count: number }>();
   return async (bytes, peer, handlerOptions) => {
     handlerOptions?.signal?.throwIfAborted();
-    if (typeof peer === 'string') {
+    // ProtocolRouter invokes handlers with the canonical `{toString, toBytes}`
+    // PeerID model, never a bare string, so normalize before keying the window.
+    // Object.prototype.toString is rejected: it would collapse every unkeyed
+    // caller onto one shared bucket instead of leaving them unkeyed.
+    const peerKey = typeof peer === 'string' ? peer
+      : typeof peer === 'object' && peer !== null && peer.toString !== Object.prototype.toString
+        ? String(peer)
+        : undefined;
+    // Without an authenticated identity there is no one to charge the window
+    // to; such a request still passes under MAX_CONCURRENT_EXPORTS below.
+    if (peerKey !== undefined && peerKey.length > 0) {
       const now = Date.now();
       for (const [id, entry] of peers) {
         if (entry.until <= now) peers.delete(id);
       }
-      const entry = peers.get(peer);
+      const entry = peers.get(peerKey);
       if (entry) {
         if (entry.count >= PEER_RATE_BURST) return statusBytes('busy');
         entry.count += 1;
       } else {
         if (peers.size >= MAX_RATE_LIMIT_PEERS) return statusBytes('busy');
-        peers.set(peer, { until: now + PEER_RATE_WINDOW_MS, count: 1 });
+        peers.set(peerKey, { until: now + PEER_RATE_WINDOW_MS, count: 1 });
       }
     }
     let request: ContextGraphAuthorityIndexSnapshotRequest;

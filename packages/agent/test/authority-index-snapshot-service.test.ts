@@ -15,6 +15,8 @@ const FIRST = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const SECOND = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 const UNTRUSTED = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const address = (peer: string) => `/ip4/127.0.0.1/tcp/9200/p2p/${peer}`;
+/** The `{toString, toBytes}` PeerID model ProtocolRouter hands to handlers. */
+const routerPeer = (peer: string) => ({ toString: () => peer, toBytes: () => new Uint8Array() });
 const request = {
   scope: 'base:84532:0x123456',
   deploymentBlockNumber: 100,
@@ -346,14 +348,26 @@ describe('cache-only snapshot serving', () => {
     const handler = createAuthorityIndexSnapshotHandler({ exportSnapshot });
     const bytes = encode({ version: 1, request });
     for (let i = 0; i < 4; i += 1) {
+      expect(decode(await handler(bytes, routerPeer(FIRST))).status).toBe('ok');
+    }
+    expect(decode(await handler(bytes, routerPeer(FIRST))).status).toBe('busy');
+    expect(decode(await handler(bytes, routerPeer(SECOND))).status).toBe('ok');
+    expect(exportSnapshot).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(decode(await handler(bytes, routerPeer(FIRST))).status).toBe('ok');
+    expect(exportSnapshot).toHaveBeenCalledTimes(6);
+  });
+
+  it('limits a peer identified by the bare PeerID string', async () => {
+    vi.useFakeTimers();
+    const exportSnapshot = vi.fn().mockResolvedValue(snapshot);
+    const handler = createAuthorityIndexSnapshotHandler({ exportSnapshot });
+    const bytes = encode({ version: 1, request });
+    for (let i = 0; i < 4; i += 1) {
       expect(decode(await handler(bytes, FIRST)).status).toBe('ok');
     }
     expect(decode(await handler(bytes, FIRST)).status).toBe('busy');
-    expect(decode(await handler(bytes, SECOND)).status).toBe('ok');
-    expect(exportSnapshot).toHaveBeenCalledTimes(5);
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(decode(await handler(bytes, FIRST)).status).toBe('ok');
-    expect(exportSnapshot).toHaveBeenCalledTimes(6);
+    expect(exportSnapshot).toHaveBeenCalledTimes(4);
   });
 
   it('bounds limiter identities without evicting an active peer limit', async () => {
@@ -362,12 +376,12 @@ describe('cache-only snapshot serving', () => {
     const handler = createAuthorityIndexSnapshotHandler({ exportSnapshot });
     const bytes = encode({ version: 1, request });
     for (let i = 0; i < 1_024; i += 1) {
-      expect(decode(await handler(bytes, `authenticated-peer-${i}`)).status).toBe('not-ready');
+      expect(decode(await handler(bytes, routerPeer(`authenticated-peer-${i}`))).status).toBe('not-ready');
     }
-    expect(decode(await handler(bytes, 'new-authenticated-peer')).status).toBe('busy');
+    expect(decode(await handler(bytes, routerPeer('new-authenticated-peer'))).status).toBe('busy');
     expect(exportSnapshot).toHaveBeenCalledTimes(1_024);
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(decode(await handler(bytes, 'new-authenticated-peer')).status).toBe('not-ready');
+    expect(decode(await handler(bytes, routerPeer('new-authenticated-peer'))).status).toBe('not-ready');
   });
 
   it('caps concurrent cache exports and releases capacity after completion', async () => {
