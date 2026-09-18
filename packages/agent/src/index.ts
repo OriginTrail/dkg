@@ -1,4 +1,9 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexConfig,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,

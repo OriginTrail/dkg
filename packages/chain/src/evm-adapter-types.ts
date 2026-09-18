@@ -9,6 +9,7 @@ import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
+import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
 
 export interface EVMAdapterBaseConfig {
@@ -116,6 +117,8 @@ export interface EVMAdapterBaseConfig {
    * retain the legacy per-graph reader.
    */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
+  /** Trusted core seed plus a bounded local tail; requires a local index store. */
+  contextGraphAuthorityIndexBootstrap?: ContextGraphAuthorityIndexBootstrap;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

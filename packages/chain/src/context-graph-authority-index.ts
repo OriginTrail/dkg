@@ -24,8 +24,29 @@ import { ContextGraphAuthorityIndexRetryableError } from
 import { ContextGraphAuthorityIndexRepository } from
   './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
+import { ContextGraphAuthorityIndexBootstrapCoordinator } from
+  './context-graph-authority-index-bootstrap.js';
+import { ContextGraphAuthorityIndexActivity, waitForAuthorityIndexOperation } from
+  './context-graph-authority-index-activity.js';
+import {
+  authorityIndexSnapshotWithinSizeLimit,
+  ContextGraphAuthorityIndexSnapshotExportError,
+  ContextGraphAuthorityIndexBootstrapUnavailableError,
+  isContextGraphAuthorityIndexSnapshotRequest,
+  type ContextGraphAuthorityIndexBootstrap,
+  type ContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexSnapshotRequest,
+} from './context-graph-authority-index-snapshot.js';
 
 const ZERO_HASH = `0x${'00'.repeat(32)}`;
+const MAX_SERVABLE_CHECKPOINTS = 8;
+
+type ServableCheckpoint = Readonly<{
+  deploymentBlockNumber: number;
+  throughBlockNumber: number;
+  /** Oversized checkpoints retain only metadata; cached wire payloads total at most 64 MiB. */
+  snapshot?: ContextGraphAuthorityIndexSnapshot;
+}>;
 
 export {
   ContextGraphAuthorityIndexRetryableError,
@@ -104,12 +125,82 @@ export interface ContextGraphAuthorityIndexNameHashesInput
 export class ContextGraphAuthorityIndex {
   readonly #repository: ContextGraphAuthorityIndexRepository;
   readonly #singleFlight = new KeyedSingleFlight<string, object>();
-  readonly #activeScans = new Set<Promise<unknown>>();
-  #activityRevision = 0;
+  readonly #activity = new ContextGraphAuthorityIndexActivity();
+  readonly #bootstrapCoordinator: ContextGraphAuthorityIndexBootstrapCoordinator | undefined;
+  readonly #servable = new Map<string, readonly ServableCheckpoint[]>();
+  readonly #servableEpochs = new Map<string, number>();
+  #closed = false;
   #lifecycleAbort = new AbortController();
 
-  constructor(readonly localStore: ContextGraphAuthorityIndexStore) {
+  constructor(
+    readonly localStore: ContextGraphAuthorityIndexStore,
+    private readonly bootstrap?: ContextGraphAuthorityIndexBootstrap,
+  ) {
+    this.#bootstrapCoordinator = bootstrap === undefined ? undefined
+      : new ContextGraphAuthorityIndexBootstrapCoordinator(bootstrap, this.#activity);
     this.#repository = new ContextGraphAuthorityIndexRepository(localStore);
+  }
+
+  /** The caller must bind requests to this adapter's own initialized scope. */
+  exportSnapshot(
+    request: ContextGraphAuthorityIndexSnapshotRequest,
+  ): ContextGraphAuthorityIndexSnapshot | null {
+    if (this.#closed || this.bootstrap !== undefined
+      || !isContextGraphAuthorityIndexSnapshotRequest(request)) return null;
+    const candidates = this.#servable.get(request.scope)?.filter((candidate) => (
+      candidate.deploymentBlockNumber === request.deploymentBlockNumber
+    ));
+    if (!candidates?.length) return null;
+    const compatible = candidates.filter((candidate) => (
+      candidate.throughBlockNumber >= request.minThroughBlockNumber
+      && candidate.throughBlockNumber <= request.maxThroughBlockNumber
+    ));
+    const snapshot = compatible.find((candidate) => candidate.snapshot !== undefined)?.snapshot;
+    if (snapshot !== undefined) return snapshot;
+    if (compatible.length > 0) throw new ContextGraphAuthorityIndexSnapshotExportError('too-large');
+    if (candidates.every((candidate) => candidate.throughBlockNumber > request.maxThroughBlockNumber)) {
+      throw new ContextGraphAuthorityIndexSnapshotExportError('above-range');
+    }
+    if (candidates.every((candidate) => candidate.throughBlockNumber < request.minThroughBlockNumber)) {
+      throw new ContextGraphAuthorityIndexSnapshotExportError('below-range');
+    }
+    throw new ContextGraphAuthorityIndexSnapshotExportError('unavailable');
+  }
+
+  /**
+   * Publishes ONLY the holdback-clamped durable cursor. The in-memory `tail`
+   * of a live scan sits above every requester's `maxThroughBlockNumber` and is
+   * not reorg-settled, so it must never reach this method.
+   */
+  #rememberServable(scope: string, durableCheckpoint: ContextGraphAuthorityIndexCheckpoint): void {
+    if (this.bootstrap !== undefined) return;
+    const snapshot = Object.freeze({ version: 1 as const, scope, checkpoint: durableCheckpoint });
+    const entry: ServableCheckpoint = Object.freeze({
+      deploymentBlockNumber: durableCheckpoint.cursor.deploymentBlockNumber,
+      throughBlockNumber: durableCheckpoint.cursor.throughBlockNumber,
+      ...(authorityIndexSnapshotWithinSizeLimit(snapshot) ? { snapshot } : {}),
+    });
+    const entries = (this.#servable.get(scope) ?? []).filter((candidate) => (
+      candidate.deploymentBlockNumber === entry.deploymentBlockNumber
+      && candidate.throughBlockNumber !== entry.throughBlockNumber
+    ));
+    this.#servable.set(scope, [...entries, entry]
+      .sort((a, b) => b.throughBlockNumber - a.throughBlockNumber)
+      .slice(0, MAX_SERVABLE_CHECKPOINTS));
+  }
+
+  async refresh(input: ContextGraphAuthorityIndexScanInput): Promise<void> {
+    await this.#snapshot(input);
+  }
+
+  open(): void {
+    this.#closed = false;
+  }
+
+  close(): Promise<void> {
+    this.#closed = true;
+    this.clear();
+    return this.whenIdle();
   }
 
   clear(): void {
@@ -119,19 +210,15 @@ export class ContextGraphAuthorityIndex {
     ));
     this.#lifecycleAbort = new AbortController();
     this.#repository.clear();
+    this.#servable.clear();
+    this.#servableEpochs.clear();
+    this.#bootstrapCoordinator?.clear();
     this.#singleFlight.invalidateAll();
   }
 
   /** Wait until every lifecycle-owned physical scan has settled. */
-  async whenIdle(): Promise<void> {
-    for (;;) {
-      const activityRevision = this.#activityRevision;
-      await Promise.allSettled(this.#activeScans);
-      if (
-        activityRevision === this.#activityRevision
-        && this.#activeScans.size === 0
-      ) return;
-    }
+  whenIdle(): Promise<void> {
+    return this.#activity.whenIdle();
   }
 
   async resolve(
@@ -231,6 +318,7 @@ export class ContextGraphAuthorityIndex {
     input: ContextGraphAuthorityIndexScanInput,
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     input.signal?.throwIfAborted();
+    if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
     const scope = input.scope.trim();
     if (scope.length === 0) throw new Error('Context Graph authority index scope is empty');
     if (input.readScope === null || typeof input.readScope !== 'object') {
@@ -247,14 +335,9 @@ export class ContextGraphAuthorityIndex {
         number: input.finalized.number,
         hash: finalizedHash,
       } }, lifecycleSignal);
-      this.#activityRevision += 1;
-      this.#activeScans.add(scan);
-      void scan.finally(() => {
-        this.#activeScans.delete(scan);
-      }).catch(() => undefined);
-      return scan;
+      return this.#activity.track(scan);
     });
-    return waitForSharedAuthorityIndexScan(pending, input.signal);
+    return waitForAuthorityIndexOperation(pending, input.signal);
   }
 
   async #scan(
@@ -262,7 +345,11 @@ export class ContextGraphAuthorityIndex {
     lifecycleSignal: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     const scope = input.scope;
-    const repository = this.#repository.forScope(scope);
+    // Imported authority is never promoted into an independently scanned index
+    // after a trust-policy change or when snapshot bootstrap is disabled.
+    const repositoryScope = this.bootstrap === undefined ? scope
+      : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`;
+    const repository = this.#repository.forScope(repositoryScope);
     const deploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
@@ -278,6 +365,12 @@ export class ContextGraphAuthorityIndex {
       throw new Error('Context Graph authority index scan bounds are invalid');
     }
 
+    let servableEpoch = this.#servableEpochs.get(scope) ?? 0;
+    const onRejectedCheckpoint = (): void => {
+      this.#servable.delete(scope);
+      servableEpoch = (this.#servableEpochs.get(scope) ?? 0) + 1;
+      this.#servableEpochs.set(scope, servableEpoch);
+    };
     let durable = await admitContextGraphAuthorityIndexCheckpoint({
       repository,
       initial: await repository.load(),
@@ -285,6 +378,7 @@ export class ContextGraphAuthorityIndex {
       finalized: { number: finalizedNumber, hash: finalizedHash },
       readBlockHash: input.readBlockHash,
       lifecycleSignal,
+      onRejectedCheckpoint,
     });
 
     // Highest block this scan may WRITE DOWN. Never below the deployment block:
@@ -296,83 +390,126 @@ export class ContextGraphAuthorityIndex {
       deploymentBlockNumber,
       finalizedNumber - holdback,
     );
+    const bootstrap = this.bootstrap;
+    const minimumSeedBlock = bootstrap === undefined ? deploymentBlockNumber
+      : Math.max(deploymentBlockNumber, finalizedNumber - bootstrap.maxTailBlocks);
+    if (bootstrap !== undefined && minimumSeedBlock > persistThroughBlockNumber) {
+      throw new RangeError(
+        'Context Graph authority index tail budget is below the durable reorg holdback',
+      );
+    }
+    let scannedBlocks = 0;
     // Set once the scan passes the horizon; from then on nothing is committed.
     let tail: ContextGraphAuthorityIndexCheckpoint | undefined;
+    const seedSession = this.#bootstrapCoordinator?.start({
+      request: Object.freeze({
+        scope, deploymentBlockNumber,
+        minThroughBlockNumber: minimumSeedBlock,
+        maxThroughBlockNumber: persistThroughBlockNumber,
+      }),
+      repository,
+      finalized: { number: finalizedNumber, hash: finalizedHash },
+      lifecycleSignal,
+      readBlockHash: input.readBlockHash,
+      onRejectedCheckpoint,
+    });
 
-    for (;;) {
-      lifecycleSignal.throwIfAborted();
-      const checkpoint = tail ?? (durable.kind === 'checkpoint'
-        ? durable.checkpoint
-        : undefined);
-      if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
-        return checkpoint;
-      }
+    try {
+      for (;;) {
+        lifecycleSignal.throwIfAborted();
+        if (seedSession !== undefined && tail === undefined && seedSession.needsSeed(durable)) {
+          durable = await seedSession.seed(durable);
+          continue;
+        }
+        const checkpoint = tail ?? (durable.kind === 'checkpoint'
+          ? durable.checkpoint
+          : undefined);
+        if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
+          if (durable.kind === 'checkpoint'
+            && servableEpoch === (this.#servableEpochs.get(scope) ?? 0)) {
+            // `durable.checkpoint`, never the local `checkpoint`: that may be
+            // the in-memory tail, which is above the holdback and unservable.
+            this.#rememberServable(scope, durable.checkpoint);
+          }
+          return checkpoint;
+        }
 
-      const fromBlockNumber = checkpoint === undefined
-        ? deploymentBlockNumber
-        : checkpoint.cursor.throughBlockNumber + 1;
-      // A page that straddles the horizon is clamped to it, so the durable part
-      // is still written down and the next iteration reduces the tail in memory.
-      const committing = tail === undefined && fromBlockNumber <= persistThroughBlockNumber;
-      const pageThroughBlockNumber = Math.min(
-        fromBlockNumber + pageSize - 1,
-        finalizedNumber,
-      );
-      const throughBlockNumber = committing
-        ? Math.min(pageThroughBlockNumber, persistThroughBlockNumber)
-        : pageThroughBlockNumber;
-      const throughBlockHash = throughBlockNumber === finalizedNumber
-        ? finalizedHash
-        : normalizeHash(await input.readBlockHash(throughBlockNumber, lifecycleSignal));
-      if (throughBlockHash === undefined) {
-        throw new ContextGraphAuthorityIndexRetryableError(
-          `Context Graph authority index block ${throughBlockNumber} is unavailable`,
+        const fromBlockNumber = checkpoint === undefined
+          ? deploymentBlockNumber
+          : checkpoint.cursor.throughBlockNumber + 1;
+        // A page that straddles the horizon is clamped to it, so the durable part
+        // is still written down and the next iteration reduces the tail in memory.
+        const committing = tail === undefined && fromBlockNumber <= persistThroughBlockNumber;
+        const pageThroughBlockNumber = Math.min(
+          fromBlockNumber + pageSize - 1,
+          finalizedNumber,
         );
-      }
+        const throughBlockNumber = committing
+          ? Math.min(pageThroughBlockNumber, persistThroughBlockNumber)
+          : pageThroughBlockNumber;
+        if (bootstrap !== undefined
+          && scannedBlocks + throughBlockNumber - fromBlockNumber + 1 > bootstrap.maxTailBlocks) {
+          throw new ContextGraphAuthorityIndexBootstrapUnavailableError(new Error(
+            'Context Graph authority index local tail scan budget exhausted',
+          ));
+        }
+        const throughBlockHash = throughBlockNumber === finalizedNumber
+          ? finalizedHash
+          : normalizeHash(await input.readBlockHash(throughBlockNumber, lifecycleSignal));
+        if (throughBlockHash === undefined) {
+          throw new ContextGraphAuthorityIndexRetryableError(
+            `Context Graph authority index block ${throughBlockNumber} is unavailable`,
+          );
+        }
 
-      const events = await input.readPage(
-        fromBlockNumber,
-        throughBlockNumber,
-        lifecycleSignal,
-      );
-      lifecycleSignal.throwIfAborted();
-      const reduction = reduceContextGraphAuthorityIndexPage({
-        deploymentBlockNumber,
-        throughBlockNumber,
-        throughBlockHash,
-        previous: checkpoint,
-        events,
-      });
-      const next = reduction.checkpoint;
-
-      if (!committing) {
-        // Above the reorg horizon: project, do not persist.
-        tail = next;
-        continue;
-      }
-
-      const commit = await repository.commitOrReloadWinner(
-        durable,
-        next,
-      );
-      if (commit.kind === 'winner') {
-        // Another valid provider completion won the page. Reload its result
-        // and continue from that cursor rather than overwriting or rescanning.
-        durable = await admitContextGraphAuthorityIndexCheckpoint({
-          repository,
-          initial: commit.record,
-          deploymentBlockNumber,
-          finalized: { number: finalizedNumber, hash: finalizedHash },
-          readBlockHash: input.readBlockHash,
+        scannedBlocks += throughBlockNumber - fromBlockNumber + 1;
+        const events = await input.readPage(
+          fromBlockNumber,
+          throughBlockNumber,
           lifecycleSignal,
+        );
+        lifecycleSignal.throwIfAborted();
+        const reduction = reduceContextGraphAuthorityIndexPage({
+          deploymentBlockNumber,
+          throughBlockNumber,
+          throughBlockHash,
+          previous: checkpoint,
+          events,
         });
-        continue;
+        const next = reduction.checkpoint;
+
+        if (!committing) {
+          // Above the reorg horizon: project, do not persist.
+          tail = next;
+          continue;
+        }
+
+        const commit = await repository.commitOrReloadWinner(
+          durable,
+          next,
+        );
+        if (commit.kind === 'winner') {
+          // Another valid provider completion won the page. Reload its result
+          // and continue from that cursor rather than overwriting or rescanning.
+          durable = await admitContextGraphAuthorityIndexCheckpoint({
+            repository,
+            initial: commit.record,
+            deploymentBlockNumber,
+            finalized: { number: finalizedNumber, hash: finalizedHash },
+            readBlockHash: input.readBlockHash,
+            lifecycleSignal,
+            onRejectedCheckpoint,
+          });
+          continue;
+        }
+        // A newer cache entry can belong to a concurrently scanned provider
+        // fork. Keep this attempt on the checkpoint it reduced and admitted;
+        // if another token wins the next CAS, that value is reloaded through
+        // admission before it can influence this attempt.
+        durable = commit.record;
       }
-      // A newer cache entry can belong to a concurrently scanned provider
-      // fork. Keep this attempt on the checkpoint it reduced and admitted;
-      // if another token wins the next CAS, that value is reloaded through
-      // admission before it can influence this attempt.
-      durable = commit.record;
+    } finally {
+      seedSession?.close();
     }
   }
 
@@ -388,19 +525,4 @@ export class ContextGraphAuthorityIndex {
     }
     return state;
   }
-}
-
-function waitForSharedAuthorityIndexScan<T>(
-  pending: Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  if (signal === undefined) return pending;
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-    signal.addEventListener('abort', onAbort, { once: true });
-    void pending.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }

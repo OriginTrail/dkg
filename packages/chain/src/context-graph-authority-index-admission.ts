@@ -35,6 +35,8 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
   readonly deploymentBlockNumber: number;
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly lifecycleSignal: AbortSignal;
+  /** Evict remotely servable observations as soon as a durable row is rejected. */
+  readonly onRejectedCheckpoint?: () => void;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -80,6 +82,7 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
                 checkpoint.cursor.throughBlockNumber,
                 input.lifecycleSignal,
               ));
+          input.lifecycleSignal.throwIfAborted();
           if (anchorHash === undefined) {
             throw new ContextGraphAuthorityIndexRetryableError(
               `Context Graph authority index anchor ${checkpoint.cursor.throughBlockNumber} `
@@ -91,12 +94,13 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
       }
     }
 
+    input.onRejectedCheckpoint?.();
     if (lostInvalidations >= MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS) {
       throw new ContextGraphAuthorityIndexRetryableError(
         'Context Graph authority index changed repeatedly during checkpoint recovery',
       );
     }
-    const recovery = await input.repository.invalidateOrReloadWinner(record);
+    const recovery = await input.repository.invalidateOrReloadWinner(record, input.lifecycleSignal);
     if (recovery.kind === 'invalidated') return recovery.record;
     lostInvalidations += 1;
     record = recovery.record;

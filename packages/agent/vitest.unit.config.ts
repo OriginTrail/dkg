@@ -18,6 +18,9 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/authority-index-snapshot-runtime.test.ts",
+      "test/authority-index-snapshot-service.test.ts",
+      "test/authority-index-snapshot-wiring.test.ts",
       "test/context-graph-discovery-options.test.ts",
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",

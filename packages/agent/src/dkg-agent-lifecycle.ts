@@ -1,5 +1,6 @@
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
+import { startAuthorityIndexSnapshotRuntime } from './authority-index-snapshot-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -2092,6 +2093,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.
     const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
@@ -3100,6 +3102,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else {
       this.log.info(ctx, `Node role is '${effectiveRole}' — skipping StorageACK handler registration (core-only)`);
     }
+
+    // Deliberately AFTER StorageACK registration, not beside the other protocol
+    // handlers above. The first refresh is a finalized-anchor resolution plus a
+    // registry `eth_getLogs` walk; started earlier it competed with the boot
+    // `getIdentityId()` this block awaits, timing it out at 20s. That makes the
+    // registration above return 'retryable', so the core advertises no
+    // `/dkg/10.0.2/storage-ack` for STORAGE_ACK_REGISTRATION_RETRY_MS and every
+    // publish that needs its ACK fails. Nothing here depends on the index.
+    this.authorityIndexSnapshotRuntime = startAuthorityIndexSnapshotRuntime({
+      nodeRole: this.config.nodeRole ?? 'edge',
+      snapshots: this.chain.contextGraphAuthorityIndexSnapshots,
+      register: (protocol, handler, options) => this.router.register(protocol, handler, options),
+      warn: (message) => this.log.warn(ctx, message),
+    });
 
     // Register VERIFY proposal handler — responds to incoming M-of-N proposals.
     // Agents on the allowList sign the verify digest when they agree with the data.

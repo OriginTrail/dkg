@@ -15,6 +15,7 @@ import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
+import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type {
   ApprovalPolicy,
   ChainReadOptions,
@@ -980,6 +981,7 @@ export class EVMChainAdapterBase {
   /** Sole public scheduling capability backed by the private materialized index. */
   readonly contextGraphAuthorityIndexRevisionReader:
     ContextGraphAuthorityIndexRevisionReader | undefined;
+  readonly contextGraphAuthorityIndexSnapshots: ContextGraphAuthorityIndexSnapshots | undefined;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -1333,10 +1335,15 @@ export class EVMChainAdapterBase {
       undefined,
       config.localContextGraphAuthorityHistoryStore,
     );
+    if (config.contextGraphAuthorityIndexBootstrap !== undefined
+      && config.localContextGraphAuthorityIndexStore === undefined) {
+      throw new TypeError('Context Graph authority index bootstrap requires a local durable index store');
+    }
     this.contextGraphAuthorityIndex = config.localContextGraphAuthorityIndexStore === undefined
       ? undefined
-      : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore);
-    this.contextGraphAuthorityIndexRevisionReader = this.contextGraphAuthorityIndex === undefined
+      : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore,
+          config.contextGraphAuthorityIndexBootstrap);
+    const authorityIndexReader = this.contextGraphAuthorityIndex === undefined
       ? undefined
       : createEvmContextGraphAuthorityIndexRevisionReaderV1({
           index: this.contextGraphAuthorityIndex,
@@ -1354,6 +1361,8 @@ export class EVMChainAdapterBase {
           pageSize: () => this.cgRegistryScanPageSize,
           finalityConfirmations: () => this.finalityConfirmations,
         });
+    this.contextGraphAuthorityIndexRevisionReader = authorityIndexReader;
+    this.contextGraphAuthorityIndexSnapshots = authorityIndexReader?.snapshots;
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;

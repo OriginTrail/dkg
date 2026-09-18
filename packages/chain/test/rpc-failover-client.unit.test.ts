@@ -52,6 +52,7 @@ import {
   isRetryableRpcError,
 } from '../src/evm-adapter-rpc.js';
 import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
+import { ContextGraphAuthorityIndexBootstrapUnavailableError } from '../src/context-graph-authority-index-snapshot.js';
 import { recorder, retryable429, NEVER_SIGN, makeClient } from './rpc-failover-test-helpers.js';
 
 const callExceptionErr = (msg = 'execution reverted: TooLowAllowance') => {
@@ -78,6 +79,12 @@ const URLS = ['https://primary.example', 'https://backup.example'];
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
 describe('RPC retry disposition', () => {
+  it('keeps core bootstrap failures retry-later even when causes mention network timeouts and 503', () => {
+    const error = new ContextGraphAuthorityIndexBootstrapUnavailableError(new Error('network timeout 503'));
+    expect(classifyRpcRetryDisposition(error)).toBe('retry-later');
+    expect(isRetryableRpcError(error)).toBe(true);
+    expect(isRpcEndpointFailoverEligible(error)).toBe(false);
+  });
   it('keeps local saturation caller-retryable but excludes it from endpoint failover', () => {
     const queueFull = new RpcRequestGovernorQueueFullError(1);
     expect(classifyRpcRetryDisposition(queueFull)).toBe('retry-later');
