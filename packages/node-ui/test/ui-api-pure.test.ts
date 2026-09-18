@@ -140,7 +140,14 @@ function startTestServer(): Promise<void> {
         } else if (url.startsWith('/api/per-type-stats')) {
           res.end(JSON.stringify({ buckets: [], types: [], series: {} }));
         } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
-          res.end(JSON.stringify({ contextGraphs: [] }));
+          // A row the summary decoder accepts, deliberately without an
+          // `onChainId`, so `ensureContextGraphOnChain` exercises the
+          // "found but off-chain" branch rather than the not-found one.
+          res.end(JSON.stringify({
+            contextGraphs: [
+              { id: 'cg1', name: 'cg1', isSystem: false, subscribed: false, synced: false },
+            ],
+          }));
         } else if (url.startsWith('/api/query')) {
           res.end(JSON.stringify({ result: { bindings: queryBindings } }));
         } else if (url.startsWith('/api/shared-memory')) {
