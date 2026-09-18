@@ -1051,6 +1051,27 @@ function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
   ].join('\0');
 }
 
+/**
+ * Keep only the newest catalog version promised for each scope. Targets that
+ * share that newest version but disagree on the head digest are all kept: that
+ * fork is evidence the row projection reports as ambiguous, and dropping one
+ * side of it would pick a branch at random.
+ */
+function pruneRfc64SupersededCatalogTargetsV1(
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+): readonly Rfc64PublicCatalogHeadAnnouncementV1[] {
+  const newestByScope = new Map<string, bigint>();
+  for (const target of targets) {
+    const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
+    const version = BigInt(target.catalogVersion);
+    const newest = newestByScope.get(scopeKey);
+    if (newest === undefined || version > newest) newestByScope.set(scopeKey, version);
+  }
+  return targets.filter((target) => (
+    BigInt(target.catalogVersion) === newestByScope.get(rfc64CatalogTargetScopeKeyV1(target))
+  ));
+}
+
 function rfc64CatalogTargetExactIdentityV1(
   left: Rfc64PublicCatalogHeadAnnouncementV1,
   right: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -1407,6 +1428,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await this.rfc64PublicCatalogServiceV1?.whenReceiverIdle();
       },
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
+      pruneSupersededTargets: pruneRfc64SupersededCatalogTargetsV1,
       parityFailed: async (contextGraphId, promised) => {
         const persistence = this.rfc64PersistenceV1;
         if (persistence === undefined) return true;

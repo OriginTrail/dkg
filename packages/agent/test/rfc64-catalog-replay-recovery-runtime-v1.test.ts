@@ -4,6 +4,21 @@ import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
 
 interface Target {
   readonly id: string;
+  readonly scope?: string;
+  readonly version?: number;
+}
+
+/** Stands in for the agent's newest-version-per-scope promise pruning. */
+function pruneSupersededTargets(targets: readonly Target[]): readonly Target[] {
+  const newestByScope = new Map<string, number>();
+  for (const target of targets) {
+    const scope = target.scope ?? target.id;
+    const version = target.version ?? 0;
+    if ((newestByScope.get(scope) ?? -1) < version) newestByScope.set(scope, version);
+  }
+  return targets.filter(
+    (target) => (target.version ?? 0) === newestByScope.get(target.scope ?? target.id),
+  );
 }
 
 function run(
@@ -146,5 +161,36 @@ describe('RFC-64 catalog replay recovery runtime', () => {
       { id: 'head-a' },
       { id: 'head-b' },
     ]);
+  });
+
+  it('prunes superseded promises instead of blocking a graph that advanced often', async () => {
+    let promisedVersion = 1;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([{
+          id: `scope-a@${promisedVersion}`,
+          scope: 'scope-a',
+          version: promisedVersion,
+        }]),
+      }),
+      whenReceiverIdle: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+      pruneSupersededTargets,
+    });
+
+    // One live scope, advanced past the per-Context-Graph target bound. Each
+    // scoped pass merges into the snapshot, so without pruning the superseded
+    // versions accumulate and overflow it into `failed`.
+    for (; promisedVersion <= 70; promisedVersion += 1) {
+      runtime.markPeerPending('public-cg', 'policy', `peer-${promisedVersion}`);
+      await expect(run(runtime, 'policy')).resolves.toEqual({ requested: 1, failed: 0 });
+    }
+
+    expect(runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'scope-a@70', scope: 'scope-a', version: 70 },
+    ]);
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(false);
   });
 });

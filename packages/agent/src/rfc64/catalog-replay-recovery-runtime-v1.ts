@@ -82,6 +82,14 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
   whenReceiverIdle(): Promise<void>;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
+  /**
+   * Drop every promise a newer promise for the same catalog scope supersedes,
+   * keeping a same-version fork intact: that disagreement is evidence the
+   * projection must still see. It bounds a merged snapshot by live scopes
+   * instead of by version history. Optional, because the runtime cannot rank
+   * opaque targets itself; a port that omits it keeps the merged set whole.
+   */
+  pruneSupersededTargets?(targets: readonly Target[]): readonly Target[];
 }
 
 export interface Rfc64CatalogReplayRecoveryResultV1 {
@@ -478,10 +486,19 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
             for (const target of promised) {
               merged.set(this.#ports.targetIdentity(target), target);
             }
-            progress.promisedTargets = merged.size
+            // `targetIdentity` is exact, so each head advance a scoped pass
+            // observes adds an entry while the superseded one stays and
+            // nothing prunes it between full passes. Pruning before the bound
+            // keeps the capacity latch a statement about live scopes -- which
+            // is what the projection reads -- instead of one about how often
+            // those scopes advanced.
+            const live = this.#ports.pruneSupersededTargets === undefined
+              ? [...merged.values()]
+              : this.#ports.pruneSupersededTargets([...merged.values()]);
+            progress.promisedTargets = live.length
               > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
               ? null
-              : Object.freeze([...merged.values()]);
+              : Object.freeze([...live]);
             if (progress.promisedTargets === null) requiresFullReplay = true;
           }
         }
