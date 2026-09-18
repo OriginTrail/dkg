@@ -61,6 +61,17 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     if (msg.includes('NoEligibleContextGraph')) throw new NoEligibleContextGraphError();
     if (msg.includes('NoEligibleKnowledgeAsset')) throw new NoEligibleKnowledgeCollectionError();
     if (msg.includes('This challenge is no longer active')) throw new ChallengeNoLongerActiveError();
+    // RandomSampling >= 10.6.1 gates `createChallenge` to undelegated EOAs. The
+    // revert is permanent for the signing wallet, so spell out the remedy in the
+    // message instead of leaving the operator with a bare custom-error name (the
+    // error object is rethrown as-is so `err.revert` stays inspectable).
+    if (msg.includes('ContractCallerNotAllowed')) {
+      err.message =
+        `${msg} — RandomSampling.createChallenge only accepts an undelegated EOA; the signing ` +
+        'operational key is a contract wallet or an EIP-7702 delegated EOA. Rotate or add an ' +
+        'undelegated EOA operational key.';
+      throw err;
+    }
     const merkleMatch = msg.match(/MerkleRootMismatchError\((0x[0-9a-fA-F]+),\s*(0x[0-9a-fA-F]+)\)/);
     if (merkleMatch) {
       throw new MerkleRootMismatchError(merkleMatch[1], merkleMatch[2]);
