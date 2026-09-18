@@ -492,6 +492,44 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
       .toContain(wireId);
   });
 
+  it('stop() fences the deferred restore drain — nothing is wired after teardown', async () => {
+    // Codex review #2614 — the drain was a detached, unowned task: `stop()`
+    // cleared the host-mode timers and joined every other background owner but
+    // never this one, so the tail could still subscribe a gossip topic and
+    // rewrite a marker while the node tore down.
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-stop-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestoreStopCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 1 },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    const cgIds = ['cg-stop-1', 'cg-stop-2', 'cg-stop-3', 'cg-stop-4'];
+    for (const cgId of cgIds) await store.markHostModeSubscribed(cgId);
+    installGossipStub(g);
+    (g as any).maybeMarkRegisteredForHostMode = async () => {};
+
+    await g.initializeSwmHostModeStore();
+
+    expect(g.swmHostModeSubscribed.size).toBe(1);
+    expect(g.swmHostModeRestoreDrain).toBeDefined();
+
+    await core.stop();
+    await g.swmHostModeRestoreDrain;
+
+    // The drain aborted at its first fence check, before the unref'd tick's
+    // first deferred marker could be wired.
+    expect(g.swmHostModeSubscribed.size).toBe(1);
+  });
+
   it('restart restore contains a failing legacy re-wire to keep startup alive', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-legacy-error-'));
     tempDirs.push(dataDir);

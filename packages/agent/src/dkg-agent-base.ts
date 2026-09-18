@@ -780,10 +780,17 @@ export class DKGAgentBase {
    * Tail of the restart restore walk that runs OFF the startup await. Startup
    * restores at most `swmHostMode.reconcileBatchSize` persisted markers inline
    * (each costs a store probe and, on a `hostPublic` core, a chain RPC pair);
-   * the remainder drains through this promise so boot stays bounded. Exposed
-   * so tests — and any future shutdown path — can await the drain.
+   * the remainder drains through this promise so boot stays bounded. `stop()`
+   * fences it with {@link swmHostModeRestoreDrainAborted} and awaits it with
+   * the other background owners; tests await it directly.
    */
   protected swmHostModeRestoreDrain?: Promise<void>;
+  /**
+   * Shutdown fence for {@link swmHostModeRestoreDrain}. `stop()` sets it before
+   * joining the drain so the tail stops BETWEEN markers instead of wiring a
+   * gossip topic (or rewriting a marker) into a node that is tearing down.
+   */
+  protected swmHostModeRestoreDrainAborted = false;
   /**
    * OT-RFC-43 A2 — the KA-number allocator, retained on the agent (also
    * forwarded to the publisher as `kaAllocator`). Held here so

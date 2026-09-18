@@ -821,26 +821,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             `Draining ${deferred.length} remaining persisted host-mode subscription(s) in the background ` +
             `(startup restore capped at reconcileBatchSize=${batchSize})`,
           );
-          // Hand the tail to a later macrotask rather than starting it here:
-          // the synchronous prefix of the first deferred marker (the binding
-          // rehydrate + `wireSwmHostModeHandler`) would otherwise still run on
-          // the startup stack. The timer is unref'd so it never holds the
-          // process open. `restorePersistedHostModeSubscription` is total (it
-          // logs and swallows per-marker failures); the trailing catch only
-          // guards the detached promise against an unhandled rejection if that
-          // ever changes.
-          const drain = async (): Promise<void> => {
-            for (const entry of deferred) {
-              await this.restorePersistedHostModeSubscription(entry, stripOn);
-            }
-          };
-          this.swmHostModeRestoreDrain = new Promise<void>((resolve) => {
-            const timer = setTimeout(() => {
-              void drain().catch(() => { /* per-marker failures are already logged */ })
-                .then(() => { resolve(); });
-            }, 0);
-            timer.unref?.();
-          });
+          this.swmHostModeRestoreDrainAborted = false;
+          this.swmHostModeRestoreDrain = this.drainDeferredHostModeRestores(deferred, stripOn);
         }
       }
     } catch (err) {
@@ -849,6 +831,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
         createOperationContext('system'),
         `Failed to list persisted host-mode subscriptions: ${msg}`,
       );
+    }
+  }
+
+  /**
+   * Drain the restart-restore markers that did not fit in the startup batch.
+   *
+   * Runs off the startup await: the first `await` yields to an unref'd timer
+   * so the synchronous prefix of the first deferred marker (binding rehydrate
+   * + `wireSwmHostModeHandler`) does NOT run on the boot stack, and the timer
+   * never holds the process open. Never rejects —
+   * {@link restorePersistedHostModeSubscription} logs and swallows per-marker
+   * failures — so `stop()` can join it unconditionally.
+   *
+   * Checks {@link swmHostModeRestoreDrainAborted} before every marker so a
+   * shutdown that lands mid-drain stops the tail instead of wiring a topic
+   * into a node that is tearing down.
+   */
+  async drainDeferredHostModeRestores(this: DKGAgent,
+    deferred: SwmHostModeSubscriptionBinding[],
+    stripOn: boolean,
+  ): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 0);
+      timer.unref?.();
+    });
+    for (const entry of deferred) {
+      if (this.swmHostModeRestoreDrainAborted) return;
+      await this.restorePersistedHostModeSubscription(entry, stripOn);
     }
   }
 
