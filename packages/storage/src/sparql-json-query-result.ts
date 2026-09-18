@@ -31,27 +31,34 @@ const SPARQL_JSON_BLANK_NODE_LABEL =
 const SPARQL_JSON_LANGUAGE_TAG = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/u;
 const MAX_CACHED_IRI_VARIABLES = 128;
 const MAX_CACHED_IRI_LENGTH = 1024;
+const MAX_CONSECUTIVE_IRI_MISSES = 16;
+const PAUSED_IRI_COMPARISON_ROWS = 128;
 type IriValidator = (value: string) => boolean;
 
-/** One last successful value per column, never a growing per-row/global cache. */
+/** One last successful value per column role, never a growing per-row/global cache. */
 function createIriValidator(): IriValidator {
   let lastValidIri: string | undefined;
   let consecutiveMisses = 0;
-  let disabled = false;
+  let pausedRows = 0;
   return value => {
-    if (disabled) return isSafeIri(value);
+    // High-cardinality columns (e.g. one subject per row) should not keep
+    // doing cache comparisons/assignments without ever saving validation.
+    // The pause is a bounded window rather than a latch, so a unique prefix
+    // cannot cost the response the repeated run that may follow it.
+    if (pausedRows > 0) {
+      pausedRows--;
+      return isSafeIri(value);
+    }
     if (value === lastValidIri) {
       consecutiveMisses = 0;
       return true;
     }
     const valid = isSafeIri(value);
-    // High-cardinality columns (e.g. one subject per row) should not keep
-    // doing cache comparisons/assignments without ever saving validation.
-    if (++consecutiveMisses >= 16) {
-      disabled = true;
+    if (valid && value.length <= MAX_CACHED_IRI_LENGTH) lastValidIri = value;
+    if (++consecutiveMisses >= MAX_CONSECUTIVE_IRI_MISSES) {
+      pausedRows = PAUSED_IRI_COMPARISON_ROWS;
+      consecutiveMisses = 0;
       lastValidIri = undefined;
-    } else if (valid && value.length <= MAX_CACHED_IRI_LENGTH) {
-      lastValidIri = value;
     }
     return valid;
   };
@@ -222,9 +229,11 @@ function parseSelectResponse(
     reader.read(results, 'bindings', 'SPARQL JSON results'),
     'SPARQL JSON results.bindings',
   );
-  const iriValidators = rows.length > 1
-    ? variables.slice(0, MAX_CACHED_IRI_VARIABLES).map(createIriValidator)
-    : [];
+  // Term values and literal datatypes are separate populations, so a column
+  // carrying both must not let them evict each other from one shared slot.
+  const cachedColumns = rows.length > 1 ? variables.slice(0, MAX_CACHED_IRI_VARIABLES) : [];
+  const iriValidators = cachedColumns.map(createIriValidator);
+  const datatypeValidators = cachedColumns.map(createIriValidator);
   const bindings = rows.map((input, rowIndex) => {
     if (!isOrdinaryDataRecord(input)) {
       malformed(`SPARQL JSON binding ${rowIndex} must be a plain object`);
@@ -241,7 +250,9 @@ function parseSelectResponse(
       if (!Object.prototype.hasOwnProperty.call(row, variable)) continue;
       const term = reader.read(row, variable, `SPARQL JSON binding ${rowIndex}`);
       binding[variable] = formatSparqlJsonTerm(snapshotTerm(
-        term, rowIndex, variable, reader, iriValidators[variableIndex] ?? isSafeIri,
+        term, rowIndex, variable, reader,
+        iriValidators[variableIndex] ?? isSafeIri,
+        datatypeValidators[variableIndex] ?? isSafeIri,
       ));
     }
     return binding;
@@ -269,7 +280,7 @@ function denseArray(input: unknown, label: string): unknown[] {
   return [...snapshotDenseDataArray(input, label, malformed)];
 }
 
-function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: IriValidator): AdapterSparqlJsonTerm {
+function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: IriValidator, validateDatatype: IriValidator): AdapterSparqlJsonTerm {
   const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
   if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain term object`);
   const term = input as Record<string, unknown>;
@@ -320,7 +331,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
   }
   if (hasDatatype) {
     const datatype = reader.read(term, 'datatype', label);
-    if (typeof datatype !== 'string' || !validateIri(datatype)) {
+    if (typeof datatype !== 'string' || !validateDatatype(datatype)) {
       malformed(`${label} datatype must be an absolute safe IRI`);
     }
     return { type, value, datatype };

@@ -1,5 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { isSafeIri } from '@origintrail-official/dkg-core';
 import { decodeSparqlJsonQueryResult, parseSparqlJsonSelectResponse, SparqlJsonResultsShapeError } from '../src/sparql-json-query-result.js';
+
+// Count the validations the decoder actually performs; the cache is otherwise
+// unobservable because a hit returns the same answer as the regex test.
+vi.mock('@origintrail-official/dkg-core', async importOriginal => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
+  return { ...actual, isSafeIri: vi.fn(actual.isSafeIri) };
+});
+const validations = vi.mocked(isSafeIri);
 
 const uri = (value = 'urn:test:valid') => ({ type: 'uri', value });
 const response = (terms: unknown[]) => ({ head: { vars: ['v'] }, results: { bindings: terms.map(v => ({ v })) } });
@@ -50,6 +59,35 @@ describe('bounded response-local IRI validation reuse', () => {
     const row = Object.fromEntries(vars.map(v => [v, uri()]));
     const input = { head: { vars }, results: { bindings: [row, { ...row, v128: uri('relative') }] } };
     for (const decode of decodeBoth(input)) expect(decode).toThrow(SparqlJsonResultsShapeError);
+  });
+
+  it('re-arms the cache for a repeated run that follows a unique prefix', () => {
+    const repeated = 'urn:test:repeated';
+    const repeats = 400;
+    const terms = [
+      ...Array.from({ length: 20 }, (_, index) => uri(`urn:test:unique:${index}`)),
+      ...Array.from({ length: repeats }, () => uri(repeated)),
+    ];
+    for (const decode of decodeBoth(response(terms))) {
+      validations.mockClear();
+      expect(decode()).toMatchObject({ bindings: terms.map(term => ({ v: term.value })) });
+      // A unique prefix may pause comparisons, but it must not latch them off
+      // for the rest of the response: the repeated tail stops being revalidated.
+      const revalidated = validations.mock.calls.filter(([value]) => value === repeated);
+      expect(revalidated.length).toBeLessThan(repeats / 2);
+    }
+  });
+
+  it('keeps term values and literal datatypes in separate cache slots', () => {
+    const datatype = 'urn:test:datatype';
+    const terms = Array.from({ length: 20 }, (_, index) => (index % 2 === 0
+      ? uri(`urn:test:subject:${index}`)
+      : { type: 'literal', value: `row ${index}`, datatype }));
+    for (const decode of decodeBoth(response(terms))) {
+      validations.mockClear();
+      decode();
+      expect(validations.mock.calls.filter(([value]) => value === datatype)).toHaveLength(1);
+    }
   });
 
   it('keeps validating high-cardinality columns after cache comparison is disabled', () => {
