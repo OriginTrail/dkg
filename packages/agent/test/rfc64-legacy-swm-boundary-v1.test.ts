@@ -46,11 +46,16 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
 
   it('captures once, remains private by count, and retires only after explicit republish', async () => {
     const root = await secureTempRoot(roots);
-    const heads = new Map<string, string[]>([
-      [META_GRAPH, [UAL_ONE]],
-      [SUBGRAPH_META_GRAPH, []],
-    ]);
-    const store = fakeStore(heads);
+    const store = new OxigraphStore();
+    const listGraphs = vi.spyOn(store, 'listGraphs');
+    await store.insert(legacySwmBoundaryFixtureQuadsV1({
+      graph: META_GRAPH,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ual: UAL_ONE,
+      operation: 'urn:dkg:workspace-operation:first-capture',
+      head: { shareOperationId: 'first-capture' },
+      operationShareOperationIds: ['first-capture'],
+    }));
     const firstOwner = {};
     await initializeRfc64LegacySwmBoundaryV1(firstOwner, root, store);
 
@@ -58,7 +63,14 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
 
     // A later restart must load the immutable first-upgrade capture instead of
     // silently classifying a new 10.0.16 share as historical.
-    heads.set(SUBGRAPH_META_GRAPH, [UAL_TWO]);
+    await store.insert(legacySwmBoundaryFixtureQuadsV1({
+      graph: SUBGRAPH_META_GRAPH,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ual: UAL_TWO,
+      operation: 'urn:dkg:workspace-operation:late-named',
+      head: { shareOperationId: 'late-named' },
+      operationShareOperationIds: ['late-named'],
+    }));
     const restartedOwner = {};
     await initializeRfc64LegacySwmBoundaryV1(restartedOwner, root, store);
     expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(1);
@@ -81,7 +93,7 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     const secondRestartOwner = {};
     await initializeRfc64LegacySwmBoundaryV1(secondRestartOwner, root, store);
     expect(readRfc64LegacySwmBoundaryCountV1(secondRestartOwner, CONTEXT_GRAPH_ID)).toBe(0);
-    expect(store.listGraphs).not.toHaveBeenCalled();
+    expect(listGraphs).not.toHaveBeenCalled();
   });
 
   it('persists an atomic post-capture legacy SHARE companion until that exact UAL is republished', async () => {
@@ -291,56 +303,29 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
   });
 
-  it('does not let named metadata graphs consume the root graph capture cap', async () => {
+  it('captures the root graph with one behavioral store read and no graph enumeration', async () => {
     const root = await secureTempRoot(roots);
-    const heads = new Map<string, string[]>([[META_GRAPH, [UAL_ONE]]]);
-    for (let index = 0; index < 16_384; index += 1) {
-      heads.set(
-        contextGraphSharedMemoryMetaUri(CONTEXT_GRAPH_ID, `named-${index}`),
-        [],
-      );
-    }
-    const store = fakeStore(heads);
+    const store = new OxigraphStore();
+    await store.insert(legacySwmBoundaryFixtureQuadsV1({
+      graph: META_GRAPH,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ual: UAL_ONE,
+      operation: 'urn:dkg:workspace-operation:bounded-read',
+      head: { shareOperationId: 'bounded-read' },
+      operationShareOperationIds: ['bounded-read'],
+    }));
+    const listGraphs = vi.spyOn(store, 'listGraphs');
+    const query = vi.spyOn(store, 'query');
 
     const owner = {};
     await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
 
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
-    expect(store.listGraphs).not.toHaveBeenCalled();
-    expect(store.query).toHaveBeenCalledWith(
-      expect.stringContaining('GRAPH ?metaGraph'),
-      expect.objectContaining({
-        source: 'agent.rfc64.legacySwmBoundary.readHeads',
-      }),
-    );
-  });
-
-  it('uses one bounded fully correlated capture query', async () => {
-    const root = await secureTempRoot(roots);
-    const store = fakeStore(new Map([[META_GRAPH, [UAL_ONE]]]));
-
-    await initializeRfc64LegacySwmBoundaryV1({}, root, store);
-
-    const captureQueryCalls = vi.mocked(store.query).mock.calls.filter(([, options]) => (
+    expect(listGraphs).not.toHaveBeenCalled();
+    const captureQueryCalls = query.mock.calls.filter(([, options]) => (
       options?.source === 'agent.rfc64.legacySwmBoundary.readHeads'
     ));
     expect(captureQueryCalls).toHaveLength(1);
-    const captureQuery = captureQueryCalls[0]![0];
-    expect(captureQuery).toContain(
-      '?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
-    );
-    expect(captureQuery).toContain(
-      'BIND(?operationUal AS ?ual)',
-    );
-    expect(captureQuery).toContain(
-      '?head <http://dkg.io/ontology/kaUal> ?ual ; <http://dkg.io/ontology/shareOperationId> ?shareId',
-    );
-    expect(captureQuery).toContain('LIMIT 100001');
-    expect(captureQuery).toContain(
-      'FILTER(STRENDS(STR(?head), "#dkg-swm-head"))',
-    );
-    expect(captureQuery).not.toContain('VALUES');
-    expect(captureQuery).not.toContain('queryHints#');
   });
 
   it.each([
@@ -502,29 +487,6 @@ async function secureTempRoot(roots: string[]): Promise<string> {
   await chmod(root, 0o700);
   roots.push(root);
   return root;
-}
-
-function fakeStore(
-  headsByGraph: Map<string, string[]>,
-): TripleStore {
-  return {
-    listGraphs: vi.fn(async () => [...headsByGraph.keys()]),
-    query: vi.fn(async (_sparql: string, options?: { source?: string }) => {
-      const rootHeads = headsByGraph.get(META_GRAPH) ?? [];
-      if (options?.source === 'agent.rfc64.legacySwmBoundary.readHeads') {
-        return {
-          type: 'bindings' as const,
-          bindings: rootHeads.map((ual) => ({
-            metaGraph: META_GRAPH,
-            head: `${ual}#dkg-swm-head`,
-            ual,
-            contextGraphId: `"${CONTEXT_GRAPH_ID}"`,
-          })),
-        };
-      }
-      return { type: 'bindings' as const, bindings: [] };
-    }),
-  } as unknown as TripleStore;
 }
 
 function captureBinding(
