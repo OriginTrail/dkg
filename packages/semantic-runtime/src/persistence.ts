@@ -5,7 +5,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 
 export const RUNTIME_DATABASE_FILENAME = 'semantic-runtime.sqlite';
-export const RUNTIME_DATABASE_SCHEMA_VERSION = 2;
+export const RUNTIME_DATABASE_SCHEMA_VERSION = 3;
 
 export type ExecutionStatus = 'active' | 'paused' | 'completed' | 'failed' | 'quarantined';
 export type EffectState =
@@ -216,6 +216,17 @@ const EFFECT_TRANSITIONS: Readonly<Record<EffectState, readonly EffectState[]>> 
   compensated: [],
 };
 
+export interface ProgramConfigurationRecord {
+  kind: 'binding' | 'route';
+  contextGraphId: string;
+  operationIri: string;
+  revision: number;
+  /** Null is a durable route-removal tombstone. */
+  payload: string | null;
+  updatedBy: string;
+  updatedAt: number;
+}
+
 export class SemanticRuntimeStore {
   readonly databasePath: string;
   private readonly db: Database.Database;
@@ -237,6 +248,35 @@ export class SemanticRuntimeStore {
 
   close(): void {
     if (this.db.open) this.db.close();
+  }
+
+  programConfigurationRecords(): ProgramConfigurationRecord[] {
+    const rows = this.db.prepare(`SELECT kind, context_graph_id, operation_iri, revision, payload, updated_by, updated_at
+      FROM program_configuration ORDER BY kind, context_graph_id, operation_iri`).all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      kind: row.kind as ProgramConfigurationRecord['kind'], contextGraphId: String(row.context_graph_id), operationIri: String(row.operation_iri),
+      revision: Number(row.revision), payload: row.payload === null ? null : String(row.payload),
+      updatedBy: String(row.updated_by), updatedAt: Number(row.updated_at),
+    }));
+  }
+
+  /** CAS and durable commit precede publishing the new in-process authority. */
+  writeProgramConfiguration(record: Omit<ProgramConfigurationRecord, 'revision'>, expectedRevision: number): number {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || expectedRevision >= Number.MAX_SAFE_INTEGER
+      || (record.payload !== null && Buffer.byteLength(record.payload, 'utf8') > 262_144)) throw new Error('INVALID_PROGRAM_CONFIGURATION');
+    return this.db.transaction(() => {
+      const row = this.db.prepare('SELECT revision FROM program_configuration WHERE kind=? AND context_graph_id=? AND operation_iri=?')
+        .get(record.kind, record.contextGraphId, record.operationIri) as { revision: bigint } | undefined;
+      if (Number(row?.revision ?? 0) !== expectedRevision) throw new Error('PROGRAM_CONFIGURATION_CONFLICT');
+      const count = this.db.prepare('SELECT COUNT(*) AS n FROM program_configuration WHERE kind=?').get(record.kind) as { n: bigint };
+      if (!row && count.n >= 256n) throw new Error('PROGRAM_CONFIGURATION_LIMIT');
+      const revision = expectedRevision + 1;
+      this.db.prepare(`INSERT INTO program_configuration(kind, context_graph_id, operation_iri, revision, payload, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(kind, context_graph_id, operation_iri) DO UPDATE SET
+        revision=excluded.revision, payload=excluded.payload, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
+        .run(record.kind, record.contextGraphId, record.operationIri, BigInt(revision), record.payload, record.updatedBy, BigInt(record.updatedAt));
+      return revision;
+    })();
   }
 
   registerStrategyArtifact(record: StrategyArtifactRecord): void {
@@ -858,6 +898,7 @@ export class SemanticRuntimeStore {
     this.db.transaction(() => {
       if (version < 1) this.db.exec(SCHEMA_V1);
       if (version < 2) this.db.exec(SCHEMA_V2);
+      if (version < 3) this.db.exec(SCHEMA_V3);
       this.db.pragma(`user_version = ${RUNTIME_DATABASE_SCHEMA_VERSION}`);
     })();
   }
@@ -1209,5 +1250,18 @@ const SCHEMA_V2 = `
     version INTEGER NOT NULL CHECK(version > 0),
     payload BLOB NOT NULL,
     updated_at INTEGER NOT NULL
+  );
+`;
+
+const SCHEMA_V3 = `
+  CREATE TABLE program_configuration (
+    kind TEXT NOT NULL CHECK(kind IN ('binding','route')),
+    context_graph_id TEXT NOT NULL,
+    operation_iri TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    payload TEXT,
+    updated_by TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(kind, context_graph_id, operation_iri)
   );
 `;

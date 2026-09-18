@@ -13,7 +13,7 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
   const seen = new Set<string>();
   for (const binding of value) {
     if (!record(binding)
-      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'executionLayer'])
+      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'executionLayer', 'authorizationRevision'])
       || typeof binding.enabled !== 'boolean'
       || !address(binding.executorAgentAddress)
       || !Array.isArray(binding.allowedCallerAgentAddresses)
@@ -34,6 +34,8 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
       if (typeof iri !== 'string') throw new Error('INVALID_PROGRAM_BINDING_IRI');
       sparqlIri(iri);
     }
+    if (binding.authorizationRevision !== undefined && (typeof binding.authorizationRevision !== 'number'
+      || !Number.isSafeInteger(binding.authorizationRevision) || binding.authorizationRevision < 1)) throw new Error('INVALID_AUTHORIZATION_REVISION');
     if (binding.query !== undefined) validateSemanticQueryPins([binding.query]);
     if (binding.assetCreation !== undefined) {
       if (!record(binding.assetCreation) || !keys(binding.assetCreation, ['toolIri'])

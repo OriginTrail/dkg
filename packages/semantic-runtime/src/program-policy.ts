@@ -55,6 +55,8 @@ export interface SemanticSparqlReadGrant {
 
 /** Tenant-owned invoke grant. Only the host may select the executor and data graph. */
 export interface SemanticProgramBinding {
+  /** API-owned permission revision; changes invalidate previous invocation identities. */
+  authorizationRevision?: number;
   operationIri: string;
   contextGraphId: string;
   enabled: boolean;

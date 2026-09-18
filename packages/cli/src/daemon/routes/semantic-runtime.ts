@@ -8,8 +8,10 @@ import {
 import { invokeBoundSemanticProgramOnPeer, invokeSemanticProgramOnAuthorNode } from '../../semantic-runtime-inbox.js';
 import { jsonResponse, readBody, safeParseJson } from '../http-utils.js';
 import type { RequestContext } from './context.js';
+import { canonicalProgramGraphId, handleSemanticRuntimeConfigurationRoutes } from './semantic-runtime-configuration.js';
 
 export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<void> {
+  if (await handleSemanticRuntimeConfigurationRoutes(ctx)) return;
   const { req, res, path, url, agent, config, semanticRuntimeHost } = ctx;
   const isResolve = req.method === 'GET' && path === '/api/semantic-runtime/resolve';
   const isInvoke = req.method === 'POST' && path === '/api/programs/execute';
@@ -78,6 +80,26 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       if (error instanceof SemanticProgramError) {
         return jsonResponse(res, error.status, { code: error.code, error: error.message });
       }
+      throw error;
+    }
+  }
+  // The explicit operation form never falls back to direct Program execution,
+  // even if a route has been removed or a binding has never been installed.
+  if (Object.hasOwn(body, 'operationIri')) {
+    if (typeof body.operationIri !== 'string' || typeof body.contextGraphId !== 'string' || typeof body.invocationId !== 'string'
+      || Object.keys(body).some((key) => !['contextGraphId', 'operationIri', 'invocationId'].includes(key))) {
+      return jsonResponse(res, 400, { error: 'Bound invocation requires only contextGraphId, operationIri and invocationId' });
+    }
+    try {
+      const graph = canonicalProgramGraphId(body.contextGraphId);
+      const route = config.semanticRuntime?.programRoutes?.find((entry) => entry.contextGraphId === graph && entry.operationIri === body.operationIri);
+      if (!config.semanticRuntime) throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Semantic runtime is unavailable', 409);
+      const result = route
+        ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, ctx.actor.authenticatedAgentAddress)
+        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, ctx.actor.authenticatedAgentAddress);
+      return jsonResponse(res, 200, result);
+    } catch (error) {
+      if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message });
       throw error;
     }
   }

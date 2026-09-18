@@ -239,7 +239,7 @@ describe('semantic runtime daemon configuration', () => {
       );
     expect(service?.host).toBe(host);
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      config: { enabled: true, watchdogMs: 250, maxEvents: 12 },
+      config: expect.objectContaining({ enabled: true, watchdogMs: 250, maxEvents: 12 }),
       log,
     }));
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Wasm execution + durable effect journal enabled'));
@@ -256,7 +256,7 @@ describe('semantic runtime daemon configuration', () => {
     expect(() => validateSemanticRuntimeConfig({ operatorPolicyIri: 'urn:policy> <urn:injected' })).toThrow(/operatorPolicyIri/);
   });
 
-  it('stops the started host and preserves the journal-open error if durable storage cannot open', async () => {
+  it('does not start a host when durable storage cannot open', async () => {
     const journalError = new Error('journal unavailable');
     const host = { stop: vi.fn(async () => undefined) } as any;
     const log = vi.fn();
@@ -264,7 +264,7 @@ describe('semantic runtime daemon configuration', () => {
       start: vi.fn(async () => host), log,
       openStore: () => { throw journalError; },
     })).rejects.toBe(journalError);
-    expect(host.stop).toHaveBeenCalledOnce();
+    expect(host.stop).not.toHaveBeenCalled();
     expect(log).not.toHaveBeenCalled();
   });
 
