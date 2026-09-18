@@ -124,6 +124,30 @@ function inGraph(quads: readonly Quad[], graph: string): Quad[] {
   return quads.map((quad) => ({ ...quad, graph }));
 }
 
+/**
+ * Counts the two validation queries so "did the memo answer this, or did the
+ * store?" is observable — the same technique as
+ * `swm-materialization-witness.test.ts`.
+ */
+function countingStore(inner: TripleStore) {
+  let constructs = 0;
+  let countQueries = 0;
+  const proxy = new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'query') {
+        return async (sparql: string, options?: unknown) => {
+          const normalized = sparql.trimStart();
+          if (normalized.startsWith('CONSTRUCT')) constructs += 1;
+          if (normalized.startsWith('SELECT (COUNT')) countQueries += 1;
+          return (target as TripleStore).query(sparql, options as never);
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as TripleStore;
+  return { store: proxy, constructs: () => constructs, countQueries: () => countQueries };
+}
+
 async function distinctObjects(store: TripleStore, graph: string, subject: string, predicate: string): Promise<string[]> {
   const result = await store.query(
     `SELECT DISTINCT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
@@ -187,23 +211,49 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
 
     it('evicts the oldest entries when the bounded memo reaches its limit', async () => {
       vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      // Frozen clock: the memo TTL must not be able to explain a miss below, so
+      // the LRU bound is the only thing that can force a revalidation.
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
       try {
-        const store = new OxigraphStore();
+        const inner = new OxigraphStore();
+        const { store, constructs, countQueries } = countingStore(inner);
         const { materializer } = materializerFor(store);
+        // One past MATERIALIZATION_MEMO_MAX_ENTRIES (1024), so filling the memo
+        // evicts exactly the first descriptor. `-0` is not a prefix of any other
+        // generated graph (no index carries a leading zero) and 1025 tracked
+        // graphs cannot move the tracker's global floor, so descriptors[0]'s
+        // write generation is fixed: eviction is the ONLY thing that can make
+        // the re-check below touch the store again.
         const descriptors = Array.from({ length: 1025 }, (_, index) => ({
           ...descriptorFor(v1),
           assertionGraph: `${v1.assertionGraph}-${index}`,
         }));
         for (const descriptor of descriptors) {
-          await store.insert(inGraph(v1.payload, descriptor.assertionGraph));
+          await inner.insert(inGraph(v1.payload, descriptor.assertionGraph));
           expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
         }
+        // Every check above was cold: one count gate plus one read-back each.
+        const coldCounts = countQueries();
+        const coldConstructs = constructs();
+        expect(coldCounts).toBe(descriptors.length);
+        expect(coldConstructs).toBe(descriptors.length);
 
-        // The 1025th insert forces one LRU eviction. Rechecking the first
-        // descriptor therefore performs the full validation again and still
-        // returns the digest-bound answer.
+        // The newest entry is still memoized — a warm re-check touches the
+        // store not at all. Without this row, "the answer is still true" would
+        // also hold with the memo disabled outright.
+        expect(await materializer.isGraphAssetMaterialized(descriptors.at(-1)!)).toBe(true);
+        expect(countQueries()).toBe(coldCounts);
+        expect(constructs()).toBe(coldConstructs);
+
+        // The 1025th entry evicted the first, so rechecking it pays the full
+        // COUNT + CONSTRUCT validation again — and still returns the
+        // digest-bound answer. Raising the bound, or dropping the eviction
+        // loop, leaves this warm and fails here.
         expect(await materializer.isGraphAssetMaterialized(descriptors[0]!)).toBe(true);
+        expect(countQueries()).toBe(coldCounts + 1);
+        expect(constructs()).toBe(coldConstructs + 1);
       } finally {
+        now.mockRestore();
         vi.unstubAllEnvs();
       }
     });
