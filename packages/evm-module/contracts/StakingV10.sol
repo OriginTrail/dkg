@@ -776,6 +776,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (pos.identityId == 0) revert PositionNotFound();
         uint256 delta = rewardSettlement.reconcileRewardSources(tokenId, start, count);
         if (delta == 0) return 0;
+        // Settle the current-epoch score cursor BEFORE raising `raw`, exactly
+        // as `stake`, `relock`, `redelegate` and `_claim` do. Compounding into
+        // `raw` without it retroactively re-integrates the already-accrued part
+        // of the epoch at the higher stake, pushing the delegator score above
+        // the node score and bricking every later claim/withdraw with
+        // `DelegatorRewardInvariant`.
+        _prepareForStakeChangeV10(chronos.getCurrentEpoch(), tokenId, pos.identityId);
         rewardDelta = _compoundReward(tokenId, pos.identityId, delta);
     }
 
