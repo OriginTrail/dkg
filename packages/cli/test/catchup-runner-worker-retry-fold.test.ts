@@ -13,6 +13,7 @@
 import {
   durableCatchupResult as durableResult,
   runWorkerCatchup,
+  sharedCatchupResult as sharedResult,
 } from './helpers/catchup-runner-worker-test-harness.js';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
@@ -87,5 +88,101 @@ describe('worker catch-up retry folding', () => {
     // The job itself was not cut short: the latest attempt was admitted.
     expect(result.deferredBackpressure).toBe(0);
     expect(result.peersSucceeded).toBe(1);
+  });
+
+  it('keeps a peer clean when the deferred attempt failed a phase and the retry did not', async () => {
+    // `markDeferred` adds the deferral onto the summary the round had already
+    // accumulated, so ONE attempt can return `{completedPhases: 1,
+    // failedPhases: 1, deferredBackpressure: 1}` across the RPC. The fold sums
+    // `failedPhases`, and every classifier treats a non-zero value as a
+    // blocking failure — so classifying the FOLD reports a peer whose retry was
+    // clean as failed, flipping `recordPeerRound` and dropping the peer from
+    // `peersSucceeded`.
+    let sharedCalls = 0;
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-deferred-with-phase-failure', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return singlePeer;
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            sharedCalls += 1;
+            return sharedCalls === 1
+              ? { ...sharedResult(), failedPhases: 1, deferredBackpressure: 1 }
+              : sharedResult();
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(sharedCalls).toBe(2);
+    expect(result.peersSucceeded).toBe(1);
+    expect(result.deferredBackpressure).toBe(0);
+    // The cumulative counters are still reported — they are the observability
+    // the fold exists for; they just do not decide the peer's verdict.
+    expect(result.diagnostics?.sharedMemory.failedPhases).toBe(1);
+    expect(result.diagnostics?.sharedMemory.deferredBackpressure).toBe(1);
+  });
+
+  it('classifies a retried public CG with the same classifier as an un-retried one', async () => {
+    // An explicitly subscribed PUBLIC CG uses the selected scheduling lane on
+    // every candidate peer, so its plane is classified by
+    // `classifySharedMemoryFreshness`, which discounts a RESOLVED voluntary
+    // snapshot yield from `failedPhases`. Re-deriving the classifier from
+    // `terminalBoundaryRequired` in the retry fold fell back to
+    // `classifyDurableProgress` for exactly this peer — making the verdict
+    // depend on whether local admission happened to defer the plane once.
+    let sharedCalls = 0;
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-resolved-yield-after-retry', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return singlePeer;
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            sharedCalls += 1;
+            return sharedCalls === 1
+              ? {
+                  ...sharedResult(),
+                  insertedTriples: 0,
+                  fetchedDataTriples: 0,
+                  insertedDataTriples: 0,
+                  bytesReceived: 0,
+                  completedPhases: 0,
+                  deferredBackpressure: 1,
+                }
+              : {
+                  ...sharedResult(),
+                  failedPhases: 1,
+                  snapshotPlaneIncomplete: 1,
+                  resolvedSnapshotPlaneIncomplete: 1,
+                };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(sharedCalls).toBe(2);
+    // The voluntary yield was resolved by the continuation, so the plane is
+    // clean — as it is when the very same response arrives without a retry.
+    expect(result.peersSucceeded).toBe(1);
+    expect(result.deferredBackpressure).toBe(0);
+    expect(result.diagnostics?.sharedMemory.failedPhases).toBe(1);
   });
 });
