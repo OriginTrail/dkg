@@ -1519,6 +1519,8 @@ export class DKGAgentBase {
    * kept on the encrypted path for this adapter.
    */
   protected warnedMissingCgLivenessProbe = false;
+  /** Epoch ms of the last single-read authority fallback warning; see its claim. */
+  protected lastLiveAuthorityFallbackWarnAt = Number.NEGATIVE_INFINITY;
   /**
    * Issue #872 — companion cache for the per-CG `publishPolicy` enum
    * (`0` = curators-only, `1` = open). Populated lazily by the

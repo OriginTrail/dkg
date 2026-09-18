@@ -224,6 +224,7 @@ export default defineConfig({
       "test/private-read-chain-authority.test.ts",
       "test/context-graph-authority-retry.test.ts",
       "test/context-graph-access-policy-state.test.ts",
+      "test/context-graph-live-authority-fold.test.ts",
       "test/context-graph-historical-name-binding.test.ts",
       "test/context-graph-registration-resolution.test.ts",
       "test/context-graph-list-concurrency.test.ts",
