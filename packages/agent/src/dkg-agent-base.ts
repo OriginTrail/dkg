@@ -137,7 +137,8 @@ import {
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
+import { AbortableKeyedSingleFlight, bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1580,6 +1581,20 @@ export class DKGAgentBase {
    * the RPC every envelope for an unknown id, opening a DoS lever.
    */
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
+  /**
+   * Coalesces CONCURRENT identical registered-authority resolutions.
+   *
+   * This is not a cache and holds no value once a resolution settles: callers
+   * that arrive while a read is in flight join it instead of issuing their own.
+   * The chain view each caller receives is the one that read returns, so the
+   * "fresh chain view" contract of `resolveRegisteredContextGraphAuthority`
+   * is preserved exactly — what changes is how many times the same question is
+   * asked of the RPC endpoint at the same instant. Measured on one 100-asset
+   * run: 7,228 of 8,823 eth_calls were this resolution repeated for a single
+   * context graph, peaking at ~40/s.
+   */
+  protected readonly registeredAuthorityFlight =
+    new AbortableKeyedSingleFlight<string, RegisteredContextGraphAuthority>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
   protected readonly knownCorePeerIds = new Set<string>();
   protected readonly knownCorePeerIdsV2 = new Set<string>();

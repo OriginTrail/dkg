@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { SingleFlightInvalidatedError, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1565,6 +1565,90 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
+      allowAcceptedRfc64FinalizedAbsence?: boolean;
+    } = {},
+  ): Promise<RegisteredContextGraphAuthority> {
+    // Concurrency coalescing only — NOT a cache. Callers that arrive while an
+    // identical resolution is already in flight join it rather than issuing
+    // their own reads; nothing is retained once it settles, so every caller
+    // still gets a chain view read during its own call. Options that change
+    // the answer are part of the key, so a cached-roster caller never joins a
+    // fresh-roster caller's read. Each waiter keeps its own cancellation: the
+    // shared read runs on its own signal and is abandoned only when the last
+    // waiter leaves.
+    const flightKey = [
+      contextGraphId,
+      options.allowCachedRoster === true ? 'roster:cached' : 'roster:fresh',
+      options.allowAcceptedRfc64FinalizedAbsence === true ? 'rfc64absence:1' : 'rfc64absence:0',
+      `timeout:${options.registrationTimeoutMs ?? 'default'}`,
+    ].join('|');
+    // The resolve methods are a mixin: a partial receiver (tests bind them onto
+    // hand-built objects) may carry neither the flight nor the fresh method.
+    // Coalescing is an optimization, so its absence degrades to the fresh read
+    // rather than failing the resolution. The instance method is preferred so
+    // an instrumented agent stays observable; the prototype is the fallback.
+    const fresh = typeof this.resolveRegisteredContextGraphAuthorityFreshV1 === 'function'
+      ? this.resolveRegisteredContextGraphAuthorityFreshV1
+      : ContextGraphResolveMethods.prototype.resolveRegisteredContextGraphAuthorityFreshV1;
+    const flight = this.registeredAuthorityFlight;
+    if (flight === undefined) return await fresh.call(this, contextGraphId, options);
+    try {
+      return await flight.run(
+        flightKey,
+        (sharedSignal) => fresh.call(this, contextGraphId, { ...options, signal: sharedSignal }),
+        options.signal,
+      );
+    } catch (error) {
+      // Two outcomes only the shared read can produce, neither of which any
+      // caller saw before coalescing existed. Both are answered by handing the
+      // caller exactly what its own fresh read would have returned:
+      //  - its signal aborted while it waited: every bounded read
+      //    short-circuits on an already-aborted signal before issuing work, so
+      //    this is the pre-coalescing fail-closed `unavailable` value, chosen
+      //    by the stage the read was at, at zero RPC cost;
+      //  - the shared read was dropped by a local authority mutation: the
+      //    caller must not be served the pre-mutation answer, so it reads
+      //    for itself, after the mutation.
+      if (options.signal?.aborted === true || error instanceof SingleFlightInvalidatedError) {
+        return await fresh.call(this, contextGraphId, options);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Drop any in-flight shared resolution for a context graph.
+   *
+   * Called where the node itself mutates chain authority: a read started before
+   * that mutation must not be handed to a caller that arrives after it. Joiners
+   * of the dropped read are failed rather than served, and the initiating
+   * caller's own read is abandoned only if nobody is still waiting on it.
+   *
+   * This drops in-flight reads for every context graph, not just the mutated
+   * one: the flight key carries the caller's option variants, so there is no
+   * single key to target. That is deliberate and cheap — only reads that are
+   * airborne at this instant are affected, and each dropped caller simply
+   * issues its own fresh read.
+   */
+  invalidateRegisteredAuthorityFlightV1(this: DKGAgent, contextGraphId: string): void {
+    this.registeredAuthorityFlight?.invalidateAll(
+      `registered authority mutated for ${contextGraphId}`,
+      { retryable: true },
+    );
+  }
+
+  /**
+   * The uncoalesced resolution. Every read here is issued against the chain on
+   * every call; `resolveRegisteredContextGraphAuthority` is the entry point
+   * that shares one such call between simultaneous askers.
+   */
+  async resolveRegisteredContextGraphAuthorityFreshV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: {
+      allowCachedRoster?: boolean;
+      signal?: AbortSignal;
+      registrationTimeoutMs?: number;
       allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {

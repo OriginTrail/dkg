@@ -2182,6 +2182,11 @@ export class ContextGraphMethods extends DKGAgentBase {
       prepared: registeredParticipantMutation,
       invalidateRoster: (onChainId) => {
         this.onChainParticipantAgentsCache.delete(onChainId.toString());
+        // A resolution already in flight was started BEFORE this mutation, so a
+        // caller arriving after it must not join it and read the pre-mutation
+        // roster. Dropping the shared read forces those callers to issue their
+        // own, post-mutation one.
+        this.invalidateRegisteredAuthorityFlightV1(contextGraphId);
       },
     });
 
@@ -2339,6 +2344,11 @@ export class ContextGraphMethods extends DKGAgentBase {
       prepared: registeredParticipantMutation,
       invalidateRoster: (onChainId) => {
         this.onChainParticipantAgentsCache.delete(onChainId.toString());
+        // A resolution already in flight was started BEFORE this mutation, so a
+        // caller arriving after it must not join it and read the pre-mutation
+        // roster. Dropping the shared read forces those callers to issue their
+        // own, post-mutation one.
+        this.invalidateRegisteredAuthorityFlightV1(contextGraphId);
       },
     });
 
