@@ -90,3 +90,13 @@ export function validateProgramRoutes(value: unknown): asserts value is NonNulla
     seen.add(key);
   }
 }
+
+/** One graph/operation has one execution path, including after API overlays. */
+export function validateProgramConfiguration(bindings: unknown, routes: unknown): void {
+  validateProgramBindings(bindings);
+  validateProgramRoutes(routes);
+  for (const route of routes) {
+    if (bindings.some((binding) => binding.contextGraphId === route.contextGraphId
+      && binding.operationIri === route.operationIri)) throw new Error('AMBIGUOUS_PROGRAM_ROUTE');
+  }
+}

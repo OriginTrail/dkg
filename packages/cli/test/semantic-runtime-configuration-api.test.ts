@@ -19,7 +19,8 @@ import { startConfiguredSemanticRuntime, type ConfiguredSemanticRuntimeService }
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const owner = '0x1111111111111111111111111111111111111111';
-const executor = '0x2222222222222222222222222222222222222222';
+const executor = owner;
+const foreignExecutor = '0x2222222222222222222222222222222222222222';
 const author = '0x3333333333333333333333333333333333333333';
 const member = '0x4444444444444444444444444444444444444444';
 const callerKey = '0x' + '01'.padStart(64, '0');
@@ -87,23 +88,23 @@ async function fixture() {
   const sealed = new Set<string>();
   let uploaded: Quad[] = [];
   let inbox!: (request: any, peer: string) => Promise<any>;
-  const allowed = (address?: string) => [owner, executor, author, member].includes(address ?? '');
+  const allowed = (address?: string) => [owner, foreignExecutor, author, member].includes(address ?? '');
   const agent: any = {
-    peerId: 'peer-runner', log: { info: vi.fn() }, store,
+    peerId: 'peer-runner', log: { info: vi.fn() }, store, queryEngine: engine,
     registerSkill: (_skill: string, handler: typeof inbox) => { inbox = handler; },
-    listLocalAgents: () => [{ agentAddress: executor }], getCustodialAgentPrivateKey: (address: string) => address === executor ? callerKey : undefined,
+    listLocalAgents: () => [executor, foreignExecutor].map((agentAddress) => ({ agentAddress })),
+    getCustodialAgentPrivateKey: (address: string) => [executor, foreignExecutor].includes(address) ? callerKey : undefined,
     assertContextGraphOwner: vi.fn(async (cg: string, identity: string) => { if (cg !== graph || identity !== owner) throw new Error('not owner'); }),
     canReadContextGraph: vi.fn(async (_cg: string, opts: any) => allowed(opts.callerAgentAddress)),
     resolveContextGraphReadAuthority: vi.fn(async (_cg: string, opts: any) => ({ outcome: allowed(opts.callerAgentAddress) ? 'allowed' : 'denied' })),
     canUseSharedMemoryForContextGraph: vi.fn(async () => true),
     probeContextGraphWritePreflight: vi.fn(async () => ({ storeAvailable: true, exists: true, hasLocalContent: true, callerAuthorized: true })),
-    query: vi.fn(async (query: string, opts: any) => allowed(opts.callerAgentAddress)
-      ? engine.query(query, opts) : DKGAgent.prototype.query.call(agent, query, opts)),
+    query: vi.fn(async (query: string, opts: any) => DKGAgent.prototype.query.call(agent, query, opts)),
     assertion: {
       history: vi.fn(async (_cg: string, name: string) => sealed.has(name) ? { wmCurrentAssertion: 'aa'.repeat(32), memoryLayer: 'WM' } : null),
       create: vi.fn(async (_cg: string, name: string) => { content.set(name, []); return 'urn:example:asset:' + name; }),
-      write: vi.fn(async (cg: string, name: string, quads: Quad[]) => {
-        const at = `did:dkg:context-graph:${cg}/_working_memory/${executor}/${content.size + 10}`;
+      write: vi.fn(async (cg: string, name: string, quads: Quad[], lane: { agentAddress: string }) => {
+        const at = `did:dkg:context-graph:${cg}/_working_memory/${lane.agentAddress}/${content.size + 10}`;
         const entries = quads.map((q) => ({ ...q, graph: at })); content.get(name)!.push(...entries); await store.insert(entries);
       }),
       finalize: vi.fn(async (_cg: string, name: string) => { sealed.add(name); }),
@@ -132,6 +133,8 @@ async function fixture() {
   };
   await store.insert([{ subject: 'urn:example:device:1', predicate: 'urn:example:value', object: '"42"',
     graph: `did:dkg:context-graph:${graph}/_working_memory/${executor}/1` }]);
+  await store.insert([{ subject: 'urn:example:foreign-device:1', predicate: 'urn:example:value', object: '"42"',
+    graph: `did:dkg:context-graph:${graph}/_working_memory/${foreignExecutor}/1` }]);
   await upload();
   const activate = () => request(target, 'owner', 'POST', '/api/programs/bindings', { binding: bindingInput() });
   const route = () => request(client, 'operator', 'POST', '/api/programs/routes', { route: { contextGraphId: graph, operationIri: operation, targetPeerId: agent.peerId } });
@@ -140,6 +143,143 @@ async function fixture() {
 }
 
 describe('durable Program management API', () => {
+  it('cannot turn graph ownership into access to another custodial agent\'s private WM', async () => {
+    const f = await fixture();
+    await f.upload(source.replace('urn:example:device:1', 'urn:example:foreign-device:1'));
+    const raw = await request(f.target, 'owner', 'POST', '/api/query', {
+      sparql: 'SELECT ?value WHERE { <urn:example:foreign-device:1> <urn:example:value> ?value }',
+      contextGraphId: graph, view: 'working-memory', agentAddress: foreignExecutor,
+    });
+    expect(raw.status).toBe(200); expect(raw.body.result.bindings).toEqual([]);
+    const approved = await request(f.target, 'owner', 'POST', '/api/programs/bindings', {
+      binding: { ...bindingInput(), executorAgentAddress: foreignExecutor, allowedCallerAgentAddresses: [owner] },
+    });
+    const invoked = await request(f.target, 'owner', 'POST', '/api/programs/execute', {
+      contextGraphId: graph, operationIri: operation, invocationId: randomUUID(),
+    });
+    expect(invoked.status).toBe(403);
+    expect(approved).toMatchObject({ status: 403, body: { code: 'PROGRAM_EXECUTOR_FORBIDDEN' } });
+    expect(f.target.runtime!.store.programConfigurationRecords()).toEqual([]);
+    expect(f.agent.assertion.create).not.toHaveBeenCalled();
+  });
+  it.each(['query', 'sparqlRead', 'assetCreation'] as const)('rejects foreign executor selection on POST and PUT before resolving %s tools', async (permission) => {
+    const f = await fixture(); await f.activate();
+    const before = f.target.runtime!.store.programConfigurationRecords();
+    const binding: any = bindingInput(); delete binding.sparqlRead;
+    binding.executorAgentAddress = foreignExecutor;
+    binding[permission] = permission === 'sparqlRead' ? bindingInput().sparqlRead
+      : permission === 'query' ? { selector: 'device-value', outputSchema: bindingInput().sparqlRead.outputSchema }
+        : { toolIri: 'urn:example:tool:asset-create' };
+    f.agent.query.mockClear();
+    for (const method of ['POST', 'PUT']) {
+      const response = await request(f.target, 'owner', method, '/api/programs/bindings', {
+        binding: { ...binding, operationIri: method === 'POST' ? 'urn:example:other-operation' : operation },
+        ...(method === 'PUT' ? { expectedRevision: 1 } : {}),
+      });
+      expect(response).toMatchObject({ status: 403, body: { code: 'PROGRAM_EXECUTOR_FORBIDDEN' } });
+    }
+    expect(f.agent.query).not.toHaveBeenCalled();
+    expect(f.target.runtime!.store.programConfigurationRecords()).toEqual(before);
+    expect((await request(f.target, 'owner', 'GET', inspect)).body.binding.executorAgentAddress).toBe(owner);
+  });
+  it('allows the owner to use its own custodial executor and the operator to explicitly select another one', async () => {
+    const f = await fixture(); await f.route();
+    const self = await f.activate();
+    expect(self.status).toBe(201); expect(self.body.binding.executorAgentAddress).toBe(owner);
+    expect((await f.invoke()).status).toBe(200);
+    await f.upload(source.replace('urn:example:device:1', 'urn:example:foreign-device:1'));
+    const binding = { ...bindingInput(), executorAgentAddress: foreignExecutor };
+    expect((await request(f.target, 'operator', 'PUT', '/api/programs/bindings', { binding, expectedRevision: 1 })).status).toBe(200);
+    const result = await f.invoke();
+    expect(result.status).toBe(200); expect(result.body.persisted).toBe(true);
+    expect(JSON.parse(result.body.outputs[0]).result.bindings).toEqual([{ value: '"42"' }]);
+    expect(f.agent.query).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      source: 'semantic-runtime-sparql-read', callerAgentAddress: foreignExecutor, agentAddress: foreignExecutor,
+    }));
+    // An operator-issued grant still does not let the owner refresh its foreign executor authority.
+    expect((await request(f.target, 'owner', 'PUT', '/api/programs/bindings', { binding, expectedRevision: 2 })).status).toBe(403);
+    // The graph owner can always withdraw the operation, including an operator-issued binding.
+    expect((await request(f.target, 'owner', 'DELETE', '/api/programs/bindings', remove(2))).status).toBe(200);
+    expect((await request(f.target, 'operator', 'POST', '/api/programs/bindings', {
+      binding: { ...binding, operationIri: 'urn:example:operator-operation' },
+    })).status).toBe(201);
+  });
+  it.each(['binding', 'route'] as const)('rejects an overlapping API operation when %s is installed first without changing state', async (first) => {
+    const f = await fixture();
+    const entries = { binding: bindingInput(), route: { contextGraphId: graph, operationIri: operation, targetPeerId: 'peer-other' } };
+    const second = first === 'binding' ? 'route' : 'binding';
+    expect((await request(f.target, 'operator', 'POST', `/api/programs/${first}s`, { [first]: entries[first] })).status).toBe(201);
+    const before = f.target.runtime!.store.programConfigurationRecords(); const effective = structuredClone(f.target.config.semanticRuntime);
+    for (const method of ['POST', 'PUT']) {
+      const response = await request(f.target, 'operator', method, `/api/programs/${second}s`, {
+        [second]: entries[second], ...(method === 'PUT' ? { expectedRevision: 0 } : {}),
+      });
+      expect(response).toMatchObject({ status: 409, body: { code: 'AMBIGUOUS_PROGRAM_ROUTE' } });
+      expect(f.target.runtime!.store.programConfigurationRecords()).toEqual(before);
+      expect(f.target.config.semanticRuntime).toEqual(effective);
+    }
+  });
+  it.each(['binding', 'route'] as const)('rejects API overlap with a file %s and preserves the file entry', async (first) => {
+    const f = await fixture(); const approved = await f.activate();
+    const binding = { ...approved.body.binding }; delete binding.authorizationRevision;
+    const route = { contextGraphId: graph, operationIri: operation, targetPeerId: 'peer-other' };
+    const n = node(f.agent, { enabled: true, ...(first === 'binding' ? { programBindings: [binding] } : { programRoutes: [route] }) });
+    await n.boot();
+    const before = structuredClone(n.config.semanticRuntime);
+    const second = first === 'binding' ? 'route' : 'binding';
+    const response = await request(n, 'operator', 'POST', `/api/programs/${second}s`, { [second]: second === 'route' ? route : bindingInput() });
+    expect(response).toMatchObject({ status: 409, body: { code: 'AMBIGUOUS_PROGRAM_ROUTE' } });
+    expect(n.runtime!.store.programConfigurationRecords()).toEqual([]);
+    expect(n.config.semanticRuntime).toEqual(before);
+  });
+  it.each(['api-binding/file-route', 'file-binding/api-route', 'api-binding/api-route'] as const)('fails startup on restored overlap: %s', async (setup) => {
+    const f = await fixture(); const approved = await f.activate();
+    const binding = approved.body.binding;
+    const route = { contextGraphId: graph, operationIri: operation, targetPeerId: 'peer-other' };
+    const n = node(f.agent, {
+      ...(setup === 'file-binding/api-route' ? { programBindings: [binding] } : {}),
+      ...(setup === 'api-binding/file-route' ? { programRoutes: [route] } : {}),
+    });
+    // Model records accepted by the old API, bypassing the fixed management boundary.
+    const db = SemanticRuntimeStore.openInDataDirectory(n.dir);
+    for (const kind of ['binding', 'route'] as const) {
+      if ((kind === 'binding' && setup.startsWith('api-binding')) || (kind === 'route' && setup.endsWith('api-route'))) {
+        db.writeProgramConfiguration({ kind, contextGraphId: graph, operationIri: operation,
+          payload: JSON.stringify(kind === 'binding' ? binding : route), updatedBy: 'node-operator', updatedAt: 1 }, 0);
+      }
+    }
+    const before = db.programConfigurationRecords(); db.close();
+    const file = structuredClone(n.config.semanticRuntime);
+    const start = vi.fn(async () => ({ stop: vi.fn() }) as any);
+    const restored = startConfiguredSemanticRuntime(n.config.semanticRuntime, { dataDirectory: n.dir, log: vi.fn(), start })
+      .then((service) => { if (service) runtimes.add(service); return service; });
+    await expect(restored).rejects.toThrow('AMBIGUOUS_PROGRAM_ROUTE');
+    expect(start).not.toHaveBeenCalled(); expect(n.config.semanticRuntime).toEqual(file);
+    const reopened = SemanticRuntimeStore.openInDataDirectory(n.dir);
+    expect(reopened.programConfigurationRecords()).toEqual(before); reopened.close();
+  });
+  it('applies route-removal tombstones before checking restored file overlaps', async () => {
+    const f = await fixture(); const approved = await f.activate();
+    const route = { contextGraphId: graph, operationIri: operation, targetPeerId: 'peer-other' };
+    const n = node(f.agent, { programBindings: [approved.body.binding], programRoutes: [route] });
+    const db = SemanticRuntimeStore.openInDataDirectory(n.dir);
+    db.writeProgramConfiguration({ kind: 'route', contextGraphId: graph, operationIri: operation, payload: null, updatedBy: 'node-operator', updatedAt: 1 }, 0);
+    db.close();
+    await n.boot();
+    expect(n.config.semanticRuntime.programRoutes).toEqual([]);
+    expect(n.config.semanticRuntime.programBindings).toEqual([approved.body.binding]);
+    expect((await request(n, 'operator', 'PUT', '/api/programs/routes', { route, expectedRevision: 1 })).status).toBe(409);
+    expect((await request(n, 'operator', 'GET', inspect.replace('bindings', 'routes'))).body.route).toBeNull();
+  });
+  it('keeps a revoked binding reserved as a local operation instead of allowing an outbound route', async () => {
+    const f = await fixture(); await f.activate(); await request(f.target, 'owner', 'DELETE', '/api/programs/bindings', remove(1));
+    const before = f.target.runtime!.store.programConfigurationRecords();
+    const response = await request(f.target, 'operator', 'POST', '/api/programs/routes', {
+      route: { contextGraphId: graph, operationIri: operation, targetPeerId: 'peer-other' },
+    });
+    expect(response).toMatchObject({ status: 409, body: { code: 'AMBIGUOUS_PROGRAM_ROUTE' } });
+    expect(f.target.runtime!.store.programConfigurationRecords()).toEqual(before);
+  });
   it.each(['member', 'caller', 'anonymous', 'disabled-anonymous'] as const)('denies %s binding changes without starting a runtime or reading Program data', async (identity) => {
     const f = await fixture();
     for (const method of ['GET', 'POST', 'PUT', 'DELETE']) {
@@ -283,7 +423,7 @@ describe('durable Program management API', () => {
     if (fault === 'hash') input.program.sourceHash = '00'.repeat(32);
     if (fault === 'tool') input.sparqlRead.toolIri = 'urn:wrong:tool';
     if (fault === 'executor') input.executorAgentAddress = caller;
-    if (fault === 'source-rights') f.agent.canReadContextGraph.mockImplementation(async (_cg: string, opts: any) => opts.callerAgentAddress === executor);
+    if (fault === 'source-rights') f.agent.canReadContextGraph.mockResolvedValue(false);
     if (fault === 'uncompilable') await f.upload('(invalid)');
     if (fault === 'raw-update') await f.upload(source.replace('SELECT ?value WHERE { <urn:example:device:1> <urn:example:value> ?value } LIMIT 5', 'DELETE WHERE { ?s ?p ?o }'));
     if (fault === 'multiple-calls') await f.upload(source.replace('(call dkg/sparql-read@1', '(sequence (call dkg/sparql-read@1 "ASK {}") (call dkg/sparql-read@1') + ')');
