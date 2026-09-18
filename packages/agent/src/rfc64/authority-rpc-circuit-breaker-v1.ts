@@ -340,6 +340,13 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   }
 
   #open(error: RpcEndpointsExhaustedErrorLike): void {
+    // One outage round costs one backoff step. Under `run` the serializer
+    // enforced that on its own: after the first trip the next admitted read was
+    // refused before it reached a provider. `runUnqueued` admits at call time,
+    // so every read already in flight when the pool failed lands here with the
+    // same outage. Escalation is the job of the read that fails after the
+    // deadline has passed, not of that read's concurrent siblings.
+    if (this.#now() < this.#retryAtMs) return;
     this.#tripGeneration += 1;
     this.#consecutiveExhaustions += 1;
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);

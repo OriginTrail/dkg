@@ -361,6 +361,45 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
   });
 
+  it('counts one backoff step per outage round across concurrent unqueued reads', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const release = Promise.withResolvers<void>();
+    // Unqueued reads admit at call time, so a fan-out is already past the gate
+    // when the first of them exhausts. One outage must stay one step.
+    const concurrent = Array.from({ length: 4 }, () => breaker.runUnqueued(
+      undefined,
+      async () => {
+        await release.promise;
+        throw exhausted();
+      },
+    ));
+    release.resolve();
+    for (const read of concurrent) {
+      await expect(read).rejects.toBeInstanceOf(ChainRpcTransportError);
+    }
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    // Escalation still belongs to the read that fails past the deadline.
+    now = 100;
+    await expect(breaker.runUnqueued(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 2,
+      retryAtMs: 300,
+    });
+  });
+
   it('retires an unqueued read before close settles', async () => {
     const breaker = new Rfc64AuthorityReadCoordinatorV1();
     const release = Promise.withResolvers<void>();
