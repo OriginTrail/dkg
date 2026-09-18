@@ -96,7 +96,7 @@ function inMemoryQueryEngine(store: Captured[]): QueryEngine & { lastSparql?: st
       // `{ ?event epcis:epcList "<epc>" }` UNION form. Parse the new
       // shape so our fake engine narrows results the way the daemon
       // would (match on epcList OR childEPCs, mirroring the VALUES set).
-      const epcPredMatch = sparql.match(/\?event \?_epcPred "([^"]+)"/);
+      const epcPredMatch = sparql.match(/FILTER\(STR\(\?_epcValue\) = "([^"]+)"\)/);
       const wantEpc = epcPredMatch?.[1];
       for (const c of store) {
         const doc = await capturedDocument(c.content);
