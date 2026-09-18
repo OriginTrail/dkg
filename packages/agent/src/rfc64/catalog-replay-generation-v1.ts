@@ -2,6 +2,8 @@
 
 import type { ContextGraphPolicyV1 } from '@origintrail-official/dkg-core';
 
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
+
 /** The scope fields a replayed head must share with the accepted policy. */
 export interface Rfc64CatalogHeadGenerationV1 {
   readonly governanceChainId: string | null;
@@ -33,32 +35,49 @@ export function isRfc64CatalogHeadOfAcceptedGenerationV1(
     && head.era === policy.era;
 }
 
+/** The wire scope two replayed heads may never share. */
+type Rfc64CatalogReplayWireScopeV1 = Pick<
+  Rfc64PublicCatalogHeadAnnouncementV1,
+  'networkId' | 'contextGraphId' | 'subGraphName' | 'authorAddress' | 'catalogEra'
+>;
+
 /**
- * Keep only the heads a peer can actually accept under the current policy.
+ * Refuse a replay manifest that would repeat one wire scope.
  *
- * Every announcement this node replays is stamped with the accepted policy
- * digest, so a head from a superseded authority generation cannot be applied
- * by the receiver: its catalog scope digest no longer matches. Replaying it
- * anyway is worse than useless. Two generations of the same author lane
- * collapse to one wire scope, the V2 completion manifest refuses to encode a
- * repeated scope, and the whole replay response fails — including the heads
- * the receiver was waiting for. A Context Graph published to both before and
- * after registration would then never serve replay again, and every receiver
- * would sit at `catalog-replay-incomplete` with no way forward.
+ * Selecting a single authority generation is what keeps the manifest free of
+ * repeated scopes today, but that is a property of the durable scopes this
+ * node holds, not something the selection can prove: the durable
+ * `AuthorCatalogScopeV1` has nine fields, the wire scope five, and the
+ * generation predicate above compares the four the accepted policy carries.
+ * `bucketCount` is on neither the wire nor `ContextGraphPolicyV1`, so two
+ * applied heads of one author lane differing only there would both survive
+ * the selection — unreachable only because every authoring path pins
+ * `bucketCount: '1'`, an invariant this code cannot enforce.
  *
- * Selection is therefore by generation, not by recency: `version` counts
- * within one catalog scope and says nothing across two of them.
+ * So assert the guarantee where it is cheap to assert. A repeat caught here
+ * names the offending scope on the provider; the same repeat reaching the V2
+ * completion encoder fails the whole response instead, leaving the receiver
+ * at `catalog-replay-incomplete` with nothing to act on.
  */
-export function selectRfc64AcceptedGenerationHeadsV1<
-  Entry extends { readonly head: { readonly payload: Rfc64CatalogHeadGenerationV1 } },
->(
-  entries: readonly Entry[],
-  policy: Readonly<Pick<
-    ContextGraphPolicyV1,
-    'governanceChainId' | 'governanceContractAddress' | 'ownershipTransitionDigest' | 'era'
-  >>,
-): readonly Entry[] {
-  return Object.freeze(entries.filter(
-    (entry) => isRfc64CatalogHeadOfAcceptedGenerationV1(entry.head.payload, policy),
-  ));
+export function assertRfc64ReplayManifestScopesUniqueV1(
+  manifest: readonly Rfc64CatalogReplayWireScopeV1[],
+): void {
+  const scopes = new Set<string>();
+  for (const head of manifest) {
+    const scope = [
+      head.networkId,
+      head.contextGraphId,
+      head.subGraphName ?? '',
+      head.authorAddress,
+      head.catalogEra,
+    ].join('\0');
+    if (scopes.has(scope)) {
+      throw new Error(
+        'RFC-64 catalog replay manifest repeats a catalog scope before delivery: '
+        + `${head.contextGraphId}/${head.subGraphName ?? ''}`
+        + `/${head.authorAddress}/${head.catalogEra}`,
+      );
+    }
+    scopes.add(scope);
+  }
 }

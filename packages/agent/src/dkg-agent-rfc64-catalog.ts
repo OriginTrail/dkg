@@ -180,8 +180,10 @@ import type { Rfc64CatalogMutationCoordinatorV1 } from
 import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
-import { isRfc64CatalogHeadOfAcceptedGenerationV1 } from
-  './rfc64/catalog-replay-generation-v1.js';
+import {
+  assertRfc64ReplayManifestScopesUniqueV1,
+  isRfc64CatalogHeadOfAcceptedGenerationV1,
+} from './rfc64/catalog-replay-generation-v1.js';
 import {
   Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
   type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
@@ -4195,6 +4197,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           const rightKey = rfc64CatalogTargetExactIdentityKeyV1(right);
           return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
         });
+        // The generation filter above is what keeps one author lane to one
+        // wire scope, but it can only compare the fields the accepted policy
+        // carries. Assert the guarantee the V2 completion depends on here,
+        // where the offending scope can still be named, rather than letting
+        // the encoder fail the whole response at delivery time.
+        assertRfc64ReplayManifestScopesUniqueV1(manifest);
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
           try {

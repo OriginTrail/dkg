@@ -3,9 +3,28 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertRfc64ReplayManifestScopesUniqueV1,
   isRfc64CatalogHeadOfAcceptedGenerationV1,
-  selectRfc64AcceptedGenerationHeadsV1,
 } from '../src/rfc64/catalog-replay-generation-v1.js';
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
+  '../src/rfc64/public-catalog-transport-v1.js';
+
+/** The exact fields the replay manifest may not repeat, typed from the wire. */
+type WireScope = Pick<
+  Rfc64PublicCatalogHeadAnnouncementV1,
+  'networkId' | 'contextGraphId' | 'subGraphName' | 'authorAddress' | 'catalogEra'
+>;
+
+function wireScope(overrides: Partial<WireScope> = {}): WireScope {
+  return {
+    networkId: 'otp:20430',
+    contextGraphId: '0x1111111111111111111111111111111111111111/replay-scope',
+    subGraphName: null,
+    authorAddress: '0x1111111111111111111111111111111111111111',
+    catalogEra: '0',
+    ...overrides,
+  } as WireScope;
+}
 
 /**
  * A Context Graph authored before its registration and again afterwards holds
@@ -50,28 +69,28 @@ const ownerSignedPolicy = {
 
 describe('RFC-64 catalog replay authority generation', () => {
   it('keeps only the generation the accepted policy governs', () => {
-    const entries = [ownerSignedHead, finalizedChainHead];
-
-    expect(selectRfc64AcceptedGenerationHeadsV1(entries, finalizedChainPolicy))
-      .toEqual([finalizedChainHead]);
-    // Symmetric: before registration the owner-signed lane is the live one and
-    // a later finalized head must not be replayed under it.
-    expect(selectRfc64AcceptedGenerationHeadsV1(entries, ownerSignedPolicy))
-      .toEqual([ownerSignedHead]);
-  });
-
-  it('never returns two heads that share one wire scope', () => {
-    // The wire scope is (networkId, contextGraphId, subGraphName,
-    // authorAddress, catalogEra): these two differ only outside it, which is
+    // The two heads differ only outside the wire scope (networkId,
+    // contextGraphId, subGraphName, authorAddress, catalogEra), which is
     // exactly the collision that made the provider's own completion
     // unencodable and left every receiver at catalog-replay-incomplete.
-    const selected = selectRfc64AcceptedGenerationHeadsV1(
-      [ownerSignedHead, finalizedChainHead],
+    expect(isRfc64CatalogHeadOfAcceptedGenerationV1(
+      finalizedChainHead.head.payload,
       finalizedChainPolicy,
-    );
-
-    expect(selected).toHaveLength(1);
-    expect(selected[0]!.head.payload.version).toBe('12');
+    )).toBe(true);
+    expect(isRfc64CatalogHeadOfAcceptedGenerationV1(
+      ownerSignedHead.head.payload,
+      finalizedChainPolicy,
+    )).toBe(false);
+    // Symmetric: before registration the owner-signed lane is the live one and
+    // a later finalized head must not be replayed under it.
+    expect(isRfc64CatalogHeadOfAcceptedGenerationV1(
+      ownerSignedHead.head.payload,
+      ownerSignedPolicy,
+    )).toBe(true);
+    expect(isRfc64CatalogHeadOfAcceptedGenerationV1(
+      finalizedChainHead.head.payload,
+      ownerSignedPolicy,
+    )).toBe(false);
   });
 
   it('rejects a head whose ownership transition no longer matches', () => {
@@ -88,14 +107,37 @@ describe('RFC-64 catalog replay authority generation', () => {
 
     expect(isRfc64CatalogHeadOfAcceptedGenerationV1(rotated.head.payload, finalizedChainPolicy))
       .toBe(false);
-    expect(selectRfc64AcceptedGenerationHeadsV1([rotated, finalizedChainHead], finalizedChainPolicy))
-      .toEqual([finalizedChainHead]);
   });
 
   it('keeps an era change out of the replayed generation', () => {
     const nextEra = { head: { payload: { ...finalizedChainHead.head.payload, era: '1' } } };
 
-    expect(selectRfc64AcceptedGenerationHeadsV1([nextEra, finalizedChainHead], finalizedChainPolicy))
-      .toEqual([finalizedChainHead]);
+    expect(isRfc64CatalogHeadOfAcceptedGenerationV1(nextEra.head.payload, finalizedChainPolicy))
+      .toBe(false);
+  });
+});
+
+describe('RFC-64 catalog replay manifest wire scopes', () => {
+  it('accepts heads that differ inside the wire scope', () => {
+    expect(() => assertRfc64ReplayManifestScopesUniqueV1([
+      wireScope(),
+      wireScope({ subGraphName: 'lane' as WireScope['subGraphName'] }),
+      wireScope({ catalogEra: '1' as WireScope['catalogEra'] }),
+      wireScope({
+        authorAddress: '0x2222222222222222222222222222222222222222' as
+          WireScope['authorAddress'],
+      }),
+    ])).not.toThrow();
+  });
+
+  it('names the repeated scope instead of leaving the completion unencodable', () => {
+    // Two applied heads of one author lane that the generation filter cannot
+    // tell apart — differing only in a durable scope field the wire and the
+    // policy both omit, such as bucketCount — must fail here, on the
+    // provider, rather than as an unencodable peer completion.
+    expect(() => assertRfc64ReplayManifestScopesUniqueV1([wireScope(), wireScope()]))
+      .toThrow(/repeats a catalog scope before delivery/u);
+    expect(() => assertRfc64ReplayManifestScopesUniqueV1([wireScope(), wireScope()]))
+      .toThrow(/replay-scope/u);
   });
 });
