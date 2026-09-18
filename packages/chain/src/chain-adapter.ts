@@ -3,6 +3,7 @@ import type {
 } from './random-sampling-availability.js';
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 export type { ContextGraphAuthorityIndexId } from
@@ -1324,6 +1325,7 @@ export interface ChainAdapter {
    */
   readonly contextGraphAuthorityIndexRevisionReader?:
     ContextGraphAuthorityIndexRevisionReader;
+  readonly contextGraphAuthorityIndexSnapshots?: ContextGraphAuthorityIndexSnapshots;
 
   /**
    * OPTIONAL RPC-usage capability: drain the raw JSON-RPC request counts

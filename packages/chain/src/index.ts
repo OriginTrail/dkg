@@ -1,4 +1,12 @@
 export * from './chain-adapter.js';
+export {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
+  normalizeContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexSnapshotRequest,
+  type ContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexBootstrap,
+  type ContextGraphAuthorityIndexSnapshots,
+} from './context-graph-authority-index-snapshot.js';
 export { assertContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 export {

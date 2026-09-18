@@ -89,6 +89,7 @@ import type {
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+import type { AuthorityIndexConfig } from './authority-index-config.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1825,6 +1826,8 @@ export interface DKGAgentConfig {
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
+  /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
+  authorityIndex?: AuthorityIndexConfig;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.

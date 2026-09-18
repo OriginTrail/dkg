@@ -24,6 +24,14 @@ import { ContextGraphAuthorityIndexRetryableError } from
 import { ContextGraphAuthorityIndexRepository } from
   './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
+import {
+  authorityIndexSnapshotWithinSizeLimit,
+  decodeContextGraphAuthorityIndexSnapshot,
+  isContextGraphAuthorityIndexSnapshotRequest,
+  type ContextGraphAuthorityIndexBootstrap,
+  type ContextGraphAuthorityIndexSnapshot,
+  type ContextGraphAuthorityIndexSnapshotRequest,
+} from './context-graph-authority-index-snapshot.js';
 
 const ZERO_HASH = `0x${'00'.repeat(32)}`;
 
@@ -105,11 +113,52 @@ export class ContextGraphAuthorityIndex {
   readonly #repository: ContextGraphAuthorityIndexRepository;
   readonly #singleFlight = new KeyedSingleFlight<string, object>();
   readonly #activeScans = new Set<Promise<unknown>>();
+  readonly #servable = new Map<string, ContextGraphAuthorityIndexCheckpoint>();
+  #closed = false;
   #activityRevision = 0;
   #lifecycleAbort = new AbortController();
 
-  constructor(readonly localStore: ContextGraphAuthorityIndexStore) {
+  constructor(
+    readonly localStore: ContextGraphAuthorityIndexStore,
+    private readonly bootstrap?: ContextGraphAuthorityIndexBootstrap,
+  ) {
+    if (bootstrap !== undefined && (
+      !Number.isSafeInteger(bootstrap.maxTailBlocks)
+      || bootstrap.maxTailBlocks < 50 || bootstrap.maxTailBlocks > 10_000
+      || typeof bootstrap.trustDomain !== 'string' || bootstrap.trustDomain.trim().length === 0
+      || bootstrap.trustDomain.length > 256
+      || typeof bootstrap.fetchSnapshot !== 'function'
+    )) throw new TypeError('Context Graph authority index bootstrap configuration is invalid');
     this.#repository = new ContextGraphAuthorityIndexRepository(localStore);
+  }
+
+  /** The caller must bind requests to this adapter's own initialized scope. */
+  exportSnapshot(
+    request: ContextGraphAuthorityIndexSnapshotRequest,
+  ): ContextGraphAuthorityIndexSnapshot | null {
+    if (this.#closed || this.bootstrap !== undefined
+      || !isContextGraphAuthorityIndexSnapshotRequest(request)) return null;
+    const checkpoint = this.#servable.get(request.scope);
+    if (checkpoint === undefined
+      || checkpoint.cursor.deploymentBlockNumber !== request.deploymentBlockNumber
+      || checkpoint.cursor.throughBlockNumber < request.minThroughBlockNumber
+      || checkpoint.cursor.throughBlockNumber > request.maxThroughBlockNumber) return null;
+    const snapshot = Object.freeze({ version: 1 as const, scope: request.scope, checkpoint });
+    return authorityIndexSnapshotWithinSizeLimit(snapshot) ? snapshot : null;
+  }
+
+  async refresh(input: ContextGraphAuthorityIndexScanInput): Promise<void> {
+    await this.#snapshot(input);
+  }
+
+  open(): void {
+    this.#closed = false;
+  }
+
+  close(): Promise<void> {
+    this.#closed = true;
+    this.clear();
+    return this.whenIdle();
   }
 
   clear(): void {
@@ -119,6 +168,7 @@ export class ContextGraphAuthorityIndex {
     ));
     this.#lifecycleAbort = new AbortController();
     this.#repository.clear();
+    this.#servable.clear();
     this.#singleFlight.invalidateAll();
   }
 
@@ -231,6 +281,7 @@ export class ContextGraphAuthorityIndex {
     input: ContextGraphAuthorityIndexScanInput,
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     input.signal?.throwIfAborted();
+    if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
     const scope = input.scope.trim();
     if (scope.length === 0) throw new Error('Context Graph authority index scope is empty');
     if (input.readScope === null || typeof input.readScope !== 'object') {
@@ -262,7 +313,11 @@ export class ContextGraphAuthorityIndex {
     lifecycleSignal: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     const scope = input.scope;
-    const repository = this.#repository.forScope(scope);
+    // Imported authority is never promoted into an independently scanned index
+    // after a trust-policy change or when snapshot bootstrap is disabled.
+    const repositoryScope = this.bootstrap === undefined ? scope
+      : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`;
+    const repository = this.#repository.forScope(repositoryScope);
     const deploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
@@ -296,15 +351,84 @@ export class ContextGraphAuthorityIndex {
       deploymentBlockNumber,
       finalizedNumber - holdback,
     );
+    const bootstrap = this.bootstrap;
+    const minimumSeedBlock = bootstrap === undefined ? deploymentBlockNumber
+      : Math.max(deploymentBlockNumber, finalizedNumber - bootstrap.maxTailBlocks);
+    if (bootstrap !== undefined && minimumSeedBlock > persistThroughBlockNumber) {
+      throw new ContextGraphAuthorityIndexRetryableError(
+        'Context Graph authority index tail budget is below the durable reorg holdback',
+      );
+    }
+    let seedAttempts = 0;
+    let scannedBlocks = 0;
     // Set once the scan passes the horizon; from then on nothing is committed.
     let tail: ContextGraphAuthorityIndexCheckpoint | undefined;
 
     for (;;) {
       lifecycleSignal.throwIfAborted();
+      if (bootstrap !== undefined && tail === undefined && (
+        durable.kind !== 'checkpoint'
+        || durable.checkpoint.cursor.throughBlockNumber < minimumSeedBlock
+      )) {
+        if (seedAttempts >= 3) {
+          throw new ContextGraphAuthorityIndexRetryableError(
+            'Context Graph authority index snapshot changed repeatedly during import',
+          );
+        }
+        seedAttempts += 1;
+        const request: ContextGraphAuthorityIndexSnapshotRequest = Object.freeze({
+          scope,
+          deploymentBlockNumber,
+          minThroughBlockNumber: minimumSeedBlock,
+          maxThroughBlockNumber: persistThroughBlockNumber,
+        });
+        const anchors = new Map<number, string | undefined>();
+        const validateSnapshot = async (
+          value: unknown,
+          attemptSignal?: AbortSignal,
+        ): Promise<ContextGraphAuthorityIndexCheckpoint> => {
+          const validationSignal = attemptSignal === undefined ? lifecycleSignal
+            : AbortSignal.any([lifecycleSignal, attemptSignal]);
+          validationSignal.throwIfAborted();
+          const seed = decodeContextGraphAuthorityIndexSnapshot(value, request);
+          if (seed === undefined) {
+            throw new ContextGraphAuthorityIndexRetryableError(
+              'Context Graph authority index trusted snapshot is invalid or outside the tail budget',
+            );
+          }
+          const blockNumber = seed.cursor.throughBlockNumber;
+          if (!anchors.has(blockNumber)) {
+            anchors.set(blockNumber, blockNumber === finalizedNumber ? finalizedHash
+              : normalizeHash(await input.readBlockHash(blockNumber, validationSignal)));
+          }
+          validationSignal.throwIfAborted();
+          if (anchors.get(blockNumber) !== seed.cursor.throughBlockHash) {
+            throw new ContextGraphAuthorityIndexRetryableError(
+              'Context Graph authority index trusted snapshot anchor is unavailable or replaced',
+            );
+          }
+          return seed;
+        };
+        const value = await bootstrap.fetchSnapshot(request, lifecycleSignal,
+          async (candidate, signal) => { await validateSnapshot(candidate, signal); });
+        const seed = await validateSnapshot(value);
+        const commit = await repository.commitOrReloadWinner(durable, seed);
+        durable = commit.kind === 'committed' ? commit.record
+          : await admitContextGraphAuthorityIndexCheckpoint({
+              repository,
+              initial: commit.record,
+              deploymentBlockNumber,
+              finalized: { number: finalizedNumber, hash: finalizedHash },
+              readBlockHash: input.readBlockHash,
+              lifecycleSignal,
+            });
+        continue;
+      }
       const checkpoint = tail ?? (durable.kind === 'checkpoint'
         ? durable.checkpoint
         : undefined);
       if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
+        if (durable.kind === 'checkpoint') this.#servable.set(scope, durable.checkpoint);
         return checkpoint;
       }
 
@@ -321,6 +445,12 @@ export class ContextGraphAuthorityIndex {
       const throughBlockNumber = committing
         ? Math.min(pageThroughBlockNumber, persistThroughBlockNumber)
         : pageThroughBlockNumber;
+      if (bootstrap !== undefined
+        && scannedBlocks + throughBlockNumber - fromBlockNumber + 1 > bootstrap.maxTailBlocks) {
+        throw new ContextGraphAuthorityIndexRetryableError(
+          'Context Graph authority index local tail scan budget exhausted',
+        );
+      }
       const throughBlockHash = throughBlockNumber === finalizedNumber
         ? finalizedHash
         : normalizeHash(await input.readBlockHash(throughBlockNumber, lifecycleSignal));
@@ -330,6 +460,7 @@ export class ContextGraphAuthorityIndex {
         );
       }
 
+      scannedBlocks += throughBlockNumber - fromBlockNumber + 1;
       const events = await input.readPage(
         fromBlockNumber,
         throughBlockNumber,

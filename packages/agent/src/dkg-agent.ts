@@ -1,5 +1,12 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { peerIdFromString } from '@libp2p/peer-id';
+import { resolveAuthorityIndexConfig } from './authority-index-config.js';
+import {
+  createAuthorityIndexSnapshotClient,
+  normalizeAuthorityIndexSnapshotConfig,
+  PROTOCOL_CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT,
+} from './authority-index-snapshot-service.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -684,6 +691,7 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalized
 
 function constructConfiguredChainAdapter(
   config: StorageAckNormalizedDKGAgentConfig,
+  contextGraphAuthorityIndexBootstrap?: EVMAdapterConfig['contextGraphAuthorityIndexBootstrap'],
 ): Readonly<{ chain: ChainAdapter; operationalKeys: string[] | undefined }> {
   let operationalKeys = config.chainConfig?.operationalKeys;
   if (config.chainAdapter) {
@@ -714,6 +722,7 @@ function constructConfiguredChainAdapter(
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
       localContextGraphAuthorityIndexStore: config.localContextGraphAuthorityIndexStore,
+      contextGraphAuthorityIndexBootstrap,
     };
     const chain = config.chainConfig.adminPrivateKey
       ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
@@ -1168,6 +1177,36 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    const authorityIndex = resolveAuthorityIndexConfig(inputConfig.authorityIndex, inputConfig.nodeRole);
+    if (authorityIndex !== undefined && (
+      inputConfig.chainAdapter !== undefined
+      || !inputConfig.chainConfig?.operationalKeys?.length
+      || inputConfig.localContextGraphAuthorityIndexStore === undefined
+    )) {
+      throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
+    }
+    let agentRef: DKGAgent | undefined;
+    const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
+      config: authorityIndex,
+      request: async (peer, bytes, options) => {
+        const agent = agentRef;
+        if (agent === undefined || !agent.started || agent.router === undefined) {
+          throw new Error('Authority index snapshot transport is not started');
+        }
+        options.signal.throwIfAborted();
+        // Pin the configured destination before admission/dialing. This path
+        // must not depend on the Agent Registry it is bootstrapping.
+        await agent.node.libp2p.peerStore.merge(peerIdFromString(peer.peerId), {
+          multiaddrs: [multiaddr(peer.multiaddr)],
+        });
+        options.signal.throwIfAborted();
+        // Establish the authenticated connection directly: PeerResolver's
+        // cold lookup otherwise visits the authority-dependent phonebook.
+        await agent.node.libp2p.dial(multiaddr(peer.multiaddr), { signal: options.signal });
+        options.signal.throwIfAborted();
+        return agent.router.send(peer.peerId, PROTOCOL_CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT, bytes, options);
+      },
+    });
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
         ? true
@@ -1180,6 +1219,7 @@ export class DKGAgent extends DKGAgentBase {
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
+      authorityIndex,
       syncContextGraphPriorities: resolveSyncContextGraphPriorities(
         inputConfig.syncContextGraphPriorities,
       ),
@@ -1190,7 +1230,16 @@ export class DKGAgent extends DKGAgentBase {
     ) {
       throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
     }
-    const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(normalizedConfig);
+    const trustedPeerIds = authorityIndex === undefined ? undefined
+      : normalizeAuthorityIndexSnapshotConfig(authorityIndex).trustedCorePeers.map((peer) => peer.peerId).sort();
+    const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(
+      normalizedConfig,
+      snapshotClient === undefined || authorityIndex === undefined ? undefined : {
+        maxTailBlocks: authorityIndex.maxTailBlocks,
+        trustDomain: createHash('sha256').update(JSON.stringify(trustedPeerIds)).digest('hex'),
+        fetchSnapshot: (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
+      },
+    );
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
     if (
       normalizedConfig.networkIdentity?.chainId
@@ -1478,7 +1527,6 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    let agentRef: DKGAgent | undefined;
     const agentStore = createListContextGraphsCacheInvalidatingStore(
       store,
       () => {
@@ -2457,6 +2505,12 @@ export class DKGAgent extends DKGAgentBase {
   async stop(): Promise<void> {
     if (!this.started) return;
     this.peerSyncSession.close();
+    // Cancelling a waiter alone does not retire the shared physical scan.
+    const authorityIndexSnapshotDrain = Promise.all([
+      this.authorityIndexSnapshotRuntime?.close(),
+      this.chain.contextGraphAuthorityIndexSnapshots?.close(),
+    ]);
+    this.authorityIndexSnapshotRuntime = undefined;
     // Disconnect history survives sessions; transient freshness and cooldowns do not.
     const disconnectedAt = Date.now();
     for (const peer of this.node.libp2p.getPeers()) {
@@ -2551,6 +2605,7 @@ export class DKGAgent extends DKGAgentBase {
       }
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
+    drains.push(authorityIndexSnapshotDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);

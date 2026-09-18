@@ -568,6 +568,14 @@ export interface DkgConfig {
   listenPort: number;
   nodeRole: 'core' | 'edge';
   /**
+   * Opt an edge into authority snapshots from explicitly trusted core PeerIDs.
+   * Local operator config only: network discovery/relay lists do not establish
+   * authority trust. Omission preserves the independent historical index.
+   * The edge scans at most maxTailBlocks after the snapshot (default 2,000;
+   * maximum 10,000), refreshing from a core when farther behind.
+   */
+  authorityIndex?: DKGAgentConfig['authorityIndex'];
+  /**
    * Core-Node-specific operator tuning. Today only `allowDegradedRelay`;
    * future Core-only knobs (e.g. relay-target prioritisation) belong here
    * rather than at the top level so they stay grouped.

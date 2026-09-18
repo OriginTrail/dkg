@@ -54,7 +54,7 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   db?.close?.();
 }
 
-describe('runDaemonInner wires sync options into DKGAgent.create', () => {
+describe('runDaemonInner wires sync and authority index options into DKGAgent.create', () => {
   let tempHome: string | undefined;
   let originalDkgHome: string | undefined;
   const originalSyncEnv = process.env.DKG_SYNC_AGENTS_META;
@@ -107,7 +107,7 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     tempHome = undefined;
   });
 
-  // Drive runDaemonInner as a CORE node and return the options object that was
+  // Drive runDaemonInner as a core by default and return the options object that was
   // handed to DKGAgent.create. `configOverrides` is merged onto the base config.
   async function captureCreateArg(configOverrides: Record<string, unknown> = {}): Promise<any> {
     await expect(runDaemonInner(true, {
@@ -127,12 +127,61 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
     closeDashboardDbFromAgentCreateArg(createArg);
-    // Sanity: prove we actually exercised the CORE construction path, so the
-    // syncAgentsMeta assertions below are meaningful for the case the reviewer
-    // flagged (a core reverting to the always-true branch).
-    expect(createArg.nodeRole).toBe('core');
+    expect(createArg.nodeRole).toBe(configOverrides.nodeRole ?? 'core');
     return createArg;
   }
+
+  const trustedCorePeer = '/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+
+  it.each([undefined, 50, 10_000])(
+    'forwards explicit edge snapshot trust with bounded tail %j', async maxTailBlocks => {
+      const createArg = await captureCreateArg({
+        nodeRole: 'edge',
+        authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks },
+      });
+      expect(createArg.authorityIndex).toEqual({
+        mode: 'core-snapshot',
+        trustedCorePeers: [trustedCorePeer],
+        maxTailBlocks: maxTailBlocks ?? 2_000,
+      });
+    },
+  );
+
+  it('does not derive snapshot trust from network configuration or discovered relays', async () => {
+    mocks.loadNetworkConfig.mockResolvedValue({
+      networkName: 'DKG V10 Gnosis Mainnet',
+      genesisId: 'gnosis-mainnet',
+      genesisVersion: 1,
+      relays: [trustedCorePeer],
+      authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer] },
+    });
+    const createArg = await captureCreateArg({ nodeRole: 'edge' });
+    expect(createArg.authorityIndex).toBeUndefined();
+  });
+
+  it.each([
+    { nodeRole: 'core', authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer] } },
+    { authorityIndex: null },
+    { authorityIndex: {} },
+    { authorityIndex: { mode: 'auto', trustedCorePeers: [trustedCorePeer] } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [] } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: ['/dns4/core.example.com/tcp/9090'] } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: ['invalid'] } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 0 } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 49 } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 10_001 } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 1.5 } },
+  ])('rejects invalid snapshot trust before allocating daemon resources: %j', async overrides => {
+    await expect(runDaemonInner(true, {
+      name: 'invalid-authority-index',
+      nodeRole: 'edge',
+      listenPort: 0,
+      ...overrides,
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(/authorityIndex/);
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+    expect(mocks.loadNetworkConfig).not.toHaveBeenCalled();
+    expect(mocks.loadOpWallets).not.toHaveBeenCalled();
+  });
 
   it.each([undefined, { batchSize: 50, maxPayloadBytes: 8 * 1024 * 1024, concurrency: 2 }])(
     'passes operator outbox limits into agent construction: %j', async limits => {

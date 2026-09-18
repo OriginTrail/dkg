@@ -15,6 +15,7 @@ import {
 } from './context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
+import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import {
   assertContextGraphAuthorityIndexId,
   type ContextGraphAuthorityIndexId,
@@ -353,8 +354,16 @@ class EvmContextGraphAuthorityIndexRevisionReadLifecycleV1 {
  */
 export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   dependencies: EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1,
-): ContextGraphAuthorityIndexRevisionReader {
+): ContextGraphAuthorityIndexRevisionReader & Readonly<{
+  snapshots: ContextGraphAuthorityIndexSnapshots;
+}> {
   const lifecycle = new EvmContextGraphAuthorityIndexRevisionReadLifecycleV1();
+  let lifecycleAbort = new AbortController();
+  let ownScope: string | undefined;
+  let closed = false;
+  const assertOpen = (): void => {
+    if (closed) throw new DOMException('Context Graph authority index reader is closed', 'AbortError');
+  };
   const runFinalizedProjection = async <T>(
     operationLabel: string,
     options: ChainReadOptions,
@@ -366,13 +375,19 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       }>,
     ) => Promise<T>,
   ): Promise<T> => {
+    assertOpen();
+    const projectionSignal = lifecycleAbort.signal;
     options.signal?.throwIfAborted();
     await dependencies.initialize();
+    assertOpen();
+    projectionSignal.throwIfAborted();
     options.signal?.throwIfAborted();
     const base = dependencies.requireContextGraphStorage();
     return dependencies.readTipProvider(
       operationLabel,
-      (provider) => lifecycle.run(async () => {
+      (provider) => withRpcRequestContext({ signal: projectionSignal }, () => lifecycle.run(async () => {
+        assertOpen();
+        projectionSignal.throwIfAborted();
         // Anchor the whole projection at the operator-configured finality depth,
         // NOT at the endpoint's `finalized` tag. The tag lags head by ~600
         // blocks / ~20 minutes on Base Sepolia, which made a freshly registered
@@ -396,6 +411,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         });
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
+        ownScope = [dependencies.deploymentId, contractAddress].join(':');
         const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
           contractAddress,
           operationLabel,
@@ -418,7 +434,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         );
         await indexed.stabilize();
         return indexed.value;
-      }),
+      })),
       {
         signal: options.signal,
         isRetryable: (error: unknown) => (
@@ -519,6 +535,27 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   return Object.freeze({
+    snapshots: Object.freeze({
+      open(): void {
+        if (lifecycleAbort.signal.aborted) lifecycleAbort = new AbortController();
+        dependencies.index.open();
+        closed = false;
+      },
+      async close(): Promise<void> {
+        closed = true;
+        ownScope = undefined;
+        lifecycleAbort.abort(new DOMException('Context Graph authority reader lifecycle closed', 'AbortError'));
+        await Promise.all([dependencies.index.close(), lifecycle.whenIdle()]);
+      },
+      async exportSnapshot(request) {
+        if (closed || request?.scope !== ownScope) return null;
+        return dependencies.index.exportSnapshot(request);
+      },
+      refresh(options: ChainReadOptions = {}): Promise<void> {
+        return runFinalizedProjection('refreshContextGraphAuthorityIndex', options,
+          (scan) => dependencies.index.refresh(scan));
+      },
+    } satisfies ContextGraphAuthorityIndexSnapshots),
     async whenIdle(): Promise<void> {
       await Promise.all([
         lifecycle.whenIdle(),

@@ -71,6 +71,7 @@ import {
   DKGAgent,
   loadOpWallets,
   KaNumberAllocator,
+  resolveAuthorityIndexConfig,
   resolveSyncAgentsMeta,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -1129,6 +1130,9 @@ async function runDaemonInnerWithStartupOwnership(
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
+  // Snapshot peers supply authority-bearing state. Validate explicit operator
+  // trust before allocating startup resources, never infer it from relays.
+  const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1822,6 +1826,7 @@ async function runDaemonInnerWithStartupOwnership(
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
+    authorityIndex,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
     logging: config.logging,

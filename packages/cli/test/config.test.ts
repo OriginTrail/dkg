@@ -980,6 +980,35 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.relayServerCapacity).toBe(2048);
   });
 
+  it('round-trips explicitly trusted core authority index sources', async () => {
+    const authorityIndex = {
+      mode: 'core-snapshot' as const,
+      trustedCorePeers: ['/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+      maxTailBlocks: 2_000,
+    };
+    await saveConfig({
+      name: 'snapshot-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      authorityIndex,
+    });
+
+    expect((await loadConfig()).authorityIndex).toEqual(authorityIndex);
+  });
+
+  it('keeps authority index snapshot trust absent for existing configs', async () => {
+    await saveConfig({
+      name: 'existing-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      relayPeers: ['/dns4/relay.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+    });
+
+    expect((await loadConfig()).authorityIndex).toBeUndefined();
+  });
+
   it('round-trips relayReservationCount through saveConfig/loadConfig (operator override)', async () => {
     // PR3 multi-reservation tuning: same contract as
     // relayServerCapacity above — operators should be able to

@@ -1,5 +1,6 @@
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
+import { startAuthorityIndexSnapshotRuntime } from './authority-index-snapshot-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -2092,6 +2093,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.
     const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
@@ -2389,6 +2391,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       resolvePeer: async (peerId, { signal }) => {
         await peerResolver.connect(peerId, { signal }).catch(() => undefined);
       },
+    });
+    this.authorityIndexSnapshotRuntime = startAuthorityIndexSnapshotRuntime({
+      nodeRole: this.config.nodeRole ?? 'edge',
+      snapshots: this.chain.contextGraphAuthorityIndexSnapshots,
+      register: (protocol, handler, options) => this.router.register(protocol, handler, options),
+      warn: (message) => this.log.warn(ctx, message),
     });
     // A remote join handler that aborts before persisting its decision can be
     // observed by libp2p as either a stream reset or clean EOF. Treat only a

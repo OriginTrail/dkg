@@ -90,6 +90,7 @@ function makeIndexedAuthorityAdapter(
     indexReadDelayMs?: number;
     authorityIndexStore?: MemoryAuthorityIndexStore;
     finalityConfirmations?: number;
+    authorityIndexBootstrap?: import('../src/context-graph-authority-index-snapshot.js').ContextGraphAuthorityIndexBootstrap;
   }> = {},
 ): IndexedAuthorityHarness {
   const scenario = createAuthorityScenario(options);
@@ -101,6 +102,7 @@ function makeIndexedAuthorityAdapter(
     allowNoAdminSigner: true,
     chainId: 'evm:31337',
     localContextGraphAuthorityIndexStore: authorityIndexStore,
+    contextGraphAuthorityIndexBootstrap: options.authorityIndexBootstrap,
     ...(options.finalityConfirmations === undefined
       ? {}
       : { finalityConfirmations: options.finalityConfirmations }),
@@ -327,6 +329,69 @@ function bindProductionRpcTipReader(
 }
 
 describe('RFC-64 indexed Context Graph authority snapshots', () => {
+  it('exports cached core state and bootstraps an edge authority read through the adapter capability', async () => {
+    const core = makeIndexedAuthorityAdapter();
+    const snapshots = core.adapter.contextGraphAuthorityIndexSnapshots!;
+    const request = {
+      scope: `${core.adapter.deploymentId}:${GOVERNANCE}`,
+      deploymentBlockNumber: 7, minThroughBlockNumber: 7, maxThroughBlockNumber: 30,
+    };
+    expect(await snapshots.exportSnapshot(request)).toBeNull();
+    expect(core.evidence.headReads).toEqual([]);
+    expect(core.evidence.indexRanges).toEqual([]);
+    await snapshots.refresh();
+    const ranges = core.evidence.indexRanges.length;
+    expect(await snapshots.exportSnapshot(request)).toMatchObject({
+      version: 1, scope: request.scope, checkpoint: { cursor: { throughBlockNumber: 30 } },
+    });
+    expect(await snapshots.exportSnapshot({ ...request, scope: 'another-deployment' })).toBeNull();
+    expect(core.evidence.indexRanges).toHaveLength(ranges);
+
+    const fetchSnapshot = vi.fn(async (requested, signal, validate) => {
+      signal.throwIfAborted();
+      const snapshot = await snapshots.exportSnapshot(requested);
+      await validate(snapshot, signal);
+      return snapshot;
+    });
+    const edge = makeIndexedAuthorityAdapter({ authorityIndexBootstrap: {
+      trustDomain: 'core-peer-A', maxTailBlocks: 200, fetchSnapshot,
+    } });
+    await expect(edge.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({ contextGraphId: '9' });
+    expect(fetchSnapshot).toHaveBeenCalledOnce();
+    expect(edge.evidence.indexRanges).toEqual([]);
+  });
+
+  it('closes, aborts and drains an owned core refresh before reopening the adapter', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    const snapshots = harness.adapter.contextGraphAuthorityIndexSnapshots!;
+    const gate = harness.holdIndexPageRead();
+    const pending = snapshots.refresh();
+    const rejected = expect(pending).rejects.toThrow('lifecycle cleared');
+    await gate.entered;
+    await snapshots.close();
+    await rejected;
+    expect(harness.evidence.indexPageSignals[0]?.aborted).toBe(true);
+    const ranges = harness.evidence.indexRanges.length;
+    await expect(snapshots.refresh()).rejects.toThrow('closed');
+    expect(harness.evidence.indexRanges).toHaveLength(ranges);
+    snapshots.open();
+    await snapshots.refresh();
+    gate.release();
+  });
+
+  it('also cancels a core refresh waiting for its chain head before any index page exists', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    const gate = harness.holdHeadRead();
+    const snapshots = harness.adapter.contextGraphAuthorityIndexSnapshots!;
+    const pending = snapshots.refresh();
+    const rejected = expect(pending).rejects.toThrow('reader lifecycle closed');
+    await gate.entered;
+    await snapshots.close();
+    await rejected;
+    expect(harness.evidence.indexRanges).toEqual([]);
+    gate.release();
+  });
+
   it('plans authority-index pages within a 10,000-block provider cap', async () => {
     const { adapter, evidence } = makeIndexedAuthorityAdapter({
       finalizedNumber: 20_020,
