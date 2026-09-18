@@ -158,7 +158,18 @@ export interface OxigraphServerHandle {
 }
 
 export interface OxigraphRecoveryState {
+  /**
+   * The listener was terminated or is being terminated. Work already
+   * dispatched into this generation has an indeterminate outcome.
+   */
   recovering: boolean;
+  /**
+   * WAL maintenance has closed admission and is waiting for in-flight work to
+   * drain. The child is still alive and still answering what it already
+   * accepted, so this refuses new work without making dispatched work
+   * indeterminate.
+   */
+  admissionsPaused: boolean;
   generation: number;
 }
 
@@ -608,11 +619,11 @@ export async function startOxigraphServer(
     walMaintenance.registerActivity();
 
   const getRecoveryState = (): OxigraphRecoveryState => ({
-    recovering: walMaintenance.admissionsPaused()
-      || lifecycle.phase === 'restart-verifying'
+    recovering: lifecycle.phase === 'restart-verifying'
       || lifecycle.phase === 'recovering'
       || lifecycle.phase === 'stopping'
       || lifecycle.phase === 'restart-signalled',
+    admissionsPaused: walMaintenance.admissionsPaused(),
     generation: lifecycle.generation,
   });
 

@@ -688,7 +688,8 @@ describe('startManagedOxigraph (real download + real server)', () => {
       await expect(store.update(
         'INSERT DATA { <urn:mutation> <urn:must-restart> "true" }',
       )).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
-      expect(result!.handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: true, admissionsPaused: false, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -704,7 +705,8 @@ describe('startManagedOxigraph (real download + real server)', () => {
       for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
 
       await expect(store.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
         code: 'STORE_OPERATION_TIMEOUT',
@@ -712,7 +714,8 @@ describe('startManagedOxigraph (real download + real server)', () => {
       });
       // Close store admission while ownership verification is in flight. The
       // generation advances only after the verified listener is signalled.
-      expect(result!.handle.getRecoveryState()).toEqual({ recovering: true, generation: 1 });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: true, admissionsPaused: false, generation: 1 });
       let pid3 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -728,7 +731,8 @@ describe('startManagedOxigraph (real download + real server)', () => {
       for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 2 });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 2 });
 
       await expect(store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
         .rejects.toMatchObject({
@@ -750,7 +754,8 @@ describe('startManagedOxigraph (real download + real server)', () => {
       for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 3 });
+      expect(result!.handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 3 });
     } finally {
       globalThis.fetch = originalFetch;
       await store?.close();

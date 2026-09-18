@@ -198,7 +198,10 @@ export interface SparqlHttpSlowQueryEvent {
 }
 
 export interface SparqlHttpRecoveryState {
+  /** The managed process was or is being terminated. */
   recovering: boolean;
+  /** Maintenance refuses new work while the live process drains. */
+  admissionsPaused?: boolean;
   generation: number;
 }
 
@@ -515,7 +518,7 @@ export class SparqlHttpStore implements TripleStore {
     work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
     const recovery = this.readRecoveryState();
-    if (recovery?.recovering) {
+    if (this.admissionRefused(recovery)) {
       return Promise.reject(this.recoveryError(operation, 'not_started'));
     }
     return this.workLifecycle.run(
@@ -563,6 +566,17 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
+  /**
+   * Pre-dispatch admission gate. A terminated generation and a maintenance
+   * drain both refuse new work, but only termination can invalidate work that
+   * was already dispatched — `recoveryInterrupted` therefore stays on
+   * `recovering` alone, so a paused admission window never reclassifies a
+   * definite failure as `indeterminate`.
+   */
+  private admissionRefused(state: ManagedOxigraphRuntimeStateV1 | null): boolean {
+    return state !== null && (state.recovering || state.admissionsPaused === true);
+  }
+
   private recoveryInterrupted(
     started: ManagedOxigraphRuntimeStateV1 | null,
   ): boolean {
@@ -603,7 +617,7 @@ export class SparqlHttpStore implements TripleStore {
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
     const recoveryAtStart = this.readRecoveryState();
-    if (recoveryAtStart?.recovering) {
+    if (this.admissionRefused(recoveryAtStart)) {
       throw this.recoveryError(storeOperation, 'not_started');
     }
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
@@ -679,7 +693,7 @@ export class SparqlHttpStore implements TripleStore {
     // data. See postQuery for why form encoding breaks large payloads.
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const recoveryAtStart = this.readRecoveryState();
-      if (recoveryAtStart?.recovering) {
+      if (this.admissionRefused(recoveryAtStart)) {
         throw this.recoveryError(operation, 'not_started');
       }
       const timeoutSignal = AbortSignal.timeout(this.timeout);
@@ -1039,7 +1053,7 @@ export class SparqlHttpStore implements TripleStore {
     try {
       await this.runStoreWork(opts.operation, opts.options, async (lifecycleSignal) => {
         const recoveryAtStart = this.readRecoveryState();
-        if (recoveryAtStart?.recovering) {
+        if (this.admissionRefused(recoveryAtStart)) {
           throw this.recoveryError(opts.operation, 'not_started');
         }
         const timeoutSignal = AbortSignal.timeout(this.timeout);

@@ -760,6 +760,56 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('keeps a definite write failure definite while maintenance pauses admission', async () => {
+    const originalFetch = globalThis.fetch;
+    let recovery: {
+      recovering: boolean;
+      admissionsPaused?: boolean;
+      generation: number;
+    } = { recovering: false, generation: 0 };
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      // WAL maintenance closes admission while this update is in flight. The
+      // child is alive and answers what it already accepted — here, with a
+      // hard parse error that definitively never applied.
+      recovery = { recovering: false, admissionsPaused: true, generation: 0 };
+      return new Response('SPARQL update parse error', { status: 400 });
+    }) as typeof fetch;
+
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+        timeout: 5_000,
+      }, {
+        getRecoveryState: () => recovery,
+      });
+      const failure = await managed.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]).catch((error) => error);
+
+      // An admission pause is not a termination, so the server's own verdict
+      // must survive instead of being reclassified as "may have committed".
+      expect(isSparqlHttpResponseError(failure)).toBe(true);
+      expect(failure).toMatchObject({ status: 400 });
+      expect(failure).not.toMatchObject({ code: STORE_OPERATION_TIMEOUT_CODE });
+
+      // New work is still refused for as long as admission stays paused.
+      await expect(managed.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+        outcome: 'not_started',
+      });
+      expect(fetchCalls).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('rejects a partial managed Oxigraph SELECT response when the native deadline cancels it', async () => {
     const originalFetch = globalThis.fetch;
     const onClientTimeout = vi.fn();

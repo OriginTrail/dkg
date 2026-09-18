@@ -11,7 +11,13 @@ type ManagedRuntimeDecoratorKey = typeof MANAGED_RUNTIME_DECORATOR_KEYS[number];
 type ManagedRuntimeDecorators = Pick<TripleStoreConfig, ManagedRuntimeDecoratorKey>;
 
 export interface ManagedOxigraphRuntimeStateV1 {
+  /** The managed process was or is being terminated. */
   readonly recovering: boolean;
+  /**
+   * Maintenance has closed admission while the live process drains. New work
+   * is refused; work already dispatched keeps its ordinary outcome.
+   */
+  readonly admissionsPaused?: boolean;
   readonly generation: number;
 }
 

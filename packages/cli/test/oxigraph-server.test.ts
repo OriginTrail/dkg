@@ -311,7 +311,8 @@ describe('startOxigraphServer (real child processes)', () => {
       expect(pid2, 'supervisor never respawned the crashed child').toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
       for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
-      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+      expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
     } finally {
       await handle.stop();
     }
@@ -326,7 +327,8 @@ describe('startOxigraphServer (real child processes)', () => {
       expect(handle.requestRestart('query exceeded the managed SPARQL client deadline')).toBe(true);
       // Recovery admission closes before asynchronous listener verification,
       // so a new store operation cannot race the signal boundary.
-      expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
+      expect(handle.getRecoveryState())
+        .toEqual({ recovering: true, admissionsPaused: false, generation: 0 });
       expect(handle.requestRestart('duplicate timeout')).toBe(false);
 
       let pid2 = 0;
@@ -342,7 +344,8 @@ describe('startOxigraphServer (real child processes)', () => {
       expect(pid2, 'supervisor never recovered the explicitly restarted child').toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
       for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
-      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+      expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
       expect(logs.some((line) => line.includes('server terminated for recovery'))).toBe(true);
     } finally {
       await handle.stop();
@@ -398,7 +401,8 @@ describe('startOxigraphServer (real child processes)', () => {
       }
 
       expect(killProcess).not.toHaveBeenCalled();
-      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 0 });
       const definitiveError = new Error('definitive backend failure after cancelled restart');
       rejectUpdate(definitiveError);
       expect(await updateFailure).toBe(definitiveError);
@@ -434,7 +438,8 @@ describe('startOxigraphServer (real child processes)', () => {
         for (let i = 0; i < 50 && signalAttempts < 1; i++) await sleep(20);
 
         expect(signalAttempts).toBe(1);
-        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+        expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 0 });
         expect(await fetchPid(port)).toBe(pid);
         expect(await portAnswers(port)).toBe(true);
 
@@ -443,7 +448,8 @@ describe('startOxigraphServer (real child processes)', () => {
         expect(handle.requestRestart(`second signal failure: ${failureMode}`)).toBe(true);
         for (let i = 0; i < 50 && signalAttempts < 2; i++) await sleep(20);
         expect(signalAttempts).toBe(2);
-        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+        expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 0 });
         expect(logs.filter((line) => line.includes('could not signal')).length).toBe(2);
       } finally {
         await handle.stop();
@@ -553,7 +559,13 @@ describe('startOxigraphServer (real child processes)', () => {
       await sleep(180);
       expect(await fetchPid(port)).toBe(firstPid);
       expect(measurements).toBeGreaterThanOrEqual(2);
-      expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
+      // The child is alive and still answering admitted work; only new work is
+      // refused, so this is an admission pause and not a recovery.
+      expect(handle.getRecoveryState()).toEqual({
+        recovering: false,
+        admissionsPaused: true,
+        generation: 0,
+      });
 
       activity.report(0);
       await sleep(40);
@@ -630,8 +642,13 @@ describe('startOxigraphServer (real child processes)', () => {
         expect(cancellations).toBeGreaterThanOrEqual(2);
         expect(await fetchPid(port)).toBe(initialPid);
         // The threshold remains armed: new store work stays fail-closed while
-        // the coordinator retries the verified restart.
-        expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
+        // the coordinator retries the verified restart. The child is still
+        // alive, so this is an admission pause and not a recovery.
+        expect(handle.getRecoveryState()).toEqual({
+          recovering: false,
+          admissionsPaused: true,
+          generation: 0,
+        });
         if (failureMode === 'signal') expect(signalAttempts).toBeGreaterThanOrEqual(2);
 
         rejectOwnership = false;
@@ -650,7 +667,8 @@ describe('startOxigraphServer (real child processes)', () => {
         for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i += 1) {
           await sleep(20);
         }
-        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+        expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
       } finally {
         await handle.stop();
       }
@@ -784,7 +802,8 @@ describe(
         ) {
           await sleep(50);
         }
-        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+        expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
         expect(measureRetainedWalBytes(location)).toBeLessThan(retainedBefore);
         await expect(store.query(
           'ASK { GRAPH <urn:wal-maintenance-graph> { <urn:wal-maintenance:42> <urn:retained> ?o } }',
