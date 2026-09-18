@@ -2,7 +2,6 @@ import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-officia
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   createLaneCursorStore,
-  seedLaneCursorStore,
   type CursorPersistence,
   type LaneCursorStore,
 } from './chain-event-lane-cursor-store.js';
@@ -104,22 +103,6 @@ export class ChainEventLaneRunner {
 
   async restoreCurrentlyActive(ctx: OperationContext): Promise<void> {
     await this.restoreLaneCursors(this.activeLaneSpecs(), ctx);
-  }
-
-  /** Seed every configured runtime lane through the same specifications used by polling. */
-  async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
-    const lanes = [...new Set(this.lanes.map(({ name }) => name))];
-    await seedLaneCursorStore(this.cursorStore, lanes, blockNumber);
-    // A legacy aggregate store cannot represent lanes that deliberately ignore
-    // migration cursors. An explicit seed still applies to every lane owned by
-    // this runner, including currently disabled full-history lanes that become
-    // active later in the same lifetime.
-    for (const lane of lanes) {
-      const state = this.stateFor(lane);
-      state.lastBlock = blockNumber;
-      state.headKnown = true;
-      this.restoredLanes.add(lane);
-    }
   }
 
   async poll(signal?: AbortSignal): Promise<void> {

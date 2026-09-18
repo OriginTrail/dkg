@@ -5,139 +5,17 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import type { ChainEventPollerLane } from '../src/chain-event-poller.js';
-import type {
-  LaneCursorPersistence,
-  LegacyCursorPersistence,
-} from '../src/chain-event-poller.js';
+import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
+import { CHAIN_EVENT_POLLER_LANES } from '../src/chain-event-lanes.js';
 import { ChainEventLaneRunner } from '../src/chain-event-lane-runner.js';
 import type { ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller scheduler', () => {
-  it('seeds every production cursor without activating optional poller callbacks', async () => {
-    const saved: Array<{ lane: ChainEventPollerLane; block: number }> = [];
-    const cursor: LaneCursorPersistence = {
-      async loadLane() { return undefined; },
-      async saveLane(lane, block) { saved.push({ lane, block }); },
-    };
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      intervalMs: 60_000,
-      cursorPersistence: cursor,
-    });
-    await poller.seedConfiguredLaneCursors(42);
-
-    expect(saved).toEqual([
-      { lane: 'publish', block: 42 },
-      { lane: 'allocatorReconcile', block: 42 },
-      { lane: 'contextGraphDiscovery', block: 42 },
-      { lane: 'vmReconcile', block: 42 },
-      { lane: 'collectionUpdates', block: 42 },
-      { lane: 'allowListUpdates', block: 42 },
-      { lane: 'profileEvents', block: 42 },
-    ]);
-  });
-
-  it('seeds every production lane through one bulk persistence operation', async () => {
-    const bulkCalls: Array<{ lanes: ChainEventPollerLane[]; block: number }> = [];
-    const laneCalls: ChainEventPollerLane[] = [];
-    const cursor: LaneCursorPersistence = {
-      async loadLane() { return undefined; },
-      async saveLane(lane) { laneCalls.push(lane); },
-      async saveLanes(lanes, block) { bulkCalls.push({ lanes: [...lanes], block }); },
-    };
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      intervalMs: 60_000,
-      cursorPersistence: cursor,
-    });
-    await poller.seedConfiguredLaneCursors(42);
-
-    expect(laneCalls).toEqual([]);
-    expect(bulkCalls).toEqual([{
-      lanes: [
-        'publish',
-        'allocatorReconcile',
-        'contextGraphDiscovery',
-        'vmReconcile',
-        'collectionUpdates',
-        'allowListUpdates',
-        'profileEvents',
-      ],
-      block: 42,
-    }]);
-  });
-
-  it('leaves every lane cursor at its prior value when a bulk seed fails', async () => {
-    const stored = new Map<ChainEventPollerLane, number>([['publish', 7], ['vmReconcile', 9]]);
-    const cursor: LaneCursorPersistence = {
-      async loadLane(lane) { return stored.get(lane); },
-      async saveLane(lane, block) { stored.set(lane, block); },
-      async saveLanes() { throw new Error('cursor persistence unavailable'); },
-    };
-
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      intervalMs: 60_000,
-      cursorPersistence: cursor,
-    });
-    await expect(poller.seedConfiguredLaneCursors(42))
-      .rejects.toThrow('cursor persistence unavailable');
-    expect([...stored]).toEqual([['publish', 7], ['vmReconcile', 9]]);
-  });
-
-  // Zero is the runner's "no cursor yet" sentinel, so accepting it as a seed
-  // would let a live-tail lane resume near the head after a restart instead of
-  // at block 1.
-  it.each([-1, 0, 1.5, Number.NaN])('rejects invalid configured cursor seed %s', async (blockNumber) => {
-    const saved: Array<{ lane: ChainEventPollerLane; block: number }> = [];
-    const cursor: LaneCursorPersistence = {
-      async loadLane() { return undefined; },
-      async saveLane(lane, block) { saved.push({ lane, block }); },
-    };
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      intervalMs: 60_000,
-      cursorPersistence: cursor,
-    });
-    await expect(poller.seedConfiguredLaneCursors(blockNumber))
-      .rejects.toThrow(/positive safe integer/);
-    expect(saved).toEqual([]);
-  });
-
-  // A legacy aggregate cursor cannot restore full-history lanes on its own,
-  // which is why all-lane seeding is poller-scoped: the seed also lives in this
-  // runner's lane state for the rest of its lifetime (proven by the
-  // disabled-full-history case at the end of this file).
-  it('seeds a legacy aggregate cursor once for every configured lane', async () => {
-    const saved: number[] = [];
-    const cursor: LegacyCursorPersistence = {
-      async load() { return undefined; },
-      async save(blockNumber) { saved.push(blockNumber); },
-    };
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      intervalMs: 60_000,
-      cursorPersistence: cursor,
-    });
-
-    await poller.seedConfiguredLaneCursors(42);
-
-    expect(saved).toEqual([42]);
-  });
-
-  it('restores the lowest accepted seed on a live-tail lane after reconstructing the poller', async () => {
-    const saved = new Map<ChainEventPollerLane, number>();
+  it('restores the lowest persisted cursor on a live-tail lane after reconstructing the poller', async () => {
+    const saved = new Map<ChainEventPollerLane, number>(
+      CHAIN_EVENT_POLLER_LANES.map((lane) => [lane, 1]),
+    );
     const cursor: LaneCursorPersistence = {
       async loadLane(lane) { return saved.get(lane); },
       async saveLane(lane, block) { saved.set(lane, block); },
@@ -150,19 +28,20 @@ describe('ChainEventPoller scheduler', () => {
       cursorPersistence: cursor,
       onContextGraphCreated: async () => { /* sink */ },
     });
-    await poller.seedConfiguredLaneCursors(1);
 
     await poller.start();
     await poller.waitForCurrentPoll();
     await poller.stop();
 
-    // Every accepted seed restores exactly: the lane resumes at seed + 1
+    // Every persisted cursor restores exactly: the lane resumes at cursor + 1
     // rather than inside the live-tail window near the head.
     expect(filters[0]?.fromBlock).toBe(2);
   });
 
-  it('restores a seeded allocator lane at seed + 1 after reconstructing the poller', async () => {
-    const saved = new Map<ChainEventPollerLane, number>();
+  it('restores a persisted allocator lane at cursor + 1 after reconstructing the poller', async () => {
+    const saved = new Map<ChainEventPollerLane, number>(
+      CHAIN_EVENT_POLLER_LANES.map((lane) => [lane, 42]),
+    );
     const cursor: LaneCursorPersistence = {
       async loadLane(lane) { return saved.get(lane); },
       async saveLane(lane, block) { saved.set(lane, block); },
@@ -175,7 +54,6 @@ describe('ChainEventPoller scheduler', () => {
       cursorPersistence: cursor,
       onKnowledgeAssetCreated: async () => { /* sink */ },
     });
-    await poller.seedConfiguredLaneCursors(42);
 
     await poller.start();
     await poller.waitForCurrentPoll();
@@ -183,40 +61,6 @@ describe('ChainEventPoller scheduler', () => {
 
     expect(filters.map(({ eventTypes, fromBlock, toBlock }) => [eventTypes, fromBlock, toBlock]))
       .toEqual([[['KCCreated'], 43, 100]]);
-  });
-
-  it('applies a legacy explicit seed to a disabled full-history lane before activation', async () => {
-    let enabled = false;
-    const saved: number[] = [];
-    const cursor: LegacyCursorPersistence = {
-      async load() { return undefined; },
-      async save(blockNumber) { saved.push(blockNumber); },
-    };
-    const { adapter, filters } = makeChain({ head: 100 });
-    const lane: ChainEventPollerLaneSpec = {
-      name: 'allocatorReconcile',
-      enabled: () => enabled,
-      eventTypes: () => ['KCCreated'],
-      requiresFullHistory: () => true,
-      canUseLegacyAggregateCursor: () => false,
-      cadenceMs: 20,
-      dispatch: async () => { /* sink */ },
-    };
-    const runner = new ChainEventLaneRunner({
-      chain: adapter,
-      lanes: [lane],
-      maxRange: 1000,
-      clock: () => 0,
-      log: { info() {}, warn() {}, error() {} } as any,
-      cursorPersistence: cursor,
-    });
-
-    await runner.seedConfiguredLaneCursors(42);
-    enabled = true;
-    await runner.poll();
-
-    expect(saved).toEqual([42]);
-    expect(filters.map(({ fromBlock, toBlock }) => [fromBlock, toBlock])).toEqual([[43, 100]]);
   });
 
   it('classifies every poller RPC as background work', async () => {

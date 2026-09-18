@@ -177,20 +177,6 @@ export class ChainEventPoller {
     });
   }
 
-  /**
-   * Seed every lane this poller declares at `blockNumber`, before it starts.
-   *
-   * An explicit administrative operation for an operator (or a fixture) that
-   * wants a poller to begin at a known block instead of replaying history. It
-   * goes through the same lane specifications polling uses, so a lane added
-   * later is seeded without a second inventory, and it is deliberately
-   * poller-scoped: a legacy aggregate cursor cannot represent full-history
-   * lanes on its own, so the seed also lives in this runner's lane state.
-   */
-  async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
-    await this.laneRunner.seedConfiguredLaneCursors(blockNumber);
-  }
-
   async start(): Promise<void> {
     if (this.running) return;
     if (this.pollLifecycle.signal.aborted) {
