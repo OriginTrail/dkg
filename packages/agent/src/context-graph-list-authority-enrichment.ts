@@ -1,27 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { DKGAgentBase } from './dkg-agent-base.js';
+import type { ContextGraphListFullRow } from '@origintrail-official/dkg-core';
 import type {
   FinalizedContextGraphAuthorityTargetV1,
   FinalizedContextGraphAuthorityTargetsResolutionV1,
 } from './dkg-agent-cg-registry.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 
-export type ListContextGraphsRow = {
-  id: string;
-  uri: string;
-  name: string;
-  description?: string;
-  creator?: string;
-  curator?: string;
-  accessPolicy?: string;
-  createdAt?: string;
-  isSystem: boolean;
-  subscribed: boolean;
-  synced: boolean;
-  onChainId?: string;
-  callerInvolved?: boolean;
-};
+export type ListContextGraphsRow = ContextGraphListFullRow;
 
 type ContextGraphListAuthorityAttemptV1<T> =
   | Readonly<{ ok: true; value: T }>

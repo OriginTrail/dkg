@@ -6,7 +6,6 @@ import {
   fetchStatus,
   fetchAgents,
   fetchMetrics,
-  fetchContextGraphs,
   fetchOperations,
   fetchOperationsWithPhases,
   fetchOperation,
@@ -53,7 +52,12 @@ import {
 
 let server: Server;
 let baseUrl: string;
-const requestLog: Array<{ url: string; method: string; body: string }> = [];
+const requestLog: Array<{
+  url: string;
+  method: string;
+  body: string;
+  headers: Record<string, string | string[] | undefined>;
+}> = [];
 let queryBindings: any[] = [];
 // Scripted per-call responses (status + body) for tests that need a non-200
 // reply, e.g. a fail-closed publish precondition. Each entry is consumed on
@@ -62,6 +66,8 @@ type ResponseOverride = {
   match: (url: string, method: string, body: string) => boolean;
   status: number;
   body: unknown;
+  headers?: Record<string, string>;
+  delayMs?: number;
 };
 let responseOverrides: ResponseOverride[] = [];
 
@@ -70,20 +76,27 @@ function startTestServer(): Promise<void> {
     server = createServer((req, res) => {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', async () => {
         const reqUrl = req.url ?? '';
         const reqMethod = req.method ?? '';
-        requestLog.push({ url: reqUrl, method: reqMethod, body });
+        requestLog.push({ url: reqUrl, method: reqMethod, body, headers: req.headers });
 
         // Scripted override (consumed on first match) — lets a test return a
         // specific failure or partial-success response.
         const ovIdx = responseOverrides.findIndex(o => o.match(reqUrl, reqMethod, body));
         if (ovIdx !== -1) {
           const [ov] = responseOverrides.splice(ovIdx, 1);
-          res.writeHead(ov.status, { 'Content-Type': 'application/json' });
+          if (ov.delayMs) {
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, ov.delayMs));
+          }
+          res.writeHead(ov.status, {
+            'Content-Type': 'application/json',
+            ...ov.headers,
+          });
           res.end(JSON.stringify(ov.body));
           return;
         }
+
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
 
@@ -127,7 +140,14 @@ function startTestServer(): Promise<void> {
         } else if (url.startsWith('/api/per-type-stats')) {
           res.end(JSON.stringify({ buckets: [], types: [], series: {} }));
         } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
-          res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }] }));
+          // A row the summary decoder accepts, deliberately without an
+          // `onChainId`, so `ensureContextGraphOnChain` exercises the
+          // "found but off-chain" branch rather than the not-found one.
+          res.end(JSON.stringify({
+            contextGraphs: [
+              { id: 'cg1', name: 'cg1', isSystem: false, subscribed: false, synced: false },
+            ],
+          }));
         } else if (url.startsWith('/api/query')) {
           res.end(JSON.stringify({ result: { bindings: queryBindings } }));
         } else if (url.startsWith('/api/shared-memory')) {
@@ -177,6 +197,7 @@ describe('UI API tests', () => {
     requestLog.length = 0;
     queryBindings = [];
     responseOverrides = [];
+    if (typeof window !== 'undefined') window.__DKG_TOKEN__ = undefined;
   });
 
   describe('fileUrl', () => {

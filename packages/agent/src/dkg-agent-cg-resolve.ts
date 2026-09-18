@@ -2340,7 +2340,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         if (cached.expiresAt > this.listContextGraphsCacheNow()) {
           this.listContextGraphsCache.delete(cacheKey);
           this.listContextGraphsCache.set(cacheKey, cached);
-          return cloneRows(cached.rows as ListContextGraphsRow[]);
+          return cloneRows(cached.rows);
         }
         this.listContextGraphsCache.delete(cacheKey);
       }
@@ -2349,7 +2349,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (cacheEnabled) {
       const inFlight = this.listContextGraphsInFlight.get(cacheKey);
       if (inFlight) {
-        return cloneRows((await inFlight) as ListContextGraphsRow[]);
+        return cloneRows(await inFlight);
       }
     }
 
@@ -2360,7 +2360,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (cacheEnabled && result.cacheable && this.listContextGraphsCacheGeneration === generation) {
         this.listContextGraphsCache.set(cacheKey, {
           expiresAt: this.listContextGraphsCacheNow() + cacheTtlMs,
-          rows: cloneRows(rows) as Array<Record<string, unknown>>,
+          rows: cloneRows(rows),
         });
         while (this.listContextGraphsCache.size > DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_MAX) {
           const oldest = this.listContextGraphsCache.keys().next().value;
@@ -2372,7 +2372,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     })();
 
     if (cacheEnabled) {
-      this.listContextGraphsInFlight.set(cacheKey, task as Promise<Array<Record<string, unknown>>>);
+      this.listContextGraphsInFlight.set(cacheKey, task);
     }
     try {
       return cloneRows(await task);
