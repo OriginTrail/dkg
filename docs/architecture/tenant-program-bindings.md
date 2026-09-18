@@ -13,6 +13,8 @@ Bindings can be managed through the [Program authorization API](program-authoriz
 
 The loaded binding supplies the execution policy and authorizes only the approved host adapters (`dkg/query@1`, `dkg/sparql-read@1`, `dkg/asset-create@1`). No `operatorPolicyIri`, VM policy, or VM tool offer is required for this bound operation. The host still checks the installed/enabled adapter, graph access, source/author pins, exact query definition, result schema and current grant. Direct invocation outside `programBindings` still requires its operator-authored VM policy and tool offers. This does not bypass the storage layer's access or graph-authority checks: a locally stored Program must still be readable through the selected memory view.
 
+For API approval, an agent-authenticated graph owner may select only its own custodial executor identity. Selecting another local wallet requires an explicitly authenticated node operator; graph ownership alone grants no access to that wallet's private Working Memory. Local bindings and outbound routes must also use different graph/operation keys on a node, including after durable API records are restored.
+
 This configuration template uses illustrative DMaaST identities and measurement vocabulary, not a claim about the deployed Kamstrup dataset. Replace addresses, IRIs and hash placeholders with reviewed values before enabling it. `sourceHash` is lowercase SHA-256 of the exact UTF-8 S-expression source. Generate `query` using `createSemanticQueryPin(selector, decodedCatalogItem, outputSchema)` from `packages/cli/src/semantic-runtime-query-pins.ts`; it hashes the complete saved-query definition, including SPARQL, parameters/defaults, scope and view.
 
 ```json

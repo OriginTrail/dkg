@@ -38,7 +38,7 @@ import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapt
 import { assertSparqlReadOutput, createSparqlReadAdapter } from './semantic-runtime-sparql-adapter.js';
 import { createDkgQueryAdapter, findSavedQuery } from './semantic-runtime-query-adapter.js';
 import { readContextGraphQueryCatalogBindings } from './daemon/query-catalog-service.js';
-import { programBindingDigest, validateProgramBindings, validateProgramRoutes } from './semantic-runtime-program-bindings.js';
+import { programBindingDigest, validateProgramBindings, validateProgramConfiguration } from './semantic-runtime-program-bindings.js';
 import { assertSemanticQueryDefinition, assertSemanticQueryOutput } from './semantic-runtime-query-pins.js';
 import { validateSemanticProgramPolicy } from './semantic-runtime-program-policy.js';
 import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
@@ -163,7 +163,9 @@ export async function startConfiguredSemanticRuntime(
   const fileRoutes = config.programRoutes;
   if (config.enabled !== true && !deps.activate
     && !(deps.dataDirectory && existsSync(join(deps.dataDirectory, RUNTIME_DATABASE_FILENAME)))) return null;
-  validateSemanticRuntimeConfig(config);
+  // Validate service settings now; the configuration manager validates authority
+  // after durable overrides/tombstones have been merged with file defaults.
+  validateSemanticRuntimeSettings(config);
   const store = deps.openStore?.()
     ?? (deps.dataDirectory ? SemanticRuntimeStore.openInDataDirectory(deps.dataDirectory) : new SemanticRuntimeStore(':memory:'));
   let host: SemanticRuntimeHost;
@@ -1757,12 +1759,11 @@ async function assertProgramInvocationAuthorized(input: {
 }
 
 export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): void {
-  if (config.programBindings !== undefined) validateProgramBindings(config.programBindings);
-  if (config.programRoutes !== undefined) validateProgramRoutes(config.programRoutes);
-  for (const route of config.programRoutes ?? []) {
-    if (config.programBindings?.some((binding) => binding.contextGraphId === route.contextGraphId
-      && binding.operationIri === route.operationIri)) throw new Error('AMBIGUOUS_PROGRAM_ROUTE');
-  }
+  validateProgramConfiguration(config.programBindings ?? [], config.programRoutes ?? []);
+  validateSemanticRuntimeSettings(config);
+}
+
+function validateSemanticRuntimeSettings(config: SemanticRuntimeConfig): void {
   if (config.programPolicy !== undefined) validateSemanticProgramPolicy(config.programPolicy);
   validatePositiveInteger(config.watchdogMs, 'semanticRuntime.watchdogMs', 60_000);
   validatePositiveInteger(config.startupTimeoutMs, 'semanticRuntime.startupTimeoutMs', 120_000);

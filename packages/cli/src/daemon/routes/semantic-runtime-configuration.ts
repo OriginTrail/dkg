@@ -56,6 +56,12 @@ async function prepareBinding(ctx: RequestContext, raw: Record<string, unknown>)
   if (typeof raw.program.programLayer !== 'string' || !['wm', 'swm', 'vm'].includes(raw.program.programLayer)) badRequest('program.programLayer must be wm, swm or vm');
   const executor = address(raw.executorAgentAddress);
   const principal = ctx.actor.authentication.principal;
+  // Owning a graph is not authority to impersonate another custodial wallet,
+  // including for its private WM or writes. There is no executor delegation
+  // contract on this API; only an explicit node operator may select another local wallet.
+  if (principal.kind === 'agent' && principal.agentAddress.toLowerCase() !== executor.toLowerCase()) {
+    throw new SemanticProgramError('PROGRAM_EXECUTOR_FORBIDDEN', 'An agent-authenticated graph owner may select only its own custodial executor identity', 403);
+  }
   const reader = principal.kind === 'agent' ? principal.agentAddress : executor;
   if (!await ctx.agent.canReadContextGraph(sourceGraph, { callerAgentAddress: reader, allowSubscriptionFallback: false })) {
     throw new SemanticProgramError('PROGRAM_SOURCE_ACCESS_DENIED', 'The manager must be able to read the source Program', 403);
@@ -152,6 +158,7 @@ export async function handleSemanticRuntimeConfigurationRoutes(ctx: RequestConte
     jsonResponse(ctx.res, method === 'POST' ? 201 : 200, { ...effective, ...(resolution ? { resolution } : {}) });
   } catch (error) {
     if (error instanceof SemanticProgramError) jsonResponse(ctx.res, error.status, { code: error.code, error: error.message });
+    else if (error instanceof Error && error.message === 'AMBIGUOUS_PROGRAM_ROUTE') jsonResponse(ctx.res, 409, { code: error.message, error: 'A graph/operation cannot have both a local binding and an outbound route' });
     else if (error instanceof Error && error.message === 'PROGRAM_CONFIGURATION_CONFLICT') jsonResponse(ctx.res, 409, { code: error.message, error: 'Configuration changed during validation; inspect the current revision' });
     else if (error instanceof Error && /^(INVALID_|EMPTY_|DUPLICATE_|SEMANTIC_QUERY_|PROGRAM_CONFIGURATION_LIMIT)/.test(error.message)) jsonResponse(ctx.res, 400, { code: error.message, error: 'Invalid Program configuration or output contract' });
     else throw error;
