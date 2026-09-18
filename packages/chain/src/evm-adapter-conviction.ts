@@ -10,6 +10,7 @@
  */
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import { contractVersionAtLeast } from './contract-version.js';
 import { ethers, Contract } from 'ethers';
 import type {
   TxResult,
@@ -27,6 +28,9 @@ import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 import type { PcaMutationInvalidation } from './pca-read-cache.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
+
+/** Lowest deployed PublishingConviction version exposing clearAgents. */
+export const CLEAR_AGENTS_MIN_PCA_VERSION = '10.0.6';
 
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
@@ -616,11 +620,18 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     // DEPLOYED version so the button only enables once the upgrade is live —
     // self-healing (no node software redeploy needed when the contract is
     // upgraded). Fail closed (unsupported) if the version can't be read.
+    //
+    // Uses the shared `contractVersionAtLeast` rather than an inline parse/compare:
+    // this was the second copy of that logic, and a version gate is a capability
+    // boundary where drift is silent. The migration is behaviour-preserving —
+    // `test/contract-version.unit.test.ts` pins the shared comparator against the
+    // exact expression this replaced, across the full edge-case matrix.
     let clearAgentsSupported = false;
     try {
-      const v = String(await logic.version()).split('.').map((n) => parseInt(n, 10) || 0);
-      const [maj, min, pat] = [v[0] ?? 0, v[1] ?? 0, v[2] ?? 0];
-      clearAgentsSupported = maj > 10 || (maj === 10 && (min > 0 || (min === 0 && pat >= 6)));
+      clearAgentsSupported = contractVersionAtLeast(
+        String(await logic.version()),
+        CLEAR_AGENTS_MIN_PCA_VERSION,
+      );
     } catch {
       /* unknown / pre-versioned contract → treat as unsupported */
     }

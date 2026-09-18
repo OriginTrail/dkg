@@ -212,11 +212,21 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   publish_intent_stale: ['claimed', 'validated'],
   canonicalization_failed: ['claimed', 'validated'],
   authority_unavailable: ['claimed', 'validated'],
-  // GH#1786 — also reachable from 'broadcast': the executor discovers mid-publish, before
-  // any transaction is sent, that it cannot re-sign the UpdateAuthorAttestation for this
-  // author. That is an authority failure rather than a transport one, and it is PERMANENT,
-  // so it must be able to fail the job terminally from the broadcast state instead of
-  // falling through to the retryable `rpc_unavailable` default.
+  // Reachable from 'broadcast' for TWO independent reasons. Both are PERMANENT
+  // authority failures the executor discovers mid-publish, before any transaction
+  // is sent, and both would otherwise fall through to the retryable
+  // `rpc_unavailable` default and be reset forever:
+  //
+  //   GH#1786 — the node cannot re-sign the UpdateAuthorAttestation for this
+  //   author (no custodial key on file, and it is not the publisher EOA).
+  //
+  //   GH#1689 — the context-graph publish policy rejects the publish. Raised at
+  //   PLAN time inside the broadcast step, before a signer is picked and before
+  //   anything is signed.
+  //
+  // In both cases the failure is attributed to 'broadcast' (the state the job is
+  // in) while its PHASE stays 'validation' (what actually failed) — independent
+  // axes, which is why this widens the STATE list and leaves the phase alone.
   authority_forbidden: ['claimed', 'validated', 'broadcast'],
   validation_timeout: ['claimed', 'validated'],
   wallet_claim_timeout: ['accepted', 'claimed'],
