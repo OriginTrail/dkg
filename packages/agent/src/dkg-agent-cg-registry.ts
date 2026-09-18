@@ -10,6 +10,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { resolveApprovedPrivateReplicaOwner } from './approved-private-replica.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -1149,6 +1150,49 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         : CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS);
     if (localTarget !== null) {
       try {
+        // An approved private replica uses the same finalized name index as
+        // catalog admission. The legacy current-slot enumerator scans every
+        // registry slot across all RPCs and can fail quorum even while the
+        // authoritative finalized index is healthy. Neither join metadata nor
+        // an unavailable index constitutes evidence of chain absence.
+        if (
+          !hasBindingCandidate
+          && this.chain.contextGraphAuthorityIndexRevisionReader !== undefined
+          && await resolveApprovedPrivateReplicaOwner(
+            this, contextGraphId, this.localApprovedAgentByCG?.get(contextGraphId), options.signal,
+          ) !== null
+        ) {
+          const resolution = await runBoundedOperation(
+            (signal) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+              [contextGraphId], { signal },
+            ),
+            { label: `privateReplicaRegistration(${contextGraphId})`,
+              timeoutMs: registrationResolutionTimeoutMs, signal: options.signal },
+          );
+          if (resolution.kind === 'finalized-index') {
+            // A concurrent registration/binding must supersede the absence
+            // read, including when a custom reader ignored cancellation.
+            if (
+              this.contextGraphRegistrationsInFlight?.has(contextGraphId)
+              || this.contextGraphBindingState.hasBindingCandidate(
+                localTarget.localId, this.subscribedContextGraphs.get(localTarget.localId),
+              )
+            ) throw new Error('Context Graph binding changed during private replica registration discovery');
+            const target = resolution.targets.get(contextGraphId);
+            if (target !== undefined && (
+              target.expectedOnChainId <= 0n || target.expectedOnChainId >= (1n << 256n)
+              || (target.kind === 'resolved-snapshot' && (
+                target.finalizedSnapshot.active !== true
+                || target.finalizedSnapshot.contextGraphId !== target.expectedOnChainId.toString(10)
+                || this.contextGraphWireId(target.finalizedSnapshot.nameHash)
+                  !== this.contextGraphWireId(target.expectedNameHash)
+              ))
+            )) throw new Error('Finalized private replica registration evidence is invalid');
+            return target === undefined
+              ? { kind: 'unregistered' }
+              : { kind: 'registered', onChainId: target.expectedOnChainId, provenance: 'name-hash' };
+          }
+        }
         const binding = await runBoundedOperation(
           (signal) => this.resolveContextGraphOnChainIdBinding(contextGraphId, {
             signal,

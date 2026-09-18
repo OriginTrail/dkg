@@ -74,11 +74,15 @@ curl --fail-with-body -sS "$RUNNER_URL/api/knowledge-assets" \
   --data-binary @upload.json
 ```
 
-The source graph must already be registered and ready for sharing; authorization fails closed if the selected Program view is unavailable or ambiguous. For a new version, upload a new asset name and versioned Program IRI. Normal asset lifecycle/retry rules still apply.
+The source graph must be created and ready for sharing; on-chain registration is not required for private P2P sharing. Authorization fails closed if the selected Program view is unavailable or ambiguous. For a new version, upload a new asset name and versioned Program IRI. Normal asset lifecycle/retry rules still apply.
 
 For private source graphs, SWM sender-key delivery distinguishes API registration from encryption-key custody. Registering a remote agent's public key on runner for API authentication does not make runner its decryption custodian. An external API-only recipient uses its resolved remote peer and active encryption key; the receiving node still checks graph/peer authorization and possession of the exact private key. Missing/self remote destinations are rejected for these external registrations. Locally custodial identities and locally owned or revoked keys retain the strict local checks; missing/revoked custody is not bypassed by forwarding elsewhere. Keep the external API registration and its credential in place—do not copy private keys between nodes to enable sharing.
 
 A partial upload response (`207` with a `swm-share` error) means the sealed WM asset exists but sharing did not complete. After fixing the reported cause, retry the existing asset's SWM transition with its original owner token and author lane, then verify source readback in SWM before approving a `programLayer: "swm"` binding. Shared Program visibility does not grant invocation permission or access to the separate private data graph.
+
+For a private unregistered replica, the receiver validates its durable approved join, the approving curator's identity and owner generation, the graph's own private metadata, and its current membership/delegation to the physical receiver. The finalized chain-name index must independently establish absence; a known binding or registration in flight takes precedence. Raw participant lists, subscription hints and ontology declarations do not establish this authority. The same validated lifecycle policy supplies the private catalog roster.
+
+Sender-key ACKs distinguish an authoritative exclusion (`sender-not-allowed`, terminal) from unavailable authority (`authority-unavailable`, retryable). The latter retains the resolver's typed reason and a diagnostic digest; receiver logs include bounded, sanitized resolver details. It installs no receive key. The sender persists the pending setup for retry, so even HTTP 200 / `swmShared:true` is not proof of receiver replication: query the **receiver's** local SWM for the newly shared Program and verify its source hash. Sharing the Program graph never grants membership of its separate data graph.
 
 ## 2. Authorize the caller on runner
 

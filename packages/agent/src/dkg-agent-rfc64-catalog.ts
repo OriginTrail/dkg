@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { resolveApprovedPrivateReplicaOwner } from './approved-private-replica.js';
+
 /**
  * RFC-64 Gate 1 public author-catalog wiring, extracted as a DKGAgent mixin
  * holder. Methods take `this: DKGAgent` so cross-mixin calls resolve against
@@ -2928,10 +2930,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           snapshot: authoritativeSnapshot,
         });
       } else {
+        // Finalized absence above establishes registration state. A private
+        // replica additionally needs its persisted, authenticated approval and
+        // CURRENT root/member/delegation proof. Plain participant metadata and
+        // public ontology carriers cannot authorize this branch.
+        const approvedPrivateOwner = !localFirstUnregistered
+          && !directAcceptedPrivateAuthority
+          && replicaUnregisteredAuthority === null
+          ? await resolveApprovedPrivateReplicaOwner(
+            this, contextGraphId, this.localApprovedAgentByCG.get(contextGraphId), signal,
+          )
+          : null;
         if (
           !localFirstUnregistered
           && !directAcceptedPrivateAuthority
           && replicaUnregisteredAuthority === null
+          && approvedPrivateOwner === null
         ) {
           throw new Rfc64CatalogAuthorityResolutionErrorV1(
             'unregistered-owner-unresolved',
@@ -2958,6 +2972,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               'unregistered RFC-64 Context Graph has no canonical owner address',
             );
           }
+          if (approvedPrivateOwner !== null && ownerAddress !== approvedPrivateOwner) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'unregistered-owner-unresolved', 'Private replica owner changed during authority resolution',
+            );
+          }
           const accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           if (accessPolicy === null) {
@@ -2969,7 +2988,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // A direct private compatibility mark may advance only through the
           // authenticated private lifecycle. Never let public RDF metadata
           // reinterpret that mark as unsigned public replica authority.
-          if (directAcceptedPrivateAuthority && accessPolicy !== 'private') {
+          if ((directAcceptedPrivateAuthority || approvedPrivateOwner !== null) && accessPolicy !== 'private') {
             throw new Rfc64CatalogAuthorityResolutionErrorV1(
               'access-policy-unresolved',
               'authenticated private RFC-64 authority cannot become public without signed authority',
