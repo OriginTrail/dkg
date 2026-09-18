@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 if (process.argv[2] === '--worker') {
   const { decodeSparqlJsonQueryResult } = await import(pathToFileURL(process.argv[3]));
@@ -23,7 +23,7 @@ if (process.argv[2] === '--worker') {
   const digest = createHash('sha256').update(JSON.stringify(result)).digest('hex');
   console.log(JSON.stringify({ ms, cpuMs: (cpu.user + cpu.system) / 1000, digest, rows: result.bindings.length, iterations }));
 } else {
-  const repo = new URL('../../../', import.meta.url).pathname;
+  const repo = fileURLToPath(new URL('../../../', import.meta.url));
   const argument = name => process.argv.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
   const ref = argument('baseline');
   if (!ref) throw new Error('Provide --baseline=REF (the PR base commit)');
