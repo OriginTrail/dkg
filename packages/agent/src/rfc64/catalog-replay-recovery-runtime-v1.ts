@@ -84,11 +84,37 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
    * Named for its scope on purpose: a node-wide wait satisfies the same
    * signature, and wiring one in would let any other graph's work hold this
    * graph's pass (and its replay-active flag) open again.
+   *
+   * The wait is BOUNDED by the caller (see `idleDrainBudgetMs`): this pass runs
+   * inside the single-flight authority refresh, so parking here forever also
+   * withholds every admission queued behind that refresh.
    */
   whenReceiverIdleForContextGraph(contextGraphId: string): Promise<void>;
+  /**
+   * Resolve after `ms`, for the idle-drain budget. Optional: omitted, a real
+   * unref'd timer is used, so the budget always applies. Injected so tests
+   * exercise it deterministically instead of by elapsed time.
+   */
+  sleep?(ms: number): Promise<void>;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
 }
+
+/**
+ * How long one pass waits for this graph's admitted announcements to drain.
+ *
+ * A drain that never completes used to hang the pass forever. That wait is not
+ * self-contained: `requestRfc64CatalogHeadReplaysFromConnectedPeersV1` is
+ * awaited inside the single-flight RFC-64 authority refresh, so a parked pass
+ * also holds every admission queued behind that refresh — including the
+ * finalized-private catalog placement a confirmed VM publish waits on. One
+ * stuck graph therefore stalled unrelated publishes indefinitely.
+ *
+ * Exceeding the budget is treated exactly like an exhausted worklist: the pass
+ * did NOT observe parity, so it reports failure and demands a full replay. It
+ * never reports parity it has not seen.
+ */
+export const RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 = 120_000;
 
 export interface Rfc64CatalogReplayRecoveryResultV1 {
   readonly requested: number;
@@ -423,7 +449,13 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // withholding this graph's catalog parity for as long as that lasts.
         // The announcements admitted above still take their turn behind other
         // graphs' tasks for the receiver's shared slots.
-        await this.#ports.whenReceiverIdleForContextGraph(input.contextGraphId);
+        if (!await this.#drainedWithinBudget(input.contextGraphId)) {
+          // Budget spent without observing the drain: fail closed and release
+          // the authority-refresh single flight this pass runs inside.
+          requiresFullReplay = true;
+          failed += 1;
+          break;
+        }
         if (progress.peerWorklist.exhausted) {
           requiresFullReplay = true;
           failed += 1;
@@ -616,6 +648,30 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   /** Retain bounded attribution; overflow survives as a full-replay witness. */
+  /**
+   * Wait for this graph's admitted announcements to drain, bounded by
+   * `RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1`. Returns `false` when the
+   * budget is spent first, so the caller fails the pass closed rather than
+   * holding the authority-refresh single flight open forever.
+   */
+  async #drainedWithinBudget(contextGraphId: string): Promise<boolean> {
+    // Always bounded, whether or not a `sleep` port is injected: a missed
+    // wiring must not silently restore the unbounded park this replaced.
+    const sleep = this.#ports.sleep ?? ((ms: number) => new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    }));
+    let timedOut = false;
+    const budget = sleep(RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1).then(() => {
+      timedOut = true;
+    });
+    await Promise.race([
+      this.#ports.whenReceiverIdleForContextGraph(contextGraphId),
+      budget,
+    ]);
+    return !timedOut;
+  }
+
   #retainPeerFailure(progress: ReplayProgressV1, peerId: string): boolean {
     const failures = progress.unresolvedPeers.get(peerId);
     if (failures !== undefined) {

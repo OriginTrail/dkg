@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
-  '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
+import {
+  Rfc64CatalogReplayRecoveryRuntimeV1,
+  RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1,
+} from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 
 interface Target {
   readonly id: string;
@@ -151,5 +153,91 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     releases.get('busy-cg')!();
     await expect(busy).resolves.toEqual({ requested: 1, failed: 0 });
     expect(runtime.status('busy-cg', 'policy')?.active).toBe(false);
+  });
+});
+
+/**
+ * A pass runs INSIDE the single-flight RFC-64 authority refresh
+ * (`requestRfc64CatalogHeadReplaysFromConnectedPeersV1` is awaited there), so a
+ * drain that never completes does not merely stall this graph — it withholds
+ * every admission queued behind that refresh, including the finalized-private
+ * catalog placement a confirmed VM publish waits on. That is how a single
+ * private graph wedged the async promote queue: four such publishes pinned all
+ * four worker slots and the queue stopped claiming work entirely.
+ */
+describe('RFC-64 replay recovery: the idle drain is bounded', () => {
+  function runtimeWith(
+    whenReceiverIdleForContextGraph: () => Promise<void>,
+    sleep?: (ms: number) => Promise<void>,
+  ) {
+    return new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([{ id: 'target-1' }]),
+      }),
+      whenReceiverIdleForContextGraph,
+      ...(sleep ? { sleep } : {}),
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+  }
+
+  it('fails the pass closed when the drain outlives its budget, instead of parking forever', async () => {
+    const budgets: number[] = [];
+    // A drain that never settles. Without the budget this await never returns.
+    const runtime = runtimeWith(
+      () => new Promise<void>(() => {}),
+      async (ms) => { budgets.push(ms); },
+    );
+
+    const result = await runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'p1',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-1']),
+    });
+
+    // Reported as failure, never as observed parity.
+    expect(result.failed).toBeGreaterThan(0);
+    expect(budgets).toEqual([RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1]);
+  });
+
+  it('takes the drain result when it settles inside the budget', async () => {
+    let drained = false;
+    const runtime = runtimeWith(
+      async () => { drained = true; },
+      // Budget that never fires: only a real drain can complete this pass.
+      () => new Promise<void>(() => {}),
+    );
+
+    const result = await runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'p1',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-1']),
+    });
+
+    expect(drained).toBe(true);
+    expect(result.failed).toBe(0);
+    expect(result.requested).toBeGreaterThan(0);
+  });
+
+  it('bounds the drain even when no sleep port is injected', async () => {
+    // A missed wiring must not silently restore the unbounded park.
+    const runtime = runtimeWith(() => new Promise<void>(() => {}));
+    const pass = runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'p1',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-1']),
+    });
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 + 1);
+      await expect(pass).resolves.toMatchObject({ failed: expect.any(Number) });
+      expect((await pass).failed).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
