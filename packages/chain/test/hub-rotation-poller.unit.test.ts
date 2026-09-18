@@ -184,6 +184,54 @@ describe('HubRotationPoller', () => {
     }
   });
 
+  it('re-delivers the whole batch when a dispatch callback throws (at-least-once)', async () => {
+    const iface = hubInterface();
+    const first = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_000, '72', 0);
+    const second = rotationLog(iface, 'ContractChanged', 'ShardingTable', 1_000, '72', 1);
+    const provider = {
+      getBlockNumber: vi.fn(async () => 1_000),
+      getLogs: vi.fn(async () => [first, second]),
+    };
+    let failOnShardingTable = true;
+    const onContractName = vi.fn((name: string) => {
+      if (failOnShardingTable && name === 'ShardingTable') throw new Error('consumer blew up');
+    });
+    const poller = new HubRotationPoller({
+      readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+
+      await expect(poller.pollOnce()).rejects.toThrow('consumer blew up');
+      expect(onContractName.mock.calls.map(([name]) => name)).toEqual([
+        'ContextGraphs',
+        'ShardingTable',
+      ]);
+
+      // Nothing was committed, so the next poll replays the batch from the top —
+      // including the log that already dispatched successfully.
+      failOnShardingTable = false;
+      await poller.pollOnce();
+      expect(onContractName.mock.calls.map(([name]) => name)).toEqual([
+        'ContextGraphs',
+        'ShardingTable',
+        'ContextGraphs',
+        'ShardingTable',
+      ]);
+
+      // Once a batch commits, its logs stay deduped.
+      await poller.pollOnce();
+      expect(onContractName).toHaveBeenCalledTimes(4);
+    } finally {
+      poller.stop();
+    }
+  });
+
   it('recovers after a failed periodic poll', async () => {
     vi.useFakeTimers({ now: 0 });
     const hub = hubContract();

@@ -10,6 +10,11 @@ export interface HubRotationPollerConfig {
   readProvider: HubRotationReadProvider;
   intervalMs: number;
   reorgBufferBlocks: number;
+  /**
+   * MUST be idempotent: the scan commits per batch, so a throw anywhere in a
+   * batch re-delivers that whole batch on the next poll (see `RawLogScanner`'s
+   * at-least-once contract). `applyHubRotationEventName` satisfies this.
+   */
   onContractName: (name: string) => void;
 }
 

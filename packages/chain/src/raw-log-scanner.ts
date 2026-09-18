@@ -47,6 +47,14 @@ type RawLogWithIdentity = ethers.Log & {
  * Callers read a batch and commit it only after their domain-specific dispatch
  * succeeds. This keeps cursor and dedupe state from advancing when a poll is
  * stopped or its domain callback fails between the RPC read and dispatch.
+ *
+ * DELIVERY IS AT-LEAST-ONCE, and the BATCH is the commit unit. Nothing is
+ * recorded as seen until `commit()`, so a dispatch that throws on the k-th log
+ * leaves logs 1..k-1 uncommitted too and the next `read()` re-delivers the WHOLE
+ * batch, not just the tail. Dispatch callbacks MUST be idempotent. The rejected
+ * alternative — marking each log as it is dispatched — would make the failing
+ * log itself at-most-once (silently dropped), which is the worse trade for
+ * rotation-style state that has to converge.
  */
 export class RawLogScanner {
   readonly #readProvider: RawLogScanReadProvider;
