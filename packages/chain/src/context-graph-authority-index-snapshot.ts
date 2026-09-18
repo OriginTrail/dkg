@@ -5,10 +5,20 @@ import {
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
 } from './context-graph-authority-index-checkpoint.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024;
 /** Includes room for the 50-block durable holdback and ordinary refresh/head skew. */
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS = 200;
+// The coupling the comment above asserts, enforced rather than described. The
+// read-time RangeError in ContextGraphAuthorityIndex only fires once the
+// holdback exceeds the tail budget, so raising CG_REGISTRY_REORG_BUFFER_BLOCKS
+// past this floor must fail here, at import, not on a later authority read.
+if ((CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS as number) <= CG_REGISTRY_REORG_BUFFER_BLOCKS) {
+  throw new RangeError(
+    'CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS must exceed CG_REGISTRY_REORG_BUFFER_BLOCKS',
+  );
+}
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS = 30_000;
 
 export class ContextGraphAuthorityIndexSnapshotExportError extends Error {
