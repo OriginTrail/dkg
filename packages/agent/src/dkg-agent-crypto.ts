@@ -1556,7 +1556,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         });
         const packageBytes = encodeSwmSenderKeyPackage(pkg);
 
-        if (this.hasLocalAgent(recipientAgentAddress)) {
+        const localRecipient = [...this.localAgents.values()].find(
+          (record) => record.agentAddress.toLowerCase() === recipientAgentAddress.toLowerCase(),
+        );
+        // A self-sovereign API registration authenticates a caller; it does
+        // not claim custody of every encryption key that caller advertises.
+        // Decide for this exact key. Custodial identities and locally owned
+        // or revoked keys must still go through the strict local validator,
+        // so damaged custody/revocation cannot turn into remote delegation.
+        const externalApiRecipient = localRecipient?.mode === 'self-sovereign'
+          && !localRecipient.privateKey
+          && !localRecipient.workspaceEncryptionKeys.some((key) =>
+            key.encryptionKeyId === recipient.recipientKeyId
+            && (key.privateEncryptionKey || key.revokedAt));
+
+        if (localRecipient && !externalApiRecipient) {
           try {
             await this.acceptSwmSenderKeyPackage(pkg, this.node.peerId.toString(), input.ctx);
             return { kind: 'success', agentAddress: recipientAgentAddress };
@@ -1568,6 +1582,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
               error: err instanceof Error ? err : new Error(String(err)),
             };
           }
+        }
+
+        if (externalApiRecipient && (!recipient.peerId || recipient.peerId === this.node.peerId.toString())) {
+          return {
+            kind: 'failure',
+            agentAddress: recipientAgentAddress,
+            keyId: recipient.recipientKeyId,
+            error: new Error(`External API agent ${recipientAgentAddress} requires a remote peer for SWM key ${recipient.recipientKeyId}`),
+          };
         }
 
         if (!recipient.peerId) {
