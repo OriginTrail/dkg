@@ -61,12 +61,16 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   Rfc64PublicCatalogTransportErrorV1,
+  encodeRfc64PublicCatalogHeadReplayCompletionV2,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
-import { composeRfc64UnregisteredCatalogAuthorityV1 } from
-  '../src/rfc64/release-native-catalog-authority-v1.js';
+import {
+  composeRfc64FinalizedCatalogAuthorityV1,
+  composeRfc64UnregisteredCatalogAuthorityV1,
+  parseRfc64AuthoritySnapshotV1,
+} from '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
   commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1,
   prepareRfc64AppliedCatalogAuthorityDeactivationV1,
@@ -1374,6 +1378,90 @@ describe('RFC-64 rollout authority integration', () => {
     expect(announcementContextGraphs().sort())
       .toEqual([CONTEXT_GRAPH_ID, privateContextGraphId].sort());
   });
+
+  it('replays only the accepted generation when one CG holds both generations\' heads', async () => {
+    // The devnet failure this guards: a CG authored before its registration
+    // keeps its owner-signed durable head alongside the finalized-chain head
+    // published afterwards. Both are current for their own catalog scope and
+    // both collapse to one wire scope, so replaying both makes the V2
+    // completion unencodable and every receiver sits at
+    // catalog-replay-incomplete.
+    const { provider, persistence, publication, scope } =
+      await startAppliedOpenReplayProvider('replay-two-generations');
+    const signer = Object.freeze({
+      address: AUTHOR,
+      signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+    });
+    const finalized = composeRfc64FinalizedCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      snapshot: parseRfc64AuthoritySnapshotV1(
+        { ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'), accessPolicy: 0 },
+        9n,
+      ),
+    });
+    // Registration is the one-way promotion the authority reconciler performs
+    // once the CG is on chain: the owner-signed seed stays durable, the
+    // finalized generation becomes the accepted one.
+    (provider as any).rfc64PublicCatalogServiceV1.acceptAuthoritativePolicySnapshot({
+      policy: finalized.policy,
+      policyDigest: finalized.policyDigest,
+      roster: finalized.roster,
+    });
+    const governedScope = Object.freeze({
+      ...scope,
+      governanceChainId: finalized.policy.governanceChainId,
+      governanceContractAddress: finalized.policy.governanceContractAddress,
+      ownershipTransitionDigest: finalized.policy.ownershipTransitionDigest,
+      era: finalized.policy.era,
+    }) as AuthorCatalogScopeV1;
+    const governedGenesis = await provider.publishAuthorCatalogGenesisV1({
+      scope: governedScope,
+      author: signer,
+      peers: [],
+      issuedAt: '1773900000002' as TimestampMsV1,
+      catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    const governedScopeDigest = computeAuthorCatalogScopeDigestV1(governedScope);
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest: governedScopeDigest,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: null,
+      currentCatalogHeadDigest: governedGenesis.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        catalogScopeDigest: governedScopeDigest,
+        rows: [],
+      }),
+      catalogVersion: governedGenesis.announcement.catalogVersion,
+      inventoryRowCount: '0',
+    });
+    // Both generations are durable and applied for this one CG.
+    expect(persistence.inventory.listAppliedCatalogHeadsV1().filter(
+      (row: { authorAddress: string }) => row.authorAddress === AUTHOR,
+    )).toHaveLength(2);
+    vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
+
+    const replay = await provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplayTwoGenerationsPeer',
+    );
+
+    expect(replay).toMatchObject({ announced: 1, failed: 0 });
+    expect(replay.manifest).toHaveLength(1);
+    expect(replay.manifest[0]).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      catalogHeadObjectDigest: governedGenesis.headObjectDigest,
+      policyDigest: finalized.policyDigest,
+    });
+    expect(replay.manifest[0]?.catalogHeadObjectDigest)
+      .not.toBe(publication.headObjectDigest);
+    // The superseded head must not merely be dropped from delivery: the
+    // completion this manifest becomes has to encode.
+    expect(() => encodeRfc64PublicCatalogHeadReplayCompletionV2({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: replay.manifest,
+    })).not.toThrow();
+  }, 30_000);
 
   it('fails replay when an applied inventory row points at a missing durable head', async () => {
     const { provider, persistence, applied } = await startAppliedOpenReplayProvider(
