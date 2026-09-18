@@ -365,6 +365,75 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     }).attributions).toEqual([{ method: 'eth_estimateGas', consumer: 'publish', count: 1 }]);
   });
 
+  it('derives the legacy eth_call view identically through the tracker, normalize and merge', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('token.balanceOf', () => { t.record('eth_call'); t.record('eth_call'); });
+    withRpcUsageConsumer('hub.getContract', () => t.record('eth_call'));
+    t.record('eth_call'); // unattributed: excluded from the legacy view everywhere
+    withRpcUsageConsumer('token.balanceOf', () => t.record('eth_blockNumber')); // not eth_call
+
+    const drained = t.drainWindow();
+    const expected = { 'token.balanceOf': 2, 'hub.getContract': 1 };
+    expect(drained.ethCallByConsumer).toEqual(expected);
+    // Re-derived from `attributions` alone, the view must not change...
+    expect(normalizeRpcUsageWindow({
+      byMethod: drained.byMethod, attributions: drained.attributions, lifetimeTotal: drained.lifetimeTotal,
+    }).ethCallByConsumer).toEqual(expected);
+    // ...and merging a window with itself must exactly double it.
+    expect(mergeRpcUsageWindows(drained, drained).ethCallByConsumer)
+      .toEqual({ 'token.balanceOf': 4, 'hub.getContract': 2 });
+    // An externally supplied window may carry several rows for one consumer.
+    // The view must ACCUMULATE them; an overwriting projection would report
+    // only the last row (2) where the requests total 3.
+    expect(normalizeRpcUsageWindow({
+      byMethod: { eth_call: 3 },
+      lifetimeTotal: 3,
+      attributions: [
+        { method: 'eth_call', consumer: 'token.balanceOf', count: 1 },
+        { method: 'eth_call', consumer: 'token.balanceOf', count: 2 },
+      ],
+    }).ethCallByConsumer).toEqual({ 'token.balanceOf': 3 });
+  });
+
+  it('bounds distinct CONSUMERS, not (method, consumer) pairs', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    const max = RpcUsageTracker.MAX_WINDOW_CONSUMERS;
+    // One consumer fanning out over more methods than the bound must not evict
+    // a second consumer: only two consumers were ever seen.
+    withRpcUsageConsumer('busy.consumer', () => {
+      for (let i = 0; i < 60; i += 1) t.record(`method_${i}`);
+    });
+    withRpcUsageConsumer('second.consumer', () => t.record('eth_call'));
+    const twoConsumers = t.drainWindow();
+    expect(twoConsumers.attributions).toContainEqual({ method: 'eth_call', consumer: 'second.consumer', count: 1 });
+    expect(twoConsumers.attributions.some((a) => a.consumer === 'other')).toBe(false);
+
+    // ...while genuinely exceeding the consumer bound still folds into `other`.
+    for (let i = 0; i < max + 3; i += 1) withRpcUsageConsumer(`c.${i}`, () => t.record('eth_blockNumber'));
+    const overflow = t.drainWindow();
+    expect(overflow.attributions).toContainEqual({ method: 'eth_blockNumber', consumer: 'other', count: 3 });
+    expect(new Set(overflow.attributions.map((a) => a.consumer)).size).toBe(max + 1);
+  });
+
+  it('applies ONE method-name bound, so byMethod and attributions stay reconcilable', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    const hostile = 'eth_call\nlevel=error';
+    const tooLong = 'x'.repeat(65);
+    withRpcUsageConsumer('c', () => { t.record(hostile); t.record(tooLong); t.record('eth_chainId'); });
+
+    const w = t.drainWindow();
+    // A name normalization would drop never reaches byMethod under its own key.
+    expect(w.byMethod).toEqual({ other: 2, eth_chainId: 1 });
+    const survives = normalizeRpcUsageWindow({
+      byMethod: w.byMethod, attributions: w.attributions, lifetimeTotal: w.lifetimeTotal,
+    });
+    expect(survives.attributions).toEqual(w.attributions); // nothing dropped on the way through
+    for (const [method, count] of Object.entries(w.byMethod)) {
+      const attributed = w.attributions.filter((a) => a.method === method).reduce((n, a) => n + a.count, 0);
+      expect(attributed, `method ${method}`).toBe(count);
+    }
+  });
+
   it('attributes eth_call to the current bounded consumer without changing aggregate totals', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     withRpcUsageConsumer('pcaNFT.getAccountInfo', () => {
@@ -594,6 +663,48 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       provider.destroy();
     }
   }, 30_000);
+
+  it('bills an UNLABELLED payload to "unattributed", never to the caller whose timer drains it', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const tracker = new RpcUsageTracker(() => 'evm:31337');
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 1,
+      providerOptions: { batchMaxCount: 1 },
+      endpointSlot: 0,
+      onRequest: (method, slot) => tracker.record(method, slot),
+    });
+    try {
+      await provider.send('eth_blockNumber', []); // bootstrap outside the windows under test
+      tracker.drainWindow();
+
+      // ethers drains its queue from ONE timer owned by whichever caller enqueued
+      // first, and whether two sends share that timer is its scheduling detail,
+      // not something a test can pin. So this never asserts on grouping: it runs
+      // many mixed windows in both orders and requires every one to be billed
+      // exactly. Correct code passes deterministically; a transport that skips
+      // the restore for an unlabelled issuer mis-bills whenever a window is
+      // shared, which over this many windows is a near-certainty.
+      const WINDOWS = 25;
+      for (let i = 0; i < WINDOWS; i += 1) {
+        const labelled = () => withRpcUsageConsumer('issuer.alpha', () => provider.send('eth_blockNumber', []));
+        const unlabelled = () => provider.send('eth_blockNumber', []);
+        await Promise.all(i % 2 === 0 ? [labelled(), unlabelled()] : [unlabelled(), labelled()]);
+      }
+
+      const usage = tracker.drainWindow();
+      const billed = usage.attributions.filter((a) => a.method === 'eth_blockNumber');
+      expect(billed).toEqual(expect.arrayContaining([
+        { method: 'eth_blockNumber', consumer: 'issuer.alpha', count: WINDOWS },
+        { method: 'eth_blockNumber', consumer: 'unattributed', count: WINDOWS },
+      ]));
+      // Reconciliation: a method's attribution always sums to its aggregate.
+      expect(billed.reduce((sum, a) => sum + a.count, 0)).toBe(usage.byMethod.eth_blockNumber);
+      expect(usage.byMethod.eth_blockNumber).toBe(2 * WINDOWS);
+    } finally {
+      provider.destroy();
+    }
+  }, 60_000);
 
   it('attributes ethers-internal eth_getLogs retries to the same endpoint slot', async () => {
     const rpc = await startLoopbackRpc({ throttle: ['eth_getLogs'] });

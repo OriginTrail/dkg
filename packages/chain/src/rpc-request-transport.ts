@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { activeRpcUsageConsumer, withRpcUsageConsumer } from './rpc-usage.js';
+import { activeRpcUsageConsumer, runWithExactRpcUsageConsumer } from './rpc-usage.js';
 import {
   FetchRequest,
   JsonRpcProvider,
@@ -415,10 +415,12 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
   ): Promise<Array<JsonRpcResult>> {
     const pending = this.#pendingRequestContexts.shift();
     if (!pending) return super._send(payload);
+    // Both issuer scopes are restored for EVERY payload, including an explicit
+    // clear for an unlabelled issuer: the drain timer belongs to whichever
+    // caller enqueued first, so skipping the restore when there is no label
+    // would bill that payload to the timer's owner instead of `unattributed`.
     return rpcRequestContext.run(pending.context, () => (
-      pending.consumer === undefined
-        ? super._send(payload)
-        : withRpcUsageConsumer(pending.consumer, () => super._send(payload))
+      runWithExactRpcUsageConsumer(pending.consumer, () => super._send(payload))
     ));
   }
 }
