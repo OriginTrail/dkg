@@ -881,19 +881,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
         await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER);
         return;
       }
-      if (this.sharedMemoryGossipRegistered.has(cgId)) {
-        // Member-mode subscription already active — apply path covers
-        // local consumption; no need to also opaquely store. Same guard
-        // {@link reconcileSwmHostModeSubscription} applies, and the direct
-        // wire below needs it independently: since the restore walk was
-        // split into an awaited prefix and a deferred drain, a marker past
-        // `reconcileBatchSize` can be processed AFTER member rehydration has
-        // unwired the host handler and claimed this CG. Re-wiring it there
-        // would double-process every envelope (apply + opaque append) —
-        // exactly what that unwire exists to prevent.
-        return;
-      }
+      // No member-registration guard here: {@link wireSwmHostModeHandler}
+      // refuses a member-claimed CG itself, which is what makes the deferred
+      // drain safe even when it runs AFTER member rehydration claimed this CG.
       this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
+      if (!this.swmHostModeSubscribed.has(this.canonicalSwmHostModeKey(cgId))) return;
       // Codex PR #620 R2: also re-probe registration state.
       // Without this, a host-only CG that was registered while
       // the node was offline stays on the 1MiB / 6h pre-reg
@@ -958,9 +950,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.unwireSwmHostModeHandler(contextGraphId);
       return;
     }
-    if (this.sharedMemoryGossipRegistered.has(contextGraphId)) {
+    if (this.isMemberModeRegisteredForCg(contextGraphId)) {
       // Member-mode subscription already active — apply path covers
-      // local consumption; no need to also opaquely store.
+      // local consumption; no need to also opaquely store. The probe is
+      // shape-agnostic so a sweep driven by the wire HASH still sees a
+      // registration recorded under the cleartext id (and vice versa);
+      // `wireSwmHostModeHandler` enforces the same refusal as a backstop.
       return;
     }
     const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
@@ -1139,6 +1134,33 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Is this CG already claimed by MEMBER mode on this node?
+   *
+   * `sharedMemoryGossipRegistered` is keyed by the CALLER-supplied cleartext
+   * id (see `dkg-agent-swm-substrate.ts`), while host-mode state — and the
+   * persisted host markers a restart replays — can be keyed by the
+   * curator-committed wire HASH. A raw `has()` therefore answers `false` for a
+   * hash-shaped id even when the node IS a member, and the host handler gets
+   * wired next to the member handler on the SAME topic: every envelope is then
+   * both applied (member) and opaquely appended (host).
+   *
+   * Resolve every shape back to the member key before asking, the same way
+   * {@link getSwmSubscriptionSource} does for the ACK path.
+   */
+  isMemberModeRegisteredForCg(this: DKGAgent, contextGraphId: string): boolean {
+    if (this.sharedMemoryGossipRegistered.has(contextGraphId)) return true;
+    for (const candidate of [
+      this.localCgIdForWireId(contextGraphId),
+      this.localCgIdForWireId(this.canonicalSwmHostModeKey(contextGraphId)),
+    ]) {
+      if (candidate !== contextGraphId && this.sharedMemoryGossipRegistered.has(candidate)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Register the host-mode gossip handler for `contextGraphId` and
    * track its reference so {@link unwireSwmHostModeHandler} can
    * remove ONLY that handler later (without touching member-mode
@@ -1193,6 +1215,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // discovery path to wire the handler wins the provenance label;
       // a later path covering the same CG is "also true" but the
       // operator-meaningful answer is "which path got us here first".
+      return;
+    }
+    // Codex PR #610 R4 / review #2614 — "never host a CG member mode already
+    // owns" is enforced HERE, at the single wiring point, rather than restated
+    // by each caller. The callers still check it when they need a distinct
+    // answer (`enableSwmHostModeFor` reports `memberMode:true`), but a caller
+    // that forgets — or one that runs after member rehydration claimed the CG,
+    // as the deferred restore drain can — cannot reintroduce the double-
+    // processing (member apply + opaque host append) this refusal prevents.
+    // Do NOT clear the persisted marker here: member mode may hand the CG back
+    // (leave/unregister), and the marker is what re-engages hosting then.
+    if (this.isMemberModeRegisteredForCg(contextGraphId)) {
+      this.log.debug(
+        createOperationContext('system'),
+        `SWM host-mode wiring skipped for "${contextGraphId}": local node is already a CG member ` +
+        `(member-mode handler is authoritative)`,
+      );
       return;
     }
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
@@ -7435,7 +7474,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // opaquely appended via the host handler. The reconciler
     // path already refuses this; the operator-driven entrypoint
     // must do the same to keep the invariant globally true.
-    if (this.sharedMemoryGossipRegistered.has(contextGraphId)) {
+    if (this.isMemberModeRegisteredForCg(contextGraphId)) {
       this.log.info(
         createOperationContext('system'),
         `SWM host-mode subscribe refused for "${contextGraphId}": local node is already a CG member (member-mode handler is authoritative)`,

@@ -65,6 +65,7 @@ interface StripInternals {
   beaconCuratorByWireId: Map<string, string>;
   swmHostModeRestoreDrain?: Promise<void>;
   sharedMemoryGossipRegistered: Set<string>;
+  wireIdToLocalCgId: Map<string, string>;
   config: { swmHostMode?: { enabled?: boolean; hostPublic?: boolean; stripCiphertext?: boolean } };
   isPrivateContextGraph(cgId: string): Promise<boolean>;
   isConfirmedPublicForHostMode(cgId: string): Promise<boolean>;
@@ -399,9 +400,9 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     // can be drained AFTER `reconcileSharedMemoryGossipSubscription` has
     // unwired the host handler and added the CG to
     // `sharedMemoryGossipRegistered` — re-wiring it there double-processes
-    // every envelope (member apply + opaque host append). The drain must
-    // observe the same membership guard `reconcileSwmHostModeSubscription`
-    // applies.
+    // every envelope (member apply + opaque host append). The refusal lives in
+    // `wireSwmHostModeHandler` itself (review #2614), so this drives the REAL
+    // wiring point instead of a stub of it.
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-member-race-'));
     tempDirs.push(dataDir);
     const core = await DKGAgent.create({
@@ -419,30 +420,76 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     g.swmHostModeStore = store;
     const cgIds = ['cg-race-1', 'cg-race-2', 'cg-race-3', 'cg-race-4', 'cg-race-5'];
     for (const cgId of cgIds) await store.markHostModeSubscribed(cgId);
-    (g as any).maybeMarkRegisteredForHostMode = async () => {};
+    installGossipStub(g);
     // Restore order is store-listing order, not the order they were marked.
     const restoreOrder = (await store.listHostModeSubscriptions()).map((e) => e.contextGraphId);
     expect([...restoreOrder].sort()).toEqual([...cgIds].sort());
     const firstDeferred = restoreOrder[2];
     const claimedByMember = restoreOrder[4];
-    const wired: string[] = [];
-    g.wireSwmHostModeHandler = (id: string) => {
-      wired.push(id);
-      // Member rehydration lands WHILE the deferred drain is in flight: the
-      // first deferred marker is being wired here, and the tail of the drain
-      // (including `claimedByMember`) has not run yet.
+    // `maybeMarkRegisteredForHostMode` runs right AFTER each marker is wired,
+    // so it is the seam where member rehydration lands mid-drain: the first
+    // deferred marker is done and the tail (including `claimedByMember`) has
+    // not run yet.
+    (g as any).maybeMarkRegisteredForHostMode = async (id: string) => {
       if (id === firstDeferred) g.sharedMemoryGossipRegistered.add(claimedByMember);
     };
+    const hostKey = (id: string): string => (g as any).canonicalSwmHostModeKey(id) as string;
 
     await g.initializeSwmHostModeStore();
 
-    expect(wired).toEqual(restoreOrder.slice(0, 2));
+    expect([...g.swmHostModeSubscribed.keys()]).toEqual(restoreOrder.slice(0, 2).map(hostKey));
     expect(g.swmHostModeRestoreDrain).toBeDefined();
 
     await g.swmHostModeRestoreDrain;
 
-    expect(wired).not.toContain(claimedByMember);
-    expect(wired).toEqual(restoreOrder.slice(0, 4));
+    expect(g.swmHostModeHandlers.has(hostKey(claimedByMember))).toBe(false);
+    expect(g.swmHostModeSubscribed.has(hostKey(claimedByMember))).toBe(false);
+    expect([...g.swmHostModeSubscribed.keys()]).toEqual(restoreOrder.slice(0, 4).map(hostKey));
+  });
+
+  it('deferred restore drain refuses a HASH-keyed marker whose cleartext id is member-registered', async () => {
+    // Codex review #2614 — `sharedMemoryGossipRegistered` is keyed by the
+    // member's CLEARTEXT id, while a host-only discovery path persists its
+    // marker under the curator-committed wire HASH. A raw `has()` misses that
+    // pairing entirely, so the drain would wire a host handler onto the very
+    // topic the member handler already owns (apply + opaque append). The
+    // membership probe must resolve the hash back through `wireIdToLocalCgId`.
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-hash-member-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestoreHashMemberCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 1 },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    const cgId = 'cg-hash-keyed-member';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(cgId)).toLowerCase();
+    // One inline marker keeps the hash marker in the DEFERRED tail.
+    await store.markHostModeSubscribed('cg-hash-keyed-filler');
+    await store.markHostModeSubscribed(wireId);
+    installGossipStub(g);
+    (g as any).maybeMarkRegisteredForHostMode = async () => {};
+    // The node is a MEMBER of the same CG, registered under the cleartext id.
+    g.wireIdToLocalCgId.set(wireId, cgId);
+    g.sharedMemoryGossipRegistered.add(cgId);
+
+    await g.initializeSwmHostModeStore();
+    expect(g.swmHostModeRestoreDrain).toBeDefined();
+    await g.swmHostModeRestoreDrain;
+
+    expect(g.swmHostModeHandlers.has(wireId)).toBe(false);
+    expect(g.swmHostModeSubscribed.has(wireId)).toBe(false);
+    // The marker itself must SURVIVE: member mode can hand the CG back, and
+    // the marker is what re-engages hosting then.
+    expect((await store.listHostModeSubscriptions()).map((e) => e.contextGraphId))
+      .toContain(wireId);
   });
 
   it('restart restore contains a failing legacy re-wire to keep startup alive', async () => {
