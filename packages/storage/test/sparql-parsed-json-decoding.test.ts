@@ -55,6 +55,18 @@ describe('privately parsed JSON SELECT decoding', () => {
     expect(() => decodeSparqlJsonQueryResult(JSON.stringify(input), 'select')).toThrow(SparqlJsonResultsShapeError);
   });
 
+  it('decodes a __proto__ variable as an ordinary column on both readers', () => {
+    const text = '{"head":{"vars":["__proto__","v"]},"results":{"bindings":'
+      + '[{"__proto__":{"type":"uri","value":"urn:test:proto"},"v":{"type":"uri","value":"urn:test:v"}}]}}';
+    const reflective = parseSparqlJsonSelectResponse(JSON.parse(text));
+    const fast = decodeSparqlJsonQueryResult(text, 'select') as { bindings: Array<Record<string, string>> };
+    for (const bindings of [reflective.bindings, fast.bindings]) {
+      expect(Object.keys(bindings[0])).toEqual(['__proto__', 'v']);
+      expect(bindings[0]['__proto__']).toBe('urn:test:proto');
+      expect(bindings[0]['v']).toBe('urn:test:v');
+    }
+  });
+
   it('does not borrow missing fields from Object.prototype', () => {
     let calls = 0;
     let failure: unknown;

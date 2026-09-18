@@ -229,6 +229,9 @@ function parseSelectResponse(
     reader.read(results, 'bindings', 'SPARQL JSON results'),
     'SPARQL JSON results.bindings',
   );
+  // `__proto__` is a legal SPARQL variable name, and assigning it on an
+  // ordinary object literal hits the inherited setter and drops the column.
+  const protoVariable = variables.includes('__proto__');
   // Term values and literal datatypes are separate populations, so a column
   // carrying both must not let them evict each other from one shared slot.
   const cachedColumns = rows.length > 1 ? variables.slice(0, MAX_CACHED_IRI_VARIABLES) : [];
@@ -244,7 +247,7 @@ function parseSelectResponse(
         malformed(`SPARQL JSON binding ${rowIndex} contains an undeclared variable`);
       }
     }
-    const binding: Record<string, string> = {};
+    const binding: Record<string, string> = protoVariable ? Object.create(null) : {};
     for (let variableIndex = 0; variableIndex < variables.length; variableIndex++) {
       const variable = variables[variableIndex];
       if (!Object.prototype.hasOwnProperty.call(row, variable)) continue;
