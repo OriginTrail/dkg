@@ -58,6 +58,49 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     expect(resolveWalRestartThresholdBytes(1234)).toBe(1234);
   });
 
+  it('applies the documented 60s check, 30s idle, and 1h cooldown defaults', () => {
+    // Every other test overrides all three seams, so the values operators are
+    // told about in docs/use-dkg/storage-sparql-http.md are otherwise untested.
+    let now = 0;
+    let tick = () => {};
+    const measureRetainedWalBytes = vi.fn(() => 101);
+    const requestRestart = vi.fn(() => true);
+    const coordinator = createOxigraphWalMaintenanceCoordinator({
+      location: '/tmp/oxigraph-test',
+      thresholdBytes: 100,
+      measureRetainedWalBytes,
+      requestRestart,
+      serverAvailable: () => true,
+      log: () => {},
+      now: () => now,
+      schedule: (callback, intervalMs) => {
+        expect(intervalMs).toBe(60_000);
+        tick = callback;
+        return { unref: vi.fn() } as unknown as ReturnType<typeof setInterval>;
+      },
+      cancel: vi.fn(),
+    });
+
+    tick();
+    expect(coordinator.admissionsPaused()).toBe(true);
+    now = 29_999;
+    tick();
+    expect(requestRestart).not.toHaveBeenCalled();
+    now = 30_000;
+    tick();
+    expect(requestRestart).toHaveBeenCalledOnce();
+
+    coordinator.restartCompleted();
+    coordinator.serverLifecycleChanged();
+    now = 30_000 + 3_599_999;
+    tick();
+    expect(measureRetainedWalBytes).toHaveBeenCalledOnce();
+    now = 30_000 + 3_600_000;
+    tick();
+    expect(measureRetainedWalBytes).toHaveBeenCalledTimes(2);
+    coordinator.stop();
+  });
+
   it('measures under continuous traffic, pauses admission, and waits for active work to drain', () => {
     const measureRetainedWalBytes = vi.fn(() => 101);
     const requestRestart = vi.fn(() => true);
