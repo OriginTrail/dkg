@@ -72,6 +72,17 @@ export interface VmRecoverySlotScope {
   readonly signal: AbortSignal;
   /** Attach selected targets before discovery and after preparation, including unowned fallback targets. */
   track(targets: readonly Target[]): void;
+  /**
+   * Prepare a target on behalf of this scope. Retirement and donation inside
+   * the preparation detach this scope's lease without cancelling it: a scope
+   * that fails its own evidence open must not abort its siblings' transport.
+   */
+  prepare(
+    target: Target,
+    params: VmRecoveryAdmissionParams,
+    now: number,
+    reservation?: VmRecoverySlotAdmissionReservation,
+  ): VmRecoveryPreparation;
   reserveAdmission(target: Target, now: number): VmRecoverySlotReservation;
   release(): void;
 }
@@ -245,8 +256,17 @@ export class VmRecoverySlotRegistry {
 
   /** Immediate and delayed admission use the same reserved-capacity transition. */
   admit(target: Target, params: VmRecoveryAdmissionParams, now: number): VmRecoverySlotAdmission {
+    return this.admitWithin(target, params, now);
+  }
+
+  private admitWithin(
+    target: Target,
+    params: VmRecoveryAdmissionParams,
+    now: number,
+    exempt?: VmRecoverySlotLease,
+  ): VmRecoverySlotAdmission {
     if (params.candidatePeerIds.length === 0) return { kind: 'deferred' };
-    const admission = this.reserveAdmission(target, now);
+    const admission = this.reserveAdmission(target, now, exempt);
     return admission.kind === 'reserved' ? admission.reservation.commit(params) : admission;
   }
 
@@ -320,6 +340,16 @@ export class VmRecoverySlotRegistry {
     now: number,
     reservation?: VmRecoverySlotAdmissionReservation,
   ): VmRecoveryPreparation {
+    return this.prepareWithin(target, params, now, reservation);
+  }
+
+  private prepareWithin(
+    target: Target,
+    params: VmRecoveryAdmissionParams,
+    now: number,
+    reservation?: VmRecoverySlotAdmissionReservation,
+    exempt?: VmRecoverySlotLease,
+  ): VmRecoveryPreparation {
     this.observeTarget(target);
     const key = vmRecoverySlotKey(target);
     const observed = this.slots.get(key);
@@ -333,7 +363,7 @@ export class VmRecoverySlotRegistry {
     if (record && hasUnconfirmedAbsence(record, params.curatorRosterConfirmed)) {
       // Absence gathered while curator discovery was unavailable must not
       // suppress the next lookup: that lookup may reveal the only holder.
-      this.invalidate(target);
+      this.invalidateWithin(target, exempt);
       if (this.slots.has(key)) {
         // Abort callbacks may already have installed a new owner, including
         // one with the same fingerprint. Do not re-observe or adopt it here.
@@ -347,7 +377,9 @@ export class VmRecoverySlotRegistry {
         reservation?.release();
         return { kind: 'evidence-free' };
       }
-      const admission = reservation ? reservation.commit(params) : this.admit(target, params, now);
+      const admission = reservation
+        ? reservation.commit(params)
+        : this.admitWithin(target, params, now, exempt);
       // Preserve the pressure bound at cap: an unowned target cannot retain
       // exponential retry state, so running elevated exact transport here
       // would replay it every sweep. Defer until an expired/resolved slot is
@@ -359,7 +391,7 @@ export class VmRecoverySlotRegistry {
         this.touch(target, record.handle);
         return { kind: 'backoff', slot: captureRotation(record) };
       case 'expired':
-        return this.retireForPreparation(target);
+        return this.retireForPreparation(target, exempt);
       case 'collecting':
         this.touch(target, record.handle);
         return { kind: 'owned', slot: captureRotation(record) };
@@ -367,8 +399,8 @@ export class VmRecoverySlotRegistry {
   }
 
   /** Retire only this preparation's owner; never adopt a replacement created by an abort callback. */
-  private retireForPreparation(target: Target): VmRecoveryPreparation {
-    this.invalidate(target);
+  private retireForPreparation(target: Target, exempt?: VmRecoverySlotLease): VmRecoveryPreparation {
+    this.invalidateWithin(target, exempt);
     return { kind: this.slots.has(vmRecoverySlotKey(target)) ? 'invalidated' : 'evidence-free' };
   }
 
@@ -473,7 +505,7 @@ export class VmRecoverySlotRegistry {
       if (original) {
         // A donor remains untouched until its requester's admission commits.
         if (this.isReservedDonor(target, original.handle)) return { kind: 'owned', slot: original };
-        const prepared = this.prepare(target, {
+        const prepared = scope.prepare(target, {
           candidatePeerIds: options.observedCandidatePeerIds,
           curatorRosterConfirmed: original.snapshot.curatorRosterConfirmed,
           collectionDeadlineAt: options.collectionDeadlineAt,
@@ -545,16 +577,16 @@ export class VmRecoverySlotRegistry {
             case 'invalidated': result = admission; break;
             case 'reserved':
               if (stale) { admission.reservation.release(); result = { kind: 'invalidated' }; }
-              else result = this.prepare(target, params, options.now, admission.reservation);
+              else result = scope.prepare(target, params, options.now, admission.reservation);
               break;
             case 'owned':
             case 'backoff':
               result = stale || !this.isCurrent(target, admission.slot.handle)
                 ? { kind: 'invalidated' }
-                : this.prepare(target, params, options.now);
+                : scope.prepare(target, params, options.now);
               break;
             case 'deferred':
-              result = stale ? { kind: 'invalidated' } : this.prepare(target, params, options.now);
+              result = stale ? { kind: 'invalidated' } : scope.prepare(target, params, options.now);
               break;
           }
           return { index, target, prepared: result };
@@ -642,6 +674,8 @@ export class VmRecoverySlotRegistry {
           lease.attach(slot.generation ??= new VmRecoverySlotGeneration(key));
         }
       },
+      prepare: (target, params, now, reservation) =>
+        this.prepareWithin(target, params, now, reservation, lease),
       reserveAdmission: (target, now) => {
         if (released || lease.signal.aborted) return { kind: 'deferred' };
         const result = this.reserveAdmission(target, now, lease);
@@ -687,9 +721,13 @@ export class VmRecoverySlotRegistry {
   }
 
   invalidate(target: SlotLocator): void {
+    this.invalidateWithin(target);
+  }
+
+  private invalidateWithin(target: SlotLocator, exempt?: VmRecoverySlotLease): void {
     const key = vmRecoverySlotKey(target);
     const slot = this.slots.get(key);
-    if (slot) this.invalidateSlot(key, slot);
+    if (slot) this.invalidateSlot(key, slot, exempt);
   }
 
   private invalidateSlot(key: string, slot: SlotState, exempt?: VmRecoverySlotLease): void {

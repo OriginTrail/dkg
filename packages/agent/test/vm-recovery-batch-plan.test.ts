@@ -266,8 +266,55 @@ describe('VM recovery batch transaction', () => {
     expect(committed.eligible).toEqual([{ index: 0, target: selected, prepared: { kind: 'evidence-free' } }]);
     expect(registry.recordCount).toBe(0);
     expect(registry.peekSnapshot(selected)).toBeUndefined();
+    // Failing this batch's own evidence open is not an external replacement:
+    // the batch keeps its lease and the target stays runnable without evidence.
+    expect(transaction.signal.aborted).toBe(false);
     transaction.release();
   });
+
+  it.each(['deadline-crossed', 'empty-roster'] as const)(
+    'keeps sibling transport when commit retires one target: %s', reason => {
+      const registry = new VmRecoverySlotRegistry(2);
+      const retiring = target(0);
+      const sibling = target(1);
+      registry.prepare(retiring, {
+        candidatePeerIds: ['peer'], curatorRosterConfirmed: true,
+        collectionDeadlineAt: reason === 'deadline-crossed' ? 10 : 100,
+      }, 0);
+      const retained = ownedSlot(registry.prepare(sibling, {
+        candidatePeerIds: ['peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
+      }, 0));
+      const transaction = registry.beginBatch();
+      try {
+        const plan = transaction.reserveBatch({
+          targets: [retiring, sibling], admissionCursor: 0, observedCandidatePeerIds: ['peer'],
+          now: 5, collectionDeadlineAt: 105,
+        });
+        expect(plan.initiallyEligibleTargets).toEqual([retiring, sibling]);
+        const committed = transaction.commit({
+          // An empty roster retires both; a crossed deadline retires only the
+          // first, whose evidence expires while the second is still collecting.
+          candidatePeerIds: reason === 'empty-roster' ? [] : ['peer'],
+          curatorRosterConfirmed: true, now: 20, collectionDeadlineAt: 120,
+          isCurrent: () => !transaction.signal.aborted,
+        });
+        expect(transaction.signal.aborted).toBe(false);
+        expect(registry.peekSnapshot(retiring)).toBeUndefined();
+        if (reason === 'empty-roster') {
+          expect(committed.eligible).toEqual([
+            { index: 0, target: retiring, prepared: { kind: 'evidence-free' } },
+            { index: 1, target: sibling, prepared: { kind: 'evidence-free' } },
+          ]);
+          expect(registry.recordCount).toBe(0);
+        } else {
+          expect(committed.eligible.map(entry => entry.target)).toEqual([sibling, retiring]);
+          expect(ownedSlot(committed.eligible[0]!.prepared).handle).toBe(retained.handle);
+          expect(committed.eligible[1]!.prepared).toEqual({ kind: 'evidence-free' });
+          expect(registry.isCurrent(sibling, retained.handle)).toBe(true);
+          expect(registry.recordCount).toBe(1);
+        }
+      } finally { transaction.release(); }
+    });
 
   it('commits a waiting reservation after discovery and suppresses its donated owner', () => {
     const registry = new VmRecoverySlotRegistry(1);
