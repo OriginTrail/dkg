@@ -7536,6 +7536,33 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
+    // Codex review #2614 — and fail CLOSED on UNKNOWN curation. The probe above
+    // answers from in-memory state (`onChainAccessPolicyCache`,
+    // `beaconCuratorByWireId`) plus the local `_meta`. On a host-only core
+    // right after a restart all three are cold, so a genuinely curated CG whose
+    // marker was restored from disk reads NOT curated and would be wired with
+    // `curated=false` — which makes the dispatch closure append its ciphertext,
+    // exactly the custody WS-A retires. A local `false` is therefore not enough
+    // to authorize the hatch for a CG that carries chain provenance: demand the
+    // chain-authoritative public/open-publish verdict instead, and refuse when
+    // it is unavailable. Scoped to rows WITH `onChainHash`/`onChainId` so the
+    // Phase A hatch stays usable for a CG this core has no chain record for.
+    if (this.swmHostModeStripCiphertext() && !curated) {
+      const sub = this.subscribedContextGraphs.get(contextGraphId)
+        ?? this.subscribedContextGraphs.get(hostKey);
+      if (
+        (sub?.onChainHash || sub?.onChainId)
+        && !await this.isConfirmedPublicForHostMode(contextGraphId)
+      ) {
+        this.log.info(
+          createOperationContext('system'),
+          `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip is ON ` +
+          `(OT-RFC-49 WS-A — the operator override is closed for curated CGs; cores custody zero private SWM ciphertext) ` +
+          `— curation could not be positively cleared for a CG with an on-chain binding`,
+        );
+        return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+      }
+    }
     this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL, curated);
     await this.awaitHostModePersistence(contextGraphId);
     // Codex PR #610 R1 comment 5: a core that only knows the CG by

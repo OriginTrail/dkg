@@ -632,6 +632,54 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(wired).toEqual([]);
   });
 
+  it('strip ON CLOSES the operator hatch for a cold-restored chain binding it cannot clear', async () => {
+    // Codex review #2614 — the curation probe answers from IN-MEMORY state
+    // (`onChainAccessPolicyCache`, `beaconCuratorByWireId`) plus the local
+    // `_meta`. Right after a restart on a host-only core all three are cold, so
+    // a genuinely curated CG restored from its persisted marker reads NOT
+    // curated. A local `false` must not authorize custody for a CG that carries
+    // chain provenance: the chain-authoritative verdict decides, and an
+    // unavailable/negative answer refuses.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-cold-restored-curated';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(cgId)).toLowerCase();
+    // Exactly the state `restorePersistedHostModeBinding` materialises from a
+    // hash-keyed marker: an `onChainHash` + `onChainId` row, EMPTY policy cache,
+    // no beacon, no local `_meta`.
+    expect(g.stageOnChainContextGraphBindingFromNameHash(wireId, '7')).toBe(wireId);
+    expect(g.onChainAccessPolicyCache.size).toBe(0);
+    expect(g.beaconCuratorByWireId.size).toBe(0);
+    g.isPrivateContextGraph = async () => false;         // host-only core: no _meta
+    g.isConfirmedPublicForHostMode = async () => false;  // chain cannot clear it
+    expect(await (g as any).isCuratedForHostMode(wireId)).toBe(false);
+    installGossipStub(g);
+
+    const result = await g.enableSwmHostModeFor(wireId);
+
+    expect(result).toEqual({ subscribed: false, alreadySubscribed: false, hostingEnabled: true });
+    expect(g.swmHostModeHandlers.size).toBe(0);
+    expect(g.swmHostModeSubscribed.size).toBe(0);
+  });
+
+  it('strip ON still admits a cold-restored binding the chain confirms PUBLIC', async () => {
+    // The scoping control for the refusal above: chain provenance alone does
+    // not close the hatch, an uncleared verdict does.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-cold-restored-public';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(cgId)).toLowerCase();
+    expect(g.stageOnChainContextGraphBindingFromNameHash(wireId, '8')).toBe(wireId);
+    g.isPrivateContextGraph = async () => false;
+    g.isConfirmedPublicForHostMode = async () => true;
+    installGossipStub(g);
+
+    const result = await g.enableSwmHostModeFor(wireId);
+
+    expect(result.subscribed).toBe(true);
+    expect(g.swmHostModeCurated.get(wireId)).toBe(false);
+  });
+
   it('strip ON does NOT affect the operator override for a PUBLIC/uncurated CG', async () => {
     const core = await makeCore(true);
     const g = core as unknown as StripInternals;
