@@ -1673,7 +1673,16 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return false;
     try {
-      return await store.transition(entry.key, entry.generation, state, reason);
+      const changed = await store.transition(entry.key, entry.generation, state, reason);
+      // A refused SETTLED write means the row lost its CAS or never persisted
+      // verified evidence; the caller discards the result, so say so here.
+      if (!changed && state === 'SETTLED') {
+        this.log.warn(
+          `Finalization recovery inbox refused to settle ${entry.ual}: `
+            + 'generation lost or verified evidence missing',
+        );
+      }
+      return changed;
     } catch (error) {
       this.log.warn(
         `Finalization recovery transition to ${state} failed for ${entry.ual}: `
