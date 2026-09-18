@@ -964,7 +964,8 @@ export class TripleStoreAsyncLiftPublisher
     // rather than the first job outright. Skipping is not starvation: the lane that IS authorized
     // claims the skipped job on its own pass, and the ordering within each lane's eligible subset
     // is still acceptedAt-then-jobId. A job NO wallet can sign is deliberately NOT skipped — it is
-    // returned so the claim can record its terminal failure (see assertClaimablePublishAuthority).
+    // returned so the claim can record its terminal failure (see
+    // {@link unpublishablePublishAuthorityError}).
     for (const job of accepted) {
       const verdict = await this.publishAuthorityVerdict(job.request, walletId);
       if (verdict.kind === 'eligible' || verdict.kind === 'unpublishable') return job;
