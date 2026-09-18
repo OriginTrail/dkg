@@ -30,9 +30,16 @@ function harness(managed = true) {
     onClientTimeout: recover,
     onActivityChange: (activeOperations: number) => activity.push(activeOperations),
   };
+  // The generic store is handed the full legacy capability shape on purpose:
+  // the 'external' case only proves the "generic stores cannot gain managed
+  // authority" boundary if the adapter had something to ignore.
   const store = managed
     ? createManagedOxigraphSparqlStoreV1(options, hooks)
-    : new SparqlHttpStore(options);
+    : new SparqlHttpStore({
+      ...options,
+      onClientTimeout: recover,
+      managedRecovery: { readState: hooks.getRecoveryState, recover },
+    });
   async function abandon(sparql = 'SELECT ?s WHERE { ?s ?p ?o }') {
     started = new Promise<void>((resolve) => { dispatched = resolve; });
     const caller = new AbortController();
