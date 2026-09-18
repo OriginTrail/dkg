@@ -429,6 +429,69 @@ describe('RFC-64 author catalog transport v1', () => {
     });
   });
 
+  it('refuses to answer completed when every stored head was withheld', async () => {
+    // An empty manifest answered as `completed` is indistinguishable from a peer that
+    // holds nothing at all: on the requester the parity predicate is vacuously true over
+    // an empty promise set, `requested` counts as positive evidence, and the Context Graph
+    // settles as corroborated with `unverified` cleared. A provider that withheld every
+    // head it had must stay distinguishable from one that had none.
+    const handlers = new Map<
+      string,
+      Parameters<ProtocolRouter['register']>[1]
+    >();
+    const providerRouter = {
+      register: (protocolId: string, handler: Parameters<ProtocolRouter['register']>[1]) => {
+        handlers.set(protocolId, handler);
+      },
+      unregister: (protocolId: string) => { handlers.delete(protocolId); },
+      send: vi.fn(),
+    } as unknown as ProtocolRouter;
+    const requesterSend = vi.fn(async (
+      _peerId: string,
+      protocolId: string,
+      data: Uint8Array,
+    ) => {
+      const handler = handlers.get(protocolId);
+      if (handler === undefined) throw new Error(`missing handler for ${protocolId}`);
+      return handler(data, {
+        toString: () => 'requester-peer',
+        toBytes: () => new Uint8Array(),
+      });
+    });
+    const requesterRouter = {
+      register: () => {},
+      unregister: () => {},
+      send: requesterSend,
+    } as unknown as ProtocolRouter;
+    const provider = new Rfc64PublicCatalogTransportV1(providerRouter, {
+      controlObjects: { getVerifiedObject: async () => null },
+      authorizeCatalogOperation: OPEN_POLICY,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      onCatalogHeadAvailable: async () => {},
+      onCatalogHeadReplayRequested: () => Object.freeze({
+        status: 'admitted' as const,
+        completion: Promise.resolve(Object.freeze({
+          announced: 0,
+          failed: 0,
+          withheld: 1,
+          manifest: Object.freeze([]),
+        })),
+      }),
+    });
+    const requester = new Rfc64PublicCatalogTransportV1(requesterRouter, {
+      controlObjects: { getVerifiedObject: async () => null },
+      authorizeCatalogOperation: OPEN_POLICY,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      onCatalogHeadAvailable: async () => {},
+    });
+    transports.push(provider, requester);
+    provider.start();
+    requester.start();
+
+    await expect(requester.requestCatalogHeadReplay('provider-peer', replayRequest()))
+      .rejects.toMatchObject({ code: 'catalog-transport-wire' });
+  });
+
   it('retries only overload and reports a typed error at the persistent bound', async () => {
     const send = vi.fn(async () => Uint8Array.of(2));
     const wait = vi.fn(async () => {});

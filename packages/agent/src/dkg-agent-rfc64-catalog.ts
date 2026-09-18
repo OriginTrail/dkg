@@ -565,6 +565,14 @@ interface Rfc64CatalogReplaySnapshotRuntimeOwnerV1 {
 interface Rfc64CatalogReplayResultV1 {
   readonly announced: number;
   readonly failed: number;
+  /**
+   * Stored heads this pass refused to serve because they belong to a superseded
+   * authority generation. Carried so the transport can tell "this provider holds
+   * nothing for you" from "everything it holds is superseded": an empty manifest
+   * answered as `completed` settles the requester's Context Graph as corroborated
+   * and verified, which is a clean bill of health for a peer that served nothing.
+   */
+  readonly withheld: number;
   readonly manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
 }
 
@@ -4145,7 +4153,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (requestedScope !== undefined) {
         throw new Error('RFC-64 scoped catalog replay service is unavailable');
       }
-      return Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) });
+      return Object.freeze({
+        announced: 0,
+        failed: 0,
+        withheld: 0,
+        manifest: Object.freeze([]),
+      });
     }
     let announced = 0;
     let failed = 0;
@@ -4302,6 +4315,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return Object.freeze({
           announced,
           failed,
+          withheld: superseded.length,
           manifest: Object.freeze(completedManifest),
         });
       },
