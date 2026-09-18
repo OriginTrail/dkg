@@ -47,10 +47,14 @@ export interface Rfc64AuthorityReadRunOptionsV1 {
    * exhausted pool. It is not a general availability switch: a rare,
    * caller-initiated read whose result cannot be reconstructed later must not
    * be silently downgraded for the length of one backoff window. Such a read
-   * still queues behind the same serializer, so at most one of them reaches
-   * the pool at a time; it still trips the circuit on exhaustion, and its
-   * success still counts as recovery evidence. In effect it behaves as an
-   * additional half-open probe rather than as a bypass.
+   * still trips the circuit on exhaustion, and its success still counts as
+   * recovery evidence. In effect it behaves as an additional half-open probe
+   * rather than as a bypass.
+   *
+   * On `run` it also queues behind the same serializer, so at most one of them
+   * reaches the pool at a time. `runUnqueued` accepts this option too and
+   * provides no such bound: several of them can reach an exhausted pool at
+   * once. Only pass it there for a read that is genuinely rare.
    */
   readonly admitWhileOpen?: boolean;
 }
@@ -104,13 +108,23 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 /**
  * Node-local governor shared by every registered RFC-64 authority read.
  *
- * Work is serialized even while the circuit is closed. This covers authority
- * bootstrap calls that do not pass through the periodic loop's permit pool and
- * guarantees that, after one full-pool exhaustion, queued graphs observe the
- * open circuit instead of stampeding the same endpoints. Past the retry
- * deadline the serializer admits reads again one at a time; a success that
- * reached the pool closes the circuit and an exhaustion reopens it with the
- * next backoff step.
+ * Reads submitted through `run` are serialized even while the circuit is
+ * closed. This covers authority bootstrap calls that do not pass through the
+ * periodic loop's permit pool and guarantees that, after one full-pool
+ * exhaustion, queued graphs observe the open circuit instead of stampeding the
+ * same endpoints. Past the retry deadline the serializer admits reads again one
+ * at a time; a success that reached the pool closes the circuit and an
+ * exhaustion reopens it with the next backoff step.
+ *
+ * Serialization is a property of `run` alone. `runUnqueued` is for a
+ * latency-bounded foreground read that must not spend its budget behind a bulk
+ * pass; it keeps everything else the governor provides — the admission check
+ * that refuses while the circuit is open, the trip on provider exhaustion, the
+ * evidence-gated close, and retirement through `whenIdle`/`close` — but it can
+ * run alongside `run` and alongside itself. Because reads on the two lanes
+ * overlap, circuit transitions are keyed to a trip generation: a result cannot
+ * close a trip that happened after it was admitted, and the failures of one
+ * outage round coalesce into a single backoff step.
  *
  * Recovery needs evidence, not merely a fulfilled callback. A read that was
  * answered from local or cached state says nothing about the pool it never
@@ -129,7 +143,15 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   readonly #random: () => number;
   #consecutiveExhaustions = 0;
   #retryAtMs = 0;
+  /**
+   * Bumped by every trip. A read carries the generation it was admitted under,
+   * so a result that predates a trip cannot be mistaken for evidence about the
+   * pool state that trip established.
+   */
+  #tripGeneration = 0;
   #tail: Promise<void> = Promise.resolve();
+  /** In-flight reads admitted without the serializer, retired by `whenIdle`. */
+  readonly #unqueued = new Set<Promise<unknown>>();
   #lifecycleAbort = new AbortController();
 
   constructor(options: Rfc64AuthorityReadCoordinatorOptionsV1 = {}) {
@@ -182,18 +204,14 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           );
         }
 
+        const admittedGeneration = this.#tripGeneration;
         let rpcAttempted = false;
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
           markRpcAttempt: () => { rpcAttempted = true; },
         });
         try {
           const result = await operation(runSignal, evidence);
-          // A local/cache-only answer is useful to its caller, but cannot
-          // prove that a previously exhausted provider pool has recovered.
-          if (this.#consecutiveExhaustions === 0 || rpcAttempted) {
-            this.#consecutiveExhaustions = 0;
-            this.#retryAtMs = 0;
-          }
+          this.#recordSuccess(rpcAttempted, admittedGeneration);
           return result;
         } catch (error) {
           if (isRpcEndpointsExhaustedError(error)) this.#open(error);
@@ -224,15 +242,78 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     }
   }
 
-  whenIdle(): Promise<void> {
-    return this.#tail;
+  /**
+   * Circuit state for one caller-driven read, without queue admission.
+   *
+   * FIFO admission is the anti-stampede mechanism for bulk per-graph passes:
+   * it is what stops a hundred graphs from each walking an exhausted pool. A
+   * latency-bounded foreground read that fails closed must not inherit it —
+   * queued behind a cold whole-contract scan it would spend its entire budget
+   * waiting and deny a policy decision on a node whose pool is healthy. Such a
+   * read still refuses while the circuit is open, still trips the circuit on
+   * provider exhaustion, and still closes it on proven recovery; it only skips
+   * the serializer.
+   *
+   * Retirement still covers it: `whenIdle` and `close` wait for these reads
+   * too, so shutdown cannot leave one in flight.
+   */
+  async runUnqueued<T>(
+    signal: AbortSignal | undefined,
+    operation: (
+      signal: AbortSignal,
+      evidence: Rfc64AuthorityRpcProbeEvidenceV1,
+    ) => Promise<T>,
+    options: Rfc64AuthorityReadRunOptionsV1 = {},
+  ): Promise<T> {
+    const runSignal = signal === undefined
+      ? this.#lifecycleAbort.signal
+      : AbortSignal.any([signal, this.#lifecycleAbort.signal]);
+    throwIfAborted(runSignal);
+    const now = this.#now();
+    if (options.admitWhileOpen !== true && now < this.#retryAtMs) {
+      throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
+        this.#retryAtMs,
+        this.#retryAtMs - now,
+      );
+    }
+
+    const admittedGeneration = this.#tripGeneration;
+    let rpcAttempted = false;
+    const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
+      markRpcAttempt: () => { rpcAttempted = true; },
+    });
+    const active = (async () => {
+      try {
+        const result = await operation(runSignal, evidence);
+        this.#recordSuccess(rpcAttempted, admittedGeneration);
+        return result;
+      } catch (error) {
+        if (isRpcEndpointsExhaustedError(error)) this.#open(error);
+        throw error;
+      }
+    })();
+    this.#unqueued.add(active);
+    const untrack = (): void => { this.#unqueued.delete(active); };
+    void active.then(untrack, untrack);
+    return active;
+  }
+
+  async whenIdle(): Promise<void> {
+    // Unqueued reads retire independently of the serializer, so quiescence is
+    // only reached when neither lane admitted new work while this waited.
+    for (;;) {
+      const tail = this.#tail;
+      const unqueued = [...this.#unqueued];
+      await Promise.allSettled([tail, ...unqueued]);
+      if (this.#tail === tail && this.#unqueued.size === 0) return;
+    }
   }
 
   close(): Promise<void> {
     if (!this.#lifecycleAbort.signal.aborted) {
       this.#lifecycleAbort.abort(new Error('RFC-64 authority read coordinator is closing'));
     }
-    return this.#tail;
+    return this.whenIdle();
   }
 
   reopen(): void {
@@ -253,7 +334,50 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     });
   }
 
+  /**
+   * Clear an outstanding exhaustion once a read proves the pool answered.
+   *
+   * A local or cached answer cannot prove that an exhausted pool came back, so
+   * it never clears. Neither can a read that was admitted before the trip it
+   * would be clearing: `runUnqueued` overlaps `run`, so a read that reached the
+   * pool while it was still healthy can settle after a later read exhausted it,
+   * and honoring that as evidence would discard a live cooldown and restart the
+   * backoff ladder. Only evidence gathered under the current generation counts.
+   */
+  #recordSuccess(rpcAttempted: boolean, admittedGeneration: number): void {
+    if (
+      this.#consecutiveExhaustions !== 0
+      && !(rpcAttempted && this.#tripGeneration === admittedGeneration)
+    ) return;
+    this.#consecutiveExhaustions = 0;
+    this.#retryAtMs = 0;
+  }
+
   #open(error: RpcEndpointsExhaustedErrorLike): void {
+    // One outage round costs one backoff step. Under `run` the serializer
+    // enforced that on its own: after the first trip the next admitted read was
+    // refused before it reached a provider. `runUnqueued` admits at call time,
+    // so every read already in flight when the pool failed lands here with the
+    // same outage. Escalation is the job of the read that fails after the
+    // deadline has passed, not of that read's concurrent siblings.
+    const providerDelay = typeof error.retryAfterMs === 'number'
+      && Number.isFinite(error.retryAfterMs)
+      && error.retryAfterMs >= 0
+      ? Math.round(error.retryAfterMs)
+      : 0;
+    if (this.#now() < this.#retryAtMs) {
+      // Coalescing suppresses the backoff ladder, not the provider's own
+      // backpressure: a sibling that was told to wait longer still moves the
+      // shared deadline out, without advancing the generation or the counter.
+      if (providerDelay > 0) {
+        this.#retryAtMs = Math.max(
+          this.#retryAtMs,
+          this.#now() + Math.min(this.#maxBackoffMs, providerDelay),
+        );
+      }
+      return;
+    }
+    this.#tripGeneration += 1;
     this.#consecutiveExhaustions += 1;
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);
     const exponential = Math.min(
@@ -269,11 +393,6 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       : 0.5;
     const jitterMultiplier = 1 + ((random * 2) - 1) * this.#jitterRatio;
     const jittered = Math.round(exponential * jitterMultiplier);
-    const providerDelay = typeof error.retryAfterMs === 'number'
-      && Number.isFinite(error.retryAfterMs)
-      && error.retryAfterMs >= 0
-      ? Math.round(error.retryAfterMs)
-      : 0;
     const delay = Math.min(
       this.#maxBackoffMs,
       Math.max(1, jittered, providerDelay),
