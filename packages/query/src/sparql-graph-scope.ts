@@ -5,7 +5,7 @@ import {
   type SparqlGraphTarget as PreparedSparqlGraphTarget,
   type SparqlLexicalToken,
   type ValidPreparedSparql,
-} from '@origintrail-official/dkg-rdf-utils/sparql';
+} from '@origintrail-official/dkg-core/sparql-lexer';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   sparqlRewriteReady,

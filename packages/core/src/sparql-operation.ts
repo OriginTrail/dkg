@@ -1,10 +1,10 @@
 import { SparqlAnalysisCache } from './sparql-analysis-cache.js';
 import {
   prepareSparql,
-  prepareSparqlQuery,
   type PreparedSparql,
   type PreparedSparqlQuery,
-} from '@origintrail-official/dkg-rdf-utils/sparql';
+  prepareSparqlQuery,
+} from './sparql-lexer.js';
 
 const SPARQL_READ_ONLY_OPERATIONS = ['SELECT', 'CONSTRUCT', 'ASK', 'DESCRIBE'] as const;
 const SPARQL_MUTATING_KEYWORDS = [
@@ -47,10 +47,6 @@ const sparqlAnalysisCache = new SparqlAnalysisCache<PreparedSparqlOperationAnaly
 const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
 const READ_ONLY_OPERATION_SET = new Set<string>(SPARQL_READ_ONLY_OPERATIONS);
-
-export function stripSparqlLiteralsAndComments(sparql: string): string {
-  return prepareSparql(sparql).masked;
-}
 
 function detectSparqlOperationForm(query: PreparedSparqlQuery): SparqlDetectedOperation {
   const { operation } = query;
