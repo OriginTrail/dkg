@@ -48,12 +48,15 @@ import {
   INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
   INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
   INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
+  INVENTORY_V1_MIGRATE_V4_TO_V5_SQL,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
   INVENTORY_V1_V2_USER_OBJECTS,
   INVENTORY_V1_V2_USER_VERSION,
   INVENTORY_V1_V3_USER_OBJECTS,
   INVENTORY_V1_V3_USER_VERSION,
+  INVENTORY_V1_V4_USER_OBJECTS,
+  INVENTORY_V1_V4_USER_VERSION,
   normalizeInventoryV1SchemaSql,
 } from './sql.js';
 import {
@@ -553,6 +556,20 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   >[0]): void {
     this.requireOpen();
     this.#candidate.deleteFinalizedPrivatePlacementRepair(repair);
+  }
+
+  readUnregisteredAuthoritySeedV1(
+    ...input: Parameters<Rfc64InventoryV1CandidateApi['readUnregisteredAuthoritySeedV1']>
+  ) {
+    this.requireOpen();
+    return this.#candidate.readUnregisteredAuthoritySeedV1(...input);
+  }
+
+  putUnregisteredAuthoritySeedV1(record: Parameters<
+    Rfc64InventoryV1CandidateApi['putUnregisteredAuthoritySeedV1']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.putUnregisteredAuthoritySeedV1(record);
   }
 
   private requireOpen(): DatabaseSyncV1 {
@@ -1240,12 +1257,21 @@ const INVENTORY_SCHEMA_MIGRATIONS_V1: readonly InventorySchemaMigrationV1[] = Ob
   }),
   Object.freeze({
     fromVersion: INVENTORY_V1_V3_USER_VERSION,
-    toVersion: INVENTORY_V1_USER_VERSION,
+    toVersion: INVENTORY_V1_V4_USER_VERSION,
     fromLabel: 'v3',
     toLabel: 'v4',
     fromObjects: INVENTORY_V1_V3_USER_OBJECTS,
-    toObjects: INVENTORY_V1_USER_OBJECTS,
+    toObjects: INVENTORY_V1_V4_USER_OBJECTS,
     sql: INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
+  }),
+  Object.freeze({
+    fromVersion: INVENTORY_V1_V4_USER_VERSION,
+    toVersion: INVENTORY_V1_USER_VERSION,
+    fromLabel: 'v4',
+    toLabel: 'v5',
+    fromObjects: INVENTORY_V1_V4_USER_OBJECTS,
+    toObjects: INVENTORY_V1_USER_OBJECTS,
+    sql: INVENTORY_V1_MIGRATE_V4_TO_V5_SQL,
   }),
 ]);
 

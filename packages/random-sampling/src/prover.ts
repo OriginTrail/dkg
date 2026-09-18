@@ -129,6 +129,13 @@ const noopLog: ProverLogger = {
   error: () => undefined,
 };
 
+// A leaf-count/root mismatch is a deterministic local sync inconsistency, not
+// a transient RPC failure. Give the sync/reconciliation path a few ticks to
+// repair the KA before attempting another full extraction. The loop normally
+// runs every five seconds, so this caps repeated mismatch work to one extract
+// per roughly twenty seconds while keeping recovery bounded.
+const DATA_CORRUPTION_COOLDOWN_TICKS = 3;
+
 function lifecycleAbortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException(
     'Random Sampling prover handle stopped',
@@ -210,6 +217,7 @@ export class RandomSamplingProver {
   private readonly lifecycleController = new AbortController();
   private inflight: Promise<TickOutcome> | null = null;
   private readonly repairOperations = new Set<RandomSamplingRepairOperation>();
+  private readonly dataCorruptionCooldown = new Map<bigint, number>();
 
   /**
    * Proof material pinned for the active proof period. The prover already pins
@@ -368,6 +376,19 @@ export class RandomSamplingProver {
       expectedRoot,
       material,
     };
+  }
+
+  private markDataCorrupted(kaId: bigint): void {
+    this.dataCorruptionCooldown.set(kaId, DATA_CORRUPTION_COOLDOWN_TICKS);
+  }
+
+  /** Consume one retry suppression tick for a KA, returning its prior count. */
+  private consumeDataCorruptionCooldown(kaId: bigint): number {
+    const remaining = this.dataCorruptionCooldown.get(kaId);
+    if (remaining === undefined) return 0;
+    if (remaining <= 1) this.dataCorruptionCooldown.delete(kaId);
+    else this.dataCorruptionCooldown.set(kaId, remaining - 1);
+    return remaining;
   }
 
   private async extractPublicKnowledgeAssetWithRepair(input: {
@@ -609,6 +630,29 @@ export class RandomSamplingProver {
       return { kind: 'cg-not-found', kaId };
     }
 
+    const cooldownTicksRemaining = this.consumeDataCorruptionCooldown(kaId);
+    if (cooldownTicksRemaining > 0) {
+      this.log.warn('rs.tick.kc-not-synced', {
+        kaId: kaId.toString(),
+        cgId: cgId.toString(),
+        periodStart: periodKey.periodStartBlock.toString(),
+        err: 'DataCorruptionCooldown',
+        cooldownTicksRemaining,
+      });
+      await this.wal.append(
+        makeWalEntry(periodKey, 'failed', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          chunkId: chunkId.toString(),
+          error: {
+            code: 'DataCorruptionCooldown',
+            message: `retry suppressed for ${cooldownTicksRemaining} tick(s) after data-corrupted outcome`,
+          },
+        }),
+      );
+      return { kind: 'kc-not-synced', kaId, cgId };
+    }
+
     // OT-RFC-49 / WS-B Trap 1 — curation branch + commitment are PINNED on
     // the challenge at issuance. We MUST NOT re-read curation status via a
     // live `getContextGraphAccessPolicy` probe, nor the root/count via live
@@ -710,6 +754,7 @@ export class RandomSamplingProver {
               error: { code: 'KCRootEntitiesNotFoundError', message: err.message.slice(0, 200) },
             }),
           );
+          this.markDataCorrupted(kaId);
           return { kind: 'data-corrupted', kaId, cgId, reason: 'meta-graph-bug' };
         }
         throw err;
@@ -775,6 +820,7 @@ export class RandomSamplingProver {
             error: { code: (err as Error).name, message: (err as Error).message.slice(0, 200) },
           }),
         );
+        this.markDataCorrupted(kaId);
         return { kind: 'data-corrupted', kaId, cgId, reason };
       }
     }
@@ -834,6 +880,7 @@ export class RandomSamplingProver {
             error: { code: 'MerkleRootMismatch', message: err.message.slice(0, 200) },
           }),
         );
+        this.markDataCorrupted(kaId);
         return { kind: 'data-corrupted', kaId, cgId, reason: 'root-mismatch' };
       }
       throw err;

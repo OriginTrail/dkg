@@ -97,6 +97,7 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
+import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { resolveShutdownPolicy } from '../daemon/shutdown-policy.js';
 import {
   daemonShutdownCoordinator,
@@ -165,6 +166,10 @@ program
     [] as string[],
   )
   .action(async (opts: ActionOpts) => {
+    if (!assertNodeRuntimeSupported((message) => console.error(message))) {
+      process.exit(1);
+      return;
+    }
     if (!configExists()) {
       console.error('No config found. Run "dkg init" first.');
       process.exit(1);

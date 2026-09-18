@@ -113,6 +113,49 @@ export function classifyStoreUnavailable(
   };
 }
 
+/**
+ * Kept structural for the same package-boundary reason as
+ * CALLER_SPARQL_REJECTED in routes/query-error.ts: the agent emits this
+ * internal marker, while the daemon owns its public HTTP representation.
+ */
+export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE';
+
+export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return false;
+  try {
+    return Reflect.get(err, 'code') === CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE
+      && Reflect.get(err, 'retryable') === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Uniform retryable response for an unresolvable Context Graph read authority.
+ * Shared by every route that reaches `DKGAgent.query` with a scoped
+ * `contextGraphId`, so a chain/metadata outage is never reported as a 500 and
+ * the graph id, authority source, and internal reason stay out of the body.
+ */
+export function respondIfContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  err: unknown,
+): boolean {
+  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  jsonResponse(
+    res,
+    503,
+    {
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '3' },
+  );
+  return true;
+}
+
 export function respondIfStoreUnavailable(
   res: ServerResponse,
   err: unknown,
@@ -177,6 +220,11 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.
+  } else if (respondIfContextGraphReadAuthorityUnavailable(res, err)) {
+    // A scoped read whose authority source could not answer is retryable, not a
+    // server bug: any route that RE-THROWS gets the same uniform 503 the
+    // `/api/query` boundary returns instead of a 500 that also echoes the
+    // internal authority source/reason in its message.
   } else if (respondIfChainRpcTransportError(res, err)) {
     // Transient transport exhaustion (RPC_ENDPOINTS_EXHAUSTED /
     // RPC_RECEIPT_LOOKUP_FAILED → 503, TIMEOUT → 504) is retryable — a route

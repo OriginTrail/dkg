@@ -65,7 +65,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type EvmAddressV1, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type EvmAddressV1, type ContextGraphIdV1, type NetworkIdV1, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -92,9 +92,16 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
+import {
+  normalizeContextGraphDiscoveryScan,
+  legacyChainListScanOptions,
+  type DiscoverContextGraphsFromChainOptions,
+  type NormalizedContextGraphDiscoveryScan,
+} from './context-graph-discovery-options.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -438,6 +445,8 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import { Rfc64SeedFetchMethods } from './dkg-agent-rfc64-seed-fetch.js';
+import { Rfc64MetaBootstrapMethods } from './dkg-agent-rfc64-meta-bootstrap.js';
 import { Rfc64SwmCatalogProjectionMethods } from
   './dkg-agent-rfc64-swm-catalog-projection.js';
 import {
@@ -457,6 +466,7 @@ import {
   Rfc64SwmRecoveryRuntimeMethods,
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import { Rfc64SeedStoreMethods } from './dkg-agent-rfc64-seed-store.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
   './rfc64/catalog-authority-refresh-binding-v1.js';
@@ -581,25 +591,6 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   publishedUal?: string;
 }
 
-export type DiscoverContextGraphsFromChainOptions = {
-  signal?: AbortSignal;
-  throwOnChainScanFailure?: boolean;
-  pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'seedLiveTail' | 'repair';
-  minimumIntervalMs?: number;
-  incremental?: boolean;
-  seedIncrementalWatermark?: boolean;
-  resumeFromCursor?: boolean;
-};
-
-type NormalizedContextGraphDiscoveryScan =
-  | { mode: 'listAll' }
-  | { mode: 'incremental'; pageBudget?: number }
-  | { mode: 'seedFull' }
-  | { mode: 'seedFromCursor'; pageBudget?: number }
-  | { mode: 'seedLiveTail'; pageBudget?: number }
-  | { mode: 'repair'; pageBudget: number; minimumIntervalMs?: number };
-
 type ContextGraphRegistryRepairProgress = {
   readonly pageBudget: number;
   readonly startedAt: number;
@@ -610,82 +601,6 @@ type ContextGraphRegistryRepairProgress = {
   targetBlock?: number;
   completed: boolean;
 };
-
-function normalizeContextGraphDiscoveryScan(
-  options: DiscoverContextGraphsFromChainOptions,
-): NormalizedContextGraphDiscoveryScan {
-  if (options.mode !== undefined) {
-    if (options.mode === 'incremental') {
-      return {
-        mode: 'incremental',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'seedFull') return { mode: 'seedFull' };
-    if (options.mode === 'seedFromCursor') {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'seedLiveTail') {
-      return {
-        mode: 'seedLiveTail',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'repair') {
-      return {
-        mode: 'repair',
-        pageBudget: options.pageBudget ?? 1,
-        ...(options.minimumIntervalMs !== undefined
-          ? { minimumIntervalMs: options.minimumIntervalMs }
-          : {}),
-      };
-    }
-    if (options.mode === 'listAll') return { mode: 'listAll' };
-    throw new Error(`Unsupported context graph chain discovery scan mode: ${String(options.mode)}`);
-  }
-
-  if (options.incremental === true) {
-    return {
-      mode: 'incremental',
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-
-  if (options.seedIncrementalWatermark === true) {
-    if (options.resumeFromCursor === true) {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    return { mode: 'seedFull' };
-  }
-
-  return { mode: 'listAll' };
-}
-
-function legacyChainListScanOptions(
-  options: DiscoverContextGraphsFromChainOptions,
-): ContextGraphChainScanOptions | undefined {
-  if (options.mode !== undefined) return undefined;
-  if (options.incremental === true) {
-    return {
-      incremental: true,
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  if (options.seedIncrementalWatermark === true) {
-    return {
-      seedIncrementalWatermark: true,
-      ...(options.resumeFromCursor !== undefined ? { resumeFromCursor: options.resumeFromCursor } : {}),
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  return undefined;
-}
 
 function assertLegacyStorageAckAlias(
   value: unknown,
@@ -1000,6 +915,20 @@ export class DKGAgent extends DKGAgentBase {
           this.config.rfc64CatalogBootstrap,
           this.config.rfc64PublicCatalogBootstrap,
         ),
+        resolveDynamicallyAcceptedPolicy: (contextGraphId) => {
+          const service = this.rfc64PublicCatalogServiceV1;
+          const networkId = (
+            this.config.rfc64CatalogDeploymentProfile?.networkId
+            ?? this.config.networkIdentity?.chainId
+          ) as NetworkIdV1 | undefined;
+          if (service === undefined || networkId === undefined || networkId === 'none') {
+            return null;
+          }
+          return service.acceptedPolicySnapshot(
+            networkId,
+            contextGraphId as ContextGraphIdV1,
+          )?.policy ?? null;
+        },
       },
       admission: {
         invalidateContextGraph: (contextGraphId) => (
@@ -1123,7 +1052,13 @@ export class DKGAgent extends DKGAgentBase {
           // authority reads inherit foreground priority and cancellation.
           withRpcRequestContext(
             { requestClass: 'background', signal },
-            () => this.rfc64AuthorityReadCoordinatorV1.run(signal, read),
+            () => this.rfc64AuthorityReadCoordinatorV1.run(
+              signal,
+              (readSignal, evidence) => {
+                evidence.markRpcAttempt();
+                return read(readSignal);
+              },
+            ),
           )
         ),
       },
@@ -2203,8 +2138,21 @@ export class DKGAgent extends DKGAgentBase {
     minimumIntervalMs?: number;
     signal?: AbortSignal;
   }): Promise<number> {
-    const progress: ContextGraphRegistryRepairProgress = {
+    return this.repairContextGraphRegistryNormalized({
+      mode: 'repair',
       pageBudget: options.pageBudget,
+      ...(options.minimumIntervalMs !== undefined
+        ? { minimumIntervalMs: options.minimumIntervalMs }
+        : {}),
+    }, options.signal);
+  }
+
+  private async repairContextGraphRegistryNormalized(
+    scanMode: Extract<NormalizedContextGraphDiscoveryScan, { mode: 'repair' }>,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const progress: ContextGraphRegistryRepairProgress = {
+      pageBudget: scanMode.pageBudget,
       startedAt: Date.now(),
       observedPages: 0,
       acknowledgedPages: 0,
@@ -2213,10 +2161,9 @@ export class DKGAgent extends DKGAgentBase {
     let outcome: 'succeeded' | 'failed' = 'failed';
     try {
       const discovered = await this.discoverContextGraphsFromChainInternal({
-        mode: 'repair',
         throwOnChainScanFailure: true,
-        ...options,
-      }, progress);
+        ...(signal ? { signal } : {}),
+      }, scanMode, progress);
       outcome = 'succeeded';
       return discovered;
     } finally {
@@ -2248,31 +2195,29 @@ export class DKGAgent extends DKGAgentBase {
   async discoverContextGraphsFromChain(
     options: DiscoverContextGraphsFromChainOptions = {},
   ): Promise<number> {
-    if (options.mode === 'repair') {
-      return this.repairContextGraphRegistry({
-        pageBudget: options.pageBudget ?? 1,
-        ...(options.minimumIntervalMs !== undefined
-          ? { minimumIntervalMs: options.minimumIntervalMs }
-          : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+    const scanMode = normalizeContextGraphDiscoveryScan(options);
+    if (scanMode.mode === 'repair') {
+      return this.repairContextGraphRegistryNormalized(scanMode, options.signal);
     }
-    return this.discoverContextGraphsFromChainInternal(options);
+    return this.discoverContextGraphsFromChainInternal(options, scanMode);
   }
 
   /** Shared page application primitive; repair owns its orchestration above. */
   private async discoverContextGraphsFromChainInternal(
-    options: DiscoverContextGraphsFromChainOptions,
+    options: Pick<
+      DiscoverContextGraphsFromChainOptions,
+      'signal' | 'throwOnChainScanFailure'
+    >,
+    scanMode: NormalizedContextGraphDiscoveryScan,
     repairProgress?: ContextGraphRegistryRepairProgress,
   ): Promise<number> {
     options.signal?.throwIfAborted();
     const ctx = createOperationContext('system');
-    const scanMode = normalizeContextGraphDiscoveryScan(options);
     const scanFailureLane = repairProgress ? 'repair' : 'live';
     const scanFailureLabel = scanFailureLane === 'repair'
       ? 'Chain context graph repair scan'
       : 'Chain context graph scan';
-    const legacyListOptions = legacyChainListScanOptions(options);
+    const legacyListOptions = legacyChainListScanOptions(scanMode);
     const useLegacyListFallback =
       scanMode.mode !== 'listAll' &&
       legacyListOptions !== undefined &&
@@ -2521,6 +2466,8 @@ export class DKGAgent extends DKGAgentBase {
     this.randomSamplingRuntime?.cancel();
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
+    const rehydrationPromotionDrain =
+      this.contextGraphSubscriptionRehydrationPromotionRuntime?.close() ?? null;
     // Fence every detached RFC-64 responsibility, observer, and recovery RPC
     // before sampling the physical drain. This owner signal reaches governor
     // admission and active HTTP through the shared request context.
@@ -2605,6 +2552,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
+    if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
@@ -3464,13 +3412,24 @@ export class DKGAgent extends DKGAgentBase {
       return { author, allocateKaNumber };
     };
     return {
-      async create(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<string> {
+      async create(
+        contextGraphId: string,
+        name: string,
+        opts?: {
+          subGraphName?: string;
+          agentAddress?: string;
+          onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
+        },
+      ): Promise<string> {
         // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
         // KA's identity from the first write. assertionCreate only allocates when the
         // draft has no preserved kaId (the re-open guard lives there), so passing the
         // callback is safe — re-opens reuse the preserved identity.
         const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
-        return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, { allocateKaNumber });
+        return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, {
+          allocateKaNumber,
+          onDisposition: opts?.onDisposition,
+        });
       },
 
       async migrateLegacyRootScopedWorkingMemory(
@@ -4153,5 +4112,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods]);

@@ -115,7 +115,14 @@ function watchBoundedPageQuery(
       const expectedOffsets: readonly number[] = typeof expectedOffset === 'number'
         ? [expectedOffset]
         : expectedOffset;
-      expect(expectedOffsets.some((offset) => normalized.includes(`OFFSET ${offset}`))).toBe(true);
+      const usesExpectedOffset = expectedOffsets.some((offset) => normalized.includes(`OFFSET ${offset}`));
+      // Oversized exact-graph sessions may seek from the previous page's
+      // cursor instead of repeating a large OFFSET.  Keep requiring the
+      // established offset for ordinary bounded reads while recognizing the
+      // explicit RDF-term cursor predicate used by the new path.
+      const usesExactGraphCursor = normalized.includes('STR(?s)') &&
+        normalized.includes('?s =') && normalized.includes('FILTER');
+      expect(usesExpectedOffset || usesExactGraphCursor).toBe(true);
       expect(normalized).toContain(`LIMIT ${expectedLimit}`);
     }
     const result = await originalQuery(sparql);

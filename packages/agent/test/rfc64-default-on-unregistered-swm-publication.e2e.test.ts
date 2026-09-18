@@ -87,6 +87,18 @@ describe('RFC-64 default-on local unregistered SWM publication', () => {
                   'resolveFinalizedContextGraphAuthoritySnapshotByNameHash',
                 )]
           ),
+          ...(authorityIndexReader.resolveFinalizedContextGraphIdsByNameHashes === undefined
+            ? []
+            : [vi.spyOn(authorityIndexReader, 'resolveFinalizedContextGraphIdsByNameHashes')]),
+          ...(
+            authorityIndexReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes
+              === undefined
+              ? []
+              : [vi.spyOn(
+                  authorityIndexReader,
+                  'resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes',
+                )]
+          ),
         ];
 
     const contextGraphId = 'rfc64-default-on-local-unregistered-swm';
@@ -121,6 +133,7 @@ describe('RFC-64 default-on local unregistered SWM publication', () => {
     expect(await agent.readLocalContextGraphRegistrationStatus(contextGraphId))
       .toBe('unregistered');
     expect(await agent.isLocalFirstUnregisteredContextGraph(contextGraphId)).toBe(true);
+    await agent.whenRfc64CatalogSupervisorsIdleV1();
 
     // Do not call getContextGraphOnChainId merely to prove absence: that API
     // is itself allowed to perform discovery. The durable marker plus a zero

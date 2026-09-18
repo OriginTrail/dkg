@@ -897,7 +897,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(seal.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(lane.networkId),
-      peers: lane.announcementPeers,
+      peers: this.resolveRfc64CatalogAnnouncementPeersV1(lane.announcementPeers),
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     });

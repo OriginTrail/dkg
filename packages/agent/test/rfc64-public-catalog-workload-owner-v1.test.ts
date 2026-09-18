@@ -6,6 +6,8 @@ import {
   Rfc64PublicCatalogWorkloadOwnerV1,
 } from
   '../src/rfc64/public-catalog-workload-owner-v1.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 
 function fakeService(overrides: Partial<Readonly<{
   start: () => void;
@@ -151,6 +153,41 @@ describe('Rfc64PublicCatalogWorkloadOwnerV1', () => {
     owner.start(ctx);
     expect(owner.service).toBe(second);
     expect(authorityRefresh.start).toHaveBeenCalledTimes(2);
+    await owner.close();
+  });
+
+  it('aborts and physically drains authority reads before supporting restart', async () => {
+    const authorityReads = new Rfc64AuthorityReadCoordinatorV1();
+    const owner = new Rfc64PublicCatalogWorkloadOwnerV1({
+      createService: () => null,
+      authorityRefresh: authorityOwner(),
+      authorityReads,
+      onServiceStarted: vi.fn(),
+    });
+    const ctx = createOperationContext('system');
+    owner.start(ctx);
+
+    const entered = Promise.withResolvers<AbortSignal>();
+    const release = Promise.withResolvers<void>();
+    const read = authorityReads.run(undefined, async (signal) => {
+      entered.resolve(signal);
+      await release.promise;
+    });
+    const signal = await entered.promise;
+    const closing = owner.close();
+    await expect(read).rejects.toThrow('coordinator is closing');
+    expect(signal.aborted).toBe(true);
+
+    let settled = false;
+    void closing.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release.resolve();
+    await closing;
+
+    owner.start(ctx);
+    await expect(authorityReads.run(undefined, async () => 'restarted'))
+      .resolves.toBe('restarted');
     await owner.close();
   });
 

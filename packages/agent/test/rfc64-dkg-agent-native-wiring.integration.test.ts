@@ -289,6 +289,7 @@ interface NativeAgentStartOptionsV1 {
   readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
+  readonly sharedMemoryTtlMs?: number;
   readonly networkIdentityChainId?: NetworkIdV1;
   readonly syncContextGraphs?: readonly string[];
   readonly contextGraphMembershipStore?: ContextGraphMembershipStore;
@@ -312,6 +313,7 @@ async function startNativeAgentWithOptions(
     catalogActivation,
     activation,
     persistentStorePath,
+    sharedMemoryTtlMs,
     beforeStart,
     syncContextGraphs,
     contextGraphMembershipStore,
@@ -332,6 +334,7 @@ async function startNativeAgentWithOptions(
     bootstrapPeers: [],
     nodeRole: 'edge',
     store: new OxigraphStore(persistentStorePath),
+    ...(sharedMemoryTtlMs === undefined ? {} : { sharedMemoryTtlMs }),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     syncOnConnectEnabled: false,
@@ -3425,6 +3428,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           reconciliationLane: 'catalog-apply',
         }),
         resolveRecoveryConfig: () => normalizedSnapshot,
+        resolveDynamicallyAcceptedPolicy: () => null,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
@@ -6605,11 +6609,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       loadAll: async () => [],
       upsert: async () => undefined,
       delete: async () => undefined,
-      loadLocalOrigins: async () => originRecords.map((record) => ({ ...record })),
-      recordLocalOrigin: async (record) => {
-        if (!originRecords.some(({ contextGraphId }) => contextGraphId === record.contextGraphId)) {
-          originRecords.push({ ...record });
-        }
+      localOrigins: {
+        loadLocalOrigins: async () => originRecords.map((record) => ({ ...record })),
+        recordLocalOrigin: async (record) => {
+          if (!originRecords.some(({ contextGraphId }) => contextGraphId === record.contextGraphId)) {
+            originRecords.push({ ...record });
+          }
+        },
       },
     };
     const assertionCoordinate = 'legacy-boundary-republish';
@@ -6619,6 +6625,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       name: 'legacy-boundary-author',
       existingDataDir: dataDir,
       persistentStorePath,
+      sharedMemoryTtlMs: 0,
       operationalPrivateKey: AUTHOR_WALLET.privateKey,
       contextGraphMembershipStore,
       beforeStart: async (agent) => {
@@ -6677,6 +6684,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
+      sharedMemoryTtlMs: 0,
       contextGraphMembershipStore,
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
@@ -6717,6 +6725,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
+      sharedMemoryTtlMs: 0,
       contextGraphMembershipStore,
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
