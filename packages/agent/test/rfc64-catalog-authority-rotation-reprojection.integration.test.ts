@@ -560,7 +560,7 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
 
     // IDENTITY, not count. `{announced: 0, failed: 1}` only proves that ONE of the two
     // stored heads was attempted: inverting the comparison in
-    // `rfc64CatalogHeadIsSupersededGenerationV1` so the responder announces the SUPERSEDED
+    // `isRfc64CatalogHeadOfAcceptedGenerationV1` so the responder announces the SUPERSEDED
     // generation and withholds the accepted one leaves every count and every other
     // assertion in this test unchanged. Pin which head the responder actually reached for.
     expect(announceCatalogHead.mock.calls).toHaveLength(1);

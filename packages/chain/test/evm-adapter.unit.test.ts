@@ -36,10 +36,13 @@ import {
   resolveReceiptTimeoutMs,
   resolveTxSerializerStallAfterMs,
   RPC_READ_STALL_TIMEOUT_MS,
+  CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
   RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS,
   RPC_RECEIPT_POLL_INTERVAL_MS,
   RPC_RECEIPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
+import { DEFAULT_RPC_REQUEST_GOVERNOR_POLICY } from '../src/rpc-request-governor.js';
+import { CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS } from '../src/evm-context-graph-name-hash-fence.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -2912,11 +2915,45 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
 
     const first = a.getEvmChainId();
     const firstTimeout = expect(first).rejects.toThrow('configured chainId validation timed out');
-    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS);
     await firstTimeout;
 
     await expect(a.getEvmChainId()).resolves.toBe(31337n);
     expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets a healthy-but-slow configured chainId validation finish', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig({ staticNetwork: true }));
+    // Governor admission is awaited inside the RPC's own timeout window, so a
+    // queued-but-healthy eth_chainId can sit far past the 4s point-read budget
+    // before it is dispatched. It must still be allowed to answer.
+    const provider = {
+      send: vi.fn(() => new Promise((resolve) => {
+        setTimeout(() => resolve('0x7a69'), RPC_READ_STALL_TIMEOUT_MS + 100);
+      })),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+
+    const pending = a.getEvmChainId();
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 100);
+    await expect(pending).resolves.toBe(31337n);
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('budgets the chainId gate above every local admission delay', () => {
+    const policy = DEFAULT_RPC_REQUEST_GOVERNOR_POLICY;
+    // Worst-case foreground queue wait, spent inside the gate's own window.
+    expect(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS).toBeGreaterThan(
+      (policy.maxQueueSize / policy.maxRequestsPerSecond) * 1000,
+    );
+    // Background admission is additionally gated by startup jitter.
+    expect(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS).toBeGreaterThan(policy.startupJitterMs);
+    // Stay under the fence's own budget so its surfaced label stays deterministic.
+    expect(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS).toBeLessThan(
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
+    );
   });
 });
 

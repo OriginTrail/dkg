@@ -181,6 +181,10 @@ import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
 import {
+  assertRfc64ReplayManifestScopesUniqueV1,
+  isRfc64CatalogHeadOfAcceptedGenerationV1,
+} from './rfc64/catalog-replay-generation-v1.js';
+import {
   Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
   type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
 } from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
@@ -4203,17 +4207,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             throw new Error('RFC-64 scoped catalog replay policy changed before snapshot');
           }
           // The replay index is keyed on `(networkId, contextGraphId)` only, so after an
-          // authority rotation it holds one entry per generation. Serving a superseded one
-          // is wrong twice over. Every entry below is stamped with the CURRENT
-          // `accepted.policyDigest`, so a receiver admits the announcement, fetches the head
-          // and only then rejects it on scope binding -- pure churn it repeats on every
-          // connect. And two era-zero generations collapse to the same manifest uniqueness
-          // key, so `encodeRfc64PublicCatalogHeadReplayCompletionV2` refuses the whole
-          // completion and the peer gets nothing at all, including the current generation.
+          // authority rotation it holds one entry per generation: a CG authored before its
+          // on-chain registration keeps its owner-signed heads alongside the finalized-chain
+          // heads that follow, and both are durable and current for their own catalog scope.
+          // Serving a superseded one is wrong twice over. Every entry below is stamped with
+          // the CURRENT `accepted.policyDigest`, so a receiver admits the announcement,
+          // fetches the head and only then rejects it on scope binding -- pure churn it
+          // repeats on every connect. And the announcement carries neither the governance
+          // binding nor the ownership transition, so two era-zero generations collapse to the
+          // same manifest uniqueness key and
+          // `encodeRfc64PublicCatalogHeadReplayCompletionV2` refuses the whole completion,
+          // leaving the peer with nothing at all -- including the current generation.
           // Skipping is not silent loss: the author re-projects its rows onto the accepted
           // scope, so the current entry serves them. It is reported for the case where that
           // did not happen.
-          if (rfc64CatalogHeadIsSupersededGenerationV1(accepted, head.payload)) {
+          if (!isRfc64CatalogHeadOfAcceptedGenerationV1(head.payload, accepted.policy)) {
             // Carry both digests. Withholding a head is the one place this path can lose data
             // silently if the author never re-projected, so the warning has to name exactly
             // which stored lane was withheld and which one replaced it -- that pair is what
@@ -4296,6 +4304,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           const rightKey = rfc64CatalogTargetExactIdentityKeyV1(right);
           return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
         });
+        // The generation filter above is what keeps one author lane to one
+        // wire scope, but it can only compare the fields the accepted policy
+        // carries. Assert the guarantee the V2 completion depends on here,
+        // where the offending scope can still be named, rather than letting
+        // the encoder fail the whole response at delivery time.
+        assertRfc64ReplayManifestScopesUniqueV1(manifest);
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
           try {
@@ -5083,23 +5097,4 @@ export async function loadBoundedAuthorCatalogHistoryV1(
     previousDirectoryPath: Object.freeze([root]),
     previousBucket,
   });
-}
-
-/**
- * True when an applied catalog head belongs to an authority generation this node no longer
- * holds. The replay index is keyed on `(networkId, contextGraphId)`, which is deliberately
- * governance-blind, so it returns every generation's head for a Context Graph; the accepted
- * policy is what says which one is current. Mirrors the governance-and-era half of the
- * service's own `assertAcceptedPolicyMatchesCatalogScope`. The author half is not re-checked
- * here: the replay loop has already resolved the serving authority for this head.
- */
-function rfc64CatalogHeadIsSupersededGenerationV1(
-  accepted: Readonly<AcceptedRfc64CatalogAccessSnapshotV1>,
-  payload: Parameters<typeof deriveAuthorCatalogScopeFromHeadV1>[0],
-): boolean {
-  const scope = deriveAuthorCatalogScopeFromHeadV1(payload);
-  return accepted.policy.governanceChainId !== scope.governanceChainId
-    || accepted.policy.governanceContractAddress !== scope.governanceContractAddress
-    || accepted.policy.ownershipTransitionDigest !== scope.ownershipTransitionDigest
-    || accepted.policy.era !== scope.era;
 }
