@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 if (process.argv[2] === '--worker') {
   const { snapshotExactDataRecord } = await import(pathToFileURL(process.argv[3]));
@@ -18,7 +18,7 @@ if (process.argv[2] === '--worker') {
   for (let i = 0; i < iterations; i++) snapshot = snapshotExactDataRecord(value, keys, 'benchmark');
   console.log(JSON.stringify({ ms: performance.now() - start, iterations, fingerprint: JSON.stringify(snapshot) }));
 } else {
-  const repo = new URL('../../../', import.meta.url).pathname;
+  const repo = fileURLToPath(new URL('../../../', import.meta.url));
   const ref = process.argv.find(arg => arg.startsWith('--baseline='))?.slice(11);
   if (!ref) throw new Error('Provide --baseline=REF (e.g. the PR base commit)');
   const directory = mkdtempSync(join(tmpdir(), 'dkg-snapshot-bench-'));
