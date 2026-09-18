@@ -5,12 +5,19 @@ import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAG
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
   InMemoryPeerSyncLease,
+  runSelectedSharedMemoryRetry,
   runSyncOnConnect,
+  SyncOnConnectBackpressureError,
   SyncOnConnectPostSyncError,
   type SyncOnConnectPeerOutcome,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
-import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
+import {
+  getSyncBackpressureBusyError,
+  resolveSyncGlobalBackpressure,
+  SyncBackpressureBusyError,
+  withGlobalSyncBackpressure,
+} from '../src/sync/backpressure.js';
 import type { OperationContext, PeerResolver } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
@@ -111,6 +118,46 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('preserves typed backpressure from selected-lane admission', async () => {
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('selected queue full', 'queue_full');
+
+    await expect(runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      selectedSharedMemoryLane: {
+        admitWork: async () => { throw busy; },
+      },
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
+  it('preserves typed backpressure from ordinary post-sync maintenance', async () => {
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('maintenance queue full', 'queue_full');
+
+    await expect(runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags: async () => { throw busy; },
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
   it('runs durable before ordinary SWM history', async () => {
     const remotePeer = freshPeerIdString();
     const order: string[] = [];
@@ -148,6 +195,48 @@ describe('runSyncOnConnect callbacks', () => {
       'durable:ordinary',
       'shared:ordinary:ordinary',
     ]);
+  });
+
+  it('preserves typed backpressure from post-durable shared-memory sync', async () => {
+    // `ordinarySharedMemoryWork.syncFromPeer()` is awaited outside
+    // `runNonTransportStep`, after `durableSyncCompleted = true`. It is the one
+    // site where removing the attempt boundary's cause walk would otherwise let
+    // a bare busy error reach the `backoffEligible: true` wrap and grow peer
+    // backoff for purely local admission pressure.
+    const remotePeer = freshPeerIdString();
+    const busy = new SyncBackpressureBusyError('shared queue full', 'queue_full');
+
+    await expect(runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => ['first'], async () => { throw busy; }),
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['first'],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+        completedPhases: 1,
+        checkpointAdvances: 1,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    })).rejects.toMatchObject({
+      constructor: SyncOnConnectBackpressureError,
+      reason: 'queue_full',
+    });
+  });
+
+  it('keeps the busy error as the cause so admission detectors still see it', async () => {
+    // `getSyncBackpressureBusyError()` walks `cause`; dropping it degraded
+    // `syncOperationRejectionReason` to 'aborted_before_start'.
+    const busy = new SyncBackpressureBusyError('queue full', 'queue_full');
+    const typed = new SyncOnConnectBackpressureError(busy);
+
+    expect(typed.cause).toBe(busy);
+    expect(getSyncBackpressureBusyError(typed)).toBe(busy);
   });
 
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {

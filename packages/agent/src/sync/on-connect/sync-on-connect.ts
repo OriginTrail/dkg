@@ -7,6 +7,10 @@ import {
   type SharedMemoryFreshnessSummary,
   type SelectedSharedMemorySyncResult,
 } from '../shared-memory-freshness.js';
+import {
+  SyncBackpressureBusyError,
+  type SyncBackpressureBusyReason,
+} from '../backpressure.js';
 
 type SyncProgressSummary = SharedMemoryFreshnessSummary & {
   insertedTriples: number;
@@ -183,6 +187,27 @@ export class SyncOnConnectPostSyncError extends Error {
   }
 }
 
+/**
+ * Typed control flow for local admission pressure. This marker is translated
+ * to `deferred-backpressure` by the attempt boundary before generic
+ * post-sync errors are constructed, so accounting never has to inspect an
+ * arbitrary `Error.cause` chain.
+ */
+export class SyncOnConnectBackpressureError extends Error {
+  readonly reason: SyncBackpressureBusyReason;
+
+  constructor(error: SyncBackpressureBusyError) {
+    // Keep the cause: `getSyncBackpressureBusyError()` is documented as THE
+    // admission-pressure detector and is still live in ordered-sync,
+    // attempt-telemetry and lifecycle. Dropping it would degrade
+    // `syncOperationRejectionReason` to 'aborted_before_start' for any
+    // consumer that becomes reachable.
+    super(error.message, { cause: error });
+    this.name = 'SyncOnConnectBackpressureError';
+    this.reason = error.reason;
+  }
+}
+
 interface SyncResultAccounting {
   insertedTriples: number;
   madeProgress: boolean;
@@ -284,6 +309,9 @@ async function runSessionSelectedSharedMemoryRetry(
       signal.throwIfAborted();
       return result;
     } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
@@ -466,6 +494,9 @@ async function runSessionSyncOnConnect(
       signal.throwIfAborted();
       return result;
     } catch (err) {
+      if (err instanceof SyncBackpressureBusyError) {
+        throw new SyncOnConnectBackpressureError(err);
+      }
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
@@ -582,6 +613,28 @@ async function runSessionSyncOnConnect(
 
     return finishSyncAccounting();
   } catch (err) {
+    if (err instanceof SyncOnConnectBackpressureError) {
+      throw err;
+    }
+    // Local admission pressure is not a peer failure.
+    //
+    // This conversion is required BY this change, not a pre-existing bug it
+    // fixes. Before it, `executeSyncOnConnectAttempt`'s catch called
+    // `getSyncBackpressureBusyError()` first, and `SyncOnConnectPostSyncError`
+    // sets `{ cause }` — so a bare busy escaping post-durable was found at
+    // depth 1 in the cause chain and already yielded `deferred-backpressure`
+    // with no accounting. Removing that cause walk is what would make the
+    // `backoffEligible: true` wrap below reachable for local pressure, so the
+    // marker has to be raised here instead.
+    //
+    // Note the invariant this relies on: the attempt boundary now matches only
+    // DIRECT instances. Any future site that wraps a busy error (an
+    // `AggregateError`, a new `{ cause }` rethrow in the shared-memory lane)
+    // falls through to `backoffEligible: true` and grows peer backoff for local
+    // pressure. A busy error must reach this boundary bare.
+    if (err instanceof SyncBackpressureBusyError) {
+      throw new SyncOnConnectBackpressureError(err);
+    }
     if (err instanceof SyncOnConnectPostSyncError) {
       throw err;
     }
