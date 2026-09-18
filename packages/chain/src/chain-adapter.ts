@@ -518,6 +518,36 @@ export interface ContextGraphOnChain {
 }
 
 /** Deterministic finalized authority generation used by RFC-64 policy composition. */
+/**
+ * Live (latest-block) authority for one context graph, from ONE
+ * `ContextGraphStorage.getContextGraph(uint256)` read: liveness, access policy
+ * and participant roster at a single block. Three separate reads at `latest`
+ * can straddle a deactivation or a membership change; one storage read cannot.
+ */
+export interface ContextGraphLiveAuthority {
+  readonly active: boolean;
+  readonly accessPolicy: number;
+  readonly participantAgents: readonly string[];
+}
+
+/**
+ * Rejection from `getContextGraphLiveAuthority` when the single read failed in
+ * a way the package does not classify as retryable - a tuple that does not
+ * decode, a revert that proves nothing about this id. Callers fall back to the
+ * three point reads, which do not share the tuple. Distinct from a nonexistent
+ * id (which resolves `null`) and from a failure classified transient, local
+ * governor saturation included (which rejects with the transport's own error
+ * and is NOT a cue to issue more reads). `cause` is the original error.
+ */
+export class ContextGraphLiveAuthorityUnsupportedError extends Error {
+  readonly code = 'CONTEXT_GRAPH_LIVE_AUTHORITY_UNSUPPORTED' as const;
+
+  constructor(detail: string, options?: { cause?: unknown }) {
+    super(`ContextGraphStorage.getContextGraph cannot answer here: ${detail}`, options);
+    this.name = 'ContextGraphLiveAuthorityUnsupportedError';
+  }
+}
+
 export interface ContextGraphAuthoritySnapshot {
   readonly chainId: string;
   readonly governanceContract: string;
@@ -2290,6 +2320,23 @@ export interface ChainAdapter {
     contextGraphId: bigint,
     options?: ChainReadOptions,
   ): Promise<boolean>;
+
+  /**
+   * One-read live authority: `active`, `accessPolicy` and `participantAgents`
+   * from `ContextGraphStorage.getContextGraph(uint256)` at `latest`.
+   *
+   * Resolves `null` ONLY when the chain proved the id nonexistent
+   * (`ERC721NonexistentToken`); callers must treat that exactly as a liveness
+   * probe returning `false` — terminal, never retried. Rejects with
+   * `ContextGraphLiveAuthorityUnsupportedError` on a deterministic failure of
+   * the single read (callers fall back to the three point reads) and with the
+   * transport's own error on a transient one. Optional, like the point reads
+   * it composes.
+   */
+  getContextGraphLiveAuthority?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<ContextGraphLiveAuthority | null>;
 
   /**
    * On-chain publish policy for `contextGraphId`. Read from

@@ -40,6 +40,7 @@ import type {
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
+import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
 import {
@@ -1735,6 +1736,35 @@ export class MockChainAdapter implements ChainAdapter {
     const agents = (cg as { participantAgents?: string[] }).participantAgents;
     if (!Array.isArray(agents)) return [];
     return agents.map((a) => ethers.getAddress(a));
+  }
+
+  /**
+   * Live single-read mirror, composed from the three point reads so tests that
+   * stub any of them keep observing exactly the calls they did before.
+   */
+  async getContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<ContextGraphLiveAuthority | null> {
+    options.signal?.throwIfAborted();
+    // Sequential and conditional on purpose: the three-read path this mirrors
+    // never read the policy of an inactive graph nor the roster of a public
+    // one, and suites that stub the point reads observe exactly those calls.
+    // Never `null`: the mock has no "minted but burned" state, and a graph the
+    // mock does not know is exactly what a stubbed liveness probe describes.
+    // Same call arity as the point-read wiring this replaces: options only when
+    // a signal is present, so a spy that pinned `calledWith(id)` still matches.
+    const readOptions = options.signal === undefined ? undefined : { signal: options.signal };
+    const live = await (readOptions === undefined
+      ? this.isContextGraphActiveOnChain(contextGraphId)
+      : this.isContextGraphActiveOnChain(contextGraphId, readOptions));
+    if (!live) return { active: false, accessPolicy: 0, participantAgents: [] };
+    const accessPolicy = await (readOptions === undefined
+      ? this.getContextGraphAccessPolicy(contextGraphId)
+      : this.getContextGraphAccessPolicy(contextGraphId, readOptions));
+    if (accessPolicy !== 1) return { active: true, accessPolicy, participantAgents: [] };
+    const participantAgents = await this.getContextGraphParticipantAgents(contextGraphId);
+    return { active: true, accessPolicy, participantAgents };
   }
 
   /** Offline-development mirror of the finalized RFC-64 authority snapshot. */

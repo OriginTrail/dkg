@@ -18,6 +18,11 @@ import {
 import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
+import { errorCode as rpcErrorCode, errorMessage as rpcErrorMessage } from './evm-adapter-errors.js';
+import {
+  ContextGraphLiveAuthorityUnsupportedError,
+  type ContextGraphLiveAuthority,
+} from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -33,7 +38,7 @@ import {
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
-import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
+import { isRetryableRpcError, isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { markContextGraphRegistrationNotSubmitted } from
   './context-graph-registration-error.js';
@@ -710,6 +715,31 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     ));
   }
 
+  /** One `getContextGraph` read at `latest`; see ChainAdapter.getContextGraphLiveAuthority. */
+  async getContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<ContextGraphLiveAuthority | null> {
+    await this.init();
+    const cgs = this.requireContextGraphStorage();
+    let raw: unknown;
+    try {
+      raw = await this.readContractWithOptions(
+        cgs,
+        'cgStorage.getContextGraph',
+        'getContextGraph',
+        [contextGraphId],
+        { signal: options.signal },
+      );
+    } catch (err) {
+      if (options.signal?.aborted) throw err;
+      if (isNonexistentContextGraphRevert(err, contextGraphId)) return null;
+      if (isLiveAuthorityReadTransient(err)) throw err;
+      throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err), { cause: err });
+    }
+    return decodeContextGraphLiveAuthority(raw, contextGraphId);
+  }
+
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     await this.init();
     if (!this.contracts.contextGraphs || !this.contracts.contextGraphStorage) {
@@ -1110,7 +1140,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         );
         const raw =
           cg?.accessPolicy
-          ?? (Array.isArray(cg) ? cg[5] : undefined);
+          ?? (Array.isArray(cg) ? cg[CONTEXT_GRAPH_TUPLE_INDEX.accessPolicy] : undefined);
         if (raw === undefined || raw === null) {
           throw new Error('ContextGraphStorage.getContextGraph returned no accessPolicy field');
         }
@@ -1468,4 +1498,107 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<ReadonlyMap<string, bigint | null>> {
     return this.getContextGraphNameHashResolver().resolveMany(nameHashes, options.signal);
   }
+}
+
+/**
+ * Positional layout of `ContextGraphStorage.getContextGraph`, for the one shape
+ * ethers may hand back without names. One map, so the two decoders that fall
+ * back to positions cannot drift apart.
+ */
+const CONTEXT_GRAPH_TUPLE_INDEX = { participantAgents: 1, active: 3, accessPolicy: 5 } as const;
+
+const ERC721_NONEXISTENT_TOKEN_INTERFACE = new ethers.Interface([
+  'error ERC721NonexistentToken(uint256 tokenId)',
+]);
+
+/**
+ * `getContextGraph` reverts only through `_requireExists`, which always carries
+ * the typed `ERC721NonexistentToken` payload. Match it exactly — the decoded
+ * name, or the encoded bytes for THIS id — so nothing else can be mistaken for
+ * "the chain proved this id does not exist".
+ */
+function isNonexistentContextGraphRevert(err: unknown, contextGraphId: bigint): boolean {
+  if (rpcErrorCode(err) !== 'CALL_EXCEPTION') return false;
+  const e = err as { revert?: unknown; data?: unknown; errorData?: unknown };
+  const revert = e.revert as { name?: unknown; args?: unknown } | null | undefined;
+  if (revert !== null && typeof revert === 'object' && revert.name === 'ERC721NonexistentToken') {
+    // Id-exact, like the bytes branch below: a revert that names some OTHER
+    // token proves nothing about this one, and answering "nonexistent" here is
+    // terminal - it would report a live, registered graph as permanently gone.
+    const named = (revert.args as ArrayLike<unknown> | null | undefined)?.[0];
+    try {
+      return named !== undefined && named !== null
+        && BigInt(named as string | number | bigint) === contextGraphId;
+    } catch {
+      return false;
+    }
+  }
+  const expected = ERC721_NONEXISTENT_TOKEN_INTERFACE
+    .encodeErrorResult('ERC721NonexistentToken', [contextGraphId])
+    .toLowerCase();
+  for (const raw of [e.data, e.errorData]) {
+    if (typeof raw === 'string' && raw.toLowerCase() === expected) return true;
+  }
+  return false;
+}
+
+/**
+ * Transient for this view, by the package's own disposition rather than a
+ * private reading of provider error strings: another attempt may succeed, and
+ * the three point reads would fail the same way, so the error propagates. That
+ * covers local governor saturation and an exhausted endpoint set
+ * (`retry-later`) — answering those with three MORE reads would be exactly
+ * wrong. `BAD_DATA` is excluded for the reason `isContractViewRetryable`
+ * gives: on a view it is a client-side decode, not an outage.
+ *
+ * Everything else falls back to the point reads. `getContextGraph` has shipped
+ * beside them since v10.0.0, so this is never "selector absent"; it is a tuple
+ * that does not decode, or a revert that proves nothing about this id. The
+ * point reads do not share the tuple and already own the established
+ * disposition of every such fault, so they decide.
+ *
+ * That set is NOT all deterministic. ethers v6 coerces every JSON-RPC error
+ * body on `eth_call` (an HTTP-200 rate limit, "header not found") into a bare
+ * CALL_EXCEPTION, which the shared classifier reads as `fail`. Such a fault
+ * takes the fallback too; the liveness read then fails the same way and yields
+ * the same retryable disposition it always did, at the cost of one extra read.
+ * Telling those apart is the shared classifier's job, not a matcher here.
+ */
+function isLiveAuthorityReadTransient(err: unknown): boolean {
+  return isRetryableRpcError(err) && rpcErrorCode(err) !== 'BAD_DATA';
+}
+
+function decodeContextGraphLiveAuthority(
+  raw: unknown,
+  contextGraphId: bigint,
+): ContextGraphLiveAuthority {
+  const named = (raw ?? {}) as { active?: unknown; accessPolicy?: unknown; participantAgents?: unknown };
+  const positional = Array.isArray(raw) ? (raw as unknown[]) : [];
+  const active = named.active ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.active];
+  const accessPolicy = named.accessPolicy ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.accessPolicy];
+  const agents = named.participantAgents ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.participantAgents];
+  // Boundary check on an `unknown`. ethers itself never hands back a wrongly
+  // typed field - a real ABI mismatch arrives as BAD_DATA and takes the same
+  // exit through the catch in the caller - so this guards the seam (a rebound
+  // or substituted read), not the wire. Either way the answer is UNSUPPORTED:
+  // the three point reads own the established disposition of every malformed
+  // value, where a plain throw would resurface as the RETRYABLE
+  // policy-unavailable reason and retry a permanent fault forever.
+  let policy: number;
+  try {
+    if (typeof active !== 'boolean' || !Array.isArray(agents)) throw new Error('tuple layout');
+    policy = Number(BigInt(accessPolicy as string | number | bigint));
+  } catch {
+    throw new ContextGraphLiveAuthorityUnsupportedError(
+      `getContextGraph(${contextGraphId}) returned an undecodable tuple`,
+    );
+  }
+  // Roster entries are handed through as read. The resolver owns their
+  // validation and normalization, so a malformed entry keeps its terminal
+  // `chain-participant-authority-invalid` disposition on this path too.
+  return Object.freeze({
+    active,
+    accessPolicy: policy,
+    participantAgents: Object.freeze(agents.map((value) => String(value))),
+  });
 }

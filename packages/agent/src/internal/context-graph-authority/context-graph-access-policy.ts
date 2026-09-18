@@ -4,11 +4,25 @@ import { createOperationContext, type OperationContext } from
   '@origintrail-official/dkg-core';
 
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../../dkg-agent-constants.js';
+import {
+  ContextGraphLiveAuthorityUnsupportedError,
+  type ContextGraphLiveAuthority,
+} from '@origintrail-official/dkg-chain';
 import type { LiveOnChainAccessPolicyUnavailable } from
   '../../registered-context-graph-authority.js';
 
 export type LiveOnChainAccessPolicyState =
-  | { kind: 'available'; accessPolicy: 0 | 1 }
+  | {
+      kind: 'available';
+      accessPolicy: 0 | 1;
+      /**
+       * Present when the policy came from the one-read live authority: the
+       * roster observed in the SAME storage read as liveness and policy, so a
+       * caller needing it does not issue a third call that could observe a
+       * different block.
+       */
+      participantAgents?: readonly string[];
+    }
   | LiveOnChainAccessPolicyUnavailable;
 
 type BoundedPolicyRead<T> =
@@ -28,8 +42,22 @@ export interface LiveOnChainAccessPolicyDependencies {
     signal?: AbortSignal,
   ): Promise<BoundedPolicyRead<T>>;
   claimMissingLivenessWarning(): boolean;
+  /**
+   * Rate limit for the single-read fallback warning, which sits on a hot path.
+   * `false` = one was written recently, stay quiet. Absent = warn every time.
+   */
+  claimLiveAuthorityFallbackWarning?(): boolean;
   warn(ctx: OperationContext, message: string): void;
   cacheAccessPolicy(onChainId: string, accessPolicy: 0 | 1): void;
+  /**
+   * Optional one-read live authority (liveness, policy, roster from a single
+   * `getContextGraph` call). `null` = the chain proved the id nonexistent.
+   * Rejects with `ContextGraphLiveAuthorityUnsupportedError` when the single
+   * read deterministically cannot answer; any other rejection is transient.
+   */
+  readLiveAuthority?:
+    | ((onChainId: bigint, signal?: AbortSignal) => Promise<ContextGraphLiveAuthority | null>)
+    | undefined;
 }
 
 /**
@@ -50,6 +78,15 @@ export async function resolveLiveOnChainAccessPolicyState(
     return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
   }
   if (numericId <= 0n) return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
+
+  const readLiveAuthority = dependencies.readLiveAuthority;
+  if (readLiveAuthority !== undefined) {
+    const resolved = await resolveFromLiveAuthority(
+      dependencies, readLiveAuthority, numericId, onChainId, opCtx, options,
+    );
+    if (resolved !== 'unsupported') return resolved;
+    // The single read cannot answer: the three-read path below decides.
+  }
 
   const readLiveness = dependencies.isContextGraphActiveOnChain;
   if (readLiveness === undefined) {
@@ -114,6 +151,96 @@ export async function resolveLiveOnChainAccessPolicyState(
   if (policy.value === 0 || policy.value === 1) {
     dependencies.cacheAccessPolicy(onChainId, policy.value);
     return { kind: 'available', accessPolicy: policy.value };
+  }
+  return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
+}
+
+const FALLBACK_CAUSE_MAX_CHARS = 300;
+
+function truncateFallbackCause(message: string): string {
+  return message.length <= FALLBACK_CAUSE_MAX_CHARS
+    ? message
+    : `${message.slice(0, FALLBACK_CAUSE_MAX_CHARS)}… (${message.length} chars)`;
+}
+
+/**
+ * One storage read in place of the liveness + policy pair (and, for private
+ * graphs, the roster read the caller would issue next). Every outcome maps to
+ * the state the three-read path produces for the same chain fact, so nothing
+ * downstream can tell the difference except the number of RPC calls:
+ *
+ *  - nonexistent id (`null`)  => `chain-access-policy-unknown`, TERMINAL — the
+ *    same disposition as a liveness probe returning `false`. Mapping it to a
+ *    thrown/`unavailable` outcome would make it RETRYABLE and turn a
+ *    permanently-missing graph into an endless promote retry.
+ *  - inactive                 => `chain-access-policy-unknown`, checked BEFORE
+ *    the policy is looked at: with one tuple nothing structural forces the
+ *    liveness-before-policy order the three-read path had, and a deactivated
+ *    graph must never read as public.
+ *  - active, policy 0|1       => `available`, and only then is the policy
+ *    cache written — a deactivated graph must not seed it.
+ */
+async function resolveFromLiveAuthority(
+  dependencies: LiveOnChainAccessPolicyDependencies,
+  readLiveAuthority: NonNullable<LiveOnChainAccessPolicyDependencies['readLiveAuthority']>,
+  numericId: bigint,
+  onChainId: string,
+  opCtx: OperationContext | undefined,
+  options: { signal?: AbortSignal },
+): Promise<LiveOnChainAccessPolicyState | 'unsupported'> {
+  let read: BoundedPolicyRead<ContextGraphLiveAuthority | null>;
+  try {
+    read = await dependencies.runBoundedRead(
+      () => readLiveAuthority(numericId, options.signal),
+      `getContextGraphLiveAuthority(${onChainId})`,
+      options.signal,
+    );
+  } catch (error) {
+    if (
+      error instanceof ContextGraphLiveAuthorityUnsupportedError
+      || (error instanceof Error && error.name === 'ContextGraphLiveAuthorityUnsupportedError')
+    ) {
+      // Never silent: this resolution costs one read more than the path it
+      // replaces, and on a permanent fault it does so every time. Rate limited
+      // and truncated all the same - it is a hot path, and a decode failure
+      // quotes the whole return payload.
+      if (dependencies.claimLiveAuthorityFallbackWarning?.() ?? true) {
+        dependencies.warn(
+          opCtx ?? createOperationContext('share'),
+          `readLiveOnChainAccessPolicy(${onChainId}): single-read authority unavailable, ` +
+          `falling back to the point reads — ${truncateFallbackCause(error.message)}`,
+        );
+      }
+      return 'unsupported';
+    }
+    // Transient: propagates exactly as a rejected liveness read does today.
+    throw error;
+  }
+  if (read.kind === 'timeout') {
+    const detail =
+      `getContextGraphLiveAuthority(${onChainId}) timed out after ` +
+      `${CHAIN_POLICY_READ_TIMEOUT_MS}ms`;
+    dependencies.warn(
+      opCtx ?? createOperationContext('share'),
+      `readLiveOnChainAccessPolicy(${onChainId}): ${detail} — ` +
+      'treating on-chain access policy as UNKNOWN (fail-closed)',
+    );
+    return { kind: 'unavailable', reason: 'chain-access-policy-timeout', detail };
+  }
+  const authority = read.value;
+  if (authority === null) return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
+  if (authority.active !== true) return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
+  const policy = authority.accessPolicy;
+  if (policy === 0 || policy === 1) {
+    dependencies.cacheAccessPolicy(onChainId, policy);
+    // The roster travels only with a PRIVATE policy - a public graph has no
+    // roster consumer. It is passed through untouched: the resolver owns roster
+    // validation, and a malformed roster must stay the TERMINAL
+    // `chain-participant-authority-invalid` it always was; spreading it here
+    // would throw and resurface as a retryable policy failure instead.
+    return policy === 1
+      ? { kind: 'available', accessPolicy: policy, participantAgents: authority.participantAgents }
+      : { kind: 'available', accessPolicy: policy };
   }
   return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
 }

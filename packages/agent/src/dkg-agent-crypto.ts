@@ -588,6 +588,22 @@ async function evaluateContextGraphSlotBinding(
   );
 }
 
+const LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS = 60_000;
+
+/**
+ * Bind an optional chain point read. Options are passed ONLY when a signal is
+ * present, so the call keeps the arity callers and spies have always observed.
+ */
+function bindOptionalChainRead<T>(
+  chain: unknown,
+  read: ((numericId: bigint, options?: { signal?: AbortSignal }) => Promise<T>) | undefined,
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => signal
+    ? read.call(chain, numericId, { signal })
+    : read.call(chain, numericId);
+}
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -876,18 +892,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   ): Promise<LiveOnChainAccessPolicyState> {
     const readLiveness = this.chain.isContextGraphActiveOnChain;
     const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    const readLiveAuthority = this.chain.getContextGraphLiveAuthority;
     return resolveLiveAccessPolicyState(
       {
-        isContextGraphActiveOnChain: typeof readLiveness === 'function'
-          ? (numericId, signal) => signal
-            ? readLiveness.call(this.chain, numericId, { signal })
-            : readLiveness.call(this.chain, numericId)
-          : undefined,
-        getContextGraphAccessPolicy: typeof readAccessPolicy === 'function'
-          ? (numericId, signal) => signal
-            ? readAccessPolicy.call(this.chain, numericId, { signal })
-            : readAccessPolicy.call(this.chain, numericId)
-          : undefined,
+        readLiveAuthority: bindOptionalChainRead(this.chain, readLiveAuthority),
+        isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
+        getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
         runBoundedRead: async (start, label, signal) => {
           const value = await this.raceChainPolicyRead(start, label, signal);
           return value === TIMEOUT_SENTINEL
@@ -897,6 +907,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         claimMissingLivenessWarning: () => {
           if (this.warnedMissingCgLivenessProbe) return false;
           this.warnedMissingCgLivenessProbe = true;
+          return true;
+        },
+        // Unlike the static condition above this one comes and goes (a node
+        // throttling at the JSON-RPC level reaches it too), so it is limited
+        // by time rather than to once per process.
+        claimLiveAuthorityFallbackWarning: () => {
+          const now = Date.now();
+          if (now - this.lastLiveAuthorityFallbackWarnAt < LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS) return false;
+          this.lastLiveAuthorityFallbackWarnAt = now;
           return true;
         },
         warn: (ctx, message) => this.log.warn(ctx, message),
