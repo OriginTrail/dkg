@@ -370,30 +370,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       acceptedDigest,
       params.authorAddress,
     )?.rows ?? [];
-    const alreadyCarried = new Set(acceptedRows.map(rfc64AuthorInventoryRowIdentityV1));
-    // Row identity includes `shareOperationId`, so a KA RE-SHARED after the
-    // rotation has a different identity here even though the accepted
-    // generation already serves it. Carrying the pre-rotation operation id
-    // would then fail the confirmation fence and be reported as "stays
-    // unreachable" for a row that is perfectly reachable. Coordinate-level
-    // presence is the honest question: is this assertion already in the
-    // accepted generation at this version?
-    // Keyed by coordinate, holding the HIGHEST version the accepted generation
-    // already serves. A KA re-shared after the rotation lands here at the same
-    // version (different `shareOperationId`, so row identity misses); a KA
-    // UPDATED after the rotation lands at a newer one and must not mask the
-    // pre-rotation version, which still has to cross.
-    const servedVersion = new Map<string, bigint>();
-    for (const row of acceptedRows) {
-      const version = BigInt(row.assertionVersion);
-      const seen = servedVersion.get(row.assertionCoordinate);
-      if (seen === undefined || version > seen) {
-        servedVersion.set(row.assertionCoordinate, version);
-      }
-    }
+    const uncarried = rfc64UncarriedOriginRowsV1(params.rows, acceptedRows);
     const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
     let aborted = false;
-    for (const row of params.rows) {
+    for (const row of uncarried) {
       // BREAK, never return: the projection request below is what keeps carried
       // rows from sitting in the accepted generation with no applied head, and
       // returning here would recreate exactly the state its comment describes.
@@ -401,8 +381,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         aborted = true;
         break;
       }
-      if (alreadyCarried.has(rfc64AuthorInventoryRowIdentityV1(row))) continue;
-      if (servedVersion.get(row.assertionCoordinate) === BigInt(row.assertionVersion)) continue;
       // Route through the shadow runtime rather than calling the recorder
       // directly. Going around it left this write untracked by
       // `drain()`/`closeAndDrain()` — persistence could close mid-write — and
@@ -875,17 +853,32 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
 
 }
 
-/** Exact durable identity of one inventory row, used to skip an already-carried row. */
-function rfc64AuthorInventoryRowIdentityV1(
-  row: Readonly<SwmAuthorInventoryRowV1>,
-): string {
-  return JSON.stringify([
-    row.assertionCoordinate,
-    row.assertionVersion,
-    row.kaUal,
-    row.shareOperationId,
-    row.sealDigest,
-  ]);
+/**
+ * Origin rows the accepted generation does not already serve.
+ *
+ * Presence is asked by COORDINATE, at any version, and that is the whole
+ * question. Exact row identity would include `shareOperationId`, so a KA
+ * re-shared after the rotation would miss it even though the accepted
+ * generation already serves that assertion. Nothing weaker is available either:
+ * `recordRfc64SwmAuthorInventoryShadowV1` re-resolves the CURRENT author seal
+ * and durable workspace head and takes only `shareOperationId` from the origin
+ * row, so a KA UPDATED after the rotation can never satisfy
+ * `workspaceHeadIncludesShareOperationId` with its pre-rotation operation id --
+ * it always lands in `failed` and would be reported as "stays unreachable" for
+ * an asset the accepted generation serves at a newer version. The inventory is
+ * keyed by `kaUal`, so a carry that somehow did succeed would overwrite that
+ * newer row with the pre-rotation one.
+ *
+ * This is also what makes admission CONVERGE: nothing retires the origin-scope
+ * rows, so the accepted generation's own row set is the only durable evidence
+ * that a carry already happened.
+ */
+function rfc64UncarriedOriginRowsV1(
+  originRows: readonly Readonly<SwmAuthorInventoryRowV1>[],
+  acceptedRows: readonly Readonly<SwmAuthorInventoryRowV1>[],
+): readonly Readonly<SwmAuthorInventoryRowV1>[] {
+  const served = new Set(acceptedRows.map((row) => row.assertionCoordinate));
+  return originRows.filter((row) => !served.has(row.assertionCoordinate));
 }
 
 /** One observable line for a re-projection that could not run to completion. */
