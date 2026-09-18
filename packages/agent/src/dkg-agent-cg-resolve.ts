@@ -1582,13 +1582,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       options.allowAcceptedRfc64FinalizedAbsence === true ? 'rfc64absence:1' : 'rfc64absence:0',
       `timeout:${options.registrationTimeoutMs ?? 'default'}`,
     ].join('|');
+    // The resolve methods are a mixin: a partial receiver (tests bind them onto
+    // hand-built objects) may carry neither the flight nor the fresh method.
+    // Coalescing is an optimization, so its absence degrades to the fresh read
+    // rather than failing the resolution. The instance method is preferred so
+    // an instrumented agent stays observable; the prototype is the fallback.
+    const fresh = typeof this.resolveRegisteredContextGraphAuthorityFreshV1 === 'function'
+      ? this.resolveRegisteredContextGraphAuthorityFreshV1
+      : ContextGraphResolveMethods.prototype.resolveRegisteredContextGraphAuthorityFreshV1;
+    const flight = this.registeredAuthorityFlight;
+    if (flight === undefined) return await fresh.call(this, contextGraphId, options);
     try {
-      return await this.registeredAuthorityFlight.run(
+      return await flight.run(
         flightKey,
-        (sharedSignal) => this.resolveRegisteredContextGraphAuthorityFreshV1(
-          contextGraphId,
-          { ...options, signal: sharedSignal },
-        ),
+        (sharedSignal) => fresh.call(this, contextGraphId, { ...options, signal: sharedSignal }),
         options.signal,
       );
     } catch (error) {
@@ -1603,7 +1610,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       //    caller must not be served the pre-mutation answer, so it reads
       //    for itself, after the mutation.
       if (options.signal?.aborted === true || error instanceof SingleFlightInvalidatedError) {
-        return await this.resolveRegisteredContextGraphAuthorityFreshV1(contextGraphId, options);
+        return await fresh.call(this, contextGraphId, options);
       }
       throw error;
     }
@@ -1624,7 +1631,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * issues its own fresh read.
    */
   invalidateRegisteredAuthorityFlightV1(this: DKGAgent, contextGraphId: string): void {
-    this.registeredAuthorityFlight.invalidateAll(
+    this.registeredAuthorityFlight?.invalidateAll(
       `registered authority mutated for ${contextGraphId}`,
       { retryable: true },
     );
