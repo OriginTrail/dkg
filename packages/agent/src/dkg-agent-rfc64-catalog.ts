@@ -1327,6 +1327,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await this.rfc64PublicCatalogServiceV1
           ?.whenReceiverIdleForContextGraph(contextGraphId);
       },
+      warn: (message) => this.log.warn(createOperationContext('system'), message),
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
       parityFailed: async (contextGraphId, promised) => {
         const persistence = this.rfc64PersistenceV1;

@@ -169,6 +169,7 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
   function runtimeWith(
     whenReceiverIdleForContextGraph: () => Promise<void>,
     sleep?: (ms: number) => Promise<void>,
+    warn?: (message: string) => void,
   ) {
     return new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
       requestPeer: async () => Object.freeze({
@@ -177,6 +178,7 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
       }),
       whenReceiverIdleForContextGraph,
       ...(sleep ? { sleep } : {}),
+      ...(warn ? { warn } : {}),
       targetIdentity: (target) => target.id,
       parityFailed: async () => false,
     });
@@ -184,10 +186,12 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
 
   it('fails the pass closed when the drain outlives its budget, instead of parking forever', async () => {
     const budgets: number[] = [];
+    const warnings: string[] = [];
     // A drain that never settles. Without the budget this await never returns.
     const runtime = runtimeWith(
       () => new Promise<void>(() => {}),
       async (ms) => { budgets.push(ms); },
+      (message) => warnings.push(message),
     );
 
     const result = await runtime.request({
@@ -200,6 +204,10 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
     // Reported as failure, never as observed parity.
     expect(result.failed).toBeGreaterThan(0);
     expect(budgets).toEqual([RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1]);
+    // Never silent: a full replay without its cause is unreadable in the field.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('exceeded 120000ms');
+    expect(warnings[0]).toContain('public-cg');
   });
 
   it('takes the drain result when it settles inside the budget', async () => {

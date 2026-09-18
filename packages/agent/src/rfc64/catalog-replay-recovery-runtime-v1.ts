@@ -96,6 +96,11 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
    * exercise it deterministically instead of by elapsed time.
    */
   sleep?(ms: number): Promise<void>;
+  /**
+   * Report a spent idle-drain budget. Without it the pass fails closed
+   * silently and an operator sees the full replay without its cause.
+   */
+  warn?(message: string): void;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
 }
@@ -452,6 +457,12 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         if (!await this.#drainedWithinBudget(input.contextGraphId)) {
           // Budget spent without observing the drain: fail closed and release
           // the authority-refresh single flight this pass runs inside.
+          this.#ports.warn?.(
+            `RFC-64 catalog replay drain for ${input.contextGraphId} exceeded ` +
+            `${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms; failing the pass closed and ` +
+            'demanding a full replay. Sustained announcement load on this graph can keep the ' +
+            'receiver from going idle.',
+          );
           requiresFullReplay = true;
           failed += 1;
           break;
