@@ -126,4 +126,4 @@ export {
   type SemanticProjectionSink,
 } from './projection.js';
 
-export type { SemanticProgramBinding, SemanticProgramPolicy, SemanticProgramPin, SemanticDisclosurePolicy, SemanticQueryPin, SemanticQueryOutputSchema } from './program-policy.js';
+export type { SemanticSparqlReadGrant, SemanticProgramBinding, SemanticProgramPolicy, SemanticProgramPin, SemanticDisclosurePolicy, SemanticQueryPin, SemanticQueryOutputSchema } from './program-policy.js';

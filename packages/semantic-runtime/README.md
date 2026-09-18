@@ -89,7 +89,7 @@ explicitly selected WM, SWM, or VM view of the requested context graph, admits
 its S-expression in Wasm, and executes its logical agents there. The caller
 also explicitly selects the Execution KA's target layer. The narrow execution
 slice supports ordered `emit` forms and one typed tool request per delegate:
-`agent/investigate@1`, `dkg/query@1`, `dkg/asset-create@1`, `remote-execute@1`, or `llm/safe@1`. The
+`agent/investigate@1`, `dkg/query@1`, `dkg/sparql-read@1`, `dkg/asset-create@1`, `remote-execute@1`, or `llm/safe@1`. The
 host performs only the requested operation and returns its result to the
 waiting Wasm process.
 
@@ -258,7 +258,7 @@ still requires reconciliation/manual review and is never blindly replayed. Provi
 idempotency/status protocols, paid-call receipts, billing and seller transport belong to
 the adapter/application that supplies those guarantees.
 
-Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation. These query-only operations derive execution authority from the trusted local binding and installed query adapter, without requiring VM policy or tool-offer publication. Direct invocation retains its VM policy requirements.
+Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation. These operations derive execution authority from the trusted local binding and its explicitly approved installed adapters, without requiring VM policy or tool-offer publication. Direct invocation retains its VM policy requirements.
 
 
 `dkg/asset-create@1` is installed for tenant bindings with an explicit `assetCreation`
@@ -268,3 +268,9 @@ requires confirmed publication. Retries use the durable effect/checkpoint journa
 an unresolved publication is reconciled rather than blindly repeated. See
 [tenant Program operations](../../docs/architecture/tenant-program-bindings.md#creating-a-knowledge-asset-in-the-execution-layer)
 for configuration and a Kamstrup example. This is not arbitrary SPARQL UPDATE.
+
+`dkg/sparql-read@1` is available only with a tenant binding's explicit `sparqlRead`
+grant. It runs approved Program-source SPARQL through the existing scoped query
+engine, with a fixed CG, executor and memory layer, bounded output schema and
+limits. No query catalog entry is required. `SERVICE`, dataset overrides and
+SPARQL writes are rejected. See [raw reads and the Kamstrup example](../../docs/architecture/tenant-program-bindings.md#raw-sparql-reads-without-a-query-catalog).

@@ -73,6 +73,7 @@
     "undici": "^7.29.1"
   },
   "devDependencies": {
+    "@origintrail-official/dkg-query": "workspace:*",
     "@types/better-sqlite3": "^7",
     "@types/js-yaml": "^4.0.9",
     "@types/n3": "^1.26.1",

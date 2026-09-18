@@ -29,6 +29,7 @@ import {
 
 import { createAssetCreationAdapter } from './semantic-runtime-asset-adapter.js';
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
+import { assertSparqlReadOutput, createSparqlReadAdapter } from './semantic-runtime-sparql-adapter.js';
 import { createDkgQueryAdapter, findSavedQuery } from './semantic-runtime-query-adapter.js';
 import { readContextGraphQueryCatalogBindings } from './daemon/query-catalog-service.js';
 import { programBindingDigest, validateProgramBindings, validateProgramRoutes } from './semantic-runtime-program-bindings.js';
@@ -494,6 +495,11 @@ export async function invokeBoundSemanticProgram(
   for (const output of result.outputs ?? []) {
     let parsed: { kind?: unknown; queryIri?: unknown; result?: unknown };
     try { parsed = JSON.parse(output); } catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match its approved tools', 409); }
+    if (parsed?.kind === 'sparql-read' && binding.sparqlRead) {
+      try { assertSparqlReadOutput(binding.sparqlRead, contextGraphId, output); }
+      catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Raw query output differs from its tenant-approved scope or result contract', 409); }
+      continue;
+    }
     if (parsed?.kind === 'asset-created' && binding.assetCreation) {
       const backed = runtime.store.effectsForExecution(result.executionIri).some((effect) => {
         if (effect.adapterId !== 'dkg/asset-create' || effect.state !== 'succeeded') return false;
@@ -654,7 +660,8 @@ async function resolveInternal(
   }
   if (bound && (compilation.plan.adapterVersions.size !== program.requiredTools.length
     || [...compilation.plan.adapterVersions].some(([operation, version]) => version !== 1
-      || !(operation === 'dkg/query' && bound.binding.query || operation === 'dkg/asset-create' && bound.binding.assetCreation))
+      || !(operation === 'dkg/query' && bound.binding.query || operation === 'dkg/asset-create' && bound.binding.assetCreation
+        || operation === 'dkg/sparql-read' && bound.binding.sparqlRead))
     || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
   }
@@ -676,7 +683,9 @@ async function resolveInternal(
     for (const toolIri of program.requiredTools) {
       const definition = toolIri === bound.binding.assetCreation?.toolIri
         ? { operation: 'dkg/asset-create', version: '1', wit: 'origintrail:semantic-runtime/asset-create@0.1.0' }
-        : { operation: 'dkg/query', version: '1', wit: 'origintrail:semantic-runtime/query-catalog@0.1.0' };
+        : toolIri === bound.binding.sparqlRead?.toolIri
+          ? { operation: 'dkg/sparql-read', version: '1', wit: 'origintrail:semantic-runtime/sparql-read@0.1.0' }
+          : { operation: 'dkg/query', version: '1', wit: 'origintrail:semantic-runtime/query-catalog@0.1.0' };
       toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
       descriptors.push(toolIri, definition.operation, definition.version, definition.wit);
     }
@@ -793,6 +802,9 @@ async function resolveInternal(
   const programPin = config?.programPolicy?.programs.find((pin) => pin.programIri === programIri);
   registry.register(createDkgQueryAdapter(agent, contextGraphId, bound ? readPrincipal : config?.programPolicy ? originalCaller : callerAgentAddress,
     bound ? bound.binding.query ? [bound.binding.query] : [] : config?.programPolicy ? programPin?.queries ?? [] : undefined, bound?.assertAuthorized));
+  if (bound?.binding.sparqlRead) {
+    registry.register(createSparqlReadAdapter(agent, contextGraphId, operatorAddress, bound.binding.sparqlRead, bound.assertAuthorized));
+  }
   if (bound?.binding.assetCreation) {
     registry.register(createAssetCreationAdapter(agent, contextGraphId, executionLayer, operatorAddress, assetStore, bound.assertAuthorized));
   }
@@ -1083,7 +1095,7 @@ async function invokeResolved(
       maxOperations: config?.maxOperationsPerExecution ?? 10_000,
       maxToolCalls: resolved.plan.resourceBounds.hostCommands,
       maxModelTokens: resolved.plan.effectUpperBound.includes('model-invocation') ? 512 : 0,
-      maxDkgQueries: resolved.plan.effectUpperBound.includes('read') ? 1 : 0,
+      maxDkgQueries: resolved.plan.effectUpperBound.includes('read') ? resolved.plan.resourceBounds.hostCommands : 0,
     },
     expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1_000,
     revoked: false,
@@ -1142,6 +1154,7 @@ async function invokeResolved(
   const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
     if (bound && !(call.kind === 'asset-create' && bound.binding.assetCreation)
+      && !(call.kind === 'sparql-read' && bound.binding.sparqlRead)
       && (call.kind !== 'query-catalog' || call.queryId !== bound.binding.query?.selector || call.parameters.length !== 0)) {
       throw new SemanticProgramError('PROGRAM_BINDING_QUERY_FORBIDDEN', 'Only the tenant-approved tools and fixed query arguments can be invoked', 403);
     }
@@ -1162,6 +1175,8 @@ async function invokeResolved(
           selector: call.queryId,
           parameters: Object.fromEntries(call.parameters.map(({ name, value }) => [name, value])),
         },
+      } : call.kind === 'sparql-read' ? {
+        operation: 'dkg/sparql-read', version: '1', normalizedInput: { sparql: call.sparql },
       } : call.kind === 'asset-create' ? {
         operation: 'dkg/asset-create', version: '1', normalizedInput: JSON.parse(call.contentJson) as unknown,
       } : {
@@ -1244,6 +1259,7 @@ async function invokeResolved(
       childExecutions.push(...safeResult.childExecutions);
       return { kind: 'safe-llm', output: safeResult.output };
     }
+    if (call.kind === 'sparql-read') return { kind: 'sparql-read', json: outcome.output };
     if (call.kind === 'asset-create') return { kind: 'asset-create', json: outcome.output };
     if (call.kind === 'query-catalog') return { kind: 'query-catalog', json: outcome.output };
     let remote: { executionIri?: unknown; executionUal?: unknown };

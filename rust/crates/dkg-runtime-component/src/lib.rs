@@ -23,7 +23,7 @@ use bindings::exports::origintrail::semantic_runtime::executor::{
 };
 use bindings::origintrail::semantic_runtime::capability::ExecutionCapability;
 use bindings::origintrail::semantic_runtime::{
-    asset_create, investigator, query_catalog, remote_execute, safe_llm,
+    asset_create, investigator, query_catalog, remote_execute, safe_llm, sparql_read,
 };
 use dkg_runtime_codec::{
     AbiResponse, PlanApplyInput, decode_response, encode_admit_request, encode_apply_plan_request,
@@ -348,6 +348,18 @@ async fn dispatch_tool(
             )
             .await
             .map(|result| result.json)
+            .map_err(|error| tool_diagnostic(error.code, error.message, error.retryable))
+        }
+        "dkg/sparql-read" => {
+            let sparql = only_text_argument(effect.arguments, "INVALID_SPARQL_ARGUMENT")?;
+            sparql_read::query(
+                capability,
+                sparql_read::Request {
+                    effect_id: effect.effect_id,
+                    sparql,
+                },
+            )
+            .await
             .map_err(|error| tool_diagnostic(error.code, error.message, error.retryable))
         }
         "dkg/asset-create" => {

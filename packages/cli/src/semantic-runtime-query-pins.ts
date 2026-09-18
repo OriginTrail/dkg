@@ -74,7 +74,7 @@ export function assertSemanticQueryDefinition(
 }
 
 /** Validate the actual query result before it can become a Program output or leave the node. */
-export function assertSemanticQueryOutput(pin: SemanticQueryPin, result: unknown): void {
+export function assertSemanticQueryOutput(pin: Pick<SemanticQueryPin, 'outputSchema' | 'outputSchemaSha256'>, result: unknown): void {
   if (queryOutputSchemaSha256(pin.outputSchema) !== pin.outputSchemaSha256) {
     throw new Error('SEMANTIC_QUERY_SCHEMA_PIN_MISMATCH');
   }

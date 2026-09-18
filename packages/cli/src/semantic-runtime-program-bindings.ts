@@ -4,6 +4,7 @@ import { canonicalizeJson, sparqlIri, validateContextGraphId, type CanonicalJson
 import type { SemanticProgramBinding, SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { ethers } from 'ethers';
 
+import { validateSparqlReadGrant } from './semantic-runtime-sparql-adapter.js';
 import { validateSemanticQueryPins } from './semantic-runtime-query-pins.js';
 
 /** Validate trusted local configuration at startup, before any grant can be used. */
@@ -12,7 +13,7 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
   const seen = new Set<string>();
   for (const binding of value) {
     if (!record(binding)
-      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'assetCreation', 'executionLayer'])
+      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'executionLayer'])
       || typeof binding.enabled !== 'boolean'
       || !address(binding.executorAgentAddress)
       || !Array.isArray(binding.allowedCallerAgentAddresses)
@@ -40,7 +41,9 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
         || !/^[a-z][a-z0-9+.-]*:/i.test(binding.assetCreation.toolIri)) throw new Error('INVALID_ASSET_CREATION_GRANT');
       sparqlIri(binding.assetCreation.toolIri);
     }
-    if (!binding.query && !binding.assetCreation) throw new Error('EMPTY_PROGRAM_BINDING');
+    if (binding.sparqlRead !== undefined) validateSparqlReadGrant(binding.sparqlRead);
+    if (binding.sparqlRead && binding.assetCreation && (binding.sparqlRead as { toolIri: string }).toolIri === binding.assetCreation.toolIri) throw new Error('DUPLICATE_PROGRAM_TOOL');
+    if (!binding.query && !binding.assetCreation && !binding.sparqlRead) throw new Error('EMPTY_PROGRAM_BINDING');
     if (binding.executionLayer !== undefined && !['wm', 'swm', 'vm'].includes(String(binding.executionLayer))) throw new Error('INVALID_EXECUTION_LAYER');
     const key = `${binding.contextGraphId}\0${binding.operationIri}`;
     if (seen.has(key)) throw new Error('DUPLICATE_PROGRAM_BINDING');

@@ -198,6 +198,17 @@ impl AdapterRegistry {
                 false,
             ),
             adapter(
+                "dkg/sparql-read",
+                1,
+                "dkg.sparql.read",
+                EffectClass::Read,
+                IdempotencyClass::ReadOnly,
+                1,
+                1,
+                None,
+                false,
+            ),
+            adapter(
                 "dkg/query",
                 1,
                 "dkg.query",
@@ -2028,6 +2039,24 @@ mod tests {
             compile(&invalid).unwrap_err()[0].code,
             DiagnosticCode::SchemaMismatch,
         );
+    }
+
+    #[test]
+    fn raw_sparql_requires_explicit_grant_and_one_argument() {
+        let valid = envelope(
+            r#"(delegate reader (grant dkg.sparql.read) (call dkg/sparql-read@1 "ASK {}"))"#,
+        );
+        let plan = compile(&valid).unwrap();
+        assert!(plan.required_capabilities.contains("dkg.sparql.read"));
+        assert!(plan.effect_upper_bound.contains(&EffectClass::Read));
+        admit_canonical_plan(&plan.canonical_plan_cbor, &AdapterRegistry::v1()).unwrap();
+        for body in [
+            r#"(delegate reader (call dkg/sparql-read@1 "ASK {}"))"#,
+            r#"(delegate reader (grant dkg.query) (call dkg/sparql-read@1 "ASK {}"))"#,
+            r#"(delegate reader (grant dkg.sparql.read) (call dkg/sparql-read@1 "ASK {}" "vm"))"#,
+        ] {
+            assert!(compile(&envelope(body)).is_err());
+        }
     }
 
     #[test]

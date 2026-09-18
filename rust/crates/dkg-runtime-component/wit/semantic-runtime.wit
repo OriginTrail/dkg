@@ -54,6 +54,16 @@ interface query-catalog {
   ) -> result<query-result, tool-error>;
 }
 
+interface sparql-read {
+  use capability.{execution-capability};
+  record tool-error { code: string, message: string, retryable: bool }
+  record request { effect-id: u64, sparql: string }
+  query: async func(
+    capability: borrow<execution-capability>,
+    request: request,
+  ) -> result<string, tool-error>;
+}
+
 interface asset-create {
   use capability.{execution-capability};
   record tool-error { code: string, message: string, retryable: bool }
@@ -211,6 +221,7 @@ world semantic-runtime {
   import investigator;
   import query-catalog;
   import asset-create;
+  import sparql-read;
   import safe-llm;
   import remote-execute;
   export executor;

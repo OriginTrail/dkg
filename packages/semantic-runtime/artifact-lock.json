@@ -6,7 +6,7 @@
   "wasiVersion": "0.3.0",
   "targetCarrier": "wasm32-wasip2",
   "witPackage": "origintrail:semantic-runtime@0.1.0",
-  "integritySha256": "01ec24a50e41c151e2e5aae4ac7a3f3908b764cfbe43a2fa00d2ef1b3ae30643",
-  "componentSha256": "175b23d740a880a0ea02538b014927af221c4c92d9f78a8b7924903ac99cd892",
-  "witSha256": "354302786c99c99622a34c77070ca9e864f63ad93d39d839365936dbf591002f"
+  "integritySha256": "22b1d6fed29dfdc323da7a3c225ea9ca7e4e82c683bf4a2229845d25b869b7b2",
+  "componentSha256": "c405cc10870869eb50fa976cf8d748a830ca4972f9236ae37c6a72c0ce55590a",
+  "witSha256": "6088e48817533febc37f00d738002417769ce904bef319deabe6a1df8d538155"
 }

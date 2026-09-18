@@ -608,6 +608,7 @@ fn supports_plan_effects(plan: &AdmittedPlan) -> bool {
                 "agent.invoke.investigator"
                     | "llm.invoke.safe"
                     | "dkg.query"
+                    | "dkg.sparql.read"
                     | "program.remote-execute"
                     | "dkg.asset.create"
             )
@@ -628,6 +629,7 @@ fn supports_plan_effects(plan: &AdmittedPlan) -> bool {
                     "agent/investigate"
                         | "llm/safe"
                         | "dkg/query"
+                        | "dkg/sparql-read"
                         | "remote-execute"
                         | "dkg/asset-create"
                 )
@@ -678,7 +680,8 @@ fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntim
         let index = u32::try_from(index).map_err(|_| "PLAN_MATERIALIZATION_AGENT_COUNT")?;
         let model_call =
             has_call(&instructions, "agent/investigate") || has_call(&instructions, "llm/safe");
-        let dkg_query = has_call(&instructions, "dkg/query");
+        let dkg_query =
+            has_call(&instructions, "dkg/query") || has_call(&instructions, "dkg/sparql-read");
         let remote_execute = has_call(&instructions, "remote-execute")
             || has_call(&instructions, "dkg/asset-create");
         let (process_id, child) = materialize_agent(
@@ -795,6 +798,7 @@ fn collect_plan_agents(
                     "agent.invoke.investigator"
                         | "llm.invoke.safe"
                         | "dkg.query"
+                        | "dkg.sparql.read"
                         | "program.remote-execute"
                         | "dkg.asset.create"
                 )
@@ -832,6 +836,7 @@ fn collect_instructions(
                     "agent/investigate"
                         | "llm/safe"
                         | "dkg/query"
+                        | "dkg/sparql-read"
                         | "remote-execute"
                         | "dkg/asset-create"
                 ) =>
@@ -851,7 +856,7 @@ fn collect_instructions(
 fn call_budget(call: &RegisteredCall) -> Option<(BudgetKind, u64)> {
     match (call.operation.as_str(), call.version) {
         ("agent/investigate" | "llm/safe", 1) => Some((BudgetKind::ModelTokens, 512)),
-        ("dkg/query", 1) => Some((BudgetKind::DkgQueries, 1)),
+        ("dkg/query" | "dkg/sparql-read", 1) => Some((BudgetKind::DkgQueries, 1)),
         ("remote-execute" | "dkg/asset-create", 1) => Some((BudgetKind::ToolCalls, 1)),
         _ => None,
     }
