@@ -207,17 +207,6 @@ contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializ
         return rewardSources[rewardAccountId];
     }
 
-    /// @notice Return and persist the current net node reward for `epoch`.
-    ///         Retained as an observable/test surface; position claims use the
-    ///         receipt-aware entry point above.
-    function settleNodeEpochReward(
-        uint256 epoch,
-        uint72 identityId,
-        uint256 nodeScore18
-    ) external onlyStakingV10 returns (uint256 netNodeRewards) {
-        return _settleNodeEpochReward(epoch, identityId, nodeScore18);
-    }
-
     function _liveRewardAccount(uint256 tokenId) internal returns (uint256 rewardAccountId) {
         rewardAccountId = rewardAccountOfToken[tokenId];
         if (rewardAccountId == 0) {
