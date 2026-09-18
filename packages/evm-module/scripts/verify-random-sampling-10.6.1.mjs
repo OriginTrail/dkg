@@ -101,6 +101,74 @@ async function rpcCall(operation) {
   throw new Error('unreachable');
 }
 
+/**
+ * Strip solc's trailing CBOR metadata blob, whose last two bytes carry its own
+ * length. The blob embeds the source/metadata hash, so it differs between two
+ * byte-identical builds compiled from different absolute paths; everything
+ * before it is the executable runtime code we actually want to compare.
+ */
+function stripMetadata(bytecode) {
+  const body = (bytecode.startsWith('0x') ? bytecode.slice(2) : bytecode).toLowerCase();
+  if (body.length < 4) return body;
+  const metadataLength = Number.parseInt(body.slice(-4), 16);
+  if (!Number.isInteger(metadataLength)) return body;
+  const tailNibbles = (metadataLength + 2) * 2;
+  if (tailNibbles >= body.length) return body;
+  return body.slice(0, body.length - tailNibbles);
+}
+
+function compareDeployedBytecode(liveCode) {
+  const artifactPath = path.join(
+    scriptDir,
+    '..',
+    'artifacts',
+    'contracts',
+    'RandomSampling.sol',
+    'RandomSampling.json',
+  );
+  if (!fs.existsSync(artifactPath)) {
+    throw new Error(
+      `${networkName}: ${artifactPath} is missing; run ` +
+        '`pnpm exec hardhat compile --config hardhat.node.config.ts` from the reviewed ' +
+        'checkout before the postdeploy check',
+    );
+  }
+  const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
+  const deployed = artifact.deployedBytecode;
+  const expected = typeof deployed === 'string' ? deployed : deployed?.object;
+  if (typeof expected !== 'string' || expected.length === 0) {
+    throw new Error(`${networkName}: ${artifactPath} declares no deployedBytecode`);
+  }
+  // A literal comparison is only valid while the runtime code is constructor-
+  // independent. RandomSampling holds `hub` in storage, not as an immutable, and
+  // links no libraries; fail loudly rather than silently if that ever changes.
+  const immutableReferences =
+    (typeof deployed === 'object' ? deployed?.immutableReferences : undefined) ??
+    artifact.immutableReferences ??
+    {};
+  const linkReferences =
+    (typeof deployed === 'object' ? deployed?.linkReferences : undefined) ??
+    artifact.deployedLinkReferences ??
+    {};
+  if (Object.keys(immutableReferences).length !== 0 || Object.keys(linkReferences).length !== 0) {
+    throw new Error(
+      `${networkName}: RandomSampling now has immutables or library links, so its runtime code ` +
+        'is deploy-specific; mask those ranges before comparing bytecode',
+    );
+  }
+  const liveRuntime = stripMetadata(liveCode);
+  const expectedRuntime = stripMetadata(expected);
+  if (liveRuntime !== expectedRuntime) {
+    throw new Error(
+      `${networkName}: deployed runtime bytecode does not match the local ` +
+        'artifacts/contracts/RandomSampling.sol/RandomSampling.json build ' +
+        `(live ${liveRuntime.length / 2} bytes, artifact ${expectedRuntime.length / 2} bytes, ` +
+        'metadata tail excluded). The address was deployed from a different checkout or with ' +
+        'different compiler settings than the one being verified.',
+    );
+  }
+}
+
 const hubAddress = getAddress(hubEntry.evmAddress);
 const randomSamplingAddress = getAddress(randomSamplingEntry.evmAddress);
 const hub = new Contract(
@@ -151,6 +219,16 @@ if (onChainVersion !== randomSamplingEntry.version) {
     `${networkName}: on-chain version ${onChainVersion} does not match manifest ${randomSamplingEntry.version}`,
   );
 }
+// `version()` only proves the address SELF-REPORTS 10.6.1; it does not prove the
+// address holds the build that was reviewed. The realistic failure is a deploy
+// from the wrong checkout or with different compiler settings, which still
+// returns 10.6.1. Compare the live runtime code against the local artifact
+// instead. Predeploy skips this deliberately: the live contract is still 10.6.0.
+let bytecodeMatchesArtifact = false;
+if (mode === 'postdeploy') {
+  compareDeployedBytecode(code);
+  bytecodeMatchesArtifact = true;
+}
 if (!status) {
   throw new Error(`${networkName}: RandomSampling is not active`);
 }
@@ -179,6 +257,7 @@ console.log(
       hub: hubAddress,
       randomSampling: randomSamplingAddress,
       version: onChainVersion,
+      bytecodeMatchesArtifact,
       status,
       identityStorage: getAddress(identityStorage),
       randomSamplingStorage: getAddress(randomSamplingStorage),

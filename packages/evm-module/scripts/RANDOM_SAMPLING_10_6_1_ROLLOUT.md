@@ -68,7 +68,11 @@ pnpm exec hardhat deploy --network "$NETWORK" \
 The deploy helper rewrites the selected manifest with the new address,
 `version: "10.6.1"`, and `deployed: true`. Verify that metadata against live
 bytecode and confirm the Hub pointer, active status, version, and initialized
-storage references:
+storage references. The postdeploy check compares the live runtime code against
+`artifacts/contracts/RandomSampling.sol/RandomSampling.json` with the trailing
+solc metadata blob stripped, so run it from the same checkout that was compiled
+above: an address deployed from a different checkout or with different compiler
+settings still reports `10.6.1` from `version()` and is caught only here.
 
 ```bash
 node scripts/verify-random-sampling-10.6.1.mjs postdeploy "$NETWORK"
