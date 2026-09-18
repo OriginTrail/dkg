@@ -307,13 +307,30 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       readonly signal?: AbortSignal;
     }>,
   ): Promise<void> {
-    for (const origin of params.origins) {
+    for (const [index, origin] of params.origins.entries()) {
       // The caller awaits this inside `runBoundedOperation`. Without the signal a
       // large stranded inventory kept doing store reads and durable writes long
       // after the budget expired or the node began shutting down, and the
       // caller's post-await abort check could never fire because this promise
       // never rejects.
-      if (params.signal?.aborted === true) return;
+      //
+      // Named, never silent -- the same shape the in-carry abort uses. The
+      // acceptance gate does not re-fire in this process and every failure in
+      // here is log-only, so an origin that was never attempted is stranded
+      // until the next restart while the responder withholds its pre-rotation
+      // head. Returning quietly (including on a signal already aborted on entry,
+      // which skips every origin) left an operator nothing to go on.
+      if (params.signal?.aborted === true) {
+        for (const skipped of params.origins.slice(index)) {
+          this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
+            params.contextGraphId,
+            'the re-projection was aborted before this author was attempted; its '
+            + 'rows stay addressed by the superseded generation until the next restart',
+            skipped.authorAddress,
+          ));
+        }
+        return;
+      }
       try {
         await this.carryRfc64AuthorInventoryIntoAcceptedGenerationV1(lane, {
           contextGraphId: params.contextGraphId,
