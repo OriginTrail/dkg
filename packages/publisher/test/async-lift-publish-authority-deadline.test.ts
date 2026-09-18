@@ -82,14 +82,14 @@ describe('PublishAuthorityCache read deadline', () => {
       resolveContextGraphId: async () => 453n,
       resolveAuthority: async () => ({
         kind: 'resolved',
-        authorizedWalletIds: [],
+        authorizedWalletIds: [WALLET],
         candidateWalletIds: [WALLET],
       }),
       now: () => 1_000,
       readTimeoutMs: 1_000,
     });
 
-    expect(await cache.verdictFor('curated', WALLET)).toMatchObject({ kind: 'unpublishable' });
+    expect(await cache.verdictFor('curated', WALLET)).toEqual({ kind: 'eligible' });
   });
 
   it('defaults to a bounded ceiling rather than no ceiling', () => {

@@ -79,6 +79,8 @@ interface ResolvedAuthority {
 export class PublishAuthorityCache {
   private readonly cached = new Map<string, { value: ResolvedAuthority; expiresAt: number }>();
   private readonly inFlight = new Map<string, Promise<ResolvedAuthority>>();
+  /** When this graph FIRST read back an empty authorized set — see {@link emptyAuthorityIsConfirmed}. */
+  private readonly emptyAuthoritySeenAt = new Map<string, number>();
   private readonly ttlMs: number;
   private readonly readTimeoutMs: number;
 
@@ -103,6 +105,8 @@ export class PublishAuthorityCache {
       case 'unknown':
         return { kind: 'unknown' };
       case 'resolved': {
+        // An empty set reaching this point has been CONFIRMED by a second read a TTL apart
+        // (see {@link emptyAuthorityIsConfirmed}); an unconfirmed one arrives as 'unknown'.
         if (authority.authorizedWalletIds.length === 0) {
           return {
             kind: 'unpublishable',
@@ -146,14 +150,53 @@ export class PublishAuthorityCache {
    *
    * 'unknown' is deliberately NOT cached. It is the answer produced by a failed read, and one
    * transient failure must not pause claiming for a whole TTL — the next poll asks again.
+   *
+   * An EMPTY authorized set is authoritative in shape only, so it is downgraded to 'unknown'
+   * until a second read confirms it — see {@link emptyAuthorityIsConfirmed}. The downgraded
+   * answer IS cached, for exactly one TTL: that is what schedules the confirming read a full TTL
+   * later, and it keeps the re-read off every poll in between.
    */
   private memoize(contextGraphName: string, value: ResolvedAuthority): ResolvedAuthority {
     if (value.authority.kind === 'unknown') return value;
-    this.cached.set(contextGraphName, {
-      value,
-      expiresAt: this.dependencies.now() + this.ttlMs,
-    });
+    const now = this.dependencies.now();
+    if (
+      value.authority.kind === 'resolved'
+      && value.authority.authorizedWalletIds.length === 0
+      && !this.emptyAuthorityIsConfirmed(contextGraphName, now)
+    ) {
+      const deferred: ResolvedAuthority = { ...value, authority: { kind: 'unknown' } };
+      this.cached.set(contextGraphName, { value: deferred, expiresAt: now + this.ttlMs });
+      return deferred;
+    }
+    this.emptyAuthoritySeenAt.delete(contextGraphName);
+    this.cached.set(contextGraphName, { value, expiresAt: now + this.ttlMs });
     return value;
+  }
+
+  /**
+   * GH#2648 — record that this graph just read back an EMPTY authorized set, and say whether a
+   * previous read already did, at least one TTL ago.
+   *
+   * An empty set is NOT self-evidently a permanent refusal. `ContextGraphs.isAuthorizedPublisher`
+   * RETURNS `false` rather than reverting whenever it cannot answer affirmatively: for
+   * `contextGraphId > getLatestContextGraphId()`, for an inactive graph, and on every PCA
+   * resolution failure (its own fail-closed read path). A replica a few blocks behind head right
+   * after `createContextGraph` therefore hands back a perfectly successful read with an empty set
+   * — indistinguishable, here, from a curated graph that admits none of this node's wallets.
+   * Only a THROWN read is treated as unreadable upstream, so nothing else separates the two.
+   *
+   * Condemning on that first read is not a routing mistake, it is job loss: the verdict is
+   * `unpublishable`, which fails the job `authority_forbidden` with `autoRetry:false`. Requiring a
+   * second empty read a TTL later gives a lagging replica time to catch up, and costs a graph that
+   * really is refused nothing but one extra poll before its terminal failure.
+   */
+  private emptyAuthorityIsConfirmed(contextGraphName: string, now: number): boolean {
+    const seenAt = this.emptyAuthoritySeenAt.get(contextGraphName);
+    if (seenAt === undefined) {
+      this.emptyAuthoritySeenAt.set(contextGraphName, now);
+      return false;
+    }
+    return now - seenAt >= this.ttlMs;
   }
 
   /**

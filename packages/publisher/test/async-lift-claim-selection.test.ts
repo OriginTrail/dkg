@@ -197,11 +197,15 @@ describe('async-lift claim selection respects context-graph publish authority (G
 
   function publisherWithAuthority(
     resolver: (contextGraphId: bigint) => Promise<AsyncLiftPublishAuthority>,
+    options: { now?: () => number; publishAuthorityCacheTtlMs?: number } = {},
   ): TripleStoreAsyncLiftPublisher {
     return new TripleStoreAsyncLiftPublisher(store, {
-      now: () => 1_000,
+      now: options.now ?? (() => 1_000),
       claimTokenGenerator: () => 'claim-token',
       publishAuthorityResolver: resolver,
+      ...(options.publishAuthorityCacheTtlMs !== undefined
+        ? { publishAuthorityCacheTtlMs: options.publishAuthorityCacheTtlMs }
+        : {}),
     });
   }
 
@@ -328,15 +332,22 @@ describe('async-lift claim selection respects context-graph publish authority (G
   it('fails a job NO configured wallet can publish terminally instead of leaving it queued', async () => {
     // The starvation half. Skipping alone would rebuild the original bug quietly: the job would
     // sit in `accepted` forever with nothing to explain it.
+    const clock = { now: 1_000 };
     const publisher = publisherWithAuthority(async () => ({
       kind: 'resolved',
       authorizedWalletIds: [],
       candidateWalletIds: [AUTHORIZED, REFUSED],
-    }));
+    }), { now: () => clock.now, publishAuthorityCacheTtlMs: 1_000 });
     const jobId = await seedLegacyRawLiftTestJob(store, curatedRequest('share-op-1'), {
       idGenerator: () => 'job-unpublishable',
       now: () => 1,
     });
+
+    // The FIRST empty read only HOLDS the job — the contract returns an empty set for a graph a
+    // lagging replica has not caught up to yet, and condemning on that would be job loss.
+    expect(await publisher.processNext(REFUSED)).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+    clock.now += 1_000;
 
     const processed = await publisher.processNext(REFUSED);
 
@@ -370,15 +381,19 @@ describe('async-lift claim selection respects context-graph publish authority (G
   });
 
   it('fails an unpublishable KNOWLEDGE-ASSET VM publish job terminally from claimed', async () => {
+    const clock = { now: 1_000 };
     const publisher = publisherWithAuthority(async () => ({
       kind: 'resolved',
       authorizedWalletIds: [],
       candidateWalletIds: [AUTHORIZED, REFUSED],
-    }));
+    }), { now: () => clock.now, publishAuthorityCacheTtlMs: 1_000 });
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(
       kaVmPublishRequest({ contextGraphId: '453' }),
     );
 
+    // Terminal only once a second read a TTL later confirms the empty set.
+    expect(await publisher.processNext(REFUSED)).toBeNull();
+    clock.now += 1_000;
     await publisher.processNext(REFUSED);
 
     const job = await publisher.getStatus(jobId);
