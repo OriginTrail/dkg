@@ -80,7 +80,7 @@ unexpected component import/export, incompatible ABI, failed Worker handshake,
 or restore mismatch fails closed. Carrier WASI imports receive deny-only stubs:
 the component receives no filesystem, network, environment, stdio, random, or
 clock authority. Its repository-owned imports are an opaque, host-created
-execution capability and four explicit typed tool interfaces.
+execution capability and five explicit typed tool interfaces.
 
 Programs are stored in the DKG as `sr:Program` resources with `sr:language`,
 `sr:version`, and `sr:source` triples. The authenticated
@@ -89,7 +89,7 @@ explicitly selected WM, SWM, or VM view of the requested context graph, admits
 its S-expression in Wasm, and executes its logical agents there. The caller
 also explicitly selects the Execution KA's target layer. The narrow execution
 slice supports ordered `emit` forms and one typed tool request per delegate:
-`agent/investigate@1`, `dkg/query@1`, `remote-execute@1`, or `llm/safe@1`. The
+`agent/investigate@1`, `dkg/query@1`, `dkg/asset-create@1`, `remote-execute@1`, or `llm/safe@1`. The
 host performs only the requested operation and returns its result to the
 waiting Wasm process.
 
@@ -259,3 +259,12 @@ idempotency/status protocols, paid-call receipts, billing and seller transport b
 the adapter/application that supplies those guarantees.
 
 Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation. These query-only operations derive execution authority from the trusted local binding and installed query adapter, without requiring VM policy or tool-offer publication. Direct invocation retains its VM policy requirements.
+
+
+`dkg/asset-create@1` is installed for tenant bindings with an explicit `assetCreation`
+grant. It accepts a JSON string containing bounded RDF triples; the host chooses
+CG, execution layer, executor identity and a deterministic asset name. VM creation
+requires confirmed publication. Retries use the durable effect/checkpoint journal;
+an unresolved publication is reconciled rather than blindly repeated. See
+[tenant Program operations](../../docs/architecture/tenant-program-bindings.md#creating-a-knowledge-asset-in-the-execution-layer)
+for configuration and a Kamstrup example. This is not arbitrary SPARQL UPDATE.

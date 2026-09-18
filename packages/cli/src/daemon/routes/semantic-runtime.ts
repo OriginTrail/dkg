@@ -92,7 +92,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       || Object.keys(body).some((key) => !['contextGraphId', 'programIri', 'invocationId', 'programLayer', 'executionLayer'].includes(key))
       || (route && (body.programLayer !== undefined || body.executionLayer !== undefined))
       || (body.programLayer !== undefined && body.programLayer !== binding?.program.programLayer)
-      || (body.executionLayer !== undefined && body.executionLayer !== 'wm')) {
+      || (body.executionLayer !== undefined && body.executionLayer !== (binding?.executionLayer ?? 'wm'))) {
       return jsonResponse(res, 400, { error: 'Provide contextGraphId, programIri and invocationId; the tenant fixes the Program and execution layers' });
     }
     try {

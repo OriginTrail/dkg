@@ -321,6 +321,19 @@ function componentImports(): object {
           },
         };
       }
+      if (name === 'origintrail:semantic-runtime/asset-create' || name === 'origintrail:semantic-runtime/asset-create@0.1.0') {
+        return {
+          create: async (resource: ExecutionCapability, request: { effectId: bigint; contentJson: string }): Promise<string> => {
+            assertImportedTool(resource, 'dkg/asset-create', 'origintrail:semantic-runtime/asset-create@0.1.0');
+            if (typeof request?.effectId !== 'bigint' || request.effectId <= 0n || typeof request.contentJson !== 'string') {
+              throw componentResultFailure('INVALID_ASSET_ARGUMENT');
+            }
+            const result = await invokeHostTool({ kind: 'asset-create', effectId: request.effectId, contentJson: request.contentJson });
+            if (result.kind !== 'asset-create') throw componentResultFailure('COMPONENT_TOOL_RESULT_MISMATCH');
+            return result.json;
+          },
+        };
+      }
       if (
         name === 'origintrail:semantic-runtime/safe-llm'
         || name === 'origintrail:semantic-runtime/safe-llm@0.1.0'

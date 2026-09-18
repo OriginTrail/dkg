@@ -75,6 +75,12 @@ describe('signed bound operation inbox', () => {
     expect(f.target.query).not.toHaveBeenCalled();
   });
 
+  it.each(['swm', 'vm'] as const)('returns the tenant-selected %s layer and its persistence evidence', async (layer) => {
+    const value = { ...result, executionLayer: layer, ...(layer === 'vm' ? { executionUal: 'did:dkg:asset:execution' } : {}) };
+    vi.mocked(invokeBoundSemanticProgram).mockResolvedValue(value);
+    await expect(fixture().invoke()).resolves.toEqual(value);
+  });
+
   it.each([
     { contextGraphId: 'dmaast-jpb' }, { operationIri: 'urn:dmaast:operation:other' },
     { invocationId: '223e4567-e89b-42d3-a456-426614174099' },

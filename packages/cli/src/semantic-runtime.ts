@@ -27,6 +27,7 @@ import {
   type ExecutionCapabilityDescriptor,
 } from '@origintrail-official/dkg-semantic-runtime';
 
+import { createAssetCreationAdapter } from './semantic-runtime-asset-adapter.js';
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
 import { createDkgQueryAdapter, findSavedQuery } from './semantic-runtime-query-adapter.js';
 import { readContextGraphQueryCatalogBindings } from './daemon/query-catalog-service.js';
@@ -475,33 +476,38 @@ export async function invokeBoundSemanticProgram(
   await assertAuthorized();
   const result = await invokeStoredSemanticProgram(
     agent, runtime, contextGraphId, binding.program.programIri, invocationId,
-    binding.program.programLayer, 'wm', config, undefined,
+    binding.program.programLayer, binding.executionLayer ?? 'wm', config, undefined,
     authenticatedCaller, binding.executorAgentAddress, undefined, undefined,
     { binding, digest, assertAuthorized },
   );
   // Replays and fresh executions both pass the current grant and query contract.
   await assertAuthorized();
-  const rows = await readContextGraphQueryCatalogBindings(agent, contextGraphId, {
-    callerAgentAddress: binding.executorAgentAddress, source: 'semantic-runtime-query-catalog',
-  });
-  const item = findSavedQuery(decodeQueryCatalogBindings(rows, { contextGraphId }), binding.query.selector);
-  if (!item) throw new SemanticProgramError('PROGRAM_QUERY_UNAVAILABLE', 'The approved query is unavailable', 409);
-  try {
-    assertSemanticQueryDefinition([binding.query], binding.query.selector, item);
-  } catch {
-    throw new SemanticProgramError('PROGRAM_QUERY_CHANGED', 'The query differs from the tenant approval', 409);
+  if (binding.query) {
+    const rows = await readContextGraphQueryCatalogBindings(agent, contextGraphId, {
+      callerAgentAddress: binding.executorAgentAddress, source: 'semantic-runtime-query-catalog',
+    });
+    const item = findSavedQuery(decodeQueryCatalogBindings(rows, { contextGraphId }), binding.query.selector);
+    if (!item) throw new SemanticProgramError('PROGRAM_QUERY_UNAVAILABLE', 'The approved query is unavailable', 409);
+    try { assertSemanticQueryDefinition([binding.query], binding.query.selector, item); }
+    catch { throw new SemanticProgramError('PROGRAM_QUERY_CHANGED', 'The query differs from the tenant approval', 409); }
   }
   for (const output of result.outputs ?? []) {
-    let parsed: { queryIri?: unknown; result?: unknown };
-    try { parsed = JSON.parse(output); } catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409); }
-    if (!parsed || parsed.queryIri !== binding.query.queryIri || Object.keys(parsed).some((key) => !['queryIri', 'result'].includes(key))) {
+    let parsed: { kind?: unknown; queryIri?: unknown; result?: unknown };
+    try { parsed = JSON.parse(output); } catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match its approved tools', 409); }
+    if (parsed?.kind === 'asset-created' && binding.assetCreation) {
+      const backed = runtime.store.effectsForExecution(result.executionIri).some((effect) => {
+        if (effect.adapterId !== 'dkg/asset-create' || effect.state !== 'succeeded') return false;
+        const checkpoint = runtime.store.adapterCheckpoint(effect.effectId);
+        return checkpoint && JSON.parse(new TextDecoder().decode(checkpoint.payload)).output === output;
+      });
+      if (!backed) throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Asset receipt lacks a completed creation effect', 409);
+      continue;
+    }
+    if (!binding.query || !parsed || parsed.queryIri !== binding.query.queryIri || Object.keys(parsed).some((key) => !['queryIri', 'result'].includes(key))) {
       throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409);
     }
-    try {
-      assertSemanticQueryOutput(binding.query, parsed.result);
-    } catch {
-      throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409);
-    }
+    try { assertSemanticQueryOutput(binding.query, parsed.result); }
+    catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409); }
   }
   await assertAuthorized();
   return result;
@@ -598,6 +604,7 @@ async function resolveInternal(
   childInvoker?: SemanticProgramChildInvoker,
   assertAuthorized?: () => Promise<void>,
   bound?: BoundProgramInvocation,
+  assetStore?: SemanticRuntimeStore,
 ): Promise<InternalResolution> {
   await bound?.assertAuthorized();
   const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
@@ -645,11 +652,11 @@ async function resolveInternal(
       422,
     );
   }
-  if (bound && (compilation.plan.adapterVersions.size !== 1
-    || compilation.plan.adapterVersions.get('dkg/query') !== 1
-    || compilation.plan.effectUpperBound.some((effect) => effect !== 'read')
-    || program.requiredTools.length !== 1)) {
-    throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Invoke-only Programs may only use dkg/query@1', 403);
+  if (bound && (compilation.plan.adapterVersions.size !== program.requiredTools.length
+    || [...compilation.plan.adapterVersions].some(([operation, version]) => version !== 1
+      || !(operation === 'dkg/query' && bound.binding.query || operation === 'dkg/asset-create' && bound.binding.assetCreation))
+    || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
+    throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
   }
   const operatorAddress = executingAgentAddress
     ? checksumAgentAddress(executingAgentAddress, 'INVALID_EXECUTING_WALLET')
@@ -662,23 +669,18 @@ async function resolveInternal(
   let policyHashHex: string;
   let allowedTools: Set<string>;
   if (bound) {
-    // The trusted local binding is the operator's approval. Its sole tool IRI
-    // names this fixed host adapter; RDF cannot select a different operation.
-    // Include the descriptor in the policy hash so metadata changes cannot
-    // reuse a capability or a completed invocation under another tool identity.
-    const toolIri = program.requiredTools[0];
-    const definition = {
-      operation: 'dkg/query', version: '1',
-      wit: 'origintrail:semantic-runtime/query-catalog@0.1.0',
-    };
-    toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
-    allowedTools = new Set([toolIri]);
     policyIri = `urn:dkg:program-binding:${bound.digest}`;
     policyVersion = '1';
-    policyHashHex = hashParts([
-      policyIri, operatorIri, policyVersion, toolIri,
-      definition.operation, definition.version, definition.wit,
-    ]);
+    allowedTools = new Set(program.requiredTools);
+    const descriptors: string[] = [];
+    for (const toolIri of program.requiredTools) {
+      const definition = toolIri === bound.binding.assetCreation?.toolIri
+        ? { operation: 'dkg/asset-create', version: '1', wit: 'origintrail:semantic-runtime/asset-create@0.1.0' }
+        : { operation: 'dkg/query', version: '1', wit: 'origintrail:semantic-runtime/query-catalog@0.1.0' };
+      toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
+      descriptors.push(toolIri, definition.operation, definition.version, definition.wit);
+    }
+    policyHashHex = hashParts([policyIri, operatorIri, policyVersion, ...descriptors]);
   } else {
     policyIri = config?.operatorPolicyIri ?? '';
     if (!policyIri) {
@@ -790,7 +792,10 @@ async function resolveInternal(
   }
   const programPin = config?.programPolicy?.programs.find((pin) => pin.programIri === programIri);
   registry.register(createDkgQueryAdapter(agent, contextGraphId, bound ? readPrincipal : config?.programPolicy ? originalCaller : callerAgentAddress,
-    bound ? [bound.binding.query] : config?.programPolicy ? programPin?.queries ?? [] : undefined, bound?.assertAuthorized));
+    bound ? bound.binding.query ? [bound.binding.query] : [] : config?.programPolicy ? programPin?.queries ?? [] : undefined, bound?.assertAuthorized));
+  if (bound?.binding.assetCreation) {
+    registry.register(createAssetCreationAdapter(agent, contextGraphId, executionLayer, operatorAddress, assetStore, bound.assertAuthorized));
+  }
   if (!bound && (!config?.programPolicy || config.programPolicy.disclosure)) {
     registry.register(createSafeLlmAdapter(
       llmConfig,
@@ -936,6 +941,7 @@ async function invokeResolved(
     config?.programPolicy ? pinnedChildInvoker : childInvoker,
     assertAuthorized,
     bound,
+    runtime.store,
   );
   const localOperator = agent.listLocalAgents().find(({ agentAddress }) =>
     agentAddress.toLowerCase() === resolved.operatorAddress.toLowerCase());
@@ -1120,14 +1126,14 @@ async function invokeResolved(
         verbs: capabilityVerbs,
         resources: resolved.program.requiredTools,
         delegationDepth: 0,
-        oneShot: !readOnly,
+        oneShot: !readOnly && !resolved.plan.adapterVersions.has('dkg/asset-create'),
         budgetMicros: 0n,
       }),
       hostBindingKey: resolved.public.requiredTools[0]?.adapterHash ?? 'no-adapter',
       policyEpoch: 1n,
       notBefore: now - 1_000,
       expiresAt: now + 30 * 24 * 60 * 60 * 1_000,
-      oneShot: !readOnly,
+      oneShot: !readOnly && !resolved.plan.adapterVersions.has('dkg/asset-create'),
       consumedAt: null,
       revokedAt: null,
     });
@@ -1135,8 +1141,9 @@ async function invokeResolved(
 
   const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
-    if (bound && (call.kind !== 'query-catalog' || call.queryId !== bound.binding.query.selector || call.parameters.length !== 0)) {
-      throw new SemanticProgramError('PROGRAM_BINDING_QUERY_FORBIDDEN', 'Only the approved fixed query can be invoked', 403);
+    if (bound && !(call.kind === 'asset-create' && bound.binding.assetCreation)
+      && (call.kind !== 'query-catalog' || call.queryId !== bound.binding.query?.selector || call.parameters.length !== 0)) {
+      throw new SemanticProgramError('PROGRAM_BINDING_QUERY_FORBIDDEN', 'Only the tenant-approved tools and fixed query arguments can be invoked', 403);
     }
     const binding = call.kind === 'investigator'
       ? {
@@ -1155,6 +1162,8 @@ async function invokeResolved(
           selector: call.queryId,
           parameters: Object.fromEntries(call.parameters.map(({ name, value }) => [name, value])),
         },
+      } : call.kind === 'asset-create' ? {
+        operation: 'dkg/asset-create', version: '1', normalizedInput: JSON.parse(call.contentJson) as unknown,
       } : {
         operation: 'remote-execute',
         version: '1',
@@ -1203,10 +1212,13 @@ async function invokeResolved(
       if (outcome?.state === 'prepared') {
         await broker.dispatchPrepared(effectId, Date.now());
         outcome = broker.readOutcome(effectId);
+      } else if (call.kind === 'asset-create' && ['unknown', 'reconciling', 'manual_review_required'].includes(outcome?.state ?? '')) {
+        await broker.resumeUnknown(effectId, Date.now());
+        outcome = broker.readOutcome(effectId);
       }
     }
     if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
-      if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling') {
+      if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling' || outcome?.state === 'manual_review_required') {
         throw new SemanticProgramError(
           'INVOCATION_REQUIRES_RECONCILIATION',
           'The tool call may have reached its target; it will not be dispatched again automatically',
@@ -1232,6 +1244,7 @@ async function invokeResolved(
       childExecutions.push(...safeResult.childExecutions);
       return { kind: 'safe-llm', output: safeResult.output };
     }
+    if (call.kind === 'asset-create') return { kind: 'asset-create', json: outcome.output };
     if (call.kind === 'query-catalog') return { kind: 'query-catalog', json: outcome.output };
     let remote: { executionIri?: unknown; executionUal?: unknown };
     try {
@@ -1265,6 +1278,13 @@ async function invokeResolved(
   try {
     execution = await runtime.host.applyPlan(receipt.handle);
     inspection = await runtime.host.inspectPlan(receipt.handle);
+  } catch (error) {
+    // The component preserves the host error code, but not its HTTP error class.
+    if (error instanceof Error && 'code' in error && error.code === 'INVOCATION_REQUIRES_RECONCILIATION') {
+      throw new SemanticProgramError('INVOCATION_REQUIRES_RECONCILIATION',
+        'The effect is unresolved; retry the same invocation ID after checking lifecycle progress', 409);
+    }
+    throw error;
   } finally {
     await runtime.host.dropPlan(receipt.handle).catch(() => undefined);
   }

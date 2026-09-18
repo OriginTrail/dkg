@@ -1,17 +1,17 @@
 # Tenant-approved Program operations
 
-A tenant can grant IDENER permission to invoke a fixed read operation without granting IDENER general access to its Context Graph. The Program may be stored in a different Context Graph and authored by Trace Labs. The tenant's local custodial agent executes it against the tenant graph under the tenant's approved local binding.
+A tenant can grant IDENER permission to invoke an approved operation without granting IDENER general access to its Context Graph. The Program may be stored in a different Context Graph and authored by Trace Labs. The tenant's local custodial agent executes it against the tenant graph under the tenant's approved local binding.
 
-This is a manually configured, query-only path. `programBindings` grants are independent of the optional `programPolicy` used for direct local Program composition; both may be configured, but a bound operation still admits only its fixed query and cannot invoke an LLM. The source Program must already be available and readable by the executor on the tenant node. It does not fetch Programs from another node or replicate the tenant data to the Program author's node.
+This is a manually configured path for fixed queries and explicitly approved asset creation. `programBindings` grants are independent of the optional `programPolicy` used for direct local Program composition; both may be configured, but a bound operation admits only its approved query and/or asset-creation tool and cannot invoke an LLM. The source Program must already be available and readable by the executor on the tenant node. It does not fetch Programs from another node or replicate the tenant data to the Program author's node.
 
 ## Setup and activation
 
-1. Trace Labs supplies a versioned `sr:Program` in the source graph, in any supported memory layer (`wm`, `swm`, or `vm`) that the tenant executor can read. Its source calls one fixed saved-query selector through `dkg/query@1` and declares exactly one tool IRI; the host maps that declaration exclusively to its installed query adapter. No child Programs, LLM calls or remote execution are admitted through this path.
-2. The tenant installs/reviews the named query in its own query catalog and defines a closed, bounded result schema. The query's projection is the data disclosure being approved; a schema alone does not decide which rows are appropriate to disclose.
-3. The tenant adds a `semanticRuntime.programBindings` entry: stable operation IRI, tenant graph, allowed caller identities, local executor, exact source graph/Program/layer/author/source hash, and query definition/schema pins. Only the tenant operator edits this local configuration. There is no installation or approval API in this version.
+1. Trace Labs supplies a versioned `sr:Program` in the source graph, in any supported memory layer (`wm`, `swm`, or `vm`) that the tenant executor can read. Its source calls a fixed saved-query selector through `dkg/query@1` and/or creates an asset through `dkg/asset-create@1`. It declares exactly one tool IRI per operation; the host maps each declaration to its installed adapter. Asset creation requires the exact `assetCreation.toolIri` in the tenant binding. No child Programs, LLM calls or remote execution are admitted through this path.
+2. For query operations, the tenant installs/reviews the named query in its own query catalog and defines a closed, bounded result schema. The query's projection is the data disclosure being approved; a schema alone does not decide which rows are appropriate to disclose.
+3. The tenant adds a `semanticRuntime.programBindings` entry: stable operation IRI, tenant graph, allowed caller identities, local executor, exact source graph/Program/layer/author/source hash, query definition/schema pins when needed, and an explicit `assetCreation` grant when needed. `executionLayer` defaults to `wm`; the tenant may select `swm` or `vm`. Only the tenant operator edits this local configuration. There is no installation or approval API in this version.
 4. Apply the configuration through the daemon's normal restart procedure. The authenticated IDENER address must be in the binding's caller list. For signed inbox invocation, IDENER proves that address with its own signing key. For direct tenant HTTP calls, IDENER uses an agent-bound credential issued by the tenant node. A node-default/implicit operator identity is not an invoke-only credential.
 
-The loaded binding supplies the execution policy and authorizes only the host's `dkg/query@1` adapter. No `operatorPolicyIri`, VM policy, or VM tool offer is required for this bound operation. The host still checks the installed/enabled adapter, graph access, source/author pins, exact query definition, result schema and current grant. Direct invocation outside `programBindings` still requires its operator-authored VM policy and tool offers. This does not bypass the storage layer's access or graph-authority checks: a locally stored Program must still be readable through the selected memory view.
+The loaded binding supplies the execution policy and authorizes only the approved host adapters (`dkg/query@1`, `dkg/asset-create@1`). No `operatorPolicyIri`, VM policy, or VM tool offer is required for this bound operation. The host still checks the installed/enabled adapter, graph access, source/author pins, exact query definition, result schema and current grant. Direct invocation outside `programBindings` still requires its operator-authored VM policy and tool offers. This does not bypass the storage layer's access or graph-authority checks: a locally stored Program must still be readable through the selected memory view.
 
 This configuration template uses illustrative DMaaST identities and measurement vocabulary, not a claim about the deployed Kamstrup dataset. Replace addresses, IRIs and hash placeholders with reviewed values before enabling it. `sourceHash` is lowercase SHA-256 of the exact UTF-8 S-expression source. Generate `query` using `createSemanticQueryPin(selector, decodedCatalogItem, outputSchema)` from `packages/cli/src/semantic-runtime-query-pins.ts`; it hashes the complete saved-query definition, including SPARQL, parameters/defaults, scope and view.
 
@@ -152,7 +152,7 @@ An illustrative successful response preserves the existing runtime response shap
 }
 ```
 
-Execution records remain in the executor's private Working Memory. They record the source Program, stable operation, source and data graph IDs, binding/source hashes, original caller and tenant executor. `appliedPolicy` is the local identifier `urn:dkg:program-binding:<bindingHash>`; `policyHash` binds that approval to the executor and fixed tool descriptor, and broker decisions use `TENANT_PROGRAM_BINDING_ALLOW`. These identify local approval, not a VM publication or on-chain attestation. The execution IRI is a reference, not a grant to read that private graph. IDENER receives only the approved query outputs through the invocation response; raw `/api/query`, Program resolve/fork and inbox authorization remain unchanged.
+Execution records use the binding's `executionLayer` (private Working Memory when omitted). They record the source Program, stable operation, source and data graph IDs, binding/source hashes, original caller and tenant executor. `appliedPolicy` is the local identifier `urn:dkg:program-binding:<bindingHash>`; `policyHash` binds that approval to the executor and fixed tool descriptors, and broker decisions use `TENANT_PROGRAM_BINDING_ALLOW`. These identify local approval, not a VM publication or on-chain attestation. The execution IRI is a reference, not a grant to read that private graph. IDENER receives only the approved query outputs and asset receipts through the invocation response; raw `/api/query`, Program resolve/fork and inbox authorization remain unchanged.
 
 ## Program graph readiness
 
@@ -166,6 +166,49 @@ An authorized bound invocation whose Program is in SWM checks the tenant executo
 - **Compatibility:** keep the operation's output contract compatible. Use a new operation IRI for a breaking contract; its callers must be authorized separately.
 - **Rollback:** restore the previously approved binding. Use a new invocation UUID for a new execution.
 - **Retries:** repeat the same UUID only for the same caller, graph, binding and policy. A completed request replays its persisted outputs after current authorization and query-contract checks. Reusing the UUID across callers or approved versions is rejected. An old execution may no longer be retrievable through this API after activation changes its binding.
-- **Revocation:** disable the binding or remove the caller and apply the updated daemon configuration. Config-file edits are not hot reloads. Runtime checks examine the loaded grant before execution, around query dispatch, before persistence and before returning fresh or replayed results; changing that loaded grant invalidates an in-flight request. Revocation cannot retract previously delivered data.
+- **Revocation:** disable the binding or remove the caller and apply the updated daemon configuration. Config-file edits are not hot reloads. Runtime checks examine the loaded grant before execution, around tool dispatch and between asset lifecycle stages, before persistence and before returning fresh or replayed results; changing that loaded grant invalidates an in-flight request. Revocation cannot retract previously delivered data.
 
-Current limits: one fixed query selector, no request parameters, no raw SPARQL capability, no public execution publication and no paid/LLM binding on this path. Signed cross-node invocation transports the operation request; source Programs must already be readable on the tenant. Query-catalog defaults, if any, are part of the approved definition hash. The WASM import remains unchanged. Parameter forwarding and a catalog installation/approval interface are separate work.
+Current limits: one fixed query selector, no request parameters, no raw SPARQL capability and no paid/LLM binding on this path. An asset-creation call takes one JSON string from the approved source; it does not yet support substituting query/LLM results into that argument. Signed cross-node invocation transports the operation request; source Programs must already be readable on the tenant. Query-catalog defaults, if any, are part of the approved definition hash. Asset creation has its own typed WASM import. Parameter forwarding and a catalog installation/approval interface are separate work.
+
+
+## Creating a Knowledge Asset in the execution layer
+
+The tenant explicitly adds `assetCreation: { "toolIri": "urn:sr:tool:asset-create" }` to a binding and selects `executionLayer`. A creation-only binding omits `query`. Keep the exact source hash and author pins; declare `sr:requiresTool <urn:sr:tool:asset-create>` on the stored Program. Approval is the tenant configuration, with no separate human prompt per invocation. Ordinary graph write and publication authority still apply to the local executor.
+
+For example, a Kamstrup operation can record an inspection request for W10. These IRIs and vocabulary are illustrative, not a claim about deployed measurements:
+
+```scheme
+(strategy dmaast/record-w10
+  (version "1.0.0")
+  (scope graph:dmaast-kamstrup)
+  (goal record-assessment)
+  (supervise one-for-one (max-restarts 1) (window-ms 60000)
+    (delegate recorder
+      (grant dkg.asset.create)
+      (call dkg/asset-create@1
+        "{\"quads\":[{\"subject\":\"urn:kamstrup:assessment:W10\",\"predicate\":\"urn:dmaast:device\",\"object\":\"urn:kamstrup:device:W10\"}]}"))))
+```
+
+Configure a reviewed binding with operation `urn:dmaast:operation:record-w10-assessment`, the Program IRI and SHA-256 of this exact source, `contextGraphId: "dmaast-kamstrup"`, `executionLayer: "swm"`, the local executor and allowed IDENER caller addresses. IDENER then uses the same signed route or direct authenticated API:
+
+```json
+{
+  "contextGraphId": "dmaast-kamstrup",
+  "programIri": "urn:dmaast:operation:record-w10-assessment",
+  "invocationId": "123e4567-e89b-42d3-a456-426614174088"
+}
+```
+
+The host fixes the node, CG, layer and author from that invocation and binding. `programLayer` selects where the **source** is read; `executionLayer` selects where the new asset and Execution record end up. The tool cannot supply a name, graph, layer, identity or publication flag. It accepts only `quads` with subject, predicate and object, at most 256 triples / 128 KiB, with absolute IRIs and RDF literals; blank nodes and named graphs are rejected. Existing publisher metadata restrictions remain in effect.
+
+| Execution layer | Required asset lifecycle before success |
+| --- | --- |
+| `wm` | Create, write, seal in the executor's local lane |
+| `swm` | Create, write, seal, share through the normal SWM lifecycle |
+| `vm` | Create, write, seal, share, then confirm VM publication with a UAL and matching graph history |
+
+The returned `outputs` includes a JSON string with `kind: "asset-created"`, the generated `name`, `contextGraphId`, `layer`, `authorAgentAddress`, `contentDigest`, and sealed `assertion`. VM adds `ual`. The response's `executionUal` identifies the separate Execution record. A receipt is returned only when the durable effect journal backs it.
+
+Each creation effect gets a deterministic asset name. Repeating the same invocation UUID uses the original effect and asset, including after a daemon restart. A different UUID requests a new asset even for identical content. The adapter checks stored content before filling missing triples and refuses to overwrite a conflicting asset. It checks the current grant and executor's graph write authority between lifecycle steps.
+
+An ambiguous share, seal or publication is not blindly resubmitted. A retry checks the original asset's assertion/layer and completes only after matching evidence; unresolved publication requires publisher/operator recovery. Earlier lifecycle stages may already have succeeded when an invocation fails; revocation stops subsequent stages, not completed writes. Keep the original UUID during recovery. This feature is asset creation only; it does not grant arbitrary SPARQL UPDATE, mutation of an existing asset, cross-tenant writes, or a new catalog-installation API.

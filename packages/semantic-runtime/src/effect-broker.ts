@@ -580,9 +580,9 @@ export class RuntimeEffectBroker {
     effectClass: string,
     requestDigest: Uint8Array,
   ): string | null {
-    // Both effects are explicitly admitted and operator-policy-gated. Remote
-    // execution additionally carries a wallet-signed, target-bound delegation.
-    if (effectClass === 'model-invocation' || effectClass === 'remote-execution') return null;
+    // These effects require explicit plan admission and host policy. Asset creation
+    // is granted by the tenant binding; remote execution also carries a signed delegation.
+    if (effectClass === 'model-invocation' || effectClass === 'remote-execution' || effectClass === 'asset-creation') return null;
     if (!proposal.approvalId) throw new Error(`effect class ${effectClass} requires approval`);
     const approval = requireValue(
       this.store.approval(proposal.approvalId),

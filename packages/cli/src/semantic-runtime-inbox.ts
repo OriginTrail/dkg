@@ -99,7 +99,7 @@ export function registerSemanticRuntimeInboxSkill(
           agent, runtime, invocation.contextGraphId, invocation.operationIri,
           invocation.invocationId, config, callerAgentAddress,
         );
-        return { success: true, outputData: encodeJson(result) };
+        return { success: true, outputData: encodeJson(result), ...(result.executionUal ? { resultUal: result.executionUal } : {}) };
       }
       await assertRemoteSemanticInvocationAllowed(
         agent,
@@ -207,10 +207,14 @@ export async function invokeBoundSemanticProgramOnPeer(
     throw new SemanticProgramError(failure?.code ?? 'REMOTE_INVOCATION_FAILED',
       failure?.error ?? response.error ?? 'Tenant node rejected the invocation', failure?.status ?? 502);
   }
-  const result = decodeResult(response.outputData, 'wm');
+  let returned: Partial<SemanticInvocationResult> | null;
+  try { returned = response.outputData ? decodeJson(response.outputData) as Partial<SemanticInvocationResult> : null; }
+  catch { throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Invalid execution response', 502); }
+  if (!returned || !isMemoryLayer(returned.executionLayer)) throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Invalid execution layer', 502);
+  const result = decodeResult(response.outputData, returned.executionLayer);
   if (result.invocationId.toLowerCase() !== unsigned.invocationId
     || result.executionIri !== `urn:sr:execution:${unsigned.invocationId}`
-    || response.resultUal !== undefined) {
+    || (result.executionLayer === 'vm' ? response.resultUal !== result.executionUal : response.resultUal !== undefined)) {
     throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Tenant node returned inconsistent Execution persistence evidence', 502);
   }
   return result;

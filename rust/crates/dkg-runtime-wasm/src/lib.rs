@@ -609,19 +609,27 @@ fn supports_plan_effects(plan: &AdmittedPlan) -> bool {
                     | "llm.invoke.safe"
                     | "dkg.query"
                     | "program.remote-execute"
+                    | "dkg.asset.create"
             )
         })
         && !plan.effect_upper_bound.iter().any(|value| {
             !matches!(
                 value,
-                EffectClass::ModelInvocation | EffectClass::Read | EffectClass::RemoteExecution
+                EffectClass::ModelInvocation
+                    | EffectClass::Read
+                    | EffectClass::RemoteExecution
+                    | EffectClass::AssetCreation
             )
         })
         && !plan.adapter_versions.iter().any(|(operation, version)| {
             *version != 1
                 || !matches!(
                     operation.as_str(),
-                    "agent/investigate" | "llm/safe" | "dkg/query" | "remote-execute"
+                    "agent/investigate"
+                        | "llm/safe"
+                        | "dkg/query"
+                        | "remote-execute"
+                        | "dkg/asset-create"
                 )
         })
 }
@@ -671,7 +679,8 @@ fn materialize_plan(plan: &AdmittedPlan, logical_time: u64) -> Result<PlanRuntim
         let model_call =
             has_call(&instructions, "agent/investigate") || has_call(&instructions, "llm/safe");
         let dkg_query = has_call(&instructions, "dkg/query");
-        let remote_execute = has_call(&instructions, "remote-execute");
+        let remote_execute = has_call(&instructions, "remote-execute")
+            || has_call(&instructions, "dkg/asset-create");
         let (process_id, child) = materialize_agent(
             &plan.canonical_hash,
             &role,
@@ -787,6 +796,7 @@ fn collect_plan_agents(
                         | "llm.invoke.safe"
                         | "dkg.query"
                         | "program.remote-execute"
+                        | "dkg.asset.create"
                 )
             }) {
                 return Err("PLAN_MATERIALIZATION_AGENT_GRANT");
@@ -819,7 +829,11 @@ fn collect_instructions(
             if call.version == 1
                 && matches!(
                     call.operation.as_str(),
-                    "agent/investigate" | "llm/safe" | "dkg/query" | "remote-execute"
+                    "agent/investigate"
+                        | "llm/safe"
+                        | "dkg/query"
+                        | "remote-execute"
+                        | "dkg/asset-create"
                 ) =>
         {
             instructions.push(PlanInstruction::Call(call.clone()));
@@ -838,7 +852,7 @@ fn call_budget(call: &RegisteredCall) -> Option<(BudgetKind, u64)> {
     match (call.operation.as_str(), call.version) {
         ("agent/investigate" | "llm/safe", 1) => Some((BudgetKind::ModelTokens, 512)),
         ("dkg/query", 1) => Some((BudgetKind::DkgQueries, 1)),
-        ("remote-execute", 1) => Some((BudgetKind::ToolCalls, 1)),
+        ("remote-execute" | "dkg/asset-create", 1) => Some((BudgetKind::ToolCalls, 1)),
         _ => None,
     }
 }
