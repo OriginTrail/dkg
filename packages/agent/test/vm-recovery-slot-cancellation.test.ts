@@ -17,16 +17,12 @@ import {
 import {
   applyVmRecoveryInvalidation, VM_RECOVERY_INVALIDATIONS,
 } from './_helpers/vm-recovery-invalidation.js';
+import { prepareVmRecoveryRotationTarget } from './_helpers/vm-recovery-rotation.js';
 
 interface CancellationHost extends VmRecoveryHostInternals {
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   vmReconcileLifecycleController: AbortController;
   bindSubscriptionOnChainId(localCgId: string, subscription: ContextGraphSub, onChainId: string): void;
-  prepareVmReconcileRotationTarget(
-    target: OrdinalRecoveryTarget,
-    peers: readonly string[],
-    now: number,
-  ): VmRecoveryPreparation;
   closeVmReconcileRotationState(): void;
   clearVmReconcileRotationStateForSlot(localCgId: string, onChainCgId: bigint, ordinal: number): void;
 }
@@ -97,7 +93,7 @@ describe('exact VM recovery slot cancellation', () => {
       const host = harness.internals as CancellationHost;
       const donor = harness.targets[0]!;
       const waiting = harness.targets[1]!;
-      const original = ownedSlot(host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()));
+      const original = ownedSlot(prepareVmRecoveryRotationTarget(host, donor, [peer], host.vmReconcileRotationNow()));
       host.vmRecoverySlots.recordPeerVisit(donor, peer, [peer], original.handle, {
         now: 0, getLocalPeerId: () => 'test-host', baseBackoffMs: 1, maxBackoffMs: 1,
       });
@@ -125,7 +121,7 @@ describe('exact VM recovery slot cancellation', () => {
         if (invalidation === 'fingerprint' || invalidation === 'context') {
           if (invalidation === 'context') host.vmRecoverySlots.invalidateContextGraph(localCgId);
           const current = { ...donor, merkleRoot: 'replacement-root' };
-          replacement = ownedSlot(host.prepareVmReconcileRotationTarget(current, [peer], host.vmReconcileRotationNow()));
+          replacement = ownedSlot(prepareVmRecoveryRotationTarget(host, current, [peer], host.vmReconcileRotationNow()));
           replacementScope.track([current]);
           expect(discoverySignal?.aborted).toBe(true);
         }
@@ -279,7 +275,8 @@ describe('exact VM recovery slot cancellation', () => {
     try {
       await entered.promise;
       expect(current?.()).toBe(true);
-      const replacement = ownedSlot(host.prepareVmReconcileRotationTarget(
+      const replacement = ownedSlot(prepareVmRecoveryRotationTarget(
+        host,
         { ...harness.targets[0]!, merkleRoot: 'new-root' }, [peer], host.vmReconcileRotationNow(),
       ));
       expect(current?.()).toBe(false);
@@ -326,7 +323,8 @@ describe('exact VM recovery slot cancellation', () => {
       const survivor = harness.targets[2]!;
       const record = host.vmRecoverySlots.capture(survivor);
       expect(record?.snapshot.attemptedPeerIds.length).toBe(0);
-      host.prepareVmReconcileRotationTarget(
+      prepareVmRecoveryRotationTarget(
+        host,
         { ...harness.targets[1]!, merkleRoot: 'replacement-root' }, [peer], host.vmReconcileRotationNow(),
       );
       expect(receivedSignal?.aborted).toBe(true);
@@ -382,7 +380,8 @@ describe('exact VM recovery slot cancellation', () => {
       await sizingEntered.promise;
       expect(host.readVmReconcileActiveFetchCooldown(localCgId)).toBeDefined();
       const companion = harness.targets[2]!;
-      host.prepareVmReconcileRotationTarget(
+      prepareVmRecoveryRotationTarget(
+        host,
         { ...companion, merkleRoot: 'replacement-root' }, [peer], host.vmReconcileRotationNow(),
       );
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
@@ -453,14 +452,14 @@ describe('exact VM recovery slot cancellation', () => {
     const subscription: ContextGraphSub = { subscribed: true, synced: false, syncMode: 'always-on', onChainId: '1' };
     host.subscribedContextGraphs.set(localCgId, subscription);
     if (stage === 'discovery') {
-      host.prepareVmReconcileRotationTarget(harness.targets[0]!, [peer], host.vmReconcileRotationNow());
+      prepareVmRecoveryRotationTarget(host, harness.targets[0]!, [peer], host.vmReconcileRotationNow());
       host.resolveCuratorPeerIdsForCg = async (_cg, options) => {
         await wait(options?.signal);
         return { peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false };
       };
     }
     if (stage === 'legacy-meta' || stage === 'legacy-registry') {
-      host.prepareVmReconcileRotationTarget(harness.targets[0]!, [peer], host.vmReconcileRotationNow());
+      prepareVmRecoveryRotationTarget(host, harness.targets[0]!, [peer], host.vmReconcileRotationNow());
       host.resolveCuratorPeerIdsForCg = async () => ({
         peerIds: [], curatorIsLocal: false, legacyTripleResolved: false,
       });

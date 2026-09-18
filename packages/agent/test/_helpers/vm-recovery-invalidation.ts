@@ -1,5 +1,9 @@
 import type { OrdinalRecoveryTarget } from '../../src/chain-reconciler.js';
 import type { ContextGraphSub } from '../../src/dkg-agent-types.js';
+import {
+  prepareVmRecoveryRotationTarget,
+  type VmRecoveryRotationHost,
+} from './vm-recovery-rotation.js';
 
 export const VM_RECOVERY_INVALIDATIONS = [
   'unsubscribe', 'rebind', 'fingerprint', 'eviction', 'shutdown',
@@ -9,10 +13,9 @@ export type VmRecoveryInvalidation = (typeof VM_RECOVERY_INVALIDATIONS)[number];
 interface InvalidationAgent {
   unsubscribeFromContextGraph(localCgId: string, options: { persist: false }): void;
 }
-interface InvalidationHost {
+interface InvalidationHost extends VmRecoveryRotationHost {
   readonly subscribedContextGraphs: Map<string, ContextGraphSub>;
   bindSubscriptionOnChainId(localCgId: string, subscription: ContextGraphSub, onChainId: string): void;
-  prepareVmReconcileRotationTarget(target: OrdinalRecoveryTarget, peers: readonly string[], now: number): unknown;
   vmReconcileRotationNow(): number;
   closeVmReconcileRotationState(): void;
 }
@@ -40,19 +43,22 @@ export function applyVmRecoveryInvalidation(params: {
       );
       break;
     case 'fingerprint':
-      params.host.prepareVmReconcileRotationTarget(
+      prepareVmRecoveryRotationTarget(
+        params.host,
         { ...params.target, merkleRoot: params.replacementMerkleRoot ?? 'replacement-root' },
         [params.peerId],
         params.host.vmReconcileRotationNow(),
       );
       break;
     case 'eviction':
-      params.host.prepareVmReconcileRotationTarget(
+      prepareVmRecoveryRotationTarget(
+        params.host,
         { ...params.target, ordinal: params.target.ordinal + 1 },
         [params.peerId],
         params.host.vmReconcileRotationNow(),
       );
-      params.host.prepareVmReconcileRotationTarget(
+      prepareVmRecoveryRotationTarget(
+        params.host,
         { ...params.target, localCgId: params.waitingLocalCgId ?? `${params.localCgId}-waiting` },
         [params.peerId],
         params.host.vmReconcileRotationNow(),

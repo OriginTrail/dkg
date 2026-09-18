@@ -260,7 +260,7 @@ import {
 import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
 import type {
   VmRecoveryBatchTransaction, VmRecoveryPreparedEntry, VmRecoveryRotationPolicy,
-  VmRecoveryRotationSnapshot, VmRecoverySlotHandle, VmRecoveryPreparation,
+  VmRecoveryRotationSnapshot, VmRecoverySlotHandle,
 } from './internal/vm-recovery-slot-registry.js';
 import {
   VmRecoveryProviderPolicy,
@@ -4755,20 +4755,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return [...boundedCurators, ...boundedOrdinary];
   }
 
-  prepareVmReconcileRotationTarget(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-    candidatePeerIds: readonly string[],
-    now: number,
-    curatorRosterConfirmed = true,
-  ): VmRecoveryPreparation {
-    if (this.vmReconcileRotationClosed) return { kind: 'invalidated' };
-    return this.vmRecoverySlots.prepare(target, {
-      candidatePeerIds, curatorRosterConfirmed,
-      collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-    }, now);
-  }
-
   vmReconcileUncreditedCandidateOrder(
     this: DKGAgent,
     record: VmRecoveryRotationSnapshot,
@@ -4915,18 +4901,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       curatorRosterConfirmed: true,
       collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
     }, cleanAbsence, this.vmReconcileRotationPolicy(now));
-  }
-
-  creditVmReconcileCleanAbsence(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-    peerId: string,
-    expectedCandidatePeerIds: readonly string[],
-    slotHandle: VmRecoverySlotHandle,
-  ): void {
-    if (this.vmReconcileRotationClosed) return;
-    this.vmRecoverySlots.creditCleanAbsence(target, peerId, expectedCandidatePeerIds, slotHandle,
-      this.currentVmReconcileRotationPolicy());
   }
 
   installVmReconcileActiveFetchCooldown(this: DKGAgent, localCgId: string, now: number): symbol {

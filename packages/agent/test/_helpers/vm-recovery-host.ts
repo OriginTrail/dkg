@@ -1,4 +1,8 @@
-import type { VmRecoveryEligiblePreparation, VmRecoverySlotHandle } from '../../src/internal/vm-recovery-slot-registry.js';
+import type {
+  VmRecoveryEligiblePreparation,
+  VmRecoveryRotationPolicy,
+  VmRecoverySlotHandle,
+} from '../../src/internal/vm-recovery-slot-registry.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -51,7 +55,9 @@ export interface VmRecoveryHostInternals {
   };
   preferredSyncPeers: Map<string, string>;
   vmRecoverySlots: VmRecoverySlotRegistry;
+  vmReconcileRotationClosed: boolean;
   vmReconcileRotationNow(): number;
+  currentVmReconcileRotationPolicy(): VmRecoveryRotationPolicy;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
   installVmReconcileActiveFetchCooldown(localCgId: string, now: number): symbol;
   readVmReconcileActiveFetchCooldown(
