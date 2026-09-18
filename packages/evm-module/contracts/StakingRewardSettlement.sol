@@ -77,6 +77,7 @@ contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializ
     error RewardScoreChanged();
     error DelegatorRewardInvariant(uint72 identityId, uint256 epoch, uint256 paid, uint256 netReward);
     error EpochRewardInvariant(uint256 epoch, uint256 observedGross, uint256 epochPool);
+    error LegacyRewardCacheUnsupported(uint72 identityId, uint256 epoch);
     error RewardOverflow();
 
     modifier onlyStakingV10() {
@@ -294,21 +295,28 @@ contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializ
         }
 
         uint256 cachedGross = convictionStorage.getGrossNodeEpochRewards(identityId, epoch);
+        uint256 cachedNet = convictionStorage.getNetNodeEpochRewards(identityId, epoch);
         if (cachedGross == 0) {
-            uint256 cachedNet = convictionStorage.getNetNodeEpochRewards(identityId, epoch);
-            if (cachedNet == 0 && grossNodeRewards > 0) {
-                _recordGrossIncrease(epoch, grossNodeRewards, epochPool);
-                operatorFeePaid[identityId][epoch] = operatorFeeAmount;
-                convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
-                convictionStorage.setGrossNodeEpochRewards(identityId, epoch, grossNodeRewards);
-                convictionStorage.setNetNodeEpochRewards(identityId, epoch, netNodeRewards);
-                return netNodeRewards;
-            }
+            // `gross`/`net` are always written together above and
+            // `net = gross - fee <= gross`, so a cached net without a cached
+            // gross can only be pre-10.0.7 `StakingV10` state. Adopting the
+            // CURRENT pool as the baseline there would silently swallow
+            // exactly the late delta this contract exists to pay and leave the
+            // operator fee ledger at 0, so the next pool increase would credit
+            // the whole fee a second time. Refuse instead of half-migrating;
+            // such state requires the chain-reset path.
+            if (cachedNet != 0) revert LegacyRewardCacheUnsupported(identityId, epoch);
+            if (grossNodeRewards == 0) return 0;
+
+            _recordGrossIncrease(epoch, grossNodeRewards, epochPool);
+            operatorFeePaid[identityId][epoch] = operatorFeeAmount;
+            convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
             convictionStorage.setGrossNodeEpochRewards(identityId, epoch, grossNodeRewards);
-            return cachedNet;
+            convictionStorage.setNetNodeEpochRewards(identityId, epoch, netNodeRewards);
+            return netNodeRewards;
         }
         if (grossNodeRewards <= cachedGross) {
-            return convictionStorage.getNetNodeEpochRewards(identityId, epoch);
+            return cachedNet;
         }
 
         _recordGrossIncrease(epoch, grossNodeRewards - cachedGross, epochPool);

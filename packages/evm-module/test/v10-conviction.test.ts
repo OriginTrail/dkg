@@ -777,6 +777,62 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     );
   });
 
+  it('claim: refuses a pre-10.0.7 net-without-gross reward cache instead of swallowing the delta', async () => {
+    // A cached net reward without its gross baseline is impossible for
+    // 10.0.7+: the two are always written together and `net <= gross`. It can
+    // only be state left by an older StakingV10, where adopting the current
+    // pool as the baseline would silently swallow the late delta and re-pay
+    // the operator fee. Refuse it.
+    const { identityId } = await createProfile();
+    const amount = hre.ethers.parseEther('1000');
+    await mintAndApprove(accounts[0], amount);
+    await NFT.connect(accounts[0]).createConviction(identityId, amount, 0);
+
+    const epochE = await ChronosContract.getCurrentEpoch();
+    const epochLength = await ChronosContract.epochLength();
+    const sps36 = hre.ethers.parseUnits('0.001', 18);
+    const nodeScore18 = (amount * sps36) / SCALE18;
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+      epochE,
+      identityId,
+      sps36,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScore(
+      epochE,
+      identityId,
+      nodeScore18,
+    );
+    await RandomSamplingStorageContract.connect(accounts[0]).setAllNodesEpochScore(
+      epochE,
+      nodeScore18,
+    );
+    const EpochStorageContract =
+      await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      epochE,
+      epochE,
+      hre.ethers.parseEther('100'),
+    );
+
+    // Plant legacy state: fee flag set + net cached, gross never written.
+    await ConvictionStakingStorageContract.connect(
+      accounts[0],
+    ).setIsOperatorFeeClaimedForEpoch(identityId, epochE, true);
+    await ConvictionStakingStorageContract.connect(
+      accounts[0],
+    ).setNetNodeEpochRewards(identityId, epochE, hre.ethers.parseEther('50'));
+
+    await time.increase(Number(epochLength));
+    const settlement = await hre.ethers.getContract<StakingRewardSettlement>(
+      'StakingRewardSettlement',
+    );
+    await expect(NFT.connect(accounts[0]).claim(1)).to.be.revertedWithCustomError(
+      settlement,
+      'LegacyRewardCacheUnsupported',
+    );
+  });
+
   // --------------------------------------------------------------------------
   // Test 4 — atomic withdrawal (D14)
   // --------------------------------------------------------------------------

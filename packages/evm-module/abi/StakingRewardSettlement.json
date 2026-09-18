@@ -63,6 +63,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "LegacyRewardCacheUnsupported",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "OnlyStakingV10",
     "type": "error"
