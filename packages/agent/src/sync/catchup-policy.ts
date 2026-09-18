@@ -181,6 +181,20 @@ export interface CatchupPlanePolicyOptions<
   mergeDurableRetryResults?: (previous: TDurable, current: TDurable) => TDurable;
   /** Fold diagnostics across repeated shared-memory admission attempts. */
   mergeSharedMemoryRetryResults?: (previous: TShared, current: TShared) => TShared;
+  /**
+   * The single-plane option name, which this two-plane API does NOT accept —
+   * there are two planes and therefore two folds. `runCatchupPlanesWithPolicy`
+   * spreads these options into each plane's run options and then assigns
+   * `mergeRetryResults` itself, so a caller that sets it here would have it
+   * overwritten with `undefined` and silently lose every retry diagnostic.
+   *
+   * Declared `never` rather than left absent for the same reason as
+   * `retryDelaysMs`: excess-property checking only rejects the object-literal
+   * form, and a stale options VARIABLE flowing in structurally is exactly the
+   * case that would otherwise be ignored. Pinned in
+   * `test/catchup-retry-contract.typecheck.ts`.
+   */
+  mergeRetryResults?: never;
 }
 
 export interface CatchupPlanePolicyResult<
