@@ -30,7 +30,7 @@ if (process.argv[2] === '--worker') {
   writeFileSync(files.baseline, execFileSync('git', ['-C', repo, 'show', `${ref}:${source}`]));
   writeFileSync(files.candidate, readFileSync(join(repo, source)));
   const results = [];
-  const median = values => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
+  const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
   for (const fields of [2, 3, 8, 32]) {
     const trials = { baseline: [], candidate: [] };
     let fingerprint;
