@@ -46,6 +46,7 @@ export default defineConfig({
           'test/semantic-runtime-program-bindings.test.ts',
           'test/semantic-runtime-asset-program.test.ts',
           'test/semantic-runtime-sparql-adapter.test.ts',
+          'test/semantic-runtime-configuration-api.test.ts',
           'test/semantic-runtime-routes.test.ts',
           'test/semantic-runtime-safe-llm-adapter.test.ts',
           'test/semantic-runtime-remote-execute-adapter.test.ts',

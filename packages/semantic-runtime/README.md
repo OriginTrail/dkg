@@ -274,3 +274,10 @@ grant. It runs approved Program-source SPARQL through the existing scoped query
 engine, with a fixed CG, executor and memory layer, bounded output schema and
 limits. No query catalog entry is required. `SERVICE`, dataset overrides and
 SPARQL writes are rejected. See [raw reads and the Kamstrup example](../../docs/architecture/tenant-program-bindings.md#raw-sparql-reads-without-a-query-catalog).
+
+Program permissions and outbound routes can now be managed through the
+[Program authorization API](../../docs/architecture/program-authorization-api.md).
+Owner/operator-authenticated changes persist in SQLite and apply immediately;
+API revocation/removal overrides file defaults across restarts. Invocation keeps
+its signed-agent and invoke-only authority boundary. The API does not grant raw
+graph membership and never dispatches host effects during activation preflight.

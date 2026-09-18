@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
@@ -11,9 +13,12 @@ import { decodeQueryCatalogBindings } from '@origintrail-official/dkg-core/query
 import type { LlmConfig } from '@origintrail-official/dkg-node-ui';
 import { ethers } from 'ethers';
 import {
+  ComponentWorkerClient,
+  defaultExecutionCapability,
   RuntimeAdapterRegistry,
   RuntimeEffectBroker,
   SemanticRuntimeStore,
+  RUNTIME_DATABASE_FILENAME,
   WasmStrategyAdmissionClient,
   admittedPlanAuthority,
   encodeCapabilityMetadata,
@@ -27,6 +32,7 @@ import {
   type ExecutionCapabilityDescriptor,
 } from '@origintrail-official/dkg-semantic-runtime';
 
+import { SemanticProgramConfiguration } from './semantic-runtime-configuration.js';
 import { createAssetCreationAdapter } from './semantic-runtime-asset-adapter.js';
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
 import { assertSparqlReadOutput, createSparqlReadAdapter } from './semantic-runtime-sparql-adapter.js';
@@ -130,6 +136,7 @@ export class SemanticProgramError extends Error {
 export interface ConfiguredSemanticRuntimeService {
   host: SemanticRuntimeHost;
   store: SemanticRuntimeStore;
+  configuration: SemanticProgramConfiguration;
   inFlight: Map<string, {
     requestIdentity: string;
     promise: Promise<SemanticInvocationResult>;
@@ -142,23 +149,35 @@ export interface ConfiguredSemanticRuntimeDeps {
   dataDirectory?: string;
   start?: (options: SemanticRuntimeHostOptions) => Promise<SemanticRuntimeHost>;
   openStore?: () => SemanticRuntimeStore;
+  /** Only a management request already authenticated as owner/operator may opt in. */
+  activate?: boolean;
 }
 
 export async function startConfiguredSemanticRuntime(
   config: SemanticRuntimeConfig | undefined,
   deps: ConfiguredSemanticRuntimeDeps,
 ): Promise<ConfiguredSemanticRuntimeService | null> {
-  if (config?.enabled !== true) return null;
+  if (!config || config.enabled === false) return null;
+  const previouslyEnabled = config.enabled;
+  const fileBindings = config.programBindings;
+  const fileRoutes = config.programRoutes;
+  if (config.enabled !== true && !deps.activate
+    && !(deps.dataDirectory && existsSync(join(deps.dataDirectory, RUNTIME_DATABASE_FILENAME)))) return null;
   validateSemanticRuntimeConfig(config);
-  const host = await (deps.start ?? startSemanticRuntimeHost)({ config, log: deps.log });
-  let store: SemanticRuntimeStore;
+  const store = deps.openStore?.()
+    ?? (deps.dataDirectory ? SemanticRuntimeStore.openInDataDirectory(deps.dataDirectory) : new SemanticRuntimeStore(':memory:'));
+  let host: SemanticRuntimeHost;
+  let configuration: SemanticProgramConfiguration;
   try {
-    store = deps.openStore?.()
-      ?? (deps.dataDirectory
-        ? SemanticRuntimeStore.openInDataDirectory(deps.dataDirectory)
-        : new SemanticRuntimeStore(':memory:'));
+    if (config.enabled !== true && !deps.activate && store.programConfigurationRecords().length === 0) { store.close(); return null; }
+    configuration = new SemanticProgramConfiguration(store, config);
+    config.enabled = true;
+    host = await (deps.start ?? startSemanticRuntimeHost)({ config, log: deps.log });
   } catch (error) {
-    await host.stop().catch(() => undefined);
+    config.enabled = previouslyEnabled;
+    config.programBindings = fileBindings;
+    config.programRoutes = fileRoutes;
+    store.close();
     throw error;
   }
   deps.log(
@@ -168,6 +187,7 @@ export async function startConfiguredSemanticRuntime(
   return {
     host,
     store,
+    configuration,
     inFlight: new Map(),
     async stop() {
       try {
@@ -517,6 +537,74 @@ export async function invokeBoundSemanticProgram(
   }
   await assertAuthorized();
   return result;
+}
+
+/** Resolve an approval candidate without invoking it or granting runtime authority. */
+export async function validateBoundSemanticProgram(
+  agent: DKGAgent,
+  runtime: ConfiguredSemanticRuntimeService,
+  config: SemanticRuntimeConfig,
+  binding: SemanticProgramBinding,
+  assertManagerAuthorized: () => Promise<void>,
+): Promise<SemanticProgramResolution> {
+  validateProgramBindings([binding]);
+  const executor = agent.listLocalAgents().find((entry) => entry.agentAddress.toLowerCase() === binding.executorAgentAddress.toLowerCase());
+  if (!executor || !agent.getCustodialAgentPrivateKey(executor.agentAddress)) {
+    throw new SemanticProgramError('TARGET_EXECUTOR_NOT_LOCAL', 'The executor must be a local custodial agent', 409);
+  }
+  const check = async () => {
+    await assertManagerAuthorized();
+    for (const graph of new Set([binding.contextGraphId, binding.program.contextGraphId])) {
+      if (!await agent.canReadContextGraph(graph, { callerAgentAddress: executor.agentAddress, allowSubscriptionFallback: false })) {
+        throw new SemanticProgramError('PROGRAM_EXECUTOR_ACCESS_DENIED', 'Executor cannot read the approved graph', 403);
+      }
+    }
+  };
+  await check();
+  if (binding.sparqlRead?.layer === 'swm' && !await agent.canUseSharedMemoryForContextGraph(binding.contextGraphId, { callerAgentAddress: executor.agentAddress })) {
+    throw new SemanticProgramError('PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE', 'The data graph is unavailable for shared-memory reads', 503);
+  }
+  if (binding.assetCreation) {
+    const access = await agent.probeContextGraphWritePreflight(binding.contextGraphId, { callerAgentAddress: executor.agentAddress });
+    if (!access.storeAvailable || !access.exists || !access.callerAuthorized) {
+      throw new SemanticProgramError('PROGRAM_EXECUTOR_WRITE_DENIED', 'Executor cannot create assets in the data graph', 403);
+    }
+  }
+  const resolved = await resolveInternal(agent, binding.contextGraphId, binding.program.programIri, binding.program.programLayer,
+    config, undefined, executor.agentAddress, executor.agentAddress, binding.executionLayer ?? 'wm', undefined, check,
+    { binding, digest: programBindingDigest(binding), assertAuthorized: check }, runtime.store);
+  if (!resolved.public.executable) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'The declared tools do not match the approved installed adapters', 409);
+  // Exercise the actual typed component boundary with validation-only stubs.
+  // No adapter dispatch, data query, asset creation or execution journal write
+  // occurs here. This also rejects unsupported topology and malformed literals.
+  const worker = new ComponentWorkerClient({ startupTimeoutMs: config.startupTimeoutMs, requestTimeoutMs: 5000 }, async (call) => {
+    await check();
+    if (call.kind === 'query-catalog' && binding.query && call.queryId === binding.query.selector && call.parameters.length === 0) {
+      createDkgQueryAdapter(agent, binding.contextGraphId, executor.agentAddress, [binding.query], check).validateInput({ selector: call.queryId });
+    } else if (call.kind === 'sparql-read' && binding.sparqlRead) {
+      createSparqlReadAdapter(agent, binding.contextGraphId, executor.agentAddress, binding.sparqlRead, check).validateInput({ sparql: call.sparql });
+    } else if (call.kind === 'asset-create' && binding.assetCreation) {
+      createAssetCreationAdapter(agent, binding.contextGraphId, binding.executionLayer ?? 'wm', executor.agentAddress, runtime.store, check)
+        .validateInput(JSON.parse(call.contentJson));
+    } else throw new Error('PROGRAM_BINDING_TOOL_ARGUMENT_FORBIDDEN');
+    return { kind: call.kind, json: 'null' };
+  });
+  try {
+    await worker.start();
+    const capability = defaultExecutionCapability(Buffer.from(resolved.plan.canonicalHash).toString('hex'));
+    capability.contextGraphId = binding.contextGraphId;
+    capability.programIri = binding.program.programIri;
+    capability.sourceHash = binding.program.sourceHash;
+    capability.tools = resolved.public.requiredTools.map((tool) => ({ operation: tool.operation!, version: tool.semanticVersion!, witInterface: tool.witInterface! }));
+    capability.budgets.maxDkgQueries = resolved.plan.resourceBounds.hostCommands;
+    capability.budgets.maxToolCalls = resolved.plan.resourceBounds.hostCommands;
+    await worker.call('start', { plan: resolved.plan.canonicalPlan, capability, logicalTime: 0n });
+    await worker.call('advance');
+  } catch (error) {
+    throw new SemanticProgramError('PROGRAM_ACTIVATION_REJECTED', error instanceof Error ? error.message : 'Program preflight failed', 422);
+  } finally { await worker.stop(); }
+  await check();
+  return resolved.public;
 }
 
 interface LocalInvocationScope {

@@ -98,6 +98,7 @@ export {
   type EffectTransitionRecord,
   type ExecutionRecord,
   type ExecutionStatus,
+  type ProgramConfigurationRecord,
   type PrepareEffectRecord,
   type RuntimeEventRecord,
   type SnapshotRecord,

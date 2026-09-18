@@ -67,7 +67,7 @@ function fixture(options: { resumable?: boolean } = {}) {
 }
 
 describe('adapter checkpoint durability', () => {
-  it('migrates a populated v1 database to v2 without changing its events, capability, effect or artifact', async () => {
+  it('migrates a populated v1 database to v3 without changing its events, capability, effect or artifact', async () => {
     const f = fixture(); await f.interrupt();
     f.store.commitRuntimeTransition({ executionId: 'exec', expectedNextSeq: 1n, eventId: 'event', eventType: 'fixture',
       eventCbor: Uint8Array.from([1, 2]), stateDigest: bytes(4), snapshot: { partitionId: 'partition', schemaVersion: 1,
@@ -75,10 +75,10 @@ describe('adapter checkpoint durability', () => {
     const execution = f.store.execution('exec'); const effect = f.store.effect('effect'); const cap = f.store.capability('cap');
     const events = f.store.runtimeEventsAfter('exec', 0n); const transitions = f.store.effectTransitions('effect');
     f.store.close();
-    // v2 only adds adapter_checkpoint: removing it yields the exact v1 schema
-    // around real populated authorization/effect/event records.
+    // Remove both later tables to recreate the v1 schema around real
+    // populated authorization/effect/event records.
     const old = new Database(f.databasePath);
-    old.exec('DROP TABLE adapter_checkpoint; PRAGMA user_version=1;'); old.close();
+    old.exec('DROP TABLE adapter_checkpoint; DROP TABLE program_configuration; PRAGMA user_version=1;'); old.close();
     const migrated = open(f.databasePath);
     expect(migrated.execution('exec')).toEqual(execution); expect(migrated.effect('effect')).toEqual(effect);
     expect(migrated.capability('cap')).toEqual(cap); expect(migrated.runtimeEventsAfter('exec', 0n)).toEqual(events);
@@ -86,7 +86,21 @@ describe('adapter checkpoint durability', () => {
     expect(migrated.newestValidSnapshot('partition')?.seq).toBe(1n);
     migrated.verifyEffectChain('effect'); migrated.verifyRuntimeEventChain('exec');
     expect(migrated.writeAdapterCheckpoint('effect', effect!.requestDigest, Uint8Array.from([9]), 0)).toBe(1);
-    const inspect = new Database(f.databasePath, { readonly: true }); expect(inspect.pragma('user_version', { simple: true })).toBe(2); inspect.close();
+    const inspect = new Database(f.databasePath, { readonly: true }); expect(inspect.pragma('user_version', { simple: true })).toBe(3); inspect.close();
+  });
+
+  it('migrates v2 to v3 while preserving an existing adapter checkpoint', async () => {
+    const f = fixture(); await f.interrupt(); const effect = f.store.effect('effect')!;
+    f.store.writeAdapterCheckpoint('effect', effect.requestDigest, Uint8Array.from([8, 9]), 0);
+    f.store.close();
+    const old = new Database(f.databasePath);
+    old.exec('DROP TABLE program_configuration; PRAGMA user_version=2;'); old.close();
+    const migrated = open(f.databasePath);
+    expect(migrated.adapterCheckpoint('effect')).toEqual({ version: 1, payload: Uint8Array.from([8, 9]) });
+    expect(migrated.effect('effect')).toEqual(effect);
+    expect(migrated.programConfigurationRecords()).toEqual([]);
+    expect(migrated.writeProgramConfiguration({ kind: 'route', contextGraphId: 'example-data', operationIri: 'urn:example:operation',
+      payload: null, updatedBy: 'node-operator', updatedAt: 100 }, 0)).toBe(1);
   });
 
   it('binds checkpoints to the original effect digest and uses CAS across stores/reopen', async () => {

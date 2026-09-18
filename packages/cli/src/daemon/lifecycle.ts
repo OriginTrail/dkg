@@ -2255,25 +2255,30 @@ async function runDaemonInnerWithStartupOwnership(
 
   await agent.start();
 
-  // Phase 0 is exact-opt-in and starts only after the DKG agent/services and
-  // durable home exist. It runs before configured graph activation so future
-  // semantic trigger intake cannot race Worker integrity/restore readiness.
-  // A requested runtime fails closed; ordinary daemon startup never touches
-  // the Worker path while semanticRuntime.enabled is absent/false.
-  let semanticRuntimeHost: Awaited<ReturnType<typeof startConfiguredSemanticRuntime>> = null;
+  // Persisted API permissions restore the service on boot. With no records,
+  // only an authenticated management request may lazily activate it; an
+  // explicit enabled:false remains the operator's service kill switch.
+  config.semanticRuntime ??= {};
+  type SemanticRuntimeService = Awaited<ReturnType<typeof startConfiguredSemanticRuntime>>;
+  let semanticRuntimeHost: SemanticRuntimeService = null;
+  let semanticRuntimeStarting: Promise<SemanticRuntimeService> | undefined;
+  const ensureSemanticRuntime = async (activate = true): Promise<SemanticRuntimeService> => {
+    if (semanticRuntimeHost) return semanticRuntimeHost;
+    if (semanticRuntimeStarting) return semanticRuntimeStarting;
+    semanticRuntimeStarting = (async () => {
+      const started = await startConfiguredSemanticRuntime(config.semanticRuntime, { log, dataDirectory: dkgDir(), activate });
+      if (started) {
+        try { registerSemanticRuntimeInboxSkill(agent, started, config.semanticRuntime, config.llm); }
+        catch (error) { await started.stop(); throw error; }
+      }
+      semanticRuntimeHost = started;
+      return started;
+    })();
+    try { return await semanticRuntimeStarting; }
+    finally { semanticRuntimeStarting = undefined; }
+  };
   try {
-    semanticRuntimeHost = await startConfiguredSemanticRuntime(config.semanticRuntime, {
-      log,
-      dataDirectory: dkgDir(),
-    });
-    if (semanticRuntimeHost) {
-      registerSemanticRuntimeInboxSkill(
-        agent,
-        semanticRuntimeHost,
-        config.semanticRuntime,
-        config.llm,
-      );
-    }
+    semanticRuntimeHost = await ensureSemanticRuntime(false);
   } catch (err) {
     await semanticRuntimeHost?.stop().catch((stopErr: any) =>
       log(`Semantic runtime startup rollback could not stop runtime: ${stopErr?.message ?? String(stopErr)}`),
@@ -3733,6 +3738,7 @@ async function runDaemonInnerWithStartupOwnership(
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
         semanticRuntimeHost,
+        ensureSemanticRuntime,
         emitMemoryGraphChanged,
         emitNotification,
       });
