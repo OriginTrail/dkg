@@ -39,6 +39,14 @@ export interface ProverLoopStatus {
   lastSubmittedTxHash: string | null;
   /** Wall-clock ISO-8601 timestamp of the most recent `submitted` outcome. */
   lastSubmittedAt: string | null;
+  /** Number of challenges observed during the process-local trailing 24-hour window. */
+  challengesReceived24h?: number;
+  /** Number of proofs submitted during the process-local trailing 24-hour window. */
+  proofsSubmitted24h?: number;
+  /** Most recent classified proof-path failure, if one has occurred. */
+  lastFailureClassification?: string | null;
+  /** Wall-clock ISO-8601 timestamp of the most recent classified failure. */
+  lastFailureAt?: string | null;
 }
 
 export interface ProverLoopOptions {
@@ -48,6 +56,30 @@ export interface ProverLoopOptions {
   /** Fired after every tick (success or mapped failure) — observability only. */
   onTick?: (outcome: TickOutcome) => void;
   log?: ProverLogger;
+  /** Injectable clock for deterministic health-window tests. */
+  now?: () => number;
+}
+
+const HEALTH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+type HealthEvent = {
+  at: number;
+  challengeReceived: boolean;
+  proofSubmitted: boolean;
+};
+
+function outcomeHasChallenge(outcome: TickOutcome): boolean {
+  // A no-challenge result is the only explicit proof that no challenge was
+  // available. All later outcomes came from a challenge-scoped path.
+  return outcome.kind !== 'no-challenge' && outcome.kind !== 'period-closed' && outcome.kind !== 'error';
+}
+
+function outcomeIsFailure(outcome: TickOutcome): boolean {
+  return outcome.kind === 'cg-not-found'
+    || outcome.kind === 'kc-not-synced'
+    || outcome.kind === 'data-corrupted'
+    || outcome.kind === 'submit-stale'
+    || outcome.kind === 'error';
 }
 
 export interface ProverLoopHandle {
@@ -64,6 +96,7 @@ export interface ProverLoopHandle {
 }
 
 export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
+  const now = opts.now ?? Date.now;
   let timer: ReturnType<typeof setInterval> | null = null;
   let started = false;
   let stopping = false;
@@ -76,20 +109,40 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   let submittedCount = 0;
   let lastSubmittedTxHash: string | null = null;
   let lastSubmittedAt: string | null = null;
+  const healthEvents: HealthEvent[] = [];
+  let lastFailureClassification: string | null = null;
+  let lastFailureAt: string | null = null;
+
+  const pruneHealthEvents = (at: number): void => {
+    const cutoff = at - HEALTH_WINDOW_MS;
+    while (healthEvents.length > 0 && healthEvents[0]!.at <= cutoff) healthEvents.shift();
+  };
 
   const runOnce = (): Promise<void> => {
     if (inflight || stopping) return Promise.resolve();
     inflight = true;
     totalTicks += 1;
-    lastTickAt = new Date().toISOString();
+    const tickStartedAt = now();
+    lastTickAt = new Date(tickStartedAt).toISOString();
     const run = (async (): Promise<void> => {
       try {
         const outcome = await opts.prover.tick();
         lastOutcome = outcome;
+        const completedAt = now();
+        healthEvents.push({
+          at: completedAt,
+          challengeReceived: outcomeHasChallenge(outcome),
+          proofSubmitted: outcome.kind === 'submitted',
+        });
+        pruneHealthEvents(completedAt);
         if (outcome.kind === 'submitted') {
           submittedCount += 1;
           lastSubmittedTxHash = outcome.txHash;
-          lastSubmittedAt = lastTickAt;
+          lastSubmittedAt = new Date(completedAt).toISOString();
+        }
+        if (outcomeIsFailure(outcome)) {
+          lastFailureClassification = outcome.kind;
+          lastFailureAt = new Date(completedAt).toISOString();
         }
         try {
           opts.onTick?.(outcome);
@@ -101,6 +154,11 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         lastOutcome = { kind: 'error', error };
+        const completedAt = now();
+        healthEvents.push({ at: completedAt, challengeReceived: false, proofSubmitted: false });
+        pruneHealthEvents(completedAt);
+        lastFailureClassification = 'error';
+        lastFailureAt = new Date(completedAt).toISOString();
         // The orchestrator already maps known errors to TickOutcome
         // variants. An exception here means an unmapped path
         // (typically a transient adapter / RPC issue). Log and keep
@@ -165,6 +223,8 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
       return stopPromise;
     },
     getStatus(): ProverLoopStatus {
+      const at = now();
+      pruneHealthEvents(at);
       return {
         totalTicks,
         inflight,
@@ -173,6 +233,10 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
         submittedCount,
         lastSubmittedTxHash,
         lastSubmittedAt,
+        challengesReceived24h: healthEvents.filter((event) => event.challengeReceived).length,
+        proofsSubmitted24h: healthEvents.filter((event) => event.proofSubmitted).length,
+        lastFailureClassification,
+        lastFailureAt,
       };
     },
   };

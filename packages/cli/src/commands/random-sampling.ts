@@ -133,6 +133,11 @@ randomSamplingCmd
       console.log(`  Ticks:     ${status.loop.totalTicks} (in flight: ${status.loop.inflight})`);
       console.log(`  Last tick: ${status.loop.lastTickAt ?? '—'} (${last?.kind ?? 'never run'})`);
       console.log(`  Submitted: ${status.loop.submittedCount} proof${status.loop.submittedCount === 1 ? '' : 's'}`);
+      console.log(`  24h health: ${status.loop.challengesReceived24h ?? 0} challenge${status.loop.challengesReceived24h === 1 ? '' : 's'}, `
+        + `${status.loop.proofsSubmitted24h ?? 0} proof${status.loop.proofsSubmitted24h === 1 ? '' : 's'} submitted`);
+      if (status.loop.lastFailureClassification) {
+        console.log(`  Last failure: ${status.loop.lastFailureClassification} (${status.loop.lastFailureAt ?? '—'})`);
+      }
       if (status.loop.lastSubmittedAt) {
         console.log(`  Last tx:   ${status.loop.lastSubmittedTxHash} (${status.loop.lastSubmittedAt})`);
       }

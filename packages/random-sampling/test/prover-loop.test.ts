@@ -10,6 +10,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { startProverLoop, type TickableProver } from '../src/prover-loop.js';
 import type { TickOutcome } from '../src/prover.js';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 function fakeProver(impl: () => Promise<TickOutcome>): TickableProver & { closed: boolean; calls: number } {
   let calls = 0;
   const close = vi.fn();
@@ -190,6 +192,47 @@ describe('startProverLoop', () => {
     expect(status.lastSubmittedAt).toBeNull();
     expect(status.lastSubmittedTxHash).toBeNull();
     expect(status.lastOutcome).toBeNull();
+    expect(status.challengesReceived24h).toBe(0);
+    expect(status.proofsSubmitted24h).toBe(0);
+    expect(status.lastFailureClassification).toBeNull();
+    expect(status.lastFailureAt).toBeNull();
     await loop.stop();
+  });
+
+  it('reports trailing challenge/proof health and classifies the latest failure', async () => {
+    let now = 1_000;
+    let call = 0;
+    const outcomes: TickOutcome[] = [
+      { kind: 'already-solved' },
+      { kind: 'submitted', txHash: '0xproof', kaId: 1n, cgId: 2n, chunkId: 0n },
+      { kind: 'kc-not-synced', kaId: 3n, cgId: 2n },
+      { kind: 'no-challenge', reason: 'no-eligible-cg' },
+    ];
+    const prover = fakeProver(async () => outcomes[Math.min(call++, outcomes.length - 1)]!);
+    const loop = startProverLoop({ prover, intervalMs: 60_000, now: () => now });
+    loop.start();
+    await vi.waitFor(() => expect(loop.getStatus().challengesReceived24h).toBe(1));
+    now += 1;
+    // Drive the remaining outcomes directly through the timer without
+    // waiting for a real 24-hour interval.
+    const first = loop.getStatus();
+    expect(first.challengesReceived24h).toBe(1);
+    expect(first.proofsSubmitted24h).toBe(0);
+    await loop.stop();
+
+    // A second loop makes the test independent of timer scheduling while
+    // still exercising the same public health snapshot contract.
+    call = 0;
+    const second = fakeProver(async () => outcomes[Math.min(call++, outcomes.length - 1)]!);
+    const health = startProverLoop({ prover: second, intervalMs: 1, now: () => now });
+    health.start();
+    await vi.waitFor(() => expect(health.getStatus().lastFailureClassification).toBe('kc-not-synced'));
+    expect(health.getStatus().challengesReceived24h).toBe(3);
+    expect(health.getStatus().proofsSubmitted24h).toBe(1);
+    expect(health.getStatus().lastFailureAt).toBe(new Date(now).toISOString());
+    now += DAY_MS + 1;
+    expect(health.getStatus().challengesReceived24h).toBe(0);
+    expect(health.getStatus().proofsSubmitted24h).toBe(0);
+    await health.stop();
   });
 });
