@@ -158,6 +158,54 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(syncSharedMemory).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['durable-first', 'shared-first'] as const)(
+    'runs the trailing plane after a %s fold that SUMS the deferrals',
+    async (planeOrder) => {
+      // `CatchupPlaneRetryMerge` promises that the diagnostic fold and the retry
+      // CONTROL signal stay separate, so a fold is entitled to leave the sum of
+      // every attempt on `deferredBackpressure` — that separation is the whole
+      // reason the policy tracks the latest value itself. Re-deriving the
+      // leading plane's deferral from the RETURNED result broke that promise for
+      // this runner: a plane that deferred once and then succeeded still read as
+      // deferred, and the trailing plane was skipped as `leading-plane-deferred`
+      // with nothing refusing capacity any more.
+      const clock = virtualClock();
+      const sumDeferrals = (
+        previous: { deferredBackpressure?: number },
+        current: { deferredBackpressure?: number },
+      ) => ({
+        deferredBackpressure:
+          (previous.deferredBackpressure ?? 0) + (current.deferredBackpressure ?? 0),
+      });
+      const leading = vi.fn()
+        .mockResolvedValueOnce({ deferredBackpressure: 1 })
+        .mockResolvedValueOnce({ deferredBackpressure: 0 });
+      const trailing = vi.fn(async () => ({ deferredBackpressure: 0 }));
+      const sharedLeads = planeOrder === 'shared-first';
+
+      const result = await runCatchupPlanesWithPolicy({
+        mode: 'foreground',
+        includeSharedMemory: true,
+        planeOrder,
+        syncDurable: sharedLeads ? trailing : leading,
+        syncSharedMemory: sharedLeads ? leading : trailing,
+        mergeDurableRetryResults: sumDeferrals,
+        mergeSharedMemoryRetryResults: sumDeferrals,
+        now: clock.now,
+        wait: clock.wait,
+      });
+
+      expect(leading).toHaveBeenCalledTimes(2);
+      expect(trailing).toHaveBeenCalledTimes(1);
+      expect(result.skippedPlanes).toEqual({});
+      expect(result.durable).not.toBeNull();
+      expect(result.shared).not.toBeNull();
+      // The fold's cumulative value is returned untouched — the policy reads its
+      // own tracked control value instead of rewriting the caller's diagnostics.
+      expect((sharedLeads ? result.shared : result.durable)?.deferredBackpressure).toBe(1);
+    },
+  );
+
   it('retries a deferred plane on a wall-clock budget, not a fixed attempt count', async () => {
     // Before #2006 the budget was the fixed ladder [100, 250, 500] — exactly
     // four attempts totalling 850 ms — against measured sync-global queue waits
