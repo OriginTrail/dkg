@@ -43,6 +43,7 @@ import {
   RPC_RECEIPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
+import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
 // so a failover/exhaustion warning emitted by one test can't suppress (via the
@@ -4239,6 +4240,53 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     (a as any).contracts.contextGraphs = undefined;
     await expect(a.isPublishAuthorityEnforceable()).resolves.toBe(false);
+  });
+
+  it('answers `false` only for an absence the Hub itself declares', async () => {
+    // `initContracts()` swallows this one, and it is a FACT about the deployment: nothing to
+    // enforce here, so every operational wallet stays a candidate.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = undefined;
+    (a as any).contextGraphsBindingFailure = new HubContractNotFoundError(
+      'ContextGraphs',
+      '0x0000000000000000000000000000000000000abc',
+    );
+
+    await expect(a.isPublishAuthorityEnforceable()).resolves.toBe(false);
+  });
+
+  it('THROWS when the binding was lost to a failed resolution, not to a missing registration', async () => {
+    // GH#2648 — `initContracts()` swallows a transient failure too, while `init()` still marks
+    // the adapter initialized and nothing rebinds, so one startup 429 makes the unset binding
+    // permanent. Answering `false` there reports `unenforced` for the whole process: every lane
+    // eligible, and with the refusal terminal each wrong-lane claim destroys the job. A throw is
+    // mapped to `unknown` by the resolver, which holds the job instead.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = undefined;
+    (a as any).contextGraphsBindingFailure = new Error('429 Too Many Requests');
+
+    await expect(a.isPublishAuthorityEnforceable()).rejects.toThrow(/429 Too Many Requests/);
+  });
+
+  it('records WHY the ContextGraphs binding is unset when initContracts cannot resolve it', async () => {
+    // The probe above can only tell the two apart because `initContracts()` keeps the error it
+    // swallows. Without this the distinction is unreachable in production.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    const failure = new Error('429 Too Many Requests');
+    (a as any).resolveContract = recorder(async (name: string) => {
+      if (name === 'ContextGraphs') throw failure;
+      return connectable({});
+    });
+    (a as any).resolveAssetStorage = recorder(async () => connectable({}));
+    (a as any).resolveAndAssignRandomSamplingPair = recorder(async () => undefined);
+    (a as any).startHubRotationListener = recorder(async () => undefined);
+    (a as any).readContract = recorder(async () => ethers.ZeroAddress);
+    (a as any).contracts.contextGraphs = undefined;
+
+    await (a as any).initContracts();
+
+    expect((a as any).contextGraphsBindingFailure).toBe(failure);
+    await expect(a.isPublishAuthorityEnforceable()).rejects.toThrow(/429 Too Many Requests/);
   });
 
   it('lets a failed authority read THROW rather than reporting an unauthorized verdict', async () => {

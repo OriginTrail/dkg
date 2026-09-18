@@ -738,6 +738,16 @@ export class EVMChainAdapterBase {
 
   protected contracts: ContractCache;
 
+  /**
+   * GH#2648 — why `contracts.contextGraphs` is unset, when it is.
+   *
+   * `undefined` once the binding resolved. Otherwise the error `initContracts()` swallowed:
+   * a {@link HubContractNotFoundError} means the Hub genuinely does not register ContextGraphs,
+   * anything else means the resolution FAILED and the absence proves nothing. Read by
+   * {@link ContextGraphMethods.isPublishAuthorityEnforceable}.
+   */
+  protected contextGraphsBindingFailure: unknown;
+
   protected initialized = false;
 
   /**
@@ -2981,8 +2991,14 @@ export class EVMChainAdapterBase {
     try {
       this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
       this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
-    } catch {
-      // ContextGraphs not deployed — context graph operations unavailable
+      this.contextGraphsBindingFailure = undefined;
+    } catch (err) {
+      // ContextGraphs not deployed — context graph operations unavailable.
+      // GH#2648 — but WHY it is unset is not interchangeable, so keep the error. `init()` marks
+      // the adapter initialized either way and nothing rebinds, so a binding lost to a transient
+      // RPC failure here is sticky for the process lifetime; `isPublishAuthorityEnforceable`
+      // must be able to tell that apart from a Hub that simply has no ContextGraphs.
+      if (this.contracts.contextGraphs === undefined) this.contextGraphsBindingFailure = err;
     }
 
     try {
