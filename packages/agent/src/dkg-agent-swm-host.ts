@@ -1162,24 +1162,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * hash-only core has none.
    */
   /**
-   * OT-RFC-38 / LU-6 Phase B — should a `ContextGraphCreated` chain event
-   * auto-engage host mode for the CG it announces?
-   *
-   * Two tiers, and only two:
-   *   - `accessPolicy === 1` (curated) — the original Phase B tier, always
-   *     eligible; the reconciler applies the WS-A strip afterwards.
-   *   - `accessPolicy === 0 && publishPolicy === 1` (public AND open-publish)
-   *     with `swmHostMode.hostPublic` on — the explicit GH #1611 operator
-   *     opt-in for subscribers that cannot reach a member.
-   *
-   * `publishPolicy === 0` (PCA: publicly readable, curated publish) is NOT the
-   * public tier: it restricts WHO may write, so it keeps the conservative
-   * ciphertext path. Extracted from the chain-event handler so the operator
-   * matrix is testable — the periodic sweep cannot heal a miss here, because
-   * `reconcileHostModeSubscriptions` only enumerates LOCAL store graphs and a
-   * hash-only core has none.
-   */
-  /**
    * Does this core host at least ONE explicitly non-curated CG — i.e. is the
    * GH #1611 public host tier served here at all? Answers the pre-decode
    * blanket gate in {@link handleSwmHostCatchup}, so it short-circuits on the
@@ -2209,6 +2191,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   async handleSwmHostCatchup(this: DKGAgent, data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
     const ctx = createOperationContext('share');
+    // OT-RFC-49 WS-A — the strip denial is a policy statement served from two
+    // gates below (pre-decode blanket, per-CG re-check). Build it once so a
+    // wording or field change cannot drift between them.
+    const stripDenied = (): Uint8Array => encodeSwmHostCatchupResponse({
+      version: SWM_HOST_CATCHUP_WIRE_VERSION,
+      contextGraphId: '',
+      nextSeqno: 0,
+      truncated: false,
+      denied: 'private-ciphertext strip is on (OT-RFC-49 WS-A): host-mode custody retired',
+      entries: [],
+    });
     if (!this.swmHostModeStore) {
       return encodeSwmHostCatchupResponse({
         version: SWM_HOST_CATCHUP_WIRE_VERSION,
@@ -2233,21 +2226,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // unreadable — dead storage instead of the LU-6 replay leg it exists for.
     // When this core hosts NO non-curated CG (the default topology) we still
     // deny BEFORE decoding; otherwise we decode and re-check per CG below.
-    const hasPublicHostTier = [...this.swmHostModeCurated.values()].some((c) => c === false);
-    if (this.swmHostModeStripCiphertext() && !hasPublicHostTier) {
+    if (this.swmHostModeStripCiphertext() && !this.hasPublicHostTier()) {
       this.log.debug(
         ctx,
         `host-catchup served NOTHING from=${fromPeerId}: private-ciphertext strip is ON ` +
         `(OT-RFC-49 WS-A — cores serve zero private SWM ciphertext)`,
       );
-      return encodeSwmHostCatchupResponse({
-        version: SWM_HOST_CATCHUP_WIRE_VERSION,
-        contextGraphId: '',
-        nextSeqno: 0,
-        truncated: false,
-        denied: 'private-ciphertext strip is on (OT-RFC-49 WS-A): host-mode custody retired',
-        entries: [],
-      });
+      return stripDenied();
     }
     let req;
     try {
@@ -2292,14 +2277,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `host-catchup served NOTHING cg=${req.contextGraphId} from=${fromPeerId}: private-ciphertext ` +
           `strip is ON and this CG is not a confirmed-public host-tier CG (OT-RFC-49 WS-A)`,
         );
-        return encodeSwmHostCatchupResponse({
-          version: SWM_HOST_CATCHUP_WIRE_VERSION,
-          contextGraphId: '',
-          nextSeqno: 0,
-          truncated: false,
-          denied: 'private-ciphertext strip is on (OT-RFC-49 WS-A): host-mode custody retired',
-          entries: [],
-        });
+        return stripDenied();
       }
     }
 
