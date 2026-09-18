@@ -11,6 +11,8 @@ import {
   emptySharedMemorySyncResult,
   mapWithConcurrency,
   mergeFleetSharedMemoryDiagnostics,
+  mergeDurableSyncResults,
+  mergeSamePeerSharedMemoryDiagnostics,
   resolveSwmCatchupPassConfig,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
@@ -81,7 +83,36 @@ parentPort!.on('message', async (message: any) => {
  * `verifiedPrivateOnlyResponses` is normalized to a number on arrival so the
  * accumulation below never has to re-guard it.
  */
-type CatchupDurableResult = DurableSyncResult & { verifiedPrivateOnlyResponses: number };
+type CatchupDurableResult = DurableSyncResult & {
+  verifiedPrivateOnlyResponses: number;
+  /** Cumulative deferrals retained for diagnostics when the control value is latest-only. */
+  retryDeferredBackpressure?: number;
+};
+
+function mergeCatchupDurableResults(
+  previous: CatchupDurableResult,
+  current: CatchupDurableResult,
+): CatchupDurableResult {
+  // `previous.deferredBackpressure` was already rewritten to the PREVIOUS
+  // attempt's own value by the fold below, so re-seed the summing reducer with
+  // the cumulative total or every attempt past the second drops the ones before
+  // it. The loop is bounded by a wall-clock budget rather than two tries, so
+  // three-plus attempts are the normal case under sustained backpressure.
+  const merged = mergeDurableSyncResults(
+    {
+      ...previous,
+      deferredBackpressure: previous.retryDeferredBackpressure ?? previous.deferredBackpressure,
+    },
+    current,
+  );
+  return {
+    ...merged,
+    // The policy uses this latest value to decide whether another admission is
+    // needed; retain the folded value separately for worker diagnostics.
+    deferredBackpressure: current.deferredBackpressure,
+    retryDeferredBackpressure: merged.deferredBackpressure,
+  };
+}
 
 /**
  * One peer's shared-memory plane, as returned across the Worker RPC.
@@ -111,6 +142,12 @@ function selectedSharedMemoryResult(
 interface CatchupSharedMemoryPlane {
   readonly payload: SharedMemorySyncResult;
   readonly progress: DurableProgressClassification;
+  /** The admission policy this plane was classified under; a retry fold reuses it. */
+  readonly policy: CatchupSharedMemoryPolicy;
+  /** This attempt's own counters, so a retry fold never classifies the cumulative payload. */
+  readonly latestAttempt: SharedMemorySyncResult;
+  /** This attempt's typed graph-complete verdict, kept for the same reason. */
+  readonly scopeComplete: boolean;
   readonly terminalBoundaryRequired: boolean;
   readonly selectedScopeProven: boolean;
   /** Projected for the generic catch-up admission retry policy. */
@@ -124,33 +161,88 @@ interface CatchupSharedMemoryPolicy {
   readonly terminalBoundaryRequired: boolean;
 }
 
+/**
+ * The single classification branch for a shared-memory plane.
+ *
+ * Only an operator-pinned graph-complete provider may terminate the whole
+ * selected SWM scope. Every explicitly subscribed PUBLIC CG still uses the
+ * selected scheduler/continuation lane by default, but an ordinary peer's
+ * terminal verdict describes only that peer's local manifest and must not
+ * replace multi-peer union convergence. A complete-provider request that
+ * receives an older/raw host response remains fail-closed.
+ *
+ * Kept as one function because the retry fold must pick the SAME classifier as
+ * the first attempt: `classifySharedMemoryFreshness` discounts resolved
+ * voluntary yields from `failedPhases`, so re-deriving the branch from
+ * `terminalBoundaryRequired` alone flipped a public CG's verdict purely because
+ * admission had deferred it once.
+ */
+function classifyCatchupSharedMemoryPayload(
+  payload: SharedMemorySyncResult,
+  policy: CatchupSharedMemoryPolicy,
+  scopeComplete: boolean,
+): DurableProgressClassification {
+  return policy.selectedSchedulingRequested
+    ? classifySharedMemoryFreshness(payload, {
+      complete: policy.terminalBoundaryRequired ? scopeComplete : true,
+    })
+    : classifyDurableProgress(payload);
+}
+
 function normalizeCatchupSharedMemoryResult(
   result: CatchupSharedMemoryRpcResult,
   policy: CatchupSharedMemoryPolicy,
 ): CatchupSharedMemoryPlane {
   const selected = selectedSharedMemoryResult(result);
   const payload = selected?.shared ?? result as SharedMemorySyncResult;
-  // Only an operator-pinned graph-complete provider may terminate the whole
-  // selected SWM scope. Every explicitly subscribed PUBLIC CG still uses the
-  // selected scheduler/continuation lane by default, but an ordinary peer's
-  // terminal verdict describes only that peer's local manifest and must not
-  // replace multi-peer union convergence. A complete-provider request that
-  // receives an older/raw host response remains fail-closed.
-  const progress = policy.selectedSchedulingRequested
-    ? classifySharedMemoryFreshness(payload, {
-      complete: policy.terminalBoundaryRequired
-        ? selected?.scopeComplete === true
-        : true,
-    })
-    : classifyDurableProgress(payload);
+  const scopeComplete = selected?.scopeComplete === true;
+  const progress = classifyCatchupSharedMemoryPayload(payload, policy, scopeComplete);
   return {
     payload,
     progress,
+    policy,
+    latestAttempt: payload,
+    scopeComplete,
     terminalBoundaryRequired: policy.terminalBoundaryRequired,
     selectedScopeProven: policy.terminalBoundaryRequired
-      && selected?.scopeComplete === true
+      && scopeComplete
       && progress.completedWithoutFailure,
     deferredBackpressure: payload.deferredBackpressure,
+  };
+}
+
+/** Fold retries for one peer while retaining the latest completion verdict. */
+function mergeCatchupSharedMemoryPlanes(
+  previous: CatchupSharedMemoryPlane,
+  current: CatchupSharedMemoryPlane,
+): CatchupSharedMemoryPlane {
+  const payload = mergeSamePeerSharedMemoryDiagnostics(
+    previous.payload,
+    current.payload,
+  );
+  const selectedScopeProven = previous.selectedScopeProven || current.selectedScopeProven;
+  // The payload is cumulative for telemetry, while classification sees ONLY the
+  // latest attempt. `mergeSamePeerSharedMemoryDiagnostics` sums `failedPhases`,
+  // `timedOutPhases` and `deniedPhases`, and one attempt can carry a phase
+  // failure alongside its deferral (`markDeferred` adds the deferral onto the
+  // round's existing summary), so folding them into the classification input
+  // would report a peer whose retry succeeded as failed.
+  const progress = classifyCatchupSharedMemoryPayload(
+    current.latestAttempt,
+    current.policy,
+    current.scopeComplete,
+  );
+  return {
+    payload,
+    progress,
+    policy: current.policy,
+    latestAttempt: current.latestAttempt,
+    scopeComplete: current.scopeComplete,
+    terminalBoundaryRequired: current.terminalBoundaryRequired,
+    selectedScopeProven,
+    // Deferral is the latest attempt's retry control signal. Keeping it explicit
+    // documents the worker boundary alongside the cumulative payload.
+    deferredBackpressure: current.deferredBackpressure,
   };
 }
 
@@ -453,6 +545,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         .then((rawDurable) => ({
           ...rawDurable,
           verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
+          retryDeferredBackpressure: rawDurable.deferredBackpressure ?? 0,
         }));
     const syncSharedMemory = (
       { priority, source }: CatchupPlaneContext,
@@ -518,7 +611,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       );
     if (!needDurable) {
       const shared = needSharedMemory
-        ? await runCatchupPlaneWithPolicy('foreground', syncSharedMemory)
+        ? await runCatchupPlaneWithPolicy('foreground', syncSharedMemory, {
+          mergeRetryResults: mergeCatchupSharedMemoryPlanes,
+        })
         : null;
       return {
         peerId,
@@ -540,6 +635,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         : 'durable-first',
       syncDurable,
       syncSharedMemory,
+      mergeDurableRetryResults: mergeCatchupDurableResults,
+      mergeSharedMemoryRetryResults: mergeCatchupSharedMemoryPlanes,
     });
     return { peerId, fromDurableAuthority, fromSharedMemoryAuthority, ...round };
   };
@@ -583,7 +680,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.durable.rejectedKcs += durable.rejectedKcs;
       diagnostics.durable.failedPeers += durable.failedPeers;
       diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
-      diagnostics.durable.deferredBackpressure += durable.deferredBackpressure ?? 0;
+      diagnostics.durable.deferredBackpressure +=
+        durable.retryDeferredBackpressure ?? durable.deferredBackpressure ?? 0;
       deferredBackpressure += durable.deferredBackpressure ?? 0;
       diagnostics.durable.deniedPhases =
         (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
@@ -640,7 +738,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // peer's plane is deferred"), so this is a designed-for state, not an
       // edge case.
       if (!isContinuationRound) {
-        deferredBackpressure += shared.deferredBackpressure ?? 0;
+        // `shared` contains cumulative diagnostics; the plane wrapper retains
+        // the latest attempt's control value separately for job admission.
+        deferredBackpressure += sharedResult?.deferredBackpressure ?? 0;
       }
       peerDenied = peerDenied || shared.deniedPhases > 0;
 

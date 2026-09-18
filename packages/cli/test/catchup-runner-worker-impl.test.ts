@@ -1687,7 +1687,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.deferredBackpressure).toBe(0);
     expect(result.dataSynced).toBe(1);
     expect(result.sharedMemorySynced).toBe(1);
-    expect(result.diagnostics?.sharedMemory.deferredBackpressure).toBe(0);
+    // Per-attempt diagnostics retain the initial yield even though the job-level
+    // control field reflects only the successful latest attempt.
+    expect(result.diagnostics?.sharedMemory.deferredBackpressure).toBe(1);
     expect(durableCalls).toBe(1);
     expect(sharedCalls).toBe(2);
     expect(finalizeCalls).toEqual([[]]);
@@ -1731,6 +1733,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     );
 
     expect(result.deferredBackpressure).toBe(0);
+    expect(result.diagnostics?.durable.deferredBackpressure).toBe(1);
     expect(durableCalls).toBe(2);
     expect(sharedCalls).toBe(1);
     expect(callOrder).toEqual(['durable-1', 'durable-2', 'shared']);
