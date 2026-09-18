@@ -93,7 +93,18 @@ function mergeCatchupDurableResults(
   previous: CatchupDurableResult,
   current: CatchupDurableResult,
 ): CatchupDurableResult {
-  const merged = mergeDurableSyncResults(previous, current);
+  // `previous.deferredBackpressure` was already rewritten to the PREVIOUS
+  // attempt's own value by the fold below, so re-seed the summing reducer with
+  // the cumulative total or every attempt past the second drops the ones before
+  // it. The loop is bounded by a wall-clock budget rather than two tries, so
+  // three-plus attempts are the normal case under sustained backpressure.
+  const merged = mergeDurableSyncResults(
+    {
+      ...previous,
+      deferredBackpressure: previous.retryDeferredBackpressure ?? previous.deferredBackpressure,
+    },
+    current,
+  );
   return {
     ...merged,
     // The policy uses this latest value to decide whether another admission is
