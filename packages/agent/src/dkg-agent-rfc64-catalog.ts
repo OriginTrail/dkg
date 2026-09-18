@@ -205,7 +205,7 @@ const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
 const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
 const RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1 = 8;
 
-interface Rfc64OperationalAppliedHeadV1 {
+export interface Rfc64OperationalAppliedHeadV1 {
   readonly snapshot: AppliedCatalogHeadSnapshotV1;
   readonly issuedAt: TimestampMsV1;
   readonly contextGraphId: string;
@@ -260,6 +260,45 @@ function groupRfc64OperationalAppliedHeadsV1(
     byContextGraph.set(head.contextGraphId, grouped);
   }
   return byContextGraph;
+}
+
+async function loadRfc64OperationalPromisedRowCountsV1(
+  persistence: Rfc64PersistenceV1,
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+): Promise<ReadonlyMap<string, string | null>> {
+  const uniqueTargets = new Map(targets.map((target) => [
+    rfc64CatalogTargetExactIdentityKeyV1(target),
+    target,
+  ]));
+  const loaded = await mapWithConcurrency(
+    [...uniqueTargets],
+    RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
+    async ([identity, target]): Promise<readonly [string, string | null]> => {
+      const stored = await persistence.controlObjects.getVerifiedObject({
+        objectDigest: target.catalogHeadObjectDigest,
+        signatureVariantDigest: target.signatureVariantDigest,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      }).catch(() => null);
+      if (stored === null) return [identity, null] as const;
+      try {
+        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
+        const payload = stored.envelope.payload;
+        if (
+          stored.envelope.objectDigest !== target.catalogHeadObjectDigest
+          || payload.networkId !== target.networkId
+          || payload.contextGraphId !== target.contextGraphId
+          || payload.subGraphName !== target.subGraphName
+          || payload.authorAddress !== target.authorAddress
+          || payload.era !== target.catalogEra
+          || payload.version !== target.catalogVersion
+        ) return [identity, null] as const;
+        return [identity, payload.totalRows] as const;
+      } catch {
+        return [identity, null] as const;
+      }
+    },
+  );
+  return new Map(loaded);
 }
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
@@ -998,7 +1037,7 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   return runtime;
 }
 
-function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
+export function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
   networkId: string;
   contextGraphId: string;
   subGraphName: string | null;
@@ -1014,6 +1053,27 @@ function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
   ].join('\0');
 }
 
+/**
+ * Keep only the newest catalog version promised for each scope. Targets that
+ * share that newest version but disagree on the head digest are all kept: that
+ * fork is evidence the row projection reports as ambiguous, and dropping one
+ * side of it would pick a branch at random.
+ */
+function pruneRfc64SupersededCatalogTargetsV1(
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+): readonly Rfc64PublicCatalogHeadAnnouncementV1[] {
+  const newestByScope = new Map<string, bigint>();
+  for (const target of targets) {
+    const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
+    const version = BigInt(target.catalogVersion);
+    const newest = newestByScope.get(scopeKey);
+    if (newest === undefined || version > newest) newestByScope.set(scopeKey, version);
+  }
+  return targets.filter((target) => (
+    BigInt(target.catalogVersion) === newestByScope.get(rfc64CatalogTargetScopeKeyV1(target))
+  ));
+}
+
 function rfc64CatalogTargetExactIdentityV1(
   left: Rfc64PublicCatalogHeadAnnouncementV1,
   right: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -1022,7 +1082,7 @@ function rfc64CatalogTargetExactIdentityV1(
     === rfc64CatalogTargetExactIdentityKeyV1(right);
 }
 
-function rfc64CatalogTargetExactIdentityKeyV1(
+export function rfc64CatalogTargetExactIdentityKeyV1(
   target: Rfc64PublicCatalogHeadAnnouncementV1,
 ): string {
   return [
@@ -1263,6 +1323,81 @@ function sumDecimalCountsV1(values: readonly string[]): string {
   return values.reduce((sum, value) => sum + BigInt(value), 0n).toString(10);
 }
 
+interface Rfc64OperationalRowProjectionV1 {
+  readonly expectedRowCount: string | null;
+  readonly missingRowCount: string | null;
+}
+
+export function projectRfc64OperationalRowCountsV1(
+  heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+  promisedRowCounts: ReadonlyMap<string, string | null>,
+): Readonly<Rfc64OperationalRowProjectionV1> {
+  if (heads.length === 0 && targets.length === 0) {
+    return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+  }
+  const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
+  const expectedByScope = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, {
+    catalogVersion: snapshot.catalogVersion,
+    catalogHeadObjectDigest: snapshot.currentCatalogHeadDigest,
+    rowCount: snapshot.inventoryRowCount as string | null,
+    target: null as Rfc64PublicCatalogHeadAnnouncementV1 | null,
+  }]));
+  // A fork is a property of the newest version in a scope, not of the order
+  // the targets arrive in: `authoritativeTargets` preserves insertion order and
+  // the promised half arrives in peer-completion order, so deciding as the loop
+  // walks would let the same state report an ambiguous pair or a definite one
+  // depending on which peer answered first. The scope's maximum version is
+  // resolved first, and only a digest disagreement AT that maximum is ambiguous
+  // -- a strictly newer head settles the branch the older fork was on.
+  const ambiguousScopes = new Set<string>();
+  for (const target of targets) {
+    const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
+    const current = expectedByScope.get(scopeKey);
+    const targetVersion = BigInt(target.catalogVersion);
+    if (current === undefined || targetVersion > BigInt(current.catalogVersion)) {
+      expectedByScope.set(scopeKey, {
+        catalogVersion: target.catalogVersion,
+        catalogHeadObjectDigest: target.catalogHeadObjectDigest,
+        rowCount: null,
+        target,
+      });
+      ambiguousScopes.delete(scopeKey);
+    } else if (
+      targetVersion === BigInt(current.catalogVersion)
+      && target.catalogHeadObjectDigest !== current.catalogHeadObjectDigest
+    ) {
+      ambiguousScopes.add(scopeKey);
+    }
+  }
+  if (ambiguousScopes.size > 0) {
+    return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+  }
+
+  let expected = 0n;
+  let missing = 0n;
+  for (const [scopeKey, projected] of expectedByScope) {
+    const targetRowCount = projected.target === null
+      ? projected.rowCount
+      : promisedRowCounts.get(
+          rfc64CatalogTargetExactIdentityKeyV1(projected.target),
+        ) ?? null;
+    if (targetRowCount === null) {
+      return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+    }
+    const expectedForScope = BigInt(targetRowCount);
+    const appliedForScope = BigInt(
+      appliedByScope.get(scopeKey)?.snapshot.inventoryRowCount ?? '0',
+    );
+    expected += expectedForScope;
+    if (expectedForScope > appliedForScope) missing += expectedForScope - appliedForScope;
+  }
+  return Object.freeze({
+    expectedRowCount: expected.toString(10),
+    missingRowCount: missing.toString(10),
+  });
+}
+
 export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Stable recovery capabilities are captured once per agent-owned runtime. */
   /**
@@ -1323,6 +1458,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await this.rfc64PublicCatalogServiceV1?.whenReceiverIdle();
       },
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
+      pruneSupersededTargets: pruneRfc64SupersededCatalogTargetsV1,
       parityFailed: async (contextGraphId, promised) => {
         const persistence = this.rfc64PersistenceV1;
         if (persistence === undefined) return true;
@@ -1524,16 +1660,49 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await loadRfc64OperationalAppliedHeadsV1(persistence),
       );
     }
-    const replaySnapshotUnstable = replaySnapshotRevision !== replayRecovery.revision;
-    const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
-    const receiverStats = service?.stats().receiver;
-    return Object.freeze(selections.map((selection) => {
-      const accepted = service !== undefined && networkId !== undefined
+    const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
+    const targetsByContextGraph = new Map(selections.map((selection) => [
+      selection.contextGraphId,
+      targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [],
+    ]));
+    // One accepted-policy snapshot per selection, resolved before the durable
+    // reads below and reused for both the promised targets and the replay
+    // status. Reading it twice across an await lets an accepted-policy rotation
+    // pair an old-digest promise set with a null replay status, which publishes
+    // an expected/missing pair built from promises the runtime has already
+    // dropped at that rotation.
+    const acceptedByContextGraph = new Map(selections.map((selection) => [
+      selection.contextGraphId,
+      service !== undefined && networkId !== undefined
         ? service.acceptedPolicySnapshot(
           networkId,
           selection.contextGraphId as ContextGraphIdV1,
         )
-        : null;
+        : null,
+    ]));
+    const promisedTargetsByContextGraph = new Map(selections.map((selection) => {
+      const accepted = acceptedByContextGraph.get(selection.contextGraphId) ?? null;
+      return [
+        selection.contextGraphId,
+        accepted === null
+          ? null
+          : replayRecovery.promisedTargets(selection.contextGraphId, accepted.policyDigest),
+      ] as const;
+    }));
+    const operationalTargets = [...new Map(
+      selections.flatMap((selection) => [
+        ...targetsByContextGraph.get(selection.contextGraphId) ?? [],
+        ...promisedTargetsByContextGraph.get(selection.contextGraphId) ?? [],
+      ]).map((target) => [rfc64CatalogTargetExactIdentityKeyV1(target), target]),
+    ).values()];
+    const promisedRowCounts = persistence === undefined
+      ? new Map<string, string | null>()
+      : await loadRfc64OperationalPromisedRowCountsV1(persistence, operationalTargets);
+    const replaySnapshotUnstable = replaySnapshotRevision !== replayRecovery.revision;
+    const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
+    const receiverStats = service?.stats().receiver;
+    return Object.freeze(selections.map((selection) => {
+      const accepted = acceptedByContextGraph.get(selection.contextGraphId) ?? null;
       const progress = progressByContextGraph?.get(selection.contextGraphId);
       const currentReplayProgress = accepted === null
         ? null
@@ -1551,8 +1720,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const replayUnverified = currentReplayProgress?.unverified === true
         && heads.length > 0;
       const replayUnsettled = replayActive || replayFailed || replayUnverified;
-      const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
-      const targets = targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [];
+      const targets = targetsByContextGraph.get(selection.contextGraphId) ?? [];
+      const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
+      const authoritativeTargets = [...new Map([
+        ...targets,
+        ...promisedTargets ?? [],
+      ].map((target) => [rfc64CatalogTargetExactIdentityKeyV1(target), target])).values()];
       const targetCapacityExceeded = targetTracker
         ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
       const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
@@ -1587,6 +1760,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const rowCount = heads.length === 0
         ? null
         : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
+      const rowProjectionUnavailable = targetCapacityExceeded
+        || replayActive
+        || replayUnverified
+        || (replayFailed && promisedTargets === null);
+      const rowProjection = rowProjectionUnavailable
+        ? Object.freeze({ expectedRowCount: null, missingRowCount: null })
+        : projectRfc64OperationalRowCountsV1(
+          heads,
+          authoritativeTargets,
+          promisedRowCounts,
+        );
       const appliedCatalogVersion = heads.length === 0
         ? null
         : heads.reduce((highest, { snapshot }) => (
@@ -1675,6 +1859,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               ? 'applying'
             : legacyReadOnlyCount > 0
               ? 'known-incomplete'
+            : rowProjection.missingRowCount !== null
+              && BigInt(rowProjection.missingRowCount) > 0n
+              ? 'known-incomplete'
             : heads.length === 0
               ? 'bootstrapping'
             : replayUnverified
@@ -1709,18 +1896,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ? null
             : inventoryDigest,
         appliedInventoryDigest: inventoryDigest,
-        expectedRowCount:
-          targetCapacityExceeded || replayUnsettled || pendingTargets.length > 0
-            ? null
-            : rowCount,
+        expectedRowCount: rowProjection.expectedRowCount,
         appliedRowCount: rowCount,
-        missingRowCount:
-          targetCapacityExceeded
-          || replayUnsettled
-          || pendingTargets.length > 0
-          || rowCount === null
-            ? null
-            : '0',
+        missingRowCount: rowProjection.missingRowCount,
         legacyReadOnlyCount,
         catalogVersion,
         authorHeadCount: heads.length,
