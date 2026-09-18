@@ -28,6 +28,10 @@ export interface ManagedReadRecoveryCoordinatorOptionsV1 {
  * Own the retained deadline for managed server work whose HTTP request was
  * dispatched before caller cancellation. Closing the store invalidates one
  * complete lifecycle generation; a later reusable generation starts cleanly.
+ *
+ * Despite the `Read` in these names the fence covers every managed store
+ * operation — queries, constructs and updates alike. The names predate that
+ * widening and are internal to this package; renaming them is a follow-up.
  */
 export class ManagedReadRecoveryCoordinatorV1 {
   readonly #options: ManagedReadRecoveryCoordinatorOptionsV1;
