@@ -256,3 +256,9 @@ export {
   type RandomSamplingAvailabilityResolver,
   type LegacyRandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';
+
+export {
+  AbortableKeyedSingleFlight,
+  SingleFlightInvalidatedError,
+  SINGLE_FLIGHT_INVALIDATED_CODE,
+} from './keyed-ttl-single-flight-cache.js';

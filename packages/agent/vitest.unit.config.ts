@@ -219,6 +219,7 @@ export default defineConfig({
       "test/context-graph-join-policy.test.ts",
       "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",
+      "test/registered-authority-coalescing.test.ts",
       "test/context-graph-authority-retry.test.ts",
       "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-historical-name-binding.test.ts",
