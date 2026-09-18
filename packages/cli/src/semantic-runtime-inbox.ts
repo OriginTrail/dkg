@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   signAgentDelegation,
   verifyAgentDelegation,
@@ -11,6 +13,7 @@ import { ethers } from 'ethers';
 
 import {
   assertSemanticContextGraphMember,
+  invokeBoundSemanticProgram,
   invokeStoredSemanticProgram,
   loadStoredSemanticProgram,
   SemanticProgramError,
@@ -25,6 +28,12 @@ import {
   semanticInvocationScope,
   type SemanticInboxInvocationV2,
 } from './semantic-runtime-remote-execute-adapter.js';
+import {
+  assertBoundSemanticInvocation,
+  boundSemanticInvocationScope,
+  type BoundSemanticInboxInvocationV3,
+} from './semantic-runtime-bound-invocation.js';
+import { validateProgramRoutes } from './semantic-runtime-program-bindings.js';
 
 export { SEMANTIC_RUNTIME_INBOX_SKILL_IRI };
 
@@ -46,7 +55,9 @@ export function registerSemanticRuntimeInboxSkill(
   agent.registerSkill(SEMANTIC_RUNTIME_INBOX_SKILL_IRI, async (request, senderPeerId) => {
     try {
       const invocation = decodeInvocation(request);
-      const expectedScope = semanticInvocationScope(invocation, agent.peerId);
+      const expectedScope = invocation.version === 3
+        ? boundSemanticInvocationScope(invocation, agent.peerId)
+        : semanticInvocationScope(invocation, agent.peerId);
       try {
         verifyAgentDelegation(invocation.authorization, { expectedScope });
       } catch {
@@ -78,6 +89,18 @@ export function registerSemanticRuntimeInboxSkill(
         );
       }
       const callerAgentAddress = checksumAddress(invocation.authorization.agentAddress);
+      if (invocation.version === 3) {
+        if (config?.enabled !== true) {
+          throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Semantic runtime is not enabled', 409);
+        }
+        // Invoke-only callers need no raw graph membership. The local binding
+        // checks the signer and the tenant executor's graph access independently.
+        const result = await invokeBoundSemanticProgram(
+          agent, runtime, invocation.contextGraphId, invocation.operationIri,
+          invocation.invocationId, config, callerAgentAddress,
+        );
+        return { success: true, outputData: encodeJson(result) };
+      }
       await assertRemoteSemanticInvocationAllowed(
         agent,
         invocation.contextGraphId,
@@ -132,6 +155,65 @@ export function registerSemanticRuntimeInboxSkill(
       };
     }
   });
+}
+
+/** Sign as the authenticated local caller; never borrow the node's default wallet. */
+export async function invokeBoundSemanticProgramOnPeer(
+  agent: DKGAgent,
+  config: SemanticRuntimeConfig,
+  contextGraphId: string,
+  operationIri: string,
+  invocationId: string,
+  authenticatedCaller: string | undefined,
+): Promise<SemanticInvocationResult> {
+  validateProgramRoutes(config.programRoutes ?? []);
+  const route = config.programRoutes?.find((item) =>
+    item.contextGraphId === contextGraphId && item.operationIri === operationIri);
+  if (!authenticatedCaller || !route || config.enabled !== true) {
+    throw new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'No authorized local caller or configured operation route', 403);
+  }
+  const caller = checksumAddress(authenticatedCaller);
+  const privateKey = agent.getCustodialAgentPrivateKey(agent.resolveLocalAgentAddress(caller));
+  if (!privateKey) {
+    throw new SemanticProgramError('CALLER_SIGNATURE_UNAVAILABLE', 'The authenticated agent has no local signing key', 409);
+  }
+  const unsigned = { version: 3 as const, kind: 'bound-operation' as const, contextGraphId, operationIri, invocationId: invocationId.toLowerCase() };
+  try {
+    assertBoundSemanticInvocation(unsigned);
+  } catch {
+    throw new SemanticProgramError('INVALID_INBOX_INVOCATION', 'Bound operation invocation is malformed', 400);
+  }
+  const targetPeerId = route.targetPeerId;
+  const issuedAtMs = Date.now();
+  const authorization = await signAgentDelegation({
+    agentAddress: caller, agentPrivateKey: privateKey,
+    delegateePeerId: agent.peerId,
+    scope: boundSemanticInvocationScope(unsigned, targetPeerId),
+    issuedAtMs, expiresAtMs: issuedAtMs + SEMANTIC_INVOCATION_AUTHORIZATION_TTL_MS,
+  });
+  let response: SkillResponse;
+  try {
+    response = await agent.invokeSkill(targetPeerId, SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
+      encodeJson({ ...unsigned, authorization }), {
+        // Transport response caching must not skip the tenant's live grant check
+        // on a new API retry. Execution deduplication uses the signed invocationId.
+        messageId: randomUUID(), timeoutMs: INVOCATION_TIMEOUT_MS, requestOwned: true,
+      });
+  } catch (error) {
+    throw new SemanticProgramError('PROGRAM_TARGET_NODE_UNREACHABLE', `Could not invoke tenant node: ${safeMessage(error)}`, 503);
+  }
+  if (!response.success) {
+    const failure = decodeFailure(response.outputData);
+    throw new SemanticProgramError(failure?.code ?? 'REMOTE_INVOCATION_FAILED',
+      failure?.error ?? response.error ?? 'Tenant node rejected the invocation', failure?.status ?? 502);
+  }
+  const result = decodeResult(response.outputData, 'wm');
+  if (result.invocationId.toLowerCase() !== unsigned.invocationId
+    || result.executionIri !== `urn:sr:execution:${unsigned.invocationId}`
+    || response.resultUal !== undefined) {
+    throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Tenant node returned inconsistent Execution persistence evidence', 502);
+  }
+  return result;
 }
 
 export async function invokeSemanticProgramOnAuthorNode(
@@ -306,8 +388,19 @@ function localCustodialAgent(agent: DKGAgent, authorAgentAddress: string): strin
   return agent.getCustodialAgentPrivateKey(local.agentAddress) ? local.agentAddress : null;
 }
 
-function decodeInvocation(request: SkillRequest): SemanticInboxInvocationV2 {
-  const value = decodeJson(request.inputData) as Partial<SemanticInboxInvocationV2> | null;
+function decodeInvocation(request: SkillRequest): SemanticInboxInvocationV2 | BoundSemanticInboxInvocationV3 {
+  const decoded = decodeJson(request.inputData);
+  if (decoded && typeof decoded === 'object' && (decoded as { version?: unknown }).version === 3) {
+    try {
+      assertBoundSemanticInvocation(decoded);
+      const value = decoded as BoundSemanticInboxInvocationV3;
+      if (!value.authorization || typeof value.authorization !== 'object' || Array.isArray(value.authorization)) throw new Error('Missing authorization');
+      return value;
+    } catch {
+      throw new SemanticProgramError('INVALID_INBOX_INVOCATION', 'Bound operation invocation is malformed', 400);
+    }
+  }
+  const value = decoded as Partial<SemanticInboxInvocationV2> | null;
   if (
     !value
     || value.version !== 2

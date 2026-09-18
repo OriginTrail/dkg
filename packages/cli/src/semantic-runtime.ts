@@ -30,7 +30,7 @@ import {
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
 import { createDkgQueryAdapter, findSavedQuery } from './semantic-runtime-query-adapter.js';
 import { readContextGraphQueryCatalogBindings } from './daemon/query-catalog-service.js';
-import { programBindingDigest, validateProgramBindings } from './semantic-runtime-program-bindings.js';
+import { programBindingDigest, validateProgramBindings, validateProgramRoutes } from './semantic-runtime-program-bindings.js';
 import { assertSemanticQueryDefinition, assertSemanticQueryOutput } from './semantic-runtime-query-pins.js';
 import { validateSemanticProgramPolicy } from './semantic-runtime-program-policy.js';
 import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
@@ -1634,6 +1634,11 @@ async function assertProgramInvocationAuthorized(input: {
 
 export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): void {
   if (config.programBindings !== undefined) validateProgramBindings(config.programBindings);
+  if (config.programRoutes !== undefined) validateProgramRoutes(config.programRoutes);
+  for (const route of config.programRoutes ?? []) {
+    if (config.programBindings?.some((binding) => binding.contextGraphId === route.contextGraphId
+      && binding.operationIri === route.operationIri)) throw new Error('AMBIGUOUS_PROGRAM_ROUTE');
+  }
   if (config.programPolicy !== undefined) validateSemanticProgramPolicy(config.programPolicy);
   validatePositiveInteger(config.watchdogMs, 'semanticRuntime.watchdogMs', 60_000);
   validatePositiveInteger(config.startupTimeoutMs, 'semanticRuntime.startupTimeoutMs', 120_000);

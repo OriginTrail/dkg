@@ -5,7 +5,7 @@ import {
   resolveStoredSemanticProgram,
   SemanticProgramError,
 } from '../../semantic-runtime.js';
-import { invokeSemanticProgramOnAuthorNode } from '../../semantic-runtime-inbox.js';
+import { invokeBoundSemanticProgramOnPeer, invokeSemanticProgramOnAuthorNode } from '../../semantic-runtime-inbox.js';
 import { jsonResponse, readBody, safeParseJson } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
@@ -82,16 +82,26 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
     }
   }
   // A configured operation never falls back to the caller's general graph rights.
-  if (config.semanticRuntime?.programBindings?.some((binding) => binding.operationIri === body.programIri)) {
-    const binding = config.semanticRuntime.programBindings.find((item) =>
+  if (config.semanticRuntime?.programBindings?.some((binding) => binding.operationIri === body.programIri)
+    || config.semanticRuntime?.programRoutes?.some((route) => route.operationIri === body.programIri)) {
+    const binding = config.semanticRuntime.programBindings?.find((item) =>
+      item.operationIri === body.programIri && item.contextGraphId === body.contextGraphId);
+    const route = config.semanticRuntime.programRoutes?.find((item) =>
       item.operationIri === body.programIri && item.contextGraphId === body.contextGraphId);
     if (typeof body.contextGraphId !== 'string' || typeof body.invocationId !== 'string'
       || Object.keys(body).some((key) => !['contextGraphId', 'programIri', 'invocationId', 'programLayer', 'executionLayer'].includes(key))
+      || (route && (body.programLayer !== undefined || body.executionLayer !== undefined))
       || (body.programLayer !== undefined && body.programLayer !== binding?.program.programLayer)
       || (body.executionLayer !== undefined && body.executionLayer !== 'wm')) {
       return jsonResponse(res, 400, { error: 'Provide contextGraphId, programIri and invocationId; the tenant fixes the Program and execution layers' });
     }
     try {
+      if (route) {
+        return jsonResponse(res, 200, await invokeBoundSemanticProgramOnPeer(
+          agent, config.semanticRuntime, body.contextGraphId, body.programIri,
+          body.invocationId, ctx.actor.authenticatedAgentAddress,
+        ));
+      }
       return jsonResponse(res, 200, await invokeBoundSemanticProgram(
         agent, semanticRuntimeHost, body.contextGraphId, body.programIri, body.invocationId,
         config.semanticRuntime, ctx.actor.authenticatedAgentAddress,

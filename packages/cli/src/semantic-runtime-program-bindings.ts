@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { canonicalizeJson, sparqlIri, validateContextGraphId, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
-import type { SemanticProgramBinding } from '@origintrail-official/dkg-semantic-runtime';
+import type { SemanticProgramBinding, SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { ethers } from 'ethers';
 
 import { validateSemanticQueryPins } from './semantic-runtime-query-pins.js';
@@ -57,4 +57,23 @@ function keys(value: Record<string, unknown>, allowed: string[]): boolean {
 
 function address(value: unknown): value is string {
   return typeof value === 'string' && ethers.isAddress(value);
+}
+
+/** Routing never grants target authority or selects a signing identity. */
+export function validateProgramRoutes(value: unknown): asserts value is NonNullable<SemanticRuntimeConfig['programRoutes']> {
+  if (!Array.isArray(value) || value.length > 256) throw new Error('INVALID_PROGRAM_ROUTES');
+  const seen = new Set<string>();
+  for (const route of value) {
+    if (!record(route) || !keys(route, ['contextGraphId', 'operationIri', 'targetPeerId'])
+      || typeof route.contextGraphId !== 'string' || !validateContextGraphId(route.contextGraphId).valid
+      || typeof route.operationIri !== 'string' || route.operationIri.length > 2_048
+      || !/^[a-z][a-z0-9+.-]*:/i.test(route.operationIri)
+      || typeof route.targetPeerId !== 'string' || !/^\S{1,512}$/.test(route.targetPeerId)) {
+      throw new Error('INVALID_PROGRAM_ROUTE');
+    }
+    sparqlIri(route.operationIri);
+    const key = `${route.contextGraphId}\0${route.operationIri}`;
+    if (seen.has(key)) throw new Error('DUPLICATE_PROGRAM_ROUTE');
+    seen.add(key);
+  }
 }

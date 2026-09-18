@@ -44,6 +44,12 @@ export interface SemanticRuntimeConfig {
   programPolicy?: SemanticProgramPolicy;
   /** Tenant-approved fixed query operations with invoke-only caller grants. */
   programBindings?: SemanticProgramBinding[];
+  /** Trusted outbound routes. The authenticated local agent signs; the target authorizes. */
+  programRoutes?: Array<{
+    contextGraphId: string;
+    operationIri: string;
+    targetPeerId: string;
+  }>;
   watchdogMs?: number;
   startupTimeoutMs?: number;
   maxEvents?: number;
