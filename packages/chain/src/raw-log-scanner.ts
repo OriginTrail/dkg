@@ -137,6 +137,14 @@ export class RawLogScanner {
       : Math.max(this.#lastScannedBlock, head);
   }
 
+  /**
+   * Every scanner read is a background TIP probe at the ~stickiness-TTL cadence:
+   * preference-TRANSPARENT so a poll tick never re-probes/clears the preferred
+   * backend the read/write paths rely on, and so head/logs stay canonical-fresh
+   * (not a lagging sticky backend's lower tip). Owns the transport-internal
+   * `skipPreferred` opt-out ONCE so the call sites above read by INTENT (tip
+   * probe), not by the double-negative flag. Mirrors the adapter's `readTipProvider`.
+   */
   private readTip<T>(
     label: string,
     fn: (provider: JsonRpcProvider) => Promise<T>,
