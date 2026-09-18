@@ -212,7 +212,11 @@ async function resolveFromLiveAuthority(
     return {
       kind: 'available',
       accessPolicy: policy,
-      participantAgents: [...authority.participantAgents],
+      // Passed through untouched: the resolver owns roster validation, and a
+      // malformed roster must stay the TERMINAL `chain-participant-authority-
+      // invalid` it always was — spreading it here would throw and resurface
+      // as a retryable policy failure instead.
+      participantAgents: authority.participantAgents,
     };
   }
   return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };

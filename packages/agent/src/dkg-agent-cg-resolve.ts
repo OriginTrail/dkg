@@ -1613,6 +1613,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     }
     let rawAgents: string[];
     if (snapshotRoster !== undefined) {
+      if (!Array.isArray(snapshotRoster)) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-invalid',
+        };
+      }
       rawAgents = [...snapshotRoster];
     } else {
       const getParticipantAgents = this.chain.getContextGraphParticipantAgents;

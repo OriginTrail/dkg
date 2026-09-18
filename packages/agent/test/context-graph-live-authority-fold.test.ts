@@ -81,6 +81,21 @@ describe('folding liveness + policy + roster into one live authority read', () =
     expect(deps.isContextGraphActiveOnChain).not.toHaveBeenCalled();
   });
 
+  it('maps a bounded-read timeout to the retryable timeout reason, with a warning', async () => {
+    const deps = dependencies({
+      readLiveAuthority: vi.fn(async () => ({ active: true, accessPolicy: 1, participantAgents: [MEMBER] })),
+      runBoundedRead: async () => ({ kind: 'timeout' }),
+    });
+    const state = await resolveLiveOnChainAccessPolicyState(deps, '7');
+    expect(state).toMatchObject({ kind: 'unavailable', reason: 'chain-access-policy-timeout' });
+    expect((state as { detail?: string }).detail).toContain('getContextGraphLiveAuthority(7) timed out');
+    expect(deps.warn).toHaveBeenCalledTimes(1);
+    // A timeout is not an answer: nothing may be cached, and the point reads
+    // must not be tried as if the deployment lacked the getter.
+    expect(deps.cacheAccessPolicy).not.toHaveBeenCalled();
+    expect(deps.isContextGraphActiveOnChain).not.toHaveBeenCalled();
+  });
+
   it('keeps the policy-value validation: an out-of-range policy is unknown', async () => {
     const deps = dependencies({
       readLiveAuthority: vi.fn(async () => ({ active: true, accessPolicy: 2, participantAgents: [] })),
@@ -116,6 +131,48 @@ describe('registered authority resolution uses the roster from the single read',
     });
     expect(live).toHaveBeenCalledTimes(1);
     expect(roster).not.toHaveBeenCalled();
+  });
+
+  it('keeps a malformed roster TERMINAL on the single-read path', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'FoldInvalidRoster', chainAdapter: chain });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
+    // Deliberately NOT iterable: a string would spread into characters and be
+    // rejected downstream by address validation, hiding a missing shape check.
+    vi.spyOn(chain, 'getContextGraphLiveAuthority').mockResolvedValue({
+      active: true,
+      accessPolicy: 1,
+      participantAgents: { length: 1 } as unknown as string[],
+    });
+
+    // The three-read path answered a malformed roster with the terminal
+    // `invalid` reason. Surfacing it as a retryable policy failure instead
+    // would make a permanently-broken roster retry forever.
+    await expect(agent.resolveRegisteredContextGraphAuthority('cg')).resolves.toEqual({
+      kind: 'unavailable',
+      onChainId: 7n,
+      reason: 'chain-participant-authority-invalid',
+    });
+  });
+
+  it('keeps a malformed roster TERMINAL on the three-read fallback path too', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'FoldFallbackInvalidRoster', chainAdapter: chain });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
+    vi.spyOn(chain, 'getContextGraphLiveAuthority')
+      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('old deployment'));
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+    vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphParticipantAgents')
+      .mockResolvedValue('not-an-array' as unknown as string[]);
+
+    await expect(agent.resolveRegisteredContextGraphAuthority('cg')).resolves.toEqual({
+      kind: 'unavailable',
+      onChainId: 7n,
+      reason: 'chain-participant-authority-invalid',
+    });
   });
 
   it('still takes the three point reads when the getter is unsupported', async () => {
