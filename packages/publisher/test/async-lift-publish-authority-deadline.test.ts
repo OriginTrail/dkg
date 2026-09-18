@@ -48,6 +48,35 @@ describe('PublishAuthorityCache read deadline', () => {
     expect(await cache.verdictFor('curated', WALLET)).toEqual({ kind: 'eligible' });
   });
 
+  it('latches a read that lands just past the deadline instead of discarding it', async () => {
+    // The failure this closes: a node whose resolution consistently takes a little MORE than the
+    // deadline (one local id lookup plus a fan-out of `eth_call`s) timed out on every pass, so
+    // every verdict was 'unknown', every lane claimed nothing, and nothing ever threw. The late
+    // answer is still authoritative — it belongs in the cache.
+    let reads = 0;
+    let release!: () => void;
+    const answered = new Promise<void>((resolve) => { release = resolve; });
+    const cache = new PublishAuthorityCache({
+      resolveContextGraphId: async () => 453n,
+      resolveAuthority: async () => {
+        reads += 1;
+        await answered;
+        return { kind: 'resolved', authorizedWalletIds: [WALLET], candidateWalletIds: [WALLET] };
+      },
+      now: () => 1_000,
+      readTimeoutMs: 20,
+    });
+
+    expect(await cache.verdictFor('curated', WALLET)).toEqual({ kind: 'unknown' });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(await cache.verdictFor('curated', WALLET)).toEqual({ kind: 'eligible' });
+    // One read, not two: the next poll read the late answer out of the cache rather than
+    // starting a fresh resolution that would time out exactly the same way.
+    expect(reads).toBe(1);
+  });
+
   it('leaves a settling read unaffected', async () => {
     const cache = new PublishAuthorityCache({
       resolveContextGraphId: async () => 453n,

@@ -130,27 +130,40 @@ export class PublishAuthorityCache {
     const started = this.readWithinDeadline(contextGraphName);
     this.inFlight.set(contextGraphName, started);
     try {
-      const value = await started;
-      // 'unknown' is deliberately NOT cached. It is the answer produced by a failed read, and one
-      // transient failure must not pause claiming for a whole TTL — the next poll asks again.
-      // Authoritative answers are cached, INCLUDING the empty authorized set: that verdict fails
-      // the job terminally, so re-reading it per poll would buy nothing.
-      if (value.authority.kind !== 'unknown') {
-        this.cached.set(contextGraphName, {
-          value,
-          expiresAt: this.dependencies.now() + this.ttlMs,
-        });
-      }
-      return value;
+      return await started;
     } finally {
       this.inFlight.delete(contextGraphName);
     }
   }
 
   /**
+   * Memoize an answer the read established, and return what the caller should see for it.
+   *
+   * The ONE write path into {@link cached}, shared by the in-time result and by a read that only
+   * lands after the deadline — a late answer is still an answer, and dropping it is what made a
+   * node whose resolution consistently runs a little over `readTimeoutMs` time out on every pass
+   * and claim nothing, forever, with nothing thrown and no failure record.
+   *
+   * 'unknown' is deliberately NOT cached. It is the answer produced by a failed read, and one
+   * transient failure must not pause claiming for a whole TTL — the next poll asks again.
+   */
+  private memoize(contextGraphName: string, value: ResolvedAuthority): ResolvedAuthority {
+    if (value.authority.kind === 'unknown') return value;
+    this.cached.set(contextGraphName, {
+      value,
+      expiresAt: this.dependencies.now() + this.ttlMs,
+    });
+    return value;
+  }
+
+  /**
    * Resolve, but never outlast the deadline. The underlying read is abandoned rather than
    * cancelled — there is no cancellation channel through the adapter — so the timer is cleared on
    * both paths and the loser's rejection is swallowed, leaving no unhandled rejection behind.
+   *
+   * Abandoned by THIS caller only: the read still memoizes whatever it eventually establishes, so
+   * the next poll reads the answer out of the cache instead of starting a fresh read that will
+   * time out exactly the same way.
    */
   private async readWithinDeadline(contextGraphName: string): Promise<ResolvedAuthority> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -159,7 +172,7 @@ export class PublishAuthorityCache {
       timer.unref?.();
     });
     try {
-      const read = this.read(contextGraphName);
+      const read = this.read(contextGraphName).then((value) => this.memoize(contextGraphName, value));
       read.catch(() => {});
       return await Promise.race([read, expired]);
     } finally {
