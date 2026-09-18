@@ -12,7 +12,7 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
   const seen = new Set<string>();
   for (const binding of value) {
     if (!record(binding)
-      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query'])
+      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'assetCreation', 'executionLayer'])
       || typeof binding.enabled !== 'boolean'
       || !address(binding.executorAgentAddress)
       || !Array.isArray(binding.allowedCallerAgentAddresses)
@@ -33,7 +33,15 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
       if (typeof iri !== 'string') throw new Error('INVALID_PROGRAM_BINDING_IRI');
       sparqlIri(iri);
     }
-    validateSemanticQueryPins([binding.query]);
+    if (binding.query !== undefined) validateSemanticQueryPins([binding.query]);
+    if (binding.assetCreation !== undefined) {
+      if (!record(binding.assetCreation) || !keys(binding.assetCreation, ['toolIri'])
+        || typeof binding.assetCreation.toolIri !== 'string' || binding.assetCreation.toolIri.length > 2_048
+        || !/^[a-z][a-z0-9+.-]*:/i.test(binding.assetCreation.toolIri)) throw new Error('INVALID_ASSET_CREATION_GRANT');
+      sparqlIri(binding.assetCreation.toolIri);
+    }
+    if (!binding.query && !binding.assetCreation) throw new Error('EMPTY_PROGRAM_BINDING');
+    if (binding.executionLayer !== undefined && !['wm', 'swm', 'vm'].includes(String(binding.executionLayer))) throw new Error('INVALID_EXECUTION_LAYER');
     const key = `${binding.contextGraphId}\0${binding.operationIri}`;
     if (seen.has(key)) throw new Error('DUPLICATE_PROGRAM_BINDING');
     seen.add(key);

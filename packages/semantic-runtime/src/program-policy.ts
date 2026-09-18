@@ -56,5 +56,9 @@ export interface SemanticProgramBinding {
     authorAgentAddress: string;
     sourceHash: string;
   };
-  query: SemanticQueryPin;
+  query?: SemanticQueryPin;
+  /** Explicit tenant-approved creation tool; never inferred from read permission. */
+  assetCreation?: { toolIri: string };
+  /** Output assets inherit this execution layer; defaults to wm for compatibility. */
+  executionLayer?: 'wm' | 'swm' | 'vm';
 }

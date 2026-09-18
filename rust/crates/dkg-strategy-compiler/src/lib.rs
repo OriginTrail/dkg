@@ -62,6 +62,8 @@ pub enum EffectClass {
     ModelInvocation,
     /// Invocation of a DKG Program on an explicitly named remote node.
     RemoteExecution,
+    /// Creation through the approved DKG asset lifecycle.
+    AssetCreation,
     /// Repository mutation.
     RepositoryWrite,
     /// Infrastructure mutation.
@@ -80,6 +82,7 @@ impl EffectClass {
             Self::Read => "read",
             Self::ModelInvocation => "model-invocation",
             Self::RemoteExecution => "remote-execution",
+            Self::AssetCreation => "asset-creation",
             Self::RepositoryWrite => "repository-write",
             Self::InfrastructureChange => "infrastructure-change",
             Self::Publish => "publish",
@@ -221,6 +224,17 @@ impl AdapterRegistry {
                 1,
                 "llm.invoke.safe",
                 EffectClass::ModelInvocation,
+                IdempotencyClass::ReconcileBeforeRetry,
+                1,
+                1,
+                None,
+                false,
+            ),
+            adapter(
+                "dkg/asset-create",
+                1,
+                "dkg.asset.create",
+                EffectClass::AssetCreation,
                 IdempotencyClass::ReconcileBeforeRetry,
                 1,
                 1,
@@ -920,6 +934,7 @@ fn decode_effect_class(value: &str) -> CanonicalResult<EffectClass> {
         "read" => Ok(EffectClass::Read),
         "model-invocation" => Ok(EffectClass::ModelInvocation),
         "remote-execution" => Ok(EffectClass::RemoteExecution),
+        "asset-creation" => Ok(EffectClass::AssetCreation),
         "repository-write" => Ok(EffectClass::RepositoryWrite),
         "infrastructure-change" => Ok(EffectClass::InfrastructureChange),
         "publish" => Ok(EffectClass::Publish),
@@ -2012,6 +2027,33 @@ mod tests {
         assert_eq!(
             compile(&invalid).unwrap_err()[0].code,
             DiagnosticCode::SchemaMismatch,
+        );
+    }
+
+    #[test]
+    fn asset_creation_requires_a_grant_and_one_content_argument() {
+        let plan = compile(&envelope(
+            r#"(delegate recorder (grant dkg.asset.create) (call dkg/asset-create@1 "{}"))"#,
+        ))
+        .expect("tenant-approved creation is admitted");
+        assert!(plan.required_capabilities.contains("dkg.asset.create"));
+        assert!(
+            plan.effect_upper_bound
+                .contains(&EffectClass::AssetCreation)
+        );
+        assert!(plan.approval_requirements.is_empty());
+        admit_canonical_plan(&plan.canonical_plan_cbor, &AdapterRegistry::v1()).unwrap();
+        assert!(
+            compile(&envelope(
+                r#"(delegate recorder (call dkg/asset-create@1 "{}"))"#
+            ))
+            .is_err()
+        );
+        assert!(
+            compile(&envelope(
+                "(delegate recorder (grant dkg.asset.create) (call dkg/asset-create@1))"
+            ))
+            .is_err()
         );
     }
 

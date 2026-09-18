@@ -133,6 +133,21 @@ describe('tenant-bound execute route', () => {
     expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
   });
 
+  it.each(['swm', 'vm'])('uses the tenant-selected %s layer and rejects a caller override', async (layer) => {
+    vi.mocked(invokeBoundSemanticProgram).mockResolvedValue({ persisted: true, executionLayer: layer } as any);
+    const allowed = boundContext({ ...body, executionLayer: layer });
+    allowed.ctx.config.semanticRuntime.programBindings[0].executionLayer = layer;
+    await handleSemanticRuntimeRoutes(allowed.ctx);
+    expect(allowed.res.statusCode).toBe(200);
+    expect(allowed.res.body.executionLayer).toBe(layer);
+    vi.mocked(invokeBoundSemanticProgram).mockClear();
+    const denied = boundContext({ ...body, executionLayer: 'wm' });
+    denied.ctx.config.semanticRuntime.programBindings[0].executionLayer = layer;
+    await handleSemanticRuntimeRoutes(denied.ctx);
+    expect(denied.res.statusCode).toBe(400);
+    expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+  });
+
   it.each([
     { executionLayer: 'vm' }, { programLayer: 'wm' }, { callerAgentAddress: operator },
     { executorAgentAddress: operator }, { parameters: { device: 'other-device' } },

@@ -55,6 +55,7 @@ export interface ComponentStartResult extends StartedPlanInspection {
 export type ComponentExecutionResult = Extract<PlanApplyResult, { kind: 'completed' }>;
 
 export type ComponentToolCall =
+  | { kind: 'asset-create'; effectId: bigint; contentJson: string }
   | {
     kind: 'investigator';
     effectId: bigint;
@@ -79,6 +80,7 @@ export type ComponentToolCall =
   };
 
 export type ComponentToolResult =
+  | { kind: 'asset-create'; json: string }
   | { kind: 'investigator'; output: string }
   | { kind: 'query-catalog'; json: string }
   | { kind: 'remote-execute'; executionIri: string; executionUal?: string }

@@ -85,6 +85,7 @@ function capability(): ExecutionCapabilityDescriptor {
   return { ...defaultExecutionCapability(hashHex), tools: [
     { operation: 'agent/investigate', version: '1', witInterface: 'origintrail:semantic-runtime/investigator@0.1.0' },
     { operation: 'dkg/query', version: '1', witInterface: 'origintrail:semantic-runtime/query-catalog@0.1.0' },
+    { operation: 'dkg/asset-create', version: '1', witInterface: 'origintrail:semantic-runtime/asset-create@0.1.0' },
     { operation: 'llm/safe', version: '1', witInterface: 'origintrail:semantic-runtime/safe-llm@0.1.0' },
     { operation: 'remote-execute', version: '1', witInterface: 'origintrail:semantic-runtime/remote-execute@0.1.0' },
   ] };
@@ -92,10 +93,10 @@ function capability(): ExecutionCapabilityDescriptor {
 async function start(descriptor = capability()) {
   return send('start', { plan: plan.canonicalPlan, capability: descriptor, logicalTime: 5n });
 }
-type ToolKind = 'investigator' | 'query-catalog' | 'safe-llm' | 'remote-execute';
+type ToolKind = 'investigator' | 'query-catalog' | 'safe-llm' | 'remote-execute' | 'asset-create';
 function importedTool(kind: ToolKind) {
   const api = harness.imports[`origintrail:semantic-runtime/${kind}@0.1.0`];
-  return api[{ investigator: 'investigate', 'query-catalog': 'query', 'safe-llm': 'run', 'remote-execute': 'execute' }[kind]];
+  return api[{ investigator: 'investigate', 'query-catalog': 'query', 'safe-llm': 'run', 'remote-execute': 'execute', 'asset-create': 'create' }[kind]];
 }
 function invokeDuringAdvance(kind: ToolKind, argument: unknown, resource?: unknown) {
   harness.execution.advance.mockImplementation(async () => {
@@ -145,7 +146,7 @@ describe('component worker trust boundary', () => {
     const resource = harness.resource as { descriptor: ExecutionCapabilityDescriptor };
     descriptor.tools.length = 0;
     descriptor.policy.epoch = 99n;
-    expect(resource.descriptor.tools).toHaveLength(4);
+    expect(resource.descriptor.tools).toHaveLength(5);
     expect(resource.descriptor.policy.epoch).toBe(0n);
     expect(Object.isFrozen(resource.descriptor)).toBe(true);
     expect(Object.isFrozen(resource.descriptor.budgets)).toBe(true);
@@ -187,14 +188,14 @@ describe('component worker trust boundary', () => {
     expect(harness.execution.advance).toHaveBeenCalledTimes(kind === 'budget' ? 1 : 0);
   });
 
-  it.each(['investigator', 'query-catalog', 'safe-llm', 'remote-execute'] as const)('correlates %s requests and returns the matching host result', async (kind) => {
+  it.each(['investigator', 'query-catalog', 'safe-llm', 'remote-execute', 'asset-create'] as const)('correlates %s requests and returns the matching host result', async (kind) => {
     await boot(); await start();
-    const argument = kind === 'query-catalog'
+    const argument = kind === 'asset-create' ? { effectId: 1n, contentJson: '{}' } : kind === 'query-catalog'
       ? { effectId: 1n, queryId: 'catalog/items', parameters: [{ name: 'limit', value: '2' }] }
       : kind === 'remote-execute'
         ? { effectId: 1n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' }
         : { effectId: 1n, prompt: 'investigate' };
-    const result = kind === 'query-catalog' ? { kind, json: '[]' }
+    const result = kind === 'asset-create' ? { kind, json: 'receipt' } : kind === 'query-catalog' ? { kind, json: '[]' }
       : kind === 'remote-execute' ? { kind, executionIri: 'urn:sr:execution:child', executionUal: 'did:dkg:child' }
         : { kind, output: 'done' };
     invokeDuringAdvance(kind, argument);
@@ -204,12 +205,14 @@ describe('component worker trust boundary', () => {
     };
     expect(await send('advance')).toMatchObject({ ok: true, result: { kind: 'completed' } });
     expect(harness.messages.filter((message) => message.type === 'tool-call')).toHaveLength(1);
-    expect(harness.toolResult).toEqual(kind === 'query-catalog' ? { json: '[]' }
+    expect(harness.toolResult).toEqual(kind === 'asset-create' ? 'receipt' : kind === 'query-catalog' ? { json: '[]' }
       : kind === 'remote-execute' ? { executionIri: 'urn:sr:execution:child', executionUal: 'did:dkg:child' }
         : 'done');
   });
 
   it.each([
+    ['asset-create', { effectId: 0n, contentJson: '{}' }, 'INVALID_ASSET_ARGUMENT'],
+    ['asset-create', { effectId: 1n, contentJson: 123 }, 'INVALID_ASSET_ARGUMENT'],
     ['safe-llm', { effectId: 0n, prompt: 'x' }, 'INVALID_SAFE_LLM_EFFECT_ID'],
     ['safe-llm', { effectId: 1n, prompt: 9 }, 'INVALID_SAFE_LLM_ARGUMENT'],
     ['remote-execute', { effectId: 0n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' }, 'INVALID_REMOTE_EXECUTE_EFFECT_ID'],
@@ -242,12 +245,12 @@ describe('component worker trust boundary', () => {
     expect(await send('advance')).toMatchObject({ ok: false, code: kind === 'host failure' ? 'DENIED' : 'COMPONENT_TOOL_RESULT_MISMATCH', retryable: kind === 'host failure' });
   });
 
-  it.each(['safe-llm', 'remote-execute'] as const)('requires the exact %s authority and result kind', async (kind) => {
+  it.each(['safe-llm', 'remote-execute', 'asset-create'] as const)('requires the exact %s authority and result kind', async (kind) => {
     await boot();
     const descriptor = capability();
     descriptor.tools = descriptor.tools.filter((tool) => !tool.witInterface.includes(kind));
     await start(descriptor);
-    const argument = kind === 'safe-llm' ? { effectId: 1n, prompt: 'x' }
+    const argument = kind === 'asset-create' ? { effectId: 1n, contentJson: '{}' } : kind === 'safe-llm' ? { effectId: 1n, prompt: 'x' }
       : { effectId: 1n, nodeId: 'peer-b', programIri: 'urn:sr:program:child' };
     invokeDuringAdvance(kind, argument);
     expect(await send('advance')).toMatchObject({ ok: false, code: 'COMPONENT_TOOL_NOT_AUTHORIZED' });
