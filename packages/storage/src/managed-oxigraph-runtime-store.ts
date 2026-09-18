@@ -1,3 +1,4 @@
+import type { StoreOperation } from './store-operation-outcome.js';
 import type { TripleStoreConfig } from './triple-store.js';
 
 const MANAGED_RUNTIME_CONTEXT = Symbol('dkg.managed-oxigraph-runtime-v1');
@@ -29,7 +30,7 @@ export interface ManagedOxigraphRuntimeActivityLeaseV1 {
 
 /** Runtime control plane supplied only by the daemon-owned construction path. */
 export interface ManagedOxigraphRuntimeHooksV1 {
-  readonly onClientTimeout?: (operation: string) => void;
+  readonly onClientTimeout?: (operation: StoreOperation) => void;
   readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
   readonly onActivityChange?: (activeOperations: number) => void;
   /** Prefer a per-store lease so a shared supervisor can aggregate activity. */
