@@ -369,7 +369,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     params: Readonly<{
       readonly contextGraphId: string;
       readonly authorAddress: EvmAddressV1;
-      readonly originDigest: Digest32V1;
       readonly rows: readonly Readonly<SwmAuthorInventoryRowV1>[];
       readonly ctx: OperationContext;
       readonly signal?: AbortSignal;
@@ -409,6 +408,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ));
       return;
     }
+    // Re-read rather than reuse admission's narrowing: admission is synchronous
+    // and this carry runs later, off the shadow runtime, so rows that landed
+    // under the accepted generation in between must not be carried again.
     const acceptedRows = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
       acceptedDigest,
       params.authorAddress,
