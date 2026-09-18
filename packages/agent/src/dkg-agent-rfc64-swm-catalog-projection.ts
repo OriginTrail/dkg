@@ -44,8 +44,6 @@ import {
 import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { rfc64SwmInventoryAssetKeyV1 } from './dkg-agent-rfc64-catalog-auto-publish.js';
-import type { Rfc64SwmAuthorInventoryShadowMutationResultV1 } from
-  './dkg-agent-rfc64-catalog-auto-publish.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from
@@ -178,6 +176,17 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
    * already-resolved `await` yields a microtask and re-orders the coalesced
    * finalized-authority batch passes around it, so the overwhelmingly common
    * no-op must not suspend that path at all.
+   *
+   * The durable row writes are HANDED to the SWM inventory shadow runtime, not
+   * awaited here. The returned promise resolves once every stranded row has
+   * been admitted to that runtime; the rows land, and are reported, on the
+   * runtime's own asset tails (`awaitInFlightRfc64SwmInventoryObserversV1`
+   * drains them). That is not an optimisation: the acceptance path is reachable
+   * from inside the runtime, so awaiting a per-asset turn from here can deadlock
+   * against the observer that entered it -- see the carry below. It is also why
+   * the callers that pass no signal (`allowAgent`/`revokeAgent` via
+   * `reconcileRfc64CatalogAccessAuthorityV1`) no longer wait on durable carry
+   * work they could not abort.
    *
    * The returned promise never rejects: an escaping error here would wrongly
    * demote the graph's authority progress.
@@ -420,9 +429,25 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       // unserialized against `observeRfc64ConfirmedVmV1`, whose retraction of a
       // VM-confirmed row could be undone by a carry that read its fences before
       // the confirmation landed and wrote after it.
-      // `runExclusive` serializes but does not relay a return value.
-      let carried: Rfc64SwmAuthorInventoryShadowMutationResultV1 | undefined;
-      await shadowRuntime.runExclusive(
+      //
+      // SCHEDULE, never `runExclusive`. This carry runs on the authority
+      // acceptance path, and that path is reachable from INSIDE this runtime:
+      // `observeRfc64DurableSwmPromotionV1` runs under `schedule(assetKey, …)`
+      // and awaits `reconcileRfc64CatalogResponsibilityV1` ->
+      // `reconcileRfc64CatalogAccessAuthorityV1` -> the acceptance branch that
+      // awaits this re-projection. A nested `runExclusive` chains onto
+      // `#assetTails.get(assetKey)`, which — for a stranded row sharing the
+      // in-flight promotion's asset key, exactly the author this PR repairs —
+      // IS the running observer's own tracked promise: the observer would wait
+      // on itself, the authority pass would never return and `closeAndDrain()`
+      // would hang at shutdown. `runExclusive` takes no signal, so the abort
+      // check above could not break it, and holding one of the 16
+      // `#activeExecutions` slots while waiting for another gives the same hang
+      // without a key collision. `schedule` enqueues onto the same per-asset
+      // tail — so the write stays serialized against `observeRfc64ConfirmedVmV1`
+      // and tracked by `drain()`/`closeAndDrain()` — without ever awaiting it
+      // from a path observers can re-enter.
+      const admitted = shadowRuntime.schedule(
         rfc64SwmInventoryAssetKeyV1({
           contextGraphId: params.contextGraphId,
           subGraphName: null,
@@ -430,27 +455,52 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
           assertionCoordinate: row.assertionCoordinate,
         }),
         async () => {
-          carried = await this.recordRfc64SwmAuthorInventoryShadowV1({
-            contextGraphId: params.contextGraphId,
-            assertionCoordinate: row.assertionCoordinate,
-            lifecycleAgentAddress: params.authorAddress,
-            shareOperationId: row.shareOperationId,
-          });
+          try {
+            const carried = await this.recordRfc64SwmAuthorInventoryShadowV1({
+              contextGraphId: params.contextGraphId,
+              assertionCoordinate: row.assertionCoordinate,
+              lifecycleAgentAddress: params.authorAddress,
+              shareOperationId: row.shareOperationId,
+            });
+            if (carried.status === 'applied' || carried.status === 'existing') {
+              // The request below is issued long before this row lands, and the
+              // supervisor projects whatever durable snapshot it reads when it
+              // runs. Re-request so a carried row cannot sit in the accepted
+              // generation with no applied head. Refusal is already reported
+              // once per author below; repeating it per row would only bury it.
+              this.requestRfc64SwmCatalogProjectionV1({
+                contextGraphId: params.contextGraphId as ContextGraphIdV1,
+                authorAddress: params.authorAddress,
+                ctx: params.ctx,
+              });
+              return;
+            }
+            // A durable VM confirmation retires the SWM-only row deliberately;
+            // the finalized lane owns it and this rotation did not orphan it.
+            if (carried.dormantReason === 'vm-confirmed') return;
+            this.log.warn(
+              params.ctx,
+              `RFC-64 catalog re-projection could not carry ${row.kaUal} for `
+              + `${params.contextGraphId} / ${params.authorAddress} into the accepted `
+              + `authority generation (${carried.dormantReason ?? carried.status}`
+              + `${carried.error === null ? '' : `: ${carried.error}`}); that row stays `
+              + 'unreachable through the catalog path',
+            );
+          } catch (cause) {
+            this.log.warn(params.ctx, rfc64ReprojectionWarningV1(
+              params.contextGraphId,
+              cause,
+              params.authorAddress,
+            ));
+          }
         },
       );
-      if (carried === undefined) continue;
-      if (carried.status === 'applied' || carried.status === 'existing') continue;
-      // A durable VM confirmation retires the SWM-only row deliberately; the
-      // finalized lane owns it and this rotation did not orphan it.
-      if (carried.dormantReason === 'vm-confirmed') continue;
-      this.log.warn(
-        params.ctx,
-        `RFC-64 catalog re-projection could not carry ${row.kaUal} for `
-        + `${params.contextGraphId} / ${params.authorAddress} into the accepted `
-        + `authority generation (${carried.dormantReason ?? carried.status}`
-        + `${carried.error === null ? '' : `: ${carried.error}`}); that row stays `
-        + 'unreachable through the catalog path',
-      );
+      // The runtime is fenced for shutdown. The remaining rows are in the same
+      // position as an aborted carry, and for the same reason.
+      if (!admitted) {
+        aborted = true;
+        break;
+      }
     }
     if (aborted) {
       // Named, not silent: the remaining rows did not cross, and the acceptance

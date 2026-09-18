@@ -141,7 +141,11 @@ async function rotateToFinalizedChainV1(
       },
     },
   )).resolves.toMatchObject({ source: 'finalized-chain' });
-  await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  // The re-projection HANDS its durable row writes to the SWM inventory shadow
+  // runtime rather than awaiting them on the acceptance path (it is reachable
+  // from inside that runtime, so awaiting a per-asset turn there can deadlock).
+  // Drain the runtime, then the supervisor it feeds.
+  await author.awaitInFlightRfc64SwmInventoryObserversV1();
 }
 
 /** Collect every warning the agent emits, so a reported failure can be asserted on. */
