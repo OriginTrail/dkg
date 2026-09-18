@@ -20,6 +20,20 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 ///         amount already paid, so a later PCA pool credit pays only
 ///         `current full entitlement - paid entitlement` regardless of claim
 ///         ordering, relock, transfer, or withdrawal.
+///
+/// @dev STATEFUL HELPER — DO NOT REDEPLOY WITHOUT A RECEIPT MIGRATION.
+///      Unlike the rest of the V10 logic layer this contract is not
+///      stateless: `rewardAccountOfToken`, `liveTokenOfRewardAccount`,
+///      `closedRewardRecipient` and the per-source receipts
+///      (`rewardSources` / `rewardSourceIndexPlusOne`) are durable ledgers,
+///      and `delegatorRewardsPaid` / `totalGrossRewardsObserved` are the
+///      running solvency caps. A redeploy that does not copy them forward
+///      makes every pending late delta unclaimable (a withdrawn position
+///      loses its recorded recipient entirely) and resets both caps.
+///      The operator-fee side is deliberately NOT kept here: the fee already
+///      credited for `(identityId, epoch)` is derived from the CSS gross/net
+///      pair (see `_settleNodeEpochReward`), so a redeploy of this helper can
+///      never re-credit an operator fee that CSS already records.
 contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializable {
     string private constant _NAME = "StakingRewardSettlement";
     string private constant _VERSION = "10.0.8";
@@ -51,7 +65,6 @@ contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializ
     /// @dev Solvency ledgers. With valid RSS score conservation, source
     ///      payouts cannot exceed a node's net reward and node gross rewards
     ///      cannot exceed the epoch pool.
-    mapping(uint72 => mapping(uint256 => uint256)) public operatorFeePaid;
     mapping(uint72 => mapping(uint256 => uint256)) public delegatorRewardsPaid;
     mapping(uint256 => uint256) public totalGrossRewardsObserved;
 
@@ -289,7 +302,6 @@ contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializ
             convictionStorage.setIsOperatorFeeClaimedForEpoch(identityId, epoch, true);
             convictionStorage.setGrossNodeEpochRewards(identityId, epoch, grossNodeRewards);
             convictionStorage.setNetNodeEpochRewards(identityId, epoch, netNodeRewards);
-            operatorFeePaid[identityId][epoch] = operatorFeeAmount;
             convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
             return netNodeRewards;
         }
@@ -301,15 +313,14 @@ contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializ
             // `net = gross - fee <= gross`, so a cached net without a cached
             // gross can only be pre-10.0.7 `StakingV10` state. Adopting the
             // CURRENT pool as the baseline there would silently swallow
-            // exactly the late delta this contract exists to pay and leave the
-            // operator fee ledger at 0, so the next pool increase would credit
-            // the whole fee a second time. Refuse instead of half-migrating;
-            // such state requires the chain-reset path.
+            // exactly the late delta this contract exists to pay, and the
+            // resulting gross/net pair would misstate the fee already
+            // credited. Refuse instead of half-migrating; such state requires
+            // the chain-reset path.
             if (cachedNet != 0) revert LegacyRewardCacheUnsupported(identityId, epoch);
             if (grossNodeRewards == 0) return 0;
 
             _recordGrossIncrease(epoch, grossNodeRewards, epochPool);
-            operatorFeePaid[identityId][epoch] = operatorFeeAmount;
             convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
             convictionStorage.setGrossNodeEpochRewards(identityId, epoch, grossNodeRewards);
             convictionStorage.setNetNodeEpochRewards(identityId, epoch, netNodeRewards);
@@ -320,10 +331,12 @@ contract StakingRewardSettlement is INamed, IVersioned, HubDependent, IInitializ
         }
 
         _recordGrossIncrease(epoch, grossNodeRewards - cachedGross, epochPool);
-        uint256 feeAlreadyPaid = operatorFeePaid[identityId][epoch];
+        // The fee already credited for this (node, epoch) is exactly the
+        // gross/net spread recorded on CSS — no local fee ledger is needed
+        // (and a redeploy of this helper therefore cannot re-credit it).
+        uint256 feeAlreadyPaid = cachedGross - cachedNet;
         if (uint256(operatorFeeAmount) > feeAlreadyPaid) {
             uint96 feeDelta = uint96(uint256(operatorFeeAmount) - feeAlreadyPaid);
-            operatorFeePaid[identityId][epoch] = operatorFeeAmount;
             convictionStorage.increaseOperatorFeeBalance(identityId, feeDelta);
         }
         convictionStorage.setGrossNodeEpochRewards(identityId, epoch, grossNodeRewards);
