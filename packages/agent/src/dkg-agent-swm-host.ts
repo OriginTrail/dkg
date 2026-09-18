@@ -881,6 +881,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
         await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER);
         return;
       }
+      if (this.sharedMemoryGossipRegistered.has(cgId)) {
+        // Member-mode subscription already active — apply path covers
+        // local consumption; no need to also opaquely store. Same guard
+        // {@link reconcileSwmHostModeSubscription} applies, and the direct
+        // wire below needs it independently: since the restore walk was
+        // split into an awaited prefix and a deferred drain, a marker past
+        // `reconcileBatchSize` can be processed AFTER member rehydration has
+        // unwired the host handler and claimed this CG. Re-wiring it there
+        // would double-process every envelope (apply + opaque append) —
+        // exactly what that unwire exists to prevent.
+        return;
+      }
       this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
       // Codex PR #620 R2: also re-probe registration state.
       // Without this, a host-only CG that was registered while

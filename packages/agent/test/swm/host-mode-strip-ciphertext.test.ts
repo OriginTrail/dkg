@@ -64,6 +64,7 @@ interface StripInternals {
   onChainAccessPolicyCache: Map<string, number>;
   beaconCuratorByWireId: Map<string, string>;
   swmHostModeRestoreDrain?: Promise<void>;
+  sharedMemoryGossipRegistered: Set<string>;
   config: { swmHostMode?: { enabled?: boolean; hostPublic?: boolean; stripCiphertext?: boolean } };
   isPrivateContextGraph(cgId: string): Promise<boolean>;
   isConfirmedPublicForHostMode(cgId: string): Promise<boolean>;
@@ -387,6 +388,61 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     await g.swmHostModeRestoreDrain;
 
     expect([...wired].sort()).toEqual([...cgIds].sort());
+  });
+
+  it('deferred restore drain skips a CG that became member-registered mid-drain', async () => {
+    // Codex review #2614 follow-up — the batched restore above moved the tail
+    // of the walk OFF the startup await, which broke the ordering the direct
+    // (strip OFF) re-wire used to rely on: the whole walk finished inside the
+    // awaited `initializeSwmHostModeStore`, i.e. before member-mode
+    // rehydration could claim any CG. Now a marker past `reconcileBatchSize`
+    // can be drained AFTER `reconcileSharedMemoryGossipSubscription` has
+    // unwired the host handler and added the CG to
+    // `sharedMemoryGossipRegistered` — re-wiring it there double-processes
+    // every envelope (member apply + opaque host append). The drain must
+    // observe the same membership guard `reconcileSwmHostModeSubscription`
+    // applies.
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-member-race-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestoreMemberRaceCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 2 },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    const cgIds = ['cg-race-1', 'cg-race-2', 'cg-race-3', 'cg-race-4', 'cg-race-5'];
+    for (const cgId of cgIds) await store.markHostModeSubscribed(cgId);
+    (g as any).maybeMarkRegisteredForHostMode = async () => {};
+    // Restore order is store-listing order, not the order they were marked.
+    const restoreOrder = (await store.listHostModeSubscriptions()).map((e) => e.contextGraphId);
+    expect([...restoreOrder].sort()).toEqual([...cgIds].sort());
+    const firstDeferred = restoreOrder[2];
+    const claimedByMember = restoreOrder[4];
+    const wired: string[] = [];
+    g.wireSwmHostModeHandler = (id: string) => {
+      wired.push(id);
+      // Member rehydration lands WHILE the deferred drain is in flight: the
+      // first deferred marker is being wired here, and the tail of the drain
+      // (including `claimedByMember`) has not run yet.
+      if (id === firstDeferred) g.sharedMemoryGossipRegistered.add(claimedByMember);
+    };
+
+    await g.initializeSwmHostModeStore();
+
+    expect(wired).toEqual(restoreOrder.slice(0, 2));
+    expect(g.swmHostModeRestoreDrain).toBeDefined();
+
+    await g.swmHostModeRestoreDrain;
+
+    expect(wired).not.toContain(claimedByMember);
+    expect(wired).toEqual(restoreOrder.slice(0, 4));
   });
 
   it('restart restore contains a failing legacy re-wire to keep startup alive', async () => {
