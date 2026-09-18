@@ -67,6 +67,23 @@ describe('privately parsed JSON SELECT decoding', () => {
     }
   });
 
+  it('keeps the row prototype invariant whether or not __proto__ is declared', () => {
+    const withProto = '{"head":{"vars":["__proto__","v"]},"results":{"bindings":'
+      + '[{"__proto__":{"type":"uri","value":"urn:test:proto"},"v":{"type":"uri","value":"urn:test:v"}}]}}';
+    const withoutProto = '{"head":{"vars":["v"]},"results":'
+      + '{"bindings":[{"v":{"type":"uri","value":"urn:test:v"}}]}}';
+    const rowsFor = (text: string) => [
+      parseSparqlJsonSelectResponse(JSON.parse(text)).bindings[0],
+      (decodeSparqlJsonQueryResult(text, 'select') as { bindings: Array<Record<string, string>> }).bindings[0],
+    ];
+    // head.vars is endpoint-controlled, so a declared __proto__ column must not
+    // change the shape of the rows the decoder hands back to every caller.
+    for (const row of [...rowsFor(withProto), ...rowsFor(withoutProto)]) {
+      expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+      expect(() => String(row)).not.toThrow();
+    }
+  });
+
   it('reports a non-object response as such instead of a missing head field', () => {
     for (const body of ['null', '3', '"text"']) {
       expect(() => decodeSparqlJsonQueryResult(body, 'select'))
