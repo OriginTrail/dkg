@@ -82,7 +82,7 @@ import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-r
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -3331,7 +3331,7 @@ export class EVMChainAdapterBase {
         for (const { provider } of ordered) {
           try {
             await withRpcRequestTimeout(
-              RPC_READ_STALL_TIMEOUT_MS,
+              CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
               `${label} chainId validation`,
               () => this.ensureConfiguredStaticChainIdValidated(provider),
             );
@@ -3439,7 +3439,7 @@ export class EVMChainAdapterBase {
     for (const provider of this.providers) {
       try {
         await withRpcRequestTimeout(
-          RPC_READ_STALL_TIMEOUT_MS,
+          CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
           () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
@@ -3481,7 +3481,7 @@ export class EVMChainAdapterBase {
     for (const provider of this.providers) {
       try {
         await withRpcRequestTimeout(
-          RPC_READ_STALL_TIMEOUT_MS,
+          CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
           () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
@@ -3696,7 +3696,7 @@ export class EVMChainAdapterBase {
           signal: sharedSignal,
         },
         () => withRpcRequestTimeout(
-          RPC_READ_STALL_TIMEOUT_MS,
+          CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
           'configured chainId validation',
           async () => {
             const raw = await provider.send('eth_chainId', []);

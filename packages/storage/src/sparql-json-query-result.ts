@@ -8,6 +8,10 @@ import {
 } from './closed-data-snapshot.js';
 import type { AskResult, QueryResult, SelectResult } from './triple-store.js';
 
+// Keep the parser provenance stable if application code later replaces the
+// global JSON.parse. No reviver/callback can introduce foreign object graphs.
+const parseJsonText: (text: string) => unknown = JSON.parse;
+
 type SparqlJsonLiteralTerm = {
   type: 'literal' | 'typed-literal';
   value: string;
@@ -25,6 +29,81 @@ type AdapterSparqlJsonTerm =
 const SPARQL_JSON_BLANK_NODE_LABEL =
   /^[\p{L}\p{Nl}_0-9][\p{L}\p{Nl}\p{M}\p{Nd}_.\-\u00B7\u203F-\u2040]*$/u;
 const SPARQL_JSON_LANGUAGE_TAG = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/u;
+const MAX_CACHED_IRI_VARIABLES = 128;
+const MAX_CACHED_IRI_LENGTH = 1024;
+const MAX_CONSECUTIVE_IRI_MISSES = 16;
+const PAUSED_IRI_COMPARISON_ROWS = 128;
+type IriValidator = (value: string) => boolean;
+
+/** One last successful value per column role, never a growing per-row/global cache. */
+function createIriValidator(): IriValidator {
+  let lastValidIri: string | undefined;
+  let consecutiveMisses = 0;
+  let pausedRows = 0;
+  return value => {
+    // High-cardinality columns (e.g. one subject per row) should not keep
+    // doing cache comparisons/assignments without ever saving validation.
+    // The pause is a bounded window rather than a latch, so a unique prefix
+    // cannot cost the response the repeated run that may follow it.
+    if (pausedRows > 0) {
+      pausedRows--;
+      return isSafeIri(value);
+    }
+    if (value === lastValidIri) {
+      consecutiveMisses = 0;
+      return true;
+    }
+    const valid = isSafeIri(value);
+    if (valid && value.length <= MAX_CACHED_IRI_LENGTH) lastValidIri = value;
+    if (++consecutiveMisses >= MAX_CONSECUTIVE_IRI_MISSES) {
+      pausedRows = PAUSED_IRI_COMPARISON_ROWS;
+      consecutiveMisses = 0;
+      lastValidIri = undefined;
+    }
+    return valid;
+  };
+}
+
+interface ResponseDataReader {
+  read: typeof ownDataValue;
+  exact: typeof snapshotExactOrdinaryDataRecord;
+  array: typeof denseArray;
+  keys: (input: Record<string, unknown>) => readonly PropertyKey[];
+}
+
+const closedDataReader: ResponseDataReader = {
+  read: ownDataValue,
+  exact: snapshotExactOrdinaryDataRecord,
+  array: denseArray,
+  keys: Reflect.ownKeys,
+};
+
+// Only used immediately after this module's JSON.parse, without a reviver.
+// Its fresh private records cannot contain accessors, symbols, class instances
+// or sparse/adorned arrays. Semantic shape checks are still shared with the
+// fully reflective decoder used for externally supplied object graphs.
+const parsedJsonReader: ResponseDataReader = {
+  read(input, key, label) {
+    if (input === null || typeof input !== 'object') malformed(`${label} must be an object`);
+    if (!Object.prototype.hasOwnProperty.call(input, key)) {
+      malformed(`${label}.${key} must be an enumerable data property; fields must use enumerable data properties`);
+    }
+    return (input as Record<string, unknown>)[key];
+  },
+  exact(input, keys, label) {
+    if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain data object`);
+    const actual = Object.keys(input);
+    if (actual.length !== keys.length || actual.some(key => !keys.includes(key))) {
+      malformed(`${label} has unknown or missing fields`);
+    }
+    return input;
+  },
+  array(input, label) {
+    if (!Array.isArray(input)) malformed(`${label} must be an ordinary array`);
+    return input;
+  },
+  keys: Object.keys,
+};
 
 export interface AdapterSparqlJsonSelectResponse {
   head: { vars: string[] };
@@ -46,7 +125,7 @@ export class SparqlJsonResultsShapeError extends Error {
 /** Decode one successful SPARQL JSON response into the same shape-error domain. */
 export function parseSparqlJsonResponseText(text: string): unknown {
   try {
-    return JSON.parse(text) as unknown;
+    return parseJsonText(text);
   } catch (cause) {
     throw new SparqlJsonResultsShapeError('SPARQL JSON response is not valid JSON', { cause });
   }
@@ -85,7 +164,7 @@ export function decodeSparqlJsonQueryResult(
     }
     return Object.freeze({ type: 'boolean', value: record.boolean }) satisfies AskResult;
   }
-  const parsed = parseSparqlJsonSelectResponse(response);
+  const parsed = parseSelectResponse(response, parsedJsonReader);
   return Object.freeze({
     type: 'bindings',
     bindings: parsed.bindings,
@@ -126,50 +205,82 @@ export function formatSparqlJsonBindings(
 export function parseSparqlJsonSelectResponse(
   response: unknown,
 ): ParsedSparqlJsonSelectResponse {
-  const head = ownDataRecord(response, 'head', 'SPARQL JSON response');
+  return parseSelectResponse(response, closedDataReader);
+}
+
+function parseSelectResponse(
+  response: unknown,
+  reader: ResponseDataReader,
+): ParsedSparqlJsonSelectResponse {
+  const head = ownDataRecord(response, 'head', 'SPARQL JSON response', reader);
   const variables = denseStringArray(
-    ownDataValue(head, 'vars', 'SPARQL JSON head'),
+    reader.read(head, 'vars', 'SPARQL JSON head'),
     'SPARQL JSON head.vars',
+    reader,
   );
   if (new Set(variables).size !== variables.length) {
     malformed('SPARQL JSON head.vars must not contain duplicates');
   }
-  const results = ownDataRecord(response, 'results', 'SPARQL JSON response');
-  const rows = denseArray(
-    ownDataValue(results, 'bindings', 'SPARQL JSON results'),
+  // Graphs, predicates and datatypes commonly repeat in consecutive rows.
+  // Cap both column count and retained string length; uncached values still
+  // receive the exact same validator. Term shape is checked before any hit.
+  const results = ownDataRecord(response, 'results', 'SPARQL JSON response', reader);
+  const rows = reader.array(
+    reader.read(results, 'bindings', 'SPARQL JSON results'),
     'SPARQL JSON results.bindings',
   );
+  // Term values and literal datatypes are separate populations, so a column
+  // carrying both must not let them evict each other from one shared slot.
+  const cachedColumns = rows.length > 1 ? variables.slice(0, MAX_CACHED_IRI_VARIABLES) : [];
+  const iriValidators = cachedColumns.map(createIriValidator);
+  const datatypeValidators = cachedColumns.map(createIriValidator);
   const bindings = rows.map((input, rowIndex) => {
     if (!isOrdinaryDataRecord(input)) {
       malformed(`SPARQL JSON binding ${rowIndex} must be a plain object`);
     }
     const row = input as Record<string, unknown>;
-    for (const key of Reflect.ownKeys(row)) {
+    for (const key of reader.keys(row)) {
       if (typeof key !== 'string' || !variables.includes(key)) {
         malformed(`SPARQL JSON binding ${rowIndex} contains an undeclared variable`);
       }
     }
     const binding: Record<string, string> = {};
-    for (const variable of variables) {
+    for (let variableIndex = 0; variableIndex < variables.length; variableIndex++) {
+      const variable = variables[variableIndex];
       if (!Object.prototype.hasOwnProperty.call(row, variable)) continue;
-      const term = ownDataValue(row, variable, `SPARQL JSON binding ${rowIndex}`);
-      binding[variable] = formatSparqlJsonTerm(snapshotTerm(term, rowIndex, variable));
+      const term = reader.read(row, variable, `SPARQL JSON binding ${rowIndex}`);
+      const formatted = formatSparqlJsonTerm(snapshotTerm(
+        term, rowIndex, variable, reader,
+        iriValidators[variableIndex] ?? isSafeIri,
+        datatypeValidators[variableIndex] ?? isSafeIri,
+      ));
+      // `__proto__` is a legal SPARQL variable name, and a plain assignment
+      // hits the inherited setter and drops the column. Define it instead, so
+      // the row keeps the same prototype every other response's rows have:
+      // the public Record<string, string> shape must not vary with head.vars.
+      if (variable === '__proto__') {
+        Object.defineProperty(binding, '__proto__', {
+          value: formatted, writable: true, enumerable: true, configurable: true,
+        });
+        continue;
+      }
+      binding[variable] = formatted;
     }
     return binding;
   });
   return { variables: [...variables], bindings };
 }
 
-function ownDataRecord(input: unknown, key: string, label: string): Record<string, unknown> {
-  const value = ownDataValue(input, key, label);
+function ownDataRecord(input: unknown, key: string, label: string, reader = closedDataReader): Record<string, unknown> {
+  const value = reader.read(input, key, label);
   if (!isOrdinaryDataRecord(value)) {
     malformed(`${label}.${key} must be an object`);
   }
   return value as Record<string, unknown>;
 }
 
-function denseStringArray(input: unknown, label: string): string[] {
-  const values = denseArray(input, label);
+function denseStringArray(input: unknown, label: string, reader = closedDataReader): string[] {
+  const values = reader.array(input, label);
   if (values.some((value) => typeof value !== 'string')) {
     malformed(`${label} must be an array of strings`);
   }
@@ -180,22 +291,22 @@ function denseArray(input: unknown, label: string): unknown[] {
   return [...snapshotDenseDataArray(input, label, malformed)];
 }
 
-function snapshotTerm(input: unknown, rowIndex: number, variable: string): AdapterSparqlJsonTerm {
+function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: IriValidator, validateDatatype: IriValidator): AdapterSparqlJsonTerm {
   const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
   if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain term object`);
   const term = input as Record<string, unknown>;
-  const type = ownDataValue(term, 'type', label);
-  const value = ownDataValue(term, 'value', label);
+  const type = reader.read(term, 'type', label);
+  const value = reader.read(term, 'value', label);
   if (typeof type !== 'string' || typeof value !== 'string') {
     malformed(`${label} type and value must be strings`);
   }
   if (type === 'uri') {
-    snapshotExactOrdinaryDataRecord(term, ['type', 'value'], label, malformed);
-    if (!isSafeIri(value)) malformed(`${label} URI value must be an absolute safe IRI`);
+    reader.exact(term, ['type', 'value'], label, malformed);
+    if (!validateIri(value)) malformed(`${label} URI value must be an absolute safe IRI`);
     return { type, value };
   }
   if (type === 'bnode') {
-    snapshotExactOrdinaryDataRecord(term, ['type', 'value'], label, malformed);
+    reader.exact(term, ['type', 'value'], label, malformed);
     if (
       !SPARQL_JSON_BLANK_NODE_LABEL.test(value)
       || value.endsWith('.')
@@ -221,17 +332,17 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string): Adapt
     : hasDatatype
       ? ['datatype', 'type', 'value']
       : ['type', 'value'];
-  snapshotExactOrdinaryDataRecord(term, expected, label, malformed);
+  reader.exact(term, expected, label, malformed);
   if (hasLanguage) {
-    const language = ownDataValue(term, 'xml:lang', label);
+    const language = reader.read(term, 'xml:lang', label);
     if (typeof language !== 'string' || !SPARQL_JSON_LANGUAGE_TAG.test(language)) {
       malformed(`${label} language must be a valid language tag`);
     }
     return { type, value, 'xml:lang': language };
   }
   if (hasDatatype) {
-    const datatype = ownDataValue(term, 'datatype', label);
-    if (typeof datatype !== 'string' || !isSafeIri(datatype)) {
+    const datatype = reader.read(term, 'datatype', label);
+    if (typeof datatype !== 'string' || !validateDatatype(datatype)) {
       malformed(`${label} datatype must be an absolute safe IRI`);
     }
     return { type, value, datatype };
