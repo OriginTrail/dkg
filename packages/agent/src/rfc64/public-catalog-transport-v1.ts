@@ -178,7 +178,7 @@ export interface Rfc64PublicCatalogHeadReplayProviderCompletionV2 {
    * Stored heads the provider refused to serve because they belong to a
    * superseded authority generation. Process-local, never on the wire.
    */
-  readonly withheld?: number;
+  readonly withheld: number;
 }
 
 type Rfc64PublicCatalogPolicyScopeV1 =
@@ -669,7 +669,7 @@ export class Rfc64PublicCatalogTransportV1 {
     // `requested` counts the answer as positive evidence and the Context Graph
     // settles as corroborated and verified. A loud, permanent retry is the
     // honest outcome until the author re-projects those rows.
-    if ((completion.withheld ?? 0) > 0 && completion.manifest.length === 0) {
+    if (completion.withheld > 0 && completion.manifest.length === 0) {
       return Uint8Array.of(REPLAY_INCOMPLETE);
     }
     return encodeRfc64PublicCatalogHeadReplayCompletionV2(Object.freeze({
@@ -861,24 +861,17 @@ function snapshotReplayProviderCompletionV2(value: unknown): Readonly<{
   withheld: number;
   manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
 }> {
-  // `withheld` is optional: this record is the provider's own in-process
-  // completion, not a wire payload, and a caller that never withholds anything
-  // has no reason to report a zero.
-  const carriesWithheld = isPlainRecord(value) && 'withheld' in value;
   const snapshot = snapshotExactWireRecord(
     value,
-    carriesWithheld
-      ? ['announced', 'failed', 'manifest', 'withheld']
-      : ['announced', 'failed', 'manifest'],
+    ['announced', 'failed', 'manifest', 'withheld'],
   );
-  const withheld = carriesWithheld ? snapshot.withheld : 0;
   if (
     !Number.isSafeInteger(snapshot.announced)
     || (snapshot.announced as number) < 0
     || !Number.isSafeInteger(snapshot.failed)
     || (snapshot.failed as number) < 0
-    || !Number.isSafeInteger(withheld)
-    || (withheld as number) < 0
+    || !Number.isSafeInteger(snapshot.withheld)
+    || (snapshot.withheld as number) < 0
   ) {
     fail('catalog-transport-wire', 'RFC-64 replay completion counters are invalid');
   }
@@ -889,7 +882,7 @@ function snapshotReplayProviderCompletionV2(value: unknown): Readonly<{
   return Object.freeze({
     announced: snapshot.announced as number,
     failed: snapshot.failed as number,
-    withheld: withheld as number,
+    withheld: snapshot.withheld as number,
     manifest,
   });
 }

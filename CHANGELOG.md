@@ -4,6 +4,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Changed
+
+- **`withheld` is required on a catalog replay provider completion** (#2658):
+  `Rfc64PublicCatalogHeadReplayProviderCompletionV2.withheld` is no longer
+  optional, so the `onCatalogHeadReplayRequested` extension point must report
+  the count of stored heads it refused to serve. Every in-tree producer already
+  does. An out-of-tree provider that omits the field now fails loudly with
+  `catalog-transport-wire` instead of silently degrading to `withheld: 0`,
+  which answered a fully withheld replay as `completed` with an empty manifest.
+
 ## [10.0.17] - 2026-09-13
 
 An RPC-bounded RFC-64 operational-hardening release. RFC-64 remains active by

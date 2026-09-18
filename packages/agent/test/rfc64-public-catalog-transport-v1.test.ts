@@ -254,6 +254,7 @@ describe('RFC-64 author catalog transport v1', () => {
             completion: Promise.resolve(Object.freeze({
               announced: 1,
               failed: 0,
+              withheld: 0,
               manifest: Object.freeze([announcement]),
             })),
           });
@@ -385,6 +386,7 @@ describe('RFC-64 author catalog transport v1', () => {
     const completion = new Promise<Readonly<{
       announced: number;
       failed: number;
+      withheld: number;
       manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
     }>>((resolve) => {
       releaseCompletion = () => {
@@ -392,6 +394,7 @@ describe('RFC-64 author catalog transport v1', () => {
         resolve(Object.freeze({
           announced: 0,
           failed: 0,
+          withheld: 0,
           manifest: Object.freeze([]),
         }));
       };
