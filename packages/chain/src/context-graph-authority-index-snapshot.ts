@@ -7,6 +7,30 @@ import {
 } from './context-graph-authority-index-checkpoint.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES = 8 * 1024 * 1024;
+/** Includes room for the 50-block durable holdback and ordinary refresh/head skew. */
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS = 200;
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS = 30_000;
+
+export class ContextGraphAuthorityIndexSnapshotExportError extends Error {
+  override readonly name = 'ContextGraphAuthorityIndexSnapshotExportError';
+
+  constructor(readonly status: 'too-large' | 'above-range' | 'below-range' | 'unavailable') {
+    super(`Context Graph authority index snapshot ${status}`);
+  }
+}
+
+/** A later caller may retry; switching RPC providers must not restart peer walks. */
+export class ContextGraphAuthorityIndexBootstrapUnavailableError extends AggregateError {
+  override readonly name = 'ContextGraphAuthorityIndexBootstrapUnavailableError';
+  readonly code = 'AUTHORITY_INDEX_BOOTSTRAP_UNAVAILABLE';
+  readonly retryAfterMs = 5_000;
+
+  constructor(cause: unknown) {
+    super([cause], `Context Graph authority index snapshot bootstrap unavailable: ${
+      cause instanceof Error ? cause.message : String(cause)
+    }`, { cause });
+  }
+}
 
 export interface ContextGraphAuthorityIndexSnapshotRequest {
   readonly scope: string;

@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
+import { ContextGraphAuthorityIndexSnapshotExportError } from '@origintrail-official/dkg-chain';
 import {
   AUTHORITY_INDEX_SNAPSHOT_MAX_REQUEST_BYTES,
   AUTHORITY_INDEX_SNAPSHOT_MAX_RESPONSE_BYTES,
+  AuthorityIndexSnapshotUnavailableError,
+  AuthorityIndexSnapshotPeerStatusError,
   createAuthorityIndexSnapshotClient,
   createAuthorityIndexSnapshotHandler,
   normalizeAuthorityIndexSnapshotConfig,
@@ -70,10 +73,10 @@ describe('explicit authority-index snapshot trust', () => {
   it('bounds peer count and the maximum local tail', () => {
     expect(() => normalizeAuthorityIndexSnapshotConfig({ trustedCorePeers: Array(9).fill(address(FIRST)) })).toThrow(/at most 8/);
     expect(() => normalizeAuthorityIndexSnapshotConfig({ trustedCorePeers: [] })).toThrow(/at least 1/);
-    for (const maxTailBlocks of [0, 49, 10_001, Infinity, 50.5, null as unknown as number]) {
+    for (const maxTailBlocks of [0, 49, 50, 199, 10_001, Infinity, 200.5, null as unknown as number]) {
       expect(() => normalizeAuthorityIndexSnapshotConfig({ trustedCorePeers: [address(FIRST)], maxTailBlocks })).toThrow(/maxTailBlocks/);
     }
-    for (const maxTailBlocks of [50, 2_000, 10_000]) {
+    for (const maxTailBlocks of [200, 2_000, 10_000]) {
       expect(normalizeAuthorityIndexSnapshotConfig({ trustedCorePeers: [address(FIRST)], maxTailBlocks }).maxTailBlocks).toBe(maxTailBlocks);
     }
   });
@@ -193,6 +196,85 @@ describe('bounded snapshot client failover', () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it('bounds the complete peer walk and aborts a later candidate before any further peer', async () => {
+    vi.useFakeTimers();
+    const send = vi.fn().mockImplementation(() => new Promise(() => {}));
+    const client = createAuthorityIndexSnapshotClient({
+      config: { trustedCorePeers: [address(FIRST), address(SECOND), address(UNTRUSTED)] },
+      request: send, timeoutMs: 100, overallTimeoutMs: 150,
+    });
+    const result = client.fetchSnapshot(request);
+    const rejected = expect(result).rejects.toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(send.mock.calls.map(([peer]) => peer.peerId)).toEqual([FIRST, SECOND]);
+    expect(send.mock.calls[1][2].timeoutMs).toBe(50);
+    await vi.advanceTimersByTimeAsync(50);
+    await rejected;
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][2].signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps later canonical validation inside the total deadline', async () => {
+    vi.useFakeTimers();
+    const send = vi.fn().mockResolvedValue(response());
+    const signals: AbortSignal[] = [];
+    const validate = vi.fn().mockImplementation((_value: unknown, signal: AbortSignal) => {
+      signals.push(signal);
+      return new Promise<void>(() => {});
+    });
+    const client = createAuthorityIndexSnapshotClient({
+      config, request: send, timeoutMs: 100, overallTimeoutMs: 150,
+    });
+    const result = client.fetchSnapshot(request, undefined, validate);
+    const rejected = expect(result).rejects.toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(validate).toHaveBeenCalledTimes(2);
+    expect(signals[0].aborted).toBe(true);
+    expect(signals[1].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(50);
+    await rejected;
+    expect(signals[1].aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('preserves per-peer statuses and causes, and cools down failed scopes before another walk', async () => {
+    vi.useFakeTimers();
+    const transportFailure = new Error('connection refused');
+    const send = vi.fn()
+      .mockResolvedValueOnce(encode({ version: 1, status: 'below-range' }))
+      .mockRejectedValueOnce(transportFailure)
+      .mockResolvedValue(response());
+    const client = createAuthorityIndexSnapshotClient({ config, request: send });
+    const failure = await client.fetchSnapshot(request).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
+    expect(failure).toMatchObject({ code: 'AUTHORITY_INDEX_SNAPSHOT_UNAVAILABLE', retryAfterMs: 5_000 });
+    const causes = (failure as AggregateError).errors;
+    expect(causes[0]).toBeInstanceOf(AuthorityIndexSnapshotPeerStatusError);
+    expect(causes[0]).toMatchObject({ peerId: FIRST, status: 'below-range' });
+    expect(causes[1]).toBe(transportFailure);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const cooldown = await client.fetchSnapshot(request).catch((error: unknown) => error);
+    expect(cooldown).toMatchObject({ retryAfterMs: 3_000, errors: causes });
+    expect(send).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not turn lifecycle cancellation into a provider cooldown', async () => {
+    const controller = new AbortController();
+    const send = vi.fn()
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValue(response());
+    const client = createAuthorityIndexSnapshotClient({ config, request: send });
+    const cancelled = client.fetchSnapshot(request, controller.signal);
+    controller.abort(new Error('node stopped'));
+    await expect(cancelled).rejects.toThrow('node stopped');
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects caller scope/bounds errors before transport', async () => {
     const send = vi.fn();
     const client = createAuthorityIndexSnapshotClient({ config, request: send });
@@ -247,6 +329,45 @@ describe('cache-only snapshot serving', () => {
       }),
     });
     expect(decode(await large(encode({ version: 1, request })))).toEqual({ version: 1, status: 'too-large' });
+  });
+
+  it.each(['too-large', 'above-range', 'below-range', 'unavailable'] as const)(
+    'preserves the chain export diagnostic %s', async (status) => {
+      const handler = createAuthorityIndexSnapshotHandler({
+        exportSnapshot: async () => { throw new ContextGraphAuthorityIndexSnapshotExportError(status); },
+      });
+      expect(decode(await handler(encode({ version: 1, request })))).toEqual({ version: 1, status });
+    },
+  );
+
+  it('limits repeated exports per authenticated peer while allowing another identity', async () => {
+    vi.useFakeTimers();
+    const exportSnapshot = vi.fn().mockResolvedValue(snapshot);
+    const handler = createAuthorityIndexSnapshotHandler({ exportSnapshot });
+    const bytes = encode({ version: 1, request });
+    for (let i = 0; i < 4; i += 1) {
+      expect(decode(await handler(bytes, FIRST)).status).toBe('ok');
+    }
+    expect(decode(await handler(bytes, FIRST)).status).toBe('busy');
+    expect(decode(await handler(bytes, SECOND)).status).toBe('ok');
+    expect(exportSnapshot).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(decode(await handler(bytes, FIRST)).status).toBe('ok');
+    expect(exportSnapshot).toHaveBeenCalledTimes(6);
+  });
+
+  it('bounds limiter identities without evicting an active peer limit', async () => {
+    vi.useFakeTimers();
+    const exportSnapshot = vi.fn().mockResolvedValue(null);
+    const handler = createAuthorityIndexSnapshotHandler({ exportSnapshot });
+    const bytes = encode({ version: 1, request });
+    for (let i = 0; i < 1_024; i += 1) {
+      expect(decode(await handler(bytes, `authenticated-peer-${i}`)).status).toBe('not-ready');
+    }
+    expect(decode(await handler(bytes, 'new-authenticated-peer')).status).toBe('busy');
+    expect(exportSnapshot).toHaveBeenCalledTimes(1_024);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(decode(await handler(bytes, 'new-authenticated-peer')).status).toBe('not-ready');
   });
 
   it('caps concurrent cache exports and releases capacity after completion', async () => {

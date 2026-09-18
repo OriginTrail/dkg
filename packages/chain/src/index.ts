@@ -1,6 +1,11 @@
 export * from './chain-adapter.js';
 export {
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
+  ContextGraphAuthorityIndexSnapshotExportError,
+  ContextGraphAuthorityIndexBootstrapUnavailableError,
+  decodeContextGraphAuthorityIndexSnapshot,
   normalizeContextGraphAuthorityIndexSnapshot,
   type ContextGraphAuthorityIndexSnapshotRequest,
   type ContextGraphAuthorityIndexSnapshot,
@@ -15,6 +20,7 @@ export {
   type ContextGraphAuthorityHistoryStore,
 } from './context-graph-authority-history.js';
 export {
+  createContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexStore,
 } from './context-graph-authority-index-checkpoint.js';
 export {

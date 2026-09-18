@@ -1236,7 +1236,14 @@ export class DKGAgent extends DKGAgentBase {
       normalizedConfig,
       snapshotClient === undefined || authorityIndex === undefined ? undefined : {
         maxTailBlocks: authorityIndex.maxTailBlocks,
-        trustDomain: createHash('sha256').update(JSON.stringify(trustedPeerIds)).digest('hex'),
+        // Epoch zero preserves the original namespace. Increasing it lets an
+        // operator discard a suspect imported prefix without changing peers.
+        trustDomain: createHash('sha256').update(JSON.stringify(
+          (authorityIndex.cacheEpoch ?? 0) === 0 ? trustedPeerIds : {
+            trustedCorePeers: trustedPeerIds,
+            cacheEpoch: authorityIndex.cacheEpoch,
+          },
+        )).digest('hex'),
         fetchSnapshot: (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
       },
     );

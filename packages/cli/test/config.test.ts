@@ -985,6 +985,7 @@ describe('localAgentIntegrations config round-trip', () => {
       mode: 'core-snapshot' as const,
       trustedCorePeers: ['/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
       maxTailBlocks: 2_000,
+      cacheEpoch: 1,
     };
     await saveConfig({
       name: 'snapshot-edge',
@@ -995,6 +996,16 @@ describe('localAgentIntegrations config round-trip', () => {
     });
 
     expect((await loadConfig()).authorityIndex).toEqual(authorityIndex);
+  });
+
+  it.each(['json', 'yaml'])('rejects misplaced core.authorityIndex in persisted %s config', async (format) => {
+    const content = format === 'json'
+      ? JSON.stringify({ core: { authorityIndex: { mode: 'core-snapshot' } } })
+      : 'core:\n  authorityIndex:\n    mode: core-snapshot\n';
+    await writeFile(join(tempDir, `config.${format}`), content, 'utf8');
+    await expect(loadConfig()).rejects.toThrow(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level',
+    );
   });
 
   it('keeps authority index snapshot trust absent for existing configs', async () => {

@@ -5,9 +5,13 @@ import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index
 import type { ContextGraphAuthorityIndexId } from '../src/context-graph-authority-index-id.js';
 import type { ContextGraphAuthorityIndexCheckpoint, ContextGraphAuthorityIndexStore } from
   '../src/context-graph-authority-index-checkpoint.js';
+import { createContextGraphAuthorityIndexCheckpoint } from
+  '../src/context-graph-authority-index-checkpoint.js';
 import { reduceContextGraphAuthorityIndexPage } from '../src/context-graph-authority-index-reducer.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
+  ContextGraphAuthorityIndexBootstrapUnavailableError,
   normalizeContextGraphAuthorityIndexSnapshot,
   type ContextGraphAuthorityIndexBootstrap,
   type ContextGraphAuthorityIndexSnapshotRequest,
@@ -68,6 +72,11 @@ const bootstrap = (overrides: Partial<ContextGraphAuthorityIndexBootstrap> = {})
 });
 
 describe('trusted core authority index bootstrap', () => {
+  it('rejects a tail budget that leaves no refresh or head-skew margin', () => {
+    expect(() => new ContextGraphAuthorityIndex(new ScopedStore(), bootstrap({ maxTailBlocks: 50 })))
+      .toThrow('bootstrap configuration is invalid');
+  });
+
   it('imports a small prefix snapshot and reads only 100 tail blocks across 3.78m historical blocks', async () => {
     const store = new ScopedStore();
     const source = bootstrap();
@@ -225,6 +234,168 @@ describe('trusted core authority index bootstrap', () => {
     expect(scan.readPage).not.toHaveBeenCalled();
   });
 
+  it('shares one deadline across peer walks and seed CAS retries, then cools down', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new ScopedStore();
+      store.compareAndSwap.mockImplementationOnce(async (scope) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 15_000));
+        store.records.set(scope, { token: 1, value: checkpoint(20) });
+        return undefined;
+      });
+      const source = bootstrap({ fetchSnapshot: vi.fn(async (_request, signal) => {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 12_000);
+          signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+        });
+        return envelope();
+      }) });
+      const index = new ContextGraphAuthorityIndex(store, source);
+      const scan = input();
+      const pending = index.resolve(scan);
+      const rejected = expect(pending).rejects.toBeInstanceOf(ContextGraphAuthorityIndexBootstrapUnavailableError);
+      await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS);
+      await rejected;
+      expect(source.fetchSnapshot).toHaveBeenCalledTimes(2);
+      expect(store.compareAndSwap).toHaveBeenCalledOnce();
+      expect(scan.readPage).not.toHaveBeenCalled();
+      await expect(index.resolve({ ...scan, readScope: {} })).rejects.toThrow('deadline exceeded');
+      expect(source.fetchSnapshot).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const retry = index.resolve({ ...scan, readScope: {} });
+      await vi.advanceTimersByTimeAsync(12_000);
+      await expect(retry).resolves.toMatchObject({ owner: OWNER });
+      expect(source.fetchSnapshot).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns at the seed deadline and drains an in-flight CAS without launching a winner reload', async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new ScopedStore();
+      store.compareAndSwap.mockImplementationOnce(async (scope) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 40_000));
+        store.records.set(scope, { token: 1, value: checkpoint(20) });
+        return undefined;
+      });
+      const source = bootstrap();
+      const index = new ContextGraphAuthorityIndex(store, source);
+      const scan = input();
+      let settled = false;
+      const pending = index.resolve(scan).finally(() => { settled = true; });
+      const rejected = expect(pending).rejects.toThrow('deadline exceeded');
+      await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS);
+      expect(settled).toBe(true);
+      await rejected;
+      let drained = false;
+      const close = index.close().then(() => { drained = true; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drained).toBe(false);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await close;
+      expect(store.compareAndSwap).toHaveBeenCalledOnce();
+      expect(source.fetchSnapshot).toHaveBeenCalledOnce();
+      expect(store.load).toHaveBeenCalledOnce();
+      expect(scan.readPage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds a detached caller seed and drains uncooperative transport during shutdown', async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: unknown) => void;
+      const source = bootstrap({ fetchSnapshot: vi.fn(async () => new Promise((resolve) => { release = resolve; })) });
+      const index = new ContextGraphAuthorityIndex(new ScopedStore(), source);
+      const caller = new AbortController();
+      const scan = input();
+      const pending = index.resolve({ ...scan, signal: caller.signal });
+      const rejected = expect(pending).rejects.toThrow('caller left');
+      await vi.advanceTimersByTimeAsync(1);
+      caller.abort(new Error('caller left'));
+      await rejected;
+      await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS);
+      expect(source.fetchSnapshot.mock.calls[0]?.[1].aborted).toBe(true);
+      let drained = false;
+      const close = index.close().then(() => { drained = true; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drained).toBe(false);
+      release(envelope());
+      await close;
+      expect(scan.readPage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves peer failure causes in the caller-retryable bootstrap error', async () => {
+    const peerCause = new Error('core-a 503');
+    const aggregate = new AggregateError([peerCause], 'all trusted cores unavailable');
+    const index = new ContextGraphAuthorityIndex(new ScopedStore(), bootstrap({
+      fetchSnapshot: async () => { throw aggregate; },
+    }));
+    const error = await index.resolve(input()).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ContextGraphAuthorityIndexBootstrapUnavailableError);
+    expect(error).toMatchObject({ cause: aggregate, errors: [aggregate], retryAfterMs: 5_000 });
+  });
+
+  it('bounds canonical validation even when the RPC ignores abort and drains it on close', async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: string) => void;
+      const store = new ScopedStore();
+      const index = new ContextGraphAuthorityIndex(store, bootstrap());
+      const scan = { ...input(), readBlockHash: async () => new Promise<string>((resolve) => { release = resolve; }) };
+      const rejected = expect(index.resolve(scan)).rejects.toThrow('deadline exceeded');
+      await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS);
+      await rejected;
+      let drained = false;
+      const close = index.close().then(() => { drained = true; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drained).toBe(false);
+      release(hash(HEAD - 100));
+      await close;
+      expect(store.compareAndSwap).not.toHaveBeenCalled();
+      expect(scan.readPage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drains candidate validation after the transport stops waiting on a timed-out peer', async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: string) => void;
+      const store = new ScopedStore();
+      const source = bootstrap({ fetchSnapshot: async (_request, _signal, validate) => {
+        const attempt = new AbortController();
+        setTimeout(() => attempt.abort(new Error('core attempt expired')), 5_000);
+        const abandoned = new Promise<never>((_resolve, reject) => {
+          attempt.signal.addEventListener('abort', () => reject(attempt.signal.reason), { once: true });
+        });
+        await Promise.race([validate(envelope(), attempt.signal), abandoned]);
+        return envelope();
+      } });
+      const index = new ContextGraphAuthorityIndex(store, source);
+      const scan = { ...input(), readBlockHash: async () => new Promise<string>((resolve) => { release = resolve; }) };
+      const rejected = expect(index.resolve(scan)).rejects.toThrow('core attempt expired');
+      await vi.advanceTimersByTimeAsync(5_000);
+      await rejected;
+      let drained = false;
+      const close = index.close().then(() => { drained = true; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drained).toBe(false);
+      release(hash(HEAD - 100));
+      await close;
+      expect(store.compareAndSwap).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('caps total local blocks even when concurrent CAS writers repeatedly discard tail progress', async () => {
     const store = new ScopedStore();
     store.records.set(`${SCOPE}:trusted-bootstrap:trusted-core-A`, { token: 1, value: checkpoint() });
@@ -300,6 +471,76 @@ describe('trusted core authority index bootstrap', () => {
     const reads = store.load.mock.calls.length;
     expect(index.exportSnapshot({ ...coreRequest, scope: 'peer-selected-scope' })).toBeNull();
     expect(store.load).toHaveBeenCalledTimes(reads);
+  });
+
+  it('serves the newest compatible completed checkpoint when the core is ahead of the edge', async () => {
+    const index = new ContextGraphAuthorityIndex(new ScopedStore());
+    await index.refresh(input());
+    await index.refresh({ ...input(), finalized: { number: HEAD + 30, hash: hash(HEAD + 30) } });
+    expect(index.exportSnapshot(request())?.checkpoint).toMatchObject({ cursor: { throughBlockNumber: HEAD - 50 } });
+    expect(index.exportSnapshot({ ...request(), maxThroughBlockNumber: HEAD })?.checkpoint)
+      .toMatchObject({ cursor: { throughBlockNumber: HEAD - 20 } });
+    expect(() => index.exportSnapshot({ ...request(), minThroughBlockNumber: HEAD - 500, maxThroughBlockNumber: HEAD - 300 }))
+      .toThrow(expect.objectContaining({ status: 'above-range' }));
+    expect(() => index.exportSnapshot({ ...request(), minThroughBlockNumber: HEAD + 1, maxThroughBlockNumber: HEAD + 50 }))
+      .toThrow(expect.objectContaining({ status: 'below-range' }));
+  });
+
+  it('bounds the cache to the eight most recent completed cursors', async () => {
+    const index = new ContextGraphAuthorityIndex(new ScopedStore());
+    for (let offset = 0; offset <= 80; offset += 10) {
+      await index.refresh({ ...input(), finalized: { number: HEAD + offset, hash: hash(HEAD + offset) } });
+    }
+    expect(() => index.exportSnapshot({ ...request(), minThroughBlockNumber: HEAD - 50, maxThroughBlockNumber: HEAD - 50 }))
+      .toThrow(expect.objectContaining({ status: 'above-range' }));
+    expect(index.exportSnapshot({ ...request(), minThroughBlockNumber: HEAD - 40, maxThroughBlockNumber: HEAD - 40 }))
+      .toMatchObject({ checkpoint: { cursor: { throughBlockNumber: HEAD - 40 } } });
+  });
+
+  it('evicts every servable checkpoint immediately on reorg even if rebuilding fails', async () => {
+    const index = new ContextGraphAuthorityIndex(new ScopedStore());
+    await index.refresh(input());
+    expect(index.exportSnapshot(request())).not.toBeNull();
+    const rebuilding = { ...input(), readBlockHash: async () => hash(1), readPage: async () => {
+      expect(index.exportSnapshot(request())).toBeNull();
+      throw new Error('rebuild unavailable');
+    } };
+    await expect(index.refresh(rebuilding)).rejects.toThrow('rebuild unavailable');
+    expect(index.exportSnapshot(request())).toBeNull();
+  });
+
+  it('does not republish an older in-flight completion after a concurrent reorg rejection', async () => {
+    const index = new ContextGraphAuthorityIndex(new ScopedStore());
+    await index.refresh(input());
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const earlier = index.refresh({ ...input(), readPage: async () => {
+      entered();
+      await new Promise<void>((resolve) => { release = resolve; });
+      return [];
+    } });
+    await ready;
+    await expect(index.refresh({ ...input(), readBlockHash: async () => hash(1), readPage: async () => {
+      throw new Error('rebuild unavailable');
+    } })).rejects.toThrow('rebuild unavailable');
+    release();
+    await earlier;
+    expect(index.exportSnapshot(request())).toBeNull();
+  });
+
+  it('reports an oversized completed table explicitly without retaining its payload for serving', async () => {
+    const seed = checkpoint();
+    const count = Math.ceil(CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES / JSON.stringify(seed.states[0]).length) + 100;
+    const large = createContextGraphAuthorityIndexCheckpoint(seed.cursor, Array.from({ length: count }, (_, id) => ({
+      ...seed.states[0]!, contextGraphId: String(id + 1) as ContextGraphAuthorityIndexId,
+    })));
+    expect(JSON.stringify(envelope(large)).length).toBeGreaterThan(CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES);
+    const store = new ScopedStore();
+    store.records.set(SCOPE, { token: 1, value: large });
+    const index = new ContextGraphAuthorityIndex(store);
+    await index.refresh({ ...input(), finalized: { number: seed.cursor.throughBlockNumber, hash: seed.cursor.throughBlockHash } });
+    expect(() => index.exportSnapshot(request())).toThrow(expect.objectContaining({ status: 'too-large' }));
   });
 
   it('normalizes the portable envelope without turning its integrity hash into proof', () => {

@@ -572,7 +572,8 @@ export interface DkgConfig {
    * Local operator config only: network discovery/relay lists do not establish
    * authority trust. Omission preserves the independent historical index.
    * The edge scans at most maxTailBlocks after the snapshot (default 2,000;
-   * maximum 10,000), refreshing from a core when farther behind.
+   * minimum 200, maximum 10,000), refreshing from a core when farther behind.
+   * Increment cacheEpoch to discard an old trusted snapshot without changing peers.
    */
   authorityIndex?: DKGAgentConfig['authorityIndex'];
   /**
@@ -2223,9 +2224,22 @@ export function apiPortPath(): string { return new DkgHomeFiles().apiPortPath; }
 export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
 export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
+/** Reject a misplaced trust policy instead of silently ignoring it. */
+export function assertAuthorityIndexConfigPlacement(config: Pick<DkgConfig, 'core'>): void {
+  if (config.core !== null && typeof config.core === 'object'
+    && Object.hasOwn(config.core, 'authorityIndex')) {
+    throw new TypeError(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level of config.json; '
+      + 'core-snapshot mode is an edge-node option.',
+    );
+  }
+}
+
 function mergePersistedConfig(raw: unknown): DkgConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...DEFAULT_CONFIG };
-  return { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
+  const config = { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
+  assertAuthorityIndexConfigPlacement(config);
+  return config;
 }
 
 function isEnoent(err: unknown): boolean {

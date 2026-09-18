@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { activeRpcRequestContext, type ContextGraphAuthorityIndexSnapshots } from '@origintrail-official/dkg-chain';
 import { startAuthorityIndexSnapshotRuntime } from '../src/authority-index-snapshot-runtime.js';
+import { AUTHORITY_INDEX_SNAPSHOT_MAX_REQUEST_BYTES } from '../src/authority-index-snapshot-service.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -19,6 +20,15 @@ describe('core authority index refresh lifecycle', () => {
     expect(startAuthorityIndexSnapshotRuntime({ ...ports, snapshots: undefined, nodeRole: 'core' })).toBeUndefined();
     expect(ports.register).not.toHaveBeenCalled();
     expect(ports.snapshots.refresh).not.toHaveBeenCalled();
+  });
+
+  it('registers the shared request byte limit', async () => {
+    const ports = fixture();
+    const runtime = startAuthorityIndexSnapshotRuntime({ ...ports, nodeRole: 'core' })!;
+    expect(ports.register).toHaveBeenCalledWith(expect.any(String), expect.any(Function), {
+      maxReadBytes: AUTHORITY_INDEX_SNAPSHOT_MAX_REQUEST_BYTES,
+    });
+    await runtime.close();
   });
 
   it('uses background RPC capacity while rebuilding the core index', async () => {

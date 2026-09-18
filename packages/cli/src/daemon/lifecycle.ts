@@ -111,6 +111,7 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
+  assertAuthorityIndexConfigPlacement,
   saveConfig,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
@@ -1132,6 +1133,7 @@ async function runDaemonInnerWithStartupOwnership(
 ): Promise<void> {
   // Snapshot peers supply authority-bearing state. Validate explicit operator
   // trust before allocating startup resources, never infer it from relays.
+  assertAuthorityIndexConfigPlacement(config);
   const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
@@ -1298,6 +1300,12 @@ async function runDaemonInnerWithStartupOwnership(
     ? `v${nodeVersion}, ${nodeCommit}`
     : `v${nodeVersion}`;
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
+  log(
+    `[info] [authority-index] mode=${authorityIndex?.mode ?? 'local-history'} `
+    + `trustedCoreCount=${authorityIndex?.trustedCorePeers.length ?? 0} `
+    + `maxTailBlocks=${authorityIndex?.maxTailBlocks ?? 'unbounded'} `
+    + `cacheEpoch=${authorityIndex?.cacheEpoch ?? 0}`,
+  );
 
   // RFC-41 §4.9 / §4.3: structured startup log lines for telemetry.
   // The doctor's state summary correlates these with /api/status —

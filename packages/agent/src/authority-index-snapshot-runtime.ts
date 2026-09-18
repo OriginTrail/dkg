@@ -2,6 +2,7 @@
 
 import { withRpcRequestContext, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  AUTHORITY_INDEX_SNAPSHOT_MAX_REQUEST_BYTES,
   createAuthorityIndexSnapshotHandler,
   PROTOCOL_CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT,
 } from './authority-index-snapshot-service.js';
@@ -14,7 +15,7 @@ export function startAuthorityIndexSnapshotRuntime(input: {
   snapshots: ChainAdapter['contextGraphAuthorityIndexSnapshots'];
   register: (
     protocol: string,
-    handler: (data: Uint8Array) => Promise<Uint8Array>,
+    handler: (data: Uint8Array, peer?: unknown, options?: { signal?: AbortSignal }) => Promise<Uint8Array>,
     options: { maxReadBytes: number },
   ) => void;
   warn: (message: string) => void;
@@ -31,7 +32,7 @@ export function startAuthorityIndexSnapshotRuntime(input: {
         ? Promise.resolve(null)
         : snapshots.exportSnapshot(request),
     }),
-    { maxReadBytes: 2_048 },
+    { maxReadBytes: AUTHORITY_INDEX_SNAPSHOT_MAX_REQUEST_BYTES },
   );
   const run = (): void => {
     if (abort.signal.aborted) return;

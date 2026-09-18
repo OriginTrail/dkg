@@ -4,14 +4,15 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   MockChainAdapter,
+  createContextGraphAuthorityIndexCheckpoint,
+  decodeContextGraphAuthorityIndexSnapshot,
   type ContextGraphAuthorityIndexBootstrap,
   type ContextGraphAuthorityIndexSnapshots,
 } from '@origintrail-official/dkg-chain';
 import { DEFAULT_GENESIS_ID, computeNetworkId } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { createContextGraphAuthorityIndexCheckpoint } from '../../chain/src/context-graph-authority-index-checkpoint.js';
-import { decodeContextGraphAuthorityIndexSnapshot } from '../../chain/src/context-graph-authority-index-snapshot.js';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { resolveAuthorityIndexConfig } from '../src/authority-index-config.js';
 import {
   AUTHORITY_INDEX_SNAPSHOT_MAX_RESPONSE_BYTES,
   createAuthorityIndexSnapshotClient,
@@ -33,6 +34,22 @@ const snapshot = { version: 1 as const, scope: request.scope, checkpoint };
 const OPERATIONAL_KEY = '0x59c6995e998f97a5a0044966f0945388c9e82d88a3fdf0e0c7b33e0d2d2d8b2f';
 const PINNED_PEER = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const pinnedAddress = `/ip4/127.0.0.1/tcp/9200/p2p/${PINNED_PEER}`;
+const SECOND_PINNED_PEER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const secondPinnedAddress = `/dns4/core.example.com/tcp/9090/p2p/${SECOND_PINNED_PEER}`;
+const evmChainConfig = {
+  rpcUrl: 'http://127.0.0.1:59998',
+  hubAddress: '0x0000000000000000000000000000000000000001',
+  operationalKeys: [OPERATIONAL_KEY],
+  chainId: 'evm:31337',
+};
+
+function localAuthorityIndexStore() {
+  return {
+    load: vi.fn(async () => undefined),
+    compareAndSwap: vi.fn(async () => 1),
+    invalidate: vi.fn(async () => 2),
+  };
+}
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 
 function capability() {
@@ -146,12 +163,16 @@ describe('authority index snapshot production wiring', () => {
     let signal: AbortSignal | undefined;
     let release!: () => void;
     const pendingRefresh = new Promise<void>((resolve) => { release = resolve; });
+    let releaseChainClose!: () => void;
+    const pendingChainClose = new Promise<void>((resolve) => { releaseChainClose = resolve; });
     const snapshots = capability();
     snapshots.refresh.mockImplementation(async (options) => {
       signal = options?.signal;
       await pendingRefresh;
     });
+    snapshots.close.mockImplementation(async () => { await pendingChainClose; });
     const { agent } = await startAgent('StoppingSnapshotCore', 'core', snapshots);
+    const closeStore = vi.spyOn((agent as any).store, 'close');
     await vi.waitFor(() => expect(signal).toBeDefined());
 
     let stopped = false;
@@ -161,19 +182,22 @@ describe('authority index snapshot production wiring', () => {
       expect(stopped).toBe(false);
       expect(snapshots.close).toHaveBeenCalledOnce();
       expect(snapshots.refresh).toHaveBeenCalledOnce();
+      expect(closeStore).not.toHaveBeenCalled();
+      release();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(stopped).toBe(false);
+      expect(closeStore).not.toHaveBeenCalled();
     } finally {
       release();
+      releaseChainClose();
       await stopping;
     }
     expect(stopped).toBe(true);
+    expect(closeStore).toHaveBeenCalledOnce();
   }, 20_000);
 
   it('passes snapshot bootstrap into a constructed EVM adapter and primes the pinned transport address', async () => {
-    const authorityIndexStore = {
-      load: vi.fn(async () => undefined),
-      compareAndSwap: vi.fn(async () => 1),
-      invalidate: vi.fn(async () => 2),
-    };
+    const authorityIndexStore = localAuthorityIndexStore();
     const store = new OxigraphStore();
     const agent = await DKGAgent.create({
       name: 'SnapshotEvmConstruction',
@@ -183,12 +207,7 @@ describe('authority index snapshot production wiring', () => {
       nodeRole: 'edge',
       authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [pinnedAddress] },
       localContextGraphAuthorityIndexStore: authorityIndexStore,
-      chainConfig: {
-        rpcUrl: 'http://127.0.0.1:59998',
-        hubAddress: '0x0000000000000000000000000000000000000001',
-        operationalKeys: [OPERATIONAL_KEY],
-        chainId: 'evm:31337',
-      },
+      chainConfig: evmChainConfig,
     });
     const chain = (agent as any).chain;
     const bootstrap = chain.contextGraphAuthorityIndex.bootstrap as ContextGraphAuthorityIndexBootstrap;
@@ -198,10 +217,6 @@ describe('authority index snapshot production wiring', () => {
       expect(chain.contextGraphAuthorityIndex.localStore).toBe(authorityIndexStore);
       expect(bootstrap.maxTailBlocks).toBe(2_000);
       expect(bootstrap.trustDomain).toBe(createHash('sha256').update(JSON.stringify([PINNED_PEER])).digest('hex'));
-      await expect(bootstrap.fetchSnapshot(request, abort.signal, validate)).rejects.toThrow(
-        'No configured trusted core supplied a usable authority index snapshot',
-      );
-
       // Start only the libp2p transport: this construction test must not run
       // EVM startup reads against its intentionally unreachable RPC endpoint.
       await agent.node.start();
@@ -235,4 +250,99 @@ describe('authority index snapshot production wiring', () => {
       chain.destroy();
     }
   }, 20_000);
+
+  it('keeps snapshot fetch fenced until the agent transport has started', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'SnapshotBeforeStart',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      store,
+      nodeRole: 'edge',
+      authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [pinnedAddress] },
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      chainConfig: evmChainConfig,
+    });
+    const chain = (agent as any).chain;
+    const transport = vi.spyOn(agent.node, 'libp2p', 'get');
+    try {
+      await expect(chain.contextGraphAuthorityIndex.bootstrap.fetchSnapshot(request)).rejects.toThrow(
+        'No configured trusted core supplied a usable authority index snapshot',
+      );
+      expect(transport).not.toHaveBeenCalled();
+    } finally {
+      await agent.node.stop();
+      await store.close();
+      chain.destroy();
+    }
+  });
+
+  it.each([
+    ['injected chain adapter', { chainAdapter: new MockChainAdapter() }],
+    ['missing EVM configuration', { chainConfig: undefined }],
+    ['missing operational keys', { chainConfig: { ...evmChainConfig, operationalKeys: [] } }],
+    ['missing local store', { localContextGraphAuthorityIndexStore: undefined }],
+  ])('rejects snapshot mode with %s before allocating an agent', async (_label, overrides) => {
+    await expect(DKGAgent.create({
+      name: 'InvalidSnapshotConstruction',
+      nodeRole: 'edge',
+      authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [pinnedAddress] },
+      chainConfig: evmChainConfig,
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      ...overrides,
+    })).rejects.toThrow('requires a configured EVM chain and a local authority index store');
+  });
+
+  it('keys trusted cache scope by peer identity set and explicit reset epoch', async () => {
+    async function trustDomain(trustedCorePeers: string[], cacheEpoch?: number): Promise<string> {
+      const store = new OxigraphStore();
+      const agent = await DKGAgent.create({
+        name: 'SnapshotTrustDomain',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        nodeRole: 'edge',
+        store,
+        authorityIndex: { mode: 'core-snapshot', trustedCorePeers, cacheEpoch },
+        chainConfig: evmChainConfig,
+        localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      });
+      const chain = (agent as any).chain;
+      try {
+        return chain.contextGraphAuthorityIndex.bootstrap.trustDomain;
+      } finally {
+        await agent.node.stop();
+        await store.close();
+        chain.destroy();
+      }
+    }
+    const initial = await trustDomain([pinnedAddress, secondPinnedAddress]);
+    expect(await trustDomain([secondPinnedAddress, pinnedAddress], 0)).toBe(initial);
+    expect(await trustDomain([
+      `/dns4/moved.example.com/tcp/9091/p2p/${PINNED_PEER}`,
+      secondPinnedAddress,
+    ])).toBe(initial);
+    expect(await trustDomain([pinnedAddress])).not.toBe(initial);
+    expect(await trustDomain([pinnedAddress, secondPinnedAddress], 1)).not.toBe(initial);
+    expect(await trustDomain([pinnedAddress, secondPinnedAddress], 1)).toBe(
+      await trustDomain([secondPinnedAddress, pinnedAddress], 1),
+    );
+  }, 20_000);
+
+  it.each(['maxTailBlock', 'trustedCorePeer', 'unexpected'])(
+    'rejects unknown authorityIndex option %s with supported keys', (unknownKey) => {
+      expect(() => resolveAuthorityIndexConfig({
+        mode: 'core-snapshot',
+        trustedCorePeers: [pinnedAddress],
+        [unknownKey]: 2_000,
+      })).toThrow(`Unknown authorityIndex option(s): ${unknownKey}. Supported options:`);
+    },
+  );
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, null, '1'])(
+    'rejects invalid authorityIndex.cacheEpoch %j', (cacheEpoch) => {
+      expect(() => resolveAuthorityIndexConfig({
+        mode: 'core-snapshot', trustedCorePeers: [pinnedAddress], cacheEpoch,
+      })).toThrow('authorityIndex.cacheEpoch must be a non-negative safe integer');
+    },
+  );
 });

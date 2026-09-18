@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
@@ -133,7 +133,7 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
 
   const trustedCorePeer = '/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
-  it.each([undefined, 50, 10_000])(
+  it.each([undefined, 200, 10_000])(
     'forwards explicit edge snapshot trust with bounded tail %j', async maxTailBlocks => {
       const createArg = await captureCreateArg({
         nodeRole: 'edge',
@@ -143,9 +143,24 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
         mode: 'core-snapshot',
         trustedCorePeers: [trustedCorePeer],
         maxTailBlocks: maxTailBlocks ?? 2_000,
+        cacheEpoch: 0,
       });
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain(
+        `[info] [authority-index] mode=core-snapshot trustedCoreCount=1 maxTailBlocks=${maxTailBlocks ?? 2_000} cacheEpoch=0`,
+      );
     },
   );
+
+  it('forwards an explicit cache reset epoch and logs its active value', async () => {
+    const createArg = await captureCreateArg({
+      nodeRole: 'edge',
+      authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], cacheEpoch: 3 },
+    });
+    expect(createArg.authorityIndex.cacheEpoch).toBe(3);
+    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(logs).toContain('mode=core-snapshot trustedCoreCount=1 maxTailBlocks=2000 cacheEpoch=3');
+  });
 
   it('does not derive snapshot trust from network configuration or discovered relays', async () => {
     mocks.loadNetworkConfig.mockResolvedValue({
@@ -157,10 +172,16 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     });
     const createArg = await captureCreateArg({ nodeRole: 'edge' });
     expect(createArg.authorityIndex).toBeUndefined();
+    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(logs).toContain('[info] [authority-index] mode=local-history trustedCoreCount=0 maxTailBlocks=unbounded cacheEpoch=0');
   });
 
   it.each([
     { nodeRole: 'core', authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer] } },
+    { core: { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer] } } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlock: 2_000 } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], trustedCorePeer: trustedCorePeer } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], cacheEpoch: -1 } },
     { authorityIndex: null },
     { authorityIndex: {} },
     { authorityIndex: { mode: 'auto', trustedCorePeers: [trustedCorePeer] } },
@@ -168,7 +189,7 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: ['/dns4/core.example.com/tcp/9090'] } },
     { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: ['invalid'] } },
     { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 0 } },
-    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 49 } },
+    { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 199 } },
     { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 10_001 } },
     { authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks: 1.5 } },
   ])('rejects invalid snapshot trust before allocating daemon resources: %j', async overrides => {
