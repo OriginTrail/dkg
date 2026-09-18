@@ -135,7 +135,9 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     expect(requestRestart).toHaveBeenCalledOnce();
     expect(controlled.coordinator.admissionsPaused()).toBe(true);
 
-    controlled.coordinator.restartCancelled();
+    // The supervisor cancels by returning the lifecycle to `ready`; that
+    // transition is the only notification the coordinator receives.
+    controlled.setServerAvailable(true);
     controlled.setNow(159);
     controlled.tick();
     expect(requestRestart).toHaveBeenCalledOnce();

@@ -571,7 +571,6 @@ export async function startOxigraphServer(
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
-      walMaintenance.restartCancelled();
       return;
     }
     try {
@@ -592,7 +591,6 @@ export async function startOxigraphServer(
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
-      walMaintenance.restartCancelled();
     }
   };
 

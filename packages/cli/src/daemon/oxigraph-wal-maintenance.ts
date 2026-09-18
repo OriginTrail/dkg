@@ -31,7 +31,6 @@ export interface OxigraphWalMaintenanceCoordinator {
   registerActivity(): OxigraphWalMaintenanceActivityLease;
   admissionsPaused(): boolean;
   serverLifecycleChanged(): void;
-  restartCancelled(): void;
   restartCompleted(): void;
   stop(): void;
 }
@@ -99,11 +98,6 @@ export function createOxigraphWalMaintenanceCoordinator(
       );
     }
 
-    if (!maintenancePending) {
-      if (activeOperations !== 0) idleSince = null;
-      else if (idleSince === null) idleSince = observedAt;
-      return;
-    }
     if (activeOperations !== 0) {
       idleSince = null;
       return;
@@ -112,6 +106,7 @@ export function createOxigraphWalMaintenanceCoordinator(
       idleSince = observedAt;
       return;
     }
+    if (!maintenancePending) return;
     if (observedAt - idleSince < idleMs) return;
     const accepted = options.requestRestart(
       `retained WAL reached the ${formatWalBytes(thresholdBytes)} maintenance threshold `
@@ -153,12 +148,11 @@ export function createOxigraphWalMaintenanceCoordinator(
     admissionsPaused(): boolean {
       return !stopped && maintenancePending;
     },
+    // A cancelled restart needs no notification of its own: the supervisor puts
+    // the lifecycle back to `ready` through setLifecycle, which calls this and
+    // reopens the idle window from scratch.
     serverLifecycleChanged(): void {
       if (stopped) return;
-      idleSince = options.serverAvailable() && totalActiveOperations() === 0 ? now() : null;
-    },
-    restartCancelled(): void {
-      if (stopped || !maintenancePending) return;
       idleSince = options.serverAvailable() && totalActiveOperations() === 0 ? now() : null;
     },
     restartCompleted(): void {
