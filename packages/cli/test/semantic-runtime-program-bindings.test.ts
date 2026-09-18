@@ -4,10 +4,12 @@ import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { decodeQueryCatalogBindings } from '@origintrail-official/dkg-core/query-catalog';
 import { RuntimeAdapterRegistry, SemanticRuntimeStore, type SemanticProgramBinding, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
 
 import { invokeBoundSemanticProgram, resolveStoredSemanticProgram, startConfiguredSemanticRuntime, validateSemanticRuntimeConfig } from '../src/semantic-runtime.js';
 import { programBindingDigest } from '../src/semantic-runtime-program-bindings.js';
 import { createSemanticQueryPin } from '../src/semantic-runtime-query-pins.js';
+import { invokeBoundSemanticProgramOnPeer, registerSemanticRuntimeInboxSkill } from '../src/semantic-runtime-inbox.js';
 
 const caller = '0x2222222222222222222222222222222222222222';
 const executor = '0x1111111111111111111111111111111111111111';
@@ -75,6 +77,10 @@ function fixture(layer: 'wm' | 'swm' | 'vm' = 'swm') {
     listLocalAgents: () => [{ agentAddress: executor }],
     getCustodialAgentPrivateKey: () => '0x01',
     canReadContextGraph,
+    // Current canary queries preserve denied/unavailable as separate outcomes.
+    resolveContextGraphReadAuthority: vi.fn(async (graph: string, opts: { callerAgentAddress?: string }) => ({
+      outcome: await canReadContextGraph(graph, opts) ? 'allowed' : 'denied',
+    })),
     canUseSharedMemoryForContextGraph: vi.fn(async () => true),
     store: { query: vi.fn(async () => ({ type: 'bindings', bindings: [] })) },
     query: vi.fn(async (sparql: string, opts: Record<string, unknown>) => {
@@ -116,6 +122,49 @@ function fixture(layer: 'wm' | 'swm' | 'vm' = 'swm') {
 }
 
 describe('tenant Program bindings', () => {
+  it('executes a wallet-signed inbox operation with real Wasm, retries once and enforces tenant revocation', async () => {
+    const f = fixture();
+    const privateKey = `0x${'01'.padStart(64, '0')}`;
+    const signer = new ethers.Wallet(privateKey).address;
+    f.binding.allowedCallerAgentAddresses = [signer];
+    const runtime = await f.start();
+    let handler: (request: any, peer: string) => Promise<any>;
+    const tenant = Object.assign(f.agent, {
+      peerId: 'peer-kamstrup',
+      registerSkill: (_skill: string, fn: typeof handler) => { handler = fn; },
+    });
+    registerSemanticRuntimeInboxSkill(tenant as any, runtime, f.config, undefined);
+    const transportReplies = new Map<string, any>();
+    const sender = {
+      peerId: 'peer-idener',
+      resolveLocalAgentAddress: (address: string) => address,
+      getCustodialAgentPrivateKey: () => privateKey,
+      invokeSkill: vi.fn(async (_peer: string, _skill: string, data: Uint8Array, options: { messageId: string }) => {
+        // Model the transport cache: duplicate deliveries skip the inbox handler.
+        if (transportReplies.has(options.messageId)) return transportReplies.get(options.messageId);
+        const response = await handler({ inputData: data }, 'peer-idener');
+        transportReplies.set(options.messageId, response);
+        return response;
+      }),
+    };
+    const routes = { enabled: true, programRoutes: [{ contextGraphId: dataGraph, operationIri: operation, targetPeerId: tenant.peerId }] };
+    const invoke = () => invokeBoundSemanticProgramOnPeer(sender as any, routes, dataGraph, operation, invocationId, signer);
+    const result = await invoke();
+    expect(result).toMatchObject({ persisted: true, executionLayer: 'wm' });
+    expect(JSON.parse(result.outputs![0]).result.bindings).toEqual([{ device: 'urn:kamstrup:device:W10', temperature: '21.5' }]);
+    expect(f.written).toEqual(expect.arrayContaining([
+      expect.objectContaining({ predicate: SR + 'invokedBy', object: `did:dkg:agent:${signer}` }),
+      expect.objectContaining({ predicate: SR + 'executedBy', object: `did:dkg:agent:${executor}` }),
+    ]));
+    await expect(invoke()).resolves.toEqual(result);
+    expect(f.readData).toHaveBeenCalledOnce();
+    // Signing and invocation do not enroll IDENER in the data graph.
+    await expect(f.agent.query(f.catalogRows[0].sparql, { contextGraphId: dataGraph, callerAgentAddress: signer })).resolves.toMatchObject({ bindings: [] });
+    f.binding.allowedCallerAgentAddresses = [];
+    await expect(invoke()).rejects.toMatchObject({ code: 'PROGRAM_INVOCATION_FORBIDDEN', status: 403 });
+    expect(f.readData).toHaveBeenCalledOnce();
+  });
+
   it('runs a real Wasm query from a separate author graph, preserves raw ACLs and replays only to its caller', async () => {
     const f = fixture();
     const runtime = await f.start();

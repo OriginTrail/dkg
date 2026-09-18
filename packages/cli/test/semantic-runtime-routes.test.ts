@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { handleSemanticRuntimeRoutes } from '../src/daemon/routes/semantic-runtime.js';
 import { forkStoredSemanticProgram, invokeBoundSemanticProgram, resolveStoredSemanticProgram, SemanticProgramError } from '../src/semantic-runtime.js';
-import { invokeSemanticProgramOnAuthorNode } from '../src/semantic-runtime-inbox.js';
+import { invokeBoundSemanticProgramOnPeer, invokeSemanticProgramOnAuthorNode } from '../src/semantic-runtime-inbox.js';
 
 vi.mock('../src/semantic-runtime.js', async (original) => ({
   ...await original<typeof import('../src/semantic-runtime.js')>(),
@@ -11,7 +11,7 @@ vi.mock('../src/semantic-runtime.js', async (original) => ({
   invokeBoundSemanticProgram: vi.fn(),
   resolveStoredSemanticProgram: vi.fn(),
 }));
-vi.mock('../src/semantic-runtime-inbox.js', () => ({ invokeSemanticProgramOnAuthorNode: vi.fn() }));
+vi.mock('../src/semantic-runtime-inbox.js', () => ({ invokeSemanticProgramOnAuthorNode: vi.fn(), invokeBoundSemanticProgramOnPeer: vi.fn() }));
 
 const caller = '0xauthenticated-caller';
 const payload = {
@@ -173,4 +173,55 @@ it('does not dispatch the replaced invocation endpoint', async () => {
   expect(res.end).not.toHaveBeenCalled();
   expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
   expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+});
+
+describe('signed outbound operation route', () => {
+  const body = { contextGraphId: 'dmaast-kamstrup', programIri: 'urn:dmaast:operation:read-w10', invocationId: '123e4567-e89b-42d3-a456-426614174099' };
+  function routed(input: unknown = body) {
+    const result = request('POST', '/api/programs/execute', input);
+    result.ctx.actor.authenticatedAgentAddress = caller;
+    result.ctx.config.semanticRuntime.programRoutes = [{ contextGraphId: body.contextGraphId, operationIri: body.programIri, targetPeerId: 'peer-kamstrup' }];
+    return result;
+  }
+
+  it('routes the existing three-field API request using only the authenticated caller', async () => {
+    const { ctx, res } = routed();
+    vi.mocked(invokeBoundSemanticProgramOnPeer).mockResolvedValue({ persisted: true } as any);
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(invokeBoundSemanticProgramOnPeer).toHaveBeenCalledWith(ctx.agent, ctx.config.semanticRuntime,
+      body.contextGraphId, body.programIri, body.invocationId, caller);
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+    expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { targetPeerId: 'attacker' }, { callerAgentAddress: 'attacker' }, { programLayer: 'vm' },
+    { executionLayer: 'wm' }, { parameters: { device: 'other-device' } }, { authorization: {} },
+  ])('rejects untrusted routing/signing overrides %j', async (override) => {
+    const { ctx, res } = routed({ ...body, ...override });
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(400);
+    expect(invokeBoundSemanticProgramOnPeer).not.toHaveBeenCalled();
+  });
+
+  it('never supplies the default operator as a signing fallback', async () => {
+    const { ctx, res } = routed();
+    ctx.actor.authenticatedAgentAddress = undefined;
+    ctx.actor.effectiveAgentAddress = 'default-operator';
+    vi.mocked(invokeBoundSemanticProgramOnPeer).mockRejectedValue(new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'denied', 403));
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(403);
+    expect(invokeBoundSemanticProgramOnPeer).toHaveBeenCalledWith(ctx.agent, ctx.config.semanticRuntime,
+      body.contextGraphId, body.programIri, body.invocationId, undefined);
+  });
+
+  it('does not fall back to ordinary Program invocation for a wrong tenant', async () => {
+    const { ctx, res } = routed({ ...body, contextGraphId: 'unconfigured-tenant' });
+    vi.mocked(invokeBoundSemanticProgram).mockRejectedValue(new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'denied', 403));
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(403);
+    expect(invokeBoundSemanticProgramOnPeer).not.toHaveBeenCalled();
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+  });
 });

@@ -2174,8 +2174,8 @@ async function runDaemonInnerWithStartupOwnership(
     const openSkills = config.messaging?.openSkills === true;
     const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
     agent.setSkillAcl((senderPeerId: string, skillUri: string) => {
-      // The semantic handler performs wallet-signature and live Context Graph
-      // membership authorization itself. Let only that handler reach its
+      // The semantic handler verifies wallet signatures, then live graph membership
+      // for Programs or tenant approval for bound operations. Let only it reach its
       // stronger application-level gate without opening unrelated skills.
       if (
         config.semanticRuntime?.enabled === true

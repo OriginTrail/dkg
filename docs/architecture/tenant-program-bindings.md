@@ -9,7 +9,7 @@ This is a manually configured, query-only path. `programBindings` grants are ind
 1. Trace Labs supplies a versioned `sr:Program` in the source graph, in any supported memory layer (`wm`, `swm`, or `vm`) that the tenant executor can read. Its source calls one fixed saved-query selector through `dkg/query@1` and declares exactly one tool IRI; the host maps that declaration exclusively to its installed query adapter. No child Programs, LLM calls or remote execution are admitted through this path.
 2. The tenant installs/reviews the named query in its own query catalog and defines a closed, bounded result schema. The query's projection is the data disclosure being approved; a schema alone does not decide which rows are appropriate to disclose.
 3. The tenant adds a `semanticRuntime.programBindings` entry: stable operation IRI, tenant graph, allowed caller identities, local executor, exact source graph/Program/layer/author/source hash, and query definition/schema pins. Only the tenant operator edits this local configuration. There is no installation or approval API in this version.
-4. Apply the configuration through the daemon's normal restart procedure. IDENER uses an agent-bound credential issued by the tenant node; the authenticated address must be in the binding's caller list. A node-default/implicit operator identity is not an invoke-only credential.
+4. Apply the configuration through the daemon's normal restart procedure. The authenticated IDENER address must be in the binding's caller list. For signed inbox invocation, IDENER proves that address with its own signing key. For direct tenant HTTP calls, IDENER uses an agent-bound credential issued by the tenant node. A node-default/implicit operator identity is not an invoke-only credential.
 
 The loaded binding supplies the execution policy and authorizes only the host's `dkg/query@1` adapter. No `operatorPolicyIri`, VM policy, or VM tool offer is required for this bound operation. The host still checks the installed/enabled adapter, graph access, source/author pins, exact query definition, result schema and current grant. Direct invocation outside `programBindings` still requires its operator-authored VM policy and tool offers. This does not bypass the storage layer's access or graph-authority checks: a locally stored Program must still be readable through the selected memory view.
 
@@ -79,7 +79,50 @@ Example approved source:
 
 The tenant binding fixes the actual data graph. The `scope` label in the source does not authorize or select a different graph.
 
-## Everyday API call
+## Signed invocation through the IDENER node
+
+For node-to-node execution, IDENER can route the same three-field execute request through the DKG inbox. Add this trusted local configuration on IDENER, alongside `semanticRuntime.enabled: true`:
+
+```json
+{
+  "semanticRuntime": {
+    "enabled": true,
+    "programRoutes": [{
+      "contextGraphId": "dmaast-kamstrup",
+      "operationIri": "urn:dmaast:operation:read-w10",
+      "targetPeerId": "REPLACE_WITH_KAMSTRUP_PEER_ID"
+    }]
+  }
+}
+```
+
+Restart IDENER after changing the configuration. Keep the tenant's reviewed `programBindings` configuration on Kamstrup. JPB uses its own graph, peer and tenant approval. A route is a destination mapping, not permission to execute. A graph/operation pair cannot have both a local binding and an outbound route on the same node.
+
+SMAP now sends the request to **IDENER's own API**:
+
+```http
+POST /api/programs/execute
+Authorization: Bearer <IDENER-local-agent-token>
+Content-Type: application/json
+
+{
+  "contextGraphId": "dmaast-kamstrup",
+  "programIri": "urn:dmaast:operation:read-w10",
+  "invocationId": "123e4567-e89b-42d3-a456-426614174099"
+}
+```
+
+The bearer credential is issued by the IDENER node for its local IDENER agent. This implementation requires that agent's signing key to be available in IDENER's custodial keystore. It never borrows the default node wallet or accepts a caller/target override in JSON. A node-operator token without an authenticated agent identity is rejected; a public-key-only agent returns `CALLER_SIGNATURE_UNAVAILABLE`. The HTTP credential has its existing DKG agent permissions; `programRoutes` does not turn it into an endpoint-scoped token.
+
+IDENER signs a version-3 `bound-operation` request using `signAgentDelegation`, then sends it to the configured peer through the existing semantic-runtime inbox skill. The signed scope binds the request version/type, tenant graph, operation IRI, invocation UUID and target peer. The delegation also binds IDENER's sending peer and an issuance/expiry window of at most five minutes. The private key and HTTP token are never sent to the tenant or stored in the Context Graph. No tenant-issued bearer token or tenant-side API registration for IDENER is needed for this signed path.
+
+Kamstrup verifies the signature, expected target scope, actual sending peer and validity window before calling `invokeBoundSemanticProgram` with the verified agent address. Its binding must list that address in `allowedCallerAgentAddresses`. The tenant selects the source Program, query, executor and output contract. IDENER needs no general membership in the tenant data graph; the executor must still have graph access and Program admission. The inbox handler does not forward bound requests again, and the ordinary version-2 Program invocation keeps its membership checks. No `messaging.openSkills` change is required.
+
+Retries use the same UUID. The sender creates a fresh short-lived delegation; the tenant rechecks its current grant and reuses the persisted result only for the same execution identity. A disabled/removed caller remains rejected even when requesting a previously completed result. Configuration changes require the normal restart procedure. The response contains permitted outputs and the private execution reference, not permission to read the tenant's Working Memory.
+
+Both nodes need this implementation, an enabled semantic runtime, and DKG peer connectivity. Unknown/older receivers reject version 3; there is no fallback to a tenant bearer token. `PROGRAM_TARGET_NODE_UNREACHABLE` identifies transport failure. Signing does not fix unavailable tenant graph authority or missing source Programs.
+
+## Direct tenant HTTP API (existing alternative)
 
 IDENER's SMAP backend calls the **Kamstrup tenant node** directly:
 
@@ -125,4 +168,4 @@ An authorized bound invocation whose Program is in SWM checks the tenant executo
 - **Retries:** repeat the same UUID only for the same caller, graph, binding and policy. A completed request replays its persisted outputs after current authorization and query-contract checks. Reusing the UUID across callers or approved versions is rejected. An old execution may no longer be retrievable through this API after activation changes its binding.
 - **Revocation:** disable the binding or remove the caller and apply the updated daemon configuration. Config-file edits are not hot reloads. Runtime checks examine the loaded grant before execution, around query dispatch, before persistence and before returning fresh or replayed results; changing that loaded grant invalidates an in-flight request. Revocation cannot retract previously delivered data.
 
-Current limits: one fixed query selector, no request parameters, no raw SPARQL capability, no public execution publication, no paid/LLM binding on this path, and no cross-node Program invocation. Query-catalog defaults, if any, are part of the approved definition hash. The WASM import remains unchanged. Parameter forwarding and a catalog installation/approval interface are separate work.
+Current limits: one fixed query selector, no request parameters, no raw SPARQL capability, no public execution publication and no paid/LLM binding on this path. Signed cross-node invocation transports the operation request; source Programs must already be readable on the tenant. Query-catalog defaults, if any, are part of the approved definition hash. The WASM import remains unchanged. Parameter forwarding and a catalog installation/approval interface are separate work.

@@ -39,6 +39,7 @@ export default defineConfig({
           'test/config.test.ts',
           'test/semantic-runtime.test.ts',
           'test/semantic-runtime-inbox.test.ts',
+          'test/semantic-runtime-bound-inbox.test.ts',
           'test/semantic-runtime-query-adapter.test.ts',
           'test/semantic-runtime-query-pins.test.ts',
           'test/semantic-runtime-program-policy.test.ts',
