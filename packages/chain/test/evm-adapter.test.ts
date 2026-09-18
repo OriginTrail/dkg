@@ -76,7 +76,7 @@ describe('EVMChainAdapter integration', () => {
       .toEqual([retained]);
   }, 60_000);
 
-  it('answers live authority from ONE real getContextGraph read, and proves a nonexistent id', async () => {
+  it('answers live authority from a real getContextGraph read, and proves a nonexistent id', async () => {
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER),
     );

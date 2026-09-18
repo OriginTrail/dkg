@@ -588,6 +588,8 @@ async function evaluateContextGraphSlotBinding(
   );
 }
 
+const LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS = 60_000;
+
 /**
  * Bind an optional chain point read. Options are passed ONLY when a signal is
  * present, so the call keeps the arity callers and spies have always observed.
@@ -905,6 +907,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         claimMissingLivenessWarning: () => {
           if (this.warnedMissingCgLivenessProbe) return false;
           this.warnedMissingCgLivenessProbe = true;
+          return true;
+        },
+        // Unlike the static condition above this one comes and goes (a node
+        // throttling at the JSON-RPC level reaches it too), so it is limited
+        // by time rather than to once per process.
+        claimLiveAuthorityFallbackWarning: () => {
+          const now = Date.now();
+          if (now - this.lastLiveAuthorityFallbackWarnAt < LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS) return false;
+          this.lastLiveAuthorityFallbackWarnAt = now;
           return true;
         },
         warn: (ctx, message) => this.log.warn(ctx, message),

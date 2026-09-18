@@ -80,9 +80,11 @@ describe('EVM adapter: one-read live context graph authority', () => {
       .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
   });
 
-  it('sends every DETERMINISTIC failure of the single read to the point reads', async () => {
+  it('sends every failure the package does NOT classify as retryable to the point reads', async () => {
     // No private reading of provider strings: whatever the package classifies
-    // as non-retryable for a view lands here, whichever node produced it.
+    // as non-retryable for a view lands here, whichever node produced it. (The
+    // first shape is also what ethers makes of a JSON-RPC error body, so a
+    // throttling node lands here too: one extra read, same final disposition.)
     for (const failure of [
       // geth: no revert payload at all
       Object.assign(new Error('missing revert data'), { code: 'CALL_EXCEPTION', data: null, reason: null }),
@@ -101,8 +103,11 @@ describe('EVM adapter: one-read live context graph authority', () => {
     ]) {
       const f = fixture();
       f.readContractWithOptions.mockRejectedValue(failure);
-      await expect(f.adapter.getContextGraphLiveAuthority(7n))
-        .rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+      const rejection = f.adapter.getContextGraphLiveAuthority(7n);
+      await expect(rejection).rejects.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+      // The original error travels as `cause`, so whoever reads the fallback
+      // warning can still get at what the node actually said.
+      await expect(rejection).rejects.toHaveProperty('cause', failure);
     }
   });
 
@@ -190,5 +195,39 @@ describe('EVM adapter: one-read live context graph authority', () => {
     await expect(f.adapter.getContextGraphLiveAuthority(7n)).resolves.toEqual({
       active: true, accessPolicy: 1, participantAgents: ['did:dkg:agent:wrong', MEMBER],
     });
+  });
+});
+
+/**
+ * `getContextGraphAccessPolicy` falls back to the same `getContextGraph` tuple
+ * when `getAccessPolicy` fails, and reads it through the SAME positional map as
+ * the one-read decoder above. Pinned here so the two cannot drift apart.
+ */
+describe('EVM adapter: access-policy fallback shares the getContextGraph tuple layout', () => {
+  function failingPrimary(tuple: unknown) {
+    const f = fixture();
+    f.readContractWithOptions.mockImplementation(async (_c: unknown, _l: string, method: string) => {
+      if (method === 'getAccessPolicy') throw new Error('getAccessPolicy unavailable');
+      if (method === 'getContextGraph') return tuple;
+      throw new Error(`unexpected ${method}`);
+    });
+    return f;
+  }
+
+  it('reads the policy from the positional slot, with a distinct value in every slot', async () => {
+    const { adapter } = failingPrimary([OTHER, [MEMBER, OTHER], 9n, true, 1234n, 1n, 0n, OTHER, 77n]);
+    await expect(adapter.getContextGraphAccessPolicy(7n)).resolves.toBe(1);
+  });
+
+  it('prefers the named field when ethers supplies one', async () => {
+    const { adapter } = failingPrimary({ accessPolicy: 1n });
+    await expect(adapter.getContextGraphAccessPolicy(7n)).resolves.toBe(1);
+  });
+
+  it('reports both failures when the tuple carries no policy at all', async () => {
+    const { adapter } = failingPrimary({});
+    await expect(adapter.getContextGraphAccessPolicy(7n)).rejects.toThrow(
+      /getAccessPolicy unavailable.*returned no accessPolicy field/s,
+    );
   });
 });

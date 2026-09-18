@@ -81,6 +81,30 @@ describe('folding liveness + policy + roster into one live authority read', () =
     );
   });
 
+  it('rate-limits the fallback warning through its claim, and still falls back when quiet', async () => {
+    const deps = dependencies({
+      readLiveAuthority: vi.fn(async () => { throw new ContextGraphLiveAuthorityUnsupportedError('tuple layout'); }),
+      claimLiveAuthorityFallbackWarning: vi.fn(() => false),
+    });
+    await expect(resolveLiveOnChainAccessPolicyState(deps, '7')).resolves.toEqual({
+      kind: 'available',
+      accessPolicy: 1,
+    });
+    expect(deps.claimLiveAuthorityFallbackWarning).toHaveBeenCalledTimes(1);
+    expect(deps.warn).not.toHaveBeenCalled();
+  });
+
+  it('truncates the cause: a decode failure quotes the whole return payload', async () => {
+    const payload = `value="0x${'ab'.repeat(4_000)}"`;
+    const deps = dependencies({
+      readLiveAuthority: vi.fn(async () => { throw new ContextGraphLiveAuthorityUnsupportedError(payload); }),
+    });
+    await resolveLiveOnChainAccessPolicyState(deps, '7');
+    const message = vi.mocked(deps.warn).mock.calls[0][1];
+    expect(message.length).toBeLessThan(500);
+    expect(message).toMatch(/… \(\d+ chars\)$/);
+  });
+
   it('stays quiet on the normal single-read path', async () => {
     const deps = dependencies({
       readLiveAuthority: vi.fn(async () => ({ active: true, accessPolicy: 0, participantAgents: [] })),
@@ -107,7 +131,7 @@ describe('folding liveness + policy + roster into one live authority read', () =
     expect((state as { detail?: string }).detail).toContain('getContextGraphLiveAuthority(7) timed out');
     expect(deps.warn).toHaveBeenCalledTimes(1);
     // A timeout is not an answer: nothing may be cached, and the point reads
-    // must not be tried as if the deployment lacked the getter.
+    // must not be tried as if the single read had failed for good.
     expect(deps.cacheAccessPolicy).not.toHaveBeenCalled();
     expect(deps.isContextGraphActiveOnChain).not.toHaveBeenCalled();
   });
@@ -248,5 +272,106 @@ describe('registered authority resolution uses the roster from the single read',
       participantAgents: [MEMBER],
     });
     expect(roster).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a rejected roster read on the fallback leg as the retryable roster reason', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'FoldFallbackRosterDown', chainAdapter: chain });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
+    vi.spyOn(chain, 'getContextGraphLiveAuthority')
+      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('tuple layout'));
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+    vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphParticipantAgents').mockRejectedValue(new Error('socket hang up'));
+
+    await expect(agent.resolveRegisteredContextGraphAuthority('cg')).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'chain-participant-authority-unavailable',
+    });
+  });
+
+  it('writes the fallback warning at most once a minute, however hot the path', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'FoldFallbackWarnRate', chainAdapter: chain });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
+    vi.spyOn(chain, 'getContextGraphLiveAuthority')
+      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('tuple layout'));
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+    vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(0);
+    const warn = vi.spyOn((agent as unknown as { log: { warn: (...args: unknown[]) => void } }).log, 'warn')
+      .mockImplementation(() => {});
+    const fallbackWarnings = () => warn.mock.calls
+      .filter(([, message]) => String(message).includes('falling back to the point reads')).length;
+
+    const start = Date.now();
+    const clock = vi.spyOn(Date, 'now');
+    try {
+      clock.mockReturnValue(start);
+      await agent.resolveRegisteredContextGraphAuthority('cg');
+      await agent.resolveRegisteredContextGraphAuthority('cg');
+      expect(fallbackWarnings()).toBe(1);
+
+      clock.mockReturnValue(start + 59_999);
+      await agent.resolveRegisteredContextGraphAuthority('cg');
+      expect(fallbackWarnings()).toBe(1);
+
+      clock.mockReturnValue(start + 60_000);
+      await agent.resolveRegisteredContextGraphAuthority('cg');
+      expect(fallbackWarnings()).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
+/**
+ * One binder now serves all three agent-bound reads, so a single slip would
+ * drop cancellation - or the adapter's `this` - for all of them at once.
+ */
+describe('agent-bound chain reads keep their arity, signal and receiver', () => {
+  let agent: DKGAgent | null = null;
+  afterEach(async () => {
+    if (agent) await agent.stop().catch(() => undefined);
+    agent = null;
+  });
+
+  async function boundAgent(name: string) {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name, chainAdapter: chain });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
+    return { agent, chain };
+  }
+
+  it('hands the caller signal to the single read, called ON the adapter', async () => {
+    const { agent: bound, chain } = await boundAgent('BinderLive');
+    const live = vi.spyOn(chain, 'getContextGraphLiveAuthority')
+      .mockResolvedValue({ active: true, accessPolicy: 0, participantAgents: [] });
+    const { signal } = new AbortController();
+
+    await bound.resolveRegisteredContextGraphAuthority('cg', { signal });
+    expect(live.mock.calls[0]).toEqual([7n, { signal }]);
+    // Identity, not shape: two different AbortSignals are deep-equal.
+    expect((live.mock.calls[0][1] as { signal?: AbortSignal }).signal).toBe(signal);
+    expect(live.mock.contexts[0]).toBe(chain);
+  });
+
+  it('hands it to both point reads on the fallback leg too', async () => {
+    const { agent: bound, chain } = await boundAgent('BinderPointReads');
+    vi.spyOn(chain, 'getContextGraphLiveAuthority')
+      .mockRejectedValue(new ContextGraphLiveAuthorityUnsupportedError('tuple layout'));
+    const liveness = vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+    const policy = vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(0);
+    const { signal } = new AbortController();
+
+    await bound.resolveRegisteredContextGraphAuthority('cg', { signal });
+    expect(liveness.mock.calls[0]).toEqual([7n, { signal }]);
+    expect(policy.mock.calls[0]).toEqual([7n, { signal }]);
+    expect((liveness.mock.calls[0][1] as { signal?: AbortSignal }).signal).toBe(signal);
+    expect((policy.mock.calls[0][1] as { signal?: AbortSignal }).signal).toBe(signal);
+    expect(liveness.mock.contexts[0]).toBe(chain);
+    expect(policy.mock.contexts[0]).toBe(chain);
   });
 });

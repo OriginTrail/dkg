@@ -42,6 +42,11 @@ export interface LiveOnChainAccessPolicyDependencies {
     signal?: AbortSignal,
   ): Promise<BoundedPolicyRead<T>>;
   claimMissingLivenessWarning(): boolean;
+  /**
+   * Rate limit for the single-read fallback warning, which sits on a hot path.
+   * `false` = one was written recently, stay quiet. Absent = warn every time.
+   */
+  claimLiveAuthorityFallbackWarning?(): boolean;
   warn(ctx: OperationContext, message: string): void;
   cacheAccessPolicy(onChainId: string, accessPolicy: 0 | 1): void;
   /**
@@ -150,6 +155,14 @@ export async function resolveLiveOnChainAccessPolicyState(
   return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
 }
 
+const FALLBACK_CAUSE_MAX_CHARS = 300;
+
+function truncateFallbackCause(message: string): string {
+  return message.length <= FALLBACK_CAUSE_MAX_CHARS
+    ? message
+    : `${message.slice(0, FALLBACK_CAUSE_MAX_CHARS)}… (${message.length} chars)`;
+}
+
 /**
  * One storage read in place of the liveness + policy pair (and, for private
  * graphs, the roster read the caller would issue next). Every outcome maps to
@@ -187,13 +200,17 @@ async function resolveFromLiveAuthority(
       error instanceof ContextGraphLiveAuthorityUnsupportedError
       || (error instanceof Error && error.name === 'ContextGraphLiveAuthorityUnsupportedError')
     ) {
-      // Never silent: this resolution now costs four reads where the path it
-      // replaces cost three, and on a permanent fault it does so every time.
-      dependencies.warn(
-        opCtx ?? createOperationContext('share'),
-        `readLiveOnChainAccessPolicy(${onChainId}): single-read authority unavailable, ` +
-        `falling back to the point reads — ${error.message}`,
-      );
+      // Never silent: this resolution costs one read more than the path it
+      // replaces, and on a permanent fault it does so every time. Rate limited
+      // and truncated all the same - it is a hot path, and a decode failure
+      // quotes the whole return payload.
+      if (dependencies.claimLiveAuthorityFallbackWarning?.() ?? true) {
+        dependencies.warn(
+          opCtx ?? createOperationContext('share'),
+          `readLiveOnChainAccessPolicy(${onChainId}): single-read authority unavailable, ` +
+          `falling back to the point reads — ${truncateFallbackCause(error.message)}`,
+        );
+      }
       return 'unsupported';
     }
     // Transient: propagates exactly as a rejected liveness read does today.

@@ -735,7 +735,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       if (options.signal?.aborted) throw err;
       if (isNonexistentContextGraphRevert(err, contextGraphId)) return null;
       if (isLiveAuthorityReadTransient(err)) throw err;
-      throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err));
+      throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err), { cause: err });
     }
     return decodeContextGraphLiveAuthority(raw, contextGraphId);
   }
@@ -1543,19 +1543,26 @@ function isNonexistentContextGraphRevert(err: unknown, contextGraphId: bigint): 
 }
 
 /**
- * Transient for this view: another attempt may succeed, and the three point
- * reads would fail the same way, so the error propagates. The package's own
- * disposition decides, not a private reading of provider error strings. That
+ * Transient for this view, by the package's own disposition rather than a
+ * private reading of provider error strings: another attempt may succeed, and
+ * the three point reads would fail the same way, so the error propagates. That
  * covers local governor saturation and an exhausted endpoint set
  * (`retry-later`) — answering those with three MORE reads would be exactly
  * wrong. `BAD_DATA` is excluded for the reason `isContractViewRetryable`
- * gives: on a view it is a deterministic client-side decode, not an outage.
+ * gives: on a view it is a client-side decode, not an outage.
  *
- * Everything else is a deterministic failure of THIS view. `getContextGraph`
- * has shipped beside the point reads since v10.0.0, so it is never "selector
- * absent"; it is a tuple that does not decode, or a revert that proves nothing
- * about this id. The point reads do not share the tuple and already own the
- * established disposition of every such fault, so they decide.
+ * Everything else falls back to the point reads. `getContextGraph` has shipped
+ * beside them since v10.0.0, so this is never "selector absent"; it is a tuple
+ * that does not decode, or a revert that proves nothing about this id. The
+ * point reads do not share the tuple and already own the established
+ * disposition of every such fault, so they decide.
+ *
+ * That set is NOT all deterministic. ethers v6 coerces every JSON-RPC error
+ * body on `eth_call` (an HTTP-200 rate limit, "header not found") into a bare
+ * CALL_EXCEPTION, which the shared classifier reads as `fail`. Such a fault
+ * takes the fallback too; the liveness read then fails the same way and yields
+ * the same retryable disposition it always did, at the cost of one extra read.
+ * Telling those apart is the shared classifier's job, not a matcher here.
  */
 function isLiveAuthorityReadTransient(err: unknown): boolean {
   return isRetryableRpcError(err) && rpcErrorCode(err) !== 'BAD_DATA';

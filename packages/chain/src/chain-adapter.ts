@@ -531,19 +531,19 @@ export interface ContextGraphLiveAuthority {
 }
 
 /**
- * Rejection from `getContextGraphLiveAuthority` when the single read cannot
- * answer and retrying it will not help - a tuple that does not decode, a revert
- * that proves nothing about this id. Callers fall back to the three point
- * reads, which do not share the tuple. Distinct from a nonexistent id (which
- * resolves `null`) and from a transient failure, local governor saturation
- * included (which rejects with the transport's own error and is NOT a cue to
- * issue more reads).
+ * Rejection from `getContextGraphLiveAuthority` when the single read failed in
+ * a way the package does not classify as retryable - a tuple that does not
+ * decode, a revert that proves nothing about this id. Callers fall back to the
+ * three point reads, which do not share the tuple. Distinct from a nonexistent
+ * id (which resolves `null`) and from a failure classified transient, local
+ * governor saturation included (which rejects with the transport's own error
+ * and is NOT a cue to issue more reads). `cause` is the original error.
  */
 export class ContextGraphLiveAuthorityUnsupportedError extends Error {
   readonly code = 'CONTEXT_GRAPH_LIVE_AUTHORITY_UNSUPPORTED' as const;
 
-  constructor(detail: string) {
-    super(`ContextGraphStorage.getContextGraph cannot answer here: ${detail}`);
+  constructor(detail: string, options?: { cause?: unknown }) {
+    super(`ContextGraphStorage.getContextGraph cannot answer here: ${detail}`, options);
     this.name = 'ContextGraphLiveAuthorityUnsupportedError';
   }
 }
