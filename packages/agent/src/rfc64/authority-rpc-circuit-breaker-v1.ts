@@ -47,10 +47,14 @@ export interface Rfc64AuthorityReadRunOptionsV1 {
    * exhausted pool. It is not a general availability switch: a rare,
    * caller-initiated read whose result cannot be reconstructed later must not
    * be silently downgraded for the length of one backoff window. Such a read
-   * still queues behind the same serializer, so at most one of them reaches
-   * the pool at a time; it still trips the circuit on exhaustion, and its
-   * success still counts as recovery evidence. In effect it behaves as an
-   * additional half-open probe rather than as a bypass.
+   * still trips the circuit on exhaustion, and its success still counts as
+   * recovery evidence. In effect it behaves as an additional half-open probe
+   * rather than as a bypass.
+   *
+   * On `run` it also queues behind the same serializer, so at most one of them
+   * reaches the pool at a time. `runUnqueued` accepts this option too and
+   * provides no such bound: several of them can reach an exhausted pool at
+   * once. Only pass it there for a read that is genuinely rare.
    */
   readonly admitWhileOpen?: boolean;
 }
@@ -104,13 +108,23 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 /**
  * Node-local governor shared by every registered RFC-64 authority read.
  *
- * Work is serialized even while the circuit is closed. This covers authority
- * bootstrap calls that do not pass through the periodic loop's permit pool and
- * guarantees that, after one full-pool exhaustion, queued graphs observe the
- * open circuit instead of stampeding the same endpoints. Past the retry
- * deadline the serializer admits reads again one at a time; a success that
- * reached the pool closes the circuit and an exhaustion reopens it with the
- * next backoff step.
+ * Reads submitted through `run` are serialized even while the circuit is
+ * closed. This covers authority bootstrap calls that do not pass through the
+ * periodic loop's permit pool and guarantees that, after one full-pool
+ * exhaustion, queued graphs observe the open circuit instead of stampeding the
+ * same endpoints. Past the retry deadline the serializer admits reads again one
+ * at a time; a success that reached the pool closes the circuit and an
+ * exhaustion reopens it with the next backoff step.
+ *
+ * Serialization is a property of `run` alone. `runUnqueued` is for a
+ * latency-bounded foreground read that must not spend its budget behind a bulk
+ * pass; it keeps everything else the governor provides — the admission check
+ * that refuses while the circuit is open, the trip on provider exhaustion, the
+ * evidence-gated close, and retirement through `whenIdle`/`close` — but it can
+ * run alongside `run` and alongside itself. Because reads on the two lanes
+ * overlap, circuit transitions are keyed to a trip generation: a result cannot
+ * close a trip that happened after it was admitted, and the failures of one
+ * outage round coalesce into a single backoff step.
  *
  * Recovery needs evidence, not merely a fulfilled callback. A read that was
  * answered from local or cached state says nothing about the pool it never
