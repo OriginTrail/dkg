@@ -3,6 +3,7 @@
 import {
   computeAuthorCatalogScopeDigestV1,
   computeControlSignatureVariantDigestHex,
+  computeSwmAuthorInventoryScopeDigestV1,
   createOperationContext,
   type Digest32V1,
   type TimestampMsV1,
@@ -205,13 +206,18 @@ describe('RFC-64 catalog re-projection failure reporting', () => {
 
   it('reports per author when carrying one author\'s rows fails', async () => {
     const author = await startRotationAuthorV1('authority-rotation-carry-throws');
-    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    // Rotate as a replica so the rows stay stranded: once they have crossed,
+    // admission converges and there is nothing left to carry.
+    const hasLocalCreate = vi
+      .spyOn(author.localContextGraphProvenance, 'hasLocalCreate')
+      .mockReturnValue(false);
     await seedInventoryAssetV1(author, 'authority-rotation-carry-throws', 62n);
     await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       authorAddress: AUTHOR,
     });
     await rotateToFinalizedChainV1(author);
+    hasLocalCreate.mockReturnValue(true);
 
     const warnings = captureWarningsV1(author);
     vi.spyOn(
@@ -228,13 +234,18 @@ describe('RFC-64 catalog re-projection failure reporting', () => {
 
   it('reports when the projection supervisor refuses the request', async () => {
     const author = await startRotationAuthorV1('authority-rotation-supervisor-refuses');
-    vi.spyOn(author.localContextGraphProvenance, 'hasLocalCreate').mockReturnValue(true);
+    // Rotate as a replica so the rows stay stranded: once they have crossed,
+    // admission converges and there is nothing left to carry.
+    const hasLocalCreate = vi
+      .spyOn(author.localContextGraphProvenance, 'hasLocalCreate')
+      .mockReturnValue(false);
     await seedInventoryAssetV1(author, 'authority-rotation-supervisor-refuses', 63n);
     await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       authorAddress: AUTHOR,
     });
     await rotateToFinalizedChainV1(author);
+    hasLocalCreate.mockReturnValue(true);
 
     const warnings = captureWarningsV1(author);
     vi.spyOn(author, 'requestRfc64SwmCatalogProjectionV1').mockReturnValue(false);
@@ -377,10 +388,45 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
     }, { timeout: 20_000, interval: 25 });
     const afterFirst = appliedCatalogHeadV1(author, rotatedScopeDigest);
 
-    // A repeated re-projection must not fork or advance the lineage it already
-    // built: the accepted generation keeps exactly one applied head.
-    await author.beginRfc64CatalogReprojectionForAuthorityRotationV1(CONTEXT_GRAPH_ID);
-    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    // Admission CONVERGES. Nothing retires the origin-scope rows, so comparing
+    // scope digests alone stayed true for the life of a rotated graph and every
+    // later acceptance -- every roster add/remove bumps the generation --
+    // suspended the acceptance path for a carry already done. The accepted
+    // generation now answers that question, and answers it no.
+    expect(author.beginRfc64CatalogReprojectionForAuthorityRotationV1(CONTEXT_GRAPH_ID))
+      .toBeNull();
+
+    // The carry itself must still be re-entrant: forcing the rows through it a
+    // second time may not fork or advance the lineage it already built.
+    const lane = author.resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null);
+    expect(lane).not.toBeNull();
+    const originDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    } as never);
+    const originRows = (author as unknown as { rfc64PersistenceV1: any })
+      .rfc64PersistenceV1.swmAuthorInventory
+      .readSwmAuthorInventorySnapshotV1(originDigest, AUTHOR).rows;
+    expect(originRows.length).toBeGreaterThan(0);
+    await (author as unknown as {
+      carryRfc64AuthorInventoryIntoAcceptedGenerationV1: (
+        lane: unknown,
+        params: unknown,
+      ) => Promise<void>;
+    }).carryRfc64AuthorInventoryIntoAcceptedGenerationV1(lane, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      originDigest,
+      rows: originRows,
+      ctx: createOperationContext('system'),
+    });
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(appliedCatalogHeadV1(author, rotatedScopeDigest)).toEqual(afterFirst);
   }, 60_000);
 
