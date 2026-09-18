@@ -518,6 +518,33 @@ export interface ContextGraphOnChain {
 }
 
 /** Deterministic finalized authority generation used by RFC-64 policy composition. */
+/**
+ * Live (latest-block) authority for one context graph, from ONE
+ * `ContextGraphStorage.getContextGraph(uint256)` read: liveness, access policy
+ * and participant roster at a single block. Three separate reads at `latest`
+ * can straddle a deactivation or a membership change; one storage read cannot.
+ */
+export interface ContextGraphLiveAuthority {
+  readonly active: boolean;
+  readonly accessPolicy: number;
+  readonly participantAgents: readonly string[];
+}
+
+/**
+ * Rejection from `getContextGraphLiveAuthority` when the deployed contract does
+ * not expose the combined getter, so callers fall back to the three point
+ * reads. Distinct from a nonexistent id (which resolves `null`) and from a
+ * transient transport failure (which rejects with the transport's own error).
+ */
+export class ContextGraphLiveAuthorityUnsupportedError extends Error {
+  readonly code = 'CONTEXT_GRAPH_LIVE_AUTHORITY_UNSUPPORTED' as const;
+
+  constructor(detail: string) {
+    super(`ContextGraphStorage.getContextGraph is unavailable on this deployment: ${detail}`);
+    this.name = 'ContextGraphLiveAuthorityUnsupportedError';
+  }
+}
+
 export interface ContextGraphAuthoritySnapshot {
   readonly chainId: string;
   readonly governanceContract: string;
@@ -2290,6 +2317,23 @@ export interface ChainAdapter {
     contextGraphId: bigint,
     options?: ChainReadOptions,
   ): Promise<boolean>;
+
+  /**
+   * One-read live authority: `active`, `accessPolicy` and `participantAgents`
+   * from `ContextGraphStorage.getContextGraph(uint256)` at `latest`.
+   *
+   * Resolves `null` ONLY when the chain proved the id nonexistent
+   * (`ERC721NonexistentToken`); callers must treat that exactly as a liveness
+   * probe returning `false` — terminal, never retried. Rejects with
+   * `ContextGraphLiveAuthorityUnsupportedError` when the deployed contract
+   * lacks the getter (callers fall back to the three point reads) and with the
+   * transport's own error on transient failure. Optional, like the point reads
+   * it composes.
+   */
+  getContextGraphLiveAuthority?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<ContextGraphLiveAuthority | null>;
 
   /**
    * On-chain publish policy for `contextGraphId`. Read from

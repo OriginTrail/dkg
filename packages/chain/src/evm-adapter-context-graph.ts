@@ -18,6 +18,11 @@ import {
 import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
+import { errorCode as rpcErrorCode, errorMessage as rpcErrorMessage } from './evm-adapter-errors.js';
+import {
+  ContextGraphLiveAuthorityUnsupportedError,
+  type ContextGraphLiveAuthority,
+} from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -708,6 +713,33 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       [contextGraphId],
       { signal: options.signal },
     ));
+  }
+
+  /** One `getContextGraph` read at `latest`; see ChainAdapter.getContextGraphLiveAuthority. */
+  async getContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<ContextGraphLiveAuthority | null> {
+    await this.init();
+    const cgs = this.requireContextGraphStorage();
+    let raw: unknown;
+    try {
+      raw = await this.readContractWithOptions(
+        cgs,
+        'cgStorage.getContextGraph',
+        'getContextGraph',
+        [contextGraphId],
+        { signal: options.signal },
+      );
+    } catch (err) {
+      if (options.signal?.aborted) throw err;
+      if (isNonexistentContextGraphRevert(err, contextGraphId)) return null;
+      if (isLiveAuthorityViewUnsupported(err)) {
+        throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err));
+      }
+      throw err;
+    }
+    return decodeContextGraphLiveAuthority(raw, contextGraphId);
   }
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
@@ -1468,4 +1500,78 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<ReadonlyMap<string, bigint | null>> {
     return this.getContextGraphNameHashResolver().resolveMany(nameHashes, options.signal);
   }
+}
+
+const ERC721_NONEXISTENT_TOKEN_INTERFACE = new ethers.Interface([
+  'error ERC721NonexistentToken(uint256 tokenId)',
+]);
+
+/**
+ * `getContextGraph` reverts only through `_requireExists`, which always carries
+ * the typed `ERC721NonexistentToken` payload. Match it exactly — the decoded
+ * name, or the encoded bytes for THIS id — so nothing else can be mistaken for
+ * "the chain proved this id does not exist".
+ */
+function isNonexistentContextGraphRevert(err: unknown, contextGraphId: bigint): boolean {
+  if (rpcErrorCode(err) !== 'CALL_EXCEPTION') return false;
+  const e = err as { revert?: unknown; data?: unknown; errorData?: unknown };
+  const revert = e.revert as { name?: unknown } | null | undefined;
+  if (revert !== null && typeof revert === 'object' && revert.name === 'ERC721NonexistentToken') {
+    return true;
+  }
+  const expected = ERC721_NONEXISTENT_TOKEN_INTERFACE
+    .encodeErrorResult('ERC721NonexistentToken', [contextGraphId])
+    .toLowerCase();
+  for (const raw of [e.data, e.errorData]) {
+    if (typeof raw === 'string' && raw.toLowerCase() === expected) return true;
+  }
+  return false;
+}
+
+/**
+ * The shapes an absent selector produces: a bare CALL_EXCEPTION with no revert
+ * payload ("missing revert data"), BAD_DATA on an empty return, or an explicit
+ * selector message. A bare revert cannot mean "nonexistent" here — that path
+ * always carries a payload — so reading it as unsupported is fail-safe: the
+ * caller falls back to the three point reads, which answer either way.
+ */
+function isLiveAuthorityViewUnsupported(err: unknown): boolean {
+  const code = rpcErrorCode(err);
+  const msg = rpcErrorMessage(err).toLowerCase();
+  if (code === 'BAD_DATA') {
+    return msg.includes('could not decode result data') && msg.includes('value="0x"');
+  }
+  if (code === 'CALL_EXCEPTION') {
+    const e = err as { data?: unknown; reason?: unknown };
+    const hasPayload = (e.data != null && e.data !== '0x')
+      || (typeof e.reason === 'string' && e.reason.length > 0);
+    if (!hasPayload && msg.includes('missing revert data')) return true;
+  }
+  return msg.includes('function selector') || msg.includes('selector not recognized');
+}
+
+function decodeContextGraphLiveAuthority(
+  raw: unknown,
+  contextGraphId: bigint,
+): ContextGraphLiveAuthority {
+  const named = (raw ?? {}) as { active?: unknown; accessPolicy?: unknown; participantAgents?: unknown };
+  const positional = Array.isArray(raw) ? (raw as unknown[]) : [];
+  const active = named.active ?? positional[3];
+  const accessPolicy = named.accessPolicy ?? positional[5];
+  const agents = named.participantAgents ?? positional[1];
+  if (
+    typeof active !== 'boolean'
+    || accessPolicy === undefined
+    || accessPolicy === null
+    || !Array.isArray(agents)
+  ) {
+    throw new Error(
+      `ContextGraphStorage.getContextGraph(${contextGraphId}) returned an unexpected shape`,
+    );
+  }
+  return Object.freeze({
+    active,
+    accessPolicy: Number(BigInt(accessPolicy as string | number | bigint)),
+    participantAgents: Object.freeze(agents.map((value) => ethers.getAddress(String(value)))),
+  });
 }

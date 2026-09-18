@@ -1602,46 +1602,52 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (accessPolicy === 0) return { kind: 'public', onChainId };
 
     const cacheKey = onChainId.toString();
-    if (options.allowCachedRoster) {
+    // A roster observed in the SAME storage read as liveness and policy is
+    // fresher than any cache and makes the third chain call unnecessary.
+    const snapshotRoster = accessPolicyState.participantAgents;
+    if (snapshotRoster === undefined && options.allowCachedRoster) {
       const cached = this.onChainParticipantAgentsCache.get(cacheKey);
       if (cached !== undefined) {
         return { kind: 'private', onChainId, participantAgents: [...cached] };
       }
     }
-    const getParticipantAgents = this.chain.getContextGraphParticipantAgents;
-    if (typeof getParticipantAgents !== 'function') {
-      return {
-        kind: 'unavailable',
-        onChainId,
-        reason: 'chain-participant-authority-unsupported',
-      };
-    }
-
     let rawAgents: string[];
-    try {
-      const result = await runBoundedOperation(
-        () => getParticipantAgents.call(this.chain, onChainId),
-        {
-          label: `getContextGraphParticipantAgents(${onChainId})`,
-          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
-          signal: options.signal,
-        },
-      );
-      if (!Array.isArray(result)) {
+    if (snapshotRoster !== undefined) {
+      rawAgents = [...snapshotRoster];
+    } else {
+      const getParticipantAgents = this.chain.getContextGraphParticipantAgents;
+      if (typeof getParticipantAgents !== 'function') {
         return {
           kind: 'unavailable',
           onChainId,
-          reason: 'chain-participant-authority-invalid',
+          reason: 'chain-participant-authority-unsupported',
         };
       }
-      rawAgents = result;
-    } catch (err) {
-      return {
-        kind: 'unavailable',
-        onChainId,
-        reason: 'chain-participant-authority-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-      };
+      try {
+        const result = await runBoundedOperation(
+          () => getParticipantAgents.call(this.chain, onChainId),
+          {
+            label: `getContextGraphParticipantAgents(${onChainId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
+        if (!Array.isArray(result)) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-participant-authority-invalid',
+          };
+        }
+        rawAgents = result;
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
     }
 
     const seen = new Set<string>();

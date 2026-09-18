@@ -876,8 +876,14 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   ): Promise<LiveOnChainAccessPolicyState> {
     const readLiveness = this.chain.isContextGraphActiveOnChain;
     const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    const readLiveAuthority = this.chain.getContextGraphLiveAuthority;
     return resolveLiveAccessPolicyState(
       {
+        readLiveAuthority: typeof readLiveAuthority === 'function'
+          ? (numericId, signal) => signal
+            ? readLiveAuthority.call(this.chain, numericId, { signal })
+            : readLiveAuthority.call(this.chain, numericId)
+          : undefined,
         isContextGraphActiveOnChain: typeof readLiveness === 'function'
           ? (numericId, signal) => signal
             ? readLiveness.call(this.chain, numericId, { signal })
