@@ -109,17 +109,28 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
 
   /**
    * Send an RS write (createChallenge / submitProof) through a rotation-selected
-   * REGISTERED operational wallet, with a self-heal for STALE eligibility. If
-   * the chosen wallet reverts `ProfileDoesntExist` — its operational key was
-   * removed out-of-band (a second instance sharing the identity, or a direct
-   * admin `removeKey` tx), so this process's `registeredOperationalAddresses`
-   * set is stale and the wallet now resolves to identity 0 on-chain — evict it
-   * from the set, drop its cached identityId, and retry ONCE on the primary
-   * signer (pool[0], the always-registered identity anchor). The revert is a
-   * pre-state-change modifier check (`RandomSampling.sol` `profileExists`), so
-   * the retry is idempotent. Best-effort: if the revert does not decode, this
-   * is a no-op and the original error propagates unchanged — never worse than
-   * the pre-rotation pinning.
+   * REGISTERED operational wallet, with a self-heal for the two reverts that are
+   * PERMANENT for the chosen wallet but harmless for the rest of the pool:
+   *
+   *  - `ProfileDoesntExist` — the wallet's operational key was removed
+   *    out-of-band (a second instance sharing the identity, or a direct admin
+   *    `removeKey` tx), so this process's `registeredOperationalAddresses` set is
+   *    stale and the wallet now resolves to identity 0 on-chain. Its cached
+   *    identityId is dropped along with the set membership.
+   *  - `ContractCallerNotAllowed` (RandomSampling >= 10.6.1) — the wallet is a
+   *    contract wallet or an EIP-7702 delegated EOA, so it can never clear
+   *    `createChallenge`'s EOA gate. The runbook tells operators they may ADD an
+   *    undelegated EOA rather than rotate, which leaves the ineligible wallet in
+   *    the pool; without eviction every tick that selects it burns the proof
+   *    period. The wallet's identity binding is still valid (it may publish and
+   *    submit proofs), so ONLY the RS rotation membership is dropped.
+   *
+   * Either way the wallet is evicted from the set and the send is retried ONCE
+   * on the primary signer (pool[0], the always-registered identity anchor). Both
+   * reverts are pre-state-change modifier checks (`RandomSampling.sol`
+   * `profileExists` / `externallyOwnedCaller`), so the retry is idempotent.
+   * Best-effort: if the revert does not decode, this is a no-op and the original
+   * error propagates unchanged — never worse than the pre-rotation pinning.
    */
   protected async sendRandomSamplingTx(
     contract: ethers.Contract,
@@ -132,13 +143,19 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     try {
       return await this.sendContractTransaction(contract, method, args, signer, label, opts);
     } catch (err) {
-      if (
-        signer.address.toLowerCase() !== this.signer.address.toLowerCase() &&
-        enrichEvmError(err) === 'ProfileDoesntExist'
-      ) {
-        this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
-        this.clearIdentityIdForAddress(signer.address);
-        return this.sendContractTransaction(contract, method, args, this.signer, label, opts);
+      if (signer.address.toLowerCase() !== this.signer.address.toLowerCase()) {
+        const decoded = enrichEvmError(err);
+        if (decoded === 'ProfileDoesntExist' || decoded === 'ContractCallerNotAllowed') {
+          this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
+          // Only the stale-eligibility case invalidates the identity cache; a
+          // rejected contract wallet still maps to this node's identity.
+          if (decoded === 'ProfileDoesntExist') this.clearIdentityIdForAddress(signer.address);
+          console.warn(
+            `[chain] RS signer ${signer.address} reverted ${decoded} — evicted from RS rotation; ` +
+            'retrying on the primary operational wallet.',
+          );
+          return this.sendContractTransaction(contract, method, args, this.signer, label, opts);
+        }
       }
       throw err;
     }
