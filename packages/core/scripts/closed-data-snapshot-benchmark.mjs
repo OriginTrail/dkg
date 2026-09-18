@@ -37,7 +37,8 @@ if (process.argv[2] === '--worker') {
     for (let trial = 0; trial < 5; trial++) {
       for (const mode of trial % 2 === 0 ? ['baseline', 'candidate'] : ['candidate', 'baseline']) {
         const worker = spawnSync(process.execPath, ['--expose-gc', import.meta.filename, '--worker', files[mode], String(fields)], { encoding: 'utf8', timeout: 30000 });
-        if (worker.status !== 0) throw new Error(worker.stderr || worker.stdout);
+        if (worker.error) throw worker.error;
+        if (worker.status !== 0) throw new Error(worker.stderr || worker.stdout || `worker exited with status ${worker.status}, signal ${worker.signal}`);
         const result = JSON.parse(worker.stdout);
         fingerprint ??= result.fingerprint;
         if (fingerprint !== result.fingerprint) throw new Error('Snapshot outputs differ');
