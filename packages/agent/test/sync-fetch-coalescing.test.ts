@@ -1363,6 +1363,54 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('keeps a peer clean when the deferred attempt failed a phase and the retry did not', async () => {
+    // `markDeferred` adds the deferral onto the summary the round had already
+    // accumulated, so ONE attempt can report `{failedPhases: 1,
+    // deferredBackpressure: 1}`. The retry fold sums `failedPhases`, and
+    // `classifyDurableProgress` treats any non-zero value as a blocking
+    // failure — so classifying the FOLD would report a peer whose retry came
+    // back clean as failed, dropping it from `peersSucceeded` and recording a
+    // failed SWM round. Classification must read the latest attempt; only the
+    // diagnostics projection keeps the cumulative counters.
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    let sharedCalls = 0;
+
+    try {
+      await agent.start();
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
+        sharedCalls += 1;
+        return sharedCalls === 1
+          ? {
+              ...cleanSharedMemorySyncResult(),
+              failedPhases: 1,
+              deferredBackpressure: 1,
+            }
+          : cleanSharedMemorySyncResult();
+      };
+
+      const result = await (agent as any).runCatchupOverPeers(
+        'coalesced-cg',
+        true,
+        [remotePeer],
+        { mode: 'foreground' },
+      );
+
+      expect(sharedCalls).toBe(2);
+      expect(result.peersSucceeded).toBe(1);
+      expect(result.deferredBackpressure).toBe(0);
+      // The cumulative counters are still reported — they are the observability
+      // this fold exists for; they just do not decide the peer's verdict.
+      expect(result.diagnostics.sharedMemory.failedPhases).toBe(1);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not promote catch-up readiness when durable integrity verification rejects a KA', async () => {
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const remotePeer = { toString: () => PEER_A };

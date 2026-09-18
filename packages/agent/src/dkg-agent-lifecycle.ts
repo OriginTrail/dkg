@@ -1821,17 +1821,46 @@ function mergeSharedMemorySyncResults(
 type CatchupRetrySharedMemorySyncResult = SharedMemorySyncResult & {
   /** Sum retained for diagnostics while `deferredBackpressure` stays latest-only. */
   retryDeferredBackpressure?: number;
+  /** The latest attempt's own counters; see `catchupSharedRetryLatest`. */
+  retryLatest?: SharedMemorySyncResult;
 };
 
 type CatchupRetryDurableSyncResult = DurableSyncResult & {
   /** Sum retained for diagnostics while `deferredBackpressure` stays latest-only. */
   retryDeferredBackpressure?: number;
+  /** The latest attempt's own counters; see `catchupDurableRetryLatest`. */
+  retryLatest?: DurableSyncResult;
 };
 
 /**
- * Fold a retry's diagnostics while retaining the latest deferral control
- * value. The lifecycle classifies this field to decide peer/job readiness;
- * every other numeric counter remains cumulative across attempts.
+ * The counters a readiness/success CLASSIFICATION must see for a retried plane.
+ *
+ * The folded payload is cumulative for diagnostics, and the merge reducers sum
+ * `failedPhases`, `timedOutPhases`, `deniedPhases` and `rejectedKcs` — each of
+ * which `classifyDurableProgress` treats as a blocking failure. One attempt can
+ * carry a phase failure AND its deferral together (`markDeferred` adds the
+ * deferral onto the round's existing summary), so classifying the fold would
+ * report a peer whose retry came back clean as failed, losing the credit the
+ * pre-retry replace-latest behaviour gave it.
+ */
+function catchupSharedRetryLatest(
+  result: CatchupRetrySharedMemorySyncResult,
+): SharedMemorySyncResult {
+  return result.retryLatest ?? result;
+}
+
+/** Durable half of the same classification contract. */
+function catchupDurableRetryLatest(
+  result: CatchupRetryDurableSyncResult,
+): DurableSyncResult {
+  return result.retryLatest ?? result;
+}
+
+/**
+ * Fold a retry's diagnostics while retaining the latest attempt's counters.
+ * `deferredBackpressure` stays the latest attempt's control value and
+ * `retryLatest` carries the rest of that attempt for classification; every
+ * other numeric counter in the payload remains cumulative across attempts.
  */
 function mergeSharedMemorySyncRetryResults(
   a: CatchupRetrySharedMemorySyncResult,
@@ -1848,6 +1877,7 @@ function mergeSharedMemorySyncRetryResults(
     ...merged,
     deferredBackpressure: b.deferredBackpressure,
     retryDeferredBackpressure: merged.deferredBackpressure,
+    retryLatest: catchupSharedRetryLatest(b),
   };
 }
 
@@ -1867,6 +1897,7 @@ function mergeDurableSyncRetryResults(
     ...merged,
     deferredBackpressure: b.deferredBackpressure,
     retryDeferredBackpressure: merged.deferredBackpressure,
+    retryLatest: catchupDurableRetryLatest(b),
   };
 }
 
@@ -8388,10 +8419,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // or cleanly completed empty. Empty responses still count as a
       // legitimate host response, but a no-progress timeout must not make the
       // subscribe/VM catch-up path report a successful peer.
-      const durableProgress = classifyDurableProgress(r.durable, {
+      // Classification reads the latest ATTEMPT's counters; the folded result
+      // keeps every attempt's counters for the diagnostics projection below.
+      const durableProgress = classifyDurableProgress(catchupDurableRetryLatest(r.durable), {
         complete: r.durable.complete,
       });
-      const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
+      const sharedProgress = r.shared
+        ? classifyDurableProgress(catchupSharedRetryLatest(r.shared))
+        : null;
       if (sharedProgress?.completedWithoutFailure) {
         cleanSharedMemoryPeerIds.add(remotePeerId);
       }
@@ -8510,7 +8545,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId: string,
       shared: CatchupRetrySharedMemorySyncResult,
     ): void => {
-      const progress = classifyDurableProgress(shared);
+      // Same split as the round above: classify the latest attempt, project the
+      // cumulative payload.
+      const progress = classifyDurableProgress(catchupSharedRetryLatest(shared));
       if (progress.completedWithoutFailure) {
         cleanSharedMemoryPeerIds.add(remotePeerId);
       }
