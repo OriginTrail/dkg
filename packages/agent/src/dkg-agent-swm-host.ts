@@ -985,32 +985,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // opt-in and is admitted only after the chain-authoritative public/open-
     // publish policy check below.
     //
-    // OT-RFC-38 / LU-6 Phase B — three-source curation probe in
-    // cheapest-first order. The local SPARQL probe (the original
-    // gate) only finds the access-policy triple for CGs the local
-    // node CREATED or JOINED with metadata; for a chain-event-
-    // driven host-only core OR a beacon-driven pre-reg auto-host,
-    // no local meta exists and `isPrivateContextGraph` returns
-    // false, stranding the subscription. We supplement it with:
+    // OT-RFC-38 / LU-6 Phase B — the curation probe lives in ONE place:
+    // {@link isCuratedForHostMode} documents its current sources and their
+    // order. Do NOT restate them here; an earlier duplicate of that list
+    // drifted and kept asserting that a bare `onChainHash` proves curation
+    // after the probe stopped accepting it on its own.
     //
-    //   (a) `subscribedContextGraphs[contextGraphId].onChainHash` —
-    //       set ONLY by code paths that already proved curation
-    //       (chain-event handler with accessPolicy==1, beacon
-    //       handler with accessPolicy==BEACON_ACCESS_POLICY_CURATED,
-    //       successful curator-side `registerContextGraph` on a
-    //       curated CG). Cheapest of the three.
-    //   (b) `onChainAccessPolicyCache` — populated by the chain-
-    //       event poller; keyed by on-chain numeric id. Falls
-    //       through to the existing per-CG cache for CGs whose
-    //       cleartext is unknown locally.
-    //
-    // Any of the three returning "curated" is sufficient. If all
-    // three return "not curated", we bail (same as before). The
-    // probe is shared with `enableSwmHostModeFor` via
-    // {@link isCuratedForHostMode} so the operator-hatch close
-    // (OT-RFC-49 WS-A) sees the SAME curation answer as auto-host —
-    // critically, the host-only-core case where there's no local
-    // `_meta` and `isPrivateContextGraph` alone returns false.
+    // What matters at THIS call site: the probe is shared with
+    // `enableSwmHostModeFor`, so the operator-hatch close (OT-RFC-49 WS-A)
+    // sees the SAME curation answer as auto-host — critically, the
+    // host-only-core case where there is no local `_meta` and
+    // `isPrivateContextGraph` alone returns false.
     const curated = await this.isCuratedForHostMode(contextGraphId);
     if (!curated) {
       if (this.config.swmHostMode?.hostPublic !== true) return;
@@ -1071,8 +1056,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
    *
    *   (a) `onChainId` + `onChainAccessPolicyCache===1` — populated by the
    *       chain-event poller, keyed by numeric on-chain id;
-   *   (b) a verified discovery beacon — beacons are emitted only for curated
-   *       pre-registration CGs;
+   *   (b) `onChainHash` + a VERIFIED discovery beacon for that same wire id
+   *       (`beaconCuratorByWireId`) — beacons are emitted only for curated
+   *       pre-registration CGs. The hash alone is NOT sufficient: it is also
+   *       set for public CGs by the GH #1611 host-public path, so the beacon
+   *       is what carries the curation proof here;
    *   (c) `isPrivateContextGraph` — the local `_meta` accessPolicy/allowlist
    *       read (the original gate; the only one a host-only core CANNOT
    *       satisfy, since it never holds the cleartext `_meta`).
