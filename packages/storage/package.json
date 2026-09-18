@@ -21,6 +21,7 @@
   "scripts": {
     "build": "tsc",
     "benchmark:delete-no-count": "pnpm run build && node scripts/delete-by-pattern-no-count-benchmark.mjs",
+    "benchmark:sparql-json-decode": "pnpm run build && node scripts/sparql-json-decode-benchmark.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs storage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"

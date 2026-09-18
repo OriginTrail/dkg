@@ -1,6 +1,6 @@
 // Node 24+: A/B the production decoder and its closed-data helpers, not a
 // reimplementation. Optional --fixture=PATH accepts SPARQL Results JSON.
-// node packages/storage/scripts/sparql-json-decode-benchmark.mjs --baseline=REF
+// pnpm --filter @origintrail-official/dkg-storage run benchmark:sparql-json-decode -- --baseline=REF
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
@@ -45,6 +45,13 @@ if (process.argv[2] === '--worker') {
       o: shape === 'unique' ? uri(`urn:benchmark:object:${i}`) : { type: 'literal', value: `row ${Math.floor(i / 30)} triple ${i} of run benchmark` },
     })) },
   }));
+  // A silent no-op here would point the temp module at the real package, so
+  // both variants would import the same helpers and still agree on the digest.
+  const rewrite = (text, from, to) => {
+    const rewritten = text.replaceAll(from, to);
+    if (rewritten === text) throw new Error(`import rewrite no longer matches: ${from}`);
+    return rewritten;
+  };
   const variants = {};
   for (const mode of ['baseline', 'candidate']) {
     const source = path => mode === 'baseline'
@@ -54,10 +61,10 @@ if (process.argv[2] === '--worker') {
     const closed = `${mode}-closed.mts`;
     const decoder = `${mode}-decoder.mts`;
     writeFileSync(join(directory, snapshot), source('packages/core/src/sync-wire-objects.ts'));
-    writeFileSync(join(directory, closed), source('packages/storage/src/closed-data-snapshot.ts')
-      .replace("'@origintrail-official/dkg-core/closed-data-snapshot'", `'./${snapshot}'`));
-    writeFileSync(join(directory, decoder), source('packages/storage/src/sparql-json-query-result.ts')
-      .replace("'./closed-data-snapshot.js'", `'./${closed}'`));
+    writeFileSync(join(directory, closed), rewrite(source('packages/storage/src/closed-data-snapshot.ts'),
+      "'@origintrail-official/dkg-core/closed-data-snapshot'", `'./${snapshot}'`));
+    writeFileSync(join(directory, decoder), rewrite(source('packages/storage/src/sparql-json-query-result.ts'),
+      "'./closed-data-snapshot.js'", `'./${closed}'`));
     variants[mode] = join(directory, decoder);
   }
   const samples = [];
