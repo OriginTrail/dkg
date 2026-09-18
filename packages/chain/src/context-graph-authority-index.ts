@@ -176,12 +176,17 @@ export class ContextGraphAuthorityIndex {
     throw new ContextGraphAuthorityIndexSnapshotExportError('unavailable');
   }
 
-  #rememberServable(scope: string, checkpoint: ContextGraphAuthorityIndexCheckpoint): void {
+  /**
+   * Publishes ONLY the holdback-clamped durable cursor. The in-memory `tail`
+   * of a live scan sits above every requester's `maxThroughBlockNumber` and is
+   * not reorg-settled, so it must never reach this method.
+   */
+  #rememberServable(scope: string, durableCheckpoint: ContextGraphAuthorityIndexCheckpoint): void {
     if (this.bootstrap !== undefined) return;
-    const snapshot = Object.freeze({ version: 1 as const, scope, checkpoint });
+    const snapshot = Object.freeze({ version: 1 as const, scope, checkpoint: durableCheckpoint });
     const entry: ServableCheckpoint = Object.freeze({
-      deploymentBlockNumber: checkpoint.cursor.deploymentBlockNumber,
-      throughBlockNumber: checkpoint.cursor.throughBlockNumber,
+      deploymentBlockNumber: durableCheckpoint.cursor.deploymentBlockNumber,
+      throughBlockNumber: durableCheckpoint.cursor.throughBlockNumber,
       ...(authorityIndexSnapshotWithinSizeLimit(snapshot) ? { snapshot } : {}),
     });
     const entries = (this.#servable.get(scope) ?? []).filter((candidate) => (
@@ -539,6 +544,8 @@ export class ContextGraphAuthorityIndex {
         if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
           if (durable.kind === 'checkpoint'
             && servableEpoch === (this.#servableEpochs.get(scope) ?? 0)) {
+            // `durable.checkpoint`, never the local `checkpoint`: that may be
+            // the in-memory tail, which is above the holdback and unservable.
             this.#rememberServable(scope, durable.checkpoint);
           }
           return checkpoint;
