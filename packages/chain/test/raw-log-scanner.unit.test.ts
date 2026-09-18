@@ -32,7 +32,13 @@ function providerFor(input: {
   let headIndex = 0;
   const getBlockNumber = vi.fn(async () => input.heads[Math.min(headIndex++, input.heads.length - 1)]!);
   let logIndex = 0;
-  const getLogs = vi.fn(async () => input.logs[Math.min(logIndex++, input.logs.length - 1)] ?? []);
+  // Honour the requested range the way a node does, so range construction is
+  // exercised by the assertions instead of being papered over by the fake.
+  const getLogs = vi.fn(async (filter: { fromBlock: number; toBlock: number }) => {
+    const batch = input.logs[Math.min(logIndex++, input.logs.length - 1)] ?? [];
+    return batch.filter((entry) => entry.blockNumber >= filter.fromBlock
+      && entry.blockNumber <= filter.toBlock);
+  });
   const readProvider: RawLogScanReadProvider = async (_label, fn, _opts) =>
     fn({ getBlockNumber, getLogs } as never);
   return { readProvider, getLogs, getBlockNumber };
@@ -113,21 +119,58 @@ describe('RawLogScanner', () => {
     expect(provider.getLogs).not.toHaveBeenCalled();
   });
 
-  it('prunes identities outside the reorg buffer so an old log can be observed again', async () => {
-    const entry = log(1, 0);
+  it('keeps the oldest in-range block deduped: prune and scanFromBlock share one boundary', async () => {
+    // head - reorgBufferBlocks is BOTH the oldest identity prune keeps and the
+    // fromBlock of the next scan, so a log sitting exactly there is re-read from
+    // the node every tick and must stay deduped. Pruning it (`<=` instead of
+    // `<`) re-dispatches it forever.
+    const boundary = log(5, 0);
     const provider = providerFor({
-      heads: [1, 3, 4],
-      logs: [[entry], [], [entry]],
+      heads: [6, 6],
+      logs: [[boundary], [boundary]],
     });
     const scanner = new RawLogScanner({
-      label: 'prune scan',
+      label: 'boundary scan',
       readProvider: provider.readProvider,
       reorgBufferBlocks: 1,
     });
 
     const firstBatch = await scanner.read({ address: ADDRESS, topics: [] });
+    expect(firstBatch?.logs).toEqual([boundary]);
     scanner.commit(firstBatch!);
-    scanner.commit((await scanner.read({ address: ADDRESS, topics: [] }))!);
+
+    const rescan = await scanner.read({ address: ADDRESS, topics: [] });
+    expect(provider.getLogs.mock.calls.at(-1)?.[0]).toMatchObject({
+      fromBlock: boundary.blockNumber,
+      toBlock: 6,
+    });
+    expect(rescan?.logs).toEqual([]);
+  });
+
+  it('prunes identities the scan window has left behind, so a head regression re-observes them', async () => {
+    const entry = log(8, 0);
+    const provider = providerFor({
+      // The third head regresses (lagging endpoint / reorg), widening fromBlock
+      // back below the block the second commit pruned.
+      heads: [10, 12, 9],
+      logs: [[entry], [entry], [entry]],
+    });
+    const scanner = new RawLogScanner({
+      label: 'prune scan',
+      readProvider: provider.readProvider,
+      reorgBufferBlocks: 2,
+    });
+
+    const firstBatch = await scanner.read({ address: ADDRESS, topics: [] });
+    expect(firstBatch?.logs).toEqual([entry]);
+    scanner.commit(firstBatch!);
+
+    // head 12 puts block 8 outside both the scan window and the buffer: nothing
+    // is returned, and the commit prunes the identity.
+    const outOfRange = await scanner.read({ address: ADDRESS, topics: [] });
+    expect(outOfRange?.logs).toEqual([]);
+    scanner.commit(outOfRange!);
+
     const reintroduced = await scanner.read({ address: ADDRESS, topics: [] });
     expect(reintroduced?.logs).toEqual([entry]);
   });
