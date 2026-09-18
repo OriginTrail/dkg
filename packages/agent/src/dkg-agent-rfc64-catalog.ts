@@ -181,6 +181,10 @@ import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
 import {
+  assertRfc64ReplayManifestScopesUniqueV1,
+  isRfc64CatalogHeadOfAcceptedGenerationV1,
+} from './rfc64/catalog-replay-generation-v1.js';
+import {
   Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
   type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
 } from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
@@ -4158,6 +4162,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ) {
             throw new Error('RFC-64 scoped catalog replay policy changed before snapshot');
           }
+          // A CG authored before its registration keeps owner-signed heads
+          // alongside the finalized-chain heads that follow. Both are durable
+          // and current for their own catalog scope, but the announcement
+          // carries neither the governance binding nor the ownership
+          // transition, so on the wire they are one scope — and a manifest
+          // that repeats a scope cannot encode. Replaying a superseded
+          // generation under the current policy digest is unusable to the
+          // receiver anyway: its catalog scope digest no longer matches.
+          if (!isRfc64CatalogHeadOfAcceptedGenerationV1(head.payload, accepted.policy)) {
+            continue;
+          }
           manifest.push(Object.freeze({
             kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
             networkId: head.payload.networkId,
@@ -4182,6 +4197,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           const rightKey = rfc64CatalogTargetExactIdentityKeyV1(right);
           return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
         });
+        // The generation filter above is what keeps one author lane to one
+        // wire scope, but it can only compare the fields the accepted policy
+        // carries. Assert the guarantee the V2 completion depends on here,
+        // where the offending scope can still be named, rather than letting
+        // the encoder fail the whole response at delivery time.
+        assertRfc64ReplayManifestScopesUniqueV1(manifest);
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
           try {
