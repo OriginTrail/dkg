@@ -548,13 +548,14 @@ describe('startOxigraphServer (real child processes)', () => {
     }));
     try {
       const firstPid = await fetchPid(port);
-      handle.reportStoreActivity(1);
+      const activity = handle.registerStoreActivity();
+      activity.report(1);
       await sleep(180);
       expect(await fetchPid(port)).toBe(firstPid);
       expect(measurements).toBeGreaterThanOrEqual(2);
       expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
 
-      handle.reportStoreActivity(0);
+      activity.report(0);
       await sleep(40);
       expect(await fetchPid(port)).toBe(firstPid);
       let replacementPid = firstPid;
@@ -762,7 +763,7 @@ describe(
         timeout: 10_000,
       }, {
         getRecoveryState: () => handle.getRecoveryState(),
-        onActivityChange: (activeOperations) => handle.reportStoreActivity(activeOperations),
+        registerActivity: () => handle.registerStoreActivity(),
         onClientTimeout: (operation) => handle.requestRestart(`${operation} timed out`),
       });
 

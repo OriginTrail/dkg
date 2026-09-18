@@ -139,9 +139,11 @@ export interface OxigraphServerHandle {
    * accepted requests re-verify listener ownership before sending a signal.
    */
   requestRestart(reason: string): boolean;
-  /** Runtime-only store activity signal used to fence WAL maintenance. */
-  reportStoreActivity(activeOperations: number): void;
-  /** Register one store's activity when a supervisor is shared by adapters. */
+  /**
+   * Register one store's activity lease. The lease is the only way to fence
+   * WAL maintenance, so a supervisor shared by several adapters aggregates
+   * them without any caller double-counting a single operation.
+   */
   registerStoreActivity(): OxigraphWalMaintenanceActivityLease;
   /** Runtime-only recovery state consumed by the managed SPARQL adapter. */
   getRecoveryState(): OxigraphRecoveryState;
@@ -602,9 +604,6 @@ export async function startOxigraphServer(
     void terminateVerifiedListener(request);
     return true;
   }
-  const reportStoreActivity = (activeOperations: number): void => {
-    walMaintenance.reportActivity(activeOperations);
-  };
   const registerStoreActivity = (): OxigraphWalMaintenanceActivityLease =>
     walMaintenance.registerActivity();
 
@@ -744,7 +743,6 @@ export async function startOxigraphServer(
           queryEndpoint,
           updateEndpoint,
           requestRestart,
-          reportStoreActivity,
           registerStoreActivity,
           getRecoveryState,
           stop,

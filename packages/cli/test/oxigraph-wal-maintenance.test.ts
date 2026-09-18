@@ -66,14 +66,15 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     expect(controlled.timer.unref).toHaveBeenCalledOnce();
 
     controlled.setNow(70);
-    controlled.coordinator.reportActivity(1);
+    const activity = controlled.coordinator.registerActivity();
+    activity.report(1);
     controlled.setNow(100);
     controlled.tick();
     expect(measureRetainedWalBytes).toHaveBeenCalledOnce();
     expect(controlled.coordinator.admissionsPaused()).toBe(true);
     expect(requestRestart).not.toHaveBeenCalled();
 
-    controlled.coordinator.reportActivity(0);
+    activity.report(0);
     controlled.setNow(179);
     controlled.tick();
     expect(requestRestart).not.toHaveBeenCalled();

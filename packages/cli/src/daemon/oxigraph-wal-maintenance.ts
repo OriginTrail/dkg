@@ -28,7 +28,6 @@ export interface OxigraphWalMaintenanceActivityLease {
 }
 
 export interface OxigraphWalMaintenanceCoordinator {
-  reportActivity(activeOperations: number): void;
   registerActivity(): OxigraphWalMaintenanceActivityLease;
   admissionsPaused(): boolean;
   serverLifecycleChanged(): void;
@@ -60,15 +59,14 @@ export function createOxigraphWalMaintenanceCoordinator(
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? setInterval;
   const cancel = options.cancel ?? clearInterval;
-  let legacyActiveOperations = 0;
   const activitySources = new Map<symbol, number>();
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
   let maintenancePending = false;
   let stopped = false;
 
-  const totalActiveOperations = (): number => legacyActiveOperations
-    + [...activitySources.values()].reduce((sum, active) => sum + active, 0);
+  const totalActiveOperations = (): number =>
+    [...activitySources.values()].reduce((sum, active) => sum + active, 0);
 
   const evaluate = (): void => {
     const observedAt = now();
@@ -133,12 +131,6 @@ export function createOxigraphWalMaintenanceCoordinator(
   };
 
   return {
-    reportActivity(active: number): void {
-      if (stopped) return;
-      if (!Number.isSafeInteger(active) || active < 0) return;
-      legacyActiveOperations = active;
-      updateActivity(totalActiveOperations());
-    },
     registerActivity(): OxigraphWalMaintenanceActivityLease {
       const key = Symbol('oxigraph-store-activity');
       activitySources.set(key, 0);
