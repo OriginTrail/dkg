@@ -885,4 +885,27 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       }),
     });
   });
+
+  it('reads one accepted-policy snapshot per Context Graph for one status read', async () => {
+    const edge = await startAgent({
+      name: 'replay-accepted-policy-single-read',
+      activation: activation('catalog'),
+    });
+    await applyConsistentGenesisHead(edge);
+    const acceptedPolicySnapshot = vi.spyOn(
+      (edge as any).rfc64PublicCatalogServiceV1,
+      'acceptedPolicySnapshot',
+    );
+
+    await readStatus(edge);
+
+    // The promised-target fence and the replay status must share one snapshot.
+    // Reading it a second time spans the durable promised-row load, so an
+    // accepted policy that rotates in that window pairs an old-digest promise
+    // set with a null replay status, and the projection then publishes numbers
+    // built from promises the runtime dropped at the rotation.
+    expect(acceptedPolicySnapshot.mock.calls.filter(
+      ([, contextGraphId]) => contextGraphId === CONTEXT_GRAPH_ID,
+    )).toHaveLength(1);
+  });
 });

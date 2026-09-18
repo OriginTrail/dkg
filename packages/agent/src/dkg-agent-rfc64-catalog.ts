@@ -1646,13 +1646,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       selection.contextGraphId,
       targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [],
     ]));
-    const promisedTargetsByContextGraph = new Map(selections.map((selection) => {
-      const accepted = service !== undefined && networkId !== undefined
+    // One accepted-policy snapshot per selection, resolved before the durable
+    // reads below and reused for both the promised targets and the replay
+    // status. Reading it twice across an await lets an accepted-policy rotation
+    // pair an old-digest promise set with a null replay status, which publishes
+    // an expected/missing pair built from promises the runtime has already
+    // dropped at that rotation.
+    const acceptedByContextGraph = new Map(selections.map((selection) => [
+      selection.contextGraphId,
+      service !== undefined && networkId !== undefined
         ? service.acceptedPolicySnapshot(
           networkId,
           selection.contextGraphId as ContextGraphIdV1,
         )
-        : null;
+        : null,
+    ]));
+    const promisedTargetsByContextGraph = new Map(selections.map((selection) => {
+      const accepted = acceptedByContextGraph.get(selection.contextGraphId) ?? null;
       return [
         selection.contextGraphId,
         accepted === null
@@ -1673,12 +1683,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
     const receiverStats = service?.stats().receiver;
     return Object.freeze(selections.map((selection) => {
-      const accepted = service !== undefined && networkId !== undefined
-        ? service.acceptedPolicySnapshot(
-          networkId,
-          selection.contextGraphId as ContextGraphIdV1,
-        )
-        : null;
+      const accepted = acceptedByContextGraph.get(selection.contextGraphId) ?? null;
       const progress = progressByContextGraph?.get(selection.contextGraphId);
       const currentReplayProgress = accepted === null
         ? null
