@@ -96,6 +96,17 @@ describe('folding liveness + policy + roster into one live authority read', () =
     expect(deps.isContextGraphActiveOnChain).not.toHaveBeenCalled();
   });
 
+  it('carries the roster only with a PRIVATE policy', async () => {
+    const deps = dependencies({
+      readLiveAuthority: vi.fn(async () => ({ active: true, accessPolicy: 0, participantAgents: [MEMBER] })),
+    });
+    // A public graph has no roster consumer; nothing should travel with it.
+    await expect(resolveLiveOnChainAccessPolicyState(deps, '7')).resolves.toEqual({
+      kind: 'available',
+      accessPolicy: 0,
+    });
+  });
+
   it('keeps the policy-value validation: an out-of-range policy is unknown', async () => {
     const deps = dependencies({
       readLiveAuthority: vi.fn(async () => ({ active: true, accessPolicy: 2, participantAgents: [] })),
@@ -149,6 +160,22 @@ describe('registered authority resolution uses the roster from the single read',
     // The three-read path answered a malformed roster with the terminal
     // `invalid` reason. Surfacing it as a retryable policy failure instead
     // would make a permanently-broken roster retry forever.
+    await expect(agent.resolveRegisteredContextGraphAuthority('cg')).resolves.toEqual({
+      kind: 'unavailable',
+      onChainId: 7n,
+      reason: 'chain-participant-authority-invalid',
+    });
+  });
+
+  it('keeps a malformed roster ENTRY terminal on the single-read path', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'FoldInvalidRosterEntry', chainAdapter: chain });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
+    vi.spyOn(chain, 'getContextGraphLiveAuthority').mockResolvedValue({
+      active: true, accessPolicy: 1, participantAgents: ['did:dkg:agent:wrong'],
+    });
+
     await expect(agent.resolveRegisteredContextGraphAuthority('cg')).resolves.toEqual({
       kind: 'unavailable',
       onChainId: 7n,

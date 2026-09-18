@@ -209,15 +209,14 @@ async function resolveFromLiveAuthority(
   const policy = authority.accessPolicy;
   if (policy === 0 || policy === 1) {
     dependencies.cacheAccessPolicy(onChainId, policy);
-    return {
-      kind: 'available',
-      accessPolicy: policy,
-      // Passed through untouched: the resolver owns roster validation, and a
-      // malformed roster must stay the TERMINAL `chain-participant-authority-
-      // invalid` it always was — spreading it here would throw and resurface
-      // as a retryable policy failure instead.
-      participantAgents: authority.participantAgents,
-    };
+    // The roster travels only with a PRIVATE policy - a public graph has no
+    // roster consumer. It is passed through untouched: the resolver owns roster
+    // validation, and a malformed roster must stay the TERMINAL
+    // `chain-participant-authority-invalid` it always was; spreading it here
+    // would throw and resurface as a retryable policy failure instead.
+    return policy === 1
+      ? { kind: 'available', accessPolicy: policy, participantAgents: authority.participantAgents }
+      : { kind: 'available', accessPolicy: policy };
   }
   return { kind: 'unavailable', reason: 'chain-access-policy-unknown' };
 }

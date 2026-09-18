@@ -2421,6 +2421,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const cgRegistrationWrite = vi.spyOn(chain, 'createContextGraph');
     const cgNameBindingRead = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
     const cgAccessPolicyRead = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+    // The folded authority read is the agent's default seam now and does not go
+    // through the point reads above, so it needs its own guard.
+    const cgLiveAuthorityRead = vi.spyOn(chain, 'getContextGraphLiveAuthority');
     const cgPublishPolicyRead = vi.spyOn(chain, 'getContextGraphPublishPolicy');
     const cgParticipantRosterRead = vi.spyOn(chain, 'getContextGraphParticipantAgents');
     const kaNumberFloorRead = vi.spyOn(chain, 'getMaxKaNumberForAuthor');
@@ -2445,6 +2448,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(cgRegistrationWrite).not.toHaveBeenCalled();
     expect(cgNameBindingRead).not.toHaveBeenCalled();
     expect(cgAccessPolicyRead).not.toHaveBeenCalled();
+    expect(cgLiveAuthorityRead).not.toHaveBeenCalled();
     expect(cgPublishPolicyRead).not.toHaveBeenCalled();
     expect(cgParticipantRosterRead).not.toHaveBeenCalled();
     // Incidental identity allocation, not CG registration: one cold-author

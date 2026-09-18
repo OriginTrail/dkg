@@ -1515,9 +1515,18 @@ const ERC721_NONEXISTENT_TOKEN_INTERFACE = new ethers.Interface([
 function isNonexistentContextGraphRevert(err: unknown, contextGraphId: bigint): boolean {
   if (rpcErrorCode(err) !== 'CALL_EXCEPTION') return false;
   const e = err as { revert?: unknown; data?: unknown; errorData?: unknown };
-  const revert = e.revert as { name?: unknown } | null | undefined;
+  const revert = e.revert as { name?: unknown; args?: unknown } | null | undefined;
   if (revert !== null && typeof revert === 'object' && revert.name === 'ERC721NonexistentToken') {
-    return true;
+    // Id-exact, like the bytes branch below: a revert that names some OTHER
+    // token proves nothing about this one, and answering "nonexistent" here is
+    // terminal - it would report a live, registered graph as permanently gone.
+    const named = (revert.args as ArrayLike<unknown> | null | undefined)?.[0];
+    try {
+      return named !== undefined && named !== null
+        && BigInt(named as string | number | bigint) === contextGraphId;
+    } catch {
+      return false;
+    }
   }
   const expected = ERC721_NONEXISTENT_TOKEN_INTERFACE
     .encodeErrorResult('ERC721NonexistentToken', [contextGraphId])
@@ -1559,19 +1568,27 @@ function decodeContextGraphLiveAuthority(
   const active = named.active ?? positional[3];
   const accessPolicy = named.accessPolicy ?? positional[5];
   const agents = named.participantAgents ?? positional[1];
-  if (
-    typeof active !== 'boolean'
-    || accessPolicy === undefined
-    || accessPolicy === null
-    || !Array.isArray(agents)
-  ) {
-    throw new Error(
-      `ContextGraphStorage.getContextGraph(${contextGraphId}) returned an unexpected shape`,
+  // A tuple that does not decode is an ABI/layout mismatch, not a transient
+  // fault and not an answer. Report it as UNSUPPORTED so the caller falls back
+  // to the three point reads, which already own the established disposition of
+  // every malformed value (a bad policy is terminal `unknown`, a bad roster is
+  // terminal `invalid`). Throwing a plain error instead would resurface as the
+  // RETRYABLE policy-unavailable reason and retry a permanent fault forever.
+  let policy: number;
+  try {
+    if (typeof active !== 'boolean' || !Array.isArray(agents)) throw new Error('tuple layout');
+    policy = Number(BigInt(accessPolicy as string | number | bigint));
+  } catch {
+    throw new ContextGraphLiveAuthorityUnsupportedError(
+      `getContextGraph(${contextGraphId}) returned an undecodable tuple`,
     );
   }
+  // Roster entries are handed through as read. The resolver owns their
+  // validation and normalization, so a malformed entry keeps its terminal
+  // `chain-participant-authority-invalid` disposition on this path too.
   return Object.freeze({
     active,
-    accessPolicy: Number(BigInt(accessPolicy as string | number | bigint)),
-    participantAgents: Object.freeze(agents.map((value) => ethers.getAddress(String(value)))),
+    accessPolicy: policy,
+    participantAgents: Object.freeze(agents.map((value) => String(value))),
   });
 }
