@@ -74,6 +74,7 @@ describe('SQLite finalization recovery store', () => {
     ['VERIFIED', null, 'verified row has no evidence'],
     ['SETTLED', null, 'verified row has no evidence'],
     ['RECEIVED', JSON.stringify(evidence()), 'unverified row has verified evidence'],
+    ['REORGED', JSON.stringify(evidence()), 'reorged row retains stale verified evidence'],
   ] as const)('fails closed for %s evidence mismatch', (state, verifiedEvidence, message) => {
     expect(() => finalizationRecoveryRowToEntry(sqliteRow({
       state,

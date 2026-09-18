@@ -79,11 +79,9 @@ export function finalizationRecoveryRowToEntry(
       'Finalization inbox verified row has no evidence',
     );
   }
-  if (
-    !evidenceState
-    && (state === 'RECEIVED' || state === 'REORGED')
-    && verifiedEvidence
-  ) throw new Error('Finalization inbox unverified row has verified evidence');
+  if (state === 'RECEIVED' && verifiedEvidence) {
+    throw new Error('Finalization inbox unverified row has verified evidence');
+  }
   const evidenceColumns = [
     row.block_number,
     row.block_hash,
