@@ -203,7 +203,7 @@ const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
 const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
 const RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1 = 8;
 
-interface Rfc64OperationalAppliedHeadV1 {
+export interface Rfc64OperationalAppliedHeadV1 {
   readonly snapshot: AppliedCatalogHeadSnapshotV1;
   readonly issuedAt: TimestampMsV1;
   readonly contextGraphId: string;
@@ -1035,7 +1035,7 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   return runtime;
 }
 
-function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
+export function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
   networkId: string;
   contextGraphId: string;
   subGraphName: string | null;
@@ -1080,7 +1080,7 @@ function rfc64CatalogTargetExactIdentityV1(
     === rfc64CatalogTargetExactIdentityKeyV1(right);
 }
 
-function rfc64CatalogTargetExactIdentityKeyV1(
+export function rfc64CatalogTargetExactIdentityKeyV1(
   target: Rfc64PublicCatalogHeadAnnouncementV1,
 ): string {
   return [
@@ -1326,7 +1326,7 @@ interface Rfc64OperationalRowProjectionV1 {
   readonly missingRowCount: string | null;
 }
 
-function projectRfc64OperationalRowCountsV1(
+export function projectRfc64OperationalRowCountsV1(
   heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
   targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
   promisedRowCounts: ReadonlyMap<string, string | null>,
@@ -1341,25 +1341,36 @@ function projectRfc64OperationalRowCountsV1(
     rowCount: snapshot.inventoryRowCount as string | null,
     target: null as Rfc64PublicCatalogHeadAnnouncementV1 | null,
   }]));
-  let ambiguous = false;
+  // A fork is a property of the newest version in a scope, not of the order
+  // the targets arrive in: `authoritativeTargets` preserves insertion order and
+  // the promised half arrives in peer-completion order, so deciding as the loop
+  // walks would let the same state report an ambiguous pair or a definite one
+  // depending on which peer answered first. The scope's maximum version is
+  // resolved first, and only a digest disagreement AT that maximum is ambiguous
+  // -- a strictly newer head settles the branch the older fork was on.
+  const ambiguousScopes = new Set<string>();
   for (const target of targets) {
     const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
     const current = expectedByScope.get(scopeKey);
-    if (current === undefined || BigInt(target.catalogVersion) > BigInt(current.catalogVersion)) {
+    const targetVersion = BigInt(target.catalogVersion);
+    if (current === undefined || targetVersion > BigInt(current.catalogVersion)) {
       expectedByScope.set(scopeKey, {
         catalogVersion: target.catalogVersion,
         catalogHeadObjectDigest: target.catalogHeadObjectDigest,
         rowCount: null,
         target,
       });
+      ambiguousScopes.delete(scopeKey);
     } else if (
-      target.catalogVersion === current.catalogVersion
+      targetVersion === BigInt(current.catalogVersion)
       && target.catalogHeadObjectDigest !== current.catalogHeadObjectDigest
     ) {
-      ambiguous = true;
+      ambiguousScopes.add(scopeKey);
     }
   }
-  if (ambiguous) return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+  if (ambiguousScopes.size > 0) {
+    return Object.freeze({ expectedRowCount: null, missingRowCount: null });
+  }
 
   let expected = 0n;
   let missing = 0n;
