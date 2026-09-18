@@ -154,6 +154,7 @@ function replaySuccess(
 ): Readonly<{
   announced: number;
   failed: number;
+  withheld: number;
   manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
 }> {
   const head = Object.freeze({
@@ -171,6 +172,8 @@ function replaySuccess(
   return Object.freeze({
     announced: 1,
     failed: 0,
+    // This stub serves everything it holds: nothing is superseded, so nothing is withheld.
+    withheld: 0,
     manifest: Object.freeze([head]),
   });
 }
@@ -719,6 +722,7 @@ describe('RFC-64 rollout authority integration', () => {
         return Object.freeze({
           announced: 0,
           failed: 0,
+          withheld: 0,
           manifest: Object.freeze([]),
         });
       });
@@ -1121,7 +1125,9 @@ describe('RFC-64 rollout authority integration', () => {
     const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
-      .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
+      .mockResolvedValue(Object.freeze({
+        announced: 0, failed: 0, withheld: 0, manifest: Object.freeze([]),
+      }));
     const event = () => new CustomEvent('connection:open', {
       detail: {
         remotePeer: peer.node.libp2p.peerId,
@@ -1162,7 +1168,9 @@ describe('RFC-64 rollout authority integration', () => {
     const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     const reannounce = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
-      .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
+      .mockResolvedValue(Object.freeze({
+        announced: 0, failed: 0, withheld: 0, manifest: Object.freeze([]),
+      }));
     const event = () => new CustomEvent('connection:open', {
       detail: {
         remotePeer,
@@ -1213,7 +1221,9 @@ describe('RFC-64 rollout authority integration', () => {
         return Object.freeze({ requested: 1, failed: 0 });
       });
     vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
-      .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
+      .mockResolvedValue(Object.freeze({
+        announced: 0, failed: 0, withheld: 0, manifest: Object.freeze([]),
+      }));
     const now = vi.spyOn(Date, 'now').mockReturnValue(100_000);
     const event = () => new CustomEvent('connection:open', {
       detail: {

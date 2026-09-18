@@ -6432,7 +6432,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       }
     }
     vi.spyOn(provider, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue(
-      Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }),
+      Object.freeze({ announced: 0, failed: 0, withheld: 0, manifest: Object.freeze([]) }),
     );
     vi.spyOn(receiver, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
       .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
