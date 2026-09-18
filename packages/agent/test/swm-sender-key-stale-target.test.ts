@@ -188,6 +188,61 @@ describe('StaleSenderKeyTargetError (typed error class)', () => {
   });
 });
 
+describe('sender-key authority failures', () => {
+  it.each([
+    ['local-chain-binding-unavailable', true],
+    ['chain-participant-authority-unavailable', true],
+    ['chain-participant-authority-unsupported', false],
+  ] as const)(
+    'retains %s as unavailable rather than excluding the sender (retryable: %s)', async (reason, retryable) => {
+      const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+      const authority = agent as unknown as {
+        resolveRegisteredContextGraphAuthority(): Promise<unknown>;
+      };
+      authority.resolveRegisteredContextGraphAuthority = async () => ({
+        kind: 'unavailable', reason, detail: 'request timeout https://rpc.example/secret-api-key',
+      });
+      // Exercise the real authority projection: unavailable must not become
+      // an authoritative empty roster on the production receive path.
+      internals.resolveContextGraphAgentGateAuthority =
+        (DKGAgent.prototype as unknown as DKGAgentInternals)
+          .resolveContextGraphAgentGateAuthority.bind(agent);
+      const pkg = await buildSignedPackage({ senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId });
+      const ack = decodeSwmSenderKeyPackageAck(await internals.handleSwmSenderKeyPackage(
+        encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID));
+      expect(ack.accepted).toBe(false);
+      expect(ack.reasonCode).toBe(retryable ? 'agent-gate-pending' : 'agent-gate-unavailable');
+      expect(internals.isRetryableSwmSenderKeySetupAckReason(ack.reasonCode)).toBe(retryable);
+      expect(ack.reason).toContain(reason);
+      expect(ack.reason).toContain('timeout=true');
+      expect(ack.reason).toMatch(/detailSha256=[0-9a-f]{64}/u);
+      expect(ack.reason).not.toContain('secret-api-key');
+      expect(internals.swmSenderKeyReceiveStates.size).toBe(0);
+    },
+  );
+
+  it('keeps an authoritative sender exclusion terminal', async () => {
+    const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    (agent as unknown as { resolveRegisteredContextGraphAuthority(): Promise<unknown> })
+      .resolveRegisteredContextGraphAuthority = async () => ({
+        kind: 'private', onChainId: 1n, participantAgents: [recipient.agentAddress],
+      });
+    internals.resolveContextGraphAgentGateAuthority =
+      (DKGAgent.prototype as unknown as DKGAgentInternals)
+        .resolveContextGraphAgentGateAuthority.bind(agent);
+    const pkg = await buildSignedPackage({ senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId });
+    const ack = decodeSwmSenderKeyPackageAck(await internals.handleSwmSenderKeyPackage(
+      encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID));
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('sender-not-allowed');
+    expect(internals.swmSenderKeyReceiveStates.size).toBe(0);
+  });
+});
+
 describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
   // Verifies the THROW side of the contract: when the targeted
   // `recipientKeyId` isn't an active local key, `acceptSwmSenderKey

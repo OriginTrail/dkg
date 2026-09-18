@@ -34,7 +34,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, redactLogEntry, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   logKaLifecycleEvent,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
@@ -149,6 +149,7 @@ import {
 import {
   createContextGraphAuthorityError,
   isRetryableContextGraphAuthorityUnavailableReason,
+  isContextGraphAuthorityUnavailableMarker,
   type ContextGraphAgentGateAuthority,
 } from './internal/context-graph-authority/context-graph-authority.js';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
@@ -744,11 +745,23 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async getContextGraphAgentGateAddresses(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; requireAvailable?: boolean } = {},
   ): Promise<string[] | null> {
     const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId, options);
     if (authority.kind === 'ungated') return null;
     if (authority.kind === 'available') return authority.agentAddresses;
+    if (options.requireAvailable) {
+      // Raw RPC errors can contain credential-bearing URLs. Retain the typed
+      // cause on the error; expose only its stable reason and a correlatable
+      // digest/category in transport diagnostics.
+      const detail = authority.detail ?? '';
+      const diagnostic = `detailSha256=${createHash('sha256').update(detail).digest('hex')}`
+        + ` timeout=${/timeout|timed out|deadline/iu.test(detail)}`;
+      throw createContextGraphAuthorityError(
+        `Context graph "${contextGraphId}" sender-key authority unavailable (${authority.reason}); ${diagnostic}`,
+        authority,
+      );
+    }
     return [];
   }
 
@@ -2081,6 +2094,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   swmSenderKeySetupAckReasonCode(this: DKGAgent, err: unknown): SwmSenderKeyPackageAckReasonCode {
+    if (isContextGraphAuthorityUnavailableMarker(err)) {
+      return isRetryableContextGraphAuthorityUnavailableReason(err.reason)
+        ? 'agent-gate-pending'
+        : 'agent-gate-unavailable';
+    }
     if (err instanceof StaleSenderKeyTargetError) {
       return 'stale-target';
     }
@@ -2554,10 +2572,17 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         // recipient not local, and revoked-key targeting (the
         // last of which throws a generic `Error` with the explicit
         // `was revoked at` message above and therefore stays at WARN).
+        const authorityDetail = isContextGraphAuthorityUnavailableMarker(err)
+          ? redactLogEntry({
+            ...ctx, level: 'warn', module: 'DKGAgent',
+            message: (err.detail ?? '').replace(/(?:https?|wss?):\/\/[^\s"'<>]+/giu, '[redacted-endpoint]'),
+          }).message.slice(0, 512)
+          : undefined;
         const message =
           `SWM sender-key setup receive rejected: senderAgent=${pkg.senderAgentAddress} recipientAgent=${pkg.recipientAgentAddress} ` +
           `fromPeer=${fromPeerId} contextGraph=${pkg.contextGraphId}${pkg.subGraphName ? `/${pkg.subGraphName}` : ''} ` +
-          `epoch=${pkg.epochId} membershipHash=${pkg.membershipHash} reason=${reason}`;
+          `epoch=${pkg.epochId} membershipHash=${pkg.membershipHash} reasonCode=${reasonCode} reason=${reason}`
+          + (authorityDetail === undefined ? '' : ` authorityDetail=${JSON.stringify(authorityDetail)}`);
         if (err instanceof StaleSenderKeyTargetError) {
           this.log.debug(ctx, message);
         } else {
@@ -2609,11 +2634,14 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // sender to retain and retry the package; one that needs a software or
       // configuration change is terminal, classified exactly as the promote
       // retry is (isRetryableContextGraphAuthorityUnavailableReason).
-      throw new SwmSenderKeySetupRejectionError(
-        isRetryableContextGraphAuthorityUnavailableReason(agentGateAuthority.reason)
-          ? 'agent-gate-pending'
-          : 'agent-gate-unavailable',
-        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason})`,
+      // Retain the typed authority detail for redacted receiver diagnostics;
+      // the ACK carries only a digest and category, never raw RPC credentials.
+      const detail = agentGateAuthority.detail ?? '';
+      const diagnostic = `detailSha256=${createHash('sha256').update(detail).digest('hex')}`
+        + ` timeout=${/timeout|timed out|deadline/iu.test(detail)}`;
+      throw createContextGraphAuthorityError(
+        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason}); ${diagnostic}`,
+        agentGateAuthority,
       );
     }
     const agentGateAddresses = agentGateAuthority.kind === 'available'
