@@ -18,6 +18,8 @@ import {
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
   encodeRfc64PublicCatalogHeadReplayCompletionV2,
 } from '../src/rfc64/public-catalog-transport-v1.js';
+import { rfc64SwmInventoryShadowRuntimeV1 } from
+  '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -309,6 +311,50 @@ describe('RFC-64 catalog re-projection failure reporting', () => {
     expect(warnings.filter((line) => REPROJECTION_WARNING.test(line)
       && line.includes(AUTHOR)
       && /aborted before this author was attempted/u.test(line))).toHaveLength(1);
+  }, 60_000);
+
+  it('names an author whose carry aborted part-way through its rows', async () => {
+    // The OUTER per-origin abort above is a different branch from the in-carry one: this
+    // author WAS attempted, and some of its rows crossed. The acceptance gate does not
+    // re-fire in this process, so a partially carried graph that reported nothing would be
+    // indistinguishable from a complete one.
+    const author = await startRotationAuthorV1('authority-rotation-abort-rows');
+    const hasLocalCreate = vi
+      .spyOn(author.localContextGraphProvenance, 'hasLocalCreate')
+      .mockReturnValue(false);
+    // Two rows, so the loop reaches a second iteration where the signal can be observed.
+    await seedInventoryAssetV1(author, 'authority-rotation-abort-rows-a', 67n);
+    await seedInventoryAssetV1(author, 'authority-rotation-abort-rows-b', 68n);
+    await author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+    await rotateToFinalizedChainV1(author);
+    hasLocalCreate.mockReturnValue(true);
+
+    // The carry loop has no await between rows, so the abort has to come from inside it:
+    // trip it on the first row's handoff to the shadow runtime, which is the real shape of
+    // a shutdown or budget expiry landing mid-carry.
+    const controller = new AbortController();
+    const runtime = rfc64SwmInventoryShadowRuntimeV1(author);
+    const schedule = vi.spyOn(runtime, 'schedule');
+    schedule.mockImplementation((assetKey, work) => {
+      controller.abort();
+      schedule.mockRestore();
+      return runtime.schedule(assetKey, work);
+    });
+
+    const warnings = captureWarningsV1(author);
+    await author.beginRfc64CatalogReprojectionForAuthorityRotationV1(
+      CONTEXT_GRAPH_ID,
+      createOperationContext('system'),
+      controller.signal,
+    );
+    await author.awaitInFlightRfc64SwmInventoryObserversV1();
+
+    expect(warnings.filter((line) => REPROJECTION_WARNING.test(line)
+      && line.includes(AUTHOR)
+      && /aborted before every row crossed/u.test(line))).toHaveLength(1);
   }, 60_000);
 
   it('stays silent for a row a durable VM confirmation already retired', async () => {
@@ -660,6 +706,41 @@ describe('RFC-64 catalog re-projection on authority rotation', () => {
     // The withhold DID happen, and was deliberately quiet: one head, reported at debug.
     expect(debug.mock.calls.filter(([, message]) => typeof message === 'string'
       && message.includes('catalog replay withheld 1 superseded head(s)'))).toHaveLength(1);
+  }, 60_000);
+
+  it('names the authored graph whose rows never crossed onto the accepted generation', async () => {
+    // The counterpart of the replica case, and the one operator-actionable signal the whole
+    // conditional exists to produce. Both branches are gated on `hasLocalCreate` and differ
+    // only in which filter result is non-empty, so without this an inverted gate would turn
+    // the warning off -- silently, with the replica test still green.
+    const author = await startRotationAuthorV1('authority-rotation-authored-stranded');
+    // Rotate as a replica so admission refuses and nothing is carried; the rows stay
+    // addressed by the superseded generation.
+    const hasLocalCreate = vi
+      .spyOn(author.localContextGraphProvenance, 'hasLocalCreate')
+      .mockReturnValue(false);
+
+    await seedInventoryAssetV1(author, 'authority-rotation-authored-stranded', 49n);
+    await expect(author.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    })).resolves.toMatchObject({ status: 'advanced' });
+    await rotateToFinalizedChainV1(author);
+
+    // This node IS the author of record; it simply has not re-projected.
+    hasLocalCreate.mockReturnValue(true);
+    const warn = vi.spyOn(author.log, 'warn');
+    const debug = vi.spyOn(author.log, 'debug');
+
+    await expect(author.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWAuthorProbe'))
+      .resolves.toMatchObject({ announced: 0, failed: 0, withheld: 1 });
+
+    expect(warn.mock.calls.filter(([, message]) => typeof message === 'string'
+      && /has NOT re-projected the rows onto the accepted generation/u.test(message)))
+      .toHaveLength(1);
+    // Every withheld head was actionable, so nothing was demoted to the quiet branch.
+    expect(debug.mock.calls.filter(([, message]) => typeof message === 'string'
+      && message.includes('catalog replay withheld'))).toHaveLength(0);
   }, 60_000);
 
   it('never fabricates a lineage for a graph this node did not author', async () => {
