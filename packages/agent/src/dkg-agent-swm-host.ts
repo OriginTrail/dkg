@@ -171,7 +171,11 @@ import {
   createSwmAckQuorum,
   type SwmAckQuorum,
 } from './swm/ack-quorum.js';
-import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
+import {
+  SwmHostModeStore,
+  type SwmHostModeStoreLimits,
+  type SwmHostModeSubscriptionBinding,
+} from './swm/host-mode-store.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -787,54 +791,56 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // policy-aware reconciler instead of wiring directly: it refuses stale
         // curated custody and can safely restore a confirmed public subscription
         // when `hostPublic` is enabled.
-        if (this.swmHostModeStripCiphertext()) {
+        const stripOn = this.swmHostModeStripCiphertext();
+        this.log.info(
+          createOperationContext('system'),
+          stripOn
+            ? `Re-evaluating ${previouslySubscribed.length} persisted host-mode subscription(s) under current policy ` +
+              `(private-ciphertext strip is ON; public restore requires swmHostMode.hostPublic=true)`
+            : `Restoring ${previouslySubscribed.length} persisted host-mode subscription(s) from disk`,
+        );
+        // Codex review #2614 — bound the STARTUP cost of this walk. Every
+        // marker costs at least an `isPrivateContextGraph` store probe and, on
+        // a `hostPublic` core, an access+publish RPC pair against caches that
+        // are still cold this early in `start()`. `initializeSwmHostModeStore`
+        // is awaited BEFORE protocol handlers are registered, so an unbounded
+        // serial walk delays every boot in proportion to the number of
+        // persisted markers. Await only the first `reconcileBatchSize` entries
+        // — the same cap the periodic sweep applies in
+        // {@link reconcileHostModeSubscriptions} — and drain the remainder off
+        // the startup await. Nothing is dropped: the tail still runs, it just
+        // no longer blocks the node from coming up.
+        const batchSize = normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize);
+        for (const entry of previouslySubscribed.slice(0, batchSize)) {
+          await this.restorePersistedHostModeSubscription(entry, stripOn);
+        }
+        const deferred = previouslySubscribed.slice(batchSize);
+        if (deferred.length > 0) {
           this.log.info(
             createOperationContext('system'),
-            `Re-evaluating ${previouslySubscribed.length} persisted host-mode subscription(s) under current policy ` +
-            `(private-ciphertext strip is ON; public restore requires swmHostMode.hostPublic=true)`,
+            `Draining ${deferred.length} remaining persisted host-mode subscription(s) in the background ` +
+            `(startup restore capped at reconcileBatchSize=${batchSize})`,
           );
-          for (const { contextGraphId: cgId, onChainId } of previouslySubscribed) {
-            try {
-              this.restorePersistedHostModeBinding(cgId, onChainId);
-              await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER);
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              this.log.warn(
-                createOperationContext('system'),
-                `Failed to re-evaluate persisted host-mode subscription for "${cgId}": ${msg}`,
-              );
+          // Hand the tail to a later macrotask rather than starting it here:
+          // the synchronous prefix of the first deferred marker (the binding
+          // rehydrate + `wireSwmHostModeHandler`) would otherwise still run on
+          // the startup stack. The timer is unref'd so it never holds the
+          // process open. `restorePersistedHostModeSubscription` is total (it
+          // logs and swallows per-marker failures); the trailing catch only
+          // guards the detached promise against an unhandled rejection if that
+          // ever changes.
+          const drain = async (): Promise<void> => {
+            for (const entry of deferred) {
+              await this.restorePersistedHostModeSubscription(entry, stripOn);
             }
-          }
-        } else {
-          this.log.info(
-            createOperationContext('system'),
-            `Restoring ${previouslySubscribed.length} persisted host-mode subscription(s) from disk`,
-          );
-          for (const { contextGraphId: cgId, onChainId } of previouslySubscribed) {
-            // Re-engage the gossip handler directly; we trust the
-            // previous decision (the curated check ran when the
-            // subscription was first wired). The chain-anchored
-            // authority check on every envelope ingest still catches
-            // revocations even if curator state has changed since.
-            try {
-              this.restorePersistedHostModeBinding(cgId, onChainId);
-              this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
-              // Codex PR #620 R2: also re-probe registration state.
-              // Without this, a host-only CG that was registered while
-              // the node was offline stays on the 1MiB / 6h pre-reg
-              // limits after restart and can prune valid ciphertext
-              // permanently — `GraphManager.listContextGraphs()` only
-              // sees local store graphs, so the periodic reconciler
-              // can't heal it later either.
-              await this.maybeMarkRegisteredForHostMode(cgId);
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              this.log.warn(
-                createOperationContext('system'),
-                `Failed to restore host-mode subscription for "${cgId}": ${msg}`,
-              );
-            }
-          }
+          };
+          this.swmHostModeRestoreDrain = new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              void drain().catch(() => { /* per-marker failures are already logged */ })
+                .then(() => { resolve(); });
+            }, 0);
+            timer.unref?.();
+          });
         }
       }
     } catch (err) {
@@ -842,6 +848,55 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.log.warn(
         createOperationContext('system'),
         `Failed to list persisted host-mode subscriptions: ${msg}`,
+      );
+    }
+  }
+
+  /**
+   * Restore ONE persisted host-mode marker. Extracted from
+   * {@link initializeSwmHostModeStore} so the startup path can await a bounded
+   * prefix and drain the rest in the background; the behaviour per marker is
+   * unchanged.
+   *
+   * With the strip ON we re-run the policy-aware reconciler rather than wiring
+   * directly: it refuses stale curated custody and can safely restore a
+   * confirmed-public subscription when `hostPublic` is enabled. With the strip
+   * OFF we re-engage the gossip handler directly and trust the previous
+   * decision (the curated check ran when the subscription was first wired) —
+   * the chain-anchored authority check on every envelope ingest still catches
+   * revocations even if curator state has changed since.
+   *
+   * Never throws: a marker whose probe fails is logged and skipped so one bad
+   * entry cannot abort the restore of the rest (or the boot).
+   */
+  async restorePersistedHostModeSubscription(
+    this: DKGAgent,
+    entry: SwmHostModeSubscriptionBinding,
+    stripOn: boolean,
+  ): Promise<void> {
+    const { contextGraphId: cgId, onChainId } = entry;
+    try {
+      this.restorePersistedHostModeBinding(cgId, onChainId);
+      if (stripOn) {
+        await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER);
+        return;
+      }
+      this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
+      // Codex PR #620 R2: also re-probe registration state.
+      // Without this, a host-only CG that was registered while
+      // the node was offline stays on the 1MiB / 6h pre-reg
+      // limits after restart and can prune valid ciphertext
+      // permanently — `GraphManager.listContextGraphs()` only
+      // sees local store graphs, so the periodic reconciler
+      // can't heal it later either.
+      await this.maybeMarkRegisteredForHostMode(cgId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        createOperationContext('system'),
+        stripOn
+          ? `Failed to re-evaluate persisted host-mode subscription for "${cgId}": ${msg}`
+          : `Failed to restore host-mode subscription for "${cgId}": ${msg}`,
       );
     }
   }

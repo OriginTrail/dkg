@@ -777,6 +777,14 @@ export class DKGAgentBase {
   /** Rotating cursor for bounded host-mode reconcile sweeps over known context graphs. */
   protected hostModeReconcileCursor = 0;
   /**
+   * Tail of the restart restore walk that runs OFF the startup await. Startup
+   * restores at most `swmHostMode.reconcileBatchSize` persisted markers inline
+   * (each costs a store probe and, on a `hostPublic` core, a chain RPC pair);
+   * the remainder drains through this promise so boot stays bounded. Exposed
+   * so tests — and any future shutdown path — can await the drain.
+   */
+  protected swmHostModeRestoreDrain?: Promise<void>;
+  /**
    * OT-RFC-43 A2 — the KA-number allocator, retained on the agent (also
    * forwarded to the publisher as `kaAllocator`). Held here so
    * `assertionFinalize` can ALLOCATE-AT-FINALIZE (single source of truth):

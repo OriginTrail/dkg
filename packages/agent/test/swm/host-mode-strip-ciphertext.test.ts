@@ -60,6 +60,8 @@ interface StripInternals {
   };
   subscribedContextGraphs: Map<string, { subscribed: boolean; synced: boolean; onChainHash?: string; onChainId?: string }>;
   onChainAccessPolicyCache: Map<string, number>;
+  beaconCuratorByWireId: Map<string, string>;
+  swmHostModeRestoreDrain?: Promise<void>;
   config: { swmHostMode?: { enabled?: boolean; hostPublic?: boolean; stripCiphertext?: boolean } };
   isPrivateContextGraph(cgId: string): Promise<boolean>;
   isConfirmedPublicForHostMode(cgId: string): Promise<boolean>;
@@ -340,6 +342,45 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     await g.initializeSwmHostModeStore();
 
     expect(wired).toEqual([cgId]);
+  });
+
+  it('restart restore awaits at most reconcileBatchSize markers and drains the rest off startup', async () => {
+    // Codex review #2614 — `initializeSwmHostModeStore` is awaited from
+    // `start()`. Every persisted marker costs at least a store probe (and a
+    // chain RPC pair on a `hostPublic` core), so the startup walk must be
+    // capped the same way the periodic sweep is. Nothing may be dropped: the
+    // tail still runs, just not on the boot path.
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-batch-'));
+    tempDirs.push(dataDir);
+    const core = await DKGAgent.create({
+      name: 'StripCiphertextRestoreBatchCore',
+      listenHost: '127.0.0.1',
+      dataDir,
+      nodeRole: 'core',
+      rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 2 },
+    });
+    agents.push(core);
+    const g = core as unknown as StripInternals;
+    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
+    await store.init();
+    g.swmHostModeStore = store;
+    const cgIds = ['cg-b1', 'cg-b2', 'cg-b3', 'cg-b4', 'cg-b5'];
+    for (const cgId of cgIds) await store.markHostModeSubscribed(cgId);
+    (g as any).maybeMarkRegisteredForHostMode = async () => {};
+    const wired: string[] = [];
+    g.wireSwmHostModeHandler = (id: string) => {
+      wired.push(id);
+    };
+
+    await g.initializeSwmHostModeStore();
+
+    expect(wired).toHaveLength(2);
+    expect(g.swmHostModeRestoreDrain).toBeDefined();
+
+    await g.swmHostModeRestoreDrain;
+
+    expect([...wired].sort()).toEqual([...cgIds].sort());
   });
 
   it('restart restore contains a failing legacy re-wire to keep startup alive', async () => {
