@@ -803,11 +803,19 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     installGossipStub(g);
     const publicCg = 'cg-public-catchup';
     const curatedCg = 'cg-curated-catchup';
+    // Codex review #2614 — a CG hosted as non-curated whose owner curated it
+    // AFTER the marker was written. It passes the free local gate, so it is the
+    // only case where the chain re-confirmation actually decides the outcome.
+    const lateCuratedCg = 'cg-late-curated-catchup';
+    const throwingCg = 'cg-policy-throws-catchup';
     g.wireSwmHostModeHandler(publicCg, undefined, false); // public host tier
     g.wireSwmHostModeHandler(curatedCg, undefined, true);
+    g.wireSwmHostModeHandler(lateCuratedCg, undefined, false);
+    g.wireSwmHostModeHandler(throwingCg, undefined, false);
     const confirmed: string[] = [];
     g.isConfirmedPublicForHostMode = async (id: string) => {
       confirmed.push(id);
+      if (id === throwingCg) throw new Error('simulated policy resolver failure');
       return id === publicCg;
     };
 
@@ -846,6 +854,24 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(unknownResp.denied ?? '').toMatch(/strip is on/i);
     expect(confirmed).toEqual([publicCg]);
 
+    // The chain leg is the DECIDING condition here: the CG passes the free
+    // local gate and is refused only because chain state says it is no longer
+    // public. Deleting the leg would serve it.
+    const lateCuratedResp = decodeSwmHostCatchupResponse(
+      await g.handleSwmHostCatchup(request(lateCuratedCg), '12D3KooWPeer'),
+    );
+    expect(lateCuratedResp.entries).toEqual([]);
+    expect(lateCuratedResp.denied ?? '').toMatch(/strip is on/i);
+    expect(confirmed).toEqual([publicCg, lateCuratedCg]);
+
+    // A resolver failure denies too (fail closed), and still answers with a
+    // structured response rather than throwing at the messenger substrate.
+    const throwingResp = decodeSwmHostCatchupResponse(
+      await g.handleSwmHostCatchup(request(throwingCg), '12D3KooWPeer'),
+    );
+    expect(throwingResp.entries).toEqual([]);
+    expect(throwingResp.denied ?? '').toMatch(/strip is on/i);
+    expect(confirmed).toEqual([publicCg, lateCuratedCg, throwingCg]);
   });
 
   it('strip ON RETIRES handleGetCiphertextChunk — serves nothing private (incl. RFC-39 operator branch)', async () => {

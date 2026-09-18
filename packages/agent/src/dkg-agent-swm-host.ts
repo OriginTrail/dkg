@@ -2223,7 +2223,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.swmHostModeStripCiphertext()) {
       const hostKey = this.canonicalSwmHostModeKey(req.contextGraphId);
       const nonCurated = this.swmHostModeCurated.get(hostKey) === false;
-      if (!nonCurated || !await this.isConfirmedPublicForHostMode(req.contextGraphId)) {
+      let publicHostTier = false;
+      try {
+        // `&&` keeps the short-circuit: a locally curated CG never spends the
+        // chain RPC. A throw from the resolver is a DENIAL, not a transport
+        // failure — this responder always answers with a structured response.
+        publicHostTier = nonCurated && await this.isConfirmedPublicForHostMode(req.contextGraphId);
+      } catch { publicHostTier = false; }
+      if (!publicHostTier) {
         this.log.debug(
           ctx,
           `host-catchup served NOTHING cg=${req.contextGraphId} from=${fromPeerId}: private-ciphertext ` +
