@@ -863,6 +863,8 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
+    // When the caller already checked receipt finality, naming this exact hash
+    // reuses that header timestamp; direct parsers safely fall through to RPC.
     const blockTimestamp = await this.getBlockTimestamp(
       receipt.blockNumber,
       { ...options, blockHash: receipt.blockHash },
@@ -926,6 +928,8 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
+    // When the caller already checked receipt finality, naming this exact hash
+    // reuses that header timestamp; direct parsers safely fall through to RPC.
     const blockTimestamp = await this.getBlockTimestamp(
       receipt.blockNumber,
       { ...options, blockHash: receipt.blockHash },

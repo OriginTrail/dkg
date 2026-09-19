@@ -1309,7 +1309,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             });
           };
           return Object.freeze({
-            kind: 'legacy' as const,
             readCurrent: readCurrentState,
             readHistory: () => resolveContextGraphAuthorityHistory({
               cache,
@@ -1402,8 +1401,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       },
       {
         signal: options.signal,
-        // Both branches raise ContextGraphAuthorityIndexRetryableError for a
-        // moved anchor, a cached checkpoint ahead of this endpoint and an
+        // The legacy history reader raises ContextGraphAuthorityIndexRetryableError
+        // for a moved anchor, a cached checkpoint ahead of this endpoint and an
         // unresolvable anchor block. It is recognized BY TYPE here, ahead of
         // `isRpcEndpointFailoverEligible`'s message regex, so an authority read
         // fails over instead of aborting the catalog admission it gates.
