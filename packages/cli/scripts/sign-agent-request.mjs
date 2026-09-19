@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { ethers } from 'ethers';
 import { signAgentDelegation } from '@origintrail-official/dkg-agent';
-import { signAgentHttpJwt } from '../dist/agent-http-auth.js';
+import { signAgentHttpHeaders } from '../dist/agent-http-signing.js';
 import { assertBoundSemanticInvocation, boundSemanticInvocationScope } from '../dist/semantic-runtime-bound-invocation.js';
 
 const [mode, ...args] = process.argv.slice(2);
@@ -26,12 +26,12 @@ let output;
 if (mode === 'http') {
   const contentType = options['content-type'] ?? (options.body ? 'application/json' : '');
   if (/[\r\n]/.test(contentType)) throw new Error('Invalid content type');
-  const jwt = signAgentHttpJwt({
+  const headers = signAgentHttpHeaders({
     agentAddress: wallet.address, method: required('method'), targetPeerId: required('peer'),
     path: required('path'), contentType, body: options.body ? readFileSync(options.body) : Buffer.alloc(0),
     timestamp: String(Date.now()), nonce: randomBytes(24).toString('hex'),
   }, wallet.signingKey);
-  output = `Authorization: DKG-Agent ${jwt}\n` + (contentType ? `Content-Type: ${contentType}\n` : '');
+  output = Object.entries(headers).map(([name, value]) => `${name}: ${value}\n`).join('');
 } else {
   const input = JSON.parse(readFileSync(required('input'), 'utf8'));
   if (Object.keys(input).some((key) => !['contextGraphId', 'operationIri', 'invocationId'].includes(key))) throw new Error('Only graph, operation and invocation ID are accepted');

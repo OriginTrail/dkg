@@ -8,13 +8,13 @@ The APIs configure existing typed tools and the existing agent-key-signed inbox 
 
 The examples use two nodes: **runner** hosts the private data and executes the Program; **client** forwards the caller's signed invocation. `program-library` and `tenant-data` below stand for their registered **canonical IDs**, which may be qualified on your network. Full `did:dkg:context-graph:...` graph URIs are also accepted and returned as canonical IDs without that URI prefix. Display-name/suffix aliases are not resolved by these APIs. Register/prepare the graphs and local agents using the normal DKG setup first.
 
-Every HTTP call below uses a fresh **ES256K JWT signed locally by the agent's wallet key**. The node derives the signer address and checks the request's destination, exact method/path/body, expiration and one-use nonce. It does not issue a session token or receive a private key. See the [JWT profile and operator setup](agent-key-http-authentication.md).
+Every HTTP call below is **signed directly with the agent's private key** using EIP-191. The node recovers the signer address and checks the request's destination, exact method/path/body, timestamp and one-use nonce. No JWT or session token is issued or managed. The key stays with its owner. See the [signature profile, automatic backend client and operator setup](agent-key-http-authentication.md). The request freshness window does not expire the agent key or its access.
 
 | Proof | Issuer | Represented identity | Scope |
 | --- | --- | --- | --- |
-| Owner HTTP JWT | Owner's local signer | `OWNER_AGENT_ADDRESS` | Existing owner rights: upload Program, approve/update/revoke data-graph bindings. |
-| Caller HTTP JWT | Caller's local signer | `CALLER_AGENT_ADDRESS` | Existing Program-graph read rights and separately approved invocation rights. |
-| Operator HTTP JWT | Same caller's local signer | Same `CALLER_AGENT_ADDRESS` | Administration on client only, after its operator explicitly configures this address. |
+| Owner HTTP signature | Owner's local signer | `OWNER_AGENT_ADDRESS` | Existing owner rights: upload Program, approve/update/revoke data-graph bindings. |
+| Caller HTTP signature | Caller's local signer | `CALLER_AGENT_ADDRESS` | Existing Program-graph read rights and separately approved invocation rights. |
+| Operator HTTP signature | Same caller's local signer | Same `CALLER_AGENT_ADDRESS` | Administration on client only, after its operator explicitly configures this address. |
 | Invocation delegation in JSON | Caller's local signer | Same original caller | One data graph, operation, invocation UUID, execution peer and forwarding peer; expires within five minutes. |
 
 The caller's signing key is held by the client application and need not be stored on either node. Runner retains its own executor's custodial key. Graph permissions are independent of authentication and operator role. Configure `auth.operatorAgentAddresses` on client once, as documented in the linked profile; possessing a signing key does not automatically grant administration. Anonymous/public requests cannot manage bindings or routes, including when HTTP auth is disabled. An ordinary graph member cannot approve bindings.
@@ -72,20 +72,20 @@ sequenceDiagram
   participant R as Runner node
   participant C as Client node
   participant A as Caller signer
-  O->>R: JWT POST /api/knowledge-assets (Program)
+  O->>R: Signed POST /api/knowledge-assets (Program)
   R->>C: Authorized Program-graph replication
-  O->>R: JWT POST /api/programs/bindings (private data graph)
+  O->>R: Signed POST /api/programs/bindings (private data graph)
   R->>R: Check owner/executor, pin source, persist approval
-  A->>C: JWT POST /api/programs/routes (explicit operator role)
-  A->>C: JWT POST /api/query (shared Program graph)
-  A->>C: JWT POST /api/programs/execute + invocation delegation
+  A->>C: Signed POST /api/programs/routes (explicit operator role)
+  A->>C: Signed POST /api/query (shared Program graph)
+  A->>C: Signed POST /api/programs/execute + invocation delegation
   C->>R: Operation + original caller's signed delegation
   R->>R: Check caller, current binding, source pin and replay state
   R->>R: Execute locally and persist receipt
   R-->>C: Permitted outputs and execution reference
   C-->>A: Result
-  O->>R: JWT POST /api/query (receipt as executor)
-  A->>R: JWT POST /api/query (private data graph)
+  O->>R: Signed POST /api/query (receipt as executor)
+  A->>R: Signed POST /api/query (private data graph)
   R-->>A: Denied / empty bindings under query contract
 ```
 
@@ -119,7 +119,7 @@ signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" POST '/api/knowled
 
 The source graph must be created and ready for sharing; on-chain registration is not required for private P2P sharing. Authorization fails closed if the selected Program view is unavailable or ambiguous. For a new version, upload a new asset name and versioned Program IRI. Normal asset lifecycle/retry rules still apply.
 
-For private source graphs, SWM sender-key delivery distinguishes API registration from encryption-key custody. Registering a remote agent's public key on runner for API authentication does not make runner its decryption custodian. An external API-only recipient uses its resolved remote peer and active encryption key; the receiving node still checks graph/peer authorization and possession of the exact private key. Missing/self remote destinations are rejected for these external registrations. Locally custodial identities and locally owned or revoked keys retain the strict local checks; missing/revoked custody is not bypassed by forwarding elsewhere. JWT authentication requires no API-token registration. Normal graph enrollment and encryption-key delegation remain required; do not copy signing keys between nodes to enable sharing.
+For private source graphs, SWM sender-key delivery distinguishes API registration from encryption-key custody. Registering a remote agent's public key on runner for API authentication does not make runner its decryption custodian. An external API-only recipient uses its resolved remote peer and active encryption key; the receiving node still checks graph/peer authorization and possession of the exact private key. Missing/self remote destinations are rejected for these external registrations. Locally custodial identities and locally owned or revoked keys retain the strict local checks; missing/revoked custody is not bypassed by forwarding elsewhere. Agent-key authentication requires no API-token registration. Normal graph enrollment and encryption-key delegation remain required; do not copy signing keys between nodes to enable sharing.
 
 A partial upload response (`207` with a `swm-share` error) means the sealed WM asset exists but sharing did not complete. After fixing the reported cause, retry the existing asset's SWM transition with its owner-signed request and author lane, then verify source readback in SWM before approving a `programLayer: "swm"` binding. Shared Program visibility does not grant invocation permission or access to the separate private data graph.
 
@@ -182,7 +182,7 @@ node "$SIGNER" invocation --key-file "$CALLER_KEY_FILE" --peer "$RUNNER_PEER_ID"
 signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST '/api/programs/execute' authorized-invocation.json > execution.json
 ```
 
-Reuse the same UUID for a retry, generating fresh HTTP JWT headers every time. Refresh an expired delegation with the same UUID and operation. HTTP nonces are single-use authentication; the UUID identifies the durable execution. Each delivery gets a fresh transport ID so the destination's current permission checks cannot be skipped by transport response caching. Caller, source, output contracts, memory layers and the permission revision are bound to replay validation. A changed permission requires a new invocation UUID. The existing `programIri` spelling for configured operations remains supported; new clients should use `operationIri`, which never falls back to direct Program execution when no binding or route exists.
+Reuse the same UUID for a retry, generating fresh HTTP signature headers every time. Refresh an expired delegation with the same UUID and operation. HTTP nonces are single-use authentication; the UUID identifies the durable execution. Each delivery gets a fresh transport ID so the destination's current permission checks cannot be skipped by transport response caching. Caller, source, output contracts, memory layers and the permission revision are bound to replay validation. A changed permission requires a new invocation UUID. The existing `programIri` spelling for configured operations remains supported; new clients should use `operationIri`, which never falls back to direct Program execution when no binding or route exists.
 
 Successful output includes `executionIri`, `executionLayer`, `persisted` and permitted outputs. VM execution also requires its existing publication evidence. Invocation approval does not add the caller to the graph, and does not enable `POST /api/query` or direct Program/source reads. Private graph ACLs continue to govern those APIs; a denied raw query may return empty bindings under the existing query contract.
 
