@@ -425,6 +425,10 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let providerFailures = 0;
     let replayFailed = true;
     let requiresFullReplay = false;
+    // A spent idle-drain budget is NOT evidence that rows are missing, so it
+    // must not set `requiresFullReplay`. It is also not corroboration, so it
+    // must not let a full pass CLEAR a witness. It sits between the two.
+    let drainUnobserved = false;
     try {
       const manifests: Target[][] = [];
       for (;;) {
@@ -463,16 +467,28 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // The announcements admitted above still take their turn behind other
         // graphs' tasks for the receiver's shared slots.
         if (!await this.#drainedWithinBudget(input.contextGraphId)) {
-          // Budget spent without observing the drain: fail closed and release
-          // the authority-refresh single flight this pass runs inside.
+          // Budget spent without observing the drain. This says only that
+          // parity was NOT OBSERVED; it is not evidence that the retained
+          // heads are wrong.
+          //
+          // Demanding a full replay here is a positive feedback loop, measured
+          // on the devnet: the budget expires, every retained head is
+          // re-announced at once, the receiver cannot go idle within the next
+          // budget, and it expires again. Worse, `requiresFullReplay` is what
+          // the status projection turns into `catalog-replay-incomplete` and
+          // thence `phase: 'blocked'`, which is a HARDER verdict than "not yet
+          // verified" and is exactly what the receiver reported.
+          //
+          // So: no full replay, no `failed`. The worklist is retained and the
+          // next pass re-arms. The corroboration contract still holds — this
+          // pass may not CLEAR a witness, because it observed nothing.
           this.#ports.warn?.(
             `RFC-64 catalog replay drain for ${input.contextGraphId} exceeded ` +
-            `${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms; failing the pass closed and ` +
-            'demanding a full replay. Sustained announcement load on this graph can keep the ' +
-            'receiver from going idle.',
+            `${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms; reporting the pass as ` +
+            'UNVERIFIED and retaining its worklist. Parity was not observed; the retained ' +
+            'heads are not presumed wrong, and no full replay is demanded.',
           );
-          requiresFullReplay = true;
-          failed += 1;
+          drainUnobserved = true;
           break;
         }
         if (progress.peerWorklist.exhausted) {
@@ -536,7 +552,10 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // not be replayed from stays retained for retry and is reported on its
         // own; it says nothing about this node's applied state.
         if (requiresFullReplay) current.requiresFullReplay = true;
-        if (!replayFailed && wasFullPass) current.requiresFullReplay = false;
+        // `drainUnobserved` vetoes the CLEAR without raising a failure: the
+        // pass ended without seeing this graph's admissions drain, so whatever
+        // witness was standing must keep standing.
+        if (!replayFailed && !drainUnobserved && wasFullPass) current.requiresFullReplay = false;
         current.requestedFullReplay = false;
         // SET side of the corroboration contract computed above: a full pass
         // that reached no provider at all settles as uncorroborated, never as
@@ -564,7 +583,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // coverage plus zero corroboration is MORE reason to report unverified,
         // not less. The two directions are opposites and must not share a flag.
         const wasConnectedPeerPass = input.kind === 'full-connected-peers';
-        if (requested > 0) current.unverified = false;
+        // A pass whose drain was never observed has not corroborated this
+        // node's applied rows, whatever individual providers answered, so it
+        // may not clear the uncorroborated witness either.
+        if (requested > 0 && !drainUnobserved) current.unverified = false;
+        else if (drainUnobserved) current.unverified = true;
         else if (wasConnectedPeerPass && providerFailures > 0) current.unverified = true;
         current.completion = null;
         current.peerWorklist.settleOverflow();

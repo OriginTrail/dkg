@@ -210,13 +210,60 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
       connectedPeerIds: Object.freeze(['peer-1']),
     });
 
-    // Reported as failure, never as observed parity.
-    expect(result.failed).toBeGreaterThan(0);
+    // NOT a failure: parity was not observed, which is weaker than evidence
+    // that rows are missing. Reporting `failed` here made the status
+    // projection say `catalog-replay-incomplete` -> phase 'blocked', and
+    // demanded a full replay that re-flooded the receiver it was waiting on.
+    expect(result.failed).toBe(0);
     expect(budgets).toEqual([RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1]);
-    // Never silent: a full replay without its cause is unreadable in the field.
+    // ...but it must NOT claim parity either.
+    expect(runtime.status('public-cg', 'p1').unverified).toBe(true);
+    // Never silent.
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(`exceeded ${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms`);
     expect(warnings[0]).toContain('public-cg');
+    expect(warnings[0]).toContain('UNVERIFIED');
+  });
+
+  it('a spent budget must not CLEAR a standing parity witness, even on a full pass', async () => {
+    // The corroboration contract: a pass that observed nothing may neither
+    // fail the graph nor absolve it. Without the veto, a full pass whose
+    // providers answered would clear a witness raised by real parity evidence
+    // while never having watched this graph's admissions drain.
+    // Exactly one side of the race resolves per pass, so which one wins is
+    // deterministic rather than a scheduling coin-flip.
+    let budgetWins = false;
+    let parityFails = true;
+    const never = () => new Promise<void>(() => {});
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([{ id: 'target-1' }]),
+      }),
+      whenReceiverIdleForContextGraph: () => (budgetWins ? never() : Promise.resolve()),
+      sleep: () => (budgetWins ? Promise.resolve() : never()),
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => parityFails,
+    });
+    const full = () => runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'p1',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-1']),
+    });
+
+    // Pass 1: the drain settles, parity FAILS -> a real witness stands.
+    budgetWins = false;
+    await full();
+    expect(runtime.status('public-cg', 'p1').failed).toBe(true);
+
+    // Pass 2: providers answer and parity would pass, but the drain never
+    // settles. The witness must survive: this pass corroborated nothing.
+    budgetWins = true;
+    parityFails = false;
+    await full();
+    expect(runtime.status('public-cg', 'p1').failed).toBe(true);
+    expect(runtime.status('public-cg', 'p1').unverified).toBe(true);
   });
 
   it('takes the drain result when it settles inside the budget', async () => {
@@ -236,6 +283,8 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
 
     expect(drained).toBe(true);
     expect(result.failed).toBe(0);
+    // A drain that DID complete corroborates, so the witness clears.
+    expect(runtime.status('public-cg', 'p1').unverified).toBe(false);
     expect(result.requested).toBeGreaterThan(0);
   });
 
@@ -251,8 +300,8 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
     vi.useFakeTimers();
     try {
       await vi.advanceTimersByTimeAsync(RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 + 1);
-      await expect(pass).resolves.toMatchObject({ failed: expect.any(Number) });
-      expect((await pass).failed).toBeGreaterThan(0);
+      await expect(pass).resolves.toMatchObject({ failed: 0 });
+      expect(runtime.status('public-cg', 'p1').unverified).toBe(true);
     } finally {
       vi.useRealTimers();
     }
