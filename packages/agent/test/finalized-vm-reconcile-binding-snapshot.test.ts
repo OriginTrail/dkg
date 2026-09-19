@@ -158,7 +158,10 @@ describe('resolveFinalizedVmReconcileBinding snapshot acquisition', () => {
     // asserting signal identity.
     expect(reader.getContextGraphAuthoritySnapshot).toHaveBeenCalledTimes(1);
     expect(reader.getContextGraphAuthoritySnapshot)
-      .toHaveBeenCalledWith(ON_CHAIN_ID, { signal: expect.any(AbortSignal) });
+      .toHaveBeenCalledWith(ON_CHAIN_ID, {
+        signal: expect.any(AbortSignal),
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
     const forwarded = reader.getContextGraphAuthoritySnapshot.mock
       .calls[0]![1]!.signal as AbortSignal;
     expect(forwarded.aborted).toBe(false);

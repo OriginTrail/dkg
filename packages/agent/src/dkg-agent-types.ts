@@ -1715,6 +1715,11 @@ export interface DKGAgentConfig {
      * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /**
+     * `chain.indexTickMs`: how long one completed finalized Context Graph
+     * authority projection answers reads before it is refreshed. Defaults to 6000.
+     */
+    indexTickMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint;
     /**

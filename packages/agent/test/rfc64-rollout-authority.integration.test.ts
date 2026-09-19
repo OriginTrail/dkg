@@ -1887,7 +1887,10 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).toHaveBeenCalledOnce();
     expect(resolveSnapshots).toHaveBeenCalledWith([
       secondSnapshot.nameHash,
-    ], { signal: expect.any(AbortSignal) });
+    ], {
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(requests.get(firstContextGraphId)).toMatchObject({
       kind: 'finalized-evidence',
       evidence: {
@@ -1911,6 +1914,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readSnapshots).toHaveBeenCalledOnce();
     expect(readSnapshots).toHaveBeenCalledWith(['9'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
   });
@@ -1986,6 +1990,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).not.toHaveBeenCalled();
     expect(readSnapshots).toHaveBeenCalledWith(['79'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
   });
@@ -2016,6 +2021,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readAuthority).toHaveBeenCalledOnce();
     expect(readAuthority).toHaveBeenCalledWith(9n, {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
   });
 
@@ -3451,6 +3457,7 @@ describe('RFC-64 rollout authority integration', () => {
 
     expect(readSnapshots).toHaveBeenCalledWith(['96'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
       expect.objectContaining({ contextGraphId: withdrawnContextGraphId }),
@@ -3829,7 +3836,10 @@ describe('RFC-64 rollout authority integration', () => {
       request,
     )).rejects.toThrow('no finalized indexed authority');
     expect(resolveIds).not.toHaveBeenCalled();
-    expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
+    expect(readSnapshots).toHaveBeenCalledWith(['9'], {
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
     expect(legacyPolicy).not.toHaveBeenCalled();
   });

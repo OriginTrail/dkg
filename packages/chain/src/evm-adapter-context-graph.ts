@@ -47,11 +47,14 @@ import { contextGraphAuthorityIndexIdFromBigInt } from
 import {
   contextGraphAuthorityAnchorUnavailableV1,
   readEvmContextGraphAuthorityIndexRpcV1,
-  readEvmContextGraphAuthorityStateV1,
+  evmContextGraphAuthorityHeadTimestampSecondsV1,
+  readEvmContextGraphAuthorityViewV1,
 } from
   './evm-context-graph-authority-index-reader.js';
 import { normalizeContextGraphAuthorityHash } from
   './context-graph-authority-generation.js';
+import type { ContextGraphAuthorityIndexCompletedProjection } from
+  './context-graph-authority-index-projection.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -881,7 +884,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       [contextGraphId, ethers.getAddress(agent)],
       this.signer,
       'add context graph participant agent',
-    );
+    // Also on failure: a submission whose receipt was lost may still have landed.
+    ).finally(() => this.contextGraphAuthorityIndex?.dropProjections());
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -902,7 +906,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       [contextGraphId, ethers.getAddress(agent)],
       this.signer,
       'remove context graph participant agent',
-    );
+    // Also on failure: a submission whose receipt was lost may still have landed.
+    ).finally(() => this.contextGraphAuthorityIndex?.dropProjections());
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -1223,6 +1228,37 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     options.signal?.throwIfAborted();
     const base = this.requireContextGraphStorage();
+    const index = this.contextGraphAuthorityIndex;
+    if (index !== undefined) {
+      // Reject invalid indexed ids before deployment discovery or any log scan.
+      const authorityIndexId = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
+      // Served from the index's last completed projection while it is younger
+      // than `chain.indexTickMs`; the scan below is the refresh, unchanged.
+      // Keyed by the contract bound NOW (deployment = chainId + Hub), never by
+      // the bare numeric id, which another deployment is free to reuse. An id
+      // the cached projection does not contain always forces a fresh scan, so a
+      // graph registered seconds ago is visible as quickly as it was before.
+      const projection = await index.projection({
+        scope: [this.deploymentId, (await base.getAddress()).toLowerCase()].join(':'),
+        signal: options.signal,
+        accepts: (cached) => cached.view.has(authorityIndexId),
+        onServed: options.onContextGraphAuthorityProjectionServed,
+        refresh: () => this.scanContextGraphAuthorityProjection(base, options),
+      });
+      options.signal?.throwIfAborted();
+      // Absent is explicit: `resolve` throws. It never degrades to a default.
+      const state = projection.view.resolve(authorityIndexId);
+      return Object.freeze({
+        chainId: projection.chainId,
+        governanceContract: projection.contractAddress,
+        ...state,
+        contextGraphId: contextGraphId.toString(10),
+        ownershipEra: state.ownershipEra.toString(10),
+        policyVersion: state.policyVersion.toString(10),
+        rosterVersion: state.rosterVersion.toString(10),
+        sourceBlockNumber: state.sourceBlockNumber.toString(10),
+      });
+    }
     return this.readTipProvider(
       'getContextGraphAuthoritySnapshot',
       async (provider) => {
@@ -1235,20 +1271,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // wall-clock times never shared a bound either).
         const finalized = await resolveEvmFinalityAnchorBlockV1({
           finalityConfirmations: this.finalityConfirmations,
-          readHead: () => (this.contextGraphAuthorityIndex === undefined
-            ? provider.getBlock('latest')
-            : readEvmContextGraphAuthorityIndexRpcV1(
-                'getContextGraphAuthoritySnapshot chain head',
-                () => provider.getBlock('latest'),
-                options.signal,
-              )),
-          readBlockAt: (anchorBlockNumber) => (this.contextGraphAuthorityIndex === undefined
-            ? provider.getBlock(anchorBlockNumber)
-            : readEvmContextGraphAuthorityIndexRpcV1(
-                `getContextGraphAuthoritySnapshot anchor block ${anchorBlockNumber}`,
-                () => provider.getBlock(anchorBlockNumber),
-                options.signal,
-              )),
+          readHead: () => provider.getBlock('latest'),
+          readBlockAt: (anchorBlockNumber) => provider.getBlock(anchorBlockNumber),
           unavailable: contextGraphAuthorityAnchorUnavailableV1,
         });
         const finalizedHash = finalized.hash;
@@ -1262,36 +1286,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           contextGraphId,
           { blockTag: finalized.number },
         );
-        const authoritySource: EvmContextGraphAuthoritySource =
-          this.contextGraphAuthorityIndex !== undefined ? await (async () => {
-          // Reject invalid indexed ids before deployment discovery or any log scan.
-          const authorityIndexId = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
-          // Deploy block only — immutable, so a cache hit costs no head probe.
-          const deploymentBlockNumber = await this.resolveContractDeployBlockNumber(
-            contractAddress,
-            'getContextGraphAuthoritySnapshot',
-            'ContextGraphStorage',
-          );
-          const indexed = await readEvmContextGraphAuthorityStateV1({
-            index: this.contextGraphAuthorityIndex!,
-            deploymentId: this.deploymentId,
-            contract,
-            contractAddress,
-            provider,
-            deploymentBlockNumber,
-            finalized: { number: finalized.number, hash: finalizedHash },
-            pageSize: this.cgRegistryScanPageSize,
-            finalityConfirmations: this.finalityConfirmations,
-            stabilizationOperation: 'resolution',
-            contextGraphId: authorityIndexId,
-            signal: options.signal,
-          });
-          return Object.freeze({
-            kind: 'indexed' as const,
-            readSnapshot: async () => indexed.value,
-            stabilize: indexed.stabilize,
-          });
-        })() : (() => {
+        const authoritySource: EvmContextGraphAuthoritySource = (() => {
           const cache = this.contextGraphAuthorityHistory;
           const cacheKey = [
             this.deploymentId,
@@ -1397,13 +1392,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         })();
         const authority = await resolveEvmContextGraphAuthoritySource(authoritySource);
         options.signal?.throwIfAborted();
-        const chainId = (await (this.contextGraphAuthorityIndex === undefined
-          ? provider.getNetwork()
-          : readEvmContextGraphAuthorityIndexRpcV1(
-              'getContextGraphAuthoritySnapshot network',
-              () => provider.getNetwork(),
-              options.signal,
-            ))).chainId.toString(10);
+        const chainId = (await provider.getNetwork()).chainId.toString(10);
         const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
           chainId,
           governanceContract: contractAddress,
@@ -1415,17 +1404,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           sourceBlockNumber: authority.state.sourceBlockNumber.toString(10),
         });
         // Verify the combined current-state + generation view only after both
-        // reads settle. The legacy reader publishes its checkpoint here; the
-        // shared index has already committed complete pages and this final
-        // check prevents a changed head from escaping as one mixed snapshot.
+        // reads settle. The legacy reader publishes its checkpoint here, so a
+        // changed head cannot escape as one mixed snapshot.
         await authority.stabilize();
         return snapshot;
       },
       {
-        // The caller signal remains bound to finalized/current/stabilization
-        // point reads. Shared index page reads explicitly rebind the narrower
-        // index lifecycle signal above, so one cancelled waiter does not abort
-        // transport work still serving another waiter.
         signal: options.signal,
         // Both branches raise ContextGraphAuthorityIndexRetryableError for a
         // moved anchor, a cached checkpoint ahead of this endpoint and an
@@ -1438,12 +1422,110 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             || isRpcEndpointFailoverEligible(error)
           )
         ),
+        // The legacy history scan retains the ordinary wide-scan policy.
+        policy: 'wideLogScan',
+      },
+    );
+  }
+
+  /**
+   * One complete indexed authority read — head, cursor admission, scan,
+   * stabilization fence — handed over only AFTER the fence, so the projection
+   * cache never retains a scan whose anchor moved underneath it.
+   */
+  private scanContextGraphAuthorityProjection(
+    base: Contract,
+    options: ChainReadOptions,
+  ): Promise<ContextGraphAuthorityIndexCompletedProjection> {
+    return this.readTipProvider(
+      'getContextGraphAuthoritySnapshot',
+      async (provider) => {
+        options.signal?.throwIfAborted();
+        // One anchor for the whole projection, at the operator-configured
+        // finality depth rather than at the endpoint's `finalized` tag. Peer
+        // agreement comes from the event-derived generations, never from the
+        // observation bound.
+        const observed: { head?: Awaited<ReturnType<typeof provider.getBlock>> } = {};
+        const finalized = await resolveEvmFinalityAnchorBlockV1({
+          finalityConfirmations: this.finalityConfirmations,
+          readHead: async () => {
+            observed.head = await readEvmContextGraphAuthorityIndexRpcV1(
+              'getContextGraphAuthoritySnapshot chain head',
+              () => provider.getBlock('latest'),
+              options.signal,
+            );
+            return observed.head;
+          },
+          readBlockAt: (anchorBlockNumber) => readEvmContextGraphAuthorityIndexRpcV1(
+            `getContextGraphAuthoritySnapshot anchor block ${anchorBlockNumber}`,
+            () => provider.getBlock(anchorBlockNumber),
+            options.signal,
+          ),
+          unavailable: contextGraphAuthorityAnchorUnavailableV1,
+        });
+        const contract = base.connect(provider) as Contract;
+        const contractAddress = (await contract.getAddress()).toLowerCase();
+        // Deploy block only — immutable, so a cache hit costs no head probe.
+        const deploymentBlockNumber = await this.resolveContractDeployBlockNumber(
+          contractAddress,
+          'getContextGraphAuthoritySnapshot',
+          'ContextGraphStorage',
+        );
+        const indexed = await readEvmContextGraphAuthorityViewV1({
+          index: this.contextGraphAuthorityIndex!,
+          deploymentId: this.deploymentId,
+          contract,
+          contractAddress,
+          provider,
+          deploymentBlockNumber,
+          finalized: { number: finalized.number, hash: finalized.hash },
+          pageSize: this.cgRegistryScanPageSize,
+          finalityConfirmations: this.finalityConfirmations,
+          stabilizationOperation: 'resolution',
+          signal: options.signal,
+        });
+        options.signal?.throwIfAborted();
+        const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
+          'getContextGraphAuthoritySnapshot network',
+          () => provider.getNetwork(),
+          options.signal,
+        )).chainId.toString(10);
+        // The shared index has already committed complete pages; this final
+        // check prevents a changed head from escaping as one mixed projection.
+        await indexed.stabilize();
+        return Object.freeze({
+          scope: [this.deploymentId, contractAddress].join(':'),
+          chainId,
+          contractAddress,
+          finalized: { number: finalized.number, hash: finalized.hash },
+          // The anchor resolver already failed closed on an unusable head.
+          head: {
+            number: observed.head!.number,
+            hash: observed.head!.hash!,
+            timestampSeconds: evmContextGraphAuthorityHeadTimestampSecondsV1(observed.head),
+          },
+          view: indexed.value,
+        });
+      },
+      {
+        // The caller signal remains bound to finalized/stabilization point
+        // reads. Shared index page reads explicitly rebind the narrower index
+        // lifecycle signal, so one cancelled waiter does not abort transport
+        // work still serving another waiter.
+        signal: options.signal,
+        // Recognized BY TYPE, ahead of `isRpcEndpointFailoverEligible`'s
+        // message regex, so an authority read fails over instead of aborting
+        // the catalog admission it gates.
+        isRetryable: (error: unknown) => (
+          !options.signal?.aborted && (
+            isContextGraphAuthorityIndexRetryableError(error)
+            || isRpcEndpointFailoverEligible(error)
+          )
+        ),
         // A durable index gives every physical request its own 30s deadline and
         // checkpoints each page, so its complete projection has no aggregate
-        // cap. The legacy history scan retains the ordinary wide-scan policy.
-        policy: this.contextGraphAuthorityIndex === undefined
-          ? 'wideLogScan'
-          : 'durablePagedLogScan',
+        // cap.
+        policy: 'durablePagedLogScan',
       },
     );
   }

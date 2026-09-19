@@ -3626,7 +3626,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const resolution = await raceVmReconcileAbort(
             this.resolveFinalizedContextGraphAuthorityTargetsV1(
               [localCgId],
-              { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+              {
+                signal: readSignal,
+                onRpcRead: evidence.markRpcAttempt,
+                onProjectionServed: evidence.observeProjectionServed,
+              },
             ),
             signal,
           );
@@ -3646,7 +3650,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
               this.contextGraphAuthorityReaderCapability.reader
                 .getContextGraphAuthoritySnapshot(
                   target.expectedOnChainId,
-                  { signal: readSignal },
+                  {
+                    signal: readSignal,
+                    onContextGraphAuthorityProjectionServed: evidence.observeProjectionServed,
+                  },
                 ),
               signal,
             );

@@ -91,6 +91,8 @@ import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
+import { resolveContextGraphAuthorityIndexTickMs } from
+  './context-graph-authority-index-projection.js';
 import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
   './evm-context-graph-authority-index-reader.js';
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
@@ -1387,7 +1389,8 @@ export class EVMChainAdapterBase {
     this.contextGraphAuthorityIndex = config.localContextGraphAuthorityIndexStore === undefined
       ? undefined
       : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore,
-          config.contextGraphAuthorityIndexBootstrap);
+          config.contextGraphAuthorityIndexBootstrap,
+          { tickMs: resolveContextGraphAuthorityIndexTickMs(config.indexTickMs) });
     const authorityIndexReader = this.contextGraphAuthorityIndex === undefined
       ? undefined
       : createEvmContextGraphAuthorityIndexRevisionReaderV1({

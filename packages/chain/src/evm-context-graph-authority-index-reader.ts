@@ -6,7 +6,6 @@ import type {
   ContextGraphAuthoritySnapshot,
   ContextGraphAuthorityIndexRevisionReader,
 } from './chain-adapter.js';
-import { CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS } from './chain-adapter.js';
 import {
   ContextGraphAuthorityIndex,
   ContextGraphAuthorityIndexRetryableError,
@@ -15,6 +14,11 @@ import {
 } from './context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
+import type {
+  ContextGraphAuthorityIndexCompletedProjection,
+  ContextGraphAuthorityIndexProjection,
+  ContextGraphAuthorityIndexView,
+} from './context-graph-authority-index-projection.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import {
   assertContextGraphAuthorityIndexId,
@@ -236,16 +240,24 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
   });
 }
 
-/** Resolve one state while keeping the persisted checkpoint private to the index. */
-export function readEvmContextGraphAuthorityStateV1(
-  input: EvmContextGraphAuthorityIndexReadInputV1 & Readonly<{
-    contextGraphId: ContextGraphAuthorityIndexId;
-  }>,
-): Promise<EvmContextGraphAuthorityIndexReadV1<ContextGraphAuthorityIndexState>> {
+/** Scan to the anchor while keeping the persisted checkpoint private to the index. */
+export function readEvmContextGraphAuthorityViewV1(
+  input: EvmContextGraphAuthorityIndexReadInputV1,
+): Promise<EvmContextGraphAuthorityIndexReadV1<ContextGraphAuthorityIndexView>> {
   return readEvmContextGraphAuthorityIndexProjectionV1(
     input,
-    (scan) => input.index.resolve({ ...scan, contextGraphId: input.contextGraphId }),
+    (scan) => input.index.view(scan),
   );
+}
+
+/**
+ * The head block's CHAIN time in seconds, or NaN when the endpoint gave none.
+ * NaN is deliberate: the projection cache refuses to retain a projection whose
+ * chain-time guard it could never evaluate, so such a read stays uncached.
+ */
+export function evmContextGraphAuthorityHeadTimestampSecondsV1(head: unknown): number {
+  const timestamp = (head as { timestamp?: unknown } | null | undefined)?.timestamp;
+  return typeof timestamp === 'number' ? timestamp : Number.NaN;
 }
 
 interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
@@ -364,7 +376,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   const assertOpen = (): void => {
     if (closed) throw new DOMException('Context Graph authority index reader is closed', 'AbortError');
   };
-  const runFinalizedProjection = async <T>(
+  const scanFinalizedProjection = async <T>(
     operationLabel: string,
     options: ChainReadOptions,
     project: (
@@ -372,6 +384,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       context: Readonly<{
         provider: JsonRpcProvider;
         contractAddress: string;
+        finalized: Readonly<{ number: number; hash: string }>;
+        head: ContextGraphAuthorityIndexCompletedProjection['head'];
       }>,
     ) => Promise<T>,
   ): Promise<T> => {
@@ -395,13 +409,17 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // — both peers fenced each other's catalog traffic and the replica lost
         // rows while reporting itself complete. Head and anchor come from the
         // same provider, so the pair can never be spliced across endpoints.
+        const observed: { head?: Awaited<ReturnType<JsonRpcProvider['getBlock']>> } = {};
         const finalized = await resolveEvmFinalityAnchorBlockV1({
           finalityConfirmations: dependencies.finalityConfirmations(),
-          readHead: () => readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} chain head`,
-            () => provider.getBlock('latest'),
-            options.signal,
-          ),
+          readHead: async () => {
+            observed.head = await readEvmContextGraphAuthorityIndexRpcV1(
+              `${operationLabel} chain head`,
+              () => provider.getBlock('latest'),
+              options.signal,
+            );
+            return observed.head;
+          },
           readBlockAt: (anchorBlockNumber) => readEvmContextGraphAuthorityIndexRpcV1(
             `${operationLabel} anchor block ${anchorBlockNumber}`,
             () => provider.getBlock(anchorBlockNumber),
@@ -430,7 +448,17 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             finalityConfirmations: dependencies.finalityConfirmations(),
             stabilizationOperation: operationLabel,
           },
-          (scan) => project(scan, { provider, contractAddress }),
+          (scan) => project(scan, {
+            provider,
+            contractAddress,
+            finalized: { number: finalized.number, hash: finalized.hash },
+            // The anchor resolver already failed closed on an unusable head.
+            head: {
+              number: observed.head!.number,
+              hash: observed.head!.hash!,
+              timestampSeconds: evmContextGraphAuthorityHeadTimestampSecondsV1(observed.head),
+            },
+          }),
         );
         await indexed.stabilize();
         return indexed.value;
@@ -448,6 +476,65 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     );
   };
 
+  /**
+   * Every finalized READ of this capability. It is answered from the index's
+   * last completed projection while that is younger than `chain.indexTickMs`;
+   * otherwise `scanFinalizedProjection` above runs exactly as it always has
+   * (head, cursor admission, scan, stabilize) and its result is kept. The
+   * projection is handed over only AFTER the stabilization fence, so a scan
+   * whose anchor moved is never retained.
+   *
+   * `snapshots.refresh` is NOT routed through here: the core's background loop
+   * must advance the durable cursor every pass and feeds only the servable
+   * durable snapshot.
+   */
+  const runFinalizedProjection = async <T>(
+    operationLabel: string,
+    options: ChainReadOptions,
+    accepts: (view: ContextGraphAuthorityIndexView) => boolean,
+    read: (projection: ContextGraphAuthorityIndexProjection) => T,
+  ): Promise<T> => {
+    assertOpen();
+    options.signal?.throwIfAborted();
+    await dependencies.initialize();
+    assertOpen();
+    options.signal?.throwIfAborted();
+    // Keyed by the contract this adapter is bound to NOW, never by the scope a
+    // previous read happened to see: a rotated ContextGraphStorage is a miss
+    // even if nothing told the index to clear.
+    const scope = [
+      dependencies.deploymentId,
+      (await dependencies.requireContextGraphStorage().getAddress()).toLowerCase(),
+    ].join(':');
+    const projection = await dependencies.index.projection({
+      scope,
+      signal: options.signal,
+      // A cached view that cannot even be projected (an ambiguous name hash)
+      // is not an answer; the fresh read reports that failure itself.
+      accepts: (cached) => {
+        try { return accepts(cached.view); } catch { return false; }
+      },
+      onServed: options.onContextGraphAuthorityProjectionServed,
+      refresh: () => scanFinalizedProjection(
+        operationLabel,
+        options,
+        async (scan, { provider, contractAddress, finalized, head }) => {
+          const view = await dependencies.index.view(scan);
+          const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} network`,
+            () => provider.getNetwork(),
+            options.signal,
+          )).chainId.toString(10);
+          return Object.freeze({
+            scope: scan.scope, chainId, contractAddress, finalized, head, view,
+          });
+        },
+      ),
+    });
+    options.signal?.throwIfAborted();
+    return read(projection);
+  };
+
   const resolveFinalizedIdsByNameHashes = async (
     rawNameHashes: readonly string[],
     options: ChainReadOptions,
@@ -459,27 +546,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return runFinalizedProjection(
       operationLabel,
       options,
-      async (scan) => {
+      (view) => view.statesByNameHashes(nameHashes).size === nameHashes.length,
+      ({ view }) => {
         const resolved = new Map<string, bigint>();
-        for (
-          let offset = 0;
-          offset < nameHashes.length;
-          offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
-        ) {
-          options.signal?.throwIfAborted();
-          const ownedNameHashes = nameHashes.slice(
-            offset,
-            offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
-          );
-          const states = await dependencies.index.statesByNameHashes({
-            ...scan,
-            nameHashes: ownedNameHashes,
-          });
-          options.signal?.throwIfAborted();
-          for (const nameHash of ownedNameHashes) {
-            const state = states.get(nameHash);
-            if (state !== undefined) resolved.set(nameHash, BigInt(state.contextGraphId));
-          }
+        for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
+          resolved.set(nameHash, BigInt(state.contextGraphId));
         }
         return resolved;
       },
@@ -497,37 +568,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return runFinalizedProjection(
       operationLabel,
       options,
-      async (scan, { provider, contractAddress }) => {
-        const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
-          `${operationLabel} network`,
-          () => provider.getNetwork(),
-          options.signal,
-        )).chainId.toString(10);
+      (view) => view.statesByNameHashes(nameHashes).size === nameHashes.length,
+      ({ view, chainId, contractAddress }) => {
         const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
-        for (
-          let offset = 0;
-          offset < nameHashes.length;
-          offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
-        ) {
-          options.signal?.throwIfAborted();
-          const ownedNameHashes = nameHashes.slice(
-            offset,
-            offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
-          );
-          const states = await dependencies.index.statesByNameHashes({
-            ...scan,
-            nameHashes: ownedNameHashes,
-          });
-          options.signal?.throwIfAborted();
-          for (const nameHash of ownedNameHashes) {
-            const state = states.get(nameHash);
-            if (state !== undefined) {
-              snapshots.set(
-                nameHash,
-                authoritySnapshotV1(state, chainId, contractAddress),
-              );
-            }
-          }
+        for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
+          snapshots.set(nameHash, authoritySnapshotV1(state, chainId, contractAddress));
         }
         return snapshots;
       },
@@ -552,7 +597,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         return dependencies.index.exportSnapshot(request);
       },
       refresh(options: ChainReadOptions = {}): Promise<void> {
-        return runFinalizedProjection('refreshContextGraphAuthorityIndex', options,
+        return scanFinalizedProjection('refreshContextGraphAuthorityIndex', options,
           (scan) => dependencies.index.refresh(scan));
       },
     } satisfies ContextGraphAuthorityIndexSnapshots),
@@ -610,30 +655,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       return runFinalizedProjection(
         'readContextGraphAuthorityIndexRevisions',
         options,
-        async (scan) => {
-          const revisions = new Map<ContextGraphAuthorityIndexId, string>();
-          for (
-            let offset = 0;
-            offset < targets.length;
-            offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
-          ) {
-            options.signal?.throwIfAborted();
-            const ownedTargets = targets.slice(
-              offset,
-              offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
-            );
-            const projected = await dependencies.index.revisions({
-              ...scan,
-              contextGraphIds: ownedTargets,
-            });
-            options.signal?.throwIfAborted();
-            for (const target of ownedTargets) {
-              const revision = projected.get(target);
-              if (revision !== undefined) revisions.set(target, revision);
-            }
-          }
-          return revisions;
-        },
+        (view) => view.states(targets).size === targets.length,
+        ({ view }) => view.revisions(targets),
       );
     },
     async readContextGraphAuthorityIndexSnapshots(
@@ -649,40 +672,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       return runFinalizedProjection(
         'readContextGraphAuthorityIndexSnapshots',
         options,
-        async (scan, { provider, contractAddress }) => {
-          const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
-            'readContextGraphAuthorityIndexSnapshots network',
-            () => provider.getNetwork(),
-            options.signal,
-          )).chainId.toString(10);
+        (view) => view.states(targets).size === targets.length,
+        ({ view, chainId, contractAddress }) => {
           const snapshots = new Map<
             ContextGraphAuthorityIndexId,
             ContextGraphAuthoritySnapshot
           >();
-          for (
-            let offset = 0;
-            offset < targets.length;
-            offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
-          ) {
-            options.signal?.throwIfAborted();
-            const ownedTargets = targets.slice(
-              offset,
-              offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
-            );
-            const states = await dependencies.index.states({
-              ...scan,
-              contextGraphIds: ownedTargets,
-            });
-            options.signal?.throwIfAborted();
-            for (const target of ownedTargets) {
-              const state = states.get(target);
-              if (state !== undefined) {
-                snapshots.set(
-                  target,
-                  authoritySnapshotV1(state, chainId, contractAddress),
-                );
-              }
-            }
+          for (const [target, state] of view.states(targets)) {
+            snapshots.set(target, authoritySnapshotV1(state, chainId, contractAddress));
           }
           return snapshots;
         },

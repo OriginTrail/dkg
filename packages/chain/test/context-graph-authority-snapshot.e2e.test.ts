@@ -47,6 +47,11 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     const adapter = new EVMChainAdapter({
       ...makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP),
       localContextGraphAuthorityIndexStore: store,
+      // Every step below mutates authority through a raw contract handle and
+      // asserts the very next read. That is a statement about the SCAN, so the
+      // projection cache is reduced to its 1ms minimum rather than left to
+      // answer the read from before the write for `chain.indexTickMs`.
+      indexTickMs: 1,
     });
     const owner = adapter.getSignerAddress();
     const retainedAgent = new Wallet(HARDHAT_KEYS.EXTRA1).address;

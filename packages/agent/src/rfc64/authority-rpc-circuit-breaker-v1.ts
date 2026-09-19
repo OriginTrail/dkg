@@ -2,6 +2,7 @@
 
 import {
   isRpcEndpointsExhaustedError,
+  type ContextGraphAuthorityProjectionServedEvidence,
   type RpcEndpointsExhaustedErrorLike,
 } from '@origintrail-official/dkg-chain';
 
@@ -37,6 +38,24 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
 export interface Rfc64AuthorityRpcProbeEvidenceV1 {
   /** Record that this operation actually exercised the governed RPC pool. */
   markRpcAttempt(): void;
+  /**
+   * Record how the chain adapter answered one finalized authority read; pass
+   * it as `ChainReadOptions.onContextGraphAuthorityProjectionServed`.
+   *
+   * Callers mark an attempt BEFORE they read, because until the projection
+   * cache existed every such read reached the pool. That is no longer true, so
+   * the adapter's own account refines the mark:
+   *  - `scan` reached the pool now: health.
+   *  - `cache` younger than `tickMs`: the pool answered a complete scan that
+   *    recently, and it counts as health provided that scan started AFTER the
+   *    outstanding exhaustion. Without this, a node served entirely from the
+   *    cache would keep being judged by a failure it has long recovered from.
+   *  - anything else — `stale-cache` (the refresh FAILED and an older
+   *    projection answered instead) or a cache hit that predates the
+   *    exhaustion: the operation succeeds for its caller but proves nothing
+   *    about the pool, and it voids this operation's `markRpcAttempt`.
+   */
+  observeProjectionServed(evidence: ContextGraphAuthorityProjectionServedEvidence): void;
 }
 
 export interface Rfc64AuthorityReadRunOptionsV1 {
@@ -129,6 +148,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   readonly #random: () => number;
   #consecutiveExhaustions = 0;
   #retryAtMs = 0;
+  #exhaustedAtMs = 0;
   #tail: Promise<void> = Promise.resolve();
   #lifecycleAbort = new AbortController();
 
@@ -183,14 +203,33 @@ export class Rfc64AuthorityReadCoordinatorV1 {
         }
 
         let rpcAttempted = false;
+        let projectionHealthy = false;
+        let projectionUnproven = false;
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
           markRpcAttempt: () => { rpcAttempted = true; },
+          observeProjectionServed: (served: ContextGraphAuthorityProjectionServedEvidence) => {
+            if (served.source === 'scan') {
+              projectionHealthy = true;
+            } else if (
+              served.source === 'cache'
+              && served.ageMs < served.tickMs
+              && this.#now() - served.ageMs > this.#exhaustedAtMs
+            ) {
+              projectionHealthy = true;
+            } else {
+              projectionUnproven = true;
+            }
+          },
         });
         try {
           const result = await operation(runSignal, evidence);
           // A local/cache-only answer is useful to its caller, but cannot
-          // prove that a previously exhausted provider pool has recovered.
-          if (this.#consecutiveExhaustions === 0 || rpcAttempted) {
+          // prove that a previously exhausted provider pool has recovered. An
+          // answer served DESPITE a failed refresh proves the opposite.
+          if (
+            this.#consecutiveExhaustions === 0
+            || (!projectionUnproven && (rpcAttempted || projectionHealthy))
+          ) {
             this.#consecutiveExhaustions = 0;
             this.#retryAtMs = 0;
           }
@@ -255,6 +294,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
 
   #open(error: RpcEndpointsExhaustedErrorLike): void {
     this.#consecutiveExhaustions += 1;
+    this.#exhaustedAtMs = this.#now();
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);
     const exponential = Math.min(
       this.#maxBackoffMs,

@@ -41,6 +41,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   resolveRpcRequestGovernorPolicy,
+  resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
@@ -229,6 +230,8 @@ export interface NetworkConfig {
      * A value of 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /** See `ChainConfig.indexTickMs`. */
+    indexTickMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint | string | number;
     /**
@@ -375,6 +378,15 @@ export interface ChainConfig {
    * successor-block buffer. Defaults to 1.
    */
   finalityConfirmations?: number;
+  /**
+   * How long (ms) one completed finalized Context Graph authority projection
+   * answers RFC-64 authority reads before the next read refreshes it from the
+   * chain. A lower value observes on-chain authority changes sooner and costs
+   * proportionally more RPC. After a failed refresh the previous projection
+   * keeps answering until it is `max(3 × indexTickMs, 15s)` old, then those
+   * reads fail closed. A positive integer; defaults to 6000.
+   */
+  indexTickMs?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */
   maxFeePerGasWei?: bigint | string | number;
 }
@@ -1751,6 +1763,14 @@ export function resolveChainConfig(
     : net?.finalityConfirmations;
   if (operatorHasFinalityConfirmations || finalityConfirmations !== undefined) {
     merged.finalityConfirmations = resolveFinalityConfirmations(finalityConfirmations);
+  }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasIndexTickMs = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'indexTickMs');
+  const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
+  if (operatorHasIndexTickMs || indexTickMs !== undefined) {
+    merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
   }
   const maxFeePerGasWei = parseWeiFloor(
     cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,
