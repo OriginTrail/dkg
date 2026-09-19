@@ -17,6 +17,11 @@ export {
 export { assertContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 export {
+  DEFAULT_CONTEXT_GRAPH_AUTHORITY_INDEX_TICK_MS,
+  resolveContextGraphAuthorityIndexTickMs,
+  type ContextGraphAuthorityProjectionServedEvidence,
+} from './context-graph-authority-index-projection.js';
+export {
   type ContextGraphAuthorityHistoryCheckpointV1,
   type ContextGraphAuthorityHistoryState,
   type ContextGraphAuthorityHistoryStore,

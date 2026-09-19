@@ -169,6 +169,76 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
   });
 
+  describe('projection-cache evidence', () => {
+    const T = 6_000;
+    async function halfOpenBreaker() {
+      const clock = { now: 10_000 };
+      const breaker = new Rfc64AuthorityReadCoordinatorV1({
+        baseBackoffMs: 100,
+        maxBackoffMs: 800,
+        jitterRatio: 0,
+        now: () => clock.now,
+      });
+      await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+        .rejects.toBeInstanceOf(ChainRpcTransportError);
+      clock.now += 100;
+      expect(breaker.snapshot().state).toBe('half-open');
+      return { breaker, clock };
+    }
+
+    it('counts a cache hit younger than T, fetched after the exhaustion, as RPC health', async () => {
+      const { breaker, clock } = await halfOpenBreaker();
+      clock.now += 50;
+      // No markRpcAttempt: the projection's own account is the whole evidence.
+      await breaker.run(undefined, async (_signal, evidence) => {
+        evidence.observeProjectionServed({ source: 'cache', ageMs: 40, tickMs: T });
+        return 'served-from-cache';
+      });
+      expect(breaker.snapshot().state).toBe('closed');
+    });
+
+    it('counts a completed scan as RPC health', async () => {
+      const { breaker } = await halfOpenBreaker();
+      await breaker.run(undefined, async (_signal, evidence) => {
+        evidence.observeProjectionServed({ source: 'scan', ageMs: 0, tickMs: T });
+        return 'scanned';
+      });
+      expect(breaker.snapshot().state).toBe('closed');
+    });
+
+    it('does not let a projection served despite a failed refresh close the circuit', async () => {
+      const { breaker } = await halfOpenBreaker();
+      await breaker.run(undefined, async (_signal, evidence) => {
+        // Callers mark BEFORE they read; the stale answer voids that mark.
+        evidence.markRpcAttempt();
+        evidence.observeProjectionServed({ source: 'stale-cache', ageMs: T + 1, tickMs: T });
+        return 'served-stale';
+      });
+      expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
+    });
+
+    it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
+      const { breaker } = await halfOpenBreaker();
+      await breaker.run(undefined, async (_signal, evidence) => {
+        evidence.markRpcAttempt();
+        // Fetched 101ms ago: 1ms BEFORE the pool was seen exhausted.
+        evidence.observeProjectionServed({ source: 'cache', ageMs: 101, tickMs: T });
+        return 'served-from-older-cache';
+      });
+      expect(breaker.snapshot().state).toBe('half-open');
+    });
+
+    it('does not treat a cache answer at or past T as health', async () => {
+      const { breaker, clock } = await halfOpenBreaker();
+      clock.now += 2 * T;
+      await breaker.run(undefined, async (_signal, evidence) => {
+        evidence.observeProjectionServed({ source: 'cache', ageMs: T, tickMs: T });
+        return 'served-at-t';
+      });
+      expect(breaker.snapshot().state).toBe('half-open');
+    });
+  });
+
   it('applies deterministic fleet jitter when no provider hint overrides it', async () => {
     let now = 0;
     const breaker = new Rfc64AuthorityReadCoordinatorV1({

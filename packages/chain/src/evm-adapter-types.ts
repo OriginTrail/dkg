@@ -49,6 +49,15 @@ export interface EVMAdapterBaseConfig {
    */
   finalityConfirmations?: number;
   /**
+   * `chain.indexTickMs` (T): how long one completed finalized Context Graph
+   * authority projection answers reads before the next read refreshes it, in
+   * milliseconds. After a FAILED refresh the previous projection keeps
+   * answering until it is `max(3T, 15s)` old, then reads fail closed. A
+   * positive integer; defaults to 6000. Affects only the durable authority
+   * index, so it is inert without `localContextGraphAuthorityIndexStore`.
+   */
+  indexTickMs?: number;
+  /**
    * Optional operator cap for transaction fee-per-gas fields (wei). Applied to
    * EIP-1559 maxFee/maxPriorityFee and legacy gasPrice after ethers populates a
    * transaction. Omit for provider-selected fees.

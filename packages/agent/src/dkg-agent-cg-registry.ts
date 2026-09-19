@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -719,11 +719,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetsV1(
     this: DKGAgent,
     contextGraphIds: readonly string[],
-    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
+    options: {
+      signal?: AbortSignal;
+      onRpcRead?: () => void;
+      /** Forwarded to every finalized index read; see the authority RPC circuit. */
+      onProjectionServed?: ChainReadOptions['onContextGraphAuthorityProjectionServed'];
+    } = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
-    const chainReadOptions = options.signal === undefined
-      ? {}
-      : { signal: options.signal };
+    const chainReadOptions: ChainReadOptions = {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.onProjectionServed === undefined ? {} : {
+        onContextGraphAuthorityProjectionServed: options.onProjectionServed,
+      }),
+    };
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
       const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
@@ -870,7 +878,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetV1(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
+    options: {
+      signal?: AbortSignal;
+      onRpcRead?: () => void;
+      onProjectionServed?: ChainReadOptions['onContextGraphAuthorityProjectionServed'];
+    } = {},
   ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
     if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
       throw new Error(

@@ -1841,7 +1841,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
             contextGraphId,
-            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            {
+              signal: readSignal,
+              onRpcRead: evidence.markRpcAttempt,
+              onProjectionServed: evidence.observeProjectionServed,
+            },
           );
           readSignal.throwIfAborted();
           if (target === null) return null;
@@ -1854,7 +1858,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                 this.contextGraphAuthorityReaderCapability,
               ).getContextGraphAuthoritySnapshot(
                 expectedOnChainId,
-                { signal: readSignal },
+                {
+                  signal: readSignal,
+                  onContextGraphAuthorityProjectionServed: evidence.observeProjectionServed,
+                },
               ),
             expectedOnChainId,
           );
@@ -2087,7 +2094,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               return await readSnapshots.call(
                 indexedReader,
                 targets,
-                { signal: readSignal },
+                {
+                  signal: readSignal,
+                  onContextGraphAuthorityProjectionServed: evidence.observeProjectionServed,
+                },
               );
             } finally {
               await indexedReader.whenIdle();
@@ -2140,7 +2150,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
             registeredCandidates,
-            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            {
+              signal: readSignal,
+              onRpcRead: evidence.markRpcAttempt,
+              onProjectionServed: evidence.observeProjectionServed,
+            },
           );
         } finally {
           await indexedReader.whenIdle();
@@ -2205,7 +2219,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             async (readSignal, evidence) => {
               try {
                 evidence.markRpcAttempt();
-                return await readSnapshots.call(indexedReader, targets, { signal: readSignal });
+                return await readSnapshots.call(indexedReader, targets, {
+                  signal: readSignal,
+                  onContextGraphAuthorityProjectionServed: evidence.observeProjectionServed,
+                });
               } finally {
                 await indexedReader.whenIdle();
               }

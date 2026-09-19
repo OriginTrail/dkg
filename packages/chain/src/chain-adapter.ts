@@ -4,6 +4,8 @@ import type {
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
+import type { ContextGraphAuthorityProjectionServedEvidence } from
+  './context-graph-authority-index-projection.js';
 import type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 export type { ContextGraphAuthorityIndexId } from
@@ -1294,6 +1296,16 @@ export interface PreBroadcastSignal {
 
 export interface ChainReadOptions {
   signal?: AbortSignal;
+  /**
+   * Finalized Context Graph authority reads only: told how the read was
+   * answered — by a scan that exercised the RPC pool, by the projection cache
+   * inside `chain.indexTickMs`, or by a stale projection after a FAILED
+   * refresh. A health governor needs the distinction; every other reader
+   * ignores it and no other read reports it.
+   */
+  onContextGraphAuthorityProjectionServed?: (
+    evidence: ContextGraphAuthorityProjectionServedEvidence,
+  ) => void;
 }
 
 /**

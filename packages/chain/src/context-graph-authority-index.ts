@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  contextGraphAuthorityIndexStateRevision,
   type ContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexState,
   type ContextGraphAuthorityIndexStore,
@@ -24,6 +23,13 @@ import { ContextGraphAuthorityIndexRetryableError } from
 import { ContextGraphAuthorityIndexRepository } from
   './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
+import {
+  ContextGraphAuthorityIndexProjectionCache,
+  ContextGraphAuthorityIndexView,
+  type ContextGraphAuthorityIndexProjection,
+  type ContextGraphAuthorityIndexProjectionOptions,
+  type ContextGraphAuthorityIndexProjectionReadInput,
+} from './context-graph-authority-index-projection.js';
 import { ContextGraphAuthorityIndexBootstrapCoordinator } from
   './context-graph-authority-index-bootstrap.js';
 import { ContextGraphAuthorityIndexActivity, waitForAuthorityIndexOperation } from
@@ -129,16 +135,39 @@ export class ContextGraphAuthorityIndex {
   readonly #bootstrapCoordinator: ContextGraphAuthorityIndexBootstrapCoordinator | undefined;
   readonly #servable = new Map<string, readonly ServableCheckpoint[]>();
   readonly #servableEpochs = new Map<string, number>();
+  /**
+   * Last completed, TAIL-INCLUSIVE projection per scope. Strictly separate
+   * from `#servable`: `exportSnapshot` reads only that map, so the unsettled
+   * tail a cached projection carries can never be served to an edge.
+   */
+  readonly #projections: ContextGraphAuthorityIndexProjectionCache;
   #closed = false;
   #lifecycleAbort = new AbortController();
 
   constructor(
     readonly localStore: ContextGraphAuthorityIndexStore,
     private readonly bootstrap?: ContextGraphAuthorityIndexBootstrap,
+    projection: ContextGraphAuthorityIndexProjectionOptions = {},
   ) {
+    this.#projections = new ContextGraphAuthorityIndexProjectionCache(projection);
     this.#bootstrapCoordinator = bootstrap === undefined ? undefined
       : new ContextGraphAuthorityIndexBootstrapCoordinator(bootstrap, this.#activity);
     this.#repository = new ContextGraphAuthorityIndexRepository(localStore);
+  }
+
+  /** The resolved `chain.indexTickMs` this index answers finalized reads for. */
+  get projectionTickMs(): number {
+    return this.#projections.tickMs;
+  }
+
+  /**
+   * Read-your-writes. This node just submitted an authority transaction, so
+   * every projection scanned before it is known to be out of date — including
+   * as a stale-if-error answer. The durable index is untouched: the next read
+   * is one ordinary incremental refresh.
+   */
+  dropProjections(): void {
+    this.#projections.clear();
   }
 
   /** The caller must bind requests to this adapter's own initialized scope. */
@@ -212,6 +241,7 @@ export class ContextGraphAuthorityIndex {
     this.#repository.clear();
     this.#servable.clear();
     this.#servableEpochs.clear();
+    this.#projections.clear();
     this.#bootstrapCoordinator?.clear();
     this.#singleFlight.invalidateAll();
   }
@@ -221,42 +251,44 @@ export class ContextGraphAuthorityIndex {
     return this.#activity.whenIdle();
   }
 
+  /**
+   * Answer from the last completed projection of `input.scope` while it is
+   * younger than `chain.indexTickMs`, otherwise through `input.refresh` — the
+   * caller's complete read, which ends in {@link view}. See
+   * `ContextGraphAuthorityIndexProjectionCache` for the staleness contract.
+   */
+  async projection(
+    input: ContextGraphAuthorityIndexProjectionReadInput,
+  ): Promise<ContextGraphAuthorityIndexProjection> {
+    if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
+    return this.#projections.read(input);
+  }
+
+  /** One fresh scan to the anchor, behind the checkpoint-private projections. */
+  async view(input: ContextGraphAuthorityIndexScanInput): Promise<ContextGraphAuthorityIndexView> {
+    return new ContextGraphAuthorityIndexView(await this.#snapshot(input));
+  }
+
   async resolve(
     input: ContextGraphAuthorityIndexResolveInput,
   ): Promise<ContextGraphAuthorityIndexState> {
-    const checkpoint = await this.#snapshot(input);
     // Target lookup intentionally happens after the shared contract scan, so
     // every waiter resolves its own graph from the same complete checkpoint.
-    return this.#requireState(checkpoint, input.contextGraphId);
+    return (await this.view(input)).resolve(input.contextGraphId);
   }
 
   /** Project opaque revisions without exposing persisted checkpoint internals. */
   async revisions(
     input: ContextGraphAuthorityIndexRevisionInput,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>> {
-    const targetIds = new Set<ContextGraphAuthorityIndexId>(input.contextGraphIds);
-    const checkpoint = await this.#snapshot(input);
-    const revisions = new Map<ContextGraphAuthorityIndexId, string>();
-    for (const state of checkpoint.states) {
-      if (targetIds.has(state.contextGraphId)) {
-        revisions.set(state.contextGraphId, contextGraphAuthorityIndexStateRevision(state));
-      }
-    }
-    return revisions;
+    return (await this.view(input)).revisions(input.contextGraphIds);
   }
 
   /** Project the minimal immutable/read-selection fields for many targets. */
   async states(
     input: ContextGraphAuthorityIndexRevisionInput,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>> {
-    const targetIds = new Set<ContextGraphAuthorityIndexId>(input.contextGraphIds);
-    const checkpoint = await this.#snapshot(input);
-    const states = new Map<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>();
-    for (const state of checkpoint.states) {
-      if (!targetIds.has(state.contextGraphId)) continue;
-      states.set(state.contextGraphId, state);
-    }
-    return states;
+    return (await this.view(input)).states(input.contextGraphIds);
   }
 
   /** Resolve one unique name commitment from the shared contract-wide snapshot. */
@@ -295,22 +327,7 @@ export class ContextGraphAuthorityIndex {
     }
     if (targets.size === 0) return new Map();
 
-    const checkpoint = await this.#snapshot(input);
-    const states = new Map<string, ContextGraphAuthorityIndexState>();
-    const counts = new Map<string, number>();
-    for (const state of checkpoint.states) {
-      if (!targets.has(state.nameHash)) continue;
-      counts.set(state.nameHash, (counts.get(state.nameHash) ?? 0) + 1);
-      states.set(state.nameHash, state);
-    }
-    for (const [nameHash, count] of counts) {
-      if (count <= 1) continue;
-      throw new Error(
-        `Context Graph name hash ${nameHash} is ambiguous across ` +
-        `${count} finalized Context Graphs`,
-      );
-    }
-    return states;
+    return (await this.view(input)).statesByNameHashes([...targets]);
   }
 
   /** Resolve the complete materialized index at one finalized chain anchor. */
@@ -367,6 +384,9 @@ export class ContextGraphAuthorityIndex {
 
     let servableEpoch = this.#servableEpochs.get(scope) ?? 0;
     const onRejectedCheckpoint = (): void => {
+      // The tombstone voids everything reduced on top of that checkpoint,
+      // including the projection readers are still being answered from.
+      this.#projections.drop(scope);
       this.#servable.delete(scope);
       servableEpoch = (this.#servableEpochs.get(scope) ?? 0) + 1;
       this.#servableEpochs.set(scope, servableEpoch);
@@ -511,18 +531,5 @@ export class ContextGraphAuthorityIndex {
     } finally {
       seedSession?.close();
     }
-  }
-
-  #requireState(
-    checkpoint: ContextGraphAuthorityIndexCheckpoint,
-    contextGraphId: ContextGraphAuthorityIndexId,
-  ): ContextGraphAuthorityIndexState {
-    const state = checkpoint.states.find((candidate) => (
-      candidate.contextGraphId === contextGraphId
-    ));
-    if (state === undefined) {
-      throw new Error(`Context Graph ${contextGraphId} has no finalized creation event`);
-    }
-    return state;
   }
 }
