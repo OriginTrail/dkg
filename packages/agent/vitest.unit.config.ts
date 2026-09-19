@@ -18,6 +18,11 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/encryption-key-enrollment.test.ts",
+      "test/private-recipient-admission.test.ts",
+      "test/join-encryption-key-cache.test.ts",
+      "test/agent-rotate-encryption-key.test.ts",
+      "test/encryption-key-rdf-recovery.test.ts",
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",

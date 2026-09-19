@@ -86,6 +86,8 @@ export default defineConfig({
           'test/pca-command-render.test.ts',
           'test/auth.test.ts',
           'test/agent-http-auth.test.ts',
+          'test/encryption-enrollment-routes.test.ts',
+          'test/agent-encryption-key-routes.test.ts',
           'test/request-actor-authentication.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of

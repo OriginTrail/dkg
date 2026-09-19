@@ -44,6 +44,7 @@ const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { ethers } from 'ethers';
+import { handleEncryptionEnrollment } from './encryption-enrollment.js';
 
 // Lazy resolver used by the manifest-install flow: find the
 // @origintrail-official/dkg-mcp package via Node's own resolution
@@ -444,6 +445,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     path,
   } = ctx;
   const actor = actorFromRequestContext(ctx);
+  if (await handleEncryptionEnrollment(ctx)) return;
   const {
     authentication,
     authenticatedAgentAddress,
