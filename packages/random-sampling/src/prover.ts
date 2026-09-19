@@ -240,6 +240,31 @@ export class RandomSamplingProver {
     material: Awaited<ReturnType<ProofBuilder['build']>>;
   };
 
+  /**
+   * Proof period a chain read showed as SOLVED for this identity. While the
+   * head is inside `[periodStartBlock, periodEndBlock)` the slot is terminal
+   * for this node: `submitProof` reverts "already been solved" and
+   * `createChallenge` reverts until the period rolls, so re-reading status +
+   * challenge every tick (3 eth_call, ~75% of an idle core's prover RPC)
+   * can only return what we already hold. `tickImpl` therefore answers
+   * `already-solved` from this record and pays just the head read.
+   *
+   * Only ever set from an on-chain `solved: true` read (never inferred from
+   * our own submit), in-memory only (a restart re-reads, as before), and
+   * per prover instance, whose `identityId` and `chain` are immutable. See
+   * `solvedPeriodStillOpen` for when it is dropped.
+   *
+   * Not covered (neither is this node's doing, both end at `periodEndBlock`):
+   * governance SHORTENING the duration, which takes effect at an epoch
+   * boundary and would roll the period earlier than remembered; and the
+   * owner-only `clearOutstandingChallenges` wiping an already-solved slot.
+   */
+  private solvedPeriod?: {
+    epoch: bigint;
+    periodStartBlock: bigint;
+    periodEndBlock: bigint;
+  };
+
   constructor(deps: RandomSamplingProverDeps) {
     this.chain = deps.chain;
     this.store = deps.store;
@@ -338,6 +363,36 @@ export class RandomSamplingProver {
     }
     const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
     return BigInt(currentBlock) >= periodEndBlock;
+  }
+
+  /**
+   * True only while the remembered solved period provably still covers the
+   * head, so the tick may skip the status + challenge reads. Anything short
+   * of proof answers false and the caller re-reads the chain:
+   *   - no/failed head read, or a head at/after the period end (rollover);
+   *   - a head BELOW the period start (chain reset / redeploy under a live
+   *     process — the remembered blocks belong to another chain history);
+   *   - the adapter does not positively report its RandomSampling bindings
+   *     as resolved. A Hub rotation of RandomSampling[Storage] seen by the
+   *     adapter's Hub poller clears them (`invalidateRandomSamplingPair`)
+   *     and they stay cleared until the next RandomSampling call — which,
+   *     with the reads skipped, is the fall-through this triggers. Sampled
+   *     AFTER the head await so a rotation landing mid-read counts.
+   * A rotation the adapter never observes (poller cannot scan logs) is not
+   * visible through `ChainAdapter`; it surfaces at the period end instead of
+   * at the adapter's 5-minute Hub re-resolve.
+   */
+  private async solvedPeriodStillOpen(): Promise<boolean> {
+    const solved = this.solvedPeriod;
+    if (!solved || !this.chain.getBlockNumber) return false;
+    let head: bigint;
+    try {
+      head = BigInt(await this.chain.getBlockNumber());
+    } catch {
+      return false;
+    }
+    if (this.chain.isRandomSamplingReady?.() !== true) return false;
+    return head >= solved.periodStartBlock && head < solved.periodEndBlock;
   }
 
   /** Reuse the proof material already verified for this exact challenge, if any. */
@@ -497,6 +552,22 @@ export class RandomSamplingProver {
       );
     }
 
+    // A period a previous tick READ as solved cannot change for this node
+    // until the head leaves it, so skip the three status/challenge eth_calls
+    // and report the same outcome + log. On any doubt drop the record and
+    // fall through to the full read below — exactly the pre-existing tick.
+    const solvedPeriod = this.solvedPeriod;
+    if (solvedPeriod) {
+      if (await this.solvedPeriodStillOpen()) {
+        this.log.info('rs.tick.already-solved', {
+          epoch: solvedPeriod.epoch.toString(),
+          periodStart: solvedPeriod.periodStartBlock.toString(),
+        });
+        return { kind: 'already-solved' };
+      }
+      this.solvedPeriod = undefined;
+    }
+
     // Read the period status + existing challenge in parallel. We
     // *don't* short-circuit on `!status.isValid`: that view-side
     // check stalls single-tenant deployments indefinitely because no
@@ -541,6 +612,15 @@ export class RandomSamplingProver {
         status.proofingPeriodDurationInBlocks,
       );
       if (!isStale) {
+        // Remember the period so later ticks skip these reads. Same period
+        // end the stale check above just used (live duration first — the
+        // one the chain rolls over with, PR #369 — else the challenge's).
+        this.solvedPeriod = {
+          epoch: existing.epoch,
+          periodStartBlock: existing.activeProofPeriodStartBlock,
+          periodEndBlock: existing.activeProofPeriodStartBlock
+            + (status.proofingPeriodDurationInBlocks ?? existing.proofingPeriodDurationInBlocks),
+        };
         this.log.info('rs.tick.already-solved', {
           epoch: existing.epoch.toString(),
           periodStart: existing.activeProofPeriodStartBlock.toString(),
