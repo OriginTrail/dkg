@@ -3,10 +3,11 @@
  *
  * The Playwright devnet compiles + deploys the EVM contracts with the
  * devnet-only Hardhat config (`hardhat.devnet.config.ts`: solc 0.8.24, cancun
- * EVM target, cancun in-process hardfork) because the lockfile-pinned
+ * EVM target, in-process hardfork inherited from hardhat.node.config.ts and
+ * asserted mcopy-capable there) because the lockfile-pinned
  * @openzeppelin/contracts 5.4.0 emits `mcopy` (EIP-5656). A regression in that
- * pin (solc bump into the 0.8.26+ stack-too-deep range, hardfork drift back to
- * shanghai, config split between `hardhat node` and `hardhat deploy`) breaks
+ * pin (solc bump into the 0.8.26+ stack-too-deep range, hardfork drift back
+ * below cancun, config split between `hardhat node` and `hardhat deploy`) breaks
  * the deploy — and without this spec that surfaces minutes later as opaque
  * downstream e2e failures. This spec asserts the OBSERVABLE contract directly:
  * the devnet chain is up, is the expected chain, actually EXECUTED the deploy

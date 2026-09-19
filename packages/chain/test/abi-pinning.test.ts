@@ -199,7 +199,12 @@ const PINNED_DIGESTS: Record<string, string> = {
   // RandomSampling — resolved by the chain adapter (challenge creation + runtime
   // error decoding), so its ABI surface is pinned too. Carries the permissionless
   // keeper `pruneExpiredKnowledgeAssets` added in #1268.
-  RandomSampling:               '22b0f5b837e03f061826026abbd09a747acdc2c269b32eb43d354ae06c719b43',
+  // Re-pinned for RandomSampling 10.6.1 (contract-caller rejection): the ABI now
+  // declares `ContractCallerNotAllowed(address)`, raised by `createChallenge`'s
+  // EOA gate. `getErrorInterface()` builds from THIS copy (the evm-module ABI is
+  // only a fallback), so without the lockstep refresh the selector would decode
+  // as "unknown custom error" and the RS rotation could not evict the wallet.
+  RandomSampling:               'e61e35f3d72843afc887945e0f85523ec10d61ea224c4e5123edd9de5e5feabb',
   // Identity / staking — consulted on every publish.
   Hub:                          '36976cc71bb87963b8b715791b32e4eb6b7bb85c712998afd6184221289a506b',
   Identity:                     'ca39efe9bd9ec4fd8ae67dccdf9eb888bf91232341c3a56216624477620ff4d8',
@@ -423,6 +428,22 @@ describe('ABI content sanity — required event/error surfaces are present [CH-5
     // `address(0)` (no attestation yet) but the slot is reserved for
     // vNext when updates start signing the EIP-712 envelope too.
     expect(types).toEqual(['uint256', 'address', 'string', 'bytes32', 'uint256', 'uint96']);
+  });
+
+  it('RandomSampling declares ContractCallerNotAllowed(address) for the 10.6.1 EOA gate', () => {
+    // `getErrorInterface()` (evm-adapter-errors.ts) builds the revert decoder
+    // from THIS copy of the ABI — `loadAbi` only falls back to the evm-module
+    // package when the chain-local file is missing. If the 10.6.1 error is not
+    // mirrored here, `createChallenge` reverts from a contract wallet or a
+    // 7702-delegated EOA decode as "unknown custom error", so the RS rotation
+    // cannot recognise the wallet and evict it. The digest pin above would stay
+    // green on a partial refresh that only touched packages/evm-module/abi.
+    const abi = JSON.parse(
+      readFileSync(join(ABI_DIR, 'RandomSampling.json'), 'utf8'),
+    ) as AbiEntry[];
+    const err = abi.find((e) => e.type === 'error' && e.name === 'ContractCallerNotAllowed');
+    expect(err).toBeDefined();
+    expect((err!.inputs ?? []).map((i) => i.type)).toEqual(['address']);
   });
 });
 
