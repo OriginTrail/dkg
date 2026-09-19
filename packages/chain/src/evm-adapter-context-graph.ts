@@ -1266,11 +1266,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           this.contextGraphAuthorityIndex !== undefined ? await (async () => {
           // Reject invalid indexed ids before deployment discovery or any log scan.
           const authorityIndexId = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
-          const deploymentBlockNumber = (await this.resolveContractDeployBlock(
+          // Deploy block only — immutable, so a cache hit costs no head probe.
+          const deploymentBlockNumber = await this.resolveContractDeployBlockNumber(
             contractAddress,
             'getContextGraphAuthoritySnapshot',
             'ContextGraphStorage',
-          )).fromBlock;
+          );
           const indexed = await readEvmContextGraphAuthorityStateV1({
             index: this.contextGraphAuthorityIndex!,
             deploymentId: this.deploymentId,
@@ -1332,11 +1333,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
               finalized: { number: finalized.number, hash: finalizedHash },
               pageSize: this.cgRegistryScanPageSize,
               signal: options.signal,
-              loadColdFromBlock: async () => (await this.resolveContractDeployBlock(
+              loadColdFromBlock: () => this.resolveContractDeployBlockNumber(
                 contractAddress,
                 'getContextGraphAuthoritySnapshot',
                 'ContextGraphStorage',
-              )).fromBlock,
+              ),
               readBlockHash: async (blockNumber) => (
                 (await provider.getBlock(blockNumber))?.hash ?? null
               ),
