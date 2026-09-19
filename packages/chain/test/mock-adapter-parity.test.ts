@@ -77,6 +77,14 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // RPC capabilities. MockChainAdapter mirrors those public methods directly;
   // it has no provider pool or failover plumbing to dispatch through.
   'requestBrowserWalletRpc',
+  // The refresh closure the authority-index projection cache calls on a miss:
+  // resolve the finalized anchor, then run the index scan. It is `private` in
+  // TypeScript, but this file walks the RUNTIME prototype, where that is
+  // erased — and the adapter is assembled with `applyMixins`, so a real `#`
+  // private method would not survive the mix. It is adapter-internal plumbing,
+  // not a ChainAdapter capability: the mock serves authority from its own
+  // in-memory state and has no log to scan.
+  'scanContextGraphAuthorityProjection',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
