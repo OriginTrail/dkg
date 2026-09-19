@@ -2769,6 +2769,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       : undefined;
     const resolveLocalCgId = (): string =>
       this.resolveLocalCgIdByOnChainId(numeric) ?? cleartextHint ?? numericStr;
+    const alreadyRecorded = (localCgId: string): boolean => {
+      const row = this.subscribedContextGraphs.get(localCgId);
+      return row?.coreHosted === true && row.onChainId === numericStr;
+    };
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
     // StorageACK sign, so checking "already recorded" only after the liveness +
@@ -2777,8 +2781,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // a live-then-policy read on its first observation, and an already-recorded
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
-    const recorded = this.subscribedContextGraphs.get(resolveLocalCgId());
-    if (recorded?.coreHosted && recorded.onChainId === numericStr) return; // already recorded
+    if (alreadyRecorded(resolveLocalCgId())) return;
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
@@ -2800,8 +2803,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Re-resolved after the await: the local mapping may have changed, and a
     // concurrent first ACK for the same CG may have recorded it meanwhile.
     const localCgId = resolveLocalCgId();
+    if (alreadyRecorded(localCgId)) return;
     const existing = this.subscribedContextGraphs.get(localCgId);
-    if (existing?.coreHosted && existing.onChainId === numericStr) return; // already recorded
 
     let next: ContextGraphSub;
     if (existing) {

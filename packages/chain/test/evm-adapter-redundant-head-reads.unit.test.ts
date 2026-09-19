@@ -228,6 +228,21 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     expect(p.getBlock.calls).toHaveLength(1); // per tx: finality + timestamp = ONE block read
   });
 
+  it('an already-aborted caller rejects even when the timestamp memo has the answer', async () => {
+    const p = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 });
+    const a = makeAdapter([p]);
+    await a.isReceiptBlockFinalAndCanonical(RECEIPT);
+    const controller = new AbortController();
+    const reason = new Error('cancelled before timestamp lookup');
+    controller.abort(reason);
+
+    await expect(a.getBlockTimestamp(123, {
+      blockHash: BLOCK_HASH,
+      signal: controller.signal,
+    })).rejects.toBe(reason);
+    expect(p.getBlock.calls).toHaveLength(1);
+  });
+
   it('without a block hash the by-number read still goes to the wire', async () => {
     const p = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 });
     const a = makeAdapter([p]);

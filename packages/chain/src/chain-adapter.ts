@@ -2006,16 +2006,16 @@ export interface ChainAdapter {
    */
   isRandomSamplingReady?(): boolean;
   /**
-   * Identity of the bound RandomSampling + RandomSamplingStorage pair as an
-   * opaque counter: a different value means the pair may have been rotated
-   * since the caller last read through it. Synchronous and zero-RPC.
-   * `isRandomSamplingReady()` alone cannot say this — any other caller
-   * re-binds the pair, so it reads `true` again right after a rotation.
-   * Consumers that remember a RandomSampling read across ticks (the prover's
-   * solved-period record) MUST compare it, and MUST treat a missing method
-   * or `undefined` as "cannot vouch": never reuse the remembered read.
+   * Derived identity of the currently bound RandomSampling +
+   * RandomSamplingStorage addresses. Synchronous and zero-RPC; `undefined`
+   * means the adapter cannot vouch for the pair. Deriving this from the bound
+   * handles keeps a new assignment path from forgetting to bump a parallel
+   * generation counter.
    */
-  getRandomSamplingBindingGeneration?(): number | undefined;
+  getRandomSamplingBindingId?(): string | undefined;
+  /** Current Chronos epoch. Cross-tick Random Sampling caches use it as the
+   * boundary before a pending proof-period duration may take effect. */
+  getCurrentEpoch?(): Promise<bigint>;
   /** Refresh RandomSampling bindings and read membership through one typed capability. */
   resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
 
