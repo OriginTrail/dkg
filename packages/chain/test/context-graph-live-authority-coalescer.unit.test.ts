@@ -15,6 +15,7 @@
  * fault) may cross between callers.
  */
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   ContextGraphLiveAuthorityCoalescer,
 } from '../src/context-graph-live-authority-coalescer.js';
@@ -135,6 +136,35 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     expect(joinerFailures).toEqual([second]);
     expect(calls).toHaveLength(2);
     expect(scheduler.pending()).toBe(0);
+  });
+
+  it('never hands a second retry flight failure to another joiner', async () => {
+    const scheduler = manualScheduler();
+    const flight = coalescer(scheduler);
+    const { load, calls } = controllableLoader();
+
+    const callers = [0, 1, 2].map(() => settled(flight.run(KEY, load, {})));
+    await scheduler.flush();
+    const first = new Error('first endpoint failure');
+    calls[0]!.reject(first);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await scheduler.flush();
+    const second = new Error('successor endpoint failure');
+    calls[1]!.reject(second);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(calls).toHaveLength(2);
+    expect(callers[0]!.error).toBe(first);
+    const retryOutcomes = callers.slice(1).map(({ error }) => error);
+    expect(retryOutcomes.filter((error) => error === second)).toHaveLength(1);
+    const exhausted = retryOutcomes.find((error) => error !== second);
+    expect(exhausted).toMatchObject({
+      name: 'ContextGraphLiveAuthorityJoinRetryExhaustedError',
+      message: 'Context Graph live authority shared retry was exhausted',
+    });
+    expect(exhausted).not.toBe(first);
+    expect(exhausted).not.toBe(second);
   });
 
   it('shares one read with every caller of the same turn, and every DEFINITIVE answer', async () => {
@@ -369,5 +399,30 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     expect(calls).toHaveLength(1);
     calls[0]!.resolve({ id: 'live' });
     expect(await batched).toEqual([{ id: 'live' }, { id: 'live' }]);
+  });
+
+  it('keeps a one-shot process alive until the deferred read dispatches', () => {
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import { ContextGraphLiveAuthorityCoalescer } from `
+          + `'./src/context-graph-live-authority-coalescer.ts'; `
+          + `new ContextGraphLiveAuthorityCoalescer().run('k', async () => 42)`
+          + `.then((value) => process.stdout.write(String(value)));`,
+      ],
+      {
+        cwd: new URL('..', import.meta.url),
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stderr).toBe('');
+    expect(child.stdout).toBe('42');
   });
 });

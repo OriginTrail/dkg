@@ -41,7 +41,9 @@ import { waitForSignal } from './keyed-ttl-single-flight-cache.js';
  * waiter may take, or INDEFINITELY (a transient RPC failure, an abort), which
  * only the initiator — whose own read it was — receives. A joiner that would
  * have inherited it re-reads instead, and because they all resume together
- * they re-read through ONE shared successor, never N private ones.
+ * they re-read through ONE shared successor, never N private ones. If that
+ * bounded retry is also indefinite, only its initiator receives the physical
+ * error; another joiner receives a caller-local retry-exhausted error instead.
  *
  * OWNERSHIP OF CANCELLATION. The physical read runs under
  * {@link withOwnedRpcRequestContext} with the flight's OWN controller, so
@@ -52,7 +54,7 @@ import { waitForSignal } from './keyed-ttl-single-flight-cache.js';
  *
  * WHAT IS STILL SHARED: THE CLOCK, NOT THE VALUE (review residual). A joiner
  * spends part of its own budget — 2,500 ms for the agent-side gate reads —
- * waiting on the INITIATOR's read before its own re-read begins. So an
+ * waiting on the INITIATOR's read before the successor re-read begins. So an
  * initiator-side transient failure can still fail a gate closed that an
  * unshared read would have answered in time. That is availability, not
  * authority: the joiner is never handed the initiator's outcome, and it never
@@ -112,17 +114,27 @@ export interface ContextGraphLiveAuthorityRunOptions {
 
 /**
  * One shared retry. A joiner handed an indefinite outcome re-reads through the
- * successor flight; if that one is indefinite too the failure is its own read's
- * and is raised, so a permanently failing endpoint cannot spin here.
+ * successor flight. If that one is indefinite too, its initiator receives the
+ * physical error while another joiner receives a caller-local exhaustion error,
+ * so a permanently failing endpoint cannot spin or leak one caller's failure
+ * to another.
  */
 const MAX_JOINER_RETRIES = 1;
 
 const ABANDONED_FLIGHT_MESSAGE =
   'Context Graph live authority read has no active waiters';
+const JOIN_RETRY_EXHAUSTED_MESSAGE =
+  'Context Graph live authority shared retry was exhausted';
 
 function abandonedFlightError(): Error {
   const error = new Error(ABANDONED_FLIGHT_MESSAGE);
   error.name = 'AbortError';
+  return error;
+}
+
+function joinRetryExhaustedError(): Error {
+  const error = new Error(JOIN_RETRY_EXHAUSTED_MESSAGE);
+  error.name = 'ContextGraphLiveAuthorityJoinRetryExhaustedError';
   return error;
 }
 
@@ -141,8 +153,10 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       background: { pending: new Map<string, ContextGraphLiveAuthorityFlight<V>>() },
     });
     this.#defer = options.defer ?? ((dispatch) => {
-      const timer = setTimeout(dispatch, 0);
-      timer.unref?.();
+      // This is the only mechanism that starts the physical read. Keeping the
+      // one-turn timer referenced lets an otherwise-idle one-shot consumer
+      // finish the operation it is awaiting instead of exiting before dispatch.
+      setTimeout(dispatch, 0);
     });
     this.#isDefinitiveError = options.isDefinitiveError ?? (() => false);
   }
@@ -176,7 +190,8 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       if (outcome.kind === 'value') return outcome.value;
       if (outcome.kind === 'definitive-error') throw outcome.error;
       // Indefinite: the initiator owns the failure of the read it started.
-      if (initiated || retries >= MAX_JOINER_RETRIES) throw outcome.error;
+      if (initiated) throw outcome.error;
+      if (retries >= MAX_JOINER_RETRIES) throw joinRetryExhaustedError();
       options.signal?.throwIfAborted();
     }
   }
