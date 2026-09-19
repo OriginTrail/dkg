@@ -24,7 +24,19 @@ import {
  * `DKGKnowledgeAssets`, the PCA NFT and the TRAC token, so a topic0-keyed
  * registry would feed a token transfer to the Context Graph ownership reducer.
  */
-export type ChainEventLogFamily = 'context-graph-authority' | 'hub';
+export type ChainEventLogFamily =
+  | 'context-graph-authority'
+  | 'context-graph-ka'
+  | 'knowledge-asset'
+  | 'hub';
+
+/** Every family the tick tracks coverage for, in a stable order. */
+export const CHAIN_EVENT_LOG_FAMILIES = Object.freeze([
+  'context-graph-authority',
+  'context-graph-ka',
+  'knowledge-asset',
+  'hub',
+] as const);
 
 /** The six Hub events. The old poller read four (`hub-rotation-poller.ts:189-195`). */
 export const HUB_ROTATION_EVENT_NAMES = Object.freeze([
@@ -37,6 +49,60 @@ export const HUB_ROTATION_EVENT_NAMES = Object.freeze([
 ] as const);
 
 export type HubRotationEventName = typeof HUB_ROTATION_EVENT_NAMES[number];
+
+/** The `DKGKnowledgeAssets` signatures that move a KA's merkle-root stack. */
+export const KNOWLEDGE_ASSET_EVENT_NAMES = Object.freeze([
+  'KnowledgeAssetCreated',
+  'KnowledgeAssetUpdated',
+  'KnowledgeAssetMerkleRootsUpdated',
+  'KnowledgeAssetMerkleRootAdded',
+  'KnowledgeAssetMerkleRootRemoved',
+] as const);
+
+export type KnowledgeAssetEventName = typeof KNOWLEDGE_ASSET_EVENT_NAMES[number];
+
+/** Where in the log a decoded event sat. Fold order is (block, logIndex). */
+interface ChainEventLogPosition {
+  readonly blockNumber: number;
+  readonly logIndex: number;
+  readonly transactionHash: string;
+  readonly settled: boolean;
+}
+
+/**
+ * `KnowledgeAssetRegisteredToContextGraph` — the one event behind
+ * `kaToContextGraph`, `getContextGraphKaCount` and `getContextGraphKaAt`.
+ *
+ * Both ids are indexed, and `_contextGraphKAList` is append-only with this
+ * emit as its sole writer (`ContextGraphStorage.sol:360`), so the i-th such log
+ * for a graph in (block, logIndex) order IS `getContextGraphKaAt(cg, i)`.
+ */
+export interface ContextGraphKaRegistration extends ChainEventLogPosition {
+  readonly contextGraphId: bigint;
+  readonly kaId: bigint;
+}
+
+/** One entry of the admin `KnowledgeAssetMerkleRootsUpdated` replacement list. */
+export interface KnowledgeAssetMerkleRootEntry {
+  readonly merkleRoot: string;
+  /** Contract gap #2674: only this unused admin path carries a publisher. */
+  readonly publisher?: string;
+}
+
+export interface KnowledgeAssetEvent extends ChainEventLogPosition {
+  readonly name: KnowledgeAssetEventName;
+  readonly kaId: bigint;
+  /**
+   * The NEW latest root for create/update/add — and the REMOVED one for
+   * `…MerkleRootRemoved`, where the new latest can only come from the folded
+   * history below it.
+   */
+  readonly merkleRoot?: string;
+  /** Whole-stack replacement, `…MerkleRootsUpdated` only. */
+  readonly merkleRoots?: readonly KnowledgeAssetMerkleRootEntry[];
+  /** EIP-712 attested author; carried (indexed) by create and update only. */
+  readonly author?: string;
+}
 
 export interface HubRotationEvent {
   readonly name: HubRotationEventName;
@@ -65,7 +131,17 @@ interface ChainEventLogSource<TEvent> {
  * decoders here would have made that an assertion instead of a fact.
  */
 export class ChainEventDecoderRegistry {
-  readonly #byAddress = new Map<string, ChainEventLogSource<unknown>>();
+  /**
+   * Sources per address, not ONE source per address.
+   *
+   * `ContextGraphStorage` emits the seven authority signatures AND
+   * `KnowledgeAssetRegisteredToContextGraph`, which belong to different
+   * reducers with different coverage floors: the authority fold resumes from
+   * the #2670 checkpoint, while a KA ordinal is only correct from the graph's
+   * creation block. Collapsing them into one family would make one of those two
+   * answers lie about what history it actually holds.
+   */
+  readonly #byAddress = new Map<string, ChainEventLogSource<unknown>[]>();
 
   /** Register `ContextGraphStorage`'s seven authority signatures (PR #2670's set). */
   registerContextGraphAuthority(
@@ -80,6 +156,54 @@ export class ChainEventDecoderRegistry {
         contractInterface,
         chainEventLogRowAsEthersLog(row),
       ),
+    });
+  }
+
+  /**
+   * Register `KnowledgeAssetRegisteredToContextGraph` — the SECOND family on
+   * the `ContextGraphStorage` address, beside the authority signatures.
+   */
+  registerContextGraphKnowledgeAssets(
+    address: string,
+    contractInterface: ethers.Interface,
+  ): this {
+    const fragment = contractInterface.getEvent('KnowledgeAssetRegisteredToContextGraph');
+    if (fragment === null) {
+      throw new Error('ContextGraphStorage ABI is missing KnowledgeAssetRegisteredToContextGraph');
+    }
+    return this.#register<ContextGraphKaRegistration>({
+      family: 'context-graph-ka',
+      address,
+      topic0: [fragment.topicHash.toLowerCase()],
+      decode: (row) => decodeContextGraphKaRegistration(contractInterface, row),
+    });
+  }
+
+  /** Register the five `DKGKnowledgeAssets` root signatures. */
+  registerKnowledgeAssets(address: string, contractInterface: ethers.Interface): this {
+    const topicByName = new Map<string, KnowledgeAssetEventName>();
+    const topic0 = KNOWLEDGE_ASSET_EVENT_NAMES.flatMap((name) => {
+      const fragment = contractInterface.getEvent(name);
+      // The greenfield and legacy asset-storage ABIs differ, and the three
+      // admin signatures have no caller in the current contract set. A missing
+      // one is a smaller subscription, not a broken node — what it costs is
+      // recorded by this family's coverage, not by a crash at wiring time.
+      if (fragment === null) return [];
+      topicByName.set(fragment.topicHash.toLowerCase(), name);
+      return [fragment.topicHash.toLowerCase()];
+    });
+    if (!topicByName.has(
+      contractInterface.getEvent('KnowledgeAssetCreated')?.topicHash.toLowerCase() ?? '',
+    )) {
+      // Without the create there is no root-stack bottom and no allocator
+      // floor, so every answer this family could give would be a guess.
+      throw new Error('DKGKnowledgeAssets ABI is missing KnowledgeAssetCreated');
+    }
+    return this.#register<KnowledgeAssetEvent>({
+      family: 'knowledge-asset',
+      address,
+      topic0,
+      decode: (row) => decodeKnowledgeAssetLog(contractInterface, topicByName, row),
     });
   }
 
@@ -102,11 +226,29 @@ export class ChainEventDecoderRegistry {
   #register<TEvent>(source: ChainEventLogSource<TEvent>): this {
     const address = normalizeChainEventLogAddress(source.address);
     if (address === undefined) throw new Error('Chain event log source address is invalid');
-    this.#byAddress.set(address, Object.freeze({
+    const topic0 = Object.freeze(source.topic0.map((topic) => topic.toLowerCase()));
+    const registered = this.#byAddress.get(address) ?? [];
+    for (const existing of registered) {
+      // Two families claiming one topic at one address would make `familyOf`
+      // order-dependent, which is how a row silently reaches the wrong reducer.
+      const clash = topic0.find((topic) => existing.topic0.includes(topic));
+      if (clash !== undefined) {
+        throw new Error(
+          `Chain event log topic ${clash} is already claimed by family ${existing.family} `
+          + `at ${address}`,
+        );
+      }
+    }
+    // No separate "family already registered" check: re-registering a family
+    // necessarily re-offers its own topics, so the clash above is the only way
+    // in. A second check would be unreachable, and an unreachable guard reads
+    // like protection that is not there.
+    registered.push(Object.freeze({
       ...source,
       address,
-      topic0: Object.freeze(source.topic0.map((topic) => topic.toLowerCase())),
+      topic0,
     }) as ChainEventLogSource<unknown>);
+    this.#byAddress.set(address, registered);
     return this;
   }
 
@@ -114,9 +256,11 @@ export class ChainEventDecoderRegistry {
   topicSet(): ChainEventLogTopicSet {
     const addresses = new Set<string>();
     const topic0 = new Set<string>();
-    for (const source of this.#byAddress.values()) {
-      addresses.add(source.address);
-      for (const topic of source.topic0) topic0.add(topic);
+    for (const sources of this.#byAddress.values()) {
+      for (const source of sources) {
+        addresses.add(source.address);
+        for (const topic of source.topic0) topic0.add(topic);
+      }
     }
     return Object.freeze({
       addresses: Object.freeze([...addresses].sort()),
@@ -126,6 +270,7 @@ export class ChainEventDecoderRegistry {
 
   addressesFor(family: ChainEventLogFamily): readonly string[] {
     return Object.freeze([...this.#byAddress.values()]
+      .flat()
       .filter((source) => source.family === family)
       .map((source) => source.address)
       .sort());
@@ -159,6 +304,16 @@ export class ChainEventDecoderRegistry {
     return this.#decodeFamily<HubRotationEvent>(rows, 'hub');
   }
 
+  decodeContextGraphKaRegistrations(
+    rows: readonly ChainEventLogRow[],
+  ): readonly ContextGraphKaRegistration[] {
+    return this.#decodeFamily<ContextGraphKaRegistration>(rows, 'context-graph-ka');
+  }
+
+  decodeKnowledgeAssets(rows: readonly ChainEventLogRow[]): readonly KnowledgeAssetEvent[] {
+    return this.#decodeFamily<KnowledgeAssetEvent>(rows, 'knowledge-asset');
+  }
+
   #decodeFamily<TEvent>(
     rows: readonly ChainEventLogRow[],
     family: ChainEventLogFamily,
@@ -175,10 +330,10 @@ export class ChainEventDecoderRegistry {
   #sourceFor(row: ChainEventLogRow): ChainEventLogSource<unknown> | undefined {
     const address = normalizeChainEventLogAddress(row.address);
     if (address === undefined) return undefined;
-    const source = this.#byAddress.get(address);
+    const sources = this.#byAddress.get(address);
     const topic0 = row.topics[0]?.toLowerCase();
-    if (source === undefined || topic0 === undefined) return undefined;
-    return source.topic0.includes(topic0) ? source : undefined;
+    if (sources === undefined || topic0 === undefined) return undefined;
+    return sources.find((source) => source.topic0.includes(topic0));
   }
 }
 
@@ -199,6 +354,80 @@ function chainEventLogRowAsEthersLog(row: ChainEventLogRow): ethers.Log {
     topics: [...row.topics],
     data: row.data,
   } as unknown as ethers.Log;
+}
+
+function positionOf(row: ChainEventLogRow): ChainEventLogPosition {
+  return {
+    blockNumber: row.blockNumber,
+    logIndex: row.logIndex,
+    transactionHash: row.transactionHash,
+    settled: row.settled,
+  };
+}
+
+function decodeContextGraphKaRegistration(
+  contractInterface: ethers.Interface,
+  row: ChainEventLogRow,
+): ContextGraphKaRegistration {
+  const parsed = contractInterface.parseLog({ topics: [...row.topics], data: row.data });
+  if (parsed === null) {
+    throw new Error('KnowledgeAssetRegisteredToContextGraph could not be decoded');
+  }
+  const contextGraphId = parsed.args.contextGraphId ?? parsed.args[0];
+  const kaId = parsed.args.kaId ?? parsed.args[1];
+  return Object.freeze({
+    ...positionOf(row),
+    contextGraphId: BigInt(contextGraphId),
+    kaId: BigInt(kaId),
+  });
+}
+
+/** `bytes32` as the lowercase 0x hex the root comparisons in the node use. */
+function normalizeMerkleRoot(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  return /^0x[0-9a-f]{64}$/.test(normalized) ? normalized : undefined;
+}
+
+function decodeMerkleRootEntries(value: unknown): readonly KnowledgeAssetMerkleRootEntry[] {
+  if (!Array.isArray(value)) return Object.freeze([]);
+  const entries: KnowledgeAssetMerkleRootEntry[] = [];
+  for (const item of value) {
+    const record = item as { merkleRoot?: unknown; publisher?: unknown; [index: number]: unknown };
+    const merkleRoot = normalizeMerkleRoot(record.merkleRoot ?? record[0]);
+    if (merkleRoot === undefined) continue;
+    const publisher = normalizeChainEventLogAddress(String(record.publisher ?? record[1] ?? ''));
+    entries.push(Object.freeze(
+      publisher === undefined ? { merkleRoot } : { merkleRoot, publisher },
+    ));
+  }
+  return Object.freeze(entries);
+}
+
+function decodeKnowledgeAssetLog(
+  contractInterface: ethers.Interface,
+  topicByName: ReadonlyMap<string, KnowledgeAssetEventName>,
+  row: ChainEventLogRow,
+): KnowledgeAssetEvent {
+  const topic0 = row.topics[0]?.toLowerCase() ?? '';
+  const name = topicByName.get(topic0);
+  if (name === undefined) throw new Error('DKGKnowledgeAssets returned an unknown event');
+  const parsed = contractInterface.parseLog({ topics: [...row.topics], data: row.data });
+  if (parsed === null) throw new Error(`${name} could not be decoded`);
+  const kaId = BigInt(parsed.args.id ?? parsed.args[0]);
+  const author = normalizeChainEventLogAddress(String(parsed.args.author ?? ''));
+  const merkleRoot = normalizeMerkleRoot(parsed.args.merkleRoot);
+  const merkleRoots = name === 'KnowledgeAssetMerkleRootsUpdated'
+    ? decodeMerkleRootEntries(parsed.args.merkleRoots ?? parsed.args[1])
+    : undefined;
+  return Object.freeze({
+    ...positionOf(row),
+    name,
+    kaId,
+    ...(merkleRoot === undefined ? {} : { merkleRoot }),
+    ...(merkleRoots === undefined ? {} : { merkleRoots }),
+    ...(author === undefined ? {} : { author }),
+  });
 }
 
 function decodeHubRotationLog(

@@ -14,7 +14,10 @@ import {
   type ChainEventLogState,
   type ChainEventLogStore,
 } from './chain-event-log.js';
-import type { ChainEventDecoderRegistry, ChainEventLogFamily } from './chain-event-decoders.js';
+import {
+  CHAIN_EVENT_LOG_FAMILIES,
+  type ChainEventDecoderRegistry,
+} from './chain-event-decoders.js';
 import {
   hubBoundAddressesForRange,
   reduceHubBindings,
@@ -23,6 +26,11 @@ import {
 } from './hub-bindings.js';
 
 export const CHAIN_EVENT_LOG_ZERO_HASH = `0x${'00'.repeat(32)}`;
+
+/** Key for {@link ChainIndexTickOptions.familyFloorBlocks}. */
+export function chainEventLogFloorKey(family: string, address: string): string {
+  return `${family}@${(normalizeChainEventLogAddress(address) ?? address).toLowerCase()}`;
+}
 
 /** One fetched log, before the tick decides which side of the horizon it is on. */
 export type ChainEventLogFetchedRow = Omit<ChainEventLogRow, 'settled'>;
@@ -60,7 +68,16 @@ export interface ChainIndexTickOptions {
   readonly registry: ChainEventDecoderRegistry;
   /** Hub deploy block: the floor of the scope and the anchor of its lineage. */
   readonly deploymentBlockNumber: number;
-  /** Per-family floors, so a contract deployed later is complete at ITS deploy block. */
+  /**
+   * Floors, so a contract deployed later is complete at ITS deploy block.
+   *
+   * Keyed by {@link chainEventLogFloorKey} — `family` AND address, because one
+   * address can host two families with different floors: the authority fold
+   * resumes from the #2670 checkpoint and is complete there, while the KA
+   * ordinals on the SAME `ContextGraphStorage` are only correct from the
+   * contract's deploy block. A plain address key would hand one of them the
+   * other's floor and let a half-walked range answer "absent".
+   */
   readonly familyFloorBlocks?: ReadonlyMap<string, number>;
   /** Blocks held back from the settled prefix; the reorg tail. */
   readonly reorgHoldbackBlocks: number;
@@ -561,13 +578,14 @@ export class ChainIndexTick {
     topicSetChanged: boolean,
   ): readonly ChainEventLogCoverage[] {
     const { registry, familyFloorBlocks, deploymentBlockNumber } = this.#options;
-    const families: ChainEventLogFamily[] = ['context-graph-authority', 'hub'];
     const extended: ChainEventLogCoverage[] = [];
-    for (const family of families) {
+    for (const family of CHAIN_EVENT_LOG_FAMILIES) {
       for (const address of registry.addressesFor(family)) {
         const from = lookedFrom.get(address);
         if (from === undefined) continue;
-        const floorBlock = familyFloorBlocks?.get(address) ?? deploymentBlockNumber;
+        const floorBlock = familyFloorBlocks?.get(chainEventLogFloorKey(family, address))
+          ?? familyFloorBlocks?.get(address)
+          ?? deploymentBlockNumber;
         const next: ChainEventLogCoverage = Object.freeze({
           family,
           address,

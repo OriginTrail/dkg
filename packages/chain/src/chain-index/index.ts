@@ -28,12 +28,46 @@ export {
 } from './chain-event-log.js';
 
 export {
+  CHAIN_EVENT_LOG_FAMILIES,
   ChainEventDecoderRegistry,
   HUB_ROTATION_EVENT_NAMES,
+  KNOWLEDGE_ASSET_EVENT_NAMES,
   type ChainEventLogFamily,
+  type ContextGraphKaRegistration,
   type HubRotationEvent,
   type HubRotationEventName,
+  type KnowledgeAssetEvent,
+  type KnowledgeAssetEventName,
+  type KnowledgeAssetMerkleRootEntry,
 } from './chain-event-decoders.js';
+
+export {
+  latestMerkleRootOf,
+  reduceContextGraphKaRegistrations,
+  reduceKnowledgeAssetEvents,
+  reduceKnowledgeAssetFold,
+  type ContextGraphKaList,
+  type KnowledgeAssetFold,
+  type KnowledgeAssetRootStack,
+  type KnowledgeAssetRootVersion,
+} from './knowledge-asset-reducer.js';
+
+export {
+  createChainEventLogSubscription,
+  type ChainEventLogServableRange,
+  type ChainEventLogSubscription,
+  type ChainEventLogSubscriptionOptions,
+} from './chain-event-log-subscription.js';
+
+export {
+  createKnowledgeAssetReadModel,
+  type ContextGraphForKaAnswer,
+  type KnowledgeAssetOwnWrite,
+  type KnowledgeAssetReadModel,
+  type KnowledgeAssetReadModelOptions,
+  type KnowledgeAssetReadOptions,
+  type KnowledgeAssetReadView,
+} from './knowledge-asset-read-model.js';
 
 export {
   currentHubBinding,
@@ -47,6 +81,7 @@ export {
 export {
   CHAIN_EVENT_LOG_ZERO_HASH,
   ChainIndexTick,
+  chainEventLogFloorKey,
   type ChainEventLogFetchedRow,
   type ChainIndexLogRequest,
   type ChainIndexObservedHead,
