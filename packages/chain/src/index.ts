@@ -277,3 +277,9 @@ export {
   type RandomSamplingAvailabilityResolver,
   type LegacyRandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';
+
+/**
+ * The node's ONE chain log: tick, cursor, raw events, coverage, backfill.
+ * Everything that needs an indexed on-chain event subscribes here.
+ */
+export * from './chain-index/index.js';
