@@ -1,8 +1,8 @@
 /**
  * Unified authentication for DKG node interfaces (HTTP API, MCP, WebSocket, etc.).
  *
- * Uses bearer tokens stored on disk. Tokens are auto-generated on first start.
- * Any interface that needs auth calls `verifyToken(token)` against the loaded set.
+ * HTTP supports direct agent-key signatures and existing bearer credentials.
+ * Other interfaces retain their existing token authentication.
  */
 
 import { randomBytes, createHmac, timingSafeEqual, createHash } from 'node:crypto';

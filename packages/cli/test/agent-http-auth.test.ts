@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, randomBytes, sign } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,8 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { authenticateHttpRequest, authenticatedAgentAddress, canAdministerNode } from '../src/auth.js';
-import { signAgentHttpJwt, normalizeOperatorAgentAddresses, type AgentHttpRequest } from '../src/agent-http-auth.js';
+import { normalizeOperatorAgentAddresses } from '../src/agent-http-auth.js';
+import { signAgentHttpHeaders, createAgentHttpClient, type AgentHttpRequest } from '../src/agent-http-signing.js';
 import { SqliteAgentHttpNonceStore } from '../src/agent-http-nonce-store.js';
 import { readBody } from '../src/daemon/http-utils.js';
 import { createRequestActor } from '../src/daemon/routes/context.js';
@@ -26,20 +27,8 @@ async function signed(overrides: Partial<AgentHttpRequest> = {}) {
     body: Buffer.from('{"value":42}'), timestamp: String(Date.now()),
     nonce: randomBytes(24).toString('hex'), ...overrides,
   };
-  const headers: Record<string, string> = {
-    authorization: 'DKG-Agent ' + signAgentHttpJwt(input, wallet.signingKey),
-    'content-type': input.contentType,
-  };
+  const headers = signAgentHttpHeaders(input, wallet.signingKey);
   return { ...input, headers };
-}
-function mutateJwt(req: { headers: Record<string, string> }, mutate: (h: any, c: any) => void, resign = false) {
-  const parts = req.headers.authorization.slice('DKG-Agent '.length).split('.');
-  const h = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
-  const c = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
-  mutate(h, c);
-  const input = [h, c].map((v) => Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
-  const signature = wallet.signingKey.sign('0x' + createHash('sha256').update(input).digest('hex'));
-  req.headers.authorization = 'DKG-Agent ' + input + '.' + (resign ? Buffer.from(signature.r.slice(2) + signature.s.slice(2), 'hex').toString('base64url') : parts[2]);
 }
 async function fixture(operator = false, authEnabled = true) {
   const dir = mkdtempSync(join(tmpdir(), 'agent-http-'));
@@ -58,12 +47,13 @@ async function fixture(operator = false, authEnabled = true) {
       if (!auth.allowed) return;
       const actor = createRequestActor(auth, () => other.address);
       dispatched++;
+      if (req.url === '/api/redirect') { res.writeHead(302, { location: '/api/example' }); res.end(); return; }
       const allowed = req.url?.startsWith('/api/admin') ? canAdministerNode(auth) : true;
       res.writeHead(allowed ? 200 : 403, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
         caller: authenticatedAgentAddress(auth), effective: actor.effectiveAgentAddress,
         admin: canAdministerNode(auth), principal: auth.principal.kind,
-        body: await readBody(req),
+        body: await readBody(req), nonce: req.headers['x-dkg-agent-nonce'],
       }));
     } catch (error) { res.writeHead(500); res.end(JSON.stringify({ error: String(error) })); }
   });
@@ -71,9 +61,10 @@ async function fixture(operator = false, authEnabled = true) {
   cleanup.push(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   const port = (server.address() as { port: number }).port;
   return {
+    baseUrl: `http://127.0.0.1:${port}`,
     dispatched: () => dispatched,
     restartStore: () => { db.close(); db = new Database(join(dir, 'auth.sqlite3')); nonces = new SqliteAgentHttpNonceStore(db); },
-    send: (r: { method?: string; path?: string; headers?: Record<string, string>; body?: Uint8Array }) =>
+    send: (r: { method?: string; path?: string; headers?: Record<string, string | string[]>; body?: Uint8Array }) =>
       new Promise<{ status: number; body: any }>((resolve, reject) => {
         const req = request({ hostname: '127.0.0.1', port, method: r.method ?? 'POST', path: r.path ?? '/api/example', headers: { ...r.headers, 'content-length': String(r.body?.length ?? 0) } }, (res) => {
           const chunks: Buffer[] = []; res.on('data', (chunk) => chunks.push(chunk));
@@ -102,11 +93,11 @@ describe('shared agent-key HTTP authentication', () => {
     if (field === 'path') req.path = '/api/admin';
     if (field === 'query-order') req.path = '/api/example?b=%2F&a=1';
     if (field === 'content-type') req.headers['content-type'] = 'text/plain';
-    if (field === 'timestamp') mutateJwt(req, (_, c) => { c.iat -= 1; });
-    if (field === 'nonce') mutateJwt(req, (_, c) => { c.jti = randomBytes(24).toString('hex'); });
-    if (field === 'address') mutateJwt(req, (_, c) => { c.iss = other.address; });
+    if (field === 'timestamp') req.headers['x-dkg-agent-timestamp'] = String(Number(req.timestamp) - 1);
+    if (field === 'nonce') req.headers['x-dkg-agent-nonce'] = randomBytes(24).toString('hex');
+    if (field === 'address') req.headers['x-dkg-agent-address'] = other.address;
     if (field === 'signature') req.headers.authorization = 'DKG-Agent 0x' + '00'.repeat(65);
-    expect((await f.send(req)).body.code).toBe(['body', 'method', 'path', 'query-order', 'content-type'].includes(field) ? 'AGENT_HTTP_REQUEST_MISMATCH' : 'AGENT_HTTP_SIGNATURE_INVALID');
+    expect((await f.send(req)).body.code).toBe('AGENT_HTTP_SIGNATURE_INVALID');
     expect(f.dispatched()).toBe(0);
   });
 
@@ -159,7 +150,7 @@ describe('shared agent-key HTTP authentication', () => {
     expect((await f.send({ path: '/api/admin', headers: { authorization: 'Bearer operator-token' } })).status).toBe(200);
   });
 
-  it.each([true, false])('cannot downgrade an invalid JWT to public or disabled auth (%s)', async (enabled) => {
+  it.each([true, false])('cannot downgrade an invalid signature to public or disabled auth (%s)', async (enabled) => {
     const f = await fixture(false, enabled);
     for (const path of ['/api/example', '/api/status']) {
       expect((await f.send({ path, headers: { authorization: 'DKG-Agent invalid' } })).status).toBe(401);
@@ -167,30 +158,83 @@ describe('shared agent-key HTTP authentication', () => {
     expect(f.dispatched()).toBe(0);
   });
 
-  it.each(['alg', 'typ', 'private-jwk', 'remote-jwk', 'curve', 'issuer', 'claims', 'expiry'])('rejects incorrectly scoped JWTs: %s', async (field) => {
+  it.each(['authorization', 'x-dkg-agent-address', 'x-dkg-agent-target', 'x-dkg-agent-timestamp', 'x-dkg-agent-nonce', 'content-type'])('rejects duplicate %s headers', async (name) => {
     const f = await fixture(); const req = await signed();
-    mutateJwt(req, (h, c) => {
-      if (field === 'alg') h.alg = 'HS256';
-      if (field === 'typ') h.typ = 'JWT';
-      if (field === 'private-jwk') h.jwk.d = 'unused';
-      if (field === 'remote-jwk') h.jku = 'https://example.invalid/keys';
-      if (field === 'curve') h.jwk.crv = 'P-256';
-      if (field === 'issuer') c.iss = other.address;
-      if (field === 'claims') c.admin = true;
-      if (field === 'expiry') c.exp += 60;
-    }, true);
+    expect((await f.send({ ...req, headers: { ...req.headers, [name]: [req.headers[name], req.headers[name]] } })).status).toBe(401);
+    expect(f.dispatched()).toBe(0);
+  });
+
+  it.each(['x-dkg-agent-address', 'x-dkg-agent-target', 'x-dkg-agent-timestamp', 'x-dkg-agent-nonce'])('rejects missing %s headers', async (name) => {
+    const f = await fixture(); const req = await signed();
+    delete req.headers[name];
     expect((await f.send(req)).status).toBe(401);
     expect(f.dispatched()).toBe(0);
   });
 
-  it('accepts standard ES256K signing from Node crypto, independently of the helper', async () => {
+  it.each(['authorization', 'Bearer operator-token'])('cannot downgrade partial signature headers to public/bearer authentication: %s', async (authorization) => {
+    const f = await fixture(false, false); const req = await signed({ path: '/api/status' });
+    delete req.headers.authorization;
+    if (authorization.startsWith('Bearer')) req.headers.authorization = authorization;
+    expect((await f.send(req)).status).toBe(401);
+    expect(f.dispatched()).toBe(0);
+  });
+
+  it.each(['-1', '1e12', '01', 'NaN', '9007199254740992'])('rejects noncanonical timestamps: %s', async (timestamp) => {
     const f = await fixture(); const req = await signed();
-    const parts = req.headers.authorization.slice('DKG-Agent '.length).split('.');
-    const { jwk } = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
-    const key = createPrivateKey({ key: { ...jwk, d: Buffer.from(wallet.privateKey.slice(2), 'hex').toString('base64url') }, format: 'jwk' });
-    const input = parts[0] + '.' + parts[1];
-    req.headers.authorization = 'DKG-Agent ' + input + '.' + sign('sha256', Buffer.from(input), { key, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+    req.headers['x-dkg-agent-timestamp'] = timestamp;
+    expect((await f.send(req)).status).toBe(401);
+  });
+
+  it('does not accept the former JWT envelope', async () => {
+    const f = await fixture(); const req = await signed();
+    req.headers.authorization = 'DKG-Agent eyJhbGciOiJFUzI1NksifQ.eyJpc3MiOiJhZ2VudCJ9.c2lnbmF0dXJl';
+    expect((await f.send(req)).body.code).toBe('AGENT_HTTP_SIGNATURE_INVALID');
+  });
+
+  it('accepts wallet.signMessage over the documented preimage without the signing helper', async () => {
+    const f = await fixture(); const req = await signed();
+    const message = JSON.stringify(['DKG-HTTP-REQUEST-V1', wallet.address.toLowerCase(), req.targetPeerId,
+      req.method, req.path, req.contentType, createHash('sha256').update(req.body).digest('hex'), req.timestamp, req.nonce]);
+    req.headers.authorization = 'DKG-Agent ' + await wallet.signMessage(message);
     expect((await f.send(req)).status).toBe(200);
+    req.headers.authorization = 'DKG-Agent ' + await wallet.signMessage(message.replace('DKG-HTTP-REQUEST-V1', 'DKG-OTHER-V1'));
+    expect((await f.send(req)).status).toBe(401);
+  });
+
+  it('configures the backend signer once and generates fresh authentication on every request', async () => {
+    const f = await fixture();
+    const client = createAgentHttpClient({ baseUrl: f.baseUrl, targetPeerId: 'peer-receiver', signer: wallet });
+    const results = await Promise.all([0, 1].map(async () => {
+      const response = await client.request('/api/example?a=1&b=%2F', { method: 'POST', body: '{ "text": "é" }' });
+      expect(response.status).toBe(200);
+      return response.json();
+    }));
+    expect(results.map((r) => r.caller)).toEqual([wallet.address, wallet.address]);
+    expect(results[0].nonce).not.toBe(results[1].nonce);
+    expect(results[0].body).toBe('{ "text": "é" }');
+    expect(f.dispatched()).toBe(2);
+  });
+
+  it('prevents the backend client from forwarding signatures to another origin or normalized path', async () => {
+    const f = await fixture();
+    const client = createAgentHttpClient({ baseUrl: f.baseUrl, targetPeerId: 'peer-receiver', signer: wallet });
+    for (const path of ['//evil.invalid/api', 'https://evil.invalid/api', '/api/../admin', '/api/%2e%2e/admin', '/api#fragment']) {
+      await expect(client.request(path)).rejects.toThrow();
+    }
+    expect(() => createAgentHttpClient({ baseUrl: f.baseUrl + '/prefix', targetPeerId: 'peer', signer: wallet })).toThrow();
+    expect(f.dispatched()).toBe(0);
+  });
+
+  it('does not follow redirects with agent authentication', async () => {
+    const f = await fixture();
+    const client = createAgentHttpClient({ baseUrl: f.baseUrl, targetPeerId: 'peer-receiver', signer: wallet });
+    await expect(client.request('/api/redirect')).rejects.toThrow();
+    expect(f.dispatched()).toBe(1);
+  });
+
+  it('rejects a signer configured as another agent', async () => {
+    const req = await signed();
+    expect(() => signAgentHttpHeaders({ ...req, agentAddress: other.address }, wallet.signingKey)).toThrow('Signing key does not match');
   });
 
   it('validates explicit operator addresses without granting defaults', () => {

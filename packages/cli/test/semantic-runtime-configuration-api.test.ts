@@ -18,7 +18,7 @@ import { handleSemanticRuntimeRoutes } from '../src/daemon/routes/semantic-runti
 import { registerSemanticRuntimeInboxSkill } from '../src/semantic-runtime-inbox.js';
 import { startConfiguredSemanticRuntime, type ConfiguredSemanticRuntimeService } from '../src/semantic-runtime.js';
 import { authenticateHttpRequest } from '../src/auth.js';
-import { signAgentHttpJwt } from '../src/agent-http-auth.js';
+import { signAgentHttpHeaders } from '../src/agent-http-signing.js';
 import { boundSemanticInvocationScope } from '../src/semantic-runtime-bound-invocation.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -78,9 +78,9 @@ async function request(n: Node, identity: Identity, method: string, path: string
   res.end = (data: string) => { res.body = JSON.parse(data); res.writableEnded = true; };
   if (signing) {
     const bytes = Buffer.from(JSON.stringify(body ?? {}));
-    const jwt = signAgentHttpJwt({ agentAddress: signing.wallet.address, method, path, targetPeerId: n.agent.peerId,
+    const headers = signAgentHttpHeaders({ agentAddress: signing.wallet.address, method, path, targetPeerId: n.agent.peerId,
       body: bytes, contentType: 'application/json', timestamp: String(Date.now()), nonce: randomUUID().replaceAll('-', '') }, signing.wallet.signingKey);
-    req = Object.assign(Readable.from([bytes]), { method, url: path, headers: { authorization: 'DKG-Agent ' + jwt, 'content-type': 'application/json' }, rawHeaders: [] });
+    req = Object.assign(Readable.from([bytes]), { method, url: path, headers, rawHeaders: [] });
     const result = await authenticateHttpRequest({ req, res, authEnabled: true, validTokens: new Set(), resolveAgentByToken: () => undefined,
       agentKey: { targetPeerId: n.agent.peerId, nonces: { claim: () => true }, operatorAgentAddresses: signing.operator ? [signing.wallet.address] : [] } });
     if (!result.allowed) return { status: res.statusCode as number, body: res.body as any };
@@ -158,7 +158,7 @@ async function fixture() {
 }
 
 describe('durable Program management API', () => {
-  it('uses client-held JWT identities through real WASM, preserves roles, isolates private data and revokes retries', async () => {
+  it('uses client-held signing-key identities through real WASM, preserves roles, isolates private data and revokes retries', async () => {
     const f = await fixture();
     const callerWallet = new ethers.Wallet(callerKey);
     const signOwner = { wallet: ownerWallet };

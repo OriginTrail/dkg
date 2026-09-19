@@ -12,6 +12,10 @@
   "exports": {
     ".": "./dist/cli.js",
     "./package.json": "./package.json",
+    "./agent-http": {
+      "types": "./dist/agent-http-signing.d.ts",
+      "import": "./dist/agent-http-signing.js"
+    },
     "./daemon/plugin-api": {
       "types": "./dist/daemon/plugin-api.d.ts",
       "import": "./dist/daemon/plugin-api.js"

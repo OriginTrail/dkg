@@ -1,97 +1,12 @@
-import { createHash, createPublicKey, verify } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 
 import { ethers } from 'ethers';
+import { agentHttpSigningMessage, AGENT_HTTP_HEADER_NAMES } from './agent-http-signing.js';
 
 export const AGENT_HTTP_MAX_AGE_MS = 60_000;
 export const AGENT_HTTP_CLOCK_SKEW_MS = 5_000;
 export const AGENT_HTTP_MAX_BODY_BYTES = 10 * 1024 * 1024;
-export const AGENT_HTTP_HEADERS = 'Authorization, Content-Type';
-export const AGENT_HTTP_JWT_TYPE = 'dkg-agent-http+jwt';
-
-export interface AgentHttpRequest {
-  agentAddress: string;
-  method: string;
-  /** The receiving node's physical peer ID, not a caller-supplied Host header. */
-  targetPeerId: string;
-  /** Exact origin-form request target, including the original query string. */
-  path: string;
-  contentType: string;
-  body: Uint8Array;
-  timestamp: string;
-  nonce: string;
-}
-
-/** Client-side ES256K JWT. The JWK contains only the public key, never key material. */
-export function signAgentHttpJwt(input: AgentHttpRequest, signingKey: ethers.SigningKey): string {
-  if (ethers.computeAddress(signingKey.publicKey).toLowerCase() !== input.agentAddress.toLowerCase()) {
-    throw new Error('Signing key does not match the claimed agent');
-  }
-  const publicBytes = Buffer.from(signingKey.publicKey.slice(4), 'hex');
-  const protectedHeader = {
-    alg: 'ES256K', typ: AGENT_HTTP_JWT_TYPE,
-    jwk: { kty: 'EC', crv: 'secp256k1', x: publicBytes.subarray(0, 32).toString('base64url'), y: publicBytes.subarray(32).toString('base64url') },
-  };
-  const iat = Math.floor(Number(input.timestamp) / 1000);
-  const claims = {
-    iss: ethers.getAddress(input.agentAddress), aud: input.targetPeerId, iat, exp: iat + AGENT_HTTP_MAX_AGE_MS / 1000,
-    jti: input.nonce, method: input.method, path: input.path, contentType: input.contentType,
-    bodySha256: createHash('sha256').update(input.body).digest('hex'),
-  };
-  const signingInput = [protectedHeader, claims].map((value) => Buffer.from(JSON.stringify(value)).toString('base64url')).join('.');
-  // ethers uses deterministic ECDSA; JOSE ES256K uses SHA-256 and the 64-byte R || S encoding.
-  const signature = signingKey.sign('0x' + createHash('sha256').update(signingInput).digest('hex'));
-  return signingInput + '.' + Buffer.from(signature.r.slice(2) + signature.s.slice(2), 'hex').toString('base64url');
-}
-
-function decodeBase64Url(value: string): Buffer {
-  const bytes = Buffer.from(value, 'base64url');
-  if (!/^[A-Za-z0-9_-]+$/.test(value) || bytes.toString('base64url') !== value) throw new Error('Invalid base64url');
-  return bytes;
-}
-
-function exactFields(value: unknown, fields: string[]): asserts value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).length !== fields.length || fields.some((key) => !Object.hasOwn(value, key))) {
-    throw new Error('Invalid JWT fields');
-  }
-}
-
-/** This profile accepts no algorithm negotiation, remote JWKs, private JWKs or generic session JWTs. */
-function verifyJwt(token: string) {
-  try {
-    if (token.length > 4096) throw new Error('JWT too large');
-    const parts = token.split('.');
-    if (parts.length !== 3) throw new Error('Invalid compact JWS');
-    const protectedHeader: unknown = JSON.parse(decodeBase64Url(parts[0]).toString('utf8'));
-    exactFields(protectedHeader, ['alg', 'typ', 'jwk']);
-    if (protectedHeader.alg !== 'ES256K' || protectedHeader.typ !== AGENT_HTTP_JWT_TYPE) throw new Error('Wrong JWT type/algorithm');
-    const jwk = protectedHeader.jwk;
-    exactFields(jwk, ['kty', 'crv', 'x', 'y']);
-    if (jwk.kty !== 'EC' || jwk.crv !== 'secp256k1' || typeof jwk.x !== 'string' || typeof jwk.y !== 'string') throw new Error('Wrong key type');
-    const x = decodeBase64Url(jwk.x); const y = decodeBase64Url(jwk.y);
-    if (x.length !== 32 || y.length !== 32) throw new Error('Wrong coordinate size');
-    const publicKey = createPublicKey({ key: { kty: 'EC', crv: 'secp256k1', x: jwk.x, y: jwk.y }, format: 'jwk' });
-    const signature = decodeBase64Url(parts[2]);
-    if (signature.length !== 64 || !verify('sha256', Buffer.from(parts[0] + '.' + parts[1]), { key: publicKey, dsaEncoding: 'ieee-p1363' }, signature)) {
-      throw new Error('Invalid signature');
-    }
-    const claims: unknown = JSON.parse(decodeBase64Url(parts[1]).toString('utf8'));
-    exactFields(claims, ['iss', 'aud', 'iat', 'exp', 'jti', 'method', 'path', 'contentType', 'bodySha256']);
-    if (typeof claims.iss !== 'string' || !ethers.isAddress(claims.iss)
-        || typeof claims.aud !== 'string' || typeof claims.iat !== 'number' || !Number.isSafeInteger(claims.iat)
-        || typeof claims.exp !== 'number' || !Number.isSafeInteger(claims.exp)
-        || typeof claims.jti !== 'string' || !/^[0-9a-f]{32,64}$/.test(claims.jti)
-        || typeof claims.method !== 'string' || typeof claims.path !== 'string' || typeof claims.contentType !== 'string'
-        || typeof claims.bodySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(claims.bodySha256)) throw new Error('Invalid claims');
-    const agentAddress = ethers.computeAddress('0x04' + x.toString('hex') + y.toString('hex'));
-    if (claims.iss.toLowerCase() !== agentAddress.toLowerCase()) throw new Error('Issuer does not own public key');
-    return { agentAddress, aud: claims.aud, issuedAt: claims.iat * 1000, expiresAt: claims.exp * 1000,
-      nonce: claims.jti, method: claims.method, path: claims.path, contentType: claims.contentType, bodySha256: claims.bodySha256 };
-  } catch {
-    throw new AgentHttpAuthenticationError('AGENT_HTTP_SIGNATURE_INVALID');
-  }
-}
+export const AGENT_HTTP_HEADERS = ['Authorization', 'Content-Type', ...AGENT_HTTP_HEADER_NAMES].join(', ');
 
 export interface AgentHttpNonceStore {
   /** Atomic and durable: true only for the first acceptance of this nonce. */
@@ -117,7 +32,8 @@ export function normalizeOperatorAgentAddresses(value: unknown): readonly string
 }
 
 export function hasAgentHttpCredentials(req: IncomingMessage): boolean {
-  return /^DKG-Agent(?:\s|$)/i.test(req.headers.authorization ?? '');
+  return /^DKG-Agent(?:\s|$)/i.test(req.headers.authorization ?? '')
+    || AGENT_HTTP_HEADER_NAMES.some((name) => req.headers[name] !== undefined);
 }
 
 function header(req: IncomingMessage, name: string): string {
@@ -133,9 +49,18 @@ export async function authenticateAgentHttpRequest(
 ): Promise<{ agentAddress: string; nodeOperator: boolean }> {
   const authorization = header(req, 'authorization');
   if (!authorization.startsWith('DKG-Agent ')) throw new AgentHttpAuthenticationError('AGENT_HTTP_SIGNATURE_INVALID');
-  const proof = verifyJwt(authorization.slice('DKG-Agent '.length));
-  const { agentAddress, issuedAt, expiresAt, nonce } = proof;
-  const targetPeerId = proof.aud;
+  const signature = authorization.slice('DKG-Agent '.length);
+  const claimedAddress = header(req, 'x-dkg-agent-address');
+  const targetPeerId = header(req, 'x-dkg-agent-target');
+  const timestamp = header(req, 'x-dkg-agent-timestamp');
+  const nonce = header(req, 'x-dkg-agent-nonce');
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature) || !ethers.isAddress(claimedAddress)
+      || !/^(0|[1-9][0-9]{0,15})$/.test(timestamp) || !Number.isSafeInteger(Number(timestamp))
+      || !/^[0-9a-f]{32,64}$/.test(nonce)) {
+    throw new AgentHttpAuthenticationError('AGENT_HTTP_SIGNATURE_INVALID');
+  }
+  const issuedAt = Number(timestamp);
+  const expiresAt = issuedAt + AGENT_HTTP_MAX_AGE_MS;
   if (!options.targetPeerId || targetPeerId !== options.targetPeerId) throw new AgentHttpAuthenticationError('AGENT_HTTP_TARGET_MISMATCH');
   const path = req.url ?? '';
   const method = req.method ?? '';
@@ -148,17 +73,20 @@ export async function authenticateAgentHttpRequest(
   }
   const fresh = () => {
     const now = Date.now();
-    if (issuedAt > now + AGENT_HTTP_CLOCK_SKEW_MS || expiresAt <= now
-        || expiresAt <= issuedAt || expiresAt - issuedAt > AGENT_HTTP_MAX_AGE_MS) {
+    if (issuedAt > now + AGENT_HTTP_CLOCK_SKEW_MS || expiresAt <= now) {
       throw new AgentHttpAuthenticationError('AGENT_HTTP_EXPIRED');
     }
     return now;
   };
   fresh();
   const body = await readSignedBody(req);
-  if (proof.method !== method || proof.path !== path || proof.contentType !== contentType
-      || proof.bodySha256 !== createHash('sha256').update(body).digest('hex')) {
-    throw new AgentHttpAuthenticationError('AGENT_HTTP_REQUEST_MISMATCH');
+  let agentAddress: string;
+  try {
+    const message = agentHttpSigningMessage({ agentAddress: claimedAddress, targetPeerId, method, path, contentType, body, timestamp, nonce });
+    agentAddress = ethers.verifyMessage(message, signature);
+    if (agentAddress.toLowerCase() !== claimedAddress.toLowerCase()) throw new Error('Signer mismatch');
+  } catch {
+    throw new AgentHttpAuthenticationError('AGENT_HTTP_SIGNATURE_INVALID');
   }
   const now = fresh(); // A slow body must not extend the freshness window.
   let accepted: boolean;
