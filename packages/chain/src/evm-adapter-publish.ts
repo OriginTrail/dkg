@@ -863,7 +863,10 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
+    const blockTimestamp = await this.getBlockTimestamp(
+      receipt.blockNumber,
+      { ...options, blockHash: receipt.blockHash },
+    );
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -923,7 +926,10 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
+    const blockTimestamp = await this.getBlockTimestamp(
+      receipt.blockNumber,
+      { ...options, blockHash: receipt.blockHash },
+    );
 
     return {
       batchId,
