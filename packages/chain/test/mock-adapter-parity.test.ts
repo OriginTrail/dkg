@@ -308,6 +308,8 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // is an in-memory scan with no chain, deploy block, or eth_getCode to resolve.
   'resolveKaStorageDeployBlock',
   'resolveContractDeployBlock',
+  // probe-free accessor over the same immutable deploy-block cache — EVM-only.
+  'resolveContractDeployBlockNumber',
   'resolveLogScanHead',
   // companion retry-wrapper for the deploy-block binary search's historical
   // eth_getCode probes — EVM-only, same rationale as resolveKaStorageDeployBlock.
