@@ -10,6 +10,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { EncryptionKeyEnrollments, withPrivateFileLock, writePrivateJson } from './encryption-key-enrollment.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -687,6 +688,42 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Registered agent "${name}" (${record.mode}) → ${record.agentAddress}`);
     return record;
+  }
+
+  /** Operator-prepared key custody. Preparing creates no agent, membership or signing authority. */
+  async prepareEncryptionKeyEnrollment(this: DKGAgent, agentAddress: string) {
+    if (!this.config.dataDir) throw new Error('Encryption enrollment requires durable node storage');
+    return new EncryptionKeyEnrollments(`${this.config.dataDir}/encryption-enrollments.json`, this.peerId).prepare(agentAddress);
+  }
+
+  async activateEncryptionKeyEnrollment(this: DKGAgent, input: {
+    agentAddress: string; enrollmentId: string; encryptionKeyProof: string; custodyProof: string;
+  }) {
+    if (!this.config.dataDir) throw new Error('Encryption enrollment requires durable node storage');
+    return new EncryptionKeyEnrollments(`${this.config.dataDir}/encryption-enrollments.json`, this.peerId).activate(input, async (publicKey, key) => {
+      const address = ethers.getAddress(input.agentAddress);
+      const current = this.localAgents.get(this.resolveLocalAgentAddress(address));
+      const record: AgentKeyRecord = current ? structuredClone(current) : {
+        agentAddress: address, publicKey, name: `external-${address}`, mode: 'self-sovereign',
+        authToken: '', workspaceEncryptionKeys: [], createdAt: key.createdAt,
+      };
+      const existing = record.workspaceEncryptionKeys.find((entry) => entry.encryptionKeyId === key.encryptionKeyId);
+      if (existing?.revokedAt) throw new Error('Cannot reactivate a revoked encryption key');
+      if (!existing) record.workspaceEncryptionKeys.push(key);
+      refreshDefaultEncryptionKeyView(record);
+      // Never advertise a key whose private half has not been saved. A failed RDF
+      // write leaves the pending challenge retryable, including after restart.
+      await this.saveToKeystore(record, { strict: true });
+      await this.persistAgentToStore(record);
+      this.localAgents.set(record.agentAddress, record);
+      this.log.info(createOperationContext('system'),
+        `Activated agent-approved encryption custody: agent=${record.agentAddress} peer=${this.peerId} key=${key.encryptionKeyId}`);
+      return {
+        agentAddress: record.agentAddress, encryptionKeyId: key.encryptionKeyId,
+        encryptionKeyAlgorithm: key.encryptionKeyAlgorithm, publicEncryptionKey: key.publicEncryptionKey,
+        encryptionKeyProof: key.encryptionKeyProof, targetPeerId: this.peerId,
+      };
+    });
   }
 
   /**
@@ -1423,34 +1460,35 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * was downgraded after a rotation able to read its primary key without
    * crashing, while the v2 daemon reads the array verbatim.
    */
-  async saveToKeystore(this: DKGAgent, record: AgentKeyRecord): Promise<void> {
+  async saveToKeystore(this: DKGAgent, record: AgentKeyRecord, options: { strict?: boolean } = {}): Promise<void> {
     const ksPath = this.keystorePath();
-    if (!ksPath) return;
+    if (!ksPath) {
+      if (options.strict) throw new Error('Durable keystore is required');
+      return;
+    }
     try {
-      const { readFile, writeFile, mkdir, chmod } = await import('node:fs/promises');
-      const { dirname } = await import('node:path');
-      let existing: Record<string, KeystoreEntry> = {};
-      try {
-        const raw = await readFile(ksPath, 'utf-8');
-        existing = JSON.parse(raw);
-      } catch { /* first write */ }
-      const defaultActive = activeWorkspaceEncryptionKeys(record)[0];
-      existing[record.agentAddress.toLowerCase()] = {
-        authToken: record.authToken,
-        ...(record.privateKey ? { privateKey: record.privateKey } : {}),
-        ...(record.workspaceEncryptionKeys.length
-          ? { workspaceEncryptionKeys: record.workspaceEncryptionKeys.map((k) => ({ ...k })) }
-          : {}),
-        ...(defaultActive?.encryptionKeyAlgorithm ? { encryptionKeyAlgorithm: defaultActive.encryptionKeyAlgorithm } : {}),
-        ...(defaultActive?.publicEncryptionKey ? { publicEncryptionKey: defaultActive.publicEncryptionKey } : {}),
-        ...(defaultActive?.privateEncryptionKey ? { privateEncryptionKey: defaultActive.privateEncryptionKey } : {}),
-        ...(defaultActive?.encryptionKeyProof ? { encryptionKeyProof: defaultActive.encryptionKeyProof } : {}),
-      };
-      await mkdir(dirname(ksPath), { recursive: true });
-      await writeFile(ksPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
-      await chmod(ksPath, 0o600);
-    } catch {
-      // Non-fatal — agent still works, just won't survive restart
+      await withPrivateFileLock(ksPath, async () => {
+        const { readFile } = await import('node:fs/promises');
+        let existing: Record<string, KeystoreEntry> = {};
+        try { existing = JSON.parse(await readFile(ksPath, 'utf8')); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        const defaultActive = activeWorkspaceEncryptionKeys(record)[0];
+        existing[record.agentAddress.toLowerCase()] = {
+          authToken: record.authToken,
+          ...(record.privateKey ? { privateKey: record.privateKey } : {}),
+          ...(record.workspaceEncryptionKeys.length
+            ? { workspaceEncryptionKeys: record.workspaceEncryptionKeys.map((k) => ({ ...k })) }
+            : {}),
+          ...(defaultActive?.encryptionKeyAlgorithm ? { encryptionKeyAlgorithm: defaultActive.encryptionKeyAlgorithm } : {}),
+          ...(defaultActive?.publicEncryptionKey ? { publicEncryptionKey: defaultActive.publicEncryptionKey } : {}),
+          ...(defaultActive?.privateEncryptionKey ? { privateEncryptionKey: defaultActive.privateEncryptionKey } : {}),
+          ...(defaultActive?.encryptionKeyProof ? { encryptionKeyProof: defaultActive.encryptionKeyProof } : {}),
+        };
+        await writePrivateJson(ksPath, existing);
+      });
+    } catch (error) {
+      if (options.strict) throw error;
+      // Preserve the legacy best-effort behavior for existing registration paths.
     }
   }
 

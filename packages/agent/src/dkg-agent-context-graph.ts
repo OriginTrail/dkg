@@ -102,6 +102,7 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   canonicalPublishPayload,
   resolveLiftWorkspaceSlice,
@@ -1937,7 +1938,8 @@ export class ContextGraphMethods extends DKGAgentBase {
     const alreadyAllowed = existingParticipants?.some(
       (a) => a.toLowerCase() === normalizedAgentAddress.toLowerCase(),
     ) ?? false;
-    const revokedAgentAddressesToClear = (await this.getCgMeta(contextGraphId)).revokedAgents
+    const membershipMeta = await this.getCgMeta(contextGraphId);
+    const revokedAgentAddressesToClear = membershipMeta.revokedAgents
       .filter((address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase());
 
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -2005,6 +2007,16 @@ export class ContextGraphMethods extends DKGAgentBase {
       chain: this.chain,
       resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
     });
+
+    // Every admission path (direct invite, approval and delegation refresh) must
+    // validate recipient readiness before changing the authoritative roster.
+    if (registeredParticipantMutation.kind === 'registered-private' || membershipMeta.accessPolicy === 'private') {
+      try {
+        await resolveWorkspaceAgentRecipientKeys(this.store, normalizedAgentAddress);
+      } catch (error) {
+        throw new Error(`PRIVATE_RECIPIENT_NOT_READY: ${normalizedAgentAddress} needs a verified active encryption key before admission to ${contextGraphId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     return this.contextGraphMembershipMutations.prepare(
       admissionLockToken,

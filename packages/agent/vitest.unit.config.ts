@@ -18,6 +18,11 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/encryption-key-enrollment.test.ts",
+      "test/private-recipient-admission.test.ts",
+      "test/join-encryption-key-cache.test.ts",
+      "test/agent-rotate-encryption-key.test.ts",
+      "test/encryption-key-rdf-recovery.test.ts",
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/private-swm-recovery-lifecycle-budget.test.ts",
@@ -228,6 +233,9 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-sender-key-stale-target.test.ts",
+      "test/swm-sender-key-pending-by-agent.test.ts",
+      "test/swm-external-api-recipient.test.ts",
+      "test/approved-private-replica.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count

@@ -40,7 +40,7 @@ import {
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, agentFromPrivateKey } from '../src/index.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
@@ -3763,13 +3763,82 @@ describe('RFC-64 rollout authority integration', () => {
     ]);
   });
 
+  it('keeps tenant SWM authority when an external API agent joins the Program graph', async () => {
+    const contextGraphId = `${AUTHOR}/tenant-program-with-api-caller` as ContextGraphIdV1;
+    const tenant = await startAgent({
+      name: 'tenant-program-with-api-caller',
+      config: custodialAuthorConfig(),
+    });
+    const idenerWallet = new ethers.Wallet(`0x${'65'.repeat(32)}`);
+    const idener = idenerWallet.address.toLowerCase();
+    const encryption = agentFromPrivateKey(idenerWallet.privateKey, 'external-recipient').workspaceEncryptionKeys[0];
+    await tenant.registerAgent('idener-api-caller', {
+      publicKey: idenerWallet.signingKey.publicKey,
+      publicEncryptionKey: encryption.publicEncryptionKey,
+      encryptionKeyProof: encryption.encryptionKeyProof,
+    });
+    expect(tenant.getLocalAgentMode(idener)).toBe('self-sovereign');
+    expect(tenant.getCustodialAgentPrivateKey(idener)).toBeUndefined();
+    await tenant.createContextGraph({
+      id: contextGraphId, name: 'Tenant Program graph', accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await tenant.inviteAgentToContextGraph(contextGraphId, idener, AUTHOR);
+    await tenant.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    // API registration is not a second identity for operating this node.
+    await expect(tenant.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId))
+      .resolves.toBe(AUTHOR);
+    expect(tenant.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({ contextGraphId, active: true, responsibilityReason: 'private-membership' }),
+    );
+    // Normal create/invite reconciliation must establish authority itself;
+    // no manual policy acceptance or forced bootstrap is needed for the read.
+    await expect(tenant.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress: AUTHOR }))
+      .resolves.toBe(true);
+    expect(await tenant.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
+      .toMatchObject({ source: 'owner-signed-unregistered' });
+    await expect(tenant.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress: idener }))
+      .resolves.toBe(true);
+    await expect(tenant.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress: NONMEMBER }))
+      .resolves.toBe(false);
+
+    await tenant.removeAgentFromContextGraph(contextGraphId, idener, AUTHOR);
+    await tenant.whenRfc64CatalogResponsibilitiesIdleV1();
+    await expect(tenant.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress: idener }))
+      .resolves.toBe(false);
+    await expect(tenant.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress: AUTHOR }))
+      .resolves.toBe(true);
+  });
+
+  it('does not infer node membership from a registered external agent alone', async () => {
+    const contextGraphId = `${AUTHOR}/external-api-member-only` as ContextGraphIdV1;
+    const tenant = await startAgent({ name: 'external-api-member-only', config: custodialAuthorConfig() });
+    const remote = new ethers.Wallet(`0x${'65'.repeat(32)}`);
+    const member = remote.address.toLowerCase() as EvmAddressV1;
+    await tenant.registerAgent('external-member', { publicKey: remote.signingKey.publicKey });
+    vi.spyOn(tenant, 'resolveRfc64VerifiedPrivateRosterV1').mockResolvedValue([member]);
+    await expect(tenant.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId))
+      .resolves.toBeNull();
+    await expect(tenant.hasRfc64VerifiedPrivateMembershipV1(contextGraphId))
+      .resolves.toBe(false);
+
+    // A separate authenticated graph-specific selection remains authoritative.
+    (tenant as any).localApprovedAgentByCG.set(contextGraphId, member);
+    await expect(tenant.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId))
+      .resolves.toBe(member);
+    vi.mocked(tenant.resolveRfc64VerifiedPrivateRosterV1).mockResolvedValue([AUTHOR]);
+    await expect(tenant.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId))
+      .resolves.toBe(AUTHOR);
+  });
+
   it('selects a non-default private local agent per Context Graph and fails closed on ambiguity', async () => {
     const contextGraphId = `${AUTHOR}/private-non-default-local-agent` as ContextGraphIdV1;
     const edge = await startAgent({ name: 'private-non-default-local-agent' });
     (edge as any).defaultAgentAddress = AUTHOR;
     vi.spyOn(edge, 'listLocalAgents').mockReturnValue([
-      { agentAddress: AUTHOR },
-      { agentAddress: MEMBER },
+      { agentAddress: AUTHOR, mode: 'custodial' },
+      { agentAddress: MEMBER, mode: 'custodial' },
     ] as ReturnType<DKGAgent['listLocalAgents']>);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
     const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
@@ -4079,15 +4148,18 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)).toBe('0');
 
-    await curator.inviteAgentToContextGraph(contextGraphId, MEMBER, AUTHOR);
+    const recipient = agentFromPrivateKey(ethers.Wallet.createRandom().privateKey, 'recipient');
+    const member = recipient.agentAddress.toLowerCase() as EvmAddressV1;
+    await (curator as any).persistAgentToStore(recipient);
+    await curator.inviteAgentToContextGraph(contextGraphId, member, AUTHOR);
     const admittedVersion = BigInt(
       await curator.readRfc64PrivateRosterVersionV1(contextGraphId),
     );
     expect(admittedVersion).toBeGreaterThan(0n);
     expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId))
-      .toEqual([MEMBER, AUTHOR].sort());
+      .toEqual([member, AUTHOR].sort());
 
-    await curator.removeAgentFromContextGraph(contextGraphId, MEMBER, AUTHOR);
+    await curator.removeAgentFromContextGraph(contextGraphId, member, AUTHOR);
     expect(BigInt(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)))
       .toBeGreaterThan(admittedVersion);
     expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId)).toEqual([AUTHOR]);

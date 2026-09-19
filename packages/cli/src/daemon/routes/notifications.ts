@@ -52,7 +52,7 @@ function resolveScopedCaller(ctx: RequestContext): string | undefined {
   // anonymous loopback caller the node default agent's feed). When auth is
   // enabled, httpAuthGuard already 401s tokenless requests before dispatch, so
   // this only guards the loopback-no-auth case.
-  if (!ctx.authentication.acceptedToken) return undefined;
+  if (ctx.authentication.principal.kind === 'anonymous') return undefined;
   // A token IS present (valid). Resolve it to the caller's agent: a per-agent
   // delegation token → that agent; the node's own API token (the owner's
   // normal UI token, which is NOT in the per-agent index → resolveAgentByToken

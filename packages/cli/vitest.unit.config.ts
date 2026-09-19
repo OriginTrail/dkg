@@ -39,7 +39,14 @@ export default defineConfig({
           'test/config.test.ts',
           'test/semantic-runtime.test.ts',
           'test/semantic-runtime-inbox.test.ts',
+          'test/semantic-runtime-bound-inbox.test.ts',
           'test/semantic-runtime-query-adapter.test.ts',
+          'test/semantic-runtime-query-pins.test.ts',
+          'test/semantic-runtime-program-policy.test.ts',
+          'test/semantic-runtime-program-bindings.test.ts',
+          'test/semantic-runtime-asset-program.test.ts',
+          'test/semantic-runtime-sparql-adapter.test.ts',
+          'test/semantic-runtime-configuration-api.test.ts',
           'test/semantic-runtime-routes.test.ts',
           'test/semantic-runtime-safe-llm-adapter.test.ts',
           'test/semantic-runtime-remote-execute-adapter.test.ts',
@@ -78,6 +85,10 @@ export default defineConfig({
           'test/pca-confirmation-wire.test.ts',
           'test/pca-command-render.test.ts',
           'test/auth.test.ts',
+          'test/agent-http-auth.test.ts',
+          'test/encryption-enrollment-routes.test.ts',
+          'test/agent-encryption-key-routes.test.ts',
+          'test/request-actor-authentication.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of
           // paying the 2-minute hardhat-boot tax of the default config.

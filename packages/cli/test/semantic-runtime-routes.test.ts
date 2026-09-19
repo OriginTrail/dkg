@@ -2,15 +2,16 @@ import { EventEmitter } from 'node:events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { handleSemanticRuntimeRoutes } from '../src/daemon/routes/semantic-runtime.js';
-import { forkStoredSemanticProgram, resolveStoredSemanticProgram, SemanticProgramError } from '../src/semantic-runtime.js';
-import { invokeSemanticProgramOnAuthorNode } from '../src/semantic-runtime-inbox.js';
+import { forkStoredSemanticProgram, invokeBoundSemanticProgram, resolveStoredSemanticProgram, SemanticProgramError } from '../src/semantic-runtime.js';
+import { invokeBoundSemanticProgramOnPeer, invokeSemanticProgramOnAuthorNode } from '../src/semantic-runtime-inbox.js';
 
 vi.mock('../src/semantic-runtime.js', async (original) => ({
   ...await original<typeof import('../src/semantic-runtime.js')>(),
   forkStoredSemanticProgram: vi.fn(),
+  invokeBoundSemanticProgram: vi.fn(),
   resolveStoredSemanticProgram: vi.fn(),
 }));
-vi.mock('../src/semantic-runtime-inbox.js', () => ({ invokeSemanticProgramOnAuthorNode: vi.fn() }));
+vi.mock('../src/semantic-runtime-inbox.js', () => ({ invokeSemanticProgramOnAuthorNode: vi.fn(), invokeBoundSemanticProgramOnPeer: vi.fn() }));
 
 const caller = '0xauthenticated-caller';
 const payload = {
@@ -45,7 +46,7 @@ describe('semantic runtime HTTP routes', () => {
     const unrelated = request('GET', '/api/status');
     await handleSemanticRuntimeRoutes(unrelated.ctx);
     expect(unrelated.res.end).not.toHaveBeenCalled();
-    const disabled = request('POST', '/api/semantic-runtime/invoke');
+    const disabled = request('POST', '/api/programs/execute');
     disabled.ctx.semanticRuntimeHost = null;
     await handleSemanticRuntimeRoutes(disabled.ctx);
     expect(disabled.res.statusCode).toBe(409);
@@ -64,7 +65,7 @@ describe('semantic runtime HTTP routes', () => {
 
   it('forwards invocation and fork authority from the request actor, ignoring a caller field in JSON', async () => {
     vi.mocked(invokeSemanticProgramOnAuthorNode).mockResolvedValue({ persisted: true } as any);
-    const invoked = request('POST', '/api/semantic-runtime/invoke', { ...payload, callerAgentAddress: 'attacker' });
+    const invoked = request('POST', '/api/programs/execute', { ...payload, callerAgentAddress: 'attacker' });
     await handleSemanticRuntimeRoutes(invoked.ctx);
     expect(invokeSemanticProgramOnAuthorNode).toHaveBeenCalledWith(invoked.ctx.agent, invoked.ctx.semanticRuntimeHost, 'private-graph', 'urn:program:one', 'invocation-one', 'vm', 'wm', invoked.ctx.config.semanticRuntime, invoked.ctx.config.llm, caller);
     expect(invoked.res.statusCode).toBe(200);
@@ -78,8 +79,8 @@ describe('semantic runtime HTTP routes', () => {
 
   it.each([
     ['GET', '/api/semantic-runtime/resolve', {}],
-    ['POST', '/api/semantic-runtime/invoke', { ...payload, executionLayer: 'outside' }],
-    ['POST', '/api/semantic-runtime/invoke', '{invalid'],
+    ['POST', '/api/programs/execute', { ...payload, executionLayer: 'outside' }],
+    ['POST', '/api/programs/execute', '{invalid'],
     ['POST', '/api/semantic-runtime/programs/fork', { ...forkPayload, targetLayer: 'outside' }],
   ])('rejects malformed %s %s before dispatch', async (method, pathname, body) => {
     const { ctx, res } = request(method as string, pathname as string, body);
@@ -95,7 +96,7 @@ describe('semantic runtime HTTP routes', () => {
       : operation === 'invoke' ? vi.mocked(invokeSemanticProgramOnAuthorNode) : vi.mocked(forkStoredSemanticProgram);
     const pathname = operation === 'resolve'
       ? '/api/semantic-runtime/resolve?contextGraphId=private-graph&programIri=urn:program:one&programLayer=vm'
-      : `/api/semantic-runtime/${operation === 'fork' ? 'programs/fork' : 'invoke'}`;
+      : operation === 'fork' ? '/api/semantic-runtime/programs/fork' : '/api/programs/execute';
     const makeRequest = () => request(operation === 'resolve' ? 'GET' : 'POST', pathname, operation === 'fork' ? forkPayload : payload);
     mock.mockRejectedValueOnce(new SemanticProgramError('PROGRAM_CONTEXT_GRAPH_FORBIDDEN', 'denied', 403));
     const denied = makeRequest();
@@ -105,5 +106,137 @@ describe('semantic runtime HTTP routes', () => {
     const unexpected = new Error('storage unavailable');
     mock.mockRejectedValueOnce(unexpected);
     await expect(handleSemanticRuntimeRoutes(makeRequest().ctx)).rejects.toBe(unexpected);
+  });
+});
+
+describe('tenant-bound execute route', () => {
+  const operator = '0ximplicit-operator';
+  const body = { contextGraphId: payload.contextGraphId, programIri: payload.programIri, invocationId: '123e4567-e89b-42d3-a456-426614174099' };
+  function boundContext(input: unknown = body) {
+    const result = request('POST', '/api/programs/execute', input);
+    result.ctx.actor.authenticatedAgentAddress = caller;
+    result.ctx.config.semanticRuntime!.programBindings = [{
+      contextGraphId: body.contextGraphId, operationIri: body.programIri,
+      enabled: true, allowedCallerAgentAddresses: [caller],
+      program: { programLayer: 'vm' },
+    } as any];
+    return result;
+  }
+
+  it('selects the configured operation with three fields and the authenticated caller', async () => {
+    const { ctx, res } = boundContext();
+    vi.mocked(invokeBoundSemanticProgram).mockResolvedValue({ persisted: true } as any);
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(invokeBoundSemanticProgram).toHaveBeenCalledWith(ctx.agent, ctx.semanticRuntimeHost,
+      body.contextGraphId, body.programIri, body.invocationId, ctx.config.semanticRuntime, caller);
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+  });
+
+  it.each(['swm', 'vm'])('uses the tenant-selected %s layer and rejects a caller override', async (layer) => {
+    vi.mocked(invokeBoundSemanticProgram).mockResolvedValue({ persisted: true, executionLayer: layer } as any);
+    const allowed = boundContext({ ...body, executionLayer: layer });
+    allowed.ctx.config.semanticRuntime.programBindings[0].executionLayer = layer;
+    await handleSemanticRuntimeRoutes(allowed.ctx);
+    expect(allowed.res.statusCode).toBe(200);
+    expect(allowed.res.body.executionLayer).toBe(layer);
+    vi.mocked(invokeBoundSemanticProgram).mockClear();
+    const denied = boundContext({ ...body, executionLayer: 'wm' });
+    denied.ctx.config.semanticRuntime.programBindings[0].executionLayer = layer;
+    await handleSemanticRuntimeRoutes(denied.ctx);
+    expect(denied.res.statusCode).toBe(400);
+    expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { executionLayer: 'vm' }, { programLayer: 'wm' }, { callerAgentAddress: operator },
+    { executorAgentAddress: operator }, { parameters: { device: 'other-device' } },
+    { programContextGraphId: 'other-catalog' },
+  ])('rejects client overrides %j', async (overrides) => {
+    const { ctx, res } = boundContext({ ...body, ...overrides });
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(400);
+    expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+  });
+
+  it('passes no default operator identity when there is no authenticated agent', async () => {
+    const { ctx, res } = boundContext();
+    ctx.actor = { ...ctx.actor, authenticatedAgentAddress: undefined, effectiveAgentAddress: operator };
+    vi.mocked(invokeBoundSemanticProgram).mockRejectedValue(new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'Access denied', 403));
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(invokeBoundSemanticProgram).toHaveBeenCalledWith(ctx.agent, ctx.semanticRuntimeHost,
+      body.contextGraphId, body.programIri, body.invocationId, ctx.config.semanticRuntime, undefined);
+    expect(res.statusCode).toBe(403);
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+  });
+
+  it('never falls back to author-node invocation for a disabled or wrong-tenant operation', async () => {
+    const { ctx, res } = boundContext({ ...body, contextGraphId: 'other-tenant' });
+    ctx.config.semanticRuntime!.programBindings![0].enabled = false;
+    vi.mocked(invokeBoundSemanticProgram).mockRejectedValue(new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'Access denied', 403));
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(403);
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+  });
+});
+
+
+it('does not dispatch the replaced invocation endpoint', async () => {
+  const { ctx, res } = request('POST', '/api/semantic-runtime/invoke');
+  await handleSemanticRuntimeRoutes(ctx);
+  expect(res.end).not.toHaveBeenCalled();
+  expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+  expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+});
+
+describe('signed outbound operation route', () => {
+  const body = { contextGraphId: 'dmaast-kamstrup', programIri: 'urn:dmaast:operation:read-w10', invocationId: '123e4567-e89b-42d3-a456-426614174099' };
+  function routed(input: unknown = body) {
+    const result = request('POST', '/api/programs/execute', input);
+    result.ctx.actor.authenticatedAgentAddress = caller;
+    result.ctx.config.semanticRuntime.programRoutes = [{ contextGraphId: body.contextGraphId, operationIri: body.programIri, targetPeerId: 'peer-kamstrup' }];
+    return result;
+  }
+
+  it('routes the existing three-field API request using only the authenticated caller', async () => {
+    const { ctx, res } = routed();
+    vi.mocked(invokeBoundSemanticProgramOnPeer).mockResolvedValue({ persisted: true } as any);
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(invokeBoundSemanticProgramOnPeer).toHaveBeenCalledWith(ctx.agent, ctx.config.semanticRuntime,
+      body.contextGraphId, body.programIri, body.invocationId, caller);
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
+    expect(invokeBoundSemanticProgram).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { targetPeerId: 'attacker' }, { callerAgentAddress: 'attacker' }, { programLayer: 'vm' },
+    { executionLayer: 'wm' }, { parameters: { device: 'other-device' } }, { authorization: {} },
+  ])('rejects untrusted routing/signing overrides %j', async (override) => {
+    const { ctx, res } = routed({ ...body, ...override });
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(400);
+    expect(invokeBoundSemanticProgramOnPeer).not.toHaveBeenCalled();
+  });
+
+  it('never supplies the default operator as a signing fallback', async () => {
+    const { ctx, res } = routed();
+    ctx.actor.authenticatedAgentAddress = undefined;
+    ctx.actor.effectiveAgentAddress = 'default-operator';
+    vi.mocked(invokeBoundSemanticProgramOnPeer).mockRejectedValue(new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'denied', 403));
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(403);
+    expect(invokeBoundSemanticProgramOnPeer).toHaveBeenCalledWith(ctx.agent, ctx.config.semanticRuntime,
+      body.contextGraphId, body.programIri, body.invocationId, undefined);
+  });
+
+  it('does not fall back to ordinary Program invocation for a wrong tenant', async () => {
+    const { ctx, res } = routed({ ...body, contextGraphId: 'unconfigured-tenant' });
+    vi.mocked(invokeBoundSemanticProgram).mockRejectedValue(new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'denied', 403));
+    await handleSemanticRuntimeRoutes(ctx);
+    expect(res.statusCode).toBe(403);
+    expect(invokeBoundSemanticProgramOnPeer).not.toHaveBeenCalled();
+    expect(invokeSemanticProgramOnAuthorNode).not.toHaveBeenCalled();
   });
 });

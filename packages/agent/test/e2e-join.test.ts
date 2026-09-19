@@ -186,6 +186,11 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     await curator.assertion.promote(CG, 'preapproved-catchup');
     const published = await curator.publishFromFinalizedAssertion(CG, 'preapproved-catchup');
     expect(published.status).toBe('confirmed');
+    // Key readiness precedes private admission; preparing a signed bundle
+    // still does not subscribe the requester or send a join request.
+    await (curator as any).cacheVerifiedJoinEncryptionKeys(
+      await joiner.signJoinRequest(CG, preapprovedAddr), joiner.peerId,
+    );
     await curator.inviteAgentToContextGraph(CG, preapprovedAddr);
 
     // add-agent grants authorization on the curator. It is not local join

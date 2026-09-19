@@ -61,7 +61,7 @@ interface DKGAgentInternals {
   // Exposed for the `agentGate` mock so we don't have to spin up a
   // full context graph + membership snapshot just to drive the
   // sender-key bootstrap path.
-  getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null>;
+  getContextGraphAgentGateAddresses(contextGraphId: string, options?: { requireAvailable?: boolean }): Promise<string[] | null>;
   getContextGraphOnChainPolicy(contextGraphId: string): Promise<{
     accessPolicy: number | null;
     publishPolicy: number | null;
@@ -177,6 +177,54 @@ describe('StaleSenderKeyTargetError (typed error class)', () => {
     expect(err.recipientKeyId).toBe(
       'did:dkg:agent:0xc541f50f734e01d10daf1bc1aec3891fb3ea372e#x25519-deadbeef',
     );
+  });
+});
+
+describe('sender-key authority failures', () => {
+  it.each(['local-chain-binding-unavailable', 'chain-participant-authority-unavailable'] as const)(
+    'retains %s as unavailable rather than excluding the sender', async (reason) => {
+      const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+      const authority = agent as unknown as {
+        resolveRegisteredContextGraphAuthority(): Promise<unknown>;
+      };
+      authority.resolveRegisteredContextGraphAuthority = async () => ({
+        kind: 'unavailable', reason, detail: 'request timeout https://rpc.example/secret-api-key',
+      });
+      // Restore the real projection: its previous [] result was mistaken for
+      // an authoritative empty roster by the production receive path.
+      internals.getContextGraphAgentGateAddresses = (id, options) =>
+        DKGAgent.prototype.getContextGraphAgentGateAddresses.call(agent, id, options);
+      const pkg = await buildSignedPackage({ senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId });
+      const ack = decodeSwmSenderKeyPackageAck(await internals.handleSwmSenderKeyPackage(
+        encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID));
+      expect(ack.accepted).toBe(false);
+      expect(ack.reasonCode).toBe('authority-unavailable');
+      expect(ack.reason).toContain(reason);
+      expect(ack.reason).toContain('timeout=true');
+      expect(ack.reason).toMatch(/detailSha256=[0-9a-f]{64}/u);
+      expect(ack.reason).not.toContain('secret-api-key');
+      expect(internals.swmSenderKeyReceiveStates.size).toBe(0);
+    },
+  );
+
+  it('keeps an authoritative sender exclusion terminal', async () => {
+    const { agent, internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    (agent as unknown as { resolveRegisteredContextGraphAuthority(): Promise<unknown> })
+      .resolveRegisteredContextGraphAuthority = async () => ({
+        kind: 'private', onChainId: 1n, participantAgents: [recipient.agentAddress],
+      });
+    internals.getContextGraphAgentGateAddresses = (id, options) =>
+      DKGAgent.prototype.getContextGraphAgentGateAddresses.call(agent, id, options);
+    const pkg = await buildSignedPackage({ senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId });
+    const ack = decodeSwmSenderKeyPackageAck(await internals.handleSwmSenderKeyPackage(
+      encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID));
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('sender-not-allowed');
+    expect(internals.swmSenderKeyReceiveStates.size).toBe(0);
   });
 });
 

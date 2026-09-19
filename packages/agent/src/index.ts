@@ -1,4 +1,5 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export { encryptionKeyEnrollmentPayload, type EncryptionKeyEnrollment } from './encryption-key-enrollment.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
