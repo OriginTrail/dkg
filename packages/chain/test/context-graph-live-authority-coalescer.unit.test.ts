@@ -234,7 +234,43 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     expect(await ambientForeground).toEqual({ id: 'fg' });
   });
 
-  it('keys on the full lineage, never the bare numeric id', async () => {
+  it('settles a flight whose classifier THROWS, instead of wedging its waiters', async () => {
+    const scheduler = manualScheduler();
+    // The classifier is the one piece of caller-supplied code on the settle
+    // path. The shipped one is instanceof-only so it cannot throw today, but a
+    // flight that never settles holds every enrolled waiter to its own
+    // deadline — so settling is structural, not a property of the two
+    // classification branches.
+    const flight = new ContextGraphLiveAuthorityCoalescer<Authority>({
+      defer: scheduler.defer,
+      isDefinitiveError: () => { throw new Error('classifier exploded'); },
+    });
+    const { load, calls } = controllableLoader();
+
+    const initiator = settled(flight.run(KEY, load, {}));
+    const joiner = settled(flight.run(KEY, load, {}));
+    await scheduler.flush();
+    const down = new Error('endpoint down');
+    calls[0]!.reject(down);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The initiator still gets ITS read's error, not a synthetic settle fault.
+    expect(initiator.error).toBe(down);
+    // Unclassifiable is INDEFINITE: nothing crosses callers, so the joiner
+    // re-reads rather than being handed a fault nobody could vouch for.
+    expect(joiner.done).toBe(false);
+    expect(scheduler.pending()).toBe(1);
+    await scheduler.flush();
+    calls[1]!.resolve({ id: 'live' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(joiner.value).toEqual({ id: 'live' });
+  });
+
+  // This case pins the coalescer's KEY PARTITIONING — two distinct keys never
+  // share a flight. That the ADAPTER builds those keys from the full lineage is
+  // a separate claim, pinned against the real `getContextGraphLiveAuthority` in
+  // `evm-adapter-live-authority.unit.test.ts`.
+  it('never merges two distinct keys into one flight', async () => {
     const scheduler = manualScheduler();
     const flight = coalescer(scheduler);
     const { load, calls } = controllableLoader();

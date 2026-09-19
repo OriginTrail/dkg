@@ -49,6 +49,20 @@ import { waitForSignal } from './keyed-ttl-single-flight-cache.js';
  * governor. A waiter's signal detaches that waiter only; when the last waiter
  * leaves, the flight is aborted so abandoned RPC admission cannot outlive its
  * callers.
+ *
+ * WHAT IS STILL SHARED: THE CLOCK, NOT THE VALUE (review residual). A joiner
+ * spends part of its own budget — 2,500 ms for the agent-side gate reads —
+ * waiting on the INITIATOR's read before its own re-read begins. So an
+ * initiator-side transient failure can still fail a gate closed that an
+ * unshared read would have answered in time. That is availability, not
+ * authority: the joiner is never handed the initiator's outcome, and it never
+ * waits past its own deadline. It is the same budget argument that rejected the
+ * settle-wait above, and it is the reason MAX_JOINER_RETRIES is 1.
+ *
+ * TESTING TRAP. Dispatch rides on the {@link ContextGraphLiveAuthorityCoalescerOptions.defer}
+ * hook, which defaults to `setTimeout(…, 0)`. Under `vi.useFakeTimers()` that
+ * timer never fires on its own, so every caller for that key hangs: a test with
+ * fake timers must advance them or inject its own `defer`.
  */
 
 /** A settled flight, split by whether a joiner may take the outcome. */
@@ -221,13 +235,27 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
           );
           complete({ kind: 'value', value });
         } catch (error) {
-          complete(this.#isDefinitiveError(error)
-            ? { kind: 'definitive-error', error }
-            : { kind: 'indefinite-error', error });
+          complete(this.#classify(error));
         }
       })();
     });
     return flight;
+  }
+
+  /**
+   * The classifier is the only caller-supplied code on the settle path, and it
+   * is reached ONLY from the catch above — so a classifier that threw would
+   * leave the flight unsettled and hang every enrolled waiter until its own
+   * deadline, which is the exact failure this module exists to prevent. An
+   * unclassifiable fault therefore settles INDEFINITELY: the conservative side,
+   * where it crosses to nobody and the initiator still receives its own error
+   * rather than a synthetic one.
+   */
+  #classify(error: unknown): ContextGraphLiveAuthorityFlightOutcome<V> {
+    try {
+      if (this.#isDefinitiveError(error)) return { kind: 'definitive-error', error };
+    } catch { /* unclassifiable: fall through */ }
+    return { kind: 'indefinite-error', error };
   }
 
   #leave(
