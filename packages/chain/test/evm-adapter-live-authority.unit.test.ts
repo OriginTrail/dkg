@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ContextGraphLiveAuthorityUnsupportedError } from '../src/chain-adapter.js';
 import { fixture } from './context-graph-name-hash-reverse-resolution.fixtures.js';
@@ -8,6 +8,8 @@ import { fixture } from './context-graph-name-hash-reverse-resolution.fixtures.j
 const MEMBER = '0x00000000000000000000000000000000000000a1';
 const OTHER = '0x00000000000000000000000000000000000000b2';
 const NONEXISTENT = new ethers.Interface(['error ERC721NonexistentToken(uint256 tokenId)']);
+const AUTHORITY = { active: true, accessPolicy: 1, participantAgents: [MEMBER] };
+const TUPLE = { active: true, accessPolicy: 1n, participantAgents: [MEMBER] };
 
 function callException(overrides: Record<string, unknown>): Error {
   return Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION', ...overrides });
@@ -72,6 +74,106 @@ describe('EVM adapter: one-read live context graph authority', () => {
       adapter.getContextGraphLiveAuthority(8n),
     ]);
     expect(readContractWithOptions).toHaveBeenCalledTimes(2);
+  });
+
+  // The two cases below drive `getContextGraphLiveAuthority` rather than the
+  // coalescer, because the properties they pin live in the ADAPTER's wiring —
+  // the `isDefinitiveError` predicate and the flight key. A coalescer test
+  // injects both, so it proves nothing about the pair that ships underneath a
+  // security gate.
+
+  it('#2666: a joiner inherits neither the initiator\'s transient failure nor its abort', async () => {
+    // What may cross callers is decided by the production predicate in
+    // `evm-adapter-base.ts`: ONLY the deterministic "this read cannot answer"
+    // fault. Both shapes below are indefinite, so they are the initiator's own.
+    for (const failure of [
+      // A transport interruption. Another read may well succeed.
+      Object.assign(new Error('socket hang up'), { code: 'SERVER_ERROR' }),
+      // An abort raised BELOW the flight (an endpoint pool torn down mid-call).
+      // The flight's own signal is still clear, so the loader rethrows it as-is
+      // and it reaches the predicate looking exactly like a verdict.
+      Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }),
+    ]) {
+      const f = fixture();
+      f.readContractWithOptions.mockRejectedValueOnce(failure).mockResolvedValue(TUPLE);
+
+      const initiator = f.adapter.getContextGraphLiveAuthority(7n);
+      const initiatorSettled = initiator.catch((error: unknown) => error);
+      const joiners = [0, 1].map(() => f.adapter.getContextGraphLiveAuthority(7n));
+
+      // Identity, not shape: the initiator owns the failure of the read it
+      // started, un-reclassified.
+      await expect(initiatorSettled).resolves.toBe(failure);
+      // And nobody else is ever answered by it. #2666 shipped the opposite.
+      for (const joiner of joiners) await expect(joiner).resolves.toEqual(AUTHORITY);
+
+      // Two reads, not four: the joiners re-read through ONE successor.
+      expect(f.readContractWithOptions).toHaveBeenCalledTimes(2);
+      // A successor FLIGHT, not a retry inside the failed one — so the re-read
+      // does not run on a controller the first read may already have poisoned.
+      expect(f.readContractWithOptions.mock.calls[1][4].signal)
+        .not.toBe(f.readContractWithOptions.mock.calls[0][4].signal);
+    }
+  });
+
+  it('partitions flights by the CONTRACT bound now, never by the bare numeric id', async () => {
+    const f = fixture();
+    f.readContractWithOptions.mockResolvedValue(TUPLE);
+    // ContextGraphStorage hands out ids sequentially, so id 7 exists in every
+    // deployment and names a different graph in each. The adapter reads the
+    // bound address per call — a Hub rotation rebinds the contract — so two
+    // same-turn callers can legitimately be asking two different contracts for
+    // id 7. Sharing there would answer one deployment's gate with another
+    // deployment's roster.
+    const bound = ['0x00000000000000000000000000000000000000c6',
+      '0x00000000000000000000000000000000000000d7'];
+    let nth = 0;
+    const getAddress = vi.fn(async () => bound[nth++] ?? bound[1]);
+    f.adapter.contracts.contextGraphStorage.getAddress = getAddress;
+
+    await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n),
+      f.adapter.getContextGraphLiveAuthority(7n),
+    ]);
+    // Exactly one address read per caller, so the two callers demonstrably saw
+    // the two DIFFERENT contracts above rather than the same one twice.
+    expect(getAddress).toHaveBeenCalledTimes(2);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(2);
+
+    // Control, same turn, same everything: ONE read. Without it the count above
+    // would read the same whether the key carried the lineage or the callers
+    // simply never shared anything.
+    f.readContractWithOptions.mockClear();
+    await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n),
+      f.adapter.getContextGraphLiveAuthority(7n),
+    ]);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
+  it('partitions flights by DEPLOYMENT too: one address on two chains is two graphs', async () => {
+    const f = fixture();
+    f.readContractWithOptions.mockResolvedValue(TUPLE);
+    // A reproducible deployment puts the SAME ContextGraphStorage address on
+    // several chains, so the address alone does not separate them; chainId +
+    // Hub does. Read per caller, exactly as the adapter reads it.
+    const deployments = ['evm:31337:hub=0x0000000000000000000000000000000000000001',
+      'evm:31338:hub=0x0000000000000000000000000000000000000001'];
+    let nth = 0;
+    Object.defineProperty(f.adapter, 'deploymentId', {
+      configurable: true,
+      get: () => deployments[nth++] ?? deployments[1],
+    });
+
+    await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n),
+      f.adapter.getContextGraphLiveAuthority(7n),
+    ]);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(2);
+    // One read of the getter per caller. If another line on this path ever
+    // starts reading it, the count above stops meaning what it names — so pin
+    // it, after the property rather than in front of it.
+    expect(nth).toBe(2);
   });
 
   it('gives one caller\'s abort to that caller alone; peers keep the shared read', async () => {
