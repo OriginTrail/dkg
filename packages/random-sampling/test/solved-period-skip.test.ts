@@ -31,7 +31,7 @@ async function remember(skip: SolvedPeriodSkip): Promise<void> {
   expect(context).toBeDefined();
   skip.remember({
     ...context!,
-    challengeEpoch: 3n,
+    challengePeriodEpoch: 3n,
     periodStartBlock: 1000n,
     durationInBlocks: 100n,
     observedHead: 1010n,

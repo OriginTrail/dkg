@@ -1378,14 +1378,13 @@ export class EVMChainAdapterBase {
             read,
             options,
           ),
-          // The index reader consumes only `fromBlock`: no head probe on a cache hit.
-          resolveContractDeployBlock: async (address, operationLabel, contractLabel) => ({
-            fromBlock: await this.resolveContractDeployBlockNumber(
+          // The index reader consumes only the deploy block: no head probe on a cache hit.
+          resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+            this.resolveContractDeployBlockNumber(
               address,
               operationLabel,
               contractLabel,
             ),
-          }),
           pageSize: () => this.cgRegistryScanPageSize,
           finalityConfirmations: () => this.finalityConfirmations,
         });
@@ -1722,7 +1721,19 @@ export class EVMChainAdapterBase {
           requiredBlockNumber > receipt.blockNumber
           && (await provider.getBlockNumber()) < requiredBlockNumber
         ) return null;
-        const atHeight = await provider.getBlock(receipt.blockNumber);
+        let atHeight;
+        try {
+          atHeight = await provider.getBlock(receipt.blockNumber);
+        } catch (error) {
+          const message = collectEvmErrorText(error);
+          if (/\b(header not found|unknown block|block not found)\b/.test(message)) {
+            // Some clients report an above-head block as a JSON-RPC error rather
+            // than null. For this read that still means only "this endpoint has
+            // no view yet", so let the nullable failover walk try a sibling.
+            return null;
+          }
+          throw error;
+        }
         if (!atHeight?.hash) return null;
         // Remember the header under ITS OWN hash (whatever occupies the height),
         // so the receipt parser's timestamp read of this same block is free.

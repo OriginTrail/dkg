@@ -1015,9 +1015,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
     if (this.contracts.chronos) {
       try {
-        currentEpoch = BigInt(await this.readContract(
-          this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
-        ));
+        currentEpoch = await this.getCurrentEpoch();
       } catch (err) {
         throw new Error(
           `Failed to read Chronos currentEpoch for update tokenAmount sizing: ${(err as Error).message}`,

@@ -9,22 +9,22 @@ export interface SolvedPeriodReadContext {
   /** Derived identity of the currently bound RandomSampling contract pair. */
   readonly bindingId: string;
   /** Chronos epoch whose duration schedule produced the status read. */
-  readonly epoch: bigint;
+  readonly chronosEpoch: bigint;
 }
 
 export interface SolvedPeriodRecordInput extends SolvedPeriodReadContext {
-  readonly challengeEpoch: bigint;
+  readonly challengePeriodEpoch: bigint;
   readonly periodStartBlock: bigint;
   readonly durationInBlocks: bigint;
   readonly observedHead: bigint;
 }
 
 export interface SolvedPeriodRecord {
-  readonly challengeEpoch: bigint;
+  readonly challengePeriodEpoch: bigint;
   readonly periodStartBlock: bigint;
   readonly periodEndBlock: bigint;
   readonly bindingId: string;
-  readonly epoch: bigint;
+  readonly chronosEpoch: bigint;
   readonly rereadAtBlock: bigint;
   readonly rereadAtMs: number;
 }
@@ -104,7 +104,7 @@ export class SolvedPeriodSkip {
     }
     const bindingId = this.#chain.getRandomSamplingBindingId?.();
     if (bindingId === undefined) return undefined;
-    return Object.freeze({ bindingId, epoch });
+    return Object.freeze({ bindingId, chronosEpoch: epoch });
   }
 
   remember(input: SolvedPeriodRecordInput): void {
@@ -113,18 +113,14 @@ export class SolvedPeriodSkip {
       return;
     }
     this.#record = Object.freeze({
-      challengeEpoch: input.challengeEpoch,
+      challengePeriodEpoch: input.challengePeriodEpoch,
       periodStartBlock: input.periodStartBlock,
       periodEndBlock: input.periodStartBlock + input.durationInBlocks,
       bindingId: input.bindingId,
-      epoch: input.epoch,
+      chronosEpoch: input.chronosEpoch,
       rereadAtBlock: input.observedHead + input.durationInBlocks / 2n,
       rereadAtMs: this.#now() + SOLVED_PERIOD_MAX_SKIP_MS,
     });
-  }
-
-  forget(): void {
-    this.#record = undefined;
   }
 
   /** Return the reusable record, or forget it on the first failed guard. */
@@ -146,7 +142,7 @@ export class SolvedPeriodSkip {
     const stillReusable = (
       this.#chain.isRandomSamplingReady?.() === true
       && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
-      && epoch === record.epoch
+      && epoch === record.chronosEpoch
       && head >= record.periodStartBlock
       && head < record.periodEndBlock
       && head < record.rereadAtBlock

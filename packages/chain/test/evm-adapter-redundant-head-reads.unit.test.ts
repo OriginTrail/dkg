@@ -187,6 +187,25 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     expect(healthy.getBlockNumber.calls).toHaveLength(0);
   });
 
+  it('depth 1: an above-head block error yields to a sibling without a head probe', async () => {
+    const lagging = {
+      getBlockNumber: recorder(async () => 122),
+      getBlock: recorder(async () => {
+        const error = new Error('header not found');
+        Object.assign(error, { code: 'CALL_EXCEPTION' });
+        throw error;
+      }),
+    };
+    const healthy = endpoint({ head: 123, atHeight: { number: 123, hash: BLOCK_HASH } });
+    const a = makeAdapter([lagging, healthy]);
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
+    expect(lagging.getBlock.calls).toEqual([[123]]);
+    expect(healthy.getBlock.calls).toEqual([[123]]);
+    expect(lagging.getBlockNumber.calls).toHaveLength(0);
+    expect(healthy.getBlockNumber.calls).toHaveLength(0);
+  });
+
   it('depth 1: false (not true) when NO endpoint serves the receipt height', async () => {
     const a = makeAdapter([endpoint({ head: 200, atHeight: null }), endpoint({ head: 200, atHeight: null })]);
     await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
