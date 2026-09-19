@@ -124,12 +124,17 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
   }>, finalityConfirmations = 1) {
     const seen: number[] = [];
     const readOpts: Array<{ isEmptyResult?: (v: unknown) => boolean }> = [];
+    // `seen` = endpoints CONSULTED by either read: at depth 1 the block-hash read is the only
+    // request, so an endpoint is reached without any head read.
     const providers = scripts.map((script, index) => ({
       getBlockNumber: async () => {
         seen.push(index);
         return script.latestBlockNumber;
       },
-      getBlock: async () => script.atHeight,
+      getBlock: async () => {
+        seen.push(index);
+        return script.atHeight;
+      },
     }));
     const chain = adapter({
       finalityConfirmations,

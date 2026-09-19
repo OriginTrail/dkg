@@ -131,16 +131,16 @@ it('retries a transient finality read inside the receipt deadline', async () => 
     adapter.providers = [{
       getNetwork: async () => ({ chainId: 31337n }),
       getTransactionReceipt: async () => receipt,
-      getBlockNumber: async () => {
+      // At the default depth 1 the finality read IS the block-hash read (no eth_blockNumber).
+      getBlock: async () => {
         finalityAttempt += 1;
         if (finalityAttempt === 1) {
           const error = new Error('temporary finality RPC failure') as Error & { code: string };
           error.code = 'NETWORK_ERROR';
           throw error;
         }
-        return 10;
+        return { number: 10, hash: blockHash };
       },
-      getBlock: async () => ({ number: 10, hash: blockHash }),
     }];
     const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish');
     await vi.advanceTimersByTimeAsync(RPC_RECEIPT_POLL_INTERVAL_MS + 1);
@@ -161,8 +161,7 @@ it('bounds a stalled finality read by the receipt deadline', async () => {
     adapter.providers = [{
       getNetwork: async () => ({ chainId: 31337n }),
       getTransactionReceipt: async () => receipt,
-      getBlockNumber: async () => new Promise<number>(() => {}),
-      getBlock: async () => ({ number: 10, hash: blockHash }),
+      getBlock: async () => new Promise<never>(() => {}),
     }];
     const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish').then(
       (value: unknown) => ({ ok: true as const, value }),
@@ -4212,6 +4211,32 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.message).toContain(walletB.address);
     expect(caught.message).toMatch(/Fund one of these wallets/i);
     expect(caught.cause).toBeDefined(); // original error preserved
+  });
+
+  it('reads the publish receipt block timestamp BY HASH so the finality check\'s header is reused', async () => {
+    // The receipt wait already fetched this block for its canonicality check. Naming the block
+    // by the receipt's hash lets `getBlockTimestamp` answer from that header (hash-keyed, so
+    // never stale) instead of issuing a second eth_getBlockByNumber per publish.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    const kasInterface = new ethers.Interface(['event KnowledgeAssetCreated(uint256 id, address author)']);
+    const created = kasInterface.encodeEventLog('KnowledgeAssetCreated', [55n, ethers.ZeroAddress]);
+    const blockHash = `0x${'cd'.repeat(32)}`;
+    (a as any).contracts.knowledgeAssetStorage = { target: PARITY_KA_ADDRESS, interface: kasInterface };
+    (a as any).dispatchSerializedV10Write = recorder(async () => ({
+      hash: `0x${'ab'.repeat(32)}`,
+      blockNumber: 123,
+      blockHash,
+      index: 0,
+      logs: [{ address: PARITY_KA_ADDRESS, topics: created.topics, data: created.data }],
+    }));
+    const getBlockTimestamp = recorder(async (..._args: unknown[]) => 1_700);
+    (a as any).getBlockTimestamp = getBlockTimestamp;
+
+    const result = await a.createKnowledgeAssets(makeV10PublishParams());
+
+    expect(result.kaId).toBe(55n);
+    expect(result.blockTimestamp).toBe(1_700);
+    expect(getBlockTimestamp.calls).toEqual([[123, { blockHash }]]);
   });
 
   it('kill-switch keeps legacy routing balance-blind but cannot bypass strict publish planning', async () => {
