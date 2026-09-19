@@ -48,11 +48,16 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
       ...makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP),
       localContextGraphAuthorityIndexStore: store,
       // Every step below mutates authority through a raw contract handle and
-      // asserts the very next read. That is a statement about the SCAN, so the
-      // projection cache is reduced to its 1ms minimum rather than left to
-      // answer the read from before the write for `chain.indexTickMs`.
+      // asserts the very next read. The 1ms tick minimizes the normal fresh
+      // window; raw writes below also drop projections explicitly because a
+      // failed refresh may otherwise serve stale-if-error for at least 15s.
       indexTickMs: 1,
     });
+    const dropProjections = () => (
+      adapter as unknown as {
+        contextGraphAuthorityIndex?: { dropProjections(): void };
+      }
+    ).contextGraphAuthorityIndex?.dropProjections();
     const owner = adapter.getSignerAddress();
     const retainedAgent = new Wallet(HARDHAT_KEYS.EXTRA1).address;
     const removedAgent = new Wallet(HARDHAT_KEYS.EXTRA2).address;
@@ -145,6 +150,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
         0n,
       )
     ).wait();
+    dropProjections();
     const afterAuthority = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -165,6 +171,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
         0n,
       )
     ).wait();
+    dropProjections();
     const afterPolicy = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -194,6 +201,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     const selfTransferReceipt = await (
       await storage.transferFrom(owner, owner, created.contextGraphId)
     ).wait();
+    dropProjections();
     const afterSelfTransfer = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -211,6 +219,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     const transferReceipt = await (
       await storage.transferFrom(owner, newOwner, created.contextGraphId)
     ).wait();
+    dropProjections();
     const afterTransfer = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );
@@ -242,6 +251,7 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
       new Wallet(HARDHAT_KEYS.DEPLOYER, provider),
     );
     await (await deactivator.deactivateContextGraph(created.contextGraphId)).wait();
+    dropProjections();
     const afterDeactivation = await adapter.getContextGraphAuthoritySnapshot(
       created.contextGraphId,
     );

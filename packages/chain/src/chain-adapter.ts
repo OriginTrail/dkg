@@ -571,7 +571,11 @@ export interface ContextGraphAuthoritySnapshot {
   readonly sourceBlockHash: string;
 }
 
-/** Internal physical projection size used by production authority-index readers. */
+/**
+ * @deprecated Authority-index readers now own unbounded logical target sets
+ * and their physical projection work internally. Retained for source
+ * compatibility with consumers that imported the former chunk-size hint.
+ */
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS = 4_096;
 
 /**

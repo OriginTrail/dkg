@@ -352,6 +352,56 @@ describe('RFC-64 rollout authority integration', () => {
     }
   });
 
+  it('keeps the shared circuit half-open when the scheduled revision read uses stale cache', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+    const readRevisions = vi.fn(async (
+      _contextGraphIds: readonly string[],
+      options: ChainReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'stale-cache',
+        ageMs: 18_000,
+      });
+      return new Map([['9', `0x${'ab'.repeat(32)}`]]);
+    });
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+
+    try {
+      runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
+      expect(readRevisions).not.toHaveBeenCalled();
+      // Isolate the scheduled revision probe: a subsequent point-authority
+      // refresh has its own production evidence-path coverage below and may
+      // legitimately prove pool recovery after this stale projection.
+      vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+        .mockResolvedValue(finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'));
+      await openSharedAuthorityCircuit(edge);
+      clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+        + 60_000;
+      // The responsibility owner used during construction is intentionally
+      // closed by the lifecycle helper. Seed the same durable binding and
+      // explicitly nudge the production refresh owner for this second pass.
+      (edge as any).contextGraphBindingState.bindAuthoritative(
+        CONTEXT_GRAPH_ID,
+        subscription,
+        '9',
+      );
+      (edge as any).rfc64PublicCatalogOwnerV1.requestAuthorityRefresh();
+      await runtime.whenIdle();
+      expect(readRevisions).toHaveBeenCalledOnce();
+      expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+        state: 'half-open',
+        consecutiveExhaustions: 1,
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('cancels a queued auto-publish authority read at the observer boundary without HTTP or warnings', async () => {
     let hits = 0;
     const rpc = createServer((req, res) => {
