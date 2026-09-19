@@ -77,3 +77,7 @@ HTTP proof authorizes delivery to the calling node. The separate invocation dele
 For retries, retain the invocation UUID and issue a fresh HTTP proof. Renew an expired invocation delegation against the same UUID. Execution idempotency and HTTP replay protection are independent.
 
 The [complete Program walkthrough](program-authorization-api.md) includes upload, approval, routing, shared-source readback, invocation, receipt verification, isolation checks and revocation with full JSON payloads and a sequence diagram. Source tests are not proof of live deployment; deployment reports must identify the actual commit and responses separately.
+
+## Private Program graph encryption
+
+A backend may keep only its agent signing key while its node holds an explicitly delegated X25519 decryption key. Use the [enrollment and Program-graph join walkthrough](program-authorization-api.md#0-enroll-an-external-caller-for-private-program-replication). The node operator prepares the key, the recipient agent signs key ownership and node custody, and the Program owner separately approves membership. This does not replicate the private data graph or grant its membership. JWT/bearer authentication never supplied encryption custody; an incomplete recipient can prevent later private shares regardless of the HTTP authentication method.

@@ -72,6 +72,14 @@ sequenceDiagram
   participant R as Runner node
   participant C as Client node
   participant A as Caller signer
+  A->>C: Operator-signed POST /api/agent/encryption-enrollments
+  C-->>A: Public encryption key + node-bound challenge
+  A->>C: Agent-signed POST .../activate + key/custody proofs
+  C->>C: Persist encryption key only; no graph grant
+  A->>C: Signed POST /api/context-graph/{source}/request-join + signed key bundle
+  C->>R: Agent delegation and verified encryption keys
+  O->>R: Signed POST /api/context-graph/{source}/approve-join (if pending)
+  R->>R: Validate key readiness before Program-graph admission
   O->>R: Signed POST /api/knowledge-assets (Program)
   R->>C: Authorized Program-graph replication
   O->>R: Signed POST /api/programs/bindings (private data graph)
@@ -88,6 +96,67 @@ sequenceDiagram
   A->>R: Signed POST /api/query (private data graph)
   R-->>A: Denied / empty bindings under query contract
 ```
+
+## 0. Enroll an external caller for private Program replication
+
+HTTP signing proves identity; it does not provide a key with which the receiving node can decrypt a private Program graph. The backend keeps only its existing agent signing key. The client node generates and stores a separate X25519 encryption key, after explicit operator preparation and recipient-signed custody approval. No agent signing key is uploaded, no bearer token is created, and enrollment grants no Context Graph membership, private WM access or executor rights.
+
+Using the variables and `signed_curl` function above, prepare on **client** as its explicitly authorized operator (here the caller also has that role):
+
+```sh
+jq -n --arg agent "$CALLER_AGENT_ADDRESS" '{agentAddress:$agent}' > recipient.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST \
+  /api/agent/encryption-enrollments recipient.json > enrollment.json
+node "$SIGNER" enrollment --key-file "$CALLER_KEY_FILE" --peer "$CLIENT_PEER_ID" \
+  --input enrollment.json --out activate-enrollment.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST \
+  /api/agent/encryption-enrollments/activate activate-enrollment.json > enrolled-key.json
+```
+
+Preparation returns HTTP 201 with exactly the public challenge fields:
+
+```json
+{
+  "version": 1,
+  "enrollmentId": "48_HEX_CHARACTERS",
+  "agentAddress": "CALLER_AGENT_ADDRESS",
+  "targetPeerId": "CLIENT_PEER_ID",
+  "encryptionKeyAlgorithm": "X25519",
+  "encryptionKeyId": "COMPUTED_AGENT_KEY_ID",
+  "publicEncryptionKey": "BASE64URL_PUBLIC_KEY",
+  "expiresAt": 1790000600000
+}
+```
+
+The helper produces the complete activation payload below, with two real EIP-191 signatures replacing the placeholders. `encryptionKeyProof` uses the existing workspace-key proof format; `custodyProof` binds the public key to the agent, node, enrollment ID and expiry. The signed HTTP actor must be this recipient, even if another agent prepared it as operator.
+
+```json
+{
+  "agentAddress": "CALLER_AGENT_ADDRESS",
+  "enrollmentId": "48_HEX_CHARACTERS",
+  "encryptionKeyProof": "0xAGENT_SIGNATURE_OF_ENCRYPTION_KEY",
+  "custodyProof": "0xAGENT_SIGNATURE_OF_NODE_CUSTODY_CHALLENGE"
+}
+```
+
+Activation returns HTTP 200 with `agentAddress`, `targetPeerId`, `encryptionKeyId`, `encryptionKeyAlgorithm`, `publicEncryptionKey` and `encryptionKeyProof`. Neither response contains private key material. Pending challenges last ten minutes and survive restart; completed enrollment has no session expiry. Activation consumes the challenge; inspect `/api/agent/{address}/encryption-keys` if a successful response was lost. A storage failure does not advertise an unpersisted key. Active encryption keys and their private halves survive restart in the node keystore.
+
+Next send the existing agent-signed join delegation, including its signed encryption-key bundle, through client to the Program-graph curator. `DEPLOYMENT_ID` must match both nodes' chain adapter deployment identity (chain ID and Hub for EVM), and `SOURCE_GRAPH` must be canonical. Only use the **Program** graph here.
+
+```sh
+export DEPLOYMENT_ID='REPLACE_WITH_NETWORK_DEPLOYMENT_ID'
+export SOURCE_PATH="$(python3 -c 'import os,urllib.parse; print("/api/context-graph/"+urllib.parse.quote(os.environ["SOURCE_GRAPH"],safe=""))')"
+node "$SIGNER" join --key-file "$CALLER_KEY_FILE" --peer "$CLIENT_PEER_ID" \
+  --deployment "$DEPLOYMENT_ID" --graph "$SOURCE_GRAPH" --curator "$RUNNER_PEER_ID" \
+  --input enrolled-key.json --out join-programs.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST \
+  "$SOURCE_PATH/request-join" join-programs.json
+# If the response is pending, the Program-graph owner approves:
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" POST \
+  "$SOURCE_PATH/approve-join" recipient.json
+```
+
+`join-programs.json` has the complete existing join payload: `agentName`, `curatorPeerId`, and `delegation` containing `agentAddress`, `scope`, `delegateePeerId`, `issuedAtMs`, `expiresAtMs`, `signature`, `workspaceEncryptionKeys` (algorithm, public key, proof), and `workspaceEncryptionKeysSignature`. The helper signs these locally. The curator checks the sender peer, delegation, key proofs and freshness before caching them. An already approved member can refresh its key bundle through the same signed join flow; a pending member still needs owner approval. Enrollment alone never adds membership. Direct invitations now reject private recipients without a verified active encryption key with `PRIVATE_RECIPIENT_NOT_READY`, before any roster write.
 
 ## 1. Upload the Program as a Knowledge Asset
 
