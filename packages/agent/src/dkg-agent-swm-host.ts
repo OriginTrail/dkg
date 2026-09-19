@@ -2780,6 +2780,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const recorded = this.subscribedContextGraphs.get(resolveLocalCgId());
     if (recorded?.coreHosted && recorded.onChainId === numericStr) return; // already recorded
 
+    // Same waste on a CURATED graph, where `coreHosted` is never set so the
+    // early-out above cannot fire: every ACK re-read liveness + policy only to
+    // return at `policy !== 0`. A chain-sourced `1` already in hand settles it
+    // chain-free: accessPolicy has no writer after creation, and a `1` cannot
+    // be the default-zero answer of a nonexistent slot, so it needs no
+    // liveness proof. Curated is "do nothing" whether or not the graph is
+    // still live. A cached `0` is deliberately NOT trusted here — recording a
+    // graph as public still takes the fresh live-then-policy read below.
+    if (this.onChainAccessPolicyCache.get(numericStr) === 1) return;
+
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
     // this specific CG registration is live enough for host tracking.

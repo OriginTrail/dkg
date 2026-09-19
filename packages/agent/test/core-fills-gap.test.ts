@@ -584,6 +584,63 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(saved.find((r) => r.id === '99')).toBeUndefined();
   });
 
+  it('issues no chain read for a CURATED CG once its policy is known', async () => {
+    // RPC budget: coreHosted is never set for a curated graph, so without this
+    // every ACK re-read liveness + policy just to conclude "curated, skip".
+    const internals = await boot();
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 1);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+
+    // First observation: liveness, then a fresh policy read.
+    await internals.recordCoreHostedPublicCg('98', 'curated-cell');
+    expect(isContextGraphActiveOnChain.calls).toEqual([[98n]]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([[98n]]);
+
+    for (let ack = 0; ack < 5; ack += 1) {
+      await internals.recordCoreHostedPublicCg('98', 'curated-cell');
+    }
+
+    expect(isContextGraphActiveOnChain.calls).toHaveLength(1);
+    expect(getContextGraphAccessPolicy.calls).toHaveLength(1);
+    expect(internals.subscribedContextGraphs.get('curated-cell')).toBeUndefined();
+    expect(saved).toHaveLength(0);
+  });
+
+  it('skips chain reads when the ACK curation gate already cached the curated policy', async () => {
+    const internals = await boot();
+    ((internals as any).onChainAccessPolicyCache as Map<string, 0 | 1>).set('97', 1);
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 1);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+
+    await internals.recordCoreHostedPublicCg('97', 'curated-cached');
+
+    expect(isContextGraphActiveOnChain.calls).toEqual([]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([]);
+    expect(internals.subscribedContextGraphs.get('curated-cached')).toBeUndefined();
+  });
+
+  it('does NOT record a deactivated CG as public from a cached public policy', async () => {
+    // The curated shortcut must not widen to a cached 0: recording as public
+    // needs the live-then-policy read, and a dead slot stays unrecorded.
+    const internals = await boot();
+    ((internals as any).onChainAccessPolicyCache as Map<string, 0 | 1>).set('96', 0);
+    const isContextGraphActiveOnChain = recorder(async () => false);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+
+    await internals.recordCoreHostedPublicCg('96', 'dead-public');
+
+    expect(isContextGraphActiveOnChain.calls).toEqual([[96n]]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([]);
+    expect(internals.subscribedContextGraphs.get('dead-public')).toBeUndefined();
+    expect(saved).toHaveLength(0);
+  });
+
   it('does NOT mark an UNKNOWN CG even when the policy getter defaults to public', async () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => 0;
