@@ -40,7 +40,7 @@ import {
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, agentFromPrivateKey } from '../src/index.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
@@ -3771,8 +3771,11 @@ describe('RFC-64 rollout authority integration', () => {
     });
     const idenerWallet = new ethers.Wallet(`0x${'65'.repeat(32)}`);
     const idener = idenerWallet.address.toLowerCase();
+    const encryption = agentFromPrivateKey(idenerWallet.privateKey, 'external-recipient').workspaceEncryptionKeys[0];
     await tenant.registerAgent('idener-api-caller', {
       publicKey: idenerWallet.signingKey.publicKey,
+      publicEncryptionKey: encryption.publicEncryptionKey,
+      encryptionKeyProof: encryption.encryptionKeyProof,
     });
     expect(tenant.getLocalAgentMode(idener)).toBe('self-sovereign');
     expect(tenant.getCustodialAgentPrivateKey(idener)).toBeUndefined();
@@ -4145,15 +4148,18 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)).toBe('0');
 
-    await curator.inviteAgentToContextGraph(contextGraphId, MEMBER, AUTHOR);
+    const recipient = agentFromPrivateKey(ethers.Wallet.createRandom().privateKey, 'recipient');
+    const member = recipient.agentAddress.toLowerCase() as EvmAddressV1;
+    await (curator as any).persistAgentToStore(recipient);
+    await curator.inviteAgentToContextGraph(contextGraphId, member, AUTHOR);
     const admittedVersion = BigInt(
       await curator.readRfc64PrivateRosterVersionV1(contextGraphId),
     );
     expect(admittedVersion).toBeGreaterThan(0n);
     expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId))
-      .toEqual([MEMBER, AUTHOR].sort());
+      .toEqual([member, AUTHOR].sort());
 
-    await curator.removeAgentFromContextGraph(contextGraphId, MEMBER, AUTHOR);
+    await curator.removeAgentFromContextGraph(contextGraphId, member, AUTHOR);
     expect(BigInt(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)))
       .toBeGreaterThan(admittedVersion);
     expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId)).toEqual([AUTHOR]);
