@@ -21,6 +21,8 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 const CONTRACT = '0x00000000000000000000000000000000000000AA';
+// Same address, different letter case from both CONTRACT and its lowercase form.
+const MIXED_CASE_CONTRACT = '0x00000000000000000000000000000000000000aA';
 const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
 const OTHER_HASH = `0x${'99'.repeat(32)}`;
 const RECEIPT = { blockNumber: 123, blockHash: BLOCK_HASH };
@@ -71,7 +73,10 @@ describe('resolveContractDeployBlockNumber: the immutable deploy block needs no 
     const backup = archiveProvider();
     const a = makeAdapter([primary, backup]);
 
-    expect(await a.resolveContractDeployBlockNumber(CONTRACT, 'unit', 'Contract')).toBe(DEPLOY_BLOCK);
+    // Warm with the LOWERCASE form, then look up with a checksummed (mixed-case) one below:
+    // the cache key is the lowercase address, so a lookup that skipped the normalisation
+    // would miss and probe again.
+    expect(await a.resolveContractDeployBlockNumber(CONTRACT.toLowerCase(), 'unit', 'Contract')).toBe(DEPLOY_BLOCK);
     // The miss is today's resolution, unchanged: every backend is head-probed, one is searched.
     expect(primary.getBlockNumber.calls).toHaveLength(1);
     expect(backup.getBlockNumber.calls).toHaveLength(1);
@@ -79,8 +84,7 @@ describe('resolveContractDeployBlockNumber: the immutable deploy block needs no 
     expect(searchReads).toBeGreaterThan(1);
 
     for (let i = 0; i < 5; i += 1) {
-      // Mixed-case address: the cache key is the lowercase address, as in the probing variant.
-      expect(await a.resolveContractDeployBlockNumber(CONTRACT.toLowerCase(), 'unit', 'Contract'))
+      expect(await a.resolveContractDeployBlockNumber(MIXED_CASE_CONTRACT, 'unit', 'Contract'))
         .toBe(DEPLOY_BLOCK);
     }
     expect(primary.getBlockNumber.calls).toHaveLength(1);

@@ -3095,6 +3095,9 @@ export class EVMChainAdapterBase {
     // Reuse its timestamp only when the caller names the block by HASH (from the
     // receipt): the hash commits to the timestamp, so this can never serve a
     // reorged-out header. A miss falls through to the by-number read unchanged.
+    // An already-aborted caller rejects here exactly as the read below would
+    // have: a memo hit must not turn a cancelled call into an answer.
+    options.signal?.throwIfAborted();
     const remembered = options.blockHash == null
       ? undefined
       : this.receiptBlockTimestampsByHash.get(options.blockHash.toLowerCase());
