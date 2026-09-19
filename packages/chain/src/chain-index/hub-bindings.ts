@@ -7,9 +7,18 @@ import type { HubRotationEvent } from './chain-event-decoders.js';
  *
  * The Hub is the root of the scope: every other indexed address is only valid
  * for the block range the Hub says it was bound for. Keeping that as a range
- * rather than "the current address" is what makes a rotation replayable after a
- * restart — today the only thing that catches a rotation the node slept through
- * is a 30s address memo TTL, which is not a record of anything.
+ * rather than "the current address" is what makes a rotation replayable at all
+ * — today the only thing that catches a rotation the node slept through is a
+ * 30s address memo TTL, which is not a record of anything.
+ *
+ * NOT DURABLE YET, despite the `hub_bindings` table existing. `ChainEventLogStore`
+ * has no binding method and nothing writes that table, so bindings live only in
+ * the tick's process memory: after a restart the tick resumes above its settled
+ * cursor and never re-sees the `NewContract` that established one. It degrades
+ * fail-closed — coverage is recorded only for addresses the registry knows, so
+ * an un-queried historical address simply has none and nothing may be reported
+ * absent for it — but "replayable after a restart" is not true until the store
+ * persists these. Do not read the table as a working record before then.
  */
 export interface HubBinding {
   readonly name: string;

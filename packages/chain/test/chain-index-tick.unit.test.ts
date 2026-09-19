@@ -37,7 +37,8 @@ interface Harness {
   readonly headReads: number[];
   readonly blockHashReads: number[];
   head: { number: number; hash: string; timestampSeconds: number };
-  blockHashes: Map<number, string>;
+  /** A `null` entry is an endpoint that CANNOT answer for that block. */
+  blockHashes: Map<number, string | null>;
   logs: (request: ChainIndexLogRequest) => readonly ChainEventLogFetchedRow[];
 }
 
@@ -47,7 +48,7 @@ function harness(overrides: Partial<Harness> = {}): Harness {
     headReads: [],
     blockHashReads: [],
     head: { number: 100, hash: hash(0x10), timestampSeconds: 1_700_000_000 },
-    blockHashes: new Map<number, string>(),
+    blockHashes: new Map<number, string | null>(),
     logs: () => [],
     ports: undefined as unknown as ChainIndexTickPorts,
     ...overrides,
@@ -59,7 +60,9 @@ function harness(overrides: Partial<Harness> = {}): Harness {
     },
     readBlockHash: async (blockNumber) => {
       state.blockHashReads.push(blockNumber);
-      return state.blockHashes.get(blockNumber) ?? hash(blockNumber);
+      return state.blockHashes.has(blockNumber)
+        ? state.blockHashes.get(blockNumber)!
+        : hash(blockNumber);
     },
     readLogs: async (request) => {
       state.requests.push(request);
@@ -304,6 +307,186 @@ describe('ChainIndexTick — one log', () => {
     expect(rig.requests).toHaveLength(1);
     expect(after.coveredFromBlock).toBe(before.coveredFromBlock - 20);
     expect(after.coveredThroughBlock).toBe(before.coveredThroughBlock);
+  });
+
+  /**
+   * THE invariant, at the tick: coverage claims a block ⇒ the rows it held are
+   * still in the log.
+   *
+   * Every "is this absent?" answer is a coverage check followed by a read, so a
+   * pass that can drop rows inside a claimed range turns "indexed, and nothing
+   * there" into the answer for a block that really held an event.
+   */
+  async function expectCoverageAndRowsAgree(
+    store: MemoryChainEventLogStore,
+    blockNumbersThatHeldRows: readonly number[],
+  ): Promise<void> {
+    const state = await store.load();
+    if (state === undefined) return;
+    for (const coverage of state.coverage) {
+      for (const blockNumber of blockNumbersThatHeldRows) {
+        if (blockNumber < coverage.coveredFromBlock) continue;
+        if (blockNumber > coverage.coveredThroughBlock) continue;
+        expect(store.rows().some((row) => row.blockNumber === blockNumber)).toBe(true);
+      }
+    }
+  }
+
+  it('never lets coverage outlive the rows it claims, whatever a pass does', async () => {
+    const store = new MemoryChainEventLogStore();
+    // The chain keeps answering with this row for any range containing block
+    // 100, so the ONLY way it can leave the log is a commit that dropped it
+    // without looking at its block — which is exactly what is under test.
+    const held = creationLog(100, 0, 4n);
+    const rig = harness({
+      logs: (request) => (request.fromBlock <= 100 && request.toBlock >= 100 ? [held] : []),
+    });
+    const index = tick(store, rig.ports, { backfillPageBlocks: 20 });
+    await index.runOnce(new AbortController().signal);
+    expect(store.rows().some((row) => row.blockNumber === 100)).toBe(true);
+
+    // Every shape a pass can take, back to back: a backfill page, a head
+    // refresh, and an endpoint that fell behind.
+    await index.backfillOnce(new AbortController().signal);
+    await expectCoverageAndRowsAgree(store, [100]);
+
+    await index.runOnce(new AbortController().signal);
+    await expectCoverageAndRowsAgree(store, [100]);
+
+    rig.head = { number: 98, hash: hash(0x62), timestampSeconds: 1_700_000_030 };
+    await index.runOnce(new AbortController().signal);
+    await expectCoverageAndRowsAgree(store, [100]);
+  });
+
+  it('lowercases topics on the way in, beside the address', async () => {
+    // Every reader builds its `topic1` filter with `toString(16)` and the store
+    // matches it with a plain `IN (…)`. A provider that answered in mixed case
+    // would make the per-graph read come back empty — a confident zero, not an
+    // error.
+    const store = new MemoryChainEventLogStore();
+    const shouty = creationLog(100, 0, 4n);
+    const rig = harness({
+      logs: () => [{ ...shouty, topics: shouty.topics.map((topic) => topic.toUpperCase()) }],
+    });
+    const index = tick(store, rig.ports);
+
+    await index.runOnce(new AbortController().signal);
+
+    const stored = store.rows().find((row) => row.blockNumber === 100)!;
+    expect(stored.topics).toEqual(shouty.topics.map((topic) => topic.toLowerCase()));
+  });
+
+  it('refuses a head BELOW the highest one seen instead of shortening the log', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness({ logs: () => [creationLog(100, 0, 4n)] });
+    const index = tick(store, rig.ports);
+    await index.runOnce(new AbortController().signal);
+
+    // Two blocks behind, but still ABOVE the settled cursor, so the old lagging
+    // guard did not fire and the pass climbed only to 98 — silently dropping
+    // the tail at 99..100 that coverage went on claiming.
+    rig.head = { number: 98, hash: hash(0x62), timestampSeconds: 1_700_000_030 };
+    const result = await index.runOnce(new AbortController().signal);
+
+    expect(result.outcome).toBe('endpoint-lagging');
+    expect(result.logRequests).toBe(0);
+    expect(store.rows().some((row) => row.blockNumber === 100)).toBe(true);
+  });
+
+  it('a backfill page leaves the tail alone', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness({ logs: () => [creationLog(100, 0, 4n)] });
+    const index = tick(store, rig.ports, { backfillPageBlocks: 20 });
+    await index.runOnce(new AbortController().signal);
+    const before = (await store.load())!.coverage
+      .find((entry) => entry.family === 'context-graph-authority')!;
+
+    rig.logs = () => [];
+    await index.backfillOnce(new AbortController().signal);
+
+    const after = (await store.load())!.coverage
+      .find((entry) => entry.family === 'context-graph-authority')!;
+    // History moved down and the unfinalized tail is untouched: the backfill
+    // walks DOWN and has no business replacing blocks it never looked at.
+    expect(after.coveredFromBlock).toBe(before.coveredFromBlock - 20);
+    expect(store.rows().some((row) => row.blockNumber === 100 && !row.settled)).toBe(true);
+  });
+
+  it('S4: a fork suspicion survives an interleaved backfill', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const index = tick(store, rig.ports, { backfillPageBlocks: 20 });
+    await index.runOnce(new AbortController().signal);
+    const settled = (await store.load())!.cursor.settledBlockNumber;
+
+    rig.blockHashes.set(settled, hash(0xfe));
+    rig.head = { number: 120, hash: hash(0x78), timestampSeconds: 1_700_000_100 };
+    expect((await index.runOnce(new AbortController().signal)).outcome).toBe('fork-suspected');
+
+    // The runner puts backfill passes between head passes. If one of those can
+    // erase the suspicion, the second confirmation never arrives and the scope
+    // can never be tombstoned at all.
+    await index.backfillOnce(new AbortController().signal);
+    expect((await store.load())!.suspectedForkBlockNumber).toBe(settled);
+
+    const second = await index.runOnce(new AbortController().signal);
+    expect(second.outcome).toBe('tombstoned');
+    expect(store.tombstones).toBe(1);
+  });
+
+  it('S4: a settled hash that matches again withdraws the suspicion', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const index = tick(store, rig.ports);
+    await index.runOnce(new AbortController().signal);
+    const settled = (await store.load())!.cursor.settledBlockNumber;
+
+    rig.blockHashes.set(settled, hash(0xfe));
+    rig.head = { number: 120, hash: hash(0x78), timestampSeconds: 1_700_000_100 };
+    expect((await index.runOnce(new AbortController().signal)).outcome).toBe('fork-suspected');
+
+    // One desynchronized answer must not leave a permanent tombstone primer.
+    rig.blockHashes.delete(settled);
+    rig.head = { number: 130, hash: hash(0x82), timestampSeconds: 1_700_000_160 };
+    expect((await index.runOnce(new AbortController().signal)).outcome).toBe('advanced');
+    expect((await store.load())!.suspectedForkBlockNumber).toBeUndefined();
+  });
+
+  it('S5: verifies the lineage on the path that reads no settled hash', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const index = tick(store, rig.ports, { deploymentBlockNumber: 10 });
+    await index.runOnce(new AbortController().signal);
+    const settled = (await store.load())!.cursor.settledBlockNumber;
+
+    // A redeployed devnet under a `node-ui.db` that outlived it: the new chain
+    // is SHORTER than this cursor, so it cannot answer for the settled block at
+    // all — and the old order returned "lagging" there having checked nothing.
+    rig.head = { number: 40, hash: hash(0x28), timestampSeconds: 1_700_000_200 };
+    rig.blockHashes.set(settled, null);
+    rig.blockHashes.set(10, hash(0xee));
+
+    expect((await index.runOnce(new AbortController().signal)).outcome).toBe('fork-suspected');
+    expect((await index.runOnce(new AbortController().signal)).outcome).toBe('tombstoned');
+    expect(await store.load()).toBeUndefined();
+  });
+
+  it('S5: a lagging endpoint on the SAME chain is still only lagging', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const index = tick(store, rig.ports, { deploymentBlockNumber: 10 });
+    await index.runOnce(new AbortController().signal);
+    const settled = (await store.load())!.cursor.settledBlockNumber;
+
+    // Same shape as the reset above, except the deployment block still hashes
+    // the way this scope was pinned to it.
+    rig.head = { number: 40, hash: hash(0x28), timestampSeconds: 1_700_000_200 };
+    rig.blockHashes.set(settled, null);
+
+    expect((await index.runOnce(new AbortController().signal)).outcome).toBe('endpoint-lagging');
+    expect((await index.runOnce(new AbortController().signal)).outcome).toBe('endpoint-lagging');
+    expect(store.tombstones).toBe(0);
+    expect(await store.load()).toBeDefined();
   });
 
   it('stops the backfill exactly at the family floor', async () => {

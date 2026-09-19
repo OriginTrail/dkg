@@ -127,6 +127,15 @@ export interface ChainIndexTickResult {
   readonly blockRequests: number;
 }
 
+/** What one pass learned about the chain it is following. */
+interface ChainIndexVerification {
+  readonly outcome?: 'fork-suspected' | 'tombstoned';
+  readonly suspectedForkBlockNumber?: number;
+  /** The settled hash was re-read and MATCHED. Nothing else may clear a suspicion. */
+  readonly verified: boolean;
+  readonly blockRequests: number;
+}
+
 interface ChainIndexFetchResult {
   readonly rows: readonly ChainEventLogFetchedRow[];
   readonly bindings: readonly HubBinding[];
@@ -184,14 +193,12 @@ export class ChainIndexTick {
     if (state === undefined) return this.#coldStart(observedHead, blockRequests, signal);
 
     const cursor = state.cursor;
-    // S4. A cursor ABOVE the endpoint's head says nothing about the chain; it
-    // says this endpoint is behind. Treating that as evidence is what turns one
-    // lagging provider into a repeated wipe of the node's only chain truth.
-    if (observedHead.number < cursor.settledBlockNumber) {
-      return this.#result('endpoint-lagging', { head: observedHead, blockRequests, logRequests: 0 });
-    }
-
-    const verification = await this.#verifySettledHash(state, signal);
+    // BEFORE the lagging return, not after it. A head below the cursor is the
+    // signature of a lagging endpoint AND of a devnet redeployed under a
+    // `node-ui.db` that outlived it, and the old order returned on that path
+    // having verified nothing at all, so for as long as it lasted the second
+    // case could not be detected.
+    const verification = await this.#verifyChainIdentity(state, signal);
     blockRequests += verification.blockRequests;
     if (verification.outcome !== undefined) {
       if (verification.outcome === 'tombstoned') {
@@ -200,6 +207,8 @@ export class ChainIndexTick {
         await store.commit(scope, cursor.revision, {
           cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: this.#now() } },
           rows: [],
+          // No `replacedRange`: this pass fetched no logs, so it re-supplies no
+          // tail and must not drop the one coverage still claims.
           coverage: [],
           suspectedForkBlockNumber: verification.suspectedForkBlockNumber,
         });
@@ -209,6 +218,19 @@ export class ChainIndexTick {
         blockRequests,
         logRequests: 0,
       });
+    }
+
+    // S4. A cursor ABOVE the endpoint's head says nothing about the chain; it
+    // says this endpoint is behind. Treating that as evidence is what turns one
+    // lagging provider into a repeated wipe of the node's only chain truth.
+    //
+    // Measured against the highest block this scope ever observed, not only its
+    // settled prefix: a head between the two is still a shorter chain than the
+    // one the tail came from, and climbing only to it would leave the blocks
+    // above holding rows that no later pass re-fetches — while coverage, which
+    // never shrinks, went on claiming them.
+    if (observedHead.number < Math.max(cursor.settledBlockNumber, cursor.head.number)) {
+      return this.#result('endpoint-lagging', { head: observedHead, blockRequests, logRequests: 0 });
     }
 
     const topicSetVersion = chainEventLogTopicSetVersion(registry.topicSet());
@@ -222,7 +244,10 @@ export class ChainIndexTick {
       const revision = await store.commit(scope, cursor.revision, {
         cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: this.#now() } },
         rows: [],
+        // No `replacedRange` here either: an idle pass looked at no block, so
+        // the tail it holds is still the best account of those blocks there is.
         coverage: [],
+        clearsForkSuspicion: verification.verified,
       });
       return this.#result(revision === undefined ? 'cas-lost' : 'idle', {
         head: observedHead,
@@ -254,6 +279,9 @@ export class ChainIndexTick {
     const revision = await store.commit(scope, cursor.revision, {
       cursor: nextCursor,
       rows: this.#flagRows(fetch.rows, settled.number),
+      // Exactly the blocks this pass re-fetched. The store replaces the tail
+      // only inside it, so nothing coverage claims can go missing.
+      replacedRange: { fromBlockNumber: fetchFrom, throughBlockNumber: fetchThrough },
       // `fetchThrough`, NOT the head: coverage is what was actually looked at.
       // Claiming the head while a catch-up is still climbing is exactly how an
       // unindexed range becomes an "indexed and absent" answer.
@@ -263,6 +291,7 @@ export class ChainIndexTick {
         fetchThrough,
         topicSetVersion !== cursor.topicSetVersion,
       ),
+      clearsForkSuspicion: verification.verified,
     });
 
     return this.#result(revision === undefined ? 'cas-lost' : 'advanced', {
@@ -294,7 +323,14 @@ export class ChainIndexTick {
     if (incomplete === undefined) {
       return this.#result('idle', { blockRequests: 0, logRequests: 0 });
     }
-    const throughBlock = incomplete.coveredFromBlock - 1;
+    // Clamped at the settled cursor so a page can never reach into the tail.
+    // History is settled history; if a coverage row ever started above the
+    // cursor, walking down from it would produce tail rows that this commit —
+    // which replaces no tail — is not allowed to write.
+    const throughBlock = Math.min(
+      incomplete.coveredFromBlock - 1,
+      state.cursor.settledBlockNumber,
+    );
     const fromBlock = Math.max(
       incomplete.floorBlock,
       throughBlock - this.#options.backfillPageBlocks + 1,
@@ -306,6 +342,11 @@ export class ChainIndexTick {
     const fetch = await this.#fetchRange(fromBlock, throughBlock, signal, [incomplete.address]);
     // Backfilled history is BELOW the settled cursor by construction, so every
     // row of it is settled and is written once.
+    //
+    // No `replacedRange`, and that is the point: a backfill walks DOWN, it
+    // never looks at the tail, and the commit that used to drop the whole tail
+    // anyway left the log with no unfinalized rows at all for most of every
+    // interval while coverage went on claiming them.
     const revision = await store.commit(scope, state.cursor.revision, {
       cursor: { ...state.cursor },
       rows: this.#flagRows(fetch.rows, throughBlock),
@@ -391,6 +432,7 @@ export class ChainIndexTick {
         topicSetVersion,
       },
       rows: this.#flagRows(fetch.rows, settled.number),
+      replacedRange: { fromBlockNumber: liveFrom, throughBlockNumber: fetchThrough },
       coverage: this.#extendCoverage([], fetch.lookedFrom, fetchThrough, true),
     });
     return this.#result(revision === undefined ? 'cas-lost' : 'advanced', {
@@ -403,44 +445,89 @@ export class ChainIndexTick {
   }
 
   /**
-   * Re-read the hash AT the cursor, every pass.
+   * Re-read the hash AT the cursor, every pass — and the lineage whenever that
+   * read could not happen.
    *
    * Review S5: dropping this to "every ~25 blocks" to save a request is what
    * lets "inactive is final, zero RPC" and the write-once memos answer from a
    * chain that no longer exists. One request per tick is the price of the whole
    * log being trustworthy.
+   *
+   * `verified` is the ONLY thing that may clear a held fork suspicion, so a
+   * pass that read nothing leaves the suspicion exactly where it was.
    */
-  async #verifySettledHash(
+  async #verifyChainIdentity(
     state: ChainEventLogState,
     signal: AbortSignal,
-  ): Promise<Readonly<{
-    outcome?: 'fork-suspected' | 'tombstoned';
-    suspectedForkBlockNumber?: number;
-    blockRequests: number;
-  }>> {
+  ): Promise<ChainIndexVerification> {
     const cursor = state.cursor;
     if (cursor.settledBlockHash === CHAIN_EVENT_LOG_ZERO_HASH) {
-      return Object.freeze({ blockRequests: 0 });
+      // Nothing settled to check against yet, so this pass proves nothing about
+      // the height — but the lineage is answerable at any height.
+      return this.#verifyLineage(state, 0, signal);
     }
     const observed = normalizeChainEventLogHash(
       await this.ports.readBlockHash(cursor.settledBlockNumber, signal),
     );
-    if (observed === cursor.settledBlockHash) return Object.freeze({ blockRequests: 1 });
+    if (observed === cursor.settledBlockHash) {
+      return Object.freeze({ verified: true, blockRequests: 1 });
+    }
     if (observed === undefined) {
       // An endpoint that cannot answer for a block it claims to be past is a
-      // transport problem, not evidence of a fork.
-      return Object.freeze({ blockRequests: 1 });
+      // transport problem — and it is also precisely what a redeployed chain
+      // shorter than this cursor looks like. The deployment block is low enough
+      // that both can answer for it, and only the redeploy answers differently.
+      return this.#verifyLineage(state, 1, signal);
     }
-    // S4. Destroy only on a CONFIRMED mismatch: the same cursor height must
-    // come back wrong on a second pass, which a single desynchronized or
-    // dishonest answer cannot arrange on its own.
-    if (state.suspectedForkBlockNumber === cursor.settledBlockNumber) {
-      return Object.freeze({ outcome: 'tombstoned' as const, blockRequests: 1 });
+    return this.#suspect(state, cursor.settledBlockNumber, 1);
+  }
+
+  /**
+   * Re-read the block hash the scope's lineage was pinned to.
+   *
+   * The lineage is checked at cold start and then never again, which left a
+   * live cursor with no defence at all on the one path that skips the settled
+   * read. `node-ui.db` survives a chain reset by design
+   * (`chain-reset-wipe.ts`), and a deterministic redeploy reproduces every
+   * address, so this hash is the only thing that can tell the two chains apart.
+   */
+  async #verifyLineage(
+    state: ChainEventLogState,
+    blockRequests: number,
+    signal: AbortSignal,
+  ): Promise<ChainIndexVerification> {
+    const cursor = state.cursor;
+    const observed = normalizeChainEventLogHash(
+      await this.ports.readBlockHash(cursor.deploymentBlockNumber, signal),
+    );
+    const spent = blockRequests + 1;
+    // A matching lineage says the CHAIN is the same one; it says nothing about
+    // the settled height, so it is not a verification and may not clear a
+    // suspicion. An unanswerable one is a transport problem, as above.
+    if (observed === undefined || observed === cursor.lineage) {
+      return Object.freeze({ verified: false, blockRequests: spent });
+    }
+    return this.#suspect(state, cursor.deploymentBlockNumber, spent);
+  }
+
+  /**
+   * S4. Destroy only on a CONFIRMED mismatch: the same height must come back
+   * wrong on a second pass, which a single desynchronized or dishonest answer
+   * cannot arrange on its own.
+   */
+  #suspect(
+    state: ChainEventLogState,
+    blockNumber: number,
+    blockRequests: number,
+  ): ChainIndexVerification {
+    if (state.suspectedForkBlockNumber === blockNumber) {
+      return Object.freeze({ outcome: 'tombstoned' as const, verified: false, blockRequests });
     }
     return Object.freeze({
       outcome: 'fork-suspected' as const,
-      suspectedForkBlockNumber: cursor.settledBlockNumber,
-      blockRequests: 1,
+      suspectedForkBlockNumber: blockNumber,
+      verified: false,
+      blockRequests,
     });
   }
 
@@ -567,6 +654,11 @@ export class ChainIndexTick {
     return Object.freeze(rows.map((row) => Object.freeze({
       ...row,
       address: normalizeChainEventLogAddress(row.address) ?? row.address.toLowerCase(),
+      // Topics are lowercased on the way IN, beside the address, because the
+      // store filters them with a plain `IN (…)` and every reader builds its
+      // filter with `toString(16)`. Leaving the provider's casing to chance
+      // makes a per-graph read answer an empty list instead of raising.
+      topics: Object.freeze(row.topics.map((topic) => topic.toLowerCase())),
       settled: row.blockNumber <= settledThroughBlockNumber,
     })));
   }

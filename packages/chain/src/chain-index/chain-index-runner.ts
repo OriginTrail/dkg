@@ -5,12 +5,22 @@ import type { ChainIndexTick, ChainIndexTickResult } from './chain-index-tick.js
 /** Backoff ceiling for a scope whose ticks keep failing (review C8). */
 const MAX_TICK_BACKOFF_MULTIPLIER = 16;
 
+/**
+ * Ticks between backfill pages when nothing says otherwise.
+ *
+ * One page after EVERY tick contradicted this file's own reason for keeping
+ * them apart: it made the steady-state cost two `eth_getLogs` per pass for the
+ * whole life of the backfill, not one.
+ */
+const DEFAULT_BACKFILL_EVERY_TICKS = 10;
+
 export interface ChainIndexRunnerOptions {
   /** `chain.indexTickMs` (T). The same T every staleness bound is derived from. */
   readonly intervalMs: number;
   /**
    * How many ticks pass between bounded backfill pages. History is not urgent;
    * a fresh head is. Keeping them apart is what keeps the per-tick cost flat.
+   * Defaults to {@link DEFAULT_BACKFILL_EVERY_TICKS}.
    */
   readonly backfillEveryTicks?: number;
   readonly onResult?: (result: ChainIndexTickResult) => void;
@@ -105,7 +115,12 @@ export class ChainIndexRunner {
       this.#options.onResult?.(result);
       this.#consecutiveFailures = 0;
 
-      const everyTicks = this.#options.backfillEveryTicks ?? 1;
+      const configured = this.#options.backfillEveryTicks;
+      const everyTicks = configured !== undefined
+        && Number.isSafeInteger(configured)
+        && configured >= 1
+        ? configured
+        : DEFAULT_BACKFILL_EVERY_TICKS;
       this.#ticksSinceBackfill += 1;
       if (this.#ticksSinceBackfill >= everyTicks) {
         this.#ticksSinceBackfill = 0;

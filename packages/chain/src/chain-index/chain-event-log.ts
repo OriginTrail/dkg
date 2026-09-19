@@ -109,17 +109,50 @@ export interface ChainEventLogState {
   readonly suspectedForkBlockNumber?: number;
 }
 
+/** A closed block interval. Both ends are held. */
+export interface ChainEventLogBlockRange {
+  readonly fromBlockNumber: number;
+  readonly throughBlockNumber: number;
+}
+
 /** Everything one tick writes, applied in ONE transaction under the CAS token. */
 export interface ChainEventLogCommit {
   readonly cursor: Omit<ChainEventLogCursor, 'revision'>;
   /**
    * Rows fetched this tick. Settled ones are appended idempotently (a settled
-   * row is written once); the whole previous tail is dropped first, so an
-   * orphaned log simply ceases to exist — no undo journal, no parent walk.
+   * row is written once); the tail inside {@link ChainEventLogCommit.replacedRange}
+   * is dropped first, so an orphaned log simply ceases to exist — no undo
+   * journal, no parent walk.
    */
   readonly rows: readonly ChainEventLogRow[];
+  /**
+   * The blocks this commit RE-FETCHED, and so the ONLY tail rows it may
+   * replace. Omitted means the commit walked no tail at all.
+   *
+   * This is the whole of the coverage/rows invariant, and it lives on the
+   * commit rather than in the tick because the store owns the DELETE. Coverage
+   * never shrinks ({@link extendChainEventLogCoverage}), so a commit that
+   * dropped the WHOLE tail without re-supplying it — a backfill page, an idle
+   * head refresh, a fork-suspicion note — left coverage claiming a range whose
+   * rows were gone, and the next read answered 0 events for a range that really
+   * held one. Deleting only inside the re-fetched range makes "coverage claims
+   * a block ⇒ the rows it had are still there" true by construction: settled
+   * rows are never deleted, and a tail row can only vanish in the same
+   * transaction that re-supplies the range it sat in.
+   */
+  readonly replacedRange?: ChainEventLogBlockRange;
   readonly coverage: readonly ChainEventLogCoverage[];
   readonly suspectedForkBlockNumber?: number;
+  /**
+   * Withdraw a held fork suspicion.
+   *
+   * Suspicion is STICKY in the store: it is the tick's only memory between two
+   * passes, and a commit that merely omitted the field used to erase it — so a
+   * backfill interleaved between two mismatching passes handed the second one a
+   * clean slate and the S4 tombstone could never fire. Only a pass that re-read
+   * the settled hash and saw it MATCH may clear it.
+   */
+  readonly clearsForkSuspicion?: boolean;
 }
 
 export interface ChainEventLogQuery {

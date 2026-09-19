@@ -59,11 +59,19 @@ export interface SqliteChainEventLogState {
   readonly suspectedForkBlockNumber?: number;
 }
 
+export interface SqliteChainEventLogBlockRange {
+  readonly fromBlockNumber: number;
+  readonly throughBlockNumber: number;
+}
+
 export interface SqliteChainEventLogCommit {
   readonly cursor: Omit<SqliteChainEventLogCursor, 'revision'>;
   readonly rows: readonly SqliteChainEventLogRow[];
+  /** Blocks this commit re-fetched; the only tail it may replace. */
+  readonly replacedRange?: SqliteChainEventLogBlockRange;
   readonly coverage: readonly SqliteChainEventLogCoverage[];
   readonly suspectedForkBlockNumber?: number;
+  readonly clearsForkSuspicion?: boolean;
 }
 
 export interface SqliteChainEventLogQuery {
@@ -115,6 +123,20 @@ const TOMBSTONE_LINEAGE = '';
 
 function placeholders(count: number): string {
   return new Array(count).fill('?').join(', ');
+}
+
+/** The re-fetched range, or `undefined` when this commit replaces no tail. */
+function normalizeReplacedRange(
+  range: SqliteChainEventLogBlockRange | undefined,
+): SqliteChainEventLogBlockRange | undefined {
+  if (range === undefined) return undefined;
+  if (!Number.isSafeInteger(range.fromBlockNumber)
+    || !Number.isSafeInteger(range.throughBlockNumber)) {
+    throw new Error('Chain event log replaced range is invalid');
+  }
+  // An empty range is a legitimate "this pass fetched nothing", not an error:
+  // it simply replaces no tail.
+  return range.throughBlockNumber < range.fromBlockNumber ? undefined : range;
 }
 
 export class SqliteChainEventLogStore {
@@ -186,12 +208,34 @@ export class SqliteChainEventLogStore {
       && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) {
       throw new Error('Chain event log expected revision is invalid');
     }
+    const replaced = normalizeReplacedRange(commit.replacedRange);
+    // A tail row outside the re-fetched range would be unreachable by any later
+    // replacement, so it could only ever be dropped by a commit that did not
+    // look at its block. Refusing here keeps the invariant a property of the
+    // schema rather than of whoever wrote the caller.
+    for (const row of commit.rows) {
+      if (row.settled) continue;
+      if (replaced !== undefined
+        && row.blockNumber >= replaced.fromBlockNumber
+        && row.blockNumber <= replaced.throughBlockNumber) {
+        continue;
+      }
+      throw new Error('Chain event log tail row falls outside the replaced range');
+    }
     const apply = this.db.transaction((): number | undefined => {
       const revision = this.writeCursor(scope, expectedRevision, commit);
       if (revision === undefined) return undefined;
-      // The whole previous tail goes first. An orphaned log then needs no undo
-      // journal and no parent-hash walk: it is simply not in the new tail.
-      this.db.prepare(`DELETE FROM chain_events WHERE scope = ? AND settled = 0`).run(scope);
+      // The previous tail goes first, but ONLY inside the range this commit
+      // re-fetched. Coverage never shrinks, so deleting a tail block this pass
+      // did not look at would leave coverage claiming a range whose rows are
+      // gone — and a read over that range would answer "no such event".
+      if (replaced !== undefined) {
+        this.db.prepare(`
+          DELETE FROM chain_events
+           WHERE scope = ? AND settled = 0
+             AND block_number >= ? AND block_number <= ?
+        `).run(scope, replaced.fromBlockNumber, replaced.throughBlockNumber);
+      }
       const insert = this.db.prepare(`
         INSERT OR IGNORE INTO chain_events (
           scope, block_number, log_index, block_hash, tx_hash, address,
@@ -383,18 +427,29 @@ export class SqliteChainEventLogStore {
     if (!Number.isSafeInteger(nextRevision)) {
       throw new Error('Chain event log revision exceeds the safe integer range');
     }
+    // STICKY. A suspicion is the tick's only memory between two passes, so a
+    // commit that says nothing about forks — a backfill page, an idle head
+    // refresh — must leave the held one alone. Writing NULL here is what let a
+    // backfill between two mismatching passes reset the two-pass rule forever.
+    const suspectedClause = commit.clearsForkSuspicion === true
+      ? 'NULL'
+      : commit.suspectedForkBlockNumber === undefined
+        ? 'suspected_fork_block'
+        : '?';
     const updated = this.db.prepare(`
       UPDATE chain_index_cursor
          SET revision = ?, lineage = ?, deployment_block = ?, settled_block = ?,
              settled_hash = ?, head_block = ?, head_hash = ?,
              head_timestamp_seconds = ?, head_fetched_at_ms = ?,
-             topic_set_version = ?, suspected_fork_block = ?, updated_at = ?
+             topic_set_version = ?, suspected_fork_block = ${suspectedClause},
+             updated_at = ?
        WHERE scope = ? AND revision = ? AND lineage <> ''
     `).run(
       nextRevision, cursor.lineage, cursor.deploymentBlockNumber, cursor.settledBlockNumber,
       cursor.settledBlockHash, cursor.head.number, cursor.head.hash,
       cursor.head.timestampSeconds, cursor.head.fetchedAtMs, cursor.topicSetVersion,
-      suspected, now, scope, expectedRevision,
+      ...(suspectedClause === '?' ? [suspected] : []),
+      now, scope, expectedRevision,
     ).changes === 1;
     return updated ? nextRevision : undefined;
   }

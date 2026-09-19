@@ -39,6 +39,12 @@ function commit(
   coveredFromBlock = 1,
 ): SqliteChainEventLogCommit {
   return {
+    // A pass that fetched from just above the settled cursor up to its head —
+    // the only tail this commit may replace.
+    replacedRange: {
+      fromBlockNumber: settledBlockNumber + 1,
+      throughBlockNumber: headBlockNumber,
+    },
     cursor: {
       lineage: hash(0x01),
       deploymentBlockNumber: 1,
@@ -175,5 +181,99 @@ describe('SqliteChainEventLogStore', () => {
     expect(await store.blockHashAt(SCOPE, 10)).toBe(hash(10));
     expect(await store.blockHashAt(SCOPE, 11)).toBe(hash(11));
     expect(await store.blockHashAt(SCOPE, 9)).toBeUndefined();
+  });
+
+  /**
+   * THE invariant: coverage claims a range ⇒ the rows that range held are still
+   * in the table.
+   *
+   * Every "is this absent?" answer in the node bottoms out in a coverage check
+   * followed by a read. If a commit can drop rows inside a range coverage still
+   * claims, that pair reports "indexed, and nothing there" for a block that
+   * really held an event — a missed `AgentParticipantRemoved` leaves a revoked
+   * member on a roster, a missed `ContextGraphCreated` reads as absent.
+   */
+  it('keeps every row inside a range coverage still claims, whatever the commit does',
+    async () => {
+      const { store } = createStore();
+      await store.commit(SCOPE, undefined, commit(10, 12, [
+        row(10, 0, true),
+        row(12, 0, false),
+      ]));
+
+      // Three commits that between them cover every shape the tick emits: a
+      // settled-history append, a note that carries no rows at all, and a pass
+      // that re-fetched a NARROWER range than the one already claimed.
+      let revision = 1;
+      for (const next of [
+        { ...commit(10, 12, [row(4, 0, true)], 4), replacedRange: undefined },
+        { ...commit(10, 12, []), replacedRange: undefined },
+        { ...commit(10, 12, []), replacedRange: { fromBlockNumber: 11, throughBlockNumber: 11 } },
+      ]) {
+        const applied = await store.commit(SCOPE, revision, next);
+        expect(applied).toBe(revision + 1);
+        revision = applied!;
+
+        const state = await store.load(SCOPE);
+        const coverage = state!.coverage[0]!;
+        const held = await store.readEvents(SCOPE, {
+          fromBlockNumber: coverage.coveredFromBlock,
+          throughBlockNumber: coverage.coveredThroughBlock,
+        });
+        // Block 12 is inside [coveredFrom, coveredThrough] and held a row.
+        expect(coverage.coveredThroughBlock).toBeGreaterThanOrEqual(12);
+        expect(held.map((entry) => entry.blockNumber)).toContain(12);
+      }
+    });
+
+  it('refuses a tail row the commit has not claimed the right to replace', async () => {
+    const { store } = createStore();
+    // Without a `replacedRange` covering it, this row could never be replaced
+    // by a later pass and would outlive the chain it came from.
+    await expect(store.commit(SCOPE, undefined, {
+      ...commit(10, 12, [row(12, 0, false)]),
+      replacedRange: undefined,
+    })).rejects.toThrow(/outside the replaced range/);
+  });
+
+  it('keeps a fork suspicion across a commit that says nothing about forks', async () => {
+    const { store } = createStore();
+    await store.commit(SCOPE, undefined, commit(10, 12, []));
+    expect(await store.commit(SCOPE, 1, {
+      ...commit(10, 12, []),
+      suspectedForkBlockNumber: 10,
+    })).toBe(2);
+    expect((await store.load(SCOPE))?.suspectedForkBlockNumber).toBe(10);
+
+    // A backfill page between two mismatching passes. Erasing the suspicion
+    // here is what made the two-pass tombstone unreachable.
+    expect(await store.commit(SCOPE, 2, {
+      ...commit(10, 12, []),
+      replacedRange: undefined,
+    })).toBe(3);
+
+    expect((await store.load(SCOPE))?.suspectedForkBlockNumber).toBe(10);
+  });
+
+  it('clears a fork suspicion only when a pass explicitly withdraws it', async () => {
+    const { store } = createStore();
+    await store.commit(SCOPE, undefined, commit(10, 12, []));
+    await store.commit(SCOPE, 1, { ...commit(10, 12, []), suspectedForkBlockNumber: 10 });
+
+    expect(await store.commit(SCOPE, 2, {
+      ...commit(10, 12, []),
+      clearsForkSuspicion: true,
+    })).toBe(3);
+
+    expect((await store.load(SCOPE))?.suspectedForkBlockNumber).toBeUndefined();
+  });
+
+  it('round-trips a fork suspicion through a restart', async () => {
+    const { store, dataDir } = createStore();
+    await store.commit(SCOPE, undefined, commit(10, 12, []));
+    await store.commit(SCOPE, 1, { ...commit(10, 12, []), suspectedForkBlockNumber: 10 });
+
+    const reopened = new SqliteChainEventLogStore(new DashboardDB({ dataDir }));
+    expect((await reopened.load(SCOPE))?.suspectedForkBlockNumber).toBe(10);
   });
 });
