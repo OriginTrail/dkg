@@ -1061,10 +1061,7 @@ export class DKGAgent extends DKGAgentBase {
             { requestClass: 'background', signal },
             () => this.rfc64AuthorityReadCoordinatorV1.run(
               signal,
-              (readSignal, evidence) => {
-                evidence.markRpcAttempt();
-                return read(readSignal, evidence.observeProjectionServed);
-              },
+              (readSignal, evidence) => read(evidence.chainReadOptions(readSignal)),
             ),
           )
         ),

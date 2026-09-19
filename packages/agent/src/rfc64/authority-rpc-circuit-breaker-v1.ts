@@ -209,22 +209,25 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           );
         }
 
-        let rpcAttempted = false;
-        let projectionHealthy = false;
-        let projectionUnproven = false;
-        const markRpcAttempt = () => { rpcAttempted = true; };
+        const poolEvidence: { value: 'none' | 'pool' | 'unproven' } = { value: 'none' };
+        const provePool = () => {
+          if (poolEvidence.value !== 'unproven') poolEvidence.value = 'pool';
+        };
+        const markRpcAttempt = provePool;
         const observeProjectionServed = (
           served: ContextGraphAuthorityProjectionServedEvidence,
         ) => {
           if (served.source === 'scan') {
-            projectionHealthy = true;
+            provePool();
           } else if (
             served.source === 'cache'
             && this.#now() - served.ageMs > this.#exhaustedAtMs
           ) {
-            projectionHealthy = true;
+            provePool();
           } else {
-            projectionUnproven = true;
+            // Sticky for this operation: later marks cannot turn an answer
+            // served despite a failed refresh into proof of pool recovery.
+            poolEvidence.value = 'unproven';
           }
         };
         const chainReadOptions = (signal?: AbortSignal): ChainReadOptions => {
@@ -251,7 +254,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           // answer served DESPITE a failed refresh proves the opposite.
           if (
             this.#consecutiveExhaustions === 0
-            || (!projectionUnproven && (rpcAttempted || projectionHealthy))
+            || poolEvidence.value === 'pool'
           ) {
             this.#consecutiveExhaustions = 0;
             this.#retryAtMs = 0;

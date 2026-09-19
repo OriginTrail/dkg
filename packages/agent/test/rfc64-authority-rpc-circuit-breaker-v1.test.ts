@@ -217,6 +217,17 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
     });
 
+    it('keeps unproven projection evidence sticky for the whole operation', async () => {
+      const { breaker } = await halfOpenBreaker();
+      await breaker.run(undefined, async (_signal, evidence) => {
+        evidence.observeProjectionServed({ source: 'stale-cache', ageMs: T + 1 });
+        evidence.markRpcAttempt();
+        evidence.observeProjectionServed({ source: 'scan', ageMs: 0 });
+        return 'mixed-evidence';
+      });
+      expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
+    });
+
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {

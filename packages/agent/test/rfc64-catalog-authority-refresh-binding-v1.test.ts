@@ -2,6 +2,7 @@
 
 import {
   RpcEndpointsExhaustedError,
+  type ChainReadOptions,
   type ContextGraphAuthorityProjectionServedEvidence,
   type ContextGraphAuthorityIndexId,
   type ContextGraphAuthorityIndexRevisionReader,
@@ -23,14 +24,12 @@ const REVISION_9 = `0x${'09'.repeat(32)}`;
 
 async function runAuthorityRead<T>(
   signal: AbortSignal,
-  read: (
-    signal: AbortSignal,
-    observeProjectionServed: (
-      evidence: ContextGraphAuthorityProjectionServedEvidence,
-    ) => void,
-  ) => Promise<T>,
+  read: (options: ChainReadOptions) => Promise<T>,
 ): Promise<T> {
-  return read(signal, () => undefined);
+  return read({
+    signal,
+    onContextGraphAuthorityProjectionServed: () => undefined,
+  });
 }
 
 function executionPlan(
@@ -166,10 +165,7 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
       resolveBinding: () => '9',
       runAuthorityRead: (signal, read) => coordinator.run(
         signal,
-        (readSignal, evidence) => {
-          evidence.markRpcAttempt();
-          return read(readSignal, evidence.observeProjectionServed);
-        },
+        (readSignal, evidence) => read(evidence.chainReadOptions(readSignal)),
       ),
     })!;
 
@@ -215,10 +211,7 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
       resolveBinding: () => '9',
       runAuthorityRead: (signal, read) => coordinator.run(
         signal,
-        (readSignal, evidence) => {
-          evidence.markRpcAttempt();
-          return read(readSignal, evidence.observeProjectionServed);
-        },
+        (readSignal, evidence) => read(evidence.chainReadOptions(readSignal)),
       ),
     })!;
 

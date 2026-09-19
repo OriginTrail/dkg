@@ -3,6 +3,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import { ContextGraphAuthorityIndexRetryableError } from
+  '../src/context-graph-authority-index-errors.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
@@ -293,7 +295,7 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(h.reads.refreshes).toBe(2);
   });
 
-  it('serves the last projection through a failed refresh, but never past max(3T, 15s)', async () => {
+  it('serves the last projection through a failed refresh, but never past the bounded stale window', async () => {
     const h = makeHarness();
     const cached = await h.read();
     const outage = Object.assign(new Error('all endpoints exhausted'), {
@@ -313,6 +315,43 @@ describe('finalized Context Graph authority projection cache', () => {
 
     h.failRefresh(undefined);
     expect((await h.read()).fetchedAtMs).toBe(START_MS + 18_001);
+  });
+
+  it('never masks a durable-index admission rejection with stale authority', async () => {
+    const h = makeHarness();
+    await h.read();
+    h.clock.nowMs += T;
+    const rejection = new ContextGraphAuthorityIndexRetryableError(
+      'finalized head 90 is behind durable cursor 100',
+    );
+    h.failRefresh(rejection);
+
+    await expect(h.read()).rejects.toBe(rejection);
+    expect(h.served.map(({ source }) => source)).toEqual(['scan']);
+
+    h.failRefresh(undefined);
+    await expect(h.read()).resolves.toMatchObject({ fetchedAtMs: h.clock.nowMs });
+    expect(h.reads.refreshes).toBe(3);
+  });
+
+  it('publishes a lower stabilized head after the retained newer head expires', async () => {
+    const h = makeHarness();
+    const newer = await h.read();
+    h.clock.nowMs += T;
+    const lower = await h.read(9n, undefined, async () => {
+      h.reads.refreshes += 1;
+      return Object.freeze({
+        ...newer,
+        finalized: { number: 24, hash: `0x${'24'.padStart(64, '0')}` },
+        head: { ...newer.head, number: 24, hash: `0x${'24'.padStart(64, '0')}` },
+      });
+    });
+    expect(lower.head.number).toBe(24);
+
+    h.clock.nowMs += 1;
+    expect(await h.read()).toBe(lower);
+    expect(h.reads.refreshes).toBe(2);
+    expect(h.served.at(-1)?.source).toBe('cache');
   });
 
   it('pays one failed refresh per tick during an outage, not one per read', async () => {
@@ -487,9 +526,10 @@ describe('finalized Context Graph authority projection cache', () => {
     // cursor admission cannot be what rejects it.
     const h = makeHarness({ holdback: 8 });
     const newer = await h.read();
-    h.clock.nowMs += T;
+    h.clock.nowMs += T - 1;
     h.chain.head = 24;
-    const lagging = await h.read();
+    // An absent target forces a scan while the retained head is still fresh.
+    const lagging = await h.read(13n);
     expect(lagging.head.number).toBe(24);
 
     h.chain.head = 25;

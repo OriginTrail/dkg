@@ -9,6 +9,8 @@ import type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 import { waitForAuthorityIndexOperation } from
   './context-graph-authority-index-activity.js';
+import { isContextGraphAuthorityIndexRetryableError } from
+  './context-graph-authority-index-errors.js';
 
 /** Default `chain.indexTickMs`: how long one completed projection answers reads. */
 export const DEFAULT_CONTEXT_GRAPH_AUTHORITY_INDEX_TICK_MS = 6_000;
@@ -323,6 +325,14 @@ export class ContextGraphAuthorityIndexProjectionCache {
     } catch (error) {
       // A caller that left did not observe an RPC failure.
       if (input.signal?.aborted) throw error;
+      // Admission rejected the chain view itself (for example a finalized
+      // head behind the durable cursor). That is not a transport outage the
+      // old authority projection may paper over: invalidate the retained view
+      // and propagate the typed failure.
+      if (isContextGraphAuthorityIndexRetryableError(error)) {
+        if (epoch === this.#epoch) this.drop(input.scope);
+        throw error;
+      }
       if (epoch === this.#epoch) this.#failedAtMs.set(input.scope, this.#now());
       const stale = this.#serve(input, 'refresh-failed');
       if (stale !== undefined) return stale;
@@ -342,10 +352,19 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // No chain time, no cache: the S2 guard could never be evaluated.
     if (!Number.isSafeInteger(projection.head.timestampSeconds)
       || projection.head.timestampSeconds < 0) return;
-    // A lagging sibling endpoint must not replace a newer head and then be
-    // pinned for a whole tick. Its caller is still answered, as before.
+    // A lagging sibling endpoint must not displace a still-fresh newer head.
+    // Once that retained head has reached T, however, keeping it would strand
+    // the cache forever on a legitimate reorg/reset: every stabilized lower
+    // scan would be answered to its caller but refused publication.
     const previous = this.#projections.get(scope);
-    if (previous !== undefined && projection.head.number < previous.head.number) return;
+    if (
+      previous !== undefined
+      && projection.head.number < previous.head.number
+      && projection.fetchedAtMs - previous.fetchedAtMs < this.tickMs
+    ) {
+      this.#failedAtMs.delete(scope);
+      return;
+    }
     this.#projections.set(scope, projection);
     this.#failedAtMs.delete(scope);
   }
