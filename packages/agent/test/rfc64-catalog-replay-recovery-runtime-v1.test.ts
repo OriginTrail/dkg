@@ -3,6 +3,8 @@ import {
   Rfc64CatalogReplayRecoveryRuntimeV1,
   RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1,
 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
+import { RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 } from
+  '../src/rfc64/public-catalog-receiver-v1.js';
 
 interface Target {
   readonly id: string;
@@ -166,6 +168,13 @@ describe('RFC-64 catalog replay recovery runtime', () => {
  * four worker slots and the queue stopped claiming work entirely.
  */
 describe('RFC-64 replay recovery: the idle drain is bounded', () => {
+  it('allows strictly more than the receiver can lawfully defer', () => {
+    // At exactly the deferral window this budget is a tie, and one task
+    // waiting on the process-wide chain-read lane defeats it every time.
+    expect(RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1)
+      .toBeGreaterThan(RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1);
+  });
+
   function runtimeWith(
     whenReceiverIdleForContextGraph: () => Promise<void>,
     sleep?: (ms: number) => Promise<void>,
@@ -206,7 +215,7 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
     expect(budgets).toEqual([RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1]);
     // Never silent: a full replay without its cause is unreadable in the field.
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('exceeded 120000ms');
+    expect(warnings[0]).toContain(`exceeded ${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms`);
     expect(warnings[0]).toContain('public-cg');
   });
 

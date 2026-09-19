@@ -5,6 +5,7 @@ import {
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog-limits-v1.js';
+import { RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 } from './public-catalog-receiver-v1.js';
 
 const MAX_UNRESOLVED_PEERS_V1 = 64;
 /**
@@ -118,8 +119,15 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
  * Exceeding the budget is treated exactly like an exhausted worklist: the pass
  * did NOT observe parity, so it reports failure and demands a full replay. It
  * never reports parity it has not seen.
+ *
+ * DERIVED, never a bare number: at exactly the receiver's maximum admission
+ * deferral window this budget is a tie, and one lawfully-deferring task — a
+ * task waiting on the process-wide finalized chain-read lane, which under a
+ * contended RPC budget is the expected state — defeats it every single time.
+ * Keeping the factor here means the two cannot silently drift apart.
  */
-export const RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 = 120_000;
+export const RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 =
+  RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 * 2;
 
 export interface Rfc64CatalogReplayRecoveryResultV1 {
   readonly requested: number;
