@@ -894,7 +894,7 @@ export class FinalizationRecovery<
         ? {
             kind: 'persisted',
             evidence: entry.verifiedEvidence,
-            placement: entry.state === 'REORGED' ? 'canonical-moved' : 'original',
+            placement: 'original',
           }
         : entry.state === 'REORGED'
           ? { kind: 'reorg-recovery' }
@@ -1673,7 +1673,16 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return false;
     try {
-      return await store.transition(entry.key, entry.generation, state, reason);
+      const changed = await store.transition(entry.key, entry.generation, state, reason);
+      // A refused SETTLED write means the row lost its CAS or never persisted
+      // verified evidence; the caller discards the result, so say so here.
+      if (!changed && state === 'SETTLED') {
+        this.log.warn(
+          `Finalization recovery inbox refused to settle ${entry.ual}: `
+            + 'generation lost or verified evidence missing',
+        );
+      }
+      return changed;
     } catch (error) {
       this.log.warn(
         `Finalization recovery transition to ${state} failed for ${entry.ual}: `
@@ -1918,7 +1927,12 @@ export class FinalizationRecovery<
     if (!entry || (!this.isLiveEntry(entry) && entry.state !== 'SETTLED')) {
       return 'none';
     }
-    let activeEntry = entry;
+    // `isLiveEntry` is a type predicate, so `entry` is narrowed to the live
+    // states here. `activeEntry` is later reassigned from
+    // `ensureVerifiedReplayEntry`, which returns the broad union, and it is
+    // only ever read for `.ual` and handed to `recordDeferred`, which accepts
+    // the broad union too.
+    let activeEntry: FinalizationRecoveryEntry = entry;
     try {
       // Only autonomous replay observes its persisted deadline. Chain
       // reconciliation remains an immediate, authoritative recovery trigger.

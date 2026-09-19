@@ -384,7 +384,13 @@ export {
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
 } from './dkg-agent-types.js';
-export type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+export type {
+  FinalizationRecoveryEntry,
+  FinalizationRecoveryStore,
+  HistoricalFinalizationRecoveryEntry,
+  UnverifiedFinalizationRecoveryEntry,
+  VerifiedFinalizationRecoveryEntry,
+} from './finalization-recovery-store.js';
 export {
   computeImportedArtifactSelector,
   IMPORTED_ARTIFACT_AUTH_PURPOSE,

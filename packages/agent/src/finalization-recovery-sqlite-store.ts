@@ -450,9 +450,13 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
       ).get(key);
       if (!updated) return { status: 'missing' };
+      const updatedEntry = finalizationRecoveryRowToEntry(updated);
+      if (updatedEntry.state !== 'SETTLED' || !updatedEntry.verifiedEvidence) {
+        throw new Error('Finalization inbox settled upgrade lost verified evidence');
+      }
       return {
         status: 'recorded',
-        entry: finalizationRecoveryRowToEntry(updated),
+        entry: updatedEntry,
       };
     });
   }
@@ -597,7 +601,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       }
       const entry = finalizationRecoveryRowToEntry(updated);
       if (
-        entry.generation === fields.generation
+        (entry.state === 'VERIFIED' || entry.state === 'SETTLED')
+        && entry.generation === fields.generation
         && entry.verifiedEvidence
         && VerifiedGraphScopedFinalizationEvidenceCodec.same(
           entry.verifiedEvidence,
@@ -763,7 +768,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               updated_at = ?
           WHERE key = ? AND generation = ?
             AND state IN ('RECEIVED','VERIFIED','REORGED')
-        `).run(state, state, lastError ?? null, now, key, generation);
+            AND (? != 'SETTLED' OR verified_evidence_json IS NOT NULL)
+        `).run(state, state, lastError ?? null, now, key, generation, state);
         changed = result.changes > 0;
         this.pruneWithinTransaction(now);
       });
