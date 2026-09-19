@@ -706,6 +706,9 @@ importers:
       '@origintrail-official/dkg-publisher':
         specifier: workspace:*
         version: link:../publisher
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       '@origintrail-official/dkg-semantic-runtime':
         specifier: workspace:*
         version: link:../semantic-runtime
@@ -740,6 +743,9 @@ importers:
         specifier: ^5.7
         version: 5.9.3
     devDependencies:
+      '@origintrail-official/dkg-query':
+        specifier: workspace:*
+        version: link:../query
       '@types/better-sqlite3':
         specifier: ^7
         version: 7.6.13

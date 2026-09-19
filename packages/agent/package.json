@@ -20,6 +20,7 @@
     },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
+    "./dist/approved-private-replica.js": null,
     "./dist/random-sampling-runtime.js": null,
     "./dist/random-sampling-eligibility.js": null,
     "./dist/rfc64/author-catalog-producer.js": "./dist/rfc64/author-catalog-producer.js",

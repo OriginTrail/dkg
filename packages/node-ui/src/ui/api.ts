@@ -151,7 +151,7 @@ export const invokeSemanticProgram = (
   invocationId: string,
   programLayer: SemanticMemoryLayer,
   executionLayer: SemanticMemoryLayer,
-) => post<SemanticInvocationResult>('/api/semantic-runtime/invoke', {
+) => post<SemanticInvocationResult>('/api/programs/execute', {
   contextGraphId,
   programIri,
   invocationId,

@@ -213,6 +213,8 @@ import {
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
 import { authenticateHttpRequest, loadTokens } from '../auth.js';
+import { AGENT_HTTP_HEADERS, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { SqliteAgentHttpNonceStore } from '../agent-http-nonce-store.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -2174,8 +2176,8 @@ async function runDaemonInnerWithStartupOwnership(
     const openSkills = config.messaging?.openSkills === true;
     const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
     agent.setSkillAcl((senderPeerId: string, skillUri: string) => {
-      // The semantic handler performs wallet-signature and live Context Graph
-      // membership authorization itself. Let only that handler reach its
+      // The semantic handler verifies wallet signatures, then live graph membership
+      // for Programs or tenant approval for bound operations. Let only it reach its
       // stronger application-level gate without opening unrelated skills.
       if (
         config.semanticRuntime?.enabled === true
@@ -2255,25 +2257,30 @@ async function runDaemonInnerWithStartupOwnership(
 
   await agent.start();
 
-  // Phase 0 is exact-opt-in and starts only after the DKG agent/services and
-  // durable home exist. It runs before configured graph activation so future
-  // semantic trigger intake cannot race Worker integrity/restore readiness.
-  // A requested runtime fails closed; ordinary daemon startup never touches
-  // the Worker path while semanticRuntime.enabled is absent/false.
-  let semanticRuntimeHost: Awaited<ReturnType<typeof startConfiguredSemanticRuntime>> = null;
+  // Persisted API permissions restore the service on boot. With no records,
+  // only an authenticated management request may lazily activate it; an
+  // explicit enabled:false remains the operator's service kill switch.
+  config.semanticRuntime ??= {};
+  type SemanticRuntimeService = Awaited<ReturnType<typeof startConfiguredSemanticRuntime>>;
+  let semanticRuntimeHost: SemanticRuntimeService = null;
+  let semanticRuntimeStarting: Promise<SemanticRuntimeService> | undefined;
+  const ensureSemanticRuntime = async (activate = true): Promise<SemanticRuntimeService> => {
+    if (semanticRuntimeHost) return semanticRuntimeHost;
+    if (semanticRuntimeStarting) return semanticRuntimeStarting;
+    semanticRuntimeStarting = (async () => {
+      const started = await startConfiguredSemanticRuntime(config.semanticRuntime, { log, dataDirectory: dkgDir(), activate });
+      if (started) {
+        try { registerSemanticRuntimeInboxSkill(agent, started, config.semanticRuntime, config.llm); }
+        catch (error) { await started.stop(); throw error; }
+      }
+      semanticRuntimeHost = started;
+      return started;
+    })();
+    try { return await semanticRuntimeStarting; }
+    finally { semanticRuntimeStarting = undefined; }
+  };
   try {
-    semanticRuntimeHost = await startConfiguredSemanticRuntime(config.semanticRuntime, {
-      log,
-      dataDirectory: dkgDir(),
-    });
-    if (semanticRuntimeHost) {
-      registerSemanticRuntimeInboxSkill(
-        agent,
-        semanticRuntimeHost,
-        config.semanticRuntime,
-        config.llm,
-      );
-    }
+    semanticRuntimeHost = await ensureSemanticRuntime(false);
   } catch (err) {
     await semanticRuntimeHost?.stop().catch((stopErr: any) =>
       log(`Semantic runtime startup rollback could not stop runtime: ${stopErr?.message ?? String(stopErr)}`),
@@ -3380,6 +3387,8 @@ async function runDaemonInnerWithStartupOwnership(
   // --- Authentication ---
 
   const authEnabled = config.auth?.enabled !== false;
+  const operatorAgentAddresses = normalizeOperatorAgentAddresses(config.auth?.operatorAgentAddresses);
+  const agentHttpNonces = new SqliteAgentHttpNonceStore(dashDb.db);
   const validTokens = await loadTokens(config.auth);
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
@@ -3567,7 +3576,7 @@ async function runDaemonInnerWithStartupOwnership(
             ? { "Access-Control-Allow-Origin": reqCorsOrigin }
             : {}),
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": AGENT_HTTP_HEADERS,
         });
         res.end();
         return;
@@ -3580,6 +3589,7 @@ async function runDaemonInnerWithStartupOwnership(
         authEnabled,
         validTokens,
         resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        agentKey: { targetPeerId: agent.peerId, operatorAgentAddresses, nonces: agentHttpNonces },
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
@@ -3733,6 +3743,7 @@ async function runDaemonInnerWithStartupOwnership(
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
         semanticRuntimeHost,
+        ensureSemanticRuntime,
         emitMemoryGraphChanged,
         emitNotification,
       });

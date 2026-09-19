@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { resolveApprovedPrivateReplicaOwner } from './approved-private-replica.js';
+
 /**
  * RFC-64 Gate 1 public author-catalog wiring, extracted as a DKGAgent mixin
  * holder. Methods take `this: DKGAgent` so cross-mixin calls resolve against
@@ -1712,7 +1714,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * Resolve this node's exact private-CG principal from authenticated lifecycle
    * state. An explicit operator authority remains authoritative; default mode
    * otherwise uses a valid CG-scoped approval hint or one unambiguous
-   * intersection between the verified roster and locally held identities.
+   * intersection between the verified roster and node-held identities. API
+   * clients registered with a public key are not implicit node principals.
    */
   async resolveRfc64CatalogLocalAgentAddressV1(
     this: DKGAgent,
@@ -1730,11 +1733,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : null;
     }
 
-    const localAgents = new Set<EvmAddressV1>();
-    for (const { agentAddress } of this.listLocalAgents()) {
+    const registeredAgents = new Set<EvmAddressV1>();
+    const nodeAgents = new Set<EvmAddressV1>();
+    for (const { agentAddress, mode } of this.listLocalAgents()) {
       const normalized = agentAddress.toLowerCase();
       if (ethers.isAddress(normalized) && normalized !== ethers.ZeroAddress) {
-        localAgents.add(normalized as EvmAddressV1);
+        registeredAgents.add(normalized as EvmAddressV1);
+        // Registration of an external caller stores its public identity and
+        // bearer mapping, not custody of its wallet. Counting it here can
+        // both invent node membership and deactivate the real local member.
+        if (mode === 'custodial') nodeAgents.add(normalized as EvmAddressV1);
       }
     }
     const defaultAgentAddress = this.defaultAgentAddress?.toLowerCase();
@@ -1743,17 +1751,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       && ethers.isAddress(defaultAgentAddress)
       && defaultAgentAddress !== ethers.ZeroAddress
     ) {
-      localAgents.add(defaultAgentAddress as EvmAddressV1);
+      registeredAgents.add(defaultAgentAddress as EvmAddressV1);
+      nodeAgents.add(defaultAgentAddress as EvmAddressV1);
     }
 
     const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase();
     if (
       approvedAgent !== undefined
-      && localAgents.has(approvedAgent as EvmAddressV1)
+      && registeredAgents.has(approvedAgent as EvmAddressV1)
       && rosterSet.has(approvedAgent as EvmAddressV1)
     ) return approvedAgent as EvmAddressV1;
 
-    const matching = [...localAgents].filter((address) => rosterSet.has(address));
+    const matching = [...nodeAgents].filter((address) => rosterSet.has(address));
     return matching.length === 1 ? matching[0]! : null;
   }
 
@@ -2921,10 +2930,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           snapshot: authoritativeSnapshot,
         });
       } else {
+        // Finalized absence above establishes registration state. A private
+        // replica additionally needs its persisted, authenticated approval and
+        // CURRENT root/member/delegation proof. Plain participant metadata and
+        // public ontology carriers cannot authorize this branch.
+        const approvedPrivateOwner = !localFirstUnregistered
+          && !directAcceptedPrivateAuthority
+          && replicaUnregisteredAuthority === null
+          ? await resolveApprovedPrivateReplicaOwner(
+            this, contextGraphId, this.localApprovedAgentByCG.get(contextGraphId), signal,
+          )
+          : null;
         if (
           !localFirstUnregistered
           && !directAcceptedPrivateAuthority
           && replicaUnregisteredAuthority === null
+          && approvedPrivateOwner === null
         ) {
           throw new Rfc64CatalogAuthorityResolutionErrorV1(
             'unregistered-owner-unresolved',
@@ -2951,6 +2972,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               'unregistered RFC-64 Context Graph has no canonical owner address',
             );
           }
+          if (approvedPrivateOwner !== null && ownerAddress !== approvedPrivateOwner) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'unregistered-owner-unresolved', 'Private replica owner changed during authority resolution',
+            );
+          }
           const accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           if (accessPolicy === null) {
@@ -2962,7 +2988,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // A direct private compatibility mark may advance only through the
           // authenticated private lifecycle. Never let public RDF metadata
           // reinterpret that mark as unsigned public replica authority.
-          if (directAcceptedPrivateAuthority && accessPolicy !== 'private') {
+          if ((directAcceptedPrivateAuthority || approvedPrivateOwner !== null) && accessPolicy !== 'private') {
             throw new Rfc64CatalogAuthorityResolutionErrorV1(
               'access-policy-unresolved',
               'authenticated private RFC-64 authority cannot become public without signed authority',
