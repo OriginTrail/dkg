@@ -61,9 +61,10 @@ interface FakeChainState {
   /** When set, exposes `chain.isRandomSamplingReady` (read live, so a test
    *  can flip it to simulate a Hub rotation clearing the RS bindings). */
   randomSamplingReady?: boolean;
-  /** When set, exposes `chain.getRandomSamplingBindingGeneration` (read live:
-   *  the adapter bumps it whenever the RS contract PAIR may have changed). */
-  bindingGeneration?: number;
+  /** When set, exposes the derived identity of the live RS/RSS pair. */
+  bindingId?: string;
+  /** When set, exposes the current Chronos epoch. */
+  currentEpoch?: bigint;
 }
 
 function makeChain(state: FakeChainState): ChainAdapter {
@@ -104,8 +105,11 @@ function makeChain(state: FakeChainState): ChainAdapter {
   if (state.randomSamplingReady !== undefined) {
     partial.isRandomSamplingReady = vi.fn(() => state.randomSamplingReady!);
   }
-  if (state.bindingGeneration !== undefined) {
-    partial.getRandomSamplingBindingGeneration = vi.fn(() => state.bindingGeneration);
+  if (state.bindingId !== undefined) {
+    partial.getRandomSamplingBindingId = vi.fn(() => state.bindingId);
+  }
+  if (state.currentEpoch !== undefined) {
+    partial.getCurrentEpoch = vi.fn(async () => state.currentEpoch!);
   }
   return partial as ChainAdapter;
 }
@@ -1589,7 +1593,8 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       submitProof: vi.fn() as never,
       blockNumber: RECORD_HEAD,
       randomSamplingReady: true,
-      bindingGeneration: 0,
+      bindingId: 'rs-a:rss-a',
+      currentEpoch: 3n,
       ...overrides,
     };
   }
@@ -1671,6 +1676,46 @@ describe('RandomSamplingProver — solved-period read skip', () => {
 
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     state.blockNumber = 1060;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('re-reads at an epoch boundary before a shorter duration can move the period end', async () => {
+    const state = makeSolvedState({
+      blockNumber: 1001,
+      status: {
+        activeProofPeriodStartBlock: PERIOD_START,
+        isValid: true,
+        proofingPeriodDurationInBlocks: 200n,
+      },
+      challengeForNode: makeChallenge({
+        epoch: 3n,
+        activeProofPeriodStartBlock: PERIOD_START,
+        proofingPeriodDurationInBlocks: 200n,
+        solved: true,
+      }),
+    });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    // Governance duration changes take effect at an epoch boundary. The old
+    // record said end=1200; the new schedule says end=1020. The epoch guard
+    // must force a full read before the old bound can suppress this period.
+    state.currentEpoch = 4n;
+    state.status = {
+      ...state.status,
+      proofingPeriodDurationInBlocks: 20n,
+    };
+    state.blockNumber = 1021;
     expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
     expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
     expect(state.createChallenge).toHaveBeenCalledTimes(1);
@@ -1786,7 +1831,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
 
     // Hub poller observes the rotation: invalidateRandomSamplingPair().
     state.randomSamplingReady = false;
-    state.bindingGeneration = 1;
+    state.bindingId = 'rs-b:rss-b';
     state.challengeForNode = null;
     // Eligibility reconcile → resolveRandomSamplingAvailability() re-binds.
     state.randomSamplingReady = true;
@@ -1801,7 +1846,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   it('honours a rotation that lands while the SKIP check itself is reading the head', async () => {
     // `solvedPeriodStillOpen` awaits the head. The pair identity must be sampled
     // AFTER that await: sampled before it, a rotation landing during the head
-    // read is compared against the pre-rotation generation and the tick skips
+    // read is compared against the pre-rotation binding and the tick skips
     // against a pair that is already gone.
     const state = makeSolvedState();
     const chain = makeChain(state);
@@ -1813,8 +1858,8 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const readHead = vi.mocked(chain.getBlockNumber!).getMockImplementation()!;
     vi.mocked(chain.getBlockNumber!).mockImplementationOnce(async (...args) => {
       // Rotation + re-bind by another caller, all while this read is in flight:
-      // ready stays true, only the generation moves.
-      state.bindingGeneration = 1;
+      // ready stays true, only the derived pair identity moves.
+      state.bindingId = 'rs-b:rss-b';
       state.challengeForNode = null;
       return readHead(...args);
     });
@@ -1824,14 +1869,14 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   });
 
   it('honours a rotation that lands while the RECORDING tick is reading status + challenge', async () => {
-    // Those reads went to the old pair; the generation the record carries must
+    // Those reads went to the old pair; the binding id the record carries must
     // be the one from before them, so the very next tick sees the mismatch.
     const state = makeSolvedState();
     const chain = makeChain(state);
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
     vi.mocked(chain.getActiveProofPeriodStatus!).mockImplementationOnce(async () => {
-      state.bindingGeneration = 1;
+      state.bindingId = 'rs-b:rss-b';
       return state.status;
     });
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
@@ -1842,14 +1887,31 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   });
 
   it.each([
-    ['lacks getRandomSamplingBindingGeneration', undefined],
-    ['reports an undefined binding generation', () => undefined],
+    ['lacks getRandomSamplingBindingId', undefined],
+    ['reports an undefined binding id', () => undefined],
   ] as const)('never skips for an adapter that %s', async (_label, capability) => {
-    const state = makeSolvedState({ bindingGeneration: undefined });
+    const state = makeSolvedState({ bindingId: undefined });
     const chain = makeChain(state);
-    expect(chain.getRandomSamplingBindingGeneration).toBeUndefined();
-    if (capability) chain.getRandomSamplingBindingGeneration = capability;
+    expect(chain.getRandomSamplingBindingId).toBeUndefined();
+    if (capability) chain.getRandomSamplingBindingId = capability;
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    }
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('never skips for an adapter that cannot report its current epoch', async () => {
+    const state = makeSolvedState({ currentEpoch: undefined });
+    const chain = makeChain(state);
+    expect(chain.getCurrentEpoch).toBeUndefined();
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
 
     for (let i = 0; i < 3; i += 1) {
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });

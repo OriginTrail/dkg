@@ -527,21 +527,6 @@ async function contractAddress(contract: Contract): Promise<string> {
 }
 
 /**
- * Synchronous sibling of `contractAddress` for the RandomSampling pair swap
- * check, which must not await between its generation guard and the handle
- * write. `resolveContract` always builds handles from a string address; any
- * other `target` shape counts as "changed" (costs a re-read, never a miss).
- */
-function sameContractAddress(a: Contract, b: Contract): boolean {
-  if (a === b) return true;
-  const aTarget = (a as any).target;
-  const bTarget = (b as any).target;
-  return typeof aTarget === 'string'
-    && typeof bTarget === 'string'
-    && aTarget.toLowerCase() === bTarget.toLowerCase();
-}
-
-/**
  * Per-tx-type funding requirement for operational-wallet selection. A
  * discriminated union so "native-only" (RS challenge/proof, relay, settle —
  * gas only, no TRAC transfer) is UNREPRESENTABLE-AS-TRAC-GATED: applying a
@@ -867,23 +852,6 @@ export class EVMChainAdapterBase {
   protected inflightDurationProbeContract: Contract | undefined;
 
   protected inflightDurationProbeStartedAt = 0;
-
-  /**
-   * Identity of the bound RandomSampling + RandomSamplingStorage PAIR, as a
-   * monotonic counter: it changes whenever the pair a caller read through may
-   * no longer be the pair the adapter is bound to. Bumped by
-   * `invalidateRandomSamplingPair()` (observed Hub rotation, write-side
-   * self-heal) and by `resolveAndAssignRandomSamplingPair()` when a TTL
-   * re-resolve swaps in a different address (rotation the poller missed).
-   *
-   * Exists because `isRandomSamplingReady()` cannot carry that signal: ANY
-   * `getRandomSampling()` caller re-binds the handles (the agent's 30 s
-   * eligibility reconcile does), so "ready" is true again before a consumer
-   * that remembered a read — the prover's solved-period record — looks.
-   * `randomSamplingPairCache.currentGeneration()` is not enough either: it
-   * is invalidate-only and misses the silent TTL swap.
-   */
-  private randomSamplingBindingGeneration = 0;
 
   /**
    * PR3 / RC11 — TTL cache for the three "publish pre-flight" reads the
@@ -4182,9 +4150,25 @@ export class EVMChainAdapterBase {
     return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
-  /** Synchronous, zero-RPC — see `randomSamplingBindingGeneration`. */
-  getRandomSamplingBindingGeneration(): number {
-    return this.randomSamplingBindingGeneration;
+  /** Synchronous identity derived from the handles that reads actually use. */
+  getRandomSamplingBindingId(): string | undefined {
+    const rsTarget = (this.contracts.randomSampling as { target?: unknown } | undefined)?.target;
+    const rssTarget = (
+      this.contracts.randomSamplingStorage as { target?: unknown } | undefined
+    )?.target;
+    if (typeof rsTarget !== 'string' || typeof rssTarget !== 'string') return undefined;
+    return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
+  }
+
+  async getCurrentEpoch(): Promise<bigint> {
+    if (!this.contracts.chronos) {
+      this.contracts.chronos = await this.resolveContract('Chronos');
+    }
+    return BigInt(await this.readContract(
+      this.contracts.chronos,
+      'chronos.getCurrentEpoch',
+      'getCurrentEpoch',
+    ));
   }
 
   async getBlockNumber(): Promise<number> {
@@ -4280,18 +4264,6 @@ export class EVMChainAdapterBase {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
     const pair = await this.randomSamplingPairCache.get();
     if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
-      // A TTL re-resolve that lands on a DIFFERENT address is a rotation no
-      // `invalidate()` announced: the handles go old -> new without ever
-      // reading "not ready". Surface it as a new binding generation. (Each
-      // resolve builds fresh `Contract` objects, so compare addresses.)
-      const bound = this.contracts.randomSampling;
-      const boundStorage = this.contracts.randomSamplingStorage;
-      if (
-        (bound && !sameContractAddress(bound, pair.rs))
-        || (boundStorage && !sameContractAddress(boundStorage, pair.rss))
-      ) {
-        this.randomSamplingBindingGeneration += 1;
-      }
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;
     }
@@ -4378,7 +4350,6 @@ export class EVMChainAdapterBase {
    */
   protected invalidateRandomSamplingPair(): void {
     this.randomSamplingPairCache.invalidate();
-    this.randomSamplingBindingGeneration += 1;
     this.contracts.randomSampling = undefined;
     this.contracts.randomSamplingStorage = undefined;
     this.inflightDurationProbe = undefined;
