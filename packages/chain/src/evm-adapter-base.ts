@@ -3544,7 +3544,7 @@ export class EVMChainAdapterBase {
     contractLabel: string,
   ): Promise<number> {
     const cached = this.cachedContractDeployBlocks.get(
-      this.contractDeployBlockCacheKey(address),
+      this.#contractDeployBlockCacheKey(address),
     );
     if (cached !== undefined) return cached;
     return (await this.resolveContractDeployBlock(address, operationLabel, contractLabel)).fromBlock;
@@ -3603,7 +3603,7 @@ export class EVMChainAdapterBase {
     // 2. Deploy block (immutable): cache hit, else binary-search a backend that
     //    serves historical getCode — each search uses ITS OWN head (self-
     //    consistent); fail over across backends, freshest-first.
-    const cacheKey = this.contractDeployBlockCacheKey(address);
+    const cacheKey = this.#contractDeployBlockCacheKey(address);
     const cached = this.cachedContractDeployBlocks.get(cacheKey);
     if (cached !== undefined) return { fromBlock: cached, head, scanProviders: reachable };
     let throttle: unknown; // a transient rate-limit/throttle seen during the search
@@ -3674,7 +3674,7 @@ export class EVMChainAdapterBase {
     return { fromBlock: 0, head, scanProviders, degradedFromGenesis: true };
   }
 
-  private contractDeployBlockCacheKey(address: string): string {
+  #contractDeployBlockCacheKey(address: string): string {
     return address.toLowerCase();
   }
 
