@@ -323,7 +323,6 @@ describe('RFC-64 rollout authority integration', () => {
       options.onContextGraphAuthorityProjectionServed?.({
         source: 'scan',
         ageMs: 0,
-        tickMs: 6_000,
       });
       observedProjectionEvidence = true;
       return new Map([['9', `0x${'ab'.repeat(32)}`]]);
@@ -2398,7 +2397,6 @@ describe('RFC-64 rollout authority integration', () => {
       options.onContextGraphAuthorityProjectionServed?.({
         source: 'scan',
         ageMs: 0,
-        tickMs: 6_000,
       });
       return new Map([[expectedNameHash, indexedSnapshot]]);
     });
@@ -2457,7 +2455,6 @@ describe('RFC-64 rollout authority integration', () => {
       options.onContextGraphAuthorityProjectionServed?.({
         source: 'stale-cache',
         ageMs: 18_000,
-        tickMs: 6_000,
       });
       return new Map([[expectedNameHash, indexedSnapshot]]);
     });

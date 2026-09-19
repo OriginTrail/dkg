@@ -1771,6 +1771,20 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     expect(harness.evidence.headReads).toEqual([30, 30, 30]);
   });
 
+  it('reports name hashes absent from a warm projection only after a fresh scan', async () => {
+    const harness = makeTimedAdapter();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    expect(harness.evidence.headReads).toEqual([30, 30, 30]);
+  });
+
   it('rejects an invalid chain.indexTickMs at construction', () => {
     for (const indexTickMs of [0, 1.5, -6_000]) {
       expect(() => new EVMChainAdapter({

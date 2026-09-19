@@ -197,8 +197,8 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(h.reads.refreshes).toBe(1);
     expect(h.physicalReads()).toBe(physical);
     expect(h.served).toEqual([
-      { source: 'scan', ageMs: 0, tickMs: T },
-      { source: 'cache', ageMs: T - 1, tickMs: T },
+      { source: 'scan', ageMs: 0 },
+      { source: 'cache', ageMs: T - 1 },
     ]);
   });
 
@@ -301,7 +301,7 @@ describe('finalized Context Graph authority projection cache', () => {
 
     h.clock.nowMs = START_MS + 18_000;
     expect(await h.read()).toBe(cached);
-    expect(h.served.at(-1)).toEqual({ source: 'stale-cache', ageMs: 18_000, tickMs: T });
+    expect(h.served.at(-1)).toEqual({ source: 'stale-cache', ageMs: 18_000 });
     expect(h.reads.refreshes).toBe(2);
 
     h.clock.nowMs = START_MS + 18_001;
@@ -582,7 +582,7 @@ describe('finalized Context Graph authority projection cache', () => {
       return completed;
     });
     expect(slow.fetchedAtMs).toBe(START_MS);
-    expect(h.served).toEqual([{ source: 'scan', ageMs: 5_000, tickMs: T }]);
+    expect(h.served).toEqual([{ source: 'scan', ageMs: 5_000 }]);
 
     // 5s of its 6s were spent scanning.
     h.clock.nowMs += 999;

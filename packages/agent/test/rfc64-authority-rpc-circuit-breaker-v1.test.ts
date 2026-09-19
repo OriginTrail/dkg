@@ -191,7 +191,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       clock.now += 50;
       // No markRpcAttempt: the projection's own account is the whole evidence.
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.observeProjectionServed({ source: 'cache', ageMs: 40, tickMs: T });
+        evidence.observeProjectionServed({ source: 'cache', ageMs: 40 });
         return 'served-from-cache';
       });
       expect(breaker.snapshot().state).toBe('closed');
@@ -200,7 +200,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('counts a completed scan as RPC health', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.observeProjectionServed({ source: 'scan', ageMs: 0, tickMs: T });
+        evidence.observeProjectionServed({ source: 'scan', ageMs: 0 });
         return 'scanned';
       });
       expect(breaker.snapshot().state).toBe('closed');
@@ -211,7 +211,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       await breaker.run(undefined, async (_signal, evidence) => {
         // Callers mark BEFORE they read; the stale answer voids that mark.
         evidence.markRpcAttempt();
-        evidence.observeProjectionServed({ source: 'stale-cache', ageMs: T + 1, tickMs: T });
+        evidence.observeProjectionServed({ source: 'stale-cache', ageMs: T + 1 });
         return 'served-stale';
       });
       expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
@@ -222,21 +222,12 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       await breaker.run(undefined, async (_signal, evidence) => {
         evidence.markRpcAttempt();
         // Fetched 101ms ago: 1ms BEFORE the pool was seen exhausted.
-        evidence.observeProjectionServed({ source: 'cache', ageMs: 101, tickMs: T });
+        evidence.observeProjectionServed({ source: 'cache', ageMs: 101 });
         return 'served-from-older-cache';
       });
       expect(breaker.snapshot().state).toBe('half-open');
     });
 
-    it('does not treat a cache answer at or past T as health', async () => {
-      const { breaker, clock } = await halfOpenBreaker();
-      clock.now += 2 * T;
-      await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.observeProjectionServed({ source: 'cache', ageMs: T, tickMs: T });
-        return 'served-at-t';
-      });
-      expect(breaker.snapshot().state).toBe('half-open');
-    });
   });
 
   it('applies deterministic fleet jitter when no provider hint overrides it', async () => {

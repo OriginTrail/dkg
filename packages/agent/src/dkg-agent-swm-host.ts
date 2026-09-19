@@ -3629,11 +3629,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const resolution = await raceVmReconcileAbort(
             this.resolveFinalizedContextGraphAuthorityTargetsV1(
               [localCgId],
-              {
-                signal: readSignal,
-                onRpcRead: evidence.markRpcAttempt,
-                onProjectionServed: evidence.observeProjectionServed,
-              },
+              evidence.agentReadOptions(readSignal),
             ),
             signal,
           );
@@ -3648,15 +3644,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
             if (this.contextGraphAuthorityReaderCapability.status !== 'supported') {
               throw new Error('Finalized VM authority target has no snapshot reader');
             }
-            evidence.markRpcAttempt();
             snapshot = await raceVmReconcileAbort(
               this.contextGraphAuthorityReaderCapability.reader
                 .getContextGraphAuthoritySnapshot(
                   target.expectedOnChainId,
-                  {
-                    signal: readSignal,
-                    onContextGraphAuthorityProjectionServed: evidence.observeProjectionServed,
-                  },
+                  evidence.chainReadOptions(readSignal),
                 ),
               signal,
             );

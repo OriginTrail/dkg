@@ -203,7 +203,6 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
         options?.onContextGraphAuthorityProjectionServed?.({
           source,
           ageMs: source === 'scan' ? 0 : 20,
-          tickMs: 5,
         });
         return new Map<ContextGraphAuthorityIndexId, string>([
           ['9' as ContextGraphAuthorityIndexId, REVISION_9],

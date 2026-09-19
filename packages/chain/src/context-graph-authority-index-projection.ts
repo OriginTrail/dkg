@@ -78,7 +78,7 @@ export interface ContextGraphAuthorityIndexProjectionOptions {
 
 /**
  * How one finalized authority read was answered. `scan` exercised the RPC pool
- * now; `cache` was answered by a projection fetched less than `tickMs` ago;
+ * now; `cache` was answered by a projection still inside its configured tick;
  * `stale-cache` was answered DESPITE a failed refresh and therefore proves
  * nothing about the pool.
  */
@@ -86,7 +86,6 @@ export interface ContextGraphAuthorityProjectionServedEvidence {
   readonly source: 'scan' | 'cache' | 'stale-cache';
   /** Wall-clock age of the projection's head read when it was served. */
   readonly ageMs: number;
-  readonly tickMs: number;
 }
 
 /**
@@ -315,7 +314,6 @@ export class ContextGraphAuthorityIndexProjectionCache {
       input.onServed?.(Object.freeze({
         source: 'scan',
         ageMs: Math.max(0, this.#now() - fetchedAtMs),
-        tickMs: this.tickMs,
       }));
       return projection;
     } catch (error) {
@@ -378,7 +376,6 @@ export class ContextGraphAuthorityIndexProjectionCache {
     input.onServed?.(Object.freeze({
       source: fresh ? 'cache' : 'stale-cache',
       ageMs,
-      tickMs: this.tickMs,
     }));
     return projection;
   }

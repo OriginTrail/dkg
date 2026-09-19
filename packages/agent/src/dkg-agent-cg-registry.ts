@@ -719,19 +719,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetsV1(
     this: DKGAgent,
     contextGraphIds: readonly string[],
-    options: {
-      signal?: AbortSignal;
+    options: ChainReadOptions & Readonly<{
       onRpcRead?: () => void;
-      /** Forwarded to every finalized index read; see the authority RPC circuit. */
-      onProjectionServed?: ChainReadOptions['onContextGraphAuthorityProjectionServed'];
-    } = {},
+    }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
-    const chainReadOptions: ChainReadOptions = {
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      ...(options.onProjectionServed === undefined ? {} : {
-        onContextGraphAuthorityProjectionServed: options.onProjectionServed,
-      }),
-    };
+    const { onRpcRead, ...chainReadOptions } = options;
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
       const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
@@ -779,7 +771,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
-      options.onRpcRead?.();
+      onRpcRead?.();
       const snapshotsByNameHash = await resolveSnapshots.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
@@ -807,7 +799,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         .resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
       if (resolveSnapshot !== undefined) {
         const [{ contextGraphId, expectedNameHash }] = reverseBindingTargets;
-        options.onRpcRead?.();
+        onRpcRead?.();
         const finalizedSnapshot = await resolveSnapshot.call(
           indexReader,
           expectedNameHash,
@@ -828,7 +820,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
     if (resolveMany !== undefined) {
       options.signal?.throwIfAborted();
-      options.onRpcRead?.();
+      onRpcRead?.();
       const resolvedByNameHash = await resolveMany.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
@@ -853,7 +845,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveOne = indexReader.resolveFinalizedContextGraphIdByNameHash;
     if (resolveOne === undefined) return { kind: 'legacy-current' };
     for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
-      options.onRpcRead?.();
+      onRpcRead?.();
       const expectedOnChainId = await resolveOne.call(
         indexReader,
         expectedNameHash,
@@ -878,11 +870,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetV1(
     this: DKGAgent,
     contextGraphId: string,
-    options: {
-      signal?: AbortSignal;
+    options: ChainReadOptions & Readonly<{
       onRpcRead?: () => void;
-      onProjectionServed?: ChainReadOptions['onContextGraphAuthorityProjectionServed'];
-    } = {},
+    }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
     if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
       throw new Error(

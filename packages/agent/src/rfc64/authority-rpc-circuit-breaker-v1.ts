@@ -2,6 +2,7 @@
 
 import {
   isRpcEndpointsExhaustedError,
+  type ChainReadOptions,
   type ContextGraphAuthorityProjectionServedEvidence,
   type RpcEndpointsExhaustedErrorLike,
 } from '@origintrail-official/dkg-chain';
@@ -46,8 +47,8 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    * cache existed every such read reached the pool. That is no longer true, so
    * the adapter's own account refines the mark:
    *  - `scan` reached the pool now: health.
-   *  - `cache` younger than `tickMs`: the pool answered a complete scan that
-   *    recently, and it counts as health provided that scan started AFTER the
+   *  - `cache`: the projection owner has already proved it is inside the
+   *    configured tick, and it counts as health provided that scan started AFTER the
    *    outstanding exhaustion. Without this, a node served entirely from the
    *    cache would keep being judged by a failure it has long recovered from.
    *  - anything else — `stale-cache` (the refresh FAILED and an older
@@ -56,6 +57,12 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
   observeProjectionServed(evidence: ContextGraphAuthorityProjectionServedEvidence): void;
+  /** Options for an agent authority resolver that reports when it starts its chain read. */
+  agentReadOptions(signal?: AbortSignal): ChainReadOptions & Readonly<{
+    onRpcRead: () => void;
+  }>;
+  /** Mark and build options for a direct finalized chain/index read. */
+  chainReadOptions(signal?: AbortSignal): ChainReadOptions;
 }
 
 export interface Rfc64AuthorityReadRunOptionsV1 {
@@ -205,21 +212,37 @@ export class Rfc64AuthorityReadCoordinatorV1 {
         let rpcAttempted = false;
         let projectionHealthy = false;
         let projectionUnproven = false;
+        const markRpcAttempt = () => { rpcAttempted = true; };
+        const observeProjectionServed = (
+          served: ContextGraphAuthorityProjectionServedEvidence,
+        ) => {
+          if (served.source === 'scan') {
+            projectionHealthy = true;
+          } else if (
+            served.source === 'cache'
+            && this.#now() - served.ageMs > this.#exhaustedAtMs
+          ) {
+            projectionHealthy = true;
+          } else {
+            projectionUnproven = true;
+          }
+        };
+        const chainReadOptions = (signal?: AbortSignal): ChainReadOptions => {
+          markRpcAttempt();
+          return Object.freeze({
+            ...(signal === undefined ? {} : { signal }),
+            onContextGraphAuthorityProjectionServed: observeProjectionServed,
+          });
+        };
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
-          markRpcAttempt: () => { rpcAttempted = true; },
-          observeProjectionServed: (served: ContextGraphAuthorityProjectionServedEvidence) => {
-            if (served.source === 'scan') {
-              projectionHealthy = true;
-            } else if (
-              served.source === 'cache'
-              && served.ageMs < served.tickMs
-              && this.#now() - served.ageMs > this.#exhaustedAtMs
-            ) {
-              projectionHealthy = true;
-            } else {
-              projectionUnproven = true;
-            }
-          },
+          markRpcAttempt,
+          observeProjectionServed,
+          agentReadOptions: (signal?: AbortSignal) => Object.freeze({
+            ...(signal === undefined ? {} : { signal }),
+            onRpcRead: markRpcAttempt,
+            onContextGraphAuthorityProjectionServed: observeProjectionServed,
+          }),
+          chainReadOptions,
         });
         try {
           const result = await operation(runSignal, evidence);

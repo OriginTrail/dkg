@@ -18,7 +18,6 @@ import {
   contextGraphAuthorityIndexScope,
   type ContextGraphAuthorityIndexCompletedProjection,
   type ContextGraphAuthorityIndexProjection,
-  type ContextGraphAuthorityIndexView,
 } from './context-graph-authority-index-projection.js';
 import type {
   ContextGraphAuthorityIndexSnapshots,
@@ -244,22 +243,12 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
   });
 }
 
-/** Scan to the anchor while keeping the persisted checkpoint private to the index. */
-export function readEvmContextGraphAuthorityViewV1(
-  input: EvmContextGraphAuthorityIndexReadInputV1,
-): Promise<EvmContextGraphAuthorityIndexReadV1<ContextGraphAuthorityIndexView>> {
-  return readEvmContextGraphAuthorityIndexProjectionV1(
-    input,
-    (scan) => input.index.view(scan),
-  );
-}
-
 /**
  * The head block's CHAIN time in seconds, or NaN when the endpoint gave none.
  * NaN is deliberate: the projection cache refuses to retain a projection whose
  * chain-time guard it could never evaluate, so such a read stays uncached.
  */
-export function evmContextGraphAuthorityHeadTimestampSecondsV1(head: unknown): number {
+function evmContextGraphAuthorityHeadTimestampSecondsV1(head: unknown): number {
   const timestamp = (head as { timestamp?: unknown } | null | undefined)?.timestamp;
   return typeof timestamp === 'number' ? timestamp : Number.NaN;
 }
@@ -503,8 +492,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   const runFinalizedProjection = async <T>(
     operationLabel: string,
     options: ChainReadOptions,
-    accepts: (view: ContextGraphAuthorityIndexView) => boolean,
-    read: (projection: ContextGraphAuthorityIndexProjection) => T,
+    read: (projection: ContextGraphAuthorityIndexProjection) => Readonly<{
+      complete: boolean;
+      value: T;
+    }>,
   ): Promise<T> => {
     assertOpen();
     options.signal?.throwIfAborted();
@@ -518,13 +509,24 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       dependencies.deploymentId,
       await dependencies.requireContextGraphStorage().getAddress(),
     );
+    let selected: Readonly<{
+      projection: ContextGraphAuthorityIndexProjection;
+      value: T;
+    }> | undefined;
     const projection = await dependencies.index.projection({
       scope,
       signal: options.signal,
-      // A cached view that cannot even be projected (an ambiguous name hash)
-      // is not an answer; the fresh read reports that failure itself.
+      // Project once. An incomplete cached answer forces a fresh scan, while
+      // the same projection result is reused when the cache accepts it.
       accepts: (cached) => {
-        try { return accepts(cached.view); } catch { return false; }
+        try {
+          const result = read(cached);
+          if (!result.complete) return false;
+          selected = { projection: cached, value: result.value };
+          return true;
+        } catch {
+          return false;
+        }
       },
       onServed: options.onContextGraphAuthorityProjectionServed,
       refresh: () => scanFinalizedProjection(
@@ -544,7 +546,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       ),
     });
     options.signal?.throwIfAborted();
-    return read(projection);
+    return selected?.projection === projection
+      ? selected.value
+      : read(projection).value;
   };
 
   const resolveFinalizedIdsByNameHashes = async (
@@ -558,13 +562,12 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return runFinalizedProjection(
       operationLabel,
       options,
-      (view) => view.statesByNameHashes(nameHashes).size === nameHashes.length,
       ({ view }) => {
         const resolved = new Map<string, bigint>();
         for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
           resolved.set(nameHash, BigInt(state.contextGraphId));
         }
-        return resolved;
+        return { complete: resolved.size === nameHashes.length, value: resolved };
       },
     );
   };
@@ -580,13 +583,12 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return runFinalizedProjection(
       operationLabel,
       options,
-      (view) => view.statesByNameHashes(nameHashes).size === nameHashes.length,
       ({ view, chainId, contractAddress }) => {
         const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
         for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
           snapshots.set(nameHash, authoritySnapshotV1(state, chainId, contractAddress));
         }
-        return snapshots;
+        return { complete: snapshots.size === nameHashes.length, value: snapshots };
       },
     );
   };
@@ -627,12 +629,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       return runFinalizedProjection(
         'getContextGraphAuthoritySnapshot',
         options,
-        (view) => view.has(target),
-        ({ view, chainId, contractAddress }) => authoritySnapshotV1(
-          view.resolve(target),
-          chainId,
-          contractAddress,
-        ),
+        ({ view, chainId, contractAddress }) => ({
+          complete: true,
+          value: authoritySnapshotV1(
+            view.resolve(target),
+            chainId,
+            contractAddress,
+          ),
+        }),
       );
     },
     async resolveFinalizedContextGraphIdByNameHash(
@@ -683,8 +687,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       return runFinalizedProjection(
         'readContextGraphAuthorityIndexRevisions',
         options,
-        (view) => view.states(targets).size === targets.length,
-        ({ view }) => view.revisions(targets),
+        ({ view }) => {
+          const revisions = view.revisions(targets);
+          return { complete: revisions.size === targets.length, value: revisions };
+        },
       );
     },
     async readContextGraphAuthorityIndexSnapshots(
@@ -700,7 +706,6 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       return runFinalizedProjection(
         'readContextGraphAuthorityIndexSnapshots',
         options,
-        (view) => view.states(targets).size === targets.length,
         ({ view, chainId, contractAddress }) => {
           const snapshots = new Map<
             ContextGraphAuthorityIndexId,
@@ -709,7 +714,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           for (const [target, state] of view.states(targets)) {
             snapshots.set(target, authoritySnapshotV1(state, chainId, contractAddress));
           }
-          return snapshots;
+          return { complete: snapshots.size === targets.length, value: snapshots };
         },
       );
     },
