@@ -14,7 +14,12 @@ export async function resolveApprovedPrivateReplicaOwner(
   approved: string | undefined,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  if (!approved || !agent.getWorkspaceSigningAgentForAddress(approved)) return null;
+  // Replication custody may be explicitly consented to without handing the
+  // node the agent's signing key. This only selects a local recipient; the
+  // authenticated owner approval and current graph delegation below remain
+  // mandatory, independently of encryption enrollment.
+  if (!approved || (!agent.getWorkspaceSigningAgentForAddress(approved)
+    && !agent.hasAuthorizedWorkspaceEncryptionCustodyForAddress(approved))) return null;
   const state = await agent.readRequesterJoinRequestState(contextGraphId, approved);
   if (
     state?.status !== 'approved'

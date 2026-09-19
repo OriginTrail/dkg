@@ -29,6 +29,28 @@ export function encryptionKeyEnrollmentPayload(enrollment: EncryptionKeyEnrollme
   ]);
 }
 
+/** Active custody is durable consent, not the short-lived activation challenge. */
+export function hasVerifiedEncryptionCustody(
+  agentAddress: string, peerId: string, entries: readonly WorkspaceEncryptionKeyEntry[],
+): boolean {
+  return entries.some((entry) => {
+    try {
+      const consent = entry.custodyAuthorization;
+      if (!consent || entry.revokedAt || !entry.privateEncryptionKey) return false;
+      const e = consent.enrollment;
+      return e.version === 1 && e.targetPeerId === peerId
+        && e.agentAddress.toLowerCase() === agentAddress.toLowerCase()
+        && e.encryptionKeyAlgorithm === entry.encryptionKeyAlgorithm
+        && e.encryptionKeyId === entry.encryptionKeyId
+        && e.publicEncryptionKey === entry.publicEncryptionKey
+        && ethers.verifyMessage(encryptionKeyEnrollmentPayload(e), consent.custodyProof)
+          .toLowerCase() === agentAddress.toLowerCase()
+        && verifyWorkspaceEncryptionKeyBinding(agentAddress, entry.encryptionKeyAlgorithm,
+          entry.publicEncryptionKey, entry.encryptionKeyProof);
+    } catch { return false; }
+  });
+}
+
 export async function writePrivateJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomBytes(12).toString('hex')}.tmp`;

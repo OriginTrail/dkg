@@ -5,6 +5,8 @@ import { NoChainAdapter, type ContextGraphAuthoritySnapshot } from '@origintrail
 import { DKG_ONTOLOGY as D, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { resolveApprovedPrivateReplicaOwner } from '../src/approved-private-replica.js';
+import { encryptionKeyEnrollmentPayload } from '../src/encryption-key-enrollment.js';
+import { signWorkspaceEncryptionKey } from '../src/agent-keystore.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 
 const OWNER = new ethers.Wallet(`0x${'71'.repeat(32)}`).address.toLowerCase();
@@ -13,7 +15,7 @@ const CURATOR_PEER = '12D3KooWPrivateProgramCurator';
 const h = createRfc64RolloutAgentHarness();
 afterEach(async () => { await h.cleanup(); vi.restoreAllMocks(); });
 
-async function fixture() {
+async function fixture(encryptionOnly = false) {
   const current = vi.fn(async (): Promise<bigint | null> => { throw new Error('insufficient covering RPC quorum; rate limited'); });
   const finalized = vi.fn(async (): Promise<Map<string, ContextGraphAuthoritySnapshot>> => new Map());
   const chain = Object.assign(new NoChainAdapter(), {
@@ -27,7 +29,18 @@ async function fixture() {
   const receiver = await h.startAgent({ name: 'approved-private-replica', config: {
     chainAdapter: chain, rfc64CatalogDeploymentProfile: RFC64_ROLLOUT_DEPLOYMENT,
   } });
-  const member = await receiver.registerAgent('private-replica-member');
+  const wallet = ethers.Wallet.createRandom();
+  let member: { agentAddress: string };
+  if (encryptionOnly) {
+    const challenge = await receiver.prepareEncryptionKeyEnrollment(wallet.address);
+    member = await receiver.activateEncryptionKeyEnrollment({
+      agentAddress: wallet.address, enrollmentId: challenge.enrollmentId,
+      ...signWorkspaceEncryptionKey(wallet.address, wallet.privateKey, challenge.publicEncryptionKey),
+      custodyProof: await wallet.signMessage(encryptionKeyEnrollmentPayload(challenge)),
+    });
+  } else {
+    member = await receiver.registerAgent('private-replica-member');
+  }
   const address = member.agentAddress.toLowerCase();
   const approvals = Reflect.get(receiver, 'localApprovedAgentByCG') as Map<string, string>;
   approvals.set(CG, address);
@@ -56,6 +69,40 @@ async function fixture() {
 }
 
 describe('approved private replica authorization', () => {
+  it('admits an approved encryption-only replica without requiring the external signing key', async () => {
+    const f = await fixture(true);
+    expect(f.receiver.getCustodialAgentPrivateKey(f.address)).toBeUndefined();
+    await expect(resolveApprovedPrivateReplicaOwner(f.receiver, CG, f.address)).resolves.toBe(OWNER);
+    await expect(f.receiver.resolveContextGraphRegistrationBinding(CG)).resolves.toEqual({ kind: 'unregistered' });
+    expect(f.finalized).toHaveBeenCalled();
+    expect(f.current).not.toHaveBeenCalled();
+    await expect(f.receiver.reconcileRfc64CatalogAccessAuthorityV1(CG, undefined, { kind: 'finalized-absence' }))
+      .resolves.toMatchObject({ policy: { accessPolicy: 1 } });
+    await expect(f.receiver.getContextGraphAgentGateAddresses(CG, { requireAvailable: true }))
+      .resolves.toContain(ethers.getAddress(OWNER));
+  });
+
+  it.each(['missing-consent', 'wrong-peer', 'changed-key', 'revoked-key', 'revoked-member', 'rejected-join', 'expired-delegation'] as const)
+  ('rejects encryption-only replica with %s', async (fault) => {
+    const f = await fixture(true);
+    const record = [...Reflect.get(f.receiver, 'localAgents').values()]
+      .find((entry: any) => entry.agentAddress.toLowerCase() === f.address) as any;
+    const key = record.workspaceEncryptionKeys[0];
+    if (fault === 'missing-consent') delete key.custodyAuthorization;
+    if (fault === 'wrong-peer') key.custodyAuthorization.enrollment.targetPeerId = 'another-node';
+    if (fault === 'changed-key') key.publicEncryptionKey = Buffer.alloc(32, 7).toString('base64url');
+    if (fault === 'revoked-key') key.revokedAt = new Date().toISOString();
+    if (fault === 'revoked-member') await f.receiver.store.insert([f.root(D.DKG_REVOKED_AGENT, JSON.stringify(f.address))]);
+    if (fault === 'rejected-join') await f.receiver.writeRequesterJoinRequestState(CG, f.address, { ...f.state, status: 'rejected' });
+    if (fault === 'expired-delegation') await f.receiver.store.insert([{
+      graph: contextGraphMetaGraphUri(CG), subject: `did:dkg:agent-delegation:${CG}:${f.address}`,
+      predicate: D.DKG_DELEGATION_EXPIRES_AT, object: '"1"',
+    }]);
+    await expect(resolveApprovedPrivateReplicaOwner(f.receiver, CG, f.address)).resolves.toBeNull();
+    await expect(f.receiver.reconcileRfc64CatalogAccessAuthorityV1(CG, undefined, { kind: 'finalized-absence' }))
+      .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
+  });
+
   it('uses finalized discovery and admits the authenticated lifecycle roster', async () => {
     const f = await fixture();
     await expect(f.receiver.resolveContextGraphRegistrationBinding(CG)).resolves.toEqual({ kind: 'unregistered' });
