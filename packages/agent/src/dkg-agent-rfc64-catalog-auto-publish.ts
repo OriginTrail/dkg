@@ -58,6 +58,7 @@ import {
   type RemoveRfc64SwmAuthorInventoryResultV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
 import {
+  rfc64SwmInventoryAssetKeyV1,
   rfc64SwmInventoryShadowRuntimeV1,
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
@@ -115,20 +116,10 @@ export type {
   ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1,
   ReconcileRfc64PublicCatalogFromSwmInventoryResultV1,
 } from './dkg-agent-rfc64-swm-catalog-projection.js';
-
-function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
-  contextGraphId: string;
-  subGraphName?: string | null;
-  authorAddress: string;
-  assertionCoordinate: string;
-}>): string {
-  return JSON.stringify([
-    input.contextGraphId,
-    input.subGraphName ?? null,
-    input.authorAddress.toLowerCase(),
-    input.assertionCoordinate,
-  ]);
-}
+// The key derivation moved to the shadow runtime that owns it; the name stays
+// resolvable from this module for the same historically public subpath.
+export { rfc64SwmInventoryAssetKeyV1 } from
+  './rfc64/swm-inventory-shadow-runtime-v1.js';
 
 /** Explicit catalog-authoring input; ordinary VM confirmation never calls it. */
 export interface RecordRfc64PublicCatalogAssetParamsV1 {

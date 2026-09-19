@@ -215,7 +215,7 @@ describe('peer connection lifecycle', () => {
         if (stage === 'enrichment') enrich.mockRejectedValue(new Error('enrichment unavailable'));
         else if (stage === 'sender-key') drain.mockRejectedValue(new Error('sender-key unavailable'));
         const reannounce = vi.spyOn(f.agent, 'reannounceRfc64CatalogHeadsToPeerV1')
-          .mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+          .mockResolvedValue({ announced: 0, failed: 0, withheld: 0, manifest: [] });
         if (stage === 'reannouncement') {
           reannounce.mockRejectedValue(new Error('reannouncement unavailable'));
         }

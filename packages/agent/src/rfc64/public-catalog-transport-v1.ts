@@ -174,6 +174,11 @@ export interface Rfc64PublicCatalogHeadReplayProviderCompletionV2 {
   readonly announced: number;
   readonly failed: number;
   readonly manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+  /**
+   * Stored heads the provider refused to serve because they belong to a
+   * superseded authority generation. Process-local, never on the wire.
+   */
+  readonly withheld: number;
 }
 
 type Rfc64PublicCatalogPolicyScopeV1 =
@@ -655,10 +660,21 @@ export class Rfc64PublicCatalogTransportV1 {
     );
     if (!completed.authorized) return Uint8Array.of(REPLAY_DENIED);
     if (completed.value.status === 'busy') return Uint8Array.of(REPLAY_BUSY);
-    if (completed.value.completion.failed > 0) return Uint8Array.of(REPLAY_INCOMPLETE);
+    const completion = completed.value.completion;
+    if (completion.failed > 0) return Uint8Array.of(REPLAY_INCOMPLETE);
+    // Every stored head for this scope belonged to a superseded authority
+    // generation and was withheld. Answering `completed` with an empty manifest
+    // makes this provider indistinguishable from one that holds nothing: the
+    // requester's parity predicate is vacuously true over an empty promise set,
+    // `requested` counts the answer as positive evidence and the Context Graph
+    // settles as corroborated and verified. A loud, permanent retry is the
+    // honest outcome until the author re-projects those rows.
+    if (completion.withheld > 0 && completion.manifest.length === 0) {
+      return Uint8Array.of(REPLAY_INCOMPLETE);
+    }
     return encodeRfc64PublicCatalogHeadReplayCompletionV2(Object.freeze({
       kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
-      heads: completed.value.completion.manifest,
+      heads: completion.manifest,
     }));
   }
 
@@ -842,14 +858,20 @@ export function parseRfc64PublicCatalogHeadReplayCompletionV2(
 function snapshotReplayProviderCompletionV2(value: unknown): Readonly<{
   announced: number;
   failed: number;
+  withheld: number;
   manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
 }> {
-  const snapshot = snapshotExactWireRecord(value, ['announced', 'failed', 'manifest']);
+  const snapshot = snapshotExactWireRecord(
+    value,
+    ['announced', 'failed', 'manifest', 'withheld'],
+  );
   if (
     !Number.isSafeInteger(snapshot.announced)
     || (snapshot.announced as number) < 0
     || !Number.isSafeInteger(snapshot.failed)
     || (snapshot.failed as number) < 0
+    || !Number.isSafeInteger(snapshot.withheld)
+    || (snapshot.withheld as number) < 0
   ) {
     fail('catalog-transport-wire', 'RFC-64 replay completion counters are invalid');
   }
@@ -860,6 +882,7 @@ function snapshotReplayProviderCompletionV2(value: unknown): Readonly<{
   return Object.freeze({
     announced: snapshot.announced as number,
     failed: snapshot.failed as number,
+    withheld: snapshot.withheld as number,
     manifest,
   });
 }

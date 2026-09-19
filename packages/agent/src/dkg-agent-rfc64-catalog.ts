@@ -569,6 +569,14 @@ interface Rfc64CatalogReplaySnapshotRuntimeOwnerV1 {
 interface Rfc64CatalogReplayResultV1 {
   readonly announced: number;
   readonly failed: number;
+  /**
+   * Stored heads this pass refused to serve because they belong to a superseded
+   * authority generation. Carried so the transport can tell "this provider holds
+   * nothing for you" from "everything it holds is superseded": an empty manifest
+   * answered as `completed` settles the requester's Context Graph as corroborated
+   * and verified, which is a clean bill of health for a peer that served nothing.
+   */
+  readonly withheld: number;
   readonly manifest: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
 }
 
@@ -3211,6 +3219,32 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
+        // The scope digest keying every applied catalog head -- and the durable
+        // author inventory the catalog is projected from -- includes the
+        // governance tuple, so a generation change strands everything published
+        // under the previous generation behind a digest current-head discovery
+        // can no longer resolve. Re-project the author's own inventory under the
+        // accepted scope. Gated on the same condition as the transport
+        // reconciler above, which also covers the first acceptance in a fresh
+        // process, so a restart between the rotation and the re-projection still
+        // converges (`rfc64CatalogAuthorityGenerationChangedV1` is false when
+        // there is no in-process predecessor). Admission is synchronous and
+        // yields `null` whenever there is nothing stranded, so the ordinary
+        // acceptance never suspends here and the coalesced finalized-authority
+        // batch passes around it keep their exact shape. The promise it does
+        // return never rejects.
+        // The signal is threaded so the carry stops at the caller's bounded
+        // budget and at shutdown. Without it a large stranded inventory kept
+        // doing store reads and durable writes past the 120s operation budget,
+        // and the `signal?.aborted` check in the catch below could never fire,
+        // because this promise never rejects.
+        const reprojection = this
+          .beginRfc64CatalogReprojectionForAuthorityRotationV1(
+            contextGraphId,
+            createOperationContext('system'),
+            signal,
+          );
+        if (reprojection !== null) await reprojection;
       }
       await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
       return authority;
@@ -4124,7 +4158,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (requestedScope !== undefined) {
         throw new Error('RFC-64 scoped catalog replay service is unavailable');
       }
-      return Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) });
+      return Object.freeze({
+        announced: 0,
+        failed: 0,
+        withheld: 0,
+        manifest: Object.freeze([]),
+      });
     }
     let announced = 0;
     let failed = 0;
@@ -4143,6 +4182,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           }),
       operation: async (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
+        const superseded: Readonly<{
+          contextGraphId: ContextGraphIdV1;
+          authorAddress: EvmAddressV1;
+          detail: string;
+        }>[] = [];
         for (const { head } of replayEntries) {
           const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
             head.payload.contextGraphId,
@@ -4163,15 +4207,34 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ) {
             throw new Error('RFC-64 scoped catalog replay policy changed before snapshot');
           }
-          // A CG authored before its registration keeps owner-signed heads
-          // alongside the finalized-chain heads that follow. Both are durable
-          // and current for their own catalog scope, but the announcement
-          // carries neither the governance binding nor the ownership
-          // transition, so on the wire they are one scope — and a manifest
-          // that repeats a scope cannot encode. Replaying a superseded
-          // generation under the current policy digest is unusable to the
-          // receiver anyway: its catalog scope digest no longer matches.
+          // The replay index is keyed on `(networkId, contextGraphId)` only, so after an
+          // authority rotation it holds one entry per generation: a CG authored before its
+          // on-chain registration keeps its owner-signed heads alongside the finalized-chain
+          // heads that follow, and both are durable and current for their own catalog scope.
+          // Serving a superseded one is wrong twice over. Every entry below is stamped with
+          // the CURRENT `accepted.policyDigest`, so a receiver admits the announcement,
+          // fetches the head and only then rejects it on scope binding -- pure churn it
+          // repeats on every connect. And the announcement carries neither the governance
+          // binding nor the ownership transition, so two era-zero generations collapse to the
+          // same manifest uniqueness key and
+          // `encodeRfc64PublicCatalogHeadReplayCompletionV2` refuses the whole completion,
+          // leaving the peer with nothing at all -- including the current generation.
+          // Skipping is not silent loss: the author re-projects its rows onto the accepted
+          // scope, so the current entry serves them. It is reported for the case where that
+          // did not happen.
           if (!isRfc64CatalogHeadOfAcceptedGenerationV1(head.payload, accepted.policy)) {
+            // Carry both digests. Withholding a head is the one place this path can lose data
+            // silently if the author never re-projected, so the warning has to name exactly
+            // which stored lane was withheld and which one replaced it -- that pair is what
+            // someone debugging a stuck Context Graph on the fleet needs.
+            superseded.push(Object.freeze({
+              contextGraphId: head.payload.contextGraphId,
+              authorAddress: head.payload.authorAddress,
+              detail: `${head.payload.authorAddress} scope `
+                + `${computeAuthorCatalogScopeDigestV1(
+                  deriveAuthorCatalogScopeFromHeadV1(head.payload),
+                )} superseded by policy ${accepted.policyDigest}`,
+            }));
             continue;
           }
           manifest.push(Object.freeze({
@@ -4189,6 +4252,50 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               head.signature,
             ) as Digest32V1,
           }));
+        }
+        if (superseded.length > 0) {
+          // Withholding is only a PROBLEM when the author never re-projected. Once it has, the
+          // accepted generation carries an announced head for that author and the superseded one
+          // is expected to sit there withheld forever, on every replay to every peer — the
+          // pre-rotation lineage is deliberately retained on disk. Warning unconditionally turned
+          // a real, actionable signal into a permanent stream indistinguishable from the healthy
+          // state, which is strictly worse than the retry warnings it replaced.
+          //
+          // Keyed on (contextGraphId, authorAddress), NOT authorAddress alone: the unscoped
+          // replay path selects heads across every Context Graph, so an author with an announced
+          // head in CG-X would otherwise demote its genuinely stranded head in CG-Y to debug —
+          // defeating the whole point on any multi-CG node.
+          const announcedAuthors = new Set(manifest.map(
+            (entry) => `${entry.contextGraphId}\u0000${entry.authorAddress}`,
+          ));
+          const stranded = superseded.filter(({ contextGraphId, authorAddress }) =>
+            !announcedAuthors.has(`${contextGraphId}\u0000${authorAddress}`));
+          const context = createOperationContext('system');
+          // Only the AUTHOR re-projects (`hasLocalCreate`). On a replica no re-projection will
+          // ever run, so a warning here could never clear and would be the permanent stream this
+          // block exists to avoid — the actionable signal belongs on the node that can act.
+          const authored = stranded.filter(({ contextGraphId }) =>
+            this.localContextGraphProvenance.hasLocalCreate(contextGraphId));
+          if (authored.length > 0) {
+            this.log.warn(
+              context,
+              `RFC-64 catalog replay withheld ${authored.length} head(s) from `
+              + `${peerId.slice(-8)} that belong to a superseded authority generation `
+              + `[${authored.map(({ detail }) => detail).join('; ')}]; this node authored those `
+              + 'Context Graphs and has NOT re-projected the rows onto the accepted generation, '
+              + 'so they are unreachable through the catalog path for this peer',
+            );
+          }
+          const quiet = superseded.length - authored.length;
+          if (quiet > 0) {
+            this.log.debug(
+              context,
+              `RFC-64 catalog replay withheld ${quiet} superseded head(s) from `
+              + `${peerId.slice(-8)} that are either already re-projected or authored elsewhere; `
+              + 'their rows reach this peer through the accepted generation when the author '
+              + 're-projects them',
+            );
+          }
         }
         if (manifest.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
           throw new Error('RFC-64 scoped catalog replay manifest exceeds the per-CG target cap');
@@ -4223,6 +4330,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return Object.freeze({
           announced,
           failed,
+          withheld: superseded.length,
           manifest: Object.freeze(completedManifest),
         });
       },
