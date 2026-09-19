@@ -1212,6 +1212,8 @@ type Rfc64CatalogAuthorityFailureCodeV1 =
   | 'registered-authority-binding-mismatch'
   /** Bound on-chain id is known locally but the FINALIZED authority index has no entry for it yet (chain finality lag); retryable, not a denial. */
   | 'registered-authority-unfinalized'
+  /** Private graph whose authenticated lifecycle roster is not resolvable YET. */
+  | 'registered-private-roster-unresolved'
   | 'unregistered-owner-unresolved'
   | 'access-policy-unresolved';
 
@@ -1240,6 +1242,34 @@ function requireRfc64ContextGraphAuthorityReaderV1(
     );
   }
   return capability.reader;
+}
+
+/**
+ * Refresh failures that are a not-yet, not a denial. Each keeps the graph in
+ * `resolving` and lets the AUTHOR OF RECORD retain its last accepted policy
+ * while the condition clears; a replica never retains, and every other code
+ * still fails closed to `blocked`.
+ *
+ * - `registered-authority-unfinalized`: the finalized chain index lags the
+ *   registration.
+ * - `registered-private-roster-unresolved`: the authenticated lifecycle roster
+ *   for a private graph is not resolvable locally yet. Demoting to `blocked`
+ *   here fenced off the curator's own SWM root-catalog authoring lane, which is
+ *   the only root-scope SWM delivery path on a catalog-selected graph.
+ */
+const RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1: ReadonlySet<string> = new Set([
+  'registered-authority-unfinalized',
+  'registered-private-roster-unresolved',
+]);
+
+/**
+ * Is this refresh failure a not-yet rather than a denial? Exported so the
+ * classification itself is pinned: it decides whether the author keeps its
+ * catalog lane or is parked `blocked`, and on a catalog-selected graph that
+ * lane is the only root-scope SWM delivery path.
+ */
+export function isRfc64TransientAuthorityRefreshFailureV1(code: string): boolean {
+  return RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1.has(code);
 }
 
 function rfc64CatalogAuthorityFailureCodeV1(error: unknown): string {
@@ -1327,6 +1357,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await this.rfc64PublicCatalogServiceV1
           ?.whenReceiverIdleForContextGraph(contextGraphId);
       },
+      warn: (message) => this.log.warn(createOperationContext('system'), message),
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
       parityFailed: async (contextGraphId, promised) => {
         const persistence = this.rfc64PersistenceV1;
@@ -3040,8 +3071,19 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         if (snapshot.accessPolicy === 1) {
           const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
           if (localRoster === null) {
-            throw new Error(
-              'registered private RFC-64 Context Graph has no authenticated lifecycle roster',
+            // TRANSIENT, and typed so it is classified as such. `null` here
+            // means the authenticated roster is not resolvable *yet* — not
+            // that membership was revoked to empty, which arrives as a
+            // resolved, smaller roster. A bare Error fell through to the
+            // `blocked` branch below, which closes the authoring fence and
+            // takes the SWM root-catalog lane with it: on a catalog-selected
+            // graph that lane is the ONLY delivery path for root-scope SWM
+            // (legacy apply is deliberately closed), so the curator authored
+            // zero catalog rows for a whole matrix cell and SWM converged
+            // 0/50 rather than slowly.
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'registered-private-roster-unresolved',
+              'registered private RFC-64 Context Graph has no authenticated lifecycle roster yet',
             );
           }
           // The finalized chain snapshot can lag an authenticated local
@@ -3212,7 +3254,25 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
       }
-      await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
+      // DETACHED on purpose. This runs inside the coalesced single-flight
+      // authority refresh, so awaiting it let one graph's replay hold the
+      // refresh open and withhold every admission queued behind it — including
+      // the finalized-private catalog placement a confirmed VM publish waits
+      // on. That saturated all four async-promote slots and stalled unrelated
+      // publishes for 25 minutes in an RFC-64 matrix cell. The same call is
+      // already detached at `dkg-agent-lifecycle.ts` for the receiver-selection
+      // path. Replay parity is therefore no longer known to have been
+      // evaluated by the time the refresh resolves; the runtime keys its
+      // progress by `policyDigest` and supersedes a pass whose generation was
+      // replaced, so a detached pass cannot apply under a stale policy.
+      void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId)
+        .catch((error: unknown) => {
+          this.log.warn(
+            createOperationContext('system'),
+            `RFC-64 catalog head replay for ${contextGraphId} failed after the authority refresh: `
+            + (error instanceof Error ? error.message : String(error)),
+          );
+        });
       return authority;
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
@@ -3222,7 +3282,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityRevision,
       )) {
         const failureCode = rfc64CatalogAuthorityFailureCodeV1(error);
-        if (failureCode === 'registered-authority-unfinalized') {
+        if (RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1.has(failureCode)) {
           // Finality lag is transient. Stay in `resolving`, keep whatever
           // accepted lineage the refresh started with (so an author keeps
           // serving and announcing under its accepted policy), and leave the
