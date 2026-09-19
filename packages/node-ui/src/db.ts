@@ -31,7 +31,7 @@ export {
 
 export { SqliteProtocolOutboxStore, type SqliteProtocolOutboxStoreOptions } from './protocol-outbox-store.js';
 
-export const SCHEMA_VERSION = 37;
+export const SCHEMA_VERSION = 38;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -354,6 +354,103 @@ export class DashboardDB {
         updated_at INTEGER NOT NULL
       );
     `);
+    /**
+     * The node's ONE chain log.
+     *
+     * One cursor, one raw event table, one coverage record, one set of Hub
+     * bindings, and the row-per-entity Context Graph state the authority
+     * checkpoint used to carry as a whole-blob JSON rewrite on every commit.
+     * Everything that needs an indexed on-chain event reads these tables; there
+     * is deliberately no second cursor, table or scan anywhere in the node.
+     */
+    const ensureChainEventLogSchema = () => this.db.exec(`
+      CREATE TABLE IF NOT EXISTS chain_index_cursor (
+        scope TEXT PRIMARY KEY CHECK (length(trim(scope)) > 0),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        -- Block hash at the deployment block. Binds the scope to ONE chain
+        -- instance: node-ui.db survives a chain reset, and a deterministic
+        -- redeploy reproduces the same chain id and Hub address.
+        lineage TEXT NOT NULL,
+        deployment_block INTEGER NOT NULL CHECK (deployment_block >= 0),
+        -- -1 means "nothing settled yet", the state a first pass starts from.
+        settled_block INTEGER NOT NULL CHECK (settled_block >= -1),
+        settled_hash TEXT NOT NULL,
+        head_block INTEGER NOT NULL CHECK (head_block >= 0),
+        head_hash TEXT NOT NULL,
+        head_timestamp_seconds INTEGER NOT NULL,
+        head_fetched_at_ms INTEGER NOT NULL,
+        topic_set_version TEXT NOT NULL,
+        suspected_fork_block INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS chain_events (
+        scope TEXT NOT NULL,
+        block_number INTEGER NOT NULL CHECK (block_number >= 0),
+        log_index INTEGER NOT NULL CHECK (log_index >= 0),
+        block_hash TEXT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        address TEXT NOT NULL,
+        topic0 TEXT NOT NULL,
+        topic1 TEXT,
+        topic2 TEXT,
+        topic3 TEXT,
+        data TEXT NOT NULL,
+        -- 0 while inside the reorg tail. The tail is replaced wholesale each
+        -- tick; a settled row is written once and never fetched again.
+        settled INTEGER NOT NULL CHECK (settled IN (0, 1)),
+        PRIMARY KEY (scope, block_number, log_index)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS idx_chain_events_scope_address_topic
+        ON chain_events(scope, address, topic0, topic1, block_number, log_index);
+      CREATE INDEX IF NOT EXISTS idx_chain_events_scope_unsettled
+        ON chain_events(scope, settled);
+      CREATE TABLE IF NOT EXISTS chain_index_coverage (
+        scope TEXT NOT NULL,
+        family TEXT NOT NULL,
+        address TEXT NOT NULL,
+        covered_from_block INTEGER NOT NULL CHECK (covered_from_block >= 0),
+        covered_through_block INTEGER NOT NULL CHECK (covered_through_block >= 0),
+        -- Lowest block that must be held before ABSENCE is knowable at all.
+        floor_block INTEGER NOT NULL CHECK (floor_block >= 0),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (scope, family, address)
+      );
+      CREATE TABLE IF NOT EXISTS hub_bindings (
+        scope TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('contract', 'assetStorage')),
+        name TEXT NOT NULL,
+        address TEXT NOT NULL,
+        from_block INTEGER NOT NULL CHECK (from_block >= 0),
+        to_block INTEGER,
+        PRIMARY KEY (scope, kind, name, from_block)
+      );
+      CREATE TABLE IF NOT EXISTS cg_state (
+        scope TEXT NOT NULL,
+        context_graph_id TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        active INTEGER NOT NULL CHECK (active IN (0, 1)),
+        access_policy INTEGER NOT NULL,
+        publish_policy INTEGER NOT NULL,
+        publish_authority TEXT NOT NULL,
+        publish_authority_account_id TEXT NOT NULL,
+        name_hash TEXT NOT NULL,
+        ownership_era INTEGER NOT NULL,
+        policy_version INTEGER NOT NULL,
+        roster_version INTEGER NOT NULL,
+        source_block_number INTEGER NOT NULL,
+        source_block_hash TEXT NOT NULL,
+        PRIMARY KEY (scope, context_graph_id)
+      );
+      CREATE TABLE IF NOT EXISTS cg_participants (
+        scope TEXT NOT NULL,
+        context_graph_id TEXT NOT NULL,
+        -- The checkpoint's own ordering. Preserved verbatim so the rebuilt
+        -- wire format and its integrity digest are byte-identical.
+        position INTEGER NOT NULL CHECK (position >= 0),
+        agent TEXT NOT NULL,
+        PRIMARY KEY (scope, context_graph_id, position)
+      );
+    `);
     const ensureLocalContextGraphOriginSchema = () => this.db.exec(`
       CREATE TABLE IF NOT EXISTS local_context_graph_origins (
         context_graph_id TEXT PRIMARY KEY CHECK (length(trim(context_graph_id)) > 0),
@@ -384,6 +481,7 @@ export class DashboardDB {
       ensureJoinPolicyAuditCapTrigger();
       ensureContextGraphAuthorityIndexSchema();
       ensureLocalContextGraphOriginSchema();
+      ensureChainEventLogSchema();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1331,6 +1429,12 @@ export class DashboardDB {
       // Local graph origin is immutable provenance, not mutable membership.
       // Seed the graph-keyed journal once from trusted legacy source labels.
       ensureLocalContextGraphOriginSchema();
+    }
+    if (version < 38) {
+      // The one chain log. Empty on arrival: the existing authority checkpoint
+      // keeps its revision and its folded prefix, so the first tick resumes at
+      // that cursor and no node rescans history to adopt this table.
+      ensureChainEventLogSchema();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
