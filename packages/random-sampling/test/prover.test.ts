@@ -1798,6 +1798,31 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
+  it('honours a rotation that lands while the SKIP check itself is reading the head', async () => {
+    // `solvedPeriodStillOpen` awaits the head. The pair identity must be sampled
+    // AFTER that await: sampled before it, a rotation landing during the head
+    // read is compared against the pre-rotation generation and the tick skips
+    // against a pair that is already gone.
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    const readHead = vi.mocked(chain.getBlockNumber!).getMockImplementation()!;
+    vi.mocked(chain.getBlockNumber!).mockImplementationOnce(async (...args) => {
+      // Rotation + re-bind by another caller, all while this read is in flight:
+      // ready stays true, only the generation moves.
+      state.bindingGeneration = 1;
+      state.challengeForNode = null;
+      return readHead(...args);
+    });
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
   it('honours a rotation that lands while the RECORDING tick is reading status + challenge', async () => {
     // Those reads went to the old pair; the generation the record carries must
     // be the one from before them, so the very next tick sees the mismatch.
