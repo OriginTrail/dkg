@@ -711,29 +711,54 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     ));
   }
 
-  /** One `getContextGraph` read at `latest`; see ChainAdapter.getContextGraphLiveAuthority. */
+  /**
+   * One `getContextGraph` read at `latest`; see
+   * ChainAdapter.getContextGraphLiveAuthority.
+   *
+   * Callers asking for the SAME graph at the same moment share one physical
+   * read through the coalescer. Nothing is retained: a caller arriving after
+   * that read started never receives it, so this stays a live read with zero
+   * staleness — which is what lets the security gates above it use it. See
+   * `context-graph-live-authority-coalescer.ts`.
+   */
   async getContextGraphLiveAuthority(
     contextGraphId: bigint,
     options: ChainReadOptions = {},
   ): Promise<ContextGraphLiveAuthority | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    let raw: unknown;
-    try {
-      raw = await this.readContractWithOptions(
-        cgs,
-        'cgStorage.getContextGraph',
-        'getContextGraph',
-        [contextGraphId],
-        { signal: options.signal },
-      );
-    } catch (err) {
-      if (options.signal?.aborted) throw err;
-      if (isNonexistentContextGraphRevert(err, contextGraphId)) return null;
-      if (isLiveAuthorityReadTransient(err)) throw err;
-      throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err), { cause: err });
-    }
-    return decodeContextGraphLiveAuthority(raw, contextGraphId);
+    // Full lineage, never the bare numeric id: ContextGraphStorage hands out
+    // sequential ids, so another deployment reuses them freely.
+    const flightKey = [
+      this.deploymentId,
+      (await cgs.getAddress()).toLowerCase(),
+      contextGraphId.toString(10),
+    ].join(':');
+    return this.contextGraphLiveAuthorityCoalescer.run(
+      flightKey,
+      async (flightSignal) => {
+        let raw: unknown;
+        try {
+          raw = await this.readContractWithOptions(
+            cgs,
+            'cgStorage.getContextGraph',
+            'getContextGraph',
+            [contextGraphId],
+            { signal: flightSignal },
+          );
+        } catch (err) {
+          if (flightSignal.aborted) throw err;
+          if (isNonexistentContextGraphRevert(err, contextGraphId)) return null;
+          if (isLiveAuthorityReadTransient(err)) throw err;
+          throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err), { cause: err });
+        }
+        return decodeContextGraphLiveAuthority(raw, contextGraphId);
+      },
+      {
+        signal: options.signal,
+        ...(options.requestClass === undefined ? {} : { requestClass: options.requestClass }),
+      },
+    );
   }
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {

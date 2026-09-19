@@ -2,6 +2,7 @@ import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
 import type { ethers } from 'ethers';
+import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
@@ -1296,6 +1297,14 @@ export interface PreBroadcastSignal {
 
 export interface ChainReadOptions {
   signal?: AbortSignal;
+  /**
+   * Explicit transport priority for this read. Only
+   * `getContextGraphLiveAuthority` consults it today, to partition its shared
+   * flights so a foreground gate read never waits behind a throttled
+   * background one. Omitted means the caller's ambient class, which is what an
+   * unshared read would have used anyway.
+   */
+  requestClass?: RpcRequestClass;
   /**
    * Finalized Context Graph authority reads only: told how the read was
    * answered — by a scan that exercised the RPC pool, by the projection cache

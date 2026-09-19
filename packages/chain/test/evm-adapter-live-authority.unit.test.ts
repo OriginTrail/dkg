@@ -30,7 +30,7 @@ describe('EVM adapter: one-read live context graph authority', () => {
     expect(readContractWithOptions.mock.calls[0][2]).toBe('getContextGraph');
   });
 
-  it('forwards the id and the caller signal to the read, so cancellation is not silently dropped', async () => {
+  it('forwards the id, and runs the read on the FLIGHT\'s signal, not the caller\'s', async () => {
     const { adapter, readContractWithOptions } = fixture();
     readContractWithOptions.mockResolvedValue({ active: true, accessPolicy: 0n, participantAgents: [] });
     const { signal } = new AbortController();
@@ -40,7 +40,59 @@ describe('EVM adapter: one-read live context graph authority', () => {
     expect(label).toBe('cgStorage.getContextGraph');
     expect(method).toBe('getContextGraph');
     expect(args).toEqual([7n]);
-    expect(options).toEqual({ signal });
+    // The read is shared, so it belongs to the flight: one caller abandoning
+    // its wait must not cancel it for the others. The caller's own signal only
+    // detaches that caller (see the abandonment case below).
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(options.signal).not.toBe(signal);
+  });
+
+  it('shares ONE read between callers of the same turn, and retains nothing after it', async () => {
+    const { adapter, readContractWithOptions } = fixture();
+    readContractWithOptions.mockResolvedValue({ active: true, accessPolicy: 1n, participantAgents: [MEMBER] });
+
+    const together = await Promise.all(
+      Array.from({ length: 20 }, () => adapter.getContextGraphLiveAuthority(7n)),
+    );
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+    for (const authority of together) {
+      expect(authority).toEqual({ active: true, accessPolicy: 1, participantAgents: [MEMBER] });
+    }
+
+    // Nothing is kept: each serial caller is a fresh live read. This is the
+    // kill-switch equivalence — remove the sharing and the counts are these.
+    readContractWithOptions.mockClear();
+    for (let i = 0; i < 5; i += 1) await adapter.getContextGraphLiveAuthority(7n);
+    expect(readContractWithOptions).toHaveBeenCalledTimes(5);
+
+    // A different id is a different flight, always.
+    readContractWithOptions.mockClear();
+    await Promise.all([
+      adapter.getContextGraphLiveAuthority(7n),
+      adapter.getContextGraphLiveAuthority(8n),
+    ]);
+    expect(readContractWithOptions).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives one caller\'s abort to that caller alone; peers keep the shared read', async () => {
+    const { adapter, readContractWithOptions } = fixture();
+    let release!: (value: unknown) => void;
+    readContractWithOptions.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+
+    const leaving = new AbortController();
+    const abandoned = adapter.getContextGraphLiveAuthority(7n, { signal: leaving.signal });
+    const stays = adapter.getContextGraphLiveAuthority(7n);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+
+    leaving.abort(new Error('caller stopped'));
+    await expect(abandoned).rejects.toThrow('caller stopped');
+    // The abandoning caller did not cancel the read for the one still waiting.
+    expect(readContractWithOptions.mock.calls[0][4].signal.aborted).toBe(false);
+    release({ active: true, accessPolicy: 1n, participantAgents: [MEMBER] });
+    await expect(stays).resolves.toEqual({
+      active: true, accessPolicy: 1, participantAgents: [MEMBER],
+    });
   });
 
   it('decodes the positional tuple shape ethers may hand back', async () => {
@@ -134,21 +186,43 @@ describe('EVM adapter: one-read live context graph authority', () => {
     // error: answering "unsupported" would send a cancelled call into the
     // three-read fallback, and answering `null` would be a terminal verdict
     // about a read that never completed.
-    const controller = new AbortController();
-    controller.abort(new Error('caller stopped'));
-
     const looksUnsupported = fixture();
     const bare = Object.assign(new Error('missing revert data'), { code: 'CALL_EXCEPTION', data: null, reason: null });
-    looksUnsupported.readContractWithOptions.mockRejectedValue(bare);
-    const first = looksUnsupported.adapter.getContextGraphLiveAuthority(7n, { signal: controller.signal });
-    await expect(first).rejects.toBe(bare);
-    await expect(first).rejects.not.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+    let releaseBare!: (reason: unknown) => void;
+    looksUnsupported.readContractWithOptions.mockImplementation(
+      () => new Promise((_resolve, reject) => { releaseBare = reject; }),
+    );
+    const cancelling = new AbortController();
+    const first = looksUnsupported.adapter.getContextGraphLiveAuthority(7n, { signal: cancelling.signal });
+    const firstSettled = first.catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    cancelling.abort(new Error('caller stopped'));
+    releaseBare(bare);
+    await expect(firstSettled).resolves.not.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
 
     const looksNonexistent = fixture();
     const revert = callException({ revert: { name: 'ERC721NonexistentToken', args: [7n] } });
-    looksNonexistent.readContractWithOptions.mockRejectedValue(revert);
-    await expect(looksNonexistent.adapter.getContextGraphLiveAuthority(7n, { signal: controller.signal }))
-      .rejects.toBe(revert);
+    let releaseRevert!: (reason: unknown) => void;
+    looksNonexistent.readContractWithOptions.mockImplementation(
+      () => new Promise((_resolve, reject) => { releaseRevert = reject; }),
+    );
+    const cancellingToo = new AbortController();
+    const second = looksNonexistent.adapter.getContextGraphLiveAuthority(7n, { signal: cancellingToo.signal });
+    const secondSettled = second.catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    cancellingToo.abort(new Error('caller stopped'));
+    releaseRevert(revert);
+    await expect(secondSettled).resolves.toBeInstanceOf(Error);
+    await expect(secondSettled).resolves.not.toBeNull();
+
+    // An ALREADY-aborted caller never reaches the chain at all now: it is
+    // never answered by a read it did not ask for, so there is nothing to
+    // classify.
+    const neverRead = fixture();
+    const preAborted = AbortSignal.abort(new Error('caller stopped before asking'));
+    await expect(neverRead.adapter.getContextGraphLiveAuthority(7n, { signal: preAborted }))
+      .rejects.toThrow('caller stopped before asking');
+    expect(neverRead.readContractWithOptions).not.toHaveBeenCalled();
   });
 
   it('is id-exact on the DECODED revert too: another token proves nothing about this one', async () => {

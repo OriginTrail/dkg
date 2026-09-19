@@ -1762,7 +1762,9 @@ export class MockChainAdapter implements ChainAdapter {
     // Never `null`: the mock has no "minted but burned" state, and a graph the
     // mock does not know is exactly what a stubbed liveness probe describes.
     // Same call arity as the point-read wiring this replaces: options only when
-    // a signal is present, so a spy that pinned `calledWith(id)` still matches.
+    // a signal is present. Note the agent now always supplies one on this path
+    // (the read is shared in flight, so a timed-out caller must be able to
+    // leave it), so a spy should pin the id rather than the whole call.
     const readOptions = options.signal === undefined ? undefined : { signal: options.signal };
     const live = await (readOptions === undefined
       ? this.isContextGraphActiveOnChain(contextGraphId)

@@ -260,7 +260,7 @@ export class AbortableKeyedSingleFlight<K, V> {
 }
 
 /** Waiter-local cancellation for a generic shared operation. */
-async function waitForSignal<T>(
+export async function waitForSignal<T>(
   shared: Promise<T>,
   signal: AbortSignal | undefined,
 ): Promise<T> {

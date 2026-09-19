@@ -14,11 +14,18 @@
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
-import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
+import {
+  DEFAULT_APPROVAL_POLICY,
+  buildEvmDeploymentId,
+  ContextGraphLiveAuthorityUnsupportedError,
+} from './chain-adapter.js';
+import { ContextGraphLiveAuthorityCoalescer } from
+  './context-graph-live-authority-coalescer.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  ContextGraphLiveAuthority,
   ContextGraphAuthorityIndexRevisionReader,
   KnowledgeAssetUpdateContext,
   V10PublishParams,
@@ -927,6 +934,20 @@ export class EVMChainAdapterBase {
   protected readonly receiptBlockTimestampsByHash =
     new BoundedLruCache<string, number>(RECEIPT_BLOCK_TIMESTAMP_CACHE_MAX_ENTRIES);
 
+  /**
+   * In-flight sharing for the one-read Context Graph live authority. An
+   * instance FIELD, not a lazy accessor: two empty maps cost nothing, and the
+   * adapter's prototype API surface is audited for mock parity. Retains no
+   * value, so it is safe below every security gate — see the module docstring.
+   */
+  protected readonly contextGraphLiveAuthorityCoalescer =
+    new ContextGraphLiveAuthorityCoalescer<ContextGraphLiveAuthority | null>({
+      // The only deterministic "this read cannot answer" fault; everything else
+      // (transport failure, abort) is the initiator's own and is never shared.
+      isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError
+        || (error instanceof Error && error.name === 'ContextGraphLiveAuthorityUnsupportedError'),
+    });
+
   /** Lazily constructed by the base-owned internal accessor below. */
   protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
 
@@ -1033,6 +1054,10 @@ export class EVMChainAdapterBase {
     this.cachedContractDeployBlocks.clear();
     this.receiptBlockTimestampsByHash.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
+    // Rotation cannot poison a shared flight — the key carries the contract
+    // address — but a flight opened against the pre-rotation binding must stop
+    // taking new callers all the same.
+    this.contextGraphLiveAuthorityCoalescer.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
