@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ContextGraphAuthorityIndexRevisionReader } from
+import type {
+  ContextGraphAuthorityIndexRevisionReader,
+  ContextGraphAuthorityProjectionServedEvidence,
+} from
   '@origintrail-official/dkg-chain';
 
 import {
@@ -29,7 +32,12 @@ export interface Rfc64CatalogAuthorityRevisionSourceBindingV1 {
   readonly resolveBinding: (contextGraphId: string) => string | undefined;
   readonly runAuthorityRead: <T>(
     signal: AbortSignal,
-    read: (signal: AbortSignal) => Promise<T>,
+    read: (
+      signal: AbortSignal,
+      observeProjectionServed: (
+        evidence: ContextGraphAuthorityProjectionServedEvidence,
+      ) => void,
+    ) => Promise<T>,
   ) => Promise<T>;
 }
 
@@ -61,11 +69,14 @@ export function createRfc64CatalogAuthorityRevisionSourceV1(
       try {
         revisions = await binding.runAuthorityRead(
           signal,
-          async (readSignal) => {
+          async (readSignal, observeProjectionServed) => {
             try {
               return await reader.readContextGraphAuthorityIndexRevisions(
                 targets.onChainContextGraphIds,
-                { signal: readSignal },
+                {
+                  signal: readSignal,
+                  onContextGraphAuthorityProjectionServed: observeProjectionServed,
+                },
               );
             } finally {
               // A caller cancellation may detach from a physical log scan.

@@ -14,14 +14,18 @@ import {
 } from './context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
-import type {
-  ContextGraphAuthorityIndexCompletedProjection,
-  ContextGraphAuthorityIndexProjection,
-  ContextGraphAuthorityIndexView,
+import {
+  contextGraphAuthorityIndexScope,
+  type ContextGraphAuthorityIndexCompletedProjection,
+  type ContextGraphAuthorityIndexProjection,
+  type ContextGraphAuthorityIndexView,
 } from './context-graph-authority-index-projection.js';
-import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
+import type {
+  ContextGraphAuthorityIndexSnapshots,
+} from './context-graph-authority-index-snapshot.js';
 import {
   assertContextGraphAuthorityIndexId,
+  contextGraphAuthorityIndexIdFromBigInt,
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
 import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
@@ -168,7 +172,7 @@ function authorityIndexScanInputV1(
 ): ContextGraphAuthorityIndexScanInput {
   const authorityTopics = contextGraphAuthorityEventTopics(input.contract.interface);
   return {
-    scope: [input.deploymentId, input.contractAddress].join(':'),
+    scope: contextGraphAuthorityIndexScope(input.deploymentId, input.contractAddress),
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
     finalized: input.finalized,
@@ -359,6 +363,16 @@ class EvmContextGraphAuthorityIndexRevisionReadLifecycleV1 {
   }
 }
 
+/** Adapter-private reader surface shared by indexed point and batch reads. */
+export interface EvmContextGraphAuthorityIndexReaderV1
+  extends ContextGraphAuthorityIndexRevisionReader {
+  readonly snapshots: ContextGraphAuthorityIndexSnapshots;
+  readContextGraphAuthoritySnapshot(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<ContextGraphAuthoritySnapshot>;
+}
+
 /**
  * Build the sole adapter capability for complete finalized revision reads.
  * Transport, index advancement, projection, and the final anchor fence remain
@@ -366,9 +380,7 @@ class EvmContextGraphAuthorityIndexRevisionReadLifecycleV1 {
  */
 export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   dependencies: EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1,
-): ContextGraphAuthorityIndexRevisionReader & Readonly<{
-  snapshots: ContextGraphAuthorityIndexSnapshots;
-}> {
+): EvmContextGraphAuthorityIndexReaderV1 {
   const lifecycle = new EvmContextGraphAuthorityIndexRevisionReadLifecycleV1();
   let lifecycleAbort = new AbortController();
   let ownScope: string | undefined;
@@ -429,7 +441,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         });
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
-        ownScope = [dependencies.deploymentId, contractAddress].join(':');
+        ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
         const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
           contractAddress,
           operationLabel,
@@ -502,10 +514,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     // Keyed by the contract this adapter is bound to NOW, never by the scope a
     // previous read happened to see: a rotated ContextGraphStorage is a miss
     // even if nothing told the index to clear.
-    const scope = [
+    const scope = contextGraphAuthorityIndexScope(
       dependencies.deploymentId,
-      (await dependencies.requireContextGraphStorage().getAddress()).toLowerCase(),
-    ].join(':');
+      await dependencies.requireContextGraphStorage().getAddress(),
+    );
     const projection = await dependencies.index.projection({
       scope,
       signal: options.signal,
@@ -606,6 +618,22 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         lifecycle.whenIdle(),
         dependencies.index.whenIdle(),
       ]);
+    },
+    readContextGraphAuthoritySnapshot(
+      contextGraphId: bigint,
+      options: ChainReadOptions = {},
+    ): Promise<ContextGraphAuthoritySnapshot> {
+      const target = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
+      return runFinalizedProjection(
+        'getContextGraphAuthoritySnapshot',
+        options,
+        (view) => view.has(target),
+        ({ view, chainId, contractAddress }) => authoritySnapshotV1(
+          view.resolve(target),
+          chainId,
+          contractAddress,
+        ),
+      );
     },
     async resolveFinalizedContextGraphIdByNameHash(
       nameHash: string,

@@ -1622,8 +1622,8 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 1 });
 
-    // Ticks 2..4, up to the LAST block of the period: one head read each,
-    // no status / challenge read, same outcome and same log line.
+    // Ticks 2..4, up to the LAST block of the period: one head and one Chronos
+    // epoch read each, no status / challenge read, same outcome and log line.
     for (const head of [1031, 1040, 1049]) {
       state.blockNumber = head;
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });

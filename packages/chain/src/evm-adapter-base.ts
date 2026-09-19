@@ -93,7 +93,10 @@ import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-his
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
 import { resolveContextGraphAuthorityIndexTickMs } from
   './context-graph-authority-index-projection.js';
-import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
+import {
+  createEvmContextGraphAuthorityIndexRevisionReaderV1,
+  type EvmContextGraphAuthorityIndexReaderV1,
+} from
   './evm-context-graph-authority-index-reader.js';
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 
@@ -992,6 +995,10 @@ export class EVMChainAdapterBase {
   /** Shared contract-wide authority history, enabled by daemon-local persistence. */
   protected readonly contextGraphAuthorityIndex: ContextGraphAuthorityIndex | undefined;
 
+  /** One owner for indexed point, batch, and snapshot reads. */
+  protected readonly contextGraphAuthorityIndexReader:
+    EvmContextGraphAuthorityIndexReaderV1 | undefined;
+
   /** Sole public scheduling capability backed by the private materialized index. */
   readonly contextGraphAuthorityIndexRevisionReader:
     ContextGraphAuthorityIndexRevisionReader | undefined;
@@ -1382,6 +1389,7 @@ export class EVMChainAdapterBase {
           pageSize: () => this.cgRegistryScanPageSize,
           finalityConfirmations: () => this.finalityConfirmations,
         });
+    this.contextGraphAuthorityIndexReader = authorityIndexReader;
     this.contextGraphAuthorityIndexRevisionReader = authorityIndexReader;
     this.contextGraphAuthorityIndexSnapshots = authorityIndexReader?.snapshots;
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;

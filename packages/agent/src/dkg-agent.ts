@@ -1063,7 +1063,7 @@ export class DKGAgent extends DKGAgentBase {
               signal,
               (readSignal, evidence) => {
                 evidence.markRpcAttempt();
-                return read(readSignal);
+                return read(readSignal, evidence.observeProjectionServed);
               },
             ),
           )

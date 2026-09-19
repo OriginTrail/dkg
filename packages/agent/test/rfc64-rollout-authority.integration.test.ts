@@ -34,6 +34,7 @@ import {
   RpcEndpointsExhaustedError,
   withRpcRequestContext,
   type ChainAdapter,
+  type ChainReadOptions,
   type ContextGraphAuthorityIndexId,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -312,12 +313,19 @@ describe('RFC-64 rollout authority integration', () => {
       startupJitterMs: 0,
     });
     let observedSignal: AbortSignal | undefined;
+    let observedProjectionEvidence = false;
     const readRevisions = vi.fn(async (
       _contextGraphIds: readonly string[],
-      options?: { signal?: AbortSignal },
+      options: ChainReadOptions = {},
     ) => {
-      observedSignal = options?.signal;
+      observedSignal = options.signal;
       await governor.acquireActiveRequest();
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'scan',
+        ageMs: 0,
+        tickMs: 6_000,
+      });
+      observedProjectionEvidence = true;
       return new Map([['9', `0x${'ab'.repeat(32)}`]]);
     });
     const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
@@ -331,9 +339,11 @@ describe('RFC-64 rollout authority integration', () => {
       // so startup needs only the owner's initial revision read.
       expect(readRevisions).toHaveBeenCalledOnce();
       expect(readRevisions).toHaveBeenCalledWith(['9'], {
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
         signal: expect.any(AbortSignal),
       });
       expect(observedSignal?.aborted).toBe(false);
+      expect(observedProjectionEvidence).toBe(true);
       expect(governor.snapshot()).toMatchObject({
         backgroundAdmitted: 1,
         foregroundAdmitted: 0,
@@ -2381,9 +2391,17 @@ describe('RFC-64 rollout authority integration', () => {
       ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
       accessPolicy: 0,
     });
-    const resolveSnapshots = vi.fn(async () => new Map([
-      [expectedNameHash, indexedSnapshot],
-    ]));
+    const resolveSnapshots = vi.fn(async (
+      _nameHashes: readonly string[],
+      options: ChainReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'scan',
+        ageMs: 0,
+        tickMs: 6_000,
+      });
+      return new Map([[expectedNameHash, indexedSnapshot]]);
+    });
     const pointAuthorityRead = vi.fn(async () => {
       throw new Error('an indexed projection must not reopen a point read');
     });
@@ -2417,6 +2435,60 @@ describe('RFC-64 rollout authority integration', () => {
     expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
       state: 'closed',
       consecutiveExhaustions: 0,
+    });
+  });
+
+  it('keeps the shared circuit half-open when an indexed read uses stale cache', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase();
+    const indexedSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async (
+      _nameHashes: readonly string[],
+      options: ChainReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'stale-cache',
+        ageMs: 18_000,
+        tickMs: 6_000,
+      });
+      return new Map([[expectedNameHash, indexedSnapshot]]);
+    });
+    const pointAuthorityRead = vi.fn(async () => {
+      throw new Error('a stale indexed projection must not reopen a point read');
+    });
+    const edge = await startAgent({
+      name: 'authority-stale-cache-evidence-indexed',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: pointAuthorityRead,
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
     });
   });
 
@@ -2577,7 +2649,7 @@ describe('RFC-64 rollout authority integration', () => {
   async function prepareAuthorityRefreshLifecycle(
     readRevisions?: (
       contextGraphIds: readonly string[],
-      options?: { signal?: AbortSignal },
+      options?: ChainReadOptions,
     ) => Promise<ReadonlyMap<string, string>>,
     whenRevisionReadsIdle: () => Promise<void> = async () => undefined,
   ) {

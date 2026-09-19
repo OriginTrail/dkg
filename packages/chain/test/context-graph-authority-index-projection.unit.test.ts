@@ -7,6 +7,7 @@ import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
   ContextGraphAuthorityIndexProjectionCache,
+  contextGraphAuthorityIndexScope,
   resolveContextGraphAuthorityIndexTickMs,
   type ContextGraphAuthorityIndexCompletedProjection,
   type ContextGraphAuthorityProjectionServedEvidence,
@@ -156,6 +157,13 @@ function makeHarness(options: Readonly<{
 const turns = async (count = 20): Promise<void> => {
   for (let turn = 0; turn < count; turn += 1) await Promise.resolve();
 };
+
+describe('authority projection scope', () => {
+  it('normalizes the contract address for every index/cache caller', () => {
+    expect(contextGraphAuthorityIndexScope('evm:31337:0xhub', '0xAbCd'))
+      .toBe('evm:31337:0xhub:0xabcd');
+  });
+});
 
 describe('chain.indexTickMs', () => {
   it('defaults to 6s and rejects everything that is not a positive integer', () => {

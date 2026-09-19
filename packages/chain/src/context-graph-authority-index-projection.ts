@@ -13,6 +13,14 @@ import { waitForAuthorityIndexOperation } from
 /** Default `chain.indexTickMs`: how long one completed projection answers reads. */
 export const DEFAULT_CONTEXT_GRAPH_AUTHORITY_INDEX_TICK_MS = 6_000;
 
+/** Canonical cache/index scope for one physical authority contract deployment. */
+export function contextGraphAuthorityIndexScope(
+  deploymentId: string,
+  contractAddress: string,
+): string {
+  return [deploymentId, contractAddress.toLowerCase()].join(':');
+}
+
 /**
  * Floor of the stale-if-error window. The window is `max(3T, floor)`: three
  * missed refreshes for an operator-sized T, but never so short that one slow
