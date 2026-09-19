@@ -8,16 +8,16 @@ The APIs configure existing typed tools and the existing agent-key-signed inbox 
 
 The examples use two nodes: **runner** hosts the private data and executes the Program; **client** forwards the caller's signed invocation. `program-library` and `tenant-data` below stand for their registered **canonical IDs**, which may be qualified on your network. Full `did:dkg:context-graph:...` graph URIs are also accepted and returned as canonical IDs without that URI prefix. Display-name/suffix aliases are not resolved by these APIs. Register/prepare the graphs and local agents using the normal DKG setup first.
 
-| Credential | Issuer | Represented identity | Scope in this example |
+Every HTTP call below uses a fresh **ES256K JWT signed locally by the agent's wallet key**. The node derives the signer address and checks the request's destination, exact method/path/body, expiration and one-use nonce. It does not issue a session token or receive a private key. See the [JWT profile and operator setup](agent-key-http-authentication.md).
+
+| Proof | Issuer | Represented identity | Scope |
 | --- | --- | --- | --- |
-| `OWNER_AGENT_TOKEN` | runner's agent registration/auth service | `OWNER_AGENT_ADDRESS`, the owner of the data graph | Upload to its source graph; inspect/approve/update/revoke bindings in graphs it owns. Normal graph permissions still apply. |
-| `RUNNER_OPERATOR_TOKEN` | runner's node API auth service | runner node operator, not an agent wallet | Manage any local binding. Does not stand in for an invoke-only caller. |
-| `CLIENT_OPERATOR_TOKEN` | client's node API auth service | client node operator | Manage outbound routes on client. Grants no authority at runner. |
-| `CALLER_AGENT_TOKEN` | client's agent registration/auth service | `CALLER_AGENT_ADDRESS` | Authenticate the invocation to client. Client must hold that agent's custodial signing key. |
+| Owner HTTP JWT | Owner's local signer | `OWNER_AGENT_ADDRESS` | Existing owner rights: upload Program, approve/update/revoke data-graph bindings. |
+| Caller HTTP JWT | Caller's local signer | `CALLER_AGENT_ADDRESS` | Existing Program-graph read rights and separately approved invocation rights. |
+| Operator HTTP JWT | Same caller's local signer | Same `CALLER_AGENT_ADDRESS` | Administration on client only, after its operator explicitly configures this address. |
+| Invocation delegation in JSON | Caller's local signer | Same original caller | One data graph, operation, invocation UUID, execution peer and forwarding peer; expires within five minutes. |
 
-Tokens are bearer/API credentials in `Authorization: Bearer ...`. The client then signs the existing version-3 delegation with the **caller's own agent key**; the key is never sent to the runner. The signature binds the graph, operation, invocation UUID, destination peer and sending peer and expires within five minutes. Runner checks the signer against its stored binding. No runner bearer token, general data-graph membership, or node-default identity is needed by this invoke-only caller.
-
-A node-operator credential must actually be classified as `nodeOperator` by DKG authentication. Merely naming a token `operator` does not confer authority. Anonymous/public requests, including anonymous requests with HTTP auth disabled, cannot manage bindings or routes. An ordinary graph member cannot approve bindings.
+The caller's signing key is held by the client application and need not be stored on either node. Runner retains its own executor's custodial key. Graph permissions are independent of authentication and operator role. Configure `auth.operatorAgentAddresses` on client once, as documented in the linked profile; possessing a signing key does not automatically grant administration. Anonymous/public requests cannot manage bindings or routes, including when HTTP auth is disabled. An ordinary graph member cannot approve bindings.
 
 An agent-authenticated graph owner may select only its **own custodial identity** as executor. Graph ownership or membership does not authorize borrowing another wallet for reads, writes or any other tool. A foreign executor is rejected with `PROGRAM_EXECUTOR_FORBIDDEN` (403) before Program resolution or permission persistence. Only an explicitly authenticated node operator may select a different local custodial executor. This API has no executor-delegation mechanism; an owner also cannot refresh an operator-issued foreign-executor binding, but may revoke it.
 
@@ -33,16 +33,61 @@ export DATA_GRAPH='tenant-data'
 export PROGRAM_IRI='urn:example:program:read-device:1'
 export OPERATION_IRI='urn:example:operation:read-device'
 export TOOL_IRI='urn:example:tool:sparql-read'
-# Set these to credentials/addresses from your actual local registrations:
-export OWNER_AGENT_TOKEN='REPLACE_WITH_RUNNER_OWNER_AGENT_TOKEN'
+# These files remain only on the signer's machine and contain a hex key (chmod 600).
+export OWNER_KEY_FILE='/secure/owner.key'
+export CALLER_KEY_FILE='/secure/caller.key'
 export OWNER_AGENT_ADDRESS='REPLACE_WITH_OWNER_AGENT_ADDRESS'
-export CLIENT_OPERATOR_TOKEN='REPLACE_WITH_CLIENT_NODE_OPERATOR_TOKEN'
-export CALLER_AGENT_TOKEN='REPLACE_WITH_CLIENT_CALLER_AGENT_TOKEN'
 export CALLER_AGENT_ADDRESS='REPLACE_WITH_CALLER_AGENT_ADDRESS'
 export RUNNER_PEER_ID='REPLACE_WITH_RUNNER_PEER_ID_FROM_API_STATUS'
+export CLIENT_PEER_ID='REPLACE_WITH_CLIENT_PEER_ID_FROM_API_STATUS'
+export SIGNER='packages/cli/scripts/sign-agent-request.mjs'
 ```
 
-Use your configured HTTPS endpoint or trusted local tunnel when sending bearer tokens. The graph IDs, device IRI and predicate in this example are illustrative; use data and projections you intend to disclose.
+Use HTTPS or a trusted local tunnel; signatures authenticate requests but do not encrypt their contents. The graph IDs, device IRI and predicate in this example are illustrative; use data and projections you intend to disclose.
+
+After building the CLI, run from the repository root. This wrapper gives **curl only public signature headers**, never a private key. Sign the exact path and body curl sends; do not change query encoding or reserialize JSON afterward. Do not follow redirects with the proof.
+
+```sh
+signed_curl() (
+  key_file="$1"; peer="$2"; base_url="$3"; method="$4"; request_path="$5"; body_file="${6:-}"
+  headers_file="$(mktemp)"
+  trap 'rm -f "$headers_file"' EXIT
+  if [ -n "$body_file" ]; then
+    node "$SIGNER" http --key-file "$key_file" --peer "$peer" --method "$method" \
+      --path "$request_path" --body "$body_file" --out "$headers_file"
+    curl --fail-with-body -sS -X "$method" "$base_url$request_path" -H "@$headers_file" --data-binary "@$body_file"
+  else
+    node "$SIGNER" http --key-file "$key_file" --peer "$peer" --method "$method" \
+      --path "$request_path" --out "$headers_file"
+    curl --fail-with-body -sS -X "$method" "$base_url$request_path" -H "@$headers_file"
+  fi
+)
+export BINDING_PATH="$(python3 -c 'import os,urllib.parse; print("/api/programs/bindings?"+urllib.parse.urlencode({"contextGraphId":os.environ["DATA_GRAPH"],"operationIri":os.environ["OPERATION_IRI"]}))')"
+export ROUTE_PATH="${BINDING_PATH/bindings/routes}"
+```
+
+```mermaid
+sequenceDiagram
+  participant O as Owner signer
+  participant R as Runner node
+  participant C as Client node
+  participant A as Caller signer
+  O->>R: JWT POST /api/knowledge-assets (Program)
+  R->>C: Authorized Program-graph replication
+  O->>R: JWT POST /api/programs/bindings (private data graph)
+  R->>R: Check owner/executor, pin source, persist approval
+  A->>C: JWT POST /api/programs/routes (explicit operator role)
+  A->>C: JWT POST /api/query (shared Program graph)
+  A->>C: JWT POST /api/programs/execute + invocation delegation
+  C->>R: Operation + original caller's signed delegation
+  R->>R: Check caller, current binding, source pin and replay state
+  R->>R: Execute locally and persist receipt
+  R-->>C: Permitted outputs and execution reference
+  C-->>A: Result
+  O->>R: JWT POST /api/query (receipt as executor)
+  A->>R: JWT POST /api/query (private data graph)
+  R-->>A: Denied / empty bindings under query contract
+```
 
 ## 1. Upload the Program as a Knowledge Asset
 
@@ -69,16 +114,14 @@ jq -n --arg cg "$SOURCE_GRAPH" --arg iri "$PROGRAM_IRI" --arg tool "$TOOL_IRI" \
      {subject:$iri,predicate:"https://origintrail.io/semantic-runtime/v1#requiresTool",object:$tool}
    ]}' > upload.json
 
-curl --fail-with-body -sS "$RUNNER_URL/api/knowledge-assets" \
-  -H "Authorization: Bearer $OWNER_AGENT_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @upload.json
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" POST '/api/knowledge-assets' upload.json
 ```
 
 The source graph must be created and ready for sharing; on-chain registration is not required for private P2P sharing. Authorization fails closed if the selected Program view is unavailable or ambiguous. For a new version, upload a new asset name and versioned Program IRI. Normal asset lifecycle/retry rules still apply.
 
-For private source graphs, SWM sender-key delivery distinguishes API registration from encryption-key custody. Registering a remote agent's public key on runner for API authentication does not make runner its decryption custodian. An external API-only recipient uses its resolved remote peer and active encryption key; the receiving node still checks graph/peer authorization and possession of the exact private key. Missing/self remote destinations are rejected for these external registrations. Locally custodial identities and locally owned or revoked keys retain the strict local checks; missing/revoked custody is not bypassed by forwarding elsewhere. Keep the external API registration and its credential in place—do not copy private keys between nodes to enable sharing.
+For private source graphs, SWM sender-key delivery distinguishes API registration from encryption-key custody. Registering a remote agent's public key on runner for API authentication does not make runner its decryption custodian. An external API-only recipient uses its resolved remote peer and active encryption key; the receiving node still checks graph/peer authorization and possession of the exact private key. Missing/self remote destinations are rejected for these external registrations. Locally custodial identities and locally owned or revoked keys retain the strict local checks; missing/revoked custody is not bypassed by forwarding elsewhere. JWT authentication requires no API-token registration. Normal graph enrollment and encryption-key delegation remain required; do not copy signing keys between nodes to enable sharing.
 
-A partial upload response (`207` with a `swm-share` error) means the sealed WM asset exists but sharing did not complete. After fixing the reported cause, retry the existing asset's SWM transition with its original owner token and author lane, then verify source readback in SWM before approving a `programLayer: "swm"` binding. Shared Program visibility does not grant invocation permission or access to the separate private data graph.
+A partial upload response (`207` with a `swm-share` error) means the sealed WM asset exists but sharing did not complete. After fixing the reported cause, retry the existing asset's SWM transition with its owner-signed request and author lane, then verify source readback in SWM before approving a `programLayer: "swm"` binding. Shared Program visibility does not grant invocation permission or access to the separate private data graph.
 
 For a private unregistered replica, the receiver validates its durable approved join, the approving curator's identity and owner generation, the graph's own private metadata, and its current membership/delegation to the physical receiver. The finalized chain-name index must independently establish absence; a known binding or registration in flight takes precedence. Raw participant lists, subscription hints and ontology declarations do not establish this authority. The same validated lifecycle policy supplies the private catalog roster.
 
@@ -101,9 +144,7 @@ jq -n --arg cg "$DATA_GRAPH" --arg sourceCg "$SOURCE_GRAPH" --arg op "$OPERATION
           required:["value"],properties:{value:{type:"string",maxLength:128}}}}
       }}}}}' > authorization.json
 
-curl --fail-with-body -sS "$RUNNER_URL/api/programs/bindings" \
-  -H "Authorization: Bearer $OWNER_AGENT_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @authorization.json > approved.json
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" POST '/api/programs/bindings' authorization.json > approved.json
 
 jq '{revision,bindingDigest,binding,resolution}' approved.json
 ```
@@ -113,9 +154,7 @@ jq '{revision,bindingDigest,binding,resolution}' approved.json
 Inspect one binding, or omit `operationIri` to list that graph's bindings:
 
 ```sh
-curl --fail-with-body -sS -G "$RUNNER_URL/api/programs/bindings" \
-  -H "Authorization: Bearer $OWNER_AGENT_TOKEN" \
-  --data-urlencode "contextGraphId=$DATA_GRAPH" --data-urlencode "operationIri=$OPERATION_IRI" > current.json
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" GET "$BINDING_PATH" > current.json
 ```
 
 ## 3. Configure the outbound route on client
@@ -125,13 +164,9 @@ This is an operator-only routing decision. Runner's approval is independent.
 ```sh
 jq -n --arg cg "$DATA_GRAPH" --arg op "$OPERATION_IRI" --arg peer "$RUNNER_PEER_ID" \
   '{route:{contextGraphId:$cg,operationIri:$op,targetPeerId:$peer}}' > route.json
-curl --fail-with-body -sS "$CLIENT_URL/api/programs/routes" \
-  -H "Authorization: Bearer $CLIENT_OPERATOR_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @route.json > routing.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST '/api/programs/routes' route.json > routing.json
 
-curl --fail-with-body -sS -G "$CLIENT_URL/api/programs/routes" \
-  -H "Authorization: Bearer $CLIENT_OPERATOR_TOKEN" \
-  --data-urlencode "contextGraphId=$DATA_GRAPH" --data-urlencode "operationIri=$OPERATION_IRI"
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" GET "$ROUTE_PATH"
 ```
 
 The client need not subscribe to or read the data graph to install this canonical graph/operation-to-peer mapping. Network reachability and peer discovery must be configured normally. There is no alternate peer or unsigned transport fallback.
@@ -142,14 +177,30 @@ The client need not subscribe to or read the data graph to install this canonica
 export INVOCATION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 jq -n --arg cg "$DATA_GRAPH" --arg op "$OPERATION_IRI" --arg id "$INVOCATION_ID" \
   '{contextGraphId:$cg,operationIri:$op,invocationId:$id}' > invocation.json
-curl --fail-with-body -sS "$CLIENT_URL/api/programs/execute" \
-  -H "Authorization: Bearer $CALLER_AGENT_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @invocation.json
+node "$SIGNER" invocation --key-file "$CALLER_KEY_FILE" --peer "$RUNNER_PEER_ID" \
+  --forwarder "$CLIENT_PEER_ID" --input invocation.json --out authorized-invocation.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST '/api/programs/execute' authorized-invocation.json > execution.json
 ```
 
-Reuse the same UUID for a retry. Each delivery gets a fresh transport ID so the destination's current permission checks cannot be skipped by transport response caching. Caller, source, output contracts, memory layers and the permission revision are bound to replay validation. A changed permission requires a new invocation UUID. The existing `programIri` spelling for configured operations remains supported; new clients should use `operationIri`, which never falls back to direct Program execution when no binding or route exists.
+Reuse the same UUID for a retry, generating fresh HTTP JWT headers every time. Refresh an expired delegation with the same UUID and operation. HTTP nonces are single-use authentication; the UUID identifies the durable execution. Each delivery gets a fresh transport ID so the destination's current permission checks cannot be skipped by transport response caching. Caller, source, output contracts, memory layers and the permission revision are bound to replay validation. A changed permission requires a new invocation UUID. The existing `programIri` spelling for configured operations remains supported; new clients should use `operationIri`, which never falls back to direct Program execution when no binding or route exists.
 
 Successful output includes `executionIri`, `executionLayer`, `persisted` and permitted outputs. VM execution also requires its existing publication evidence. Invocation approval does not add the caller to the graph, and does not enable `POST /api/query` or direct Program/source reads. Private graph ACLs continue to govern those APIs; a denied raw query may return empty bindings under the existing query contract.
+
+Read the newly shared Program on **client**, using a caller authorized for the Program graph only, then inspect the receipt as owner/executor and test that direct private-data access remains denied:
+
+```sh
+jq -n --arg cg "$SOURCE_GRAPH" --arg iri "$PROGRAM_IRI" \
+  '{contextGraphId:$cg,view:"shared-working-memory",sparql:("SELECT ?source WHERE { <"+$iri+"> <https://origintrail.io/semantic-runtime/v1#source> ?source }")}' > read-program.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST '/api/query' read-program.json
+jq -n --arg cg "$DATA_GRAPH" --arg iri "$(jq -r .executionIri execution.json)" \
+  '{contextGraphId:$cg,view:"working-memory",sparql:("SELECT ?p ?o WHERE { <"+$iri+"> ?p ?o }")}' > receipt.json
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" POST '/api/query' receipt.json
+jq -n --arg cg "$DATA_GRAPH" \
+  '{contextGraphId:$cg,view:"working-memory",sparql:"SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5"}' > forbidden-read.json
+signed_curl "$CALLER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" POST '/api/query' forbidden-read.json
+```
+
+The caller's direct data query must disclose no rows. A receipt reference is not permission to read it. A successful older Program is not proof that the newly uploaded definition replicated; verify the exact source on client.
 
 ## 5. Update or revoke
 
@@ -161,23 +212,15 @@ export NEW_CALLER_AGENT_ADDRESS='REPLACE_WITH_NEW_CALLER_AGENT_ADDRESS'
 jq --arg caller "$NEW_CALLER_AGENT_ADDRESS" \
   '{expectedRevision:.revision,binding:(.binding|del(.authorizationRevision)|.allowedCallerAgentAddresses=[$caller])}' \
   current.json > update.json
-curl --fail-with-body -sS -X PUT "$RUNNER_URL/api/programs/bindings" \
-  -H "Authorization: Bearer $OWNER_AGENT_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @update.json > updated.json
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" PUT '/api/programs/bindings' update.json > updated.json
 
 # Revoke using a freshly inspected revision.
-curl --fail-with-body -sS -G "$RUNNER_URL/api/programs/bindings" \
-  -H "Authorization: Bearer $OWNER_AGENT_TOKEN" \
-  --data-urlencode "contextGraphId=$DATA_GRAPH" --data-urlencode "operationIri=$OPERATION_IRI" > current.json
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" GET "$BINDING_PATH" > current.json
 jq '{contextGraphId,operationIri,expectedRevision:.revision}' current.json > revoke.json
-curl --fail-with-body -sS -X DELETE "$RUNNER_URL/api/programs/bindings" \
-  -H "Authorization: Bearer $OWNER_AGENT_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @revoke.json
+signed_curl "$OWNER_KEY_FILE" "$RUNNER_PEER_ID" "$RUNNER_URL" DELETE '/api/programs/bindings' revoke.json
 
 # A replay of the previously successful UUID is now rejected (403).
-curl -sS -w '\nHTTP %{http_code}\n' "$CLIENT_URL/api/programs/execute" \
-  -H "Authorization: Bearer $CALLER_AGENT_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @invocation.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" POST '/api/programs/execute' authorized-invocation.json
 ```
 
 Revocation persists `enabled:false` plus a new revision. It takes effect before the management response is returned and survives restart. Running executions recheck it before subsequent effects and before releasing results; completed writes are not rolled back. Re-enable only through a new owner/operator `PUT` against the current revision, which repeats Program validation. A slow concurrent approval cannot overwrite a newer update/revocation: it receives 409.
@@ -187,22 +230,16 @@ To authorize a changed Program, review the new source, then PUT its new Program 
 Route replacement and removal use the same revision contract:
 
 ```sh
-curl --fail-with-body -sS -G "$CLIENT_URL/api/programs/routes" \
-  -H "Authorization: Bearer $CLIENT_OPERATOR_TOKEN" \
-  --data-urlencode "contextGraphId=$DATA_GRAPH" --data-urlencode "operationIri=$OPERATION_IRI" > current-route.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" GET "$ROUTE_PATH" > current-route.json
 # Replace the destination; the new runner must authorize this caller independently.
 export NEW_RUNNER_PEER_ID='REPLACE_WITH_NEW_RUNNER_PEER_ID'
 jq --arg peer "$NEW_RUNNER_PEER_ID" \
   '{expectedRevision:.revision,route:(.route|.targetPeerId=$peer)}' current-route.json > update-route.json
-curl --fail-with-body -sS -X PUT "$CLIENT_URL/api/programs/routes" \
-  -H "Authorization: Bearer $CLIENT_OPERATOR_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @update-route.json > current-route.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" PUT '/api/programs/routes' update-route.json > current-route.json
 
 # Remove the route using the revision returned by the update.
 jq '{contextGraphId,operationIri,expectedRevision:.revision}' current-route.json > remove-route.json
-curl --fail-with-body -sS -X DELETE "$CLIENT_URL/api/programs/routes" \
-  -H "Authorization: Bearer $CLIENT_OPERATOR_TOKEN" -H 'Content-Type: application/json' \
-  --data-binary @remove-route.json
+signed_curl "$CALLER_KEY_FILE" "$CLIENT_PEER_ID" "$CLIENT_URL" DELETE '/api/programs/routes' remove-route.json
 ```
 
 Removing routing does not revoke permission on runner. Revoke the destination binding when withdrawing execution rights.

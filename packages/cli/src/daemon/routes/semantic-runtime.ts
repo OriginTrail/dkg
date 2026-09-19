@@ -87,15 +87,18 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
   // even if a route has been removed or a binding has never been installed.
   if (Object.hasOwn(body, 'operationIri')) {
     if (typeof body.operationIri !== 'string' || typeof body.contextGraphId !== 'string' || typeof body.invocationId !== 'string'
-      || Object.keys(body).some((key) => !['contextGraphId', 'operationIri', 'invocationId'].includes(key))) {
-      return jsonResponse(res, 400, { error: 'Bound invocation requires only contextGraphId, operationIri and invocationId' });
+      || Object.keys(body).some((key) => !['contextGraphId', 'operationIri', 'invocationId', 'authorization'].includes(key))) {
+      return jsonResponse(res, 400, { error: 'Bound invocation requires contextGraphId, operationIri and invocationId, with optional client-signed authorization' });
     }
     try {
       const graph = canonicalProgramGraphId(body.contextGraphId);
       const route = config.semanticRuntime?.programRoutes?.find((entry) => entry.contextGraphId === graph && entry.operationIri === body.operationIri);
       if (!config.semanticRuntime) throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Semantic runtime is unavailable', 409);
+      if (!route && Object.hasOwn(body, 'authorization')) {
+        throw new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'Forwarded authorization requires an exact outbound route', 403);
+      }
       const result = route
-        ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, ctx.actor.authenticatedAgentAddress)
+        ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, ctx.actor.authenticatedAgentAddress, body.authorization)
         : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, ctx.actor.authenticatedAgentAddress);
       return jsonResponse(res, 200, result);
     } catch (error) {

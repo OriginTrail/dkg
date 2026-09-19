@@ -61,6 +61,41 @@ beforeEach(() => {
 });
 
 describe('signed bound operation inbox', () => {
+  it('forwards client-held authorization without looking up or storing a caller key', async () => {
+    const f = fixture();
+    f.sender.getCustodialAgentPrivateKey.mockImplementation(() => { throw new Error('Must not access a node key'); });
+    const proof = (await signed()).authorization;
+    const invoke = () => invokeBoundSemanticProgramOnPeer(f.sender, f.config, graph, operation, id, caller, proof);
+    await expect(invoke()).resolves.toEqual(result);
+    await expect(invoke()).resolves.toEqual(result);
+    expect(f.sender.getCustodialAgentPrivateKey).not.toHaveBeenCalled();
+    expect(f.sender.resolveLocalAgentAddress).not.toHaveBeenCalled();
+    const request = JSON.parse(new TextDecoder().decode(f.sender.invokeSkill.mock.calls[0][2]));
+    expect(request.authorization).toEqual(proof);
+    expect(invokeBoundSemanticProgram).toHaveBeenLastCalledWith(f.target, {}, graph, operation, id, { enabled: true }, caller);
+    expect(invokeBoundSemanticProgram).toHaveBeenCalledTimes(2); // each retry reaches current permission checks
+    expect(f.sender.invokeSkill.mock.calls[0][3].messageId).not.toBe(f.sender.invokeSkill.mock.calls[1][3].messageId);
+  });
+
+  it.each(['other-caller', 'other-forwarder', 'other-target', 'other-operation', 'other-graph', 'other-invocation', 'expired', 'invalid', 'null'])('rejects client authorization for %s without custodial fallback', async (fault) => {
+    const f = fixture();
+    const proof: any = fault === 'null' ? null : (await signed()).authorization;
+    if (fault === 'other-caller') proof.agentAddress = ethers.Wallet.createRandom().address;
+    if (fault === 'other-forwarder') proof.delegateePeerId = 'peer-attacker';
+    if (fault === 'expired') proof.expiresAtMs = Date.now() - 1;
+    if (fault === 'invalid') proof.signature = '0x00';
+    if (fault === 'other-target') f.config.programRoutes[0].targetPeerId = 'peer-elsewhere';
+    const cg = fault === 'other-graph' ? 'other-data' : graph;
+    const op = fault === 'other-operation' ? 'urn:other:operation' : operation;
+    const invocation = fault === 'other-invocation' ? '223e4567-e89b-42d3-a456-426614174099' : id;
+    f.config.programRoutes[0].contextGraphId = cg;
+    f.config.programRoutes[0].operationIri = op;
+    await expect(invokeBoundSemanticProgramOnPeer(f.sender, f.config, cg, op, invocation, caller, proof))
+      .rejects.toMatchObject({ code: 'INVOCATION_AUTHORIZATION_INVALID' });
+    expect(f.sender.getCustodialAgentPrivateKey).not.toHaveBeenCalled();
+    expect(f.sender.invokeSkill).not.toHaveBeenCalled();
+  });
+
   it('signs locally and dispatches to the binding executor without raw graph membership', async () => {
     const f = fixture();
     await expect(f.invoke()).resolves.toEqual(result);
