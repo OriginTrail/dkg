@@ -225,8 +225,9 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           ) {
             provePool();
           } else {
-            // Sticky for this operation: later marks cannot turn an answer
-            // served despite a failed refresh into proof of pool recovery.
+            // Sticky for this whole compound operation: later subreads cannot
+            // turn an answer served despite a failed refresh into proof of
+            // pool recovery. A subsequent operation may prove recovery.
             poolEvidence.value = 'unproven';
           }
         };

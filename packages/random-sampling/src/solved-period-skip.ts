@@ -86,6 +86,13 @@ export class SolvedPeriodSkip {
     this.#now = now;
   }
 
+  /** Cheap guards checked both before and after the live head/epoch reads. */
+  #stillBound(record: SolvedPeriodRecord, now: number): boolean {
+    return this.#chain.isRandomSamplingReady?.() === true
+      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
+      && now < record.rereadAtMs;
+  }
+
   /**
    * Sample the pair/epoch BEFORE the status and challenge reads. If either can
    * not be vouched for, callers still perform the normal read but do not retain
@@ -147,11 +154,7 @@ export class SolvedPeriodSkip {
       this.#record = undefined;
       return undefined;
     }
-    if (
-      this.#chain.isRandomSamplingReady?.() !== true
-      || this.#chain.getRandomSamplingBindingId?.() !== record.bindingId
-      || this.#now() >= record.rereadAtMs
-    ) {
+    if (!this.#stillBound(record, this.#now())) {
       this.#record = undefined;
       return undefined;
     }
@@ -165,9 +168,7 @@ export class SolvedPeriodSkip {
       return undefined;
     }
     const stillReusable = (
-      this.#chain.isRandomSamplingReady?.() === true
-      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
-      && this.#now() < record.rereadAtMs
+      this.#stillBound(record, this.#now())
       && epoch === record.chronosEpoch
       && head >= record.periodStartBlock
       && head < record.periodEndBlock
