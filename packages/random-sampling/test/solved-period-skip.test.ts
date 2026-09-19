@@ -29,13 +29,15 @@ function fixture() {
 async function remember(skip: SolvedPeriodSkip): Promise<void> {
   const context = await skip.captureReadContext();
   expect(context).toBeDefined();
-  skip.remember({
-    ...context!,
-    challengePeriodEpoch: 3n,
-    periodStartBlock: 1000n,
+  expect(skip.observe({
+    context,
+    challenge: {
+      epoch: 3n,
+      activeProofPeriodStartBlock: 1000n,
+    } as NodeChallenge,
+    staleness: { stale: false, head: 1010n },
     durationInBlocks: 100n,
-    observedHead: 1010n,
-  });
+  })).toBe(true);
 }
 
 describe('SolvedPeriodSkip', () => {
@@ -64,6 +66,57 @@ describe('SolvedPeriodSkip', () => {
     mutate(state);
     expect(await skip.reusable()).toBeUndefined();
     expect(await skip.reusable()).toBeUndefined();
+  });
+
+  it.each([
+    ['binding rotation', (state: ReturnType<typeof fixture>['state']) => { state.bindingId = 'rs-b:rss-b'; }],
+    ['binding clear', (state: ReturnType<typeof fixture>['state']) => { state.ready = false; }],
+    ['wall-clock bound', (state: ReturnType<typeof fixture>['state']) => {
+      state.now = SOLVED_PERIOD_MAX_SKIP_MS;
+    }],
+  ] as const)('rejects %s before spending head or epoch RPCs', async (_label, mutate) => {
+    const { state, chain, skip } = fixture();
+    await remember(skip);
+    vi.mocked(chain.getBlockNumber!).mockClear();
+    vi.mocked(chain.getCurrentEpoch!).mockClear();
+
+    mutate(state);
+    expect(await skip.reusable()).toBeUndefined();
+    expect(chain.getBlockNumber).not.toHaveBeenCalled();
+    expect(chain.getCurrentEpoch).not.toHaveBeenCalled();
+  });
+
+  it('refuses to record unless context, head, and a positive live duration are present', async () => {
+    const { skip } = fixture();
+    const context = await skip.captureReadContext();
+    const challenge = {
+      epoch: 3n,
+      activeProofPeriodStartBlock: 1000n,
+    } as NodeChallenge;
+
+    expect(skip.observe({
+      context: undefined,
+      challenge,
+      staleness: { stale: false, head: 1010n },
+      durationInBlocks: 100n,
+    })).toBe(false);
+    expect(skip.observe({
+      context,
+      challenge,
+      staleness: { stale: false },
+      durationInBlocks: 100n,
+    })).toBe(false);
+    expect(skip.observe({
+      context,
+      challenge,
+      staleness: { stale: false, head: 1010n },
+    })).toBe(false);
+    expect(skip.observe({
+      context,
+      challenge,
+      staleness: { stale: false, head: 1010n },
+      durationInBlocks: 0n,
+    })).toBe(false);
   });
 
   it('does not capture a reusable context without every capability', async () => {

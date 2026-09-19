@@ -522,16 +522,12 @@ export class RandomSamplingProver {
         // tick: derived pair identity, Chronos epoch, head, and LIVE duration.
         // The epoch guard ends reuse before a pending governance duration can
         // take effect; a duration-probe timeout simply defers recording.
-        const liveDuration = status.proofingPeriodDurationInBlocks;
-        if (solvedReadContext && staleness.head !== undefined && liveDuration !== undefined) {
-          this.solvedPeriodSkip.remember({
-            challengePeriodEpoch: existing.epoch,
-            periodStartBlock: existing.activeProofPeriodStartBlock,
-            durationInBlocks: liveDuration,
-            observedHead: staleness.head,
-            ...solvedReadContext,
-          });
-        }
+        this.solvedPeriodSkip.observe({
+          context: solvedReadContext,
+          challenge: existing,
+          staleness,
+          durationInBlocks: status.proofingPeriodDurationInBlocks,
+        });
         this.log.info('rs.tick.already-solved', {
           epoch: existing.epoch.toString(),
           periodStart: existing.activeProofPeriodStartBlock.toString(),

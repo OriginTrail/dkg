@@ -12,11 +12,11 @@ export interface SolvedPeriodReadContext {
   readonly chronosEpoch: bigint;
 }
 
-export interface SolvedPeriodRecordInput extends SolvedPeriodReadContext {
-  readonly challengePeriodEpoch: bigint;
-  readonly periodStartBlock: bigint;
-  readonly durationInBlocks: bigint;
-  readonly observedHead: bigint;
+export interface SolvedPeriodObservation {
+  readonly context?: SolvedPeriodReadContext;
+  readonly challenge: NodeChallenge;
+  readonly staleness: CachedChallengeStaleness;
+  readonly durationInBlocks?: bigint;
 }
 
 export interface SolvedPeriodRecord {
@@ -107,26 +107,42 @@ export class SolvedPeriodSkip {
     return Object.freeze({ bindingId, chronosEpoch: epoch });
   }
 
-  remember(input: SolvedPeriodRecordInput): void {
-    if (input.durationInBlocks <= 0n) {
+  /** Record only when every live evidence source needed by the guards exists. */
+  observe(input: SolvedPeriodObservation): boolean {
+    const { context, challenge, staleness, durationInBlocks } = input;
+    if (
+      context === undefined
+      || staleness.head === undefined
+      || durationInBlocks === undefined
+      || durationInBlocks <= 0n
+    ) {
       this.#record = undefined;
-      return;
+      return false;
     }
     this.#record = Object.freeze({
-      challengePeriodEpoch: input.challengePeriodEpoch,
-      periodStartBlock: input.periodStartBlock,
-      periodEndBlock: input.periodStartBlock + input.durationInBlocks,
-      bindingId: input.bindingId,
-      chronosEpoch: input.chronosEpoch,
-      rereadAtBlock: input.observedHead + input.durationInBlocks / 2n,
+      challengePeriodEpoch: challenge.epoch,
+      periodStartBlock: challenge.activeProofPeriodStartBlock,
+      periodEndBlock: challenge.activeProofPeriodStartBlock + durationInBlocks,
+      bindingId: context.bindingId,
+      chronosEpoch: context.chronosEpoch,
+      rereadAtBlock: staleness.head + durationInBlocks / 2n,
       rereadAtMs: this.#now() + SOLVED_PERIOD_MAX_SKIP_MS,
     });
+    return true;
   }
 
   /** Return the reusable record, or forget it on the first failed guard. */
   async reusable(): Promise<SolvedPeriodRecord | undefined> {
     const record = this.#record;
     if (!record || !this.#chain.getBlockNumber || !this.#chain.getCurrentEpoch) {
+      this.#record = undefined;
+      return undefined;
+    }
+    if (
+      this.#chain.isRandomSamplingReady?.() !== true
+      || this.#chain.getRandomSamplingBindingId?.() !== record.bindingId
+      || this.#now() >= record.rereadAtMs
+    ) {
       this.#record = undefined;
       return undefined;
     }
@@ -142,11 +158,11 @@ export class SolvedPeriodSkip {
     const stillReusable = (
       this.#chain.isRandomSamplingReady?.() === true
       && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
+      && this.#now() < record.rereadAtMs
       && epoch === record.chronosEpoch
       && head >= record.periodStartBlock
       && head < record.periodEndBlock
       && head < record.rereadAtBlock
-      && this.#now() < record.rereadAtMs
     );
     if (!stillReusable) {
       this.#record = undefined;
