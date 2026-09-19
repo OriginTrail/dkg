@@ -107,5 +107,15 @@ describe('encryption-only node custody for external agents', () => {
     expect((agent as any).defaultAgentAddress).toBe(originalDefault);
     expect((agent as any).localApprovedAgentByCG.size).toBe(0);
     await expect(agent.signJoinRequest('private-data', wallet.address)).rejects.toThrow(/custodial|private key/i);
+    const host = await agent.registerAgent('replication-host');
+    (agent as any).defaultAgentAddress = host.agentAddress;
+    await agent.createContextGraph({ id: 'shared-programs', name: 'Programs', accessPolicy: 1,
+      callerAgentAddress: host.agentAddress, allowedAgents: [host.agentAddress, wallet.address] });
+    (agent as any).localApprovedAgentByCG.set('shared-programs', wallet.address.toLowerCase());
+    const request = JSON.parse(new TextDecoder().decode(await agent.buildSyncRequest('shared-programs', 0, 10, false, 'curator-peer', 'meta')));
+    expect(request.requesterAgentAddress).toBe(host.agentAddress);
+    expect(request.requesterSignatureR).toMatch(/^0x/);
+    // HTTP callers retain their identity; selection above is only node-owned sync.
+    expect(agent.getCustodialAgentPrivateKey(wallet.address)).toBeUndefined();
   });
 });

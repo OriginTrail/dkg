@@ -1310,9 +1310,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // Hint first: if we have a definitive locally-known choice (just
     // signed, or just received a join-approved for this CG), prefer it
     // — but only if it still maps to a local agent we can sign with.
+    // Encryption custody does not imply signing custody. An external API
+    // caller's approval must not displace the node's own authorized sync agent.
     const hintAddr = this.localApprovedAgentByCG.get(contextGraphId);
     const hintLocal = hintAddr
-      ? [...this.localAgents.keys()].find((a) => a.toLowerCase() === hintAddr)
+      ? [...this.localAgents.values()].find((record) =>
+        record.agentAddress.toLowerCase() === hintAddr && record.privateKey)?.agentAddress
       : undefined;
 
     let allowedAgents: string[] = [];
@@ -1332,8 +1335,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (hintLocal && allowedLower.has(hintLocal.toLowerCase())) return hintLocal;
     const defaultLower = this.defaultAgentAddress?.toLowerCase();
     if (defaultLower && allowedLower.has(defaultLower)) return this.defaultAgentAddress;
-    for (const localAddr of this.localAgents.keys()) {
-      if (allowedLower.has(localAddr.toLowerCase())) return localAddr;
+    for (const record of this.localAgents.values()) {
+      if (record.privateKey && allowedLower.has(record.agentAddress.toLowerCase())) return record.agentAddress;
     }
     return hintLocal ?? this.defaultAgentAddress;
   }

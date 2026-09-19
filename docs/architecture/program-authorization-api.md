@@ -141,6 +141,8 @@ The helper produces the complete activation payload below, with two real EIP-191
 
 Activation returns HTTP 200 with `agentAddress`, `targetPeerId`, `encryptionKeyId`, `encryptionKeyAlgorithm`, `publicEncryptionKey` and `encryptionKeyProof`. Neither response contains private key material. Pending challenges last ten minutes and survive restart; completed enrollment has no session expiry. Activation consumes the challenge; inspect `/api/agent/{address}/encryption-keys` if a successful response was lost. A storage failure does not advertise an unpersisted key. Active encryption keys and their private halves survive restart in the node keystore.
 
+The client node must also have its own authorized replication identity for the Program graph. Background metadata sync requests use that node's custodial identity; an external caller's join approval or encryption custody must not replace it. The caller is still the principal of HTTP requests and Program invocations. If no authorized node signer exists, bootstrap remains closed; enrollment does not supply the caller's signing key or grant a substitute identity access.
+
 Next send the existing agent-signed join delegation, including its signed encryption-key bundle, through client to the Program-graph curator. `DEPLOYMENT_ID` must match both nodes' chain adapter deployment identity (chain ID and Hub for EVM), and `SOURCE_GRAPH` must be canonical. Only use the **Program** graph here.
 
 ```sh
