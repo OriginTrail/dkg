@@ -47,6 +47,10 @@ import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -1124,7 +1128,10 @@ export class SharedMemoryHandler {
           hasPrivateAccessPolicy,
           agentGateAddresses,
           provenPublicOnChain: agentGateAddresses !== null
-            ? await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx)
+            ? await withRpcUsageSite(
+              CG_AUTH_RPC_SITES.plaintextProbe,
+              () => this.isContextGraphProvenPublicOnChain(contextGraphId, ctx),
+            )
             : false,
         });
       if (requiresEncryptedPayload && !decoded.encryptedPayload && !decoded.senderKeyMessage) {
@@ -2212,9 +2219,13 @@ export class SharedMemoryHandler {
     // the caller treats that as "not curated, reject defensively"
     // (`verifyHostModeEnvelopeAuthority`) which is the correct
     // failure mode.
-    if (this.chainAgentGateOracle) {
+    const chainAgentGateOracle = this.chainAgentGateOracle;
+    if (chainAgentGateOracle) {
       try {
-        const chainAgents = await this.chainAgentGateOracle(contextGraphId);
+        const chainAgents = await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.hostAdmit,
+          () => chainAgentGateOracle(contextGraphId),
+        );
         if (chainAgents && chainAgents.length > 0) {
           const normalised = chainAgents
             .filter((v) => ethers.isAddress(v))

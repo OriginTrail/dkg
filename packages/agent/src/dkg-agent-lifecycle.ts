@@ -724,6 +724,10 @@ import {
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
+import {
   rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
 } from
@@ -4343,10 +4347,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // malformed envelope must fail CLOSED (deny), never escape as a handler error.
     let authorized = false;
     try {
-      authorized = await this.authorizeSyncRequest(
-        request as unknown as SyncRequestEnvelope,
-        peerId,
-        { signal: options?.signal },
+      authorized = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.changelogAuthorize,
+        () => this.authorizeSyncRequest(
+          request as unknown as SyncRequestEnvelope,
+          peerId,
+          { signal: options?.signal },
+        ),
       );
     } catch {
       return encodeChangelogResponse({ kind: 'denied' });

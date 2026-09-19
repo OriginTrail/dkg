@@ -290,6 +290,15 @@ export function rpcUsageWindowTotal(window: Pick<RpcUsageWindow, 'byMethod'>): n
 }
 
 const rpcUsageConsumerContext = new AsyncLocalStorage<string>();
+const rpcUsageSiteContext = new AsyncLocalStorage<string>();
+
+/**
+ * Longest attributed consumer key that survives the daemon's logfmt token
+ * guard (`packages/cli/src/daemon/rpc-usage-log.ts` `safeToken`) and this
+ * module's own normalizer. A composition past it degrades to the bare read
+ * label rather than to `other`, so the billing view never loses a read.
+ */
+const MAX_RPC_USAGE_CONSUMER_CHARS = 64;
 
 /**
  * Bound code-owned read labels for logfmt-safe consumer attribution. Labels are
@@ -303,7 +312,7 @@ export function normalizeRpcUsageConsumer(consumer: string | undefined): string 
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
   if (normalized.length === 0) return undefined;
-  if (normalized.length > 64) return 'other';
+  if (normalized.length > MAX_RPC_USAGE_CONSUMER_CHARS) return 'other';
   return normalized;
 }
 
@@ -314,9 +323,52 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
   return rpcUsageConsumerContext.run(normalized, fn);
 }
 
+/**
+ * Attribute a read to the CALL SITE that wanted it, beside the read label.
+ *
+ * The consumer label above is established by the transport itself
+ * (`rpc-failover-client`), INNERMOST, so it always wins over anything a caller
+ * wraps around its own code: every `getContextGraph` read is therefore billed
+ * to one undifferentiated `cgStorage.getContextGraph`, whoever asked. That is
+ * the blind spot this second dimension removes — a funnel read that ~26 call
+ * sites share cannot be budgeted while they are indistinguishable.
+ *
+ * OUTERMOST WINS, unlike the consumer label: the first site entered in a call
+ * tree is the caller we want (sync authorize, the publish probe, a VM
+ * reconcile), and the funnel entry it passes through further down must not
+ * overwrite it. So a funnel entry labels itself and is only reported when no
+ * labelled caller sits above it. Sites are code-owned constants, never derived
+ * from peer input, and an already-established site costs one ALS read.
+ */
+export function withRpcUsageSite<T>(site: string, fn: () => T): T {
+  if (rpcUsageSiteContext.getStore() !== undefined) return fn();
+  const normalized = normalizeRpcUsageConsumer(site);
+  if (!normalized) return fn();
+  return rpcUsageSiteContext.run(normalized, fn);
+}
+
 /** Current diagnostic consumer label, if a caller established one. */
 function activeRpcUsageConsumer(): string | undefined {
   return rpcUsageConsumerContext.getStore();
+}
+
+/** Current call-site label, if some caller up the stack established one. */
+function activeRpcUsageSite(): string | undefined {
+  return rpcUsageSiteContext.getStore();
+}
+
+/**
+ * `readLabel:site` when a call site is in scope, the bare read label
+ * otherwise. Both halves are already normalized, so the composition only has
+ * to stay inside the logfmt token bound.
+ */
+export function composeRpcUsageConsumer(
+  consumer: string,
+  site: string | undefined,
+): string {
+  if (site === undefined) return consumer;
+  const composed = `${consumer}:${site}`;
+  return composed.length > MAX_RPC_USAGE_CONSUMER_CHARS ? consumer : composed;
 }
 
 /**
@@ -387,7 +439,10 @@ export class RpcUsageTracker {
     const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
     this.window.set(key, (this.window.get(key) ?? 0) + 1);
     if (raw === 'eth_call') {
-      const normalizedConsumer = activeRpcUsageConsumer();
+      const activeConsumer = activeRpcUsageConsumer();
+      const normalizedConsumer = activeConsumer === undefined
+        ? undefined
+        : composeRpcUsageConsumer(activeConsumer, activeRpcUsageSite());
       if (normalizedConsumer) {
         const consumerKey = this.ethCallConsumers.has(normalizedConsumer) ||
           this.ethCallConsumers.size < RpcUsageTracker.MAX_WINDOW_CONSUMERS
@@ -397,7 +452,10 @@ export class RpcUsageTracker {
       }
     }
     if (raw === 'eth_getLogs') {
-      const consumer = activeRpcUsageConsumer() ?? 'unattributed';
+      const consumer = composeRpcUsageConsumer(
+        activeRpcUsageConsumer() ?? 'unattributed',
+        activeRpcUsageSite(),
+      );
       const slot = boundedRpcEndpointSlotLabel(endpointSlot);
       const rawKey = `${consumer}\0${slot}`;
       const overflowKey = 'other\0other';

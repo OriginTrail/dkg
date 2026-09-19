@@ -32,6 +32,7 @@ import {
   RpcUsageTracker,
   type RpcUsageDrainable,
   withRpcUsageConsumer,
+  withRpcUsageSite,
 } from '../src/rpc-usage.js';
 import { createRpcRequestProvider } from '../src/rpc-request-transport.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
@@ -362,6 +363,89 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       'cgStorage.getContextGraph': 1,
       'pcaNFT.getAccountInfo': 2,
     });
+  });
+
+  it('splits one funnel read label by the call site that wanted it', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    // The transport establishes the read label INNERMOST, exactly as
+    // rpc-failover-client does, so this is the real nesting order.
+    withRpcUsageSite('cgAuth.syncAuthz', () => {
+      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+    });
+    withRpcUsageSite('cgAuth.curatedProbe', () => {
+      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+    });
+    // No site in scope: the bare read label is preserved, unchanged.
+    withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+
+    const w = t.drainWindow();
+    expect(w.byMethod).toEqual({ eth_call: 4 });
+    expect(w.ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.syncAuthz': 1,
+      'cgStorage.getContextGraph:cgAuth.curatedProbe': 2,
+      'cgStorage.getContextGraph': 1,
+    });
+  });
+
+  it('keeps the OUTERMOST call site: a funnel entry never overwrites its caller', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('cgAuth.syncAuthz', () => {
+      // The funnel entry labels itself too; the caller above must win.
+      withRpcUsageSite('cgAuth.gate', () => {
+        withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      });
+    });
+    // Unlabelled caller: the funnel entry's own label is what gets reported.
+    withRpcUsageSite('cgAuth.gate', () => {
+      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+    });
+
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.syncAuthz': 1,
+      'cgStorage.getContextGraph:cgAuth.gate': 1,
+    });
+  });
+
+  it('keeps composed consumer keys inside the logfmt token bound', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('x'.repeat(60), () => {
+      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+    });
+    // Degrading to the bare read label keeps the read attributed; composing
+    // past 64 chars would be rewritten to `other` by the daemon formatter.
+    expect(t.drainWindow().ethCallByConsumer).toEqual({ 'cgStorage.getContextGraph': 1 });
+  });
+
+  it('keeps overlapping async call sites isolated', async () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    await Promise.all([
+      withRpcUsageSite('cgAuth.vmReconcile', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      }),
+      withRpcUsageSite('cgAuth.recipients', async () => {
+        withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      }),
+    ]);
+
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.vmReconcile': 1,
+      'cgStorage.getContextGraph:cgAuth.recipients': 1,
+    });
+  });
+
+  it('attributes eth_getLogs to the call site as well', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('cgAuth.rfc64Roster', () => {
+      withRpcUsageConsumer('cg.authority.history', () => t.record('eth_getLogs', 0));
+    });
+    expect(t.drainWindow().attributions).toEqual([{
+      method: 'eth_getLogs',
+      consumer: 'cg.authority.history:cgAuth.rfc64Roster',
+      endpointSlot: 'primary',
+      count: 1,
+    }]);
   });
 
   it('normalizes and bounds consumer labels', () => {

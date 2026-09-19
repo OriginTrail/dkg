@@ -416,6 +416,10 @@ import {
   enrichContextGraphListAuthorityV1,
   type ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 function syncAuthAbortError(reason: unknown): Error {
   return createAbortError(reason);
@@ -1685,9 +1689,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * projects to `null`, which the caller treats as fail-closed.
    */
   async resolveOnChainParticipantAgents(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
-    const authority = await this.resolveRegisteredContextGraphAuthority(
-      contextGraphId,
-      { allowCachedRoster: true },
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.participants,
+      () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        { allowCachedRoster: true },
+      ),
     );
     if (authority.kind === 'unavailable') {
       this.log.warn(

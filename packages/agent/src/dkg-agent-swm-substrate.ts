@@ -388,6 +388,10 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
@@ -1095,7 +1099,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // send on a public CG — silently breaking member->curator SWM shares on
         // every public/curated context graph.
         publicAccessPolicyOnChainOracle: (cgId: string) =>
-          this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+          withRpcUsageSite(
+            CG_AUTH_RPC_SITES.swmPublicOracle,
+            () => this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+          ),
         // RFC-64 catalog authority already excludes selected CGs from legacy
         // durable catch-up. Apply the same decision to live gossip/substrate
         // delivery so a partial ambient generation cannot race ahead of an
@@ -1111,7 +1118,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // agent allowlist on context graph" and the LU-6 substrate
         // collapses for any CG the hosting core didn't itself
         // create or join. See `resolveOnChainParticipantAgents`.
-        chainAgentGateOracle: (cgId: string) => this.resolveOnChainParticipantAgents(cgId),
+        chainAgentGateOracle: (cgId: string) => withRpcUsageSite(
+          CG_AUTH_RPC_SITES.swmGateOracle,
+          () => this.resolveOnChainParticipantAgents(cgId),
+        ),
         // OT-RFC-38 / LU-6 Phase B — final fallback when chain has no
         // answer yet. Looks up the curator EOA the local node pinned
         // from this CG's discovery beacon. Hits during the pre-reg
@@ -1351,7 +1361,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<WorkspaceAgentRecipientFanoutSnapshot | null> {
-    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
+    const resolution = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.fanOut,
+      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
+    );
     if (!resolution.requiresEncryption) return null;
     return projectWorkspaceAgentRecipientFanout(
       resolution,

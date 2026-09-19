@@ -133,6 +133,10 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -2024,7 +2028,10 @@ export class DKGPublisher implements Publisher {
     }
 
     const resolution = parseWorkspaceAgentRecipientResolution(
-      await resolveRecipients({ contextGraphId }),
+      await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publisherWrite,
+        () => resolveRecipients({ contextGraphId }),
+      ),
       contextGraphId,
     );
     if (!resolution.requiresEncryption) {

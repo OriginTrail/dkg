@@ -511,6 +511,10 @@ import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
 import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
@@ -1869,7 +1873,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     }
 
-    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId).catch(() => null);
+    const allowedAgents = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.catchUpSigner,
+      () => this.getContextGraphAgentGateAddresses(contextGraphId),
+    ).catch(() => null);
     if (!allowedAgents || allowedAgents.length === 0) return null;
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
     for (const record of this.localAgents.values()) {
@@ -2234,7 +2241,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const requesterLower = requesterEoa.toLowerCase();
     let anyAuthorityFound = false;
     try {
-      const chainParticipants = await this.resolveOnChainParticipantAgents(req.contextGraphId);
+      const chainParticipants = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.chunkServe,
+        () => this.resolveOnChainParticipantAgents(req.contextGraphId),
+      );
       if (chainParticipants !== null) {
         anyAuthorityFound = true;
         if (chainParticipants.some((a) => a.toLowerCase() === requesterLower)) authOk = true;
@@ -2251,7 +2261,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (!authOk) {
       try {
-        const agentGate = await this.getContextGraphAgentGateAddresses(req.contextGraphId);
+        const agentGate = await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.chunkServe,
+          () => this.getContextGraphAgentGateAddresses(req.contextGraphId),
+        );
         if (agentGate !== null) {
           anyAuthorityFound = true;
           if (agentGate.some((a) => a.toLowerCase() === requesterLower)) authOk = true;
@@ -3186,10 +3199,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // not trust the persisted subscription bit as membership proof.
     const authorityRead = (async () => {
       try {
-        return await this.canReadContextGraph(localCgId, {
-          allowSubscriptionFallback: false,
-          signal,
-        });
+        return await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.exactAssetFetch,
+          () => this.canReadContextGraph(localCgId, {
+            allowSubscriptionFallback: false,
+            signal,
+          }),
+        );
       } finally {
         // A bounded caller may return while shared durable index work remains.
         // Keep that physical read in the VM lifecycle drain before releasing
@@ -3538,9 +3554,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Central defense for periodic, live-chain, and manual reconciliation.
     // Every dispatcher entry point converges here and must independently prove
     // read authority. Never let a persisted subscription authorize itself.
-    const authorityRead = this.canReadContextGraph(localCgId, {
-      allowSubscriptionFallback: false,
-    });
+    const authorityRead = withRpcUsageSite(
+      CG_AUTH_RPC_SITES.vmReconcile,
+      () => this.canReadContextGraph(localCgId, {
+        allowSubscriptionFallback: false,
+      }),
+    );
     // Cancellation releases the dispatcher worker, but an underlying store/RPC
     // read may ignore it. Keep that physical dependency in the shutdown drain.
     trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
@@ -6334,7 +6353,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
           onChainCgId,
           {
             resolvePublicAccess: async (contextGraphId) => (
-              await this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx)
+              await withRpcUsageSite(
+                CG_AUTH_RPC_SITES.vmSizing,
+                () => this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
+              )
             ) === 0,
             sizing: typeof readVmRecoveryUpdateContext === 'function'
               ? {
@@ -6947,7 +6969,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let anyAuthoritySourceFound = false;
 
     try {
-      const chainParticipants = await this.resolveOnChainParticipantAgents(req.contextGraphId);
+      const chainParticipants = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.hostCatchUp,
+        () => this.resolveOnChainParticipantAgents(req.contextGraphId),
+      );
       if (chainParticipants !== null) {
         anyAuthoritySourceFound = true;
         if (chainParticipants.some((a) => a.toLowerCase() === requesterLower)) {
@@ -6977,7 +7002,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // chain-derived sets often miss recently-approved delegatees that
     // haven't been mirrored on chain yet.
     try {
-      const agentGate = await this.getContextGraphAgentGateAddresses(req.contextGraphId);
+      const agentGate = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.hostCatchUp,
+        () => this.getContextGraphAgentGateAddresses(req.contextGraphId),
+      );
       if (agentGate !== null) {
         anyAuthoritySourceFound = true;
         if (agentGate.some((a) => a.toLowerCase() === requesterLower)) {
