@@ -61,6 +61,9 @@ interface FakeChainState {
   /** When set, exposes `chain.isRandomSamplingReady` (read live, so a test
    *  can flip it to simulate a Hub rotation clearing the RS bindings). */
   randomSamplingReady?: boolean;
+  /** When set, exposes `chain.getRandomSamplingBindingGeneration` (read live:
+   *  the adapter bumps it whenever the RS contract PAIR may have changed). */
+  bindingGeneration?: number;
 }
 
 function makeChain(state: FakeChainState): ChainAdapter {
@@ -100,6 +103,9 @@ function makeChain(state: FakeChainState): ChainAdapter {
   }
   if (state.randomSamplingReady !== undefined) {
     partial.isRandomSamplingReady = vi.fn(() => state.randomSamplingReady!);
+  }
+  if (state.bindingGeneration !== undefined) {
+    partial.getRandomSamplingBindingGeneration = vi.fn(() => state.bindingGeneration);
   }
   return partial as ChainAdapter;
 }
@@ -1554,9 +1560,14 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   // eth_blockNumber; ~370 requests per core per devnet cell). These tests pin
   // both halves: the reads ARE skipped inside the period, and every doubt
   // (rollover, chain reset, Hub rotation, missing capability, head failure,
+  // a read the record could not be fully built from, the safety re-read,
   // restart) falls back to the full chain read.
   const PERIOD_START = 1000n;
   const LIVE_DURATION = 50n;
+  // Default recording head. Past the period midpoint, so the period END
+  // (1050) — not the half-period safety re-read (1030 + 25) — is what ends
+  // the skip in the tests that are not about the safety re-read.
+  const RECORD_HEAD = 1030;
 
   function makeSolvedState(overrides: Partial<FakeChainState> = {}): FakeChainState {
     return {
@@ -1576,8 +1587,9 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       expectedLeafCount: 0,
       cgIdForKc: 0n,
       submitProof: vi.fn() as never,
-      blockNumber: 1010,
+      blockNumber: RECORD_HEAD,
       randomSamplingReady: true,
+      bindingGeneration: 0,
       ...overrides,
     };
   }
@@ -1607,7 +1619,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
 
     // Ticks 2..4, up to the LAST block of the period: one head read each,
     // no status / challenge read, same outcome and same log line.
-    for (const head of [1011, 1030, 1049]) {
+    for (const head of [1031, 1040, 1049]) {
       state.blockNumber = head;
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     }
@@ -1665,7 +1677,10 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
-  it('falls back to the challenge-baked duration for legacy adapters that omit the live one', async () => {
+  it('does not record on a tick whose status carries no LIVE duration (probe timeout / legacy adapter)', async () => {
+    // The adapter returns `proofingPeriodDurationInBlocks: undefined` when its
+    // duration probe times out. Building the skip window from the
+    // challenge-baked fallback would pin that guess for the whole period.
     const state = makeSolvedState({
       status: { activeProofPeriodStartBlock: PERIOD_START, isValid: true },
     });
@@ -1673,11 +1688,30 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    state.blockNumber = 1049;
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
-    state.blockNumber = 1050;
-    await prover.tick();
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+
+    // The probe answers on tick 3: that tick records, tick 4 skips.
+    state.status = { ...state.status, proofingPeriodDurationInBlocks: LIVE_DURATION };
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('does not record on a tick that could not read the head', async () => {
+    // Without the recording head there is no anchor for the half-period
+    // safety re-read; guessing one (e.g. the period start, which would put
+    // head 1010 inside a [1000, 1025) window) is not a chain read.
+    const state = makeSolvedState({ blockNumber: 1010 });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    vi.mocked(chain.getBlockNumber!).mockRejectedValueOnce(new Error('rpc down'));
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
     await prover.close();
   });
@@ -1704,15 +1738,16 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    state.blockNumber = 1020;
+    state.blockNumber = 1035;
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
 
     // `invalidateRandomSamplingPair()` drops the handles; the rotated
-    // RandomSamplingStorage has no challenge for this node yet.
+    // RandomSamplingStorage has no challenge for this node yet. (Generation
+    // deliberately left alone: a cleared binding is reason enough to read.)
     state.randomSamplingReady = false;
     state.challengeForNode = null;
-    state.blockNumber = 1025;
+    state.blockNumber = 1040;
     expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
     expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
     expect(state.createChallenge).toHaveBeenCalledTimes(1);
@@ -1728,11 +1763,121 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     vi.mocked(chain.getBlockNumber!).mockImplementationOnce(async () => {
       state.randomSamplingReady = false;
       state.challengeForNode = null;
-      return 1020;
+      return 1040;
     });
     expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
     expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
     await prover.close();
+  });
+
+  it('reads the chain again after a Hub rotation that ANOTHER caller already re-bound (lost-signal regression)', async () => {
+    // The adapter's handles are re-bound by any `getRandomSampling()` caller,
+    // and the agent's 30 s eligibility reconcile is one. So by this prover's
+    // next tick a rotation looks like: ready === true again, head still inside
+    // the remembered period — only the pair identity says "different contract".
+    // Skipping here parks the node until the OLD period end while the rotated
+    // RandomSamplingStorage holds an empty slot it could be proving against.
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    // Hub poller observes the rotation: invalidateRandomSamplingPair().
+    state.randomSamplingReady = false;
+    state.bindingGeneration = 1;
+    state.challengeForNode = null;
+    // Eligibility reconcile → resolveRandomSamplingAvailability() re-binds.
+    state.randomSamplingReady = true;
+
+    state.blockNumber = 1040;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('honours a rotation that lands while the RECORDING tick is reading status + challenge', async () => {
+    // Those reads went to the old pair; the generation the record carries must
+    // be the one from before them, so the very next tick sees the mismatch.
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    vi.mocked(chain.getActiveProofPeriodStatus!).mockImplementationOnce(async () => {
+      state.bindingGeneration = 1;
+      return state.status;
+    });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.challengeForNode = null;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
+  it.each([
+    ['lacks getRandomSamplingBindingGeneration', undefined],
+    ['reports an undefined binding generation', () => undefined],
+  ] as const)('never skips for an adapter that %s', async (_label, capability) => {
+    const state = makeSolvedState({ bindingGeneration: undefined });
+    const chain = makeChain(state);
+    expect(chain.getRandomSamplingBindingGeneration).toBeUndefined();
+    if (capability) chain.getRandomSamplingBindingGeneration = capability;
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    }
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('re-reads the chain half a period after the recording head, then skips again from the fresh read', async () => {
+    // Safety re-read (review R8), block bound. Recorded at 1010 → due at 1035,
+    // well before the period end (1050).
+    const state = makeSolvedState({ blockNumber: 1010 });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.blockNumber = 1034;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    state.blockNumber = 1035;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+
+    // Still solved on chain → re-recorded from head 1035; the period end is
+    // the nearer bound now.
+    state.blockNumber = 1049;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
+  it('re-reads the chain 5 minutes after the recording tick even if the head barely moved', async () => {
+    // Safety re-read (review R8), time bound — the one that matters on a
+    // long period (Base: 30 min), where half a period is 15 min away.
+    vi.useFakeTimers({ toFake: ['performance'] });
+    try {
+      const state = makeSolvedState();
+      const chain = makeChain(state);
+      const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+      vi.advanceTimersByTime(5 * 60_000 - 1);
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+      expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+      vi.advanceTimersByTime(1);
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+      expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+      await prover.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('never skips for an adapter that cannot vouch for its RandomSampling bindings', async () => {

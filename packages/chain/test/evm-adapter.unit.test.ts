@@ -2319,6 +2319,26 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((a as any).contracts.randomSamplingStorage).toBe(freshPair.rss);
   });
 
+  it('resolveAndAssignRandomSamplingPair treats a re-resolved handle whose address it cannot read as a NEW binding generation', async () => {
+    // The prover reuses a remembered read only while the generation is
+    // unchanged, so "cannot tell" must land on the side of a chain re-read.
+    const a = new EVMChainAdapter(minimalConfig());
+    const pairs = [
+      { rs: { opaque: 'rs-1' }, rss: { opaque: 'rss-1' } },
+      { rs: { opaque: 'rs-2' }, rss: { opaque: 'rss-2' } },
+    ];
+    (a as any).randomSamplingPairCache = {
+      currentGeneration: () => 0,
+      get: async () => pairs.shift(),
+    };
+
+    await (a as any).resolveAndAssignRandomSamplingPair();
+    // First bind: nothing was bound before, nothing to have rotated away from.
+    expect(a.getRandomSamplingBindingGeneration()).toBe(0);
+    await (a as any).resolveAndAssignRandomSamplingPair();
+    expect(a.getRandomSamplingBindingGeneration()).toBe(1);
+  });
+
   it('isContractMissingRevert recognises both the legacy (ZeroAddress→string) shape and ContractDoesNotExist revert (Codex N16)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     expect((a as any).isContractMissingRevert(new Error('reverted with custom error ContractDoesNotExist("RandomSampling")'))).toBe(true);

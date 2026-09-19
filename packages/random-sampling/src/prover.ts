@@ -136,6 +136,14 @@ const noopLog: ProverLogger = {
 // per roughly twenty seconds while keeping recovery bounded.
 const DATA_CORRUPTION_COOLDOWN_TICKS = 3;
 
+// Upper bound on how long a remembered solved period may stand in for the
+// chain reads (binding review R8: re-read at least every min(5 min, period/2)).
+// Rollover and observed/TTL-detected Hub rotation end the skip on their own;
+// this bounds what the prover CANNOT see from here — a governance duration
+// cut, the owner's `clearOutstandingChallenges`, a reorg that dropped the
+// solved read, a rotation no adapter path noticed — to one cheap re-read.
+const SOLVED_PERIOD_MAX_SKIP_MS = 5 * 60_000;
+
 function lifecycleAbortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException(
     'Random Sampling prover handle stopped',
@@ -254,15 +262,25 @@ export class RandomSamplingProver {
    * per prover instance, whose `identityId` and `chain` are immutable. See
    * `solvedPeriodStillOpen` for when it is dropped.
    *
-   * Not covered (neither is this node's doing, both end at `periodEndBlock`):
-   * governance SHORTENING the duration, which takes effect at an epoch
-   * boundary and would roll the period earlier than remembered; and the
-   * owner-only `clearOutstandingChallenges` wiping an already-solved slot.
+   * Keyed on the RandomSampling contract PAIR the read went through
+   * (`bindingGeneration`): "solved" is a fact about one
+   * RandomSamplingStorage, and a rotated one has an empty slot for this node.
+   *
+   * What the prover cannot observe — governance SHORTENING the duration at
+   * an epoch boundary, the owner-only `clearOutstandingChallenges` wiping a
+   * solved slot, a reorg dropping the solved read — is bounded by the
+   * safety re-read (`rereadAtBlock` / `rereadAtMs`), not by the period end.
    */
   private solvedPeriod?: {
     epoch: bigint;
     periodStartBlock: bigint;
     periodEndBlock: bigint;
+    /** `chain.getRandomSamplingBindingGeneration()` from BEFORE the reads. */
+    bindingGeneration: number;
+    /** Safety re-read, block bound: head of the recording tick + half a period. */
+    rereadAtBlock: bigint;
+    /** Safety re-read, time bound: `performance.now()` + `SOLVED_PERIOD_MAX_SKIP_MS`. */
+    rereadAtMs: number;
   };
 
   constructor(deps: RandomSamplingProverDeps) {
@@ -351,6 +369,8 @@ export class RandomSamplingProver {
   private async isCachedChallengeStale(
     existing: NodeChallenge,
     liveDurationInBlocks?: bigint,
+    /** Receives the head this check read, when it read one. */
+    observed?: { head?: bigint },
   ): Promise<boolean> {
     if (!this.chain.getBlockNumber) return false;
     const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
@@ -361,6 +381,7 @@ export class RandomSamplingProver {
     } catch {
       return false;
     }
+    if (observed) observed.head = BigInt(currentBlock);
     const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
     return BigInt(currentBlock) >= periodEndBlock;
   }
@@ -372,15 +393,16 @@ export class RandomSamplingProver {
    *   - no/failed head read, or a head at/after the period end (rollover);
    *   - a head BELOW the period start (chain reset / redeploy under a live
    *     process — the remembered blocks belong to another chain history);
-   *   - the adapter does not positively report its RandomSampling bindings
-   *     as resolved. A Hub rotation of RandomSampling[Storage] seen by the
-   *     adapter's Hub poller clears them (`invalidateRandomSamplingPair`)
-   *     and they stay cleared until the next RandomSampling call — which,
-   *     with the reads skipped, is the fall-through this triggers. Sampled
-   *     AFTER the head await so a rotation landing mid-read counts.
-   * A rotation the adapter never observes (poller cannot scan logs) is not
-   * visible through `ChainAdapter`; it surfaces at the period end instead of
-   * at the adapter's 5-minute Hub re-resolve.
+   *   - the adapter is not bound to the SAME RandomSampling pair the solved
+   *     read went through: its binding generation moved (Hub rotation seen
+   *     by the poller, write-side self-heal, or a TTL re-resolve landing on
+   *     a new address), it cannot report one, or the bindings are currently
+   *     cleared. `isRandomSamplingReady()` alone is NOT that signal — any
+   *     other `getRandomSampling()` caller (the agent's 30 s eligibility
+   *     reconcile) re-binds the rotated pair before this tick looks, so it
+   *     reads `true` again. Both sampled AFTER the head await so a rotation
+   *     landing mid-read counts;
+   *   - the safety re-read is due (see `SOLVED_PERIOD_MAX_SKIP_MS`).
    */
   private async solvedPeriodStillOpen(): Promise<boolean> {
     const solved = this.solvedPeriod;
@@ -392,6 +414,8 @@ export class RandomSamplingProver {
       return false;
     }
     if (this.chain.isRandomSamplingReady?.() !== true) return false;
+    if (this.chain.getRandomSamplingBindingGeneration?.() !== solved.bindingGeneration) return false;
+    if (head >= solved.rereadAtBlock || performance.now() >= solved.rereadAtMs) return false;
     return head >= solved.periodStartBlock && head < solved.periodEndBlock;
   }
 
@@ -568,6 +592,11 @@ export class RandomSamplingProver {
       this.solvedPeriod = undefined;
     }
 
+    // Pair identity BEFORE the reads: a rotation landing while they are in
+    // flight then shows as a generation mismatch on the next tick instead of
+    // being recorded as the (new) pair's state.
+    const bindingGeneration = this.chain.getRandomSamplingBindingGeneration?.();
+
     // Read the period status + existing challenge in parallel. We
     // *don't* short-circuit on `!status.isValid`: that view-side
     // check stalls single-tenant deployments indefinitely because no
@@ -607,20 +636,31 @@ export class RandomSamplingProver {
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
     if (existingIsCurrent && existing.solved) {
+      const observed: { head?: bigint } = {};
       const isStale = await this.isCachedChallengeStale(
         existing,
         status.proofingPeriodDurationInBlocks,
+        observed,
       );
       if (!isStale) {
-        // Remember the period so later ticks skip these reads. Same period
-        // end the stale check above just used (live duration first — the
-        // one the chain rolls over with, PR #369 — else the challenge's).
-        this.solvedPeriod = {
-          epoch: existing.epoch,
-          periodStartBlock: existing.activeProofPeriodStartBlock,
-          periodEndBlock: existing.activeProofPeriodStartBlock
-            + (status.proofingPeriodDurationInBlocks ?? existing.proofingPeriodDurationInBlocks),
-        };
+        // Remember the period so later ticks skip these reads — only when
+        // everything the skip window is built from was actually read this
+        // tick: the pair identity, the head, and the LIVE duration (the one
+        // the chain rolls over with, PR #369). A duration-probe timeout
+        // leaves it undefined; pinning the challenge-baked fallback for a
+        // whole period would turn a one-tick degradation into a long one,
+        // so record on a later tick that has it.
+        const liveDuration = status.proofingPeriodDurationInBlocks;
+        if (bindingGeneration !== undefined && observed.head !== undefined && liveDuration !== undefined) {
+          this.solvedPeriod = {
+            epoch: existing.epoch,
+            periodStartBlock: existing.activeProofPeriodStartBlock,
+            periodEndBlock: existing.activeProofPeriodStartBlock + liveDuration,
+            bindingGeneration,
+            rereadAtBlock: observed.head + liveDuration / 2n,
+            rereadAtMs: performance.now() + SOLVED_PERIOD_MAX_SKIP_MS,
+          };
+        }
         this.log.info('rs.tick.already-solved', {
           epoch: existing.epoch.toString(),
           periodStart: existing.activeProofPeriodStartBlock.toString(),

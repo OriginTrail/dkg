@@ -42,6 +42,11 @@ class HubLookupAvailabilityAdapter extends EVMChainAdapter {
       hubAddress: '0x0000000000000000000000000000000000000001', chainId: 'evm:31337' });
   }
   protected override async init(): Promise<void> { return; }
+  invalidateBindings(): void { this.invalidateRandomSamplingPair(); }
+  /** Age the cached pair past its Hub-refresh TTL so the next resolve re-reads the Hub. */
+  expireBindingTtl(): void {
+    (this.randomSamplingPairCache as unknown as { resolvedAt: number }).resolvedAt = 0;
+  }
 }
 
 const deployedAddresses: Readonly<Record<string, string>> = {
@@ -88,6 +93,61 @@ it('refreshes invalidated EVM bindings before returning membership', async () =>
   expect(chain.resolutions).toBe(2);
   expect(chain.isRandomSamplingReady()).toBe(true);
   expect(proof).not.toHaveBeenCalled();
+});
+
+// The prover keys its remembered "period already solved" read on this counter.
+// `isRandomSamplingReady()` cannot carry the rotation signal on its own: the
+// 30 s eligibility reconcile below re-binds the pair, so by the prover's next
+// tick "ready" is `true` again and only the generation still says "rotated".
+it('an observed rotation re-bound by the eligibility lookup still shows as a new binding generation', async () => {
+  const chain = new HubLookupAvailabilityAdapter();
+  adapters.push(chain);
+  stubHubReads(chain, (name) => deployedAddresses[name]!);
+  expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
+  const recorded = chain.getRandomSamplingBindingGeneration();
+
+  chain.invalidateBindings();
+  expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
+
+  expect(chain.isRandomSamplingReady()).toBe(true);
+  expect(chain.getRandomSamplingBindingGeneration()).not.toBe(recorded);
+});
+
+it.each(['RandomSampling', 'RandomSamplingStorage'] as const)(
+  'a TTL re-resolve that lands on a new %s address is a new binding generation, with no "not ready" blip',
+  async (rotated) => {
+    const chain = new HubLookupAvailabilityAdapter();
+    adapters.push(chain);
+    const addresses: Record<string, string> = { ...deployedAddresses };
+    stubHubReads(chain, (name) => addresses[name]!);
+    await chain.resolveRandomSamplingAvailability(52n);
+    const recorded = chain.getRandomSamplingBindingGeneration();
+
+    // Rotation the Hub poller never saw: nothing calls invalidate().
+    addresses[rotated] = '0x00000000000000000000000000000000000000aa';
+    chain.expireBindingTtl();
+    expect(chain.isRandomSamplingReady()).toBe(true);
+    expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
+
+    expect(chain.isRandomSamplingReady()).toBe(true);
+    expect(chain.getRandomSamplingBindingGeneration()).not.toBe(recorded);
+  },
+);
+
+it('a TTL re-resolve onto the SAME pair keeps the binding generation (the routine refresh must not end the prover skip)', async () => {
+  const chain = new HubLookupAvailabilityAdapter();
+  adapters.push(chain);
+  const hub = stubHubReads(chain, (name) => deployedAddresses[name]!);
+  await chain.resolveRandomSamplingAvailability(52n);
+  const recorded = chain.getRandomSamplingBindingGeneration();
+  const hubReadsBefore = hub.mock.calls.length;
+
+  chain.expireBindingTtl();
+  await chain.resolveRandomSamplingAvailability(52n);
+
+  // The Hub WAS re-read (fresh handles), it just resolved to the same addresses.
+  expect(hub.mock.calls.length).toBeGreaterThan(hubReadsBefore + 1);
+  expect(chain.getRandomSamplingBindingGeneration()).toBe(recorded);
 });
 
 it.each(['RandomSampling', 'RandomSamplingStorage', 'ShardingTableStorage'] as const)(
