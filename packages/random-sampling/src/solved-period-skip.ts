@@ -70,11 +70,11 @@ export async function readCachedChallengeStaleness(
  * sampled in one epoch is never reused in the next. This keeps the RPC saving
  * without trusting a duration that may shrink after the boundary.
  *
- * `RandomSamplingStorage.clearOutstandingChallenges` is documented for
- * outstanding UNSOLVED migration challenges and does not erase the separate
- * score already earned by a solved slot. A mistaken clear of a solved slot,
- * or a reorg that removes the solved observation, is nevertheless bounded by
- * the half-period / five-minute safety re-read below.
+ * `RandomSamplingStorage.clearOutstandingChallenges` deletes the challenge
+ * struct even though the separately earned score survives. That operation or
+ * a reorg can therefore invalidate the observed solved flag in-period. The
+ * block safety bound is capped inside the open period, and the five-minute
+ * bound applies independently, so the premise is always revalidated.
  */
 export class SolvedPeriodSkip {
   readonly #chain: ChainAdapter;
@@ -119,13 +119,22 @@ export class SolvedPeriodSkip {
       this.#record = undefined;
       return false;
     }
+    const periodEndBlock = challenge.activeProofPeriodStartBlock + durationInBlocks;
+    const halfPeriodRereadBlock = staleness.head + durationInBlocks / 2n;
+    // A late solved observation must still be revalidated while the period is
+    // open. Otherwise observedHead + duration / 2 can land beyond the rollover
+    // and an in-period solved -> unsolved transition remains hidden throughout
+    // the only period in which the node can recover it.
+    const latestOpenPeriodBlock = periodEndBlock - 1n;
     this.#record = Object.freeze({
       challengePeriodEpoch: challenge.epoch,
       periodStartBlock: challenge.activeProofPeriodStartBlock,
-      periodEndBlock: challenge.activeProofPeriodStartBlock + durationInBlocks,
+      periodEndBlock,
       bindingId: context.bindingId,
       chronosEpoch: context.chronosEpoch,
-      rereadAtBlock: staleness.head + durationInBlocks / 2n,
+      rereadAtBlock: halfPeriodRereadBlock < latestOpenPeriodBlock
+        ? halfPeriodRereadBlock
+        : latestOpenPeriodBlock,
       rereadAtMs: this.#now() + SOLVED_PERIOD_MAX_SKIP_MS,
     });
     return true;
