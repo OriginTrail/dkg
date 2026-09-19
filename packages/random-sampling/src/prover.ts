@@ -460,7 +460,7 @@ export class RandomSamplingProver {
     const reusableSolvedPeriod = await this.solvedPeriodSkip.reusable();
     if (reusableSolvedPeriod) {
       this.log.info('rs.tick.already-solved', {
-        epoch: reusableSolvedPeriod.challengeEpoch.toString(),
+        epoch: reusableSolvedPeriod.challengePeriodEpoch.toString(),
         periodStart: reusableSolvedPeriod.periodStartBlock.toString(),
       });
       return { kind: 'already-solved' };
@@ -525,7 +525,7 @@ export class RandomSamplingProver {
         const liveDuration = status.proofingPeriodDurationInBlocks;
         if (solvedReadContext && staleness.head !== undefined && liveDuration !== undefined) {
           this.solvedPeriodSkip.remember({
-            challengeEpoch: existing.epoch,
+            challengePeriodEpoch: existing.epoch,
             periodStartBlock: existing.activeProofPeriodStartBlock,
             durationInBlocks: liveDuration,
             observedHead: staleness.head,

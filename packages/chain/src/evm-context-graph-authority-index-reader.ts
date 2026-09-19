@@ -262,7 +262,7 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
     address: string,
     operationLabel: string,
     contractLabel: string,
-  ) => Promise<Readonly<{ fromBlock: number }>>;
+  ) => Promise<number>;
   readonly pageSize: () => number;
   /**
    * `chain.finalityConfirmations` — the node's SINGLE definition of finality.
@@ -412,11 +412,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = [dependencies.deploymentId, contractAddress].join(':');
-        const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
+        const deploymentBlockNumber = await dependencies.resolveContractDeployBlock(
           contractAddress,
           operationLabel,
           'ContextGraphStorage',
-        )).fromBlock;
+        );
         const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
           {
             index: dependencies.index,
