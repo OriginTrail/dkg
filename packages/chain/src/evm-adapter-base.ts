@@ -4140,6 +4140,8 @@ export class EVMChainAdapterBase {
     // estimate). Absent for a non-PCA publish → the UI badge degrades hidden.
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
+    // waitForReceipt already checked this exact canonical hash and memoized
+    // its header; naming the hash makes timestamp reuse explicit and reorg-safe.
     const blockTimestamp = await this.getBlockTimestamp(
       receipt.blockNumber,
       { blockHash: receipt.blockHash },

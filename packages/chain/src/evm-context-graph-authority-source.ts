@@ -3,9 +3,6 @@
 import { ethers } from 'ethers';
 import type { ContextGraphPublishDomainV1 } from '@origintrail-official/dkg-core';
 import type { ContextGraphAuthorityHistoryResolution } from './context-graph-authority-history.js';
-import type {
-  ContextGraphAuthorityIndexState,
-} from './context-graph-authority-index-checkpoint.js';
 import type { RawContextGraphAuthorityIndexEvent } from
   './context-graph-authority-index-reducer.js';
 import {
@@ -37,17 +34,10 @@ export interface EvmContextGraphAuthoritySourceResult {
   stabilize(): Promise<void>;
 }
 
-export type EvmContextGraphAuthoritySource =
-  | Readonly<{
-      kind: 'indexed';
-      readSnapshot(): Promise<ContextGraphAuthorityIndexState>;
-      stabilize(): Promise<void>;
-    }>
-  | Readonly<{
-      kind: 'legacy';
-      readCurrent(): Promise<unknown>;
-      readHistory(): Promise<ContextGraphAuthorityHistoryResolution>;
-    }>;
+export type EvmContextGraphAuthoritySource = Readonly<{
+  readCurrent(): Promise<unknown>;
+  readHistory(): Promise<ContextGraphAuthorityHistoryResolution>;
+}>;
 
 function tupleField(value: unknown, name: string, index: number): unknown {
   if (value === null || typeof value !== 'object') return undefined;
@@ -100,17 +90,10 @@ export function normalizeEvmContextGraphCurrentAuthorityState(
   });
 }
 
-/** Resolve either authority source into one typed model for snapshot assembly. */
+/** Resolve the legacy authority reads into one typed model for snapshot assembly. */
 export async function resolveEvmContextGraphAuthoritySource(
   source: EvmContextGraphAuthoritySource,
 ): Promise<EvmContextGraphAuthoritySourceResult> {
-  if (source.kind === 'indexed') {
-    const indexed = await source.readSnapshot();
-    return Object.freeze({
-      state: indexed,
-      stabilize: source.stabilize,
-    });
-  }
   const [rawCurrent, history] = await Promise.all([
     source.readCurrent(),
     source.readHistory(),

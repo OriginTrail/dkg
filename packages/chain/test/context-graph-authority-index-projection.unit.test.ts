@@ -184,6 +184,16 @@ describe('chain.indexTickMs', () => {
     expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 180_000 }).staleMs)
       .toBe(CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS);
   });
+
+  it('rejects an unusable authority head timestamp tolerance', () => {
+    for (const invalid of [0, -1, 1.5, Number.NaN, Infinity, 2 ** 53]) {
+      expect(() => new ContextGraphAuthorityIndexProjectionCache({
+        headTimestampToleranceMs: invalid,
+      })).toThrow(
+        'Context Graph authority head timestamp tolerance must be a positive integer',
+      );
+    }
+  });
 });
 
 describe('finalized Context Graph authority projection cache', () => {
@@ -274,6 +284,49 @@ describe('finalized Context Graph authority projection cache', () => {
     // And the waiters coalesced behind the first of them to take over.
     expect(h.reads.refreshes).toBe(2);
     expect(projections[1]).toBe(projections[0]);
+  });
+
+  it('lets a caller refresh for itself after two settled unusable refreshes', async () => {
+    const h = makeHarness();
+    const completed = await h.refresh();
+    let attempts = 0;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let markFirstStarted!: () => void;
+    let markSecondStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const unusable = (
+      started: () => void,
+      gate: Promise<void>,
+      suffix: string,
+    ) => async () => {
+      attempts += 1;
+      started();
+      await gate;
+      return Object.freeze({ ...completed, scope: `${h.scope}:${suffix}` });
+    };
+
+    const first = h.read(9n, undefined, unusable(markFirstStarted, firstGate, 'first'));
+    await firstStarted;
+    // Registration order is intentional: this caller takes over first, while
+    // the final caller observes and waits behind both unusable refreshes.
+    const second = h.read(9n, undefined, unusable(markSecondStarted, secondGate, 'second'));
+    const bounded = h.read(9n, undefined, async () => {
+      attempts += 1;
+      return completed;
+    });
+
+    releaseFirst();
+    await secondStarted;
+    expect(attempts).toBe(2);
+    releaseSecond();
+
+    await expect(bounded).resolves.toMatchObject({ scope: h.scope });
+    expect(attempts).toBe(3);
+    await Promise.all([first, second]);
   });
 
   it('gives a waiter its own abort without touching the refresh it waited on', async () => {

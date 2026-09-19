@@ -571,16 +571,9 @@ export interface ContextGraphAuthoritySnapshot {
 }
 
 /**
- * @deprecated Authority-index readers now own unbounded logical target sets
- * and their physical projection work internally. Retained for source
- * compatibility with consumers that imported the former chunk-size hint.
- */
-export const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS = 4_096;
-
-/**
  * Logical finalized-authority capability. Callers provide the complete target
- * set for one operation; the chain implementation owns validation, physical
- * chunking, projection, and the single finalized anchor.
+ * set for one operation; the chain implementation owns validation, projection,
+ * and the single finalized anchor.
  */
 export interface ContextGraphAuthorityIndexRevisionReader {
   /**
