@@ -10,6 +10,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { hasVerifiedEncryptionCustody } from './encryption-key-enrollment.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -720,6 +721,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       }
     }
     return null;
+  }
+
+  hasAuthorizedWorkspaceEncryptionCustodyForAddress(this: DKGAgent, address: string): boolean {
+    const record = [...this.localAgents.values()].find((agent) =>
+      agent.agentAddress.toLowerCase() === address.toLowerCase());
+    return record !== undefined
+      && hasVerifiedEncryptionCustody(address, this.peerId, record.workspaceEncryptionKeys);
   }
 
   protected async resolveContextGraphAgentGateAuthority(
