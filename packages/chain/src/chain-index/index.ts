@@ -62,6 +62,14 @@ export {
 } from './chain-index-runner.js';
 
 export {
+  resolveChainIndexAuthorityAnchor,
+  type ChainIndexAnchorRefusal,
+  type ChainIndexAnchorResult,
+  type ChainIndexAuthorityAnchor,
+  type ResolveChainIndexAuthorityAnchorInput,
+} from './chain-index-anchor.js';
+
+export {
   createChainIndexAuthorityPageSource,
   type ChainIndexAuthorityPageSource,
   type ChainIndexAuthorityPageSourceOptions,
