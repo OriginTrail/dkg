@@ -95,6 +95,15 @@ it('refreshes invalidated EVM bindings before returning membership', async () =>
   expect(proof).not.toHaveBeenCalled();
 });
 
+it('exposes the mock Random Sampling pair identity and current epoch', async () => {
+  const chain = new MockChainAdapter();
+  expect(chain.getRandomSamplingBindingId())
+    .toBe('mock-random-sampling:mock-random-sampling-storage');
+  await expect(chain.getCurrentEpoch()).resolves.toBe(1n);
+  chain.__advanceEpoch();
+  await expect(chain.getCurrentEpoch()).resolves.toBe(2n);
+});
+
 // The prover keys its remembered "period already solved" read on the derived pair.
 // `isRandomSamplingReady()` cannot carry the rotation signal on its own: the
 // 30 s eligibility reconcile below re-binds the pair, so by the prover's next

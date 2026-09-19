@@ -2337,6 +2337,28 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.getRandomSamplingBindingId()).toBeUndefined();
   });
 
+  it('getCurrentEpoch resolves Chronos once and reads the live epoch', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const chronos = { target: '0x0000000000000000000000000000000000000004' };
+    const resolveContract = vi.spyOn(a as any, 'resolveContract').mockResolvedValue(chronos);
+    const readContract = vi.spyOn(a as any, 'readContract')
+      .mockResolvedValueOnce('17')
+      .mockResolvedValueOnce(18n);
+
+    await expect(a.getCurrentEpoch()).resolves.toBe(17n);
+    await expect(a.getCurrentEpoch()).resolves.toBe(18n);
+
+    expect(resolveContract).toHaveBeenCalledOnce();
+    expect(resolveContract).toHaveBeenCalledWith('Chronos');
+    expect(readContract).toHaveBeenNthCalledWith(
+      1,
+      chronos,
+      'chronos.getCurrentEpoch',
+      'getCurrentEpoch',
+    );
+    expect(readContract).toHaveBeenCalledTimes(2);
+  });
+
   it('isContractMissingRevert recognises both the legacy (ZeroAddress→string) shape and ContractDoesNotExist revert (Codex N16)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     expect((a as any).isContractMissingRevert(new Error('reverted with custom error ContractDoesNotExist("RandomSampling")'))).toBe(true);
