@@ -81,6 +81,7 @@ import {
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
+import type { ChainEventLogBinding } from './chain-event-log-binding.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';
@@ -903,6 +904,29 @@ export class EVMChainAdapterBase {
   protected readonly resolvedContractAddressCache: ReadThroughTtlCache<string, string>;
 
   protected readonly hubRotationPoller: HubRotationPoller;
+
+  /**
+   * This adapter's window onto the node's ONE chain log, once something owns a
+   * tick that fills it.
+   *
+   * It is BOUND rather than constructed because the log is process-wide and
+   * adapters are not: per-wallet publisher adapters are built without a store
+   * (`publisher-runner.ts:81-88`), so an adapter that built its own log would
+   * be a SECOND scanner — exactly what this work exists to remove. While it is
+   * unset, every event reader keeps its own `queryFilter`, which is the
+   * pre-log behaviour and never a degraded one.
+   */
+  protected chainEventLogBinding: ChainEventLogBinding | undefined;
+
+  /**
+   * Bind (or clear) the one log for this adapter's event readers.
+   *
+   * Safe after `init()`: the readers consult the binding per call and fall
+   * back the moment coverage cannot carry the range they were asked for.
+   */
+  attachChainEventLog(binding: ChainEventLogBinding | undefined): void {
+    this.chainEventLogBinding = binding;
+  }
 
   /**
    * Single-flight guard for the best-effort

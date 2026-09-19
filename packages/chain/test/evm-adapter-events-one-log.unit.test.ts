@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * The two lanes named in the measurements — `queryFilter_ContextGraphCreated`
+ * and `queryFilter_KnowledgeAssetRegisteredToContextGraph` — read the one log.
+ *
+ * These are the pins that say so: when the log covers the range the lane asked
+ * for, NO `queryFilter` is issued; when it does not, the live scan is still
+ * there. The all-or-nothing rule is the important one — a partially covered
+ * range must fall back rather than return a short answer, because the lane
+ * advances its cursor to the bound it asked for either way.
+ */
+
+import { ethers } from 'ethers';
+import { describe, expect, it } from 'vitest';
+
+import { ChainEventDecoderRegistry } from '../src/chain-index/chain-event-decoders.js';
+import { createChainEventLogSubscription } from
+  '../src/chain-index/chain-event-log-subscription.js';
+import type { ChainEventLogRow } from '../src/chain-index/chain-event-log.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { loadAbi } from '../src/evm-adapter-abi.js';
+import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
+
+const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
+const SCOPE = 'evm:31337:0xhub:0xstorage';
+const CG_STORAGE = `0x${'cd'.repeat(20)}`.toLowerCase();
+
+const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
+const cgInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
+
+function minimalConfig(): EVMAdapterConfig {
+  return {
+    rpcUrl: 'http://127.0.0.1:59998',
+    privateKey: DEPLOYER_PK,
+    adminPrivateKey: ADMIN_PK,
+    hubAddress: '0x0000000000000000000000000000000000000001',
+    chainId: 'evm:31337',
+    staticNetwork: false,
+  };
+}
+
+function row(name: string, args: readonly unknown[], blockNumber: number): ChainEventLogRow {
+  const fragment = cgInterface.getEvent(name);
+  if (fragment === null) throw new Error(`missing ${name}`);
+  const encoded = cgInterface.encodeEventLog(fragment, [...args]);
+  return {
+    blockNumber,
+    blockHash: hash(blockNumber),
+    logIndex: 0,
+    transactionHash: hash(0xaa),
+    address: CG_STORAGE,
+    topics: [...encoded.topics],
+    data: encoded.data,
+    settled: true,
+  };
+}
+
+const creationRow = (blockNumber: number, cgId: bigint) => row('ContextGraphCreated', [
+  cgId,
+  `0x${'11'.repeat(20)}`,
+  `0x${'22'.repeat(32)}`,
+  [`0x${'11'.repeat(20)}`],
+  `0x${'33'.repeat(32)}`,
+  1,
+  0,
+  `0x${'44'.repeat(20)}`,
+  0n,
+], blockNumber);
+
+const registrationRow = (blockNumber: number, cgId: bigint, kaId: bigint) =>
+  row('KnowledgeAssetRegisteredToContextGraph', [cgId, kaId], blockNumber);
+
+function seededStore(
+  coveredThroughBlock: number,
+  rows: readonly ChainEventLogRow[],
+): MemoryChainEventLogStore {
+  const store = new MemoryChainEventLogStore();
+  store.seed({
+    cursor: {
+      revision: 1,
+      lineage: hash(1),
+      deploymentBlockNumber: 10,
+      settledBlockNumber: coveredThroughBlock,
+      settledBlockHash: hash(coveredThroughBlock),
+      head: {
+        number: coveredThroughBlock,
+        hash: hash(coveredThroughBlock),
+        timestampSeconds: 1_700_000_000,
+        fetchedAtMs: 1_700_000_000_000,
+      },
+      topicSetVersion: 'v1',
+    },
+    coverage: ['context-graph-authority', 'context-graph-ka'].map((family) => ({
+      family,
+      address: CG_STORAGE,
+      coveredFromBlock: 10,
+      coveredThroughBlock,
+      floorBlock: 10,
+    })),
+  }, rows);
+  return store;
+}
+
+/** The adapter with a stubbed contract handle and a recorded live scan. */
+function makeAdapter(store: MemoryChainEventLogStore | undefined, coveredThrough = 100) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const adapter: any = new EVMChainAdapter(minimalConfig());
+  adapter.initialized = true;
+  adapter.init = async () => { adapter.initialized = true; };
+  const liveScans: string[] = [];
+  adapter.readContractWith = async (_c: unknown, label: string) => {
+    liveScans.push(label);
+    return [];
+  };
+  adapter.contracts = {
+    contextGraphStorage: {
+      interface: cgInterface,
+      filters: {
+        ContextGraphCreated: () => ({}),
+        KnowledgeAssetRegisteredToContextGraph: () => ({}),
+      },
+    },
+  };
+  if (store !== undefined) {
+    adapter.attachChainEventLog({
+      subscription: createChainEventLogSubscription({
+        scope: SCOPE,
+        store,
+        registry: new ChainEventDecoderRegistry()
+          .registerContextGraphAuthority(CG_STORAGE, cgInterface)
+          .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface),
+      }),
+      contextGraphStorageAddress: CG_STORAGE,
+    });
+  }
+  void coveredThrough;
+  return { adapter, liveScans };
+}
+
+async function collect(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  adapter: any,
+  eventTypes: readonly string[],
+  fromBlock: number,
+  toBlock: number,
+): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for await (const event of adapter.listenForEvents({ eventTypes, fromBlock, toBlock })) {
+    out.push(event);
+  }
+  return out;
+}
+
+describe('listenForEvents over the one log', () => {
+  it('serves ContextGraphCreated from the log and issues no queryFilter', async () => {
+    const store = seededStore(100, [creationRow(50, 7n), registrationRow(51, 7n, 900n)]);
+    const { adapter, liveScans } = makeAdapter(store);
+    const events = await collect(adapter, ['ContextGraphCreated'], 10, 100);
+    expect(liveScans).toEqual([]);
+    expect(events).toHaveLength(1);
+    expect((events[0] as { data: { contextGraphId: string } }).data.contextGraphId).toBe('7');
+  });
+
+  it('does not leak the other six authority signatures into the lane', async () => {
+    // One filter carries seven signatures; this lane subscribed to one of them,
+    // and a sibling event arriving as a ContextGraphCreated would be dispatched
+    // as a brand-new graph that does not exist.
+    const store = seededStore(100, [
+      creationRow(50, 7n),
+      row('ContextGraphDeactivated', [7n], 55),
+      row('AgentParticipantAdded', [7n, `0x${'12'.repeat(20)}`], 56),
+    ]);
+    const { adapter } = makeAdapter(store);
+    const events = await collect(adapter, ['ContextGraphCreated'], 10, 100);
+    expect(events).toHaveLength(1);
+  });
+
+  it('serves KnowledgeAssetRegisteredToContextGraph from the log', async () => {
+    // The creation row shares this address and is deliberately present: the
+    // lane must see only its own signature, not everything stored there.
+    const store = seededStore(100, [creationRow(50, 7n), registrationRow(60, 7n, 900n)]);
+    const { adapter, liveScans } = makeAdapter(store);
+    const events = await collect(
+      adapter, ['KnowledgeAssetRegisteredToContextGraph'], 10, 100,
+    );
+    expect(liveScans).toEqual([]);
+    expect(events).toHaveLength(1);
+    expect((events[0] as { data: { kaId: string } }).data.kaId).toBe('900');
+  });
+
+  it('falls back to the live scan when coverage is short of the asked range', async () => {
+    // The log holds through 100; the lane asked through 140. Serving the 90
+    // blocks it has would let the lane record 140 as scanned.
+    const store = seededStore(100, [creationRow(50, 7n)]);
+    const { adapter, liveScans } = makeAdapter(store);
+    await collect(adapter, ['ContextGraphCreated'], 10, 140);
+    expect(liveScans).toEqual(['cgStorage.queryFilter(ContextGraphCreated)']);
+  });
+
+  it('falls back when the lane cursor starts below the log floor', async () => {
+    const store = seededStore(100, [creationRow(50, 7n)]);
+    const { adapter, liveScans } = makeAdapter(store);
+    await collect(adapter, ['KnowledgeAssetRegisteredToContextGraph'], 0, 100);
+    expect(liveScans).toEqual([
+      'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)',
+    ]);
+  });
+
+  it('keeps the live scan when no log is attached at all', async () => {
+    const { adapter, liveScans } = makeAdapter(undefined);
+    await collect(adapter, ['ContextGraphCreated'], 10, 100);
+    expect(liveScans).toEqual(['cgStorage.queryFilter(ContextGraphCreated)']);
+  });
+});
