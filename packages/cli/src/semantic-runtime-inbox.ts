@@ -6,6 +6,7 @@ import {
   type DKGAgent,
   type SkillRequest,
   type SkillResponse,
+  type SignedAgentDelegation,
 } from '@origintrail-official/dkg-agent';
 import type { LlmConfig } from '@origintrail-official/dkg-node-ui';
 import type { SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
@@ -165,6 +166,7 @@ export async function invokeBoundSemanticProgramOnPeer(
   operationIri: string,
   invocationId: string,
   authenticatedCaller: string | undefined,
+  clientAuthorization?: unknown,
 ): Promise<SemanticInvocationResult> {
   validateProgramRoutes(config.programRoutes ?? []);
   const route = config.programRoutes?.find((item) =>
@@ -173,10 +175,6 @@ export async function invokeBoundSemanticProgramOnPeer(
     throw new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'No authorized local caller or configured operation route', 403);
   }
   const caller = checksumAddress(authenticatedCaller);
-  const privateKey = agent.getCustodialAgentPrivateKey(agent.resolveLocalAgentAddress(caller));
-  if (!privateKey) {
-    throw new SemanticProgramError('CALLER_SIGNATURE_UNAVAILABLE', 'The authenticated agent has no local signing key', 409);
-  }
   const unsigned = { version: 3 as const, kind: 'bound-operation' as const, contextGraphId, operationIri, invocationId: invocationId.toLowerCase() };
   try {
     assertBoundSemanticInvocation(unsigned);
@@ -184,13 +182,36 @@ export async function invokeBoundSemanticProgramOnPeer(
     throw new SemanticProgramError('INVALID_INBOX_INVOCATION', 'Bound operation invocation is malformed', 400);
   }
   const targetPeerId = route.targetPeerId;
-  const issuedAtMs = Date.now();
-  const authorization = await signAgentDelegation({
-    agentAddress: caller, agentPrivateKey: privateKey,
-    delegateePeerId: agent.peerId,
-    scope: boundSemanticInvocationScope(unsigned, targetPeerId),
-    issuedAtMs, expiresAtMs: issuedAtMs + SEMANTIC_INVOCATION_AUTHORIZATION_TTL_MS,
-  });
+  let authorization: SignedAgentDelegation;
+  if (clientAuthorization !== undefined) {
+    // Forward only the original caller's exact authorization. A supplied but
+    // invalid proof must never fall back to signing with a custodial/default key.
+    try {
+      if (!clientAuthorization || typeof clientAuthorization !== 'object' || Array.isArray(clientAuthorization)) throw new Error('Invalid authorization');
+      authorization = clientAuthorization as SignedAgentDelegation;
+      if (authorization.agentAddress?.toLowerCase() !== caller.toLowerCase()
+        || authorization.delegateePeerId !== agent.peerId
+        || !Number.isSafeInteger(authorization.issuedAtMs)
+        || !Number.isSafeInteger(authorization.expiresAtMs)
+        || authorization.expiresAtMs! <= authorization.issuedAtMs
+        || authorization.expiresAtMs! - authorization.issuedAtMs > SEMANTIC_INVOCATION_AUTHORIZATION_TTL_MS) throw new Error('Invalid authorization');
+      verifyAgentDelegation(authorization, { expectedScope: boundSemanticInvocationScope(unsigned, targetPeerId) });
+    } catch {
+      throw new SemanticProgramError('INVOCATION_AUTHORIZATION_INVALID', 'Client authorization must match the authenticated caller, forwarding peer, destination, operation and validity window', 403);
+    }
+  } else {
+    const privateKey = agent.getCustodialAgentPrivateKey(agent.resolveLocalAgentAddress(caller));
+    if (!privateKey) {
+      throw new SemanticProgramError('CALLER_SIGNATURE_UNAVAILABLE', 'Provide client-signed authorization or use an agent with its own local signing key', 409);
+    }
+    const issuedAtMs = Date.now();
+    authorization = await signAgentDelegation({
+      agentAddress: caller, agentPrivateKey: privateKey,
+      delegateePeerId: agent.peerId,
+      scope: boundSemanticInvocationScope(unsigned, targetPeerId),
+      issuedAtMs, expiresAtMs: issuedAtMs + SEMANTIC_INVOCATION_AUTHORIZATION_TTL_MS,
+    });
+  }
   let response: SkillResponse;
   try {
     response = await agent.invokeSkill(targetPeerId, SEMANTIC_RUNTIME_INBOX_SKILL_IRI,

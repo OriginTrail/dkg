@@ -213,6 +213,8 @@ import {
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
 import { authenticateHttpRequest, loadTokens } from '../auth.js';
+import { AGENT_HTTP_HEADERS, normalizeOperatorAgentAddresses } from '../agent-http-auth.js';
+import { SqliteAgentHttpNonceStore } from '../agent-http-nonce-store.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -3385,6 +3387,8 @@ async function runDaemonInnerWithStartupOwnership(
   // --- Authentication ---
 
   const authEnabled = config.auth?.enabled !== false;
+  const operatorAgentAddresses = normalizeOperatorAgentAddresses(config.auth?.operatorAgentAddresses);
+  const agentHttpNonces = new SqliteAgentHttpNonceStore(dashDb.db);
   const validTokens = await loadTokens(config.auth);
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
@@ -3572,7 +3576,7 @@ async function runDaemonInnerWithStartupOwnership(
             ? { "Access-Control-Allow-Origin": reqCorsOrigin }
             : {}),
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": AGENT_HTTP_HEADERS,
         });
         res.end();
         return;
@@ -3585,6 +3589,7 @@ async function runDaemonInnerWithStartupOwnership(
         authEnabled,
         validTokens,
         resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+        agentKey: { targetPeerId: agent.peerId, operatorAgentAddresses, nonces: agentHttpNonces },
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;

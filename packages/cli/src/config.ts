@@ -786,7 +786,7 @@ export interface DkgConfig {
    * a Bearer token in the Authorization header. A token is auto-generated
    * on first start and stored in `<DKG_HOME>/auth.token`.
    */
-  auth?: { enabled?: boolean; tokens?: string[] };
+  auth?: { enabled?: boolean; tokens?: string[]; operatorAgentAddresses?: string[] };
   /**
    * Opt-in telemetry streaming to a central network dashboard.
    * `enabled` is the master gate: when false, NOTHING is forwarded off the

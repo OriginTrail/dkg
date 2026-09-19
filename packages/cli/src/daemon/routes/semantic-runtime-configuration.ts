@@ -1,3 +1,4 @@
+import { isExplicitNodeOperator } from '../../auth.js';
 import { createHash } from 'node:crypto';
 
 import { sparqlIri, validateContextGraphId } from '@origintrail-official/dkg-core';
@@ -37,7 +38,7 @@ function address(value: unknown): string { if (typeof value !== 'string' || !eth
 /** Explicit credentials only: auth-disabled mode and implicit node identities confer no management rights. */
 async function assertManager(ctx: RequestContext, kind: 'binding' | 'route', graph: string): Promise<void> {
   const auth = ctx.actor.authentication;
-  if (auth.principal.kind === 'nodeOperator' && auth.acceptedToken !== undefined) return;
+  if (isExplicitNodeOperator(auth)) return;
   if (kind === 'binding' && auth.principal.kind === 'agent') {
     try { await ctx.agent.assertContextGraphOwner(graph, auth.principal.agentAddress, 'manage Program bindings'); return; }
     catch { /* Fail closed without exposing ownership metadata to another tenant. */ }
@@ -59,7 +60,7 @@ async function prepareBinding(ctx: RequestContext, raw: Record<string, unknown>)
   // Owning a graph is not authority to impersonate another custodial wallet,
   // including for its private WM or writes. There is no executor delegation
   // contract on this API; only an explicit node operator may select another local wallet.
-  if (principal.kind === 'agent' && principal.agentAddress.toLowerCase() !== executor.toLowerCase()) {
+  if (principal.kind === 'agent' && !isExplicitNodeOperator(ctx.actor.authentication) && principal.agentAddress.toLowerCase() !== executor.toLowerCase()) {
     throw new SemanticProgramError('PROGRAM_EXECUTOR_FORBIDDEN', 'An agent-authenticated graph owner may select only its own custodial executor identity', 403);
   }
   const reader = principal.kind === 'agent' ? principal.agentAddress : executor;
@@ -106,7 +107,7 @@ export async function handleSemanticRuntimeConfigurationRoutes(ctx: RequestConte
   if (!kind) return false;
   try {
     const auth = ctx.actor.authentication;
-    if (auth.principal.kind === 'anonymous' || (kind === 'route' && auth.principal.kind !== 'nodeOperator')) {
+    if (auth.principal.kind === 'anonymous' || (kind === 'route' && !isExplicitNodeOperator(auth))) {
       throw new SemanticProgramError('PROGRAM_CONFIGURATION_FORBIDDEN', 'An explicit management credential is required', 403);
     }
     const method = ctx.req.method;

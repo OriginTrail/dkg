@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { DKGAgent } from '@origintrail-official/dkg-agent';
+import { DKGAgent, signAgentDelegation } from '@origintrail-official/dkg-agent';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { SemanticRuntimeStore, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
@@ -16,9 +17,13 @@ import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { handleSemanticRuntimeRoutes } from '../src/daemon/routes/semantic-runtime.js';
 import { registerSemanticRuntimeInboxSkill } from '../src/semantic-runtime-inbox.js';
 import { startConfiguredSemanticRuntime, type ConfiguredSemanticRuntimeService } from '../src/semantic-runtime.js';
+import { authenticateHttpRequest } from '../src/auth.js';
+import { signAgentHttpJwt } from '../src/agent-http-auth.js';
+import { boundSemanticInvocationScope } from '../src/semantic-runtime-bound-invocation.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
-const owner = '0x1111111111111111111111111111111111111111';
+const ownerWallet = new ethers.Wallet('0x' + '02'.padStart(64, '0'));
+const owner = ownerWallet.address;
 const executor = owner;
 const foreignExecutor = '0x2222222222222222222222222222222222222222';
 const author = '0x3333333333333333333333333333333333333333';
@@ -61,16 +66,26 @@ function node(agent: any, configured: SemanticRuntimeConfig = {}): Node {
     } };
   return n;
 }
-async function request(n: Node, identity: Identity, method: string, path: string, body?: unknown) {
-  const auth = identity === 'anonymous' || identity === 'disabled-anonymous'
+async function request(n: Node, identity: Identity, method: string, path: string, body?: unknown, signing?: { wallet: ethers.Wallet; operator?: boolean }) {
+  let auth = identity === 'anonymous' || identity === 'disabled-anonymous'
     ? requestAuthentication({ kind: 'anonymous', mode: identity === 'anonymous' ? 'public' : 'disabled' })
     : identity === 'operator' ? requestAuthentication({ kind: 'nodeOperator' })
       : requestAuthentication({ kind: 'agent', agentAddress: { owner, member, caller }[identity] });
   const url = new URL(path, 'http://local.test');
-  const req = Object.assign(new EventEmitter(), { method, aborted: false, __dkgPrebufferedBody: Buffer.from(JSON.stringify(body ?? {})) });
+  let req: any = Object.assign(new EventEmitter(), { method, aborted: false, __dkgPrebufferedBody: Buffer.from(JSON.stringify(body ?? {})) });
   const res: any = new EventEmitter();
   res.writeHead = (status: number) => { res.statusCode = status; return res; };
   res.end = (data: string) => { res.body = JSON.parse(data); res.writableEnded = true; };
+  if (signing) {
+    const bytes = Buffer.from(JSON.stringify(body ?? {}));
+    const jwt = signAgentHttpJwt({ agentAddress: signing.wallet.address, method, path, targetPeerId: n.agent.peerId,
+      body: bytes, contentType: 'application/json', timestamp: String(Date.now()), nonce: randomUUID().replaceAll('-', '') }, signing.wallet.signingKey);
+    req = Object.assign(Readable.from([bytes]), { method, url: path, headers: { authorization: 'DKG-Agent ' + jwt, 'content-type': 'application/json' }, rawHeaders: [] });
+    const result = await authenticateHttpRequest({ req, res, authEnabled: true, validTokens: new Set(), resolveAgentByToken: () => undefined,
+      agentKey: { targetPeerId: n.agent.peerId, nonces: { claim: () => true }, operatorAgentAddresses: signing.operator ? [signing.wallet.address] : [] } });
+    if (!result.allowed) return { status: res.statusCode as number, body: res.body as any };
+    auth = result;
+  }
   const handler = url.pathname === '/api/query' ? handleQueryRoutes : handleSemanticRuntimeRoutes;
   await handler({ req, res, path: url.pathname, url, agent: n.agent, config: n.config,
     actor: createRequestActor(auth, () => owner), authentication: auth, requestAgentAddress: owner,
@@ -143,6 +158,46 @@ async function fixture() {
 }
 
 describe('durable Program management API', () => {
+  it('uses client-held JWT identities through real WASM, preserves roles, isolates private data and revokes retries', async () => {
+    const f = await fixture();
+    const callerWallet = new ethers.Wallet(callerKey);
+    const signOwner = { wallet: ownerWallet };
+    const signCaller = { wallet: callerWallet };
+    f.senderAgent.getCustodialAgentPrivateKey = vi.fn(() => { throw new Error('Client key is not on this node'); });
+    const routeBody = { route: { contextGraphId: graph, operationIri: operation, targetPeerId: f.agent.peerId } };
+    expect((await request(f.client, 'caller', 'POST', '/api/programs/routes', routeBody, signCaller)).status).toBe(403);
+    expect((await request(f.client, 'caller', 'POST', '/api/programs/routes', routeBody, { ...signCaller, operator: true })).status).toBe(201);
+    expect(f.client.runtime!.store.programConfigurationRecords()[0].updatedBy).toContain(caller);
+    expect((await request(f.target, 'owner', 'POST', '/api/programs/bindings', {
+      binding: { ...bindingInput(), executorAgentAddress: foreignExecutor },
+    }, signOwner)).status).toBe(403);
+    expect((await request(f.target, 'owner', 'POST', '/api/programs/bindings', {
+      binding: { ...bindingInput(), operationIri: 'urn:example:operator-approved', executorAgentAddress: foreignExecutor },
+    }, { ...signOwner, operator: true })).status).toBe(201);
+    expect((await request(f.target, 'owner', 'POST', '/api/programs/bindings', { binding: bindingInput() }, signOwner)).status).toBe(201);
+    const invocationId = randomUUID();
+    const unsigned = { version: 3 as const, kind: 'bound-operation' as const, contextGraphId: graph, operationIri: operation, invocationId };
+    const authorization = await signAgentDelegation({ agentPrivateKey: callerKey, agentAddress: caller,
+      delegateePeerId: f.senderAgent.peerId, scope: boundSemanticInvocationScope(unsigned, f.agent.peerId),
+      issuedAtMs: Date.now(), expiresAtMs: Date.now() + 60_000 });
+    const payload = { contextGraphId: graph, operationIri: operation, invocationId, authorization };
+    const invoke = () => request(f.client, 'caller', 'POST', '/api/programs/execute', payload, signCaller);
+    const result = await invoke();
+    expect(result.status).toBe(200); expect(result.body.persisted).toBe(true);
+    expect(JSON.parse(result.body.outputs[0]).result.bindings).toEqual([{ value: '"42"' }]);
+    expect(await invoke()).toEqual(result);
+    expect(f.senderAgent.getCustodialAgentPrivateKey).not.toHaveBeenCalled();
+    for (const operator of [false, true]) {
+      const raw = await request(f.target, 'caller', 'POST', '/api/query', {
+        sparql: 'SELECT ?value WHERE { ?s ?p ?value }', contextGraphId: graph, view: 'working-memory', agentAddress: executor,
+      }, { ...signCaller, operator });
+      expect(raw.status).toBe(200); expect(raw.body.result.bindings).toEqual([]);
+      expect(f.agent.query).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ callerAgentAddress: caller }));
+    }
+    expect((await request(f.target, 'owner', 'DELETE', '/api/programs/bindings', remove(1), signOwner)).status).toBe(200);
+    expect((await invoke()).status).toBe(403);
+  });
+
   it('cannot turn graph ownership into access to another custodial agent\'s private WM', async () => {
     const f = await fixture();
     await f.upload(source.replace('urn:example:device:1', 'urn:example:foreign-device:1'));
