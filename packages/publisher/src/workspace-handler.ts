@@ -2219,6 +2219,11 @@ export class SharedMemoryHandler {
     // the caller treats that as "not curated, reject defensively"
     // (`verifyHostModeEnvelopeAuthority`) which is the correct
     // failure mode.
+    // Lifted out of `this` so the labelled closure below calls it directly.
+    // Safe because it is an INJECTED callback (assigned from options in the
+    // constructor), not a prototype method, so it has no `this` of its own to
+    // lose — but this is a G2-adjacent admission path, so the reason is written
+    // down rather than rediscovered.
     const chainAgentGateOracle = this.chainAgentGateOracle;
     if (chainAgentGateOracle) {
       try {
