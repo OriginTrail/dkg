@@ -175,10 +175,12 @@ describe('chain.indexTickMs', () => {
     }
   });
 
-  it('bounds stale-if-error at max(3T, 15s)', () => {
+  it('bounds stale-if-error at min(max(3T, 15s), the five-minute RFC-64 interval)', () => {
     expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 1_000 }).staleMs).toBe(15_000);
     expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 6_000 }).staleMs).toBe(18_000);
     expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 60_000 }).staleMs).toBe(180_000);
+    expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 180_000 }).staleMs)
+      .toBe(CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS);
   });
 });
 
@@ -530,17 +532,18 @@ describe('finalized Context Graph authority projection cache', () => {
     expect([...cached.view.states(targets)]).toEqual([...fresh.view.states(targets)]);
     expect([...cached.view.statesByNameHashes([NAME_9])])
       .toEqual([...fresh.view.statesByNameHashes([NAME_9])]);
-    // And identical to the index's own uncached projection of the same head.
-    expect([...cached.view.revisions(targets)]).toEqual([...await freshHarness.index.revisions({
+    // And identical to the index's own uncached view of the same head.
+    const uncachedView = await freshHarness.index.view({
       scope: SCOPE,
       readScope: {},
       deploymentBlockNumber: 10,
       finalized: fresh.finalized,
       pageSize: 100,
-      contextGraphIds: targets,
       readBlockHash: async (block) => `0x${block.toString(16).padStart(64, '0')}`,
       readPage: async () => { throw new Error('the durable cursor already covers this head'); },
-    })]);
+    });
+    expect([...cached.view.revisions(targets)])
+      .toEqual([...uncachedView.revisions(targets)]);
   });
 
   it('never lets the tail-inclusive projection reach exportSnapshot', async () => {

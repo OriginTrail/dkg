@@ -22,9 +22,9 @@ export function contextGraphAuthorityIndexScope(
 }
 
 /**
- * Floor of the stale-if-error window. The window is `max(3T, floor)`: three
- * missed refreshes for an operator-sized T, but never so short that one slow
- * failover pass (a 5s stall timeout per endpoint) already exhausts it.
+ * Floor of the stale-if-error window. The window starts at `max(3T, floor)`:
+ * three missed refreshes for an operator-sized T, but never so short that one
+ * slow failover pass (a 5s stall timeout per endpoint) already exhausts it.
  */
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS = 15_000;
 
@@ -43,7 +43,8 @@ export const CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS = 15_000;
  * between this host and the chain, and the stale-if-error window above. Five
  * minutes equals the RFC-64 accepted-authority refresh interval, so the cache
  * can never be the stalest link in that path. It also caps the useful value of
- * `chain.indexTickMs`: a larger T is accepted but stops paying past this age.
+ * `chain.indexTickMs`: both fresh-cache reuse and stale-if-error are capped at
+ * this age even when an operator configures a larger T.
  *
  * ONE-SIDED on purpose. A head stamped in the future (a devnet after
  * `evm_increaseTime`, or plain clock skew) cannot be a lagging endpoint's
@@ -224,9 +225,9 @@ export interface ContextGraphAuthorityIndexProjectionReadInput {
  * exactly what it would have done before this cache existed.
  *
  * FAIL CLOSED. A failed refresh may be papered over by the previous projection
- * only while that projection is at most `max(3T, 15s)` old by fetch time AND
- * its head is within the chain-time tolerance. Past either bound the refresh's
- * OWN error is rethrown untouched, so typed transport failures
+ * only while that projection is at most `min(max(3T, 15s), 5m)` old by fetch
+ * time AND its head is within the chain-time tolerance. Past either bound the
+ * refresh's OWN error is rethrown untouched, so typed transport failures
  * (`RPC_ENDPOINTS_EXHAUSTED`) keep reaching the RFC-64 circuit breaker. A
  * failure is never turned into an absent, public or zero answer.
  */
@@ -243,7 +244,10 @@ export class ContextGraphAuthorityIndexProjectionCache {
 
   constructor(options: ContextGraphAuthorityIndexProjectionOptions = {}) {
     this.tickMs = resolveContextGraphAuthorityIndexTickMs(options.tickMs);
-    this.staleMs = Math.max(3 * this.tickMs, CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS);
+    this.staleMs = Math.min(
+      Math.max(3 * this.tickMs, CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS),
+      CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+    );
     this.#headTimestampToleranceMs = options.headTimestampToleranceMs
       ?? CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
     if (!Number.isSafeInteger(this.#headTimestampToleranceMs)

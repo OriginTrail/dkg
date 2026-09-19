@@ -383,8 +383,10 @@ export interface ChainConfig {
    * answers RFC-64 authority reads before the next read refreshes it from the
    * chain. A lower value observes on-chain authority changes sooner and costs
    * proportionally more RPC. After a failed refresh the previous projection
-   * keeps answering until it is `max(3 × indexTickMs, 15s)` old, then those
-   * reads fail closed. A positive integer; defaults to 6000.
+   * keeps answering until it is `min(max(3 × indexTickMs, 15s), 5m)` old,
+   * then those reads fail closed. Values above five minutes do not extend
+   * cache service past the RFC-64 accepted-authority interval. A positive
+   * integer; defaults to 6000.
    */
   indexTickMs?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */

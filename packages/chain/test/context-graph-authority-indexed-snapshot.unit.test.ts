@@ -79,6 +79,7 @@ function makeIndexedAuthorityAdapter(
   options: Readonly<{
     deactivated?: boolean;
     secondContextGraph?: boolean;
+    extraContextGraph?: Readonly<{ contextGraphId: bigint; nameHash: string }>;
     zeroHashContextGraphs?: number;
     lateContextGraphNameHash?: string;
     finalizedNumber?: number;
@@ -1046,7 +1047,11 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it('validates revision targets and projects an oversized set from one finalized scan', async () => {
-    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+    const boundaryId = 4_097n;
+    const boundaryNameHash = ethers.zeroPadValue(ethers.toBeHex(boundaryId), 32);
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      extraContextGraph: { contextGraphId: boundaryId, nameHash: boundaryNameHash },
+    });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
     await expect(reader.readContextGraphAuthorityIndexRevisions([])).resolves.toEqual(new Map());
@@ -1061,27 +1066,30 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     const view = vi.spyOn((adapter as any).contextGraphAuthorityIndex, 'view');
     await expect(reader.readContextGraphAuthorityIndexRevisions(
       Array.from({ length: 4_097 }, (_, index) => authorityIndexId(String(index + 1))),
-    )).resolves.toEqual(new Map([[
-      '9',
-      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
-    ]]));
+    )).resolves.toEqual(new Map([
+      ['9', expect.stringMatching(/^0x[0-9a-f]{64}$/u)],
+      [boundaryId.toString(10), expect.stringMatching(/^0x[0-9a-f]{64}$/u)],
+    ]));
     expect(view).toHaveBeenCalledOnce();
     expect(evidence.headReads).toHaveLength(1);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
   it('projects an oversized name-hash set from one finalized scan', async () => {
-    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+    const boundaryId = 4_097n;
+    const boundaryNameHash = ethers.zeroPadValue(ethers.toBeHex(boundaryId), 32);
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      extraContextGraph: { contextGraphId: boundaryId, nameHash: boundaryNameHash },
+    });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
     const view = vi.spyOn((adapter as any).contextGraphAuthorityIndex, 'view');
     const nameHashes = Array.from(
-      { length: 4_096 },
+      { length: Number(boundaryId) },
       (_, index) => ethers.zeroPadValue(ethers.toBeHex(index + 1), 32),
     );
-    nameHashes.push(NAME_HASH);
 
     await expect(reader.resolveFinalizedContextGraphIdsByNameHashes!(nameHashes))
-      .resolves.toEqual(new Map([[NAME_HASH, 9n]]));
+      .resolves.toEqual(new Map([[boundaryNameHash, boundaryId]]));
     expect(view).toHaveBeenCalledOnce();
     expect(evidence.headReads).toHaveLength(1);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);

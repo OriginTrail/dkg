@@ -1717,7 +1717,9 @@ export interface DKGAgentConfig {
     finalityConfirmations?: number;
     /**
      * `chain.indexTickMs`: how long one completed finalized Context Graph
-     * authority projection answers reads before it is refreshed. Defaults to 6000.
+     * authority projection answers reads before it is refreshed. Cache service
+     * is always capped at the five-minute RFC-64 accepted-authority interval.
+     * Defaults to 6000.
      */
     indexTickMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */

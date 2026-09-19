@@ -2,11 +2,8 @@
 
 import {
   type ContextGraphAuthorityIndexCheckpoint,
-  type ContextGraphAuthorityIndexState,
   type ContextGraphAuthorityIndexStore,
 } from './context-graph-authority-index-checkpoint.js';
-import type { ContextGraphAuthorityIndexId } from
-  './context-graph-authority-index-id.js';
 import {
   normalizeContextGraphAuthorityHash as normalizeHash,
   normalizeContextGraphAuthorityNonNegativeSafeInteger as normalizeNonNegativeSafeInteger,
@@ -44,7 +41,6 @@ import {
   type ContextGraphAuthorityIndexSnapshotRequest,
 } from './context-graph-authority-index-snapshot.js';
 
-const ZERO_HASH = `0x${'00'.repeat(32)}`;
 const MAX_SERVABLE_CHECKPOINTS = 8;
 
 type ServableCheckpoint = Readonly<{
@@ -102,25 +98,6 @@ export interface ContextGraphAuthorityIndexScanInput {
   ) => Promise<readonly RawContextGraphAuthorityIndexEvent[]>;
 }
 
-export interface ContextGraphAuthorityIndexResolveInput
-  extends ContextGraphAuthorityIndexScanInput {
-  readonly contextGraphId: ContextGraphAuthorityIndexId;
-}
-
-export interface ContextGraphAuthorityIndexRevisionInput
-  extends ContextGraphAuthorityIndexScanInput {
-  readonly contextGraphIds: readonly ContextGraphAuthorityIndexId[];
-}
-
-export interface ContextGraphAuthorityIndexNameHashInput
-  extends ContextGraphAuthorityIndexScanInput {
-  readonly nameHash: string;
-}
-
-export interface ContextGraphAuthorityIndexNameHashesInput
-  extends ContextGraphAuthorityIndexScanInput {
-  readonly nameHashes: readonly string[];
-}
 /**
  * Process-local owner for the durable contract-wide authority index.
  *
@@ -267,67 +244,6 @@ export class ContextGraphAuthorityIndex {
   /** One fresh scan to the anchor, behind the checkpoint-private projections. */
   async view(input: ContextGraphAuthorityIndexScanInput): Promise<ContextGraphAuthorityIndexView> {
     return new ContextGraphAuthorityIndexView(await this.#snapshot(input));
-  }
-
-  async resolve(
-    input: ContextGraphAuthorityIndexResolveInput,
-  ): Promise<ContextGraphAuthorityIndexState> {
-    // Target lookup intentionally happens after the shared contract scan, so
-    // every waiter resolves its own graph from the same complete checkpoint.
-    return (await this.view(input)).resolve(input.contextGraphId);
-  }
-
-  /** Project opaque revisions without exposing persisted checkpoint internals. */
-  async revisions(
-    input: ContextGraphAuthorityIndexRevisionInput,
-  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>> {
-    return (await this.view(input)).revisions(input.contextGraphIds);
-  }
-
-  /** Project the minimal immutable/read-selection fields for many targets. */
-  async states(
-    input: ContextGraphAuthorityIndexRevisionInput,
-  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>> {
-    return (await this.view(input)).states(input.contextGraphIds);
-  }
-
-  /** Resolve one unique name commitment from the shared contract-wide snapshot. */
-  async resolveNameHash(
-    input: ContextGraphAuthorityIndexNameHashInput,
-  ): Promise<ContextGraphAuthorityIndexId | null> {
-    const nameHash = normalizeHash(input.nameHash);
-    if (nameHash === undefined) {
-      throw new Error('Context Graph authority index name hash is invalid');
-    }
-    // ContextGraphStorage permits an explicit zero commitment as an opt-out.
-    // It never participates in reverse name binding, even if several slots use it.
-    if (nameHash === ZERO_HASH) return null;
-    const matches = await this.statesByNameHashes({
-      ...input,
-      nameHashes: [nameHash],
-    });
-    return matches.get(nameHash)?.contextGraphId ?? null;
-  }
-
-  /**
-   * Project unique name commitments and their complete authority states from
-   * one checkpoint. Missing and zero-hash targets are omitted; any duplicate
-   * finalized commitment fails the whole projection closed.
-   */
-  async statesByNameHashes(
-    input: ContextGraphAuthorityIndexNameHashesInput,
-  ): Promise<ReadonlyMap<string, ContextGraphAuthorityIndexState>> {
-    const targets = new Set<string>();
-    for (const rawNameHash of input.nameHashes) {
-      const nameHash = normalizeHash(rawNameHash);
-      if (nameHash === undefined) {
-        throw new Error('Context Graph authority index name hash is invalid');
-      }
-      if (nameHash !== ZERO_HASH) targets.add(nameHash);
-    }
-    if (targets.size === 0) return new Map();
-
-    return (await this.view(input)).statesByNameHashes([...targets]);
   }
 
   /** Resolve the complete materialized index at one finalized chain anchor. */

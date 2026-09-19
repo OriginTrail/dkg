@@ -52,9 +52,11 @@ export interface EVMAdapterBaseConfig {
    * `chain.indexTickMs` (T): how long one completed finalized Context Graph
    * authority projection answers reads before the next read refreshes it, in
    * milliseconds. After a FAILED refresh the previous projection keeps
-   * answering until it is `max(3T, 15s)` old, then reads fail closed. A
-   * positive integer; defaults to 6000. Affects only the durable authority
-   * index, so it is inert without `localContextGraphAuthorityIndexStore`.
+   * answering until it is `min(max(3T, 15s), 5m)` old, then reads fail closed.
+   * A positive integer; defaults to 6000. Values above five minutes do not
+   * extend cache service past the RFC-64 accepted-authority interval. Affects
+   * only the durable authority index, so it is inert without
+   * `localContextGraphAuthorityIndexStore`.
    */
   indexTickMs?: number;
   /**
