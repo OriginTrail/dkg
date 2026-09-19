@@ -155,6 +155,17 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     };
   }
 
+  function blockErrorEndpoint(head: number, message = 'header not found') {
+    return {
+      getBlockNumber: recorder(async () => head),
+      getBlock: recorder(async () => {
+        const error = new Error(message);
+        Object.assign(error, { code: 'CALL_EXCEPTION' });
+        throw error;
+      }),
+    };
+  }
+
   it('depth 1: exactly ONE getBlock(receipt height) and ZERO head reads for a canonical receipt', async () => {
     const p = endpoint({ head: 123, atHeight: { number: 123, hash: BLOCK_HASH, timestamp: 1_700 } });
     const a = makeAdapter([p]);
@@ -187,23 +198,50 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     expect(healthy.getBlockNumber.calls).toHaveLength(0);
   });
 
-  it('depth 1: an above-head block error yields to a sibling without a head probe', async () => {
-    const lagging = {
-      getBlockNumber: recorder(async () => 122),
-      getBlock: recorder(async () => {
-        const error = new Error('header not found');
-        Object.assign(error, { code: 'CALL_EXCEPTION' });
-        throw error;
-      }),
-    };
+  it('depth 1: a confirmed above-head block error yields to a sibling', async () => {
+    const lagging = blockErrorEndpoint(122);
     const healthy = endpoint({ head: 123, atHeight: { number: 123, hash: BLOCK_HASH } });
     const a = makeAdapter([lagging, healthy]);
 
     await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
     expect(lagging.getBlock.calls).toEqual([[123]]);
     expect(healthy.getBlock.calls).toEqual([[123]]);
-    expect(lagging.getBlockNumber.calls).toHaveLength(0);
+    expect(lagging.getBlockNumber.calls).toHaveLength(1);
     expect(healthy.getBlockNumber.calls).toHaveLength(0);
+  });
+
+  it('depth 1: a bare block error surfaces when the endpoint has reached the receipt height', async () => {
+    const unhealthy = blockErrorEndpoint(123);
+    const a = makeAdapter([unhealthy]);
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT))
+      .rejects.toThrow('header not found');
+    expect(unhealthy.getBlock.calls).toEqual([[123]]);
+    expect(unhealthy.getBlockNumber.calls).toHaveLength(1);
+  });
+
+  it('depth 1: all above-head error responses exhaust as a false verdict', async () => {
+    const first = blockErrorEndpoint(121, 'unknown block');
+    const second = blockErrorEndpoint(122, 'block not found');
+    const a = makeAdapter([first, second]);
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
+    expect(first.getBlock.calls).toEqual([[123]]);
+    expect(second.getBlock.calls).toEqual([[123]]);
+    expect(first.getBlockNumber.calls).toHaveLength(1);
+    expect(second.getBlockNumber.calls).toHaveLength(1);
+  });
+
+  it('depth 1: above-head error, null, then canonical block keeps walking siblings', async () => {
+    const erroring = blockErrorEndpoint(121);
+    const empty = endpoint({ head: 122, atHeight: null });
+    const healthy = endpoint({ head: 123, atHeight: { number: 123, hash: BLOCK_HASH } });
+    const a = makeAdapter([erroring, empty, healthy]);
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
+    expect(erroring.getBlock.calls).toHaveLength(1);
+    expect(empty.getBlock.calls).toHaveLength(1);
+    expect(healthy.getBlock.calls).toHaveLength(1);
   });
 
   it('depth 1: false (not true) when NO endpoint serves the receipt height', async () => {

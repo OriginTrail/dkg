@@ -1717,20 +1717,26 @@ export class EVMChainAdapterBase {
           receipt.blockNumber,
           this.finalityConfirmations,
         );
+        let providerHead: number | undefined;
         if (
           requiredBlockNumber > receipt.blockNumber
-          && (await provider.getBlockNumber()) < requiredBlockNumber
-        ) return null;
+        ) {
+          providerHead = await provider.getBlockNumber();
+          if (providerHead < requiredBlockNumber) return null;
+        }
         let atHeight;
         try {
           atHeight = await provider.getBlock(receipt.blockNumber);
         } catch (error) {
           const message = collectEvmErrorText(error);
           if (/\b(header not found|unknown block|block not found)\b/.test(message)) {
-            // Some clients report an above-head block as a JSON-RPC error rather
-            // than null. For this read that still means only "this endpoint has
-            // no view yet", so let the nullable failover walk try a sibling.
-            return null;
+            // Some clients report an above-head block as an error rather than
+            // null. Confirm that narrow condition before treating it as the
+            // nullable failover signal: the same bare message from an endpoint
+            // already at this height indicates a sync/restart fault and must
+            // surface instead of turning into a ten-minute receipt poll.
+            providerHead ??= await provider.getBlockNumber();
+            if (providerHead < receipt.blockNumber) return null;
           }
           throw error;
         }

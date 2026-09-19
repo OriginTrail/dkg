@@ -1568,9 +1568,8 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   // restart) falls back to the full chain read.
   const PERIOD_START = 1000n;
   const LIVE_DURATION = 50n;
-  // Default recording head. Past the period midpoint, so the period END
-  // (1050) — not the half-period safety re-read (1030 + 25) — is what ends
-  // the skip in the tests that are not about the safety re-read.
+  // Default recording head. The half-period bound would land after the period;
+  // the late-observation cap therefore forces a safety read at block 1049.
   const RECORD_HEAD = 1030;
 
   function makeSolvedState(overrides: Partial<FakeChainState> = {}): FakeChainState {
@@ -1599,15 +1598,21 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     };
   }
 
-  function chainReads(chain: ChainAdapter): { status: number; challenge: number; head: number } {
+  function chainReads(chain: ChainAdapter): {
+    status: number;
+    challenge: number;
+    head: number;
+    epoch: number;
+  } {
     return {
       status: vi.mocked(chain.getActiveProofPeriodStatus!).mock.calls.length,
       challenge: vi.mocked(chain.getNodeChallenge!).mock.calls.length,
       head: chain.getBlockNumber ? vi.mocked(chain.getBlockNumber).mock.calls.length : 0,
+      epoch: chain.getCurrentEpoch ? vi.mocked(chain.getCurrentEpoch).mock.calls.length : 0,
     };
   }
 
-  it('skips the status + challenge reads for the rest of a period it read as solved', async () => {
+  it('skips status + challenge reads until the in-period safety bound', async () => {
     const state = makeSolvedState();
     const chain = makeChain(state);
     const info = vi.fn();
@@ -1620,15 +1625,20 @@ describe('RandomSamplingProver — solved-period read skip', () => {
 
     // Tick 1 learns "solved" from the chain — the full pre-existing read.
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 1 });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 1, epoch: 1 });
 
-    // Ticks 2..4, up to the LAST block of the period: one head and one Chronos
-    // epoch read each, no status / challenge read, same outcome and log line.
-    for (const head of [1031, 1040, 1049]) {
+    // Ticks inside the safe window spend one head plus one Chronos read each,
+    // with no status or challenge read.
+    for (const head of [1031, 1040]) {
       state.blockNumber = head;
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     }
-    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 4 });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 3, epoch: 3 });
+
+    // A late observation is always revalidated on the last open-period block.
+    state.blockNumber = 1049;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 5, epoch: 5 });
     expect(info.mock.calls).toEqual(
       Array.from({ length: 4 }, () => [
         'rs.tick.already-solved',
@@ -1636,6 +1646,27 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       ]),
     );
     expect(state.createChallenge).not.toHaveBeenCalled();
+    await prover.close();
+  });
+
+  it('re-reads a late solved observation before rollover and detects a solved flag clear', async () => {
+    const state = makeSolvedState({ blockNumber: 1040 });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.challengeForNode = { ...state.challengeForNode!, solved: false };
+    state.blockNumber = 1048;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 2, epoch: 2 });
+
+    state.blockNumber = 1049;
+    expect(await prover.tick()).toEqual({ kind: 'cg-not-found', kaId: 7n });
+    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 4, epoch: 4 });
     await prover.close();
   });
 
@@ -1936,11 +1967,15 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
 
-    // Still solved on chain → re-recorded from head 1035; the period end is
-    // the nearer bound now.
-    state.blockNumber = 1049;
+    // Still solved on chain -> re-recorded from head 1035 and skipped again
+    // until the in-period late-observation cap.
+    state.blockNumber = 1048;
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
     expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+
+    state.blockNumber = 1049;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
     await prover.close();
   });
 
@@ -2033,7 +2068,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
 
     expect((await prover.tick()).kind).toBe('submitted');
-    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 0, epoch: 1 });
 
     state.challengeForNode = { ...challenge, solved: true };
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });

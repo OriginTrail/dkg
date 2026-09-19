@@ -51,6 +51,26 @@ describe('SolvedPeriodSkip', () => {
     expect(await skip.reusable()).toBeUndefined();
   });
 
+  it('caps a late observation at the last open-period block', async () => {
+    const { state, skip } = fixture();
+    state.head = 1075;
+    const context = await skip.captureReadContext();
+    expect(skip.observe({
+      context,
+      challenge: {
+        epoch: 3n,
+        activeProofPeriodStartBlock: 1000n,
+      } as NodeChallenge,
+      staleness: { stale: false, head: 1075n },
+      durationInBlocks: 100n,
+    })).toBe(true);
+
+    state.head = 1098;
+    expect(await skip.reusable()).toMatchObject({ rereadAtBlock: 1099n });
+    state.head = 1099;
+    expect(await skip.reusable()).toBeUndefined();
+  });
+
   it.each([
     ['binding rotation', (state: ReturnType<typeof fixture>['state']) => { state.bindingId = 'rs-b:rss-b'; }],
     ['epoch transition', (state: ReturnType<typeof fixture>['state']) => { state.epoch = 4n; }],
