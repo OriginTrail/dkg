@@ -389,14 +389,51 @@ function normalizeMerkleRoot(value: unknown): string | undefined {
   return /^0x[0-9a-f]{64}$/.test(normalized) ? normalized : undefined;
 }
 
-function decodeMerkleRootEntries(value: unknown): readonly KnowledgeAssetMerkleRootEntry[] {
-  if (!Array.isArray(value)) return Object.freeze([]);
+/**
+ * The WHOLE replacement list, or nothing at all.
+ *
+ * `…MerkleRootsUpdated` replaces a KA's entire root stack, so a list that
+ * decodes to fewer entries than the chain emitted is not a smaller answer — it
+ * is a DIFFERENT stack: a different top root and every `rootIndex` shifted by
+ * however many entries were dropped. Of everything this log serves, that is the
+ * only value that could hand a verifier a root the chain does not hold, so one
+ * unreadable entry voids the event instead of being skipped past. The reducer
+ * sees no replacement and marks the KA unservable, and the caller goes live.
+ *
+ * The publisher is deliberately not part of this: contract gap #2674 leaves it
+ * legitimately absent, and it names no root.
+ */
+/**
+ * A tuple field by name, falling back to its position.
+ *
+ * ethers' `Result` THROWS on an out-of-range positional read rather than
+ * answering `undefined`, and this decoder reads by position precisely because
+ * the entry's shape is not fixed across ABI revisions. Without the guard, one
+ * `merkleRoots` list narrower than expected escapes the decoder entirely and
+ * refuses every KA on the node instead of only the one it belongs to — the
+ * containment rule `knowledge-asset-reducer.ts` opens with.
+ */
+function readMerkleRootEntryField(item: unknown, name: string, index: number): unknown {
+  try {
+    const named = (item as Record<string, unknown>)[name];
+    if (named !== undefined) return named;
+    return (item as Record<number, unknown>)[index];
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeMerkleRootEntries(
+  value: unknown,
+): readonly KnowledgeAssetMerkleRootEntry[] | undefined {
+  if (!Array.isArray(value)) return undefined;
   const entries: KnowledgeAssetMerkleRootEntry[] = [];
   for (const item of value) {
-    const record = item as { merkleRoot?: unknown; publisher?: unknown; [index: number]: unknown };
-    const merkleRoot = normalizeMerkleRoot(record.merkleRoot ?? record[0]);
-    if (merkleRoot === undefined) continue;
-    const publisher = normalizeChainEventLogAddress(String(record.publisher ?? record[1] ?? ''));
+    const merkleRoot = normalizeMerkleRoot(readMerkleRootEntryField(item, 'merkleRoot', 0));
+    if (merkleRoot === undefined) return undefined;
+    const publisher = normalizeChainEventLogAddress(
+      String(readMerkleRootEntryField(item, 'publisher', 1) ?? ''),
+    );
     entries.push(Object.freeze(
       publisher === undefined ? { merkleRoot } : { merkleRoot, publisher },
     ));

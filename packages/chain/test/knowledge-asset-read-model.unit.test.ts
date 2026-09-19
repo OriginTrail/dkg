@@ -78,6 +78,25 @@ const registration = (
   { blockNumber, ...extra },
 );
 
+/**
+ * The graph's own `ContextGraphCreated` — same address, same `topic1`.
+ *
+ * The read model resolves the ordinal origin from THIS row rather than from a
+ * caller's parameter, so a fixture without one is a graph the log genuinely
+ * cannot place, and every ordinal read of it must refuse.
+ */
+const creation = (
+  blockNumber: number,
+  contextGraphId: bigint,
+  extra: { logIndex?: number; settled?: boolean } = {},
+): ChainEventLogRow => row(
+  cgInterface,
+  CG_STORAGE,
+  'ContextGraphCreated',
+  [contextGraphId, author(0x11), hash(0x22), [author(0x11)], 7n, 1, 0, author(0x44), 7n],
+  { blockNumber, ...extra },
+);
+
 const created = (
   blockNumber: number,
   kaId: bigint,
@@ -106,8 +125,51 @@ const updated = (
   { blockNumber, ...extra },
 );
 
+/** `KnowledgeAssetMerkleRootAdded(uint256 indexed id, bytes32 merkleRoot)`. */
+const rootAdded = (
+  blockNumber: number,
+  kaId: bigint,
+  merkleRoot: string,
+  extra: { logIndex?: number; settled?: boolean } = {},
+): ChainEventLogRow => row(
+  kaInterface,
+  KA_STORAGE,
+  'KnowledgeAssetMerkleRootAdded',
+  [kaId, merkleRoot],
+  { blockNumber, ...extra },
+);
+
+/** `…MerkleRootRemoved` names the root it REMOVES, not the one it exposes. */
+const rootRemoved = (
+  blockNumber: number,
+  kaId: bigint,
+  merkleRoot: string,
+  extra: { logIndex?: number; settled?: boolean } = {},
+): ChainEventLogRow => row(
+  kaInterface,
+  KA_STORAGE,
+  'KnowledgeAssetMerkleRootRemoved',
+  [kaId, merkleRoot],
+  { blockNumber, ...extra },
+);
+
+/** Whole-stack replacement: `MerkleRoot[]` of (publisher, merkleRoot, timestamp). */
+const rootsUpdated = (
+  blockNumber: number,
+  kaId: bigint,
+  roots: readonly string[],
+  extra: { logIndex?: number; settled?: boolean } = {},
+): ChainEventLogRow => row(
+  kaInterface,
+  KA_STORAGE,
+  'KnowledgeAssetMerkleRootsUpdated',
+  [kaId, roots.map((merkleRoot) => [author(0x55), merkleRoot, 1_700_000_000n])],
+  { blockNumber, ...extra },
+);
+
 interface SeedOptions {
   readonly cgCoverage?: Partial<ChainEventLogCoverage>;
+  readonly authorityCoverage?: Partial<ChainEventLogCoverage>;
   readonly kaCoverage?: Partial<ChainEventLogCoverage>;
   readonly settledBlockNumber?: number;
   readonly rows?: readonly ChainEventLogRow[];
@@ -139,6 +201,16 @@ function seeded(options: SeedOptions = {}): MemoryChainEventLogStore {
         coveredThroughBlock: 105,
         floorBlock: CG_FLOOR,
         ...options.cgCoverage,
+      },
+      {
+        // The SECOND family on the same address: where `ContextGraphCreated`
+        // lives, and so where the ordinal origin is read from.
+        family: 'context-graph-authority',
+        address: CG_STORAGE.toLowerCase(),
+        coveredFromBlock: CG_FLOOR,
+        coveredThroughBlock: 105,
+        floorBlock: CG_FLOOR,
+        ...options.authorityCoverage,
       },
       {
         family: 'knowledge-asset',
@@ -246,44 +318,92 @@ describe('knowledge asset read model — KaCount / KaAt', () => {
   it('returns ordinals in (block, logIndex) order', async () => {
     const store = seeded({
       rows: [
+        creation(40, 7n),
         registration(50, 7n, 100n, { logIndex: 3 }),
         registration(50, 7n, 101n, { logIndex: 1 }),
         registration(60, 7n, 102n),
         registration(61, 8n, 999n),
       ],
     });
-    const list = await model(store).readContextGraphKaList(7n, 40);
+    const list = await model(store).readContextGraphKaList(7n);
     expect(list?.kaIds).toEqual([101n, 100n, 102n]);
   });
 
   it('refuses when coverage does not reach the graph creation block', async () => {
     const store = seeded({
       cgCoverage: { coveredFromBlock: 45 },
-      rows: [registration(50, 7n, 100n)],
+      rows: [creation(40, 7n), registration(50, 7n, 100n)],
     });
-    // The graph was created at 40 and the log only holds from 45: an ordinal
-    // computed here could be missing the graph's first KAs entirely.
-    await expect(model(store).readContextGraphKaList(7n, 40)).resolves.toBeUndefined();
+    // The graph was created at 40 and the KA family only holds from 45: an
+    // ordinal computed here could be missing the graph's first KAs entirely.
+    await expect(model(store).readContextGraphKaList(7n)).resolves.toBeUndefined();
   });
 
   it('serves an empty list once coverage reaches the creation block', async () => {
-    const store = seeded({ rows: [registration(50, 8n, 100n)] });
-    const list = await model(store).readContextGraphKaList(7n, 40);
+    const store = seeded({ rows: [creation(40, 7n), registration(50, 8n, 100n)] });
+    const list = await model(store).readContextGraphKaList(7n);
     expect(list?.kaIds).toEqual([]);
   });
 
   it('never double-counts a replayed registration', async () => {
     const store = seeded({
       rows: [
+        creation(40, 7n),
         registration(50, 7n, 100n),
         registration(51, 7n, 100n, { logIndex: 5 }),
         registration(52, 7n, 101n),
       ],
     });
-    const list = await model(store).readContextGraphKaList(7n, 40);
+    const list = await model(store).readContextGraphKaList(7n);
     // A duplicate appended would shift 101n from ordinal 1 to ordinal 2 and
     // make every later `getContextGraphKaAt` disagree with the chain.
     expect(list?.kaIds).toEqual([100n, 101n]);
+  });
+
+  it('refuses a graph whose creation row the log does not hold', async () => {
+    // The registrations are right there and the coverage is complete, so a
+    // model that took the origin on trust would answer confidently. Without
+    // the creation row nothing proves ordinal 0 is the first row held rather
+    // than the first row WALKED.
+    const store = seeded({ rows: [registration(50, 7n, 100n), registration(60, 7n, 101n)] });
+    await expect(model(store).readContextGraphKaList(7n)).resolves.toBeUndefined();
+  });
+
+  it('does not truncate the list when the graph was created earlier than the first row read',
+    async () => {
+      // This is the caller-supplied-origin defect, stated as an outcome: the
+      // graph really starts at 40, and the old signature let a caller pass 100
+      // and receive a list beginning at kaId 222.
+      const store = seeded({
+        rows: [creation(40, 7n), registration(50, 7n, 111n), registration(90, 7n, 222n)],
+      });
+      const list = await model(store).readContextGraphKaList(7n);
+      expect(list?.kaIds).toEqual([111n, 222n]);
+    });
+
+  it('refuses rather than serving an empty list when the topic filter matches nothing',
+    async () => {
+      // A `topic1` encoding that disagreed with what the tick stored would make
+      // every filtered read come back empty. The graph's own creation row goes
+      // through the SAME filter, so it vanishes too — and an empty list is then
+      // refused instead of served as a confident count of zero.
+      const store = seeded({
+        rows: [
+          { ...creation(40, 7n), topics: [creation(40, 7n).topics[0]!, `0x${'ff'.repeat(32)}`] },
+          { ...registration(50, 7n, 100n), topics: [
+            registration(50, 7n, 100n).topics[0]!,
+            `0x${'ff'.repeat(32)}`,
+          ] },
+        ],
+      });
+      await expect(model(store).readContextGraphKaList(7n)).resolves.toBeUndefined();
+    });
+
+  it('does not take the creation block from an unsettled row in the finalized view', async () => {
+    const store = seeded({
+      rows: [creation(40, 7n, { settled: false }), registration(50, 7n, 100n)],
+    });
+    await expect(model(store).readContextGraphKaList(7n)).resolves.toBeUndefined();
   });
 });
 
@@ -351,6 +471,132 @@ describe('knowledge asset read model — latest merkle root', () => {
   });
 });
 
+describe('knowledge asset read model — the three admin root branches', () => {
+  it('MerkleRootAdded pushes a version and moves rootIndex with it', async () => {
+    const store = seeded({
+      rows: [created(30, 55n, root(0xa1)), rootAdded(40, 55n, root(0xa2))],
+    });
+    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
+      merkleRoot: root(0xa2),
+      rootIndex: 1,
+    });
+  });
+
+  it('MerkleRootRemoved exposes the version UNDERNEATH, not the one it names', async () => {
+    // The whole reason the fold keeps the stack instead of "the latest root":
+    // the event names 0xa2, and the correct answer afterwards is 0xa1 at
+    // rootIndex 0 — which only the history below the removal can supply.
+    const store = seeded({
+      rows: [
+        created(30, 55n, root(0xa1)),
+        rootAdded(40, 55n, root(0xa2)),
+        rootRemoved(50, 55n, root(0xa2)),
+      ],
+    });
+    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
+      merkleRoot: root(0xa1),
+      rootIndex: 0,
+      author: author(0x11),
+    });
+  });
+
+  it('refuses when MerkleRootRemoved names a root the fold does not hold on top', async () => {
+    // Either history below was never walked or the fold disagrees with the
+    // chain. Popping anyway would serve 0xa1 as the latest when the chain says
+    // something else entirely.
+    const store = seeded({
+      rows: [created(30, 55n, root(0xa1)), rootRemoved(50, 55n, root(0xa9))],
+    });
+    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toBeUndefined();
+  });
+
+  it('MerkleRootsUpdated replaces the whole stack and re-establishes its bottom', async () => {
+    // No create is held at all, and the replacement is still servable: the
+    // event names every version the chain holds, so the bottom is known.
+    const store = seeded({
+      rows: [rootsUpdated(50, 55n, [root(0xb1), root(0xb2), root(0xb3)])],
+    });
+    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
+      merkleRoot: root(0xb3),
+      rootIndex: 2,
+    });
+  });
+
+  it('refuses an EMPTY replacement rather than reading it as "no versions"', async () => {
+    const store = seeded({ rows: [created(30, 55n, root(0xa1)), rootsUpdated(50, 55n, [])] });
+    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toBeUndefined();
+  });
+});
+
+describe('knowledge asset read model — a partially decoded replacement', () => {
+  /**
+   * The same signature carrying a `bytes` root instead of a `bytes32` one.
+   *
+   * This is the shape the decoder's own `record.merkleRoot ?? record[0]`
+   * fallback exists for, and it is the only way to build a list in which SOME
+   * entries normalize and others do not — with the shipped `bytes32` tuple
+   * every entry is well-formed by construction, so the shipped ABI alone
+   * cannot exercise the branch at all.
+   */
+  const variantInterface = new ethers.Interface([
+    'event KnowledgeAssetCreated(uint256 indexed id, address indexed author, string operationId,'
+    + ' bytes32 merkleRoot, uint256 byteSize, uint256 epochs, uint256 tokenAmount,'
+    + ' uint256 scoreFunctionId, bool isImmutable)',
+    'event KnowledgeAssetMerkleRootsUpdated(uint256 indexed id,'
+    + ' tuple(bytes merkleRoot)[] merkleRoots)',
+  ]);
+
+  function variantModel(rows: readonly ChainEventLogRow[]) {
+    const store = seeded({ rows });
+    return createKnowledgeAssetReadModel({
+      scope: SCOPE,
+      store,
+      registry: new ChainEventDecoderRegistry()
+        .registerContextGraphAuthority(CG_STORAGE, cgInterface)
+        .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface)
+        .registerKnowledgeAssets(KA_STORAGE, variantInterface),
+      contextGraphStorageAddress: CG_STORAGE,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+    });
+  }
+
+  const variantRootsUpdated = (
+    blockNumber: number,
+    kaId: bigint,
+    roots: readonly string[],
+  ): ChainEventLogRow => row(
+    variantInterface,
+    KA_STORAGE,
+    'KnowledgeAssetMerkleRootsUpdated',
+    [kaId, roots.map((merkleRoot) => [merkleRoot])],
+    { blockNumber },
+  );
+
+  it('serves a replacement every entry of which decoded', async () => {
+    const view = variantModel([variantRootsUpdated(50, 55n, [root(0xb1), root(0xb2)])]);
+    await expect(view.readLatestMerkleRoot(55n)).resolves.toEqual({
+      merkleRoot: root(0xb2),
+      rootIndex: 1,
+    });
+  });
+
+  it('refuses the WHOLE replacement when one entry does not decode', async () => {
+    // Dropping the bad entry would serve 0xb1 at rootIndex 0 for a stack whose
+    // chain top is the entry that failed. That is this branch's one way to feed
+    // a verifier a root the chain does not hold, and a shorter list is a
+    // DIFFERENT stack, not a partial one.
+    const view = variantModel([variantRootsUpdated(50, 55n, [root(0xb1), '0xdead'])]);
+    await expect(view.readLatestMerkleRoot(55n)).resolves.toBeUndefined();
+  });
+
+  it('refuses even when the entry that fails is the LAST one', async () => {
+    const view = variantModel([
+      variantRootsUpdated(50, 55n, [root(0xb1), root(0xb2), '0x00']),
+    ]);
+    await expect(view.readLatestMerkleRoot(55n)).resolves.toBeUndefined();
+  });
+});
+
 describe('knowledge asset read model — allocator floor', () => {
   it('serves the highest ordinal under complete coverage', async () => {
     const store = seeded({
@@ -377,6 +623,35 @@ describe('knowledge asset read model — allocator floor', () => {
     const store = seeded({ rows: [created(30, (3n << 96n) | 7n, root(0xa1), author(0x22))] });
     await expect(model(store).readMaxKaNumberForAuthor(author(0x44))).resolves.toBe(0n);
   });
+
+  it('refuses when a create in the window carried no decodable author', async () => {
+    // Coverage is complete and the fold is clean; what is missing is the ONE
+    // property the floor is actually built from. Gating on coverage alone
+    // returns 0n here — a floor below every number already handed out.
+    const authorless = new ethers.Interface([
+      'event KnowledgeAssetCreated(uint256 indexed id, string operationId, bytes32 merkleRoot)',
+    ]);
+    const store = seeded({
+      rows: [row(
+        authorless,
+        KA_STORAGE,
+        'KnowledgeAssetCreated',
+        [(3n << 96n) | 7n, 'op-1', root(0xa1)],
+        { blockNumber: 30 },
+      )],
+    });
+    const view = createKnowledgeAssetReadModel({
+      scope: SCOPE,
+      store,
+      registry: new ChainEventDecoderRegistry()
+        .registerContextGraphAuthority(CG_STORAGE, cgInterface)
+        .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface)
+        .registerKnowledgeAssets(KA_STORAGE, authorless),
+      contextGraphStorageAddress: CG_STORAGE,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+    });
+    await expect(view.readMaxKaNumberForAuthor(author(0x22))).resolves.toBeUndefined();
+  });
 });
 
 describe('knowledge asset read model — no log', () => {
@@ -384,7 +659,7 @@ describe('knowledge asset read model — no log', () => {
     const store = new MemoryChainEventLogStore();
     const view = model(store);
     await expect(view.readContextGraphForKa(1n)).resolves.toBeUndefined();
-    await expect(view.readContextGraphKaList(1n, 0)).resolves.toBeUndefined();
+    await expect(view.readContextGraphKaList(1n)).resolves.toBeUndefined();
     await expect(view.readLatestMerkleRoot(1n)).resolves.toBeUndefined();
     await expect(view.readMaxKaNumberForAuthor(author(0x11))).resolves.toBeUndefined();
   });

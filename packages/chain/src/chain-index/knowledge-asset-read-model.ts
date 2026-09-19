@@ -23,11 +23,14 @@
  *   the middle has the right top and the wrong `rootIndex`.
  */
 
+import type { RawContextGraphAuthorityIndexEvent } from
+  '../context-graph-authority-index-reducer.js';
 import {
   chainEventLogCoverageIncludes,
   chainEventLogCoverageIsComplete,
   findChainEventLogCoverage,
   normalizeChainEventLogAddress,
+  normalizeChainEventLogBlockNumber,
   normalizeChainEventLogHash,
   type ChainEventLogStore,
 } from './chain-event-log.js';
@@ -91,13 +94,15 @@ export interface KnowledgeAssetReadModel {
     options?: KnowledgeAssetReadOptions,
   ): Promise<ContextGraphForKaAnswer | undefined>;
   /**
-   * The per-graph KA list. `createdBlockNumber` is the graph's creation block:
-   * the ordinals are only correct once coverage reaches it, so the caller has
-   * to say which block that is rather than the model assuming block 0.
+   * The per-graph KA list.
+   *
+   * The graph's creation block is resolved FROM THE LOG, never from the caller:
+   * the ordinals are only correct once coverage reaches it, and a caller that
+   * named a block too high silently truncated the list — `getContextGraphKaAt`
+   * then disagreed with the chain from that point on forever.
    */
   readContextGraphKaList(
     contextGraphId: bigint,
-    createdBlockNumber: number,
     options?: KnowledgeAssetReadOptions,
   ): Promise<ContextGraphKaList | undefined>;
   /** `getLatestMerkleRoot(kaId)` with the `rootIndex` that names the version. */
@@ -116,6 +121,36 @@ interface ResolvedWindow {
   readonly fromBlockNumber: number;
   readonly throughBlockNumber: number;
   readonly complete: boolean;
+}
+
+/**
+ * The graph id as it sits in `topic1`.
+ *
+ * The SAME encoding the tick stores (lowercase, zero-padded to 32 bytes) and
+ * the same one `eth_getLogs` uses, because the store filters topics with a
+ * plain `IN (…)` and nothing folds case on either side.
+ */
+function contextGraphIdTopic(contextGraphId: bigint): string {
+  return `0x${contextGraphId.toString(16).padStart(64, '0')}`;
+}
+
+/** The block a graph was created at, from the log's own `ContextGraphCreated`. */
+function creationBlockOf(
+  events: readonly RawContextGraphAuthorityIndexEvent[],
+  contextGraphId: bigint,
+): number | undefined {
+  for (const event of events) {
+    if (event.name !== 'ContextGraphCreated') continue;
+    // The read was already filtered to this graph's topic; comparing the
+    // DECODED id as well is what makes that filter's correctness observable
+    // here rather than assumed.
+    if (typeof event.contextGraphId !== 'bigint' || event.contextGraphId !== contextGraphId) {
+      continue;
+    }
+    const blockNumber = normalizeChainEventLogBlockNumber(event.blockNumber);
+    if (blockNumber !== undefined) return blockNumber;
+  }
+  return undefined;
 }
 
 export function createKnowledgeAssetReadModel(
@@ -236,11 +271,44 @@ export function createKnowledgeAssetReadModel(
 
     async readContextGraphKaList(
       contextGraphId: bigint,
-      createdBlockNumber: number,
       readOptions: KnowledgeAssetReadOptions = {},
     ): Promise<ContextGraphKaList | undefined> {
-      if (!Number.isSafeInteger(createdBlockNumber) || createdBlockNumber < 0) return undefined;
+      if (contextGraphId < 0n) return undefined;
       const view = readOptions.view ?? 'finalized';
+      // `ContextGraphCreated` and `KnowledgeAssetRegisteredToContextGraph` both
+      // sit on `ContextGraphStorage` and both carry the graph id as their FIRST
+      // indexed argument, so ONE `topic1`-filtered read answers both halves of
+      // this question: where the ordinals start, and what has been registered
+      // since. It also makes the filter self-checking — if the stored topic
+      // encoding did not match the one built here, the graph's own creation row
+      // would not come back either, and an empty list is refused rather than
+      // served as a confident zero.
+      const topic1 = [contextGraphIdTopic(contextGraphId)];
+      const creationWindow = await resolveWindow(
+        'context-graph-authority',
+        contextGraphStorageAddress,
+        view,
+        readOptions.ownWrite,
+        undefined,
+      );
+      if (creationWindow === undefined) return undefined;
+      const rows = await store.readEvents(scope, {
+        fromBlockNumber: creationWindow.fromBlockNumber,
+        throughBlockNumber: creationWindow.throughBlockNumber,
+        addresses: [contextGraphStorageAddress],
+        topic1,
+      });
+      const horizonRows = view === 'finalized' ? rows.filter((row) => row.settled) : rows;
+      const createdBlockNumber = creationBlockOf(
+        registry.decodeContextGraphAuthority(horizonRows),
+        contextGraphId,
+      );
+      // No creation row in the walked range means the log cannot say where this
+      // graph's ordinal 0 is. A list folded from the middle has the wrong
+      // `getContextGraphKaAt` for every position, so there is no partial answer
+      // to give — only a live read.
+      if (createdBlockNumber === undefined) return undefined;
+
       const window = await resolveWindow(
         'context-graph-ka',
         contextGraphStorageAddress,
@@ -249,23 +317,33 @@ export function createKnowledgeAssetReadModel(
         createdBlockNumber,
       );
       if (window === undefined) return undefined;
-      // `topic1` IS the context graph id on this event, so the per-graph
-      // backfill and this read use the same one bounded filter.
-      const fold = await foldRegistrations(
-        window,
-        view,
-        [`0x${contextGraphId.toString(16).padStart(64, '0')}`],
+      // Never above what was actually read. The two families keep separate
+      // coverage on the same address, so the KA family can claim a block this
+      // one read stopped below; folding to the lower of the two under-reports
+      // the horizon, which costs a re-read and never a missing registration.
+      const throughBlockNumber = Math.min(
+        window.throughBlockNumber,
+        creationWindow.throughBlockNumber,
       );
-      return fold.listsByContextGraph.get(contextGraphId.toString())
-        // A graph with no registrations yet is a real, servable answer HERE
-        // (unlike `kaToContextGraph`) because coverage was proven back to the
-        // graph's own creation block: there is nowhere earlier for a
-        // registration to hide.
-        ?? Object.freeze({
-          contextGraphId,
-          kaIds: Object.freeze([]),
-          throughBlockNumber: window.throughBlockNumber,
-        });
+      const fold = reduceContextGraphKaRegistrations(
+        registry.decodeContextGraphKaRegistrations(
+          horizonRows.filter((row) => row.blockNumber >= createdBlockNumber
+            && row.blockNumber <= throughBlockNumber),
+        ),
+      );
+      const list = fold.listsByContextGraph.get(contextGraphId.toString());
+      if (list !== undefined) {
+        return Object.freeze({ ...list, throughBlockNumber });
+      }
+      // A graph with no registrations yet is a real, servable answer HERE
+      // (unlike `kaToContextGraph`) because coverage was proven back to the
+      // graph's own creation block: there is nowhere earlier for a registration
+      // to hide, and the creation row proves the filter is looking.
+      return Object.freeze({
+        contextGraphId,
+        kaIds: Object.freeze([]),
+        throughBlockNumber,
+      });
     },
 
     async readLatestMerkleRoot(
@@ -321,6 +399,12 @@ export function createKnowledgeAssetReadModel(
       });
       const horizonRows = view === 'finalized' ? rows.filter((row) => row.settled) : rows;
       const fold = reduceKnowledgeAssetEvents(registry.decodeKnowledgeAssets(horizonRows));
+      // Complete coverage is the wrong property ON ITS OWN. The floor is built
+      // only from creates that carried a decodable author, so an ABI that
+      // yields none folds to an empty map — and an empty map under complete
+      // coverage reads as a confident zero, which hands out a KA number the
+      // chain has already given away.
+      if (fold.authorlessCreates > 0) return undefined;
       return fold.maxKaNumberByAuthor.get(normalized) ?? 0n;
     },
   });

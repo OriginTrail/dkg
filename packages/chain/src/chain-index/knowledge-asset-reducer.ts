@@ -66,6 +66,8 @@ export interface KnowledgeAssetFold {
   readonly rootsByKa: ReadonlyMap<string, KnowledgeAssetRootStack>;
   /** `getMaxKaNumberForAuthor`: the highest low-96-bit ordinal seen per author. */
   readonly maxKaNumberByAuthor: ReadonlyMap<string, bigint>;
+  /** Creates with no decodable author; any at all void the allocator floor. */
+  readonly authorlessCreates: number;
   /** Highest block any folded row came from; 0 when nothing was folded. */
   readonly throughBlockNumber: number;
 }
@@ -139,6 +141,16 @@ export function reduceKnowledgeAssetEvents(
 ): Readonly<{
   rootsByKa: ReadonlyMap<string, KnowledgeAssetRootStack>;
   maxKaNumberByAuthor: ReadonlyMap<string, bigint>;
+  /**
+   * Creates in this fold that carried no decodable author.
+   *
+   * `maxKaNumberByAuthor` is only populated for creates that HAVE an author, so
+   * an ABI whose `KnowledgeAssetCreated` never yields one folds silently to an
+   * empty map — and an empty map under complete coverage reads as a floor of
+   * zero, which hands out a KA number that is already taken. Complete coverage
+   * is the wrong property to gate the floor on; this is the right one.
+   */
+  authorlessCreates: number;
   throughBlockNumber: number;
 }> {
   interface MutableStack {
@@ -149,6 +161,7 @@ export function reduceKnowledgeAssetEvents(
   }
   const stacks = new Map<string, MutableStack>();
   const maxKaNumberByAuthor = new Map<string, bigint>();
+  let authorlessCreates = 0;
   let throughBlockNumber = 0;
 
   const stackFor = (kaId: bigint): MutableStack => {
@@ -179,7 +192,9 @@ export function reduceKnowledgeAssetEvents(
           ...(event.author === undefined ? {} : { author: event.author }),
         })];
         stack.createdSeen = true;
-        if (event.author !== undefined) {
+        if (event.author === undefined) {
+          authorlessCreates += 1;
+        } else {
           const number = event.kaId & KA_NUMBER_MASK;
           const held = maxKaNumberByAuthor.get(event.author);
           if (held === undefined || number > held) maxKaNumberByAuthor.set(event.author, number);
@@ -211,6 +226,11 @@ export function reduceKnowledgeAssetEvents(
         break;
       }
       case 'KnowledgeAssetMerkleRootsUpdated': {
+        // Absent means the decoder could not read the list WHOLE: one entry it
+        // cannot normalize voids the event
+        // (`chain-event-decoders.ts:decodeMerkleRootEntries`), because a
+        // partial replacement is a DIFFERENT stack rather than a shorter one —
+        // wrong top root, every `rootIndex` shifted. Unservable, not partial.
         const replacement = event.merkleRoots ?? [];
         if (replacement.length === 0) {
           stack.unservable = 'inconsistent';
@@ -244,7 +264,12 @@ export function reduceKnowledgeAssetEvents(
     }));
   }
 
-  return Object.freeze({ rootsByKa, maxKaNumberByAuthor, throughBlockNumber });
+  return Object.freeze({
+    rootsByKa,
+    maxKaNumberByAuthor,
+    authorlessCreates,
+    throughBlockNumber,
+  });
 }
 
 /** Both folds together, as the read model consumes them. */
@@ -259,6 +284,7 @@ export function reduceKnowledgeAssetFold(
     contextGraphByKa: lists.contextGraphByKa,
     rootsByKa: roots.rootsByKa,
     maxKaNumberByAuthor: roots.maxKaNumberByAuthor,
+    authorlessCreates: roots.authorlessCreates,
     throughBlockNumber: Math.max(lists.throughBlockNumber, roots.throughBlockNumber),
   });
 }
