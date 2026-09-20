@@ -80,6 +80,7 @@ describe('V10 identity-wallet browser transaction integration', () => {
         path: url.pathname,
         url,
       } as unknown as RequestContext).catch(() => {
+        // Never reflect exception details: they may contain stack traces or attacker-controlled HTML.
         res.statusCode = 500;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.end('Internal server error');
