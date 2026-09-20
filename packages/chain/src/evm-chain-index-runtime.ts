@@ -252,15 +252,45 @@ function chainIndexHubWindowMaxAgeMs(intervalMs: number): number {
 
 /**
  * How old the tick's head may be before it can no longer ANCHOR an authority
- * read.
+ * read: `min(max(3T, floor), 5m)`, which is the projection cache's `staleMs`
+ * to the millisecond.
  *
- * Deliberately the same `max(3T, floor)` as the Hub window above and as the
- * projection cache's stale-if-error window: T is the one cadence this node has,
- * so a node with three consecutive missed passes is a node whose log is not
- * describing the chain right now, whichever reader is asking.
+ * `max(3T, floor)` is the shape every age bound in this node shares — three
+ * missed passes for an operator-sized T, never shorter than one slow failover
+ * pass — and the CEILING is why this is not simply the Hub window's helper
+ * reused.
+ *
+ * WHY THE CEILING. The authority log path is documented as the projection
+ * cache's four gates minus the tick gate, and a reader is entitled to conclude
+ * from that that the log can never answer something the cache would have
+ * refused. Without the cap it can. The cache takes
+ * `min(max(3T, 15s), CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS)`,
+ * so the two agree for every `T <= 100s` and diverge above it — at T=150s the
+ * cache stops at 300s while an uncapped log ran to 450s, and a 400s-old anchor
+ * then served through the log and was refused by the cache holding the same
+ * view. `resolveContextGraphAuthorityIndexTickMs` accepts any positive integer,
+ * so that T is legal configuration, and the chain-time gate does not save it:
+ * a host clock behind the chain's, or a devnet after `evm_increaseTime`, is a
+ * case both sides already contemplate as normal.
+ *
+ * The ceiling is the cache's own, for the cache's own stated reason: five
+ * minutes is the RFC-64 accepted-authority refresh interval, so no link in that
+ * path may be staler. It caps the useful value of `chain.indexTickMs` here
+ * exactly as the cache documents it capping it there — above ~100s the log
+ * refuses after two missed passes rather than three, which costs the live scan
+ * that was there before the log existed and nothing else.
+ *
+ * NOT applied to the Hub rotation window above. That bound is not claimed
+ * equivalent to anything the cache does, it gates rotation detection rather
+ * than an authority answer, and its own note says what it is for: whether the
+ * TICK is still running. Capping it would be borrowing a rationale that is not
+ * about it.
  */
 function chainIndexAuthorityAnchorMaxAgeMs(intervalMs: number): number {
-  return Math.max(3 * intervalMs, CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS);
+  return Math.min(
+    Math.max(3 * intervalMs, CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS),
+    CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+  );
 }
 
 /**
@@ -519,9 +549,14 @@ export function createEvmChainIndexRuntime(
           registry,
           contextGraphStorageAddress,
           knowledgeAssetStorageAddress: options.knowledgeAssetStorage.address,
-          // ONE liveness bound for the whole log: the same `max(3T, 15s)` the
-          // Hub window and the authority anchor use. Every reader of a frozen
-          // tick must degrade to the chain, not to the last thing it heard.
+          // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
+          // ceiling included, because these reads answer the same catalog
+          // traffic from the same stored rows and there is no reason for one of
+          // them to outlive the other. The Hub window's bound is the same
+          // `max(3T, 15s)` without the ceiling; see
+          // {@link chainIndexAuthorityAnchorMaxAgeMs} for why that one is left
+          // where it is. Every reader of a frozen tick must degrade to the
+          // chain, not to the last thing it heard.
           maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
           now,
         }),

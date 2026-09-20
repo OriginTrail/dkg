@@ -118,9 +118,11 @@ export interface ContextGraphAuthorityProjectionServedEvidence {
    * For a refresh that asked the chain that is the time since the refresh
    * began — captured before any RPC, so scan duration is included and the age
    * is over-reported rather than under. For a `log` fold it is the time since
-   * the TICK fetched the head, which can be up to `max(3T, 15s)` more. Both
-   * are the same statement: nothing was observed about the chain more recently
-   * than this.
+   * the TICK asked for the head it committed, which can be up to
+   * `min(max(3T, 15s), 5m)` more — and which is stamped before that tick's own
+   * head RPC, so the tick's pass duration is inside it under the identical
+   * discipline. Both are the same statement: nothing was observed about the
+   * chain more recently than this.
    *
    * It dates the OBSERVATION, never the observer. On a `log` fold the instant
    * it points at belongs to the background tick, so it cannot be read as "this

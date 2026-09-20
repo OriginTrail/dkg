@@ -70,6 +70,32 @@ export interface ChainEventLogHead {
    * what the answer is an answer ABOUT.
    */
   readonly timestampSeconds: number;
+  /**
+   * When the tick ASKED for this head — stamped before the head RPC, never at
+   * the commit that stored it.
+   *
+   * The distinction is the whole value of the field. A pass reads the head
+   * first and commits last, and between them sit an identity verification, an
+   * `eth_getLogs` and a settled-boundary read, each under its own capped
+   * watchdog policy. A commit-time stamp therefore dates the END of the pass
+   * while naming the head's fetch, which makes every age derived from it short
+   * by the pass duration.
+   *
+   * Two things measure against it and both need the conservative side:
+   *
+   *  - LIVENESS. The authority anchor and the knowledge-asset read model refuse
+   *    past `min(max(3T, 15s), 5m)`, the Hub rotation window past the uncapped
+   *    `max(3T, 15s)`, so a tick that stopped committing cannot pin its last
+   *    head forever. A stamp taken
+   *    before the head RPC only ever makes these refuse SOONER, and a refusal
+   *    is the live read that was there before the log existed — never a wrong
+   *    answer. It still catches every frozen tick, because a stamp becomes
+   *    visible to a reader only by being committed.
+   *  - DATA AGE. The authority reader hands this instant to the projection
+   *    cache as `dataFetchedAtMs`, which is what `onServed.ageMs` reports and
+   *    what the RFC-64 breaker dates its evidence by. That number must never
+   *    move towards zero.
+   */
   readonly fetchedAtMs: number;
 }
 

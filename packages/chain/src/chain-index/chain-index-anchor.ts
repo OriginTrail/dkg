@@ -25,11 +25,15 @@ import {
  * admission, and none of it may be lost by reading the log instead:
  *
  * 1. FRESHNESS IN FETCH TIME. A live head is zero milliseconds old by
- *    construction; a stored one is only as fresh as the last pass that
- *    committed it. {@link ResolveChainIndexAuthorityAnchorInput.maxHeadAgeMs}
- *    is that bound — the same `max(3T, 15s)` shape the Hub window and the
- *    projection cache already use — and it is what makes a tick that stopped
- *    committing refuse instead of pinning its last head forever.
+ *    construction; a stored one is only as fresh as the moment the last
+ *    committed pass ASKED for it — which is earlier than that pass's commit by
+ *    the whole of its duration, and is the instant
+ *    `ChainEventLogHead.fetchedAtMs` carries for exactly that reason.
+ *    {@link ResolveChainIndexAuthorityAnchorInput.maxHeadAgeMs} is that bound —
+ *    `min(max(3T, 15s), 5m)`, the projection cache's `staleMs` exactly — and it
+ *    is what makes a tick that stopped committing refuse instead of pinning its
+ *    last head forever. It bounds the DATA, so a slow pass spends its own
+ *    duration out of the budget rather than being handed a fresh one at commit.
  * 2. FRESHNESS IN CHAIN TIME. A responsive but LAGGING endpoint answers a head
  *    probe instantly with an old block, so fetch time alone proves nothing
  *    about what the answer is an answer about. The head's own block timestamp
@@ -62,16 +66,16 @@ export interface ChainIndexAuthorityAnchor {
   readonly finalized: Readonly<{ number: number; hash: string }>;
   /** The head the tick last observed, with its CHAIN time (review S2). */
   readonly head: Readonly<{ number: number; hash: string; timestampSeconds: number }>;
-  /** When the tick fetched that head. Age is measured against BOTH. */
-  readonly fetchedAtMs: number;
   /**
-   * Whether the family has walked down to its floor.
+   * When the tick ASKED for that head. Age is measured against BOTH.
    *
-   * `false` means history is still being backfilled, so a MISSING Context
-   * Graph is "not indexed yet", never "does not exist". Only a complete family
-   * may answer absent from the log.
+   * The tick stamps this before the head RPC and carries it unchanged into the
+   * commit, so it dates the head's OBSERVATION and not the end of the pass that
+   * stored it — see `ChainEventLogHead.fetchedAtMs`. That is what lets the same
+   * number serve the gate below AND be handed to the projection cache as the
+   * fold's data age without one of the two being wrong.
    */
-  readonly complete: boolean;
+  readonly fetchedAtMs: number;
   /**
    * The store's CAS token at the moment the anchor was resolved.
    *
@@ -126,9 +130,14 @@ export interface ResolveChainIndexAuthorityAnchorInput {
   /** Wall clock, injected so a faked `Date` is honoured by every age guard. */
   readonly nowMs: number;
   /**
-   * How old the tick's last head read may be in FETCH time. `max(3T, 15s)`:
-   * three missed passes for an operator-sized T, never shorter than one slow
-   * failover pass.
+   * How old the tick's last head read may be in FETCH time.
+   * `min(max(3T, 15s), 5m)`: three missed passes for an operator-sized T, never
+   * shorter than one slow failover pass, and never longer than the ceiling the
+   * projection cache caps its own `staleMs` at.
+   *
+   * The caller computes it; this resolver only applies it. It is the cache's
+   * `staleMs` to the millisecond so the log can never serve an answer the cache
+   * holding the same view would already have dropped.
    */
   readonly maxHeadAgeMs: number;
   /**
@@ -244,9 +253,26 @@ export function resolveChainIndexAuthorityAnchor(
     'context-graph-authority',
     contractAddress,
   );
-  // The range that must be held is everything from the contract's deployment
-  // up to the anchor — which is also what makes the family COMPLETE, so an
-  // absence read off these rows is an absence the log actually looked for.
+  // COMPLETENESS IS ENFORCED HERE, and only here.
+  //
+  // The range that must be held is everything from the contract's deployment up
+  // to the anchor. That is strictly stronger than
+  // `chainEventLogCoverageIsComplete`, which asks only
+  // `coveredFromBlock <= floorBlock`: this family's floor IS this contract's
+  // deploy block (`chainIndexFloorBlocks` in `evm-chain-index-runtime.ts` seeds
+  // `context-graph-authority` from `contextGraphStorage.deploymentBlockNumber`,
+  // and a rotation's successor inherits a floor at or ABOVE its rebind block),
+  // so a coverage record that reaches `input.deploymentBlockNumber` has by
+  // definition reached its floor. History still being backfilled leaves
+  // `coveredFromBlock` above the deploy block and is refused right here.
+  //
+  // This matters because an absence is the one answer a log can invent: a
+  // MISSING Context Graph read off an unwalked range is "not indexed yet"
+  // reported as "does not exist". The anchor deliberately carries no
+  // `complete` flag for a caller to consult — a flag nothing reads is a guard
+  // nothing has — so an incomplete family never becomes an anchor at all, and
+  // the reader's second gate (`project(candidate).complete`, which sends an
+  // absent target to the live scan) sits behind this one rather than beside it.
   if (!chainEventLogCoverageIncludes(
     coverage,
     input.deploymentBlockNumber,
@@ -268,9 +294,6 @@ export function resolveChainIndexAuthorityAnchor(
         timestampSeconds: head.timestampSeconds,
       }),
       fetchedAtMs: head.fetchedAtMs,
-      // `coverage` is non-undefined here: `chainEventLogCoverageIncludes`
-      // already refused an absent record above.
-      complete: coverage!.coveredFromBlock <= coverage!.floorBlock,
       revision: cursor.revision,
       lineage: cursor.lineage,
     }),

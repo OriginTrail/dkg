@@ -91,7 +91,6 @@ describe('resolveChainIndexAuthorityAnchor', () => {
     // moving the authority index onto the log does not move its horizon.
     expect(anchor?.finalized).toEqual({ number: HEAD, hash: hash(HEAD) });
     expect(anchor?.head.timestampSeconds).toBe(HEAD_TIMESTAMP_SECONDS);
-    expect(anchor?.complete).toBe(true);
     expect(anchor?.revision).toBe(1);
   });
 
@@ -150,11 +149,26 @@ describe('resolveChainIndexAuthorityAnchor', () => {
     expect(result.refusal).toBe('no-coverage');
   });
 
-  it('reports an incomplete family rather than letting it answer absent', () => {
-    const result = resolve({ state: state({ coveredFrom: 10, floor: 1 }) });
+  it('an incomplete family never becomes an anchor at all', () => {
+    // The anchor carries no `complete` flag for a caller to consult, because a
+    // flag nothing reads is a guard nothing has. The coverage gate IS the
+    // guard: this family's floor is the contract's deploy block, so a record
+    // that has not walked down to `deploymentBlockNumber` has not reached its
+    // floor either, and it refuses here rather than handing back an anchor an
+    // absence could be read off.
+    for (const coveredFrom of [11, 60, HEAD]) {
+      const result = resolve({
+        state: state({ coveredFrom, floor: 10 }),
+        deploymentBlockNumber: 10,
+      });
 
-    expect(result.anchor).toBeDefined();
-    expect(result.anchor?.complete).toBe(false);
+      expect(result.anchor).toBeUndefined();
+      expect(result.refusal).toBe('no-coverage');
+    }
+
+    // And the converse: reaching the deploy block IS reaching the floor, so
+    // there is no admitted anchor whose family is incomplete.
+    expect(resolve({ state: state({ coveredFrom: 10, floor: 10 }) }).anchor).toBeDefined();
   });
 
   it('S6: refuses an answer below this node own just-written block', () => {
