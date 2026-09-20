@@ -1021,7 +1021,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               creation = logged.value.creationEvents.length === 1
                 ? logged.value.creationEvents[0]
                 : undefined;
-            } catch (error) {
+            } catch {
               options.signal?.throwIfAborted();
               projectionSignal.throwIfAborted();
               // Incomplete coverage, a moved lineage/revision, or any local

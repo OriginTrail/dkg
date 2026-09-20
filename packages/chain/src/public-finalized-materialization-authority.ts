@@ -115,7 +115,7 @@ export async function resolvePublicFinalizedMaterializationAuthority(
           },
           { signal: request.signal },
         );
-      } catch (error) {
+      } catch {
         // Abort is an operation fence, not an optimization miss. Every other
         // validation failure preserves the unchanged live-read path below.
         request.signal?.throwIfAborted();
