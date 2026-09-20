@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import type {
+  ChainEventLogAuthoritySource,
   ChainEventLogBinding,
   ChainEventLogHubRotationWindow,
 } from '../src/chain-event-log-binding.js';
@@ -84,6 +85,30 @@ function chainIndexOwner(adapter: EVMChainAdapter): Readonly<{
 
 function oneLogScope(adapter: EVMChainAdapter): string {
   return [adapter.deploymentId, HUB_ADDRESS.toLowerCase()].join(':');
+}
+
+function finalizedCreationSource(
+  read: NonNullable<ChainEventLogAuthoritySource['readContextGraphFinalizedCreation']>,
+): ChainEventLogAuthoritySource {
+  return {
+    contractAddress: RETIRED_CG_STORAGE,
+    pageSource: {} as ChainEventLogAuthoritySource['pageSource'],
+    resolveAnchor: async () => ({ refusal: 'no-cursor' }),
+    anchorHolds: async () => false,
+    readContextGraphFinalizedCreation: read,
+  };
+}
+
+function borrowedAuthorityBinding(
+  adapter: EVMChainAdapter,
+  source: ChainEventLogAuthoritySource,
+): ChainEventLogBinding {
+  return Object.freeze({
+    scope: oneLogScope(adapter),
+    subscription: {} as ChainEventLogBinding['subscription'],
+    contextGraphStorageAddress: RETIRED_CG_STORAGE,
+    contextGraphAuthority: source,
+  });
 }
 
 async function waitForHubPollerIdle(adapter: EVMChainAdapter): Promise<void> {
@@ -271,6 +296,170 @@ describe('EVMChainAdapter chain index wiring', () => {
     expect(adapter.chainEventLog).toBeUndefined();
     expect(chainIndexOwner(adapter).runtime).toBeUndefined();
     adapter.destroy();
+  });
+
+  it('lets a store-less borrower consume the owner finalized creation pair', async () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    stubContextGraphStorage(borrower, RETIRED_CG_STORAGE);
+    (borrower as unknown as { initialized: boolean }).initialized = true;
+    const read = vi.fn(async () => ({ nameHash: hash(0x22), accessPolicy: 1 as const }));
+    current = borrowedAuthorityBinding(borrower, finalizedCreationSource(read));
+
+    await expect(borrower.getContextGraphFinalizedCreation(7n)).resolves.toEqual({
+      nameHash: hash(0x22),
+      accessPolicy: 1,
+    });
+    expect(read).toHaveBeenCalledOnce();
+    expect(chainIndexOwner(borrower).runtime).toBeUndefined();
+    borrower.destroy();
+  });
+
+  it('treats a rebuild gap as a fast-pair miss for unchanged live fallback', async () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    stubContextGraphStorage(borrower, RETIRED_CG_STORAGE);
+    (borrower as unknown as { initialized: boolean }).initialized = true;
+
+    current = undefined;
+    await expect(borrower.getContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    expect(chainIndexOwner(borrower).runtime).toBeUndefined();
+    borrower.destroy();
+  });
+
+  it('does not retain a point-row miss outside the owner projection', async () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    stubContextGraphStorage(borrower, RETIRED_CG_STORAGE);
+    (borrower as unknown as { initialized: boolean }).initialized = true;
+    const read = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ nameHash: hash(0x22), accessPolicy: 1 as const });
+    current = borrowedAuthorityBinding(borrower, finalizedCreationSource(read));
+
+    await expect(borrower.getContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    await expect(borrower.getContextGraphFinalizedCreation(7n)).resolves.toEqual({
+      nameHash: hash(0x22),
+      accessPolicy: 1,
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    borrower.destroy();
+  });
+
+  it('rejects a late old-generation pair across same-address A to B to A rotation', async () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    stubContextGraphStorage(borrower, RETIRED_CG_STORAGE);
+    (borrower as unknown as { initialized: boolean }).initialized = true;
+    let release!: (value: { nameHash: string; accessPolicy: 1 }) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const sourceA1 = finalizedCreationSource(() => new Promise((resolve) => {
+      release = resolve;
+      markStarted();
+    }));
+    const bindingA1 = borrowedAuthorityBinding(borrower, sourceA1);
+    const bindingB = borrowedAuthorityBinding(
+      borrower,
+      finalizedCreationSource(async () => ({ nameHash: hash(0x33), accessPolicy: 1 })),
+    );
+    const bindingA2 = borrowedAuthorityBinding(
+      borrower,
+      finalizedCreationSource(async () => ({ nameHash: hash(0x22), accessPolicy: 0 })),
+    );
+    current = bindingA1;
+
+    const late = borrower.getContextGraphFinalizedCreation(7n);
+    await started;
+    current = bindingB;
+    current = bindingA2;
+    release({ nameHash: hash(0x22), accessPolicy: 1 });
+
+    await expect(late).resolves.toBeUndefined();
+    await expect(borrower.getContextGraphFinalizedCreation(7n)).resolves.toEqual({
+      nameHash: hash(0x22),
+      accessPolicy: 0,
+    });
+    borrower.destroy();
+  });
+
+  it('rejects a source object replaced inside the same binding during the await', async () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    stubContextGraphStorage(borrower, RETIRED_CG_STORAGE);
+    (borrower as unknown as { initialized: boolean }).initialized = true;
+    let release!: (value: { nameHash: string; accessPolicy: 1 }) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const sourceA = finalizedCreationSource(() => new Promise((resolve) => {
+      release = resolve;
+      markStarted();
+    }));
+    const sourceB = finalizedCreationSource(async () => ({
+      nameHash: hash(0x33),
+      accessPolicy: 1,
+    }));
+    let currentSource = sourceA;
+    current = Object.freeze({
+      scope: oneLogScope(borrower),
+      subscription: {} as ChainEventLogBinding['subscription'],
+      contextGraphStorageAddress: RETIRED_CG_STORAGE,
+      get contextGraphAuthority() { return currentSource; },
+    });
+
+    const late = borrower.getContextGraphFinalizedCreation(7n);
+    await started;
+    currentSource = sourceB;
+    release({ nameHash: hash(0x22), accessPolicy: 1 });
+
+    await expect(late).resolves.toBeUndefined();
+    borrower.destroy();
+  });
+
+  it('rejects a pair when the physical ContextGraphStorage rotates during the await', async () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    let currentAddress = RETIRED_CG_STORAGE;
+    (borrower as unknown as { contracts: Record<string, unknown> })
+      .contracts.contextGraphStorage = {
+        interface: new ethers.Interface(loadAbi('ContextGraphStorage')),
+        getAddress: async () => ethers.getAddress(currentAddress),
+      };
+    (borrower as unknown as { initialized: boolean }).initialized = true;
+    let release!: (value: { nameHash: string; accessPolicy: 1 }) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const source = finalizedCreationSource(() => new Promise((resolve) => {
+      release = resolve;
+      markStarted();
+    }));
+    current = borrowedAuthorityBinding(borrower, source);
+
+    const late = borrower.getContextGraphFinalizedCreation(7n);
+    await started;
+    currentAddress = ROTATED_CG_STORAGE;
+    release({ nameHash: hash(0x22), accessPolicy: 1 });
+
+    await expect(late).resolves.toBeUndefined();
+    borrower.destroy();
   });
 
   it('borrows only the current exact-scope binding and never retains a static fallback', () => {

@@ -35,6 +35,13 @@ export interface ChainIndexAuthorityPageSource {
     throughBlockNumber: number,
     signal: AbortSignal,
   ): Promise<readonly RawContextGraphAuthorityIndexEvent[]>;
+  /** Topic-indexed local lookup used to validate one immutable creation pair. */
+  readContextGraphEvents(
+    contextGraphId: bigint,
+    fromBlockNumber: number,
+    throughBlockNumber: number,
+    signal: AbortSignal,
+  ): Promise<readonly RawContextGraphAuthorityIndexEvent[]>;
   readBlockHash(blockNumber: number, signal: AbortSignal): Promise<string | null>;
 }
 
@@ -91,6 +98,43 @@ export function createChainIndexAuthorityPageSource(
         fromBlockNumber,
         throughBlockNumber,
         addresses: [contractAddress],
+      });
+      signal.throwIfAborted();
+      return registry.decodeContextGraphAuthority(rows);
+    },
+
+    async readContextGraphEvents(
+      contextGraphId: bigint,
+      fromBlockNumber: number,
+      throughBlockNumber: number,
+      signal: AbortSignal,
+    ): Promise<readonly RawContextGraphAuthorityIndexEvent[]> {
+      signal.throwIfAborted();
+      if (contextGraphId < 0n || contextGraphId >= (1n << 256n)) {
+        throw new RangeError('Context Graph authority event id is outside uint256');
+      }
+      const state = await store.load(scope);
+      if (state === undefined) {
+        throw new ContextGraphAuthorityIndexRetryableError(
+          `chain event log has no cursor for ${scope}`,
+        );
+      }
+      const coverage = findChainEventLogCoverage(
+        state.coverage,
+        'context-graph-authority',
+        contractAddress,
+      );
+      if (!chainEventLogCoverageIncludes(coverage, fromBlockNumber, throughBlockNumber)) {
+        throw new ContextGraphAuthorityIndexRetryableError(
+          `chain event log does not cover blocks ${fromBlockNumber}-${throughBlockNumber} `
+          + `for ${contractAddress}`,
+        );
+      }
+      const rows = await store.readEvents(scope, {
+        fromBlockNumber,
+        throughBlockNumber,
+        addresses: [contractAddress],
+        topic1: [`0x${contextGraphId.toString(16).padStart(64, '0')}`],
       });
       signal.throwIfAborted();
       return registry.decodeContextGraphAuthority(rows);

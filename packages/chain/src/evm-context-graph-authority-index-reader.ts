@@ -4,6 +4,7 @@ import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
   ContextGraphAuthoritySnapshot,
+  ContextGraphFinalizedCreation,
   ContextGraphAuthorityIndexRevisionReader,
 } from './chain-adapter.js';
 import {
@@ -14,6 +15,8 @@ import {
 } from './context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
+import type { RawContextGraphAuthorityIndexEvent } from
+  './context-graph-authority-index-reducer.js';
 import {
   contextGraphAuthorityIndexProjectionFault,
   isContextGraphAuthorityIndexProjectionFault,
@@ -22,6 +25,7 @@ import {
   type ContextGraphAuthorityIndexCompletedProjection,
   type ContextGraphAuthorityIndexProjection,
   type ContextGraphAuthorityIndexProjectionFault,
+  type ContextGraphAuthorityIndexView,
 } from './context-graph-authority-index-projection.js';
 import type {
   ContextGraphAuthorityIndexSnapshots,
@@ -460,6 +464,10 @@ export interface EvmContextGraphAuthorityIndexReaderV1
     contextGraphId: bigint,
     options?: ContextGraphAuthorityReadOptions,
   ): Promise<ContextGraphAuthoritySnapshot>;
+  readContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options?: ContextGraphAuthorityReadOptions,
+  ): Promise<ContextGraphFinalizedCreation | undefined>;
 }
 
 /**
@@ -621,10 +629,20 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               }),
             );
             await logged.stabilize();
-            const admission = admitContextGraphAuthorityLogFold(logAnswerServes, logged.value);
-            if (admission.kind === 'served') return logged.value;
-            if (admission.kind === 'fault') {
-              return contextGraphAuthorityIndexProjectionFault(admission.fault);
+            // The fence belongs to the captured source generation. A Hub
+            // rotation, runtime rebuild, or shutdown may replace/remove that
+            // source while `anchorHolds` is awaiting the store. Re-read the
+            // late-bound owner after the await and refuse the old generation
+            // even when it happened to retain the same physical address.
+            options.signal?.throwIfAborted();
+            const currentSource = dependencies.chainEventLogAuthority?.();
+            if (currentSource === source
+              && currentSource.contractAddress === contractAddress) {
+              const admission = admitContextGraphAuthorityLogFold(logAnswerServes, logged.value);
+              if (admission.kind === 'served') return logged.value;
+              if (admission.kind === 'fault') {
+                return contextGraphAuthorityIndexProjectionFault(admission.fault);
+              }
             }
           }
         }
@@ -926,6 +944,132 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         throw new Error(`Context Graph ${target} has no finalized creation event`);
       }
       return snapshot;
+    },
+    async readContextGraphFinalizedCreation(
+      contextGraphId: bigint,
+      options: ContextGraphAuthorityReadOptions = {},
+    ): Promise<ContextGraphFinalizedCreation | undefined> {
+      const target = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
+      assertOpen();
+      options.signal?.throwIfAborted();
+      await dependencies.initialize();
+      assertOpen();
+      options.signal?.throwIfAborted();
+      const projectionSignal = lifecycleAbort.signal;
+      projectionSignal.throwIfAborted();
+      const base = dependencies.requireContextGraphStorage();
+      return dependencies.readTipProvider(
+        'getContextGraphFinalizedCreation',
+        (provider) => withRpcRequestContext(
+          { signal: projectionSignal },
+          () => lifecycle.run(async () => {
+            const contract = base.connect(provider) as Contract;
+            const contractAddress = (await contract.getAddress()).toLowerCase();
+            const source = dependencies.chainEventLogAuthority?.();
+            if (source === undefined || source.contractAddress !== contractAddress) {
+              return undefined;
+            }
+            const deploymentBlockNumber = await dependencies.resolveContractDeployBlockNumber(
+              contractAddress,
+              'getContextGraphFinalizedCreation',
+              'ContextGraphStorage',
+            );
+            const anchor = (await source.resolveAnchor({
+              deploymentBlockNumber,
+              finalityConfirmations: dependencies.finalityConfirmations(),
+            })).anchor;
+            if (anchor === undefined) return undefined;
+
+            let view: ContextGraphAuthorityIndexView;
+            let creation: Extract<
+              RawContextGraphAuthorityIndexEvent,
+              Readonly<{ name: 'ContextGraphCreated' }>
+            > | undefined;
+            try {
+              const logged = await readEvmContextGraphAuthorityIndexProjectionV1(
+                {
+                  index: dependencies.index,
+                  deploymentId: dependencies.deploymentId,
+                  contract,
+                  contractAddress,
+                  provider,
+                  deploymentBlockNumber,
+                  pageSize: dependencies.pageSize(),
+                  finalityConfirmations: dependencies.finalityConfirmations(),
+                  finalized: anchor.finalized,
+                  stabilizationOperation: 'getContextGraphFinalizedCreation',
+                  signal: projectionSignal,
+                  logSource: { anchor, source },
+                },
+                async (scan) => {
+                  const indexedView = await dependencies.index.view(scan);
+                  const creationEvents = (await source.pageSource.readContextGraphEvents(
+                    contextGraphId,
+                    deploymentBlockNumber,
+                    anchor.finalized.number,
+                    projectionSignal,
+                  )).filter((event): event is Extract<
+                    RawContextGraphAuthorityIndexEvent,
+                    Readonly<{ name: 'ContextGraphCreated' }>
+                  > => event.name === 'ContextGraphCreated'
+                    && BigInt(event.contextGraphId as bigint) === contextGraphId);
+                  return { indexedView, creationEvents };
+                },
+              );
+              await logged.stabilize();
+              view = logged.value.indexedView;
+              creation = logged.value.creationEvents.length === 1
+                ? logged.value.creationEvents[0]
+                : undefined;
+            } catch (error) {
+              options.signal?.throwIfAborted();
+              projectionSignal.throwIfAborted();
+              // Incomplete coverage, a moved lineage/revision, or any local
+              // projection fault is an optimization miss. The borrower keeps
+              // the live point-read behavior it had before this seam.
+              return undefined;
+            }
+
+            // Re-read every generation/scope dependency after the final fence
+            // await. The caller performs the stronger binding-object fence too.
+            const currentContractAddress = (
+              await dependencies.requireContextGraphStorage().getAddress()
+            ).toLowerCase();
+            options.signal?.throwIfAborted();
+            projectionSignal.throwIfAborted();
+            if (currentContractAddress !== contractAddress
+              || dependencies.chainEventLogAuthority?.() !== source
+              || !view.has(target)
+              || creation === undefined) {
+              return undefined;
+            }
+            const state = view.resolve(target);
+            const nameHash = typeof creation.nameHash === 'string'
+              ? creation.nameHash.toLowerCase()
+              : undefined;
+            const accessPolicy = typeof creation.accessPolicy === 'number'
+              ? creation.accessPolicy
+              : Number(creation.accessPolicy);
+            if (nameHash === undefined
+              || !ethers.isHexString(nameHash, 32)
+              || nameHash === ethers.ZeroHash
+              || (accessPolicy !== 0 && accessPolicy !== 1)
+              || state.nameHash !== nameHash
+              || state.accessPolicy !== accessPolicy) {
+              return undefined;
+            }
+            return Object.freeze({
+              nameHash,
+              accessPolicy: accessPolicy as 0 | 1,
+            });
+          }),
+        ),
+        {
+          signal: options.signal,
+          isRetryable: () => false,
+          policy: 'durablePagedLogScan',
+        },
+      );
     },
     async resolveFinalizedContextGraphIdByNameHash(
       nameHash: string,

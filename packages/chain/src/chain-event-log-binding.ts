@@ -72,6 +72,16 @@ export interface ChainEventLogAuthoritySource {
    */
   readonly contractAddress: string;
   readonly pageSource: ChainIndexAuthorityPageSource;
+  /**
+   * Optional owner-side immutable creation lookup. The owner may answer only
+   * from its existing complete finalized authority index/log; a borrower must
+   * never construct an index or scanner of its own. `undefined` is a proof
+   * miss and sends the borrower to its unchanged live point reads.
+   */
+  readContextGraphFinalizedCreation?(
+    contextGraphId: bigint,
+    options?: Readonly<{ signal?: AbortSignal }>,
+  ): Promise<Readonly<{ nameHash: string; accessPolicy: 0 | 1 }> | undefined>;
   /** The anchor for one read, or the reason there is none. Never throws. */
   resolveAnchor(input: Readonly<{
     deploymentBlockNumber: number;

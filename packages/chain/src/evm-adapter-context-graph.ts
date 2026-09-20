@@ -24,7 +24,7 @@ import {
   type ContextGraphLiveAuthority,
 } from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type ContextGraphFinalizedCreation, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
@@ -1516,6 +1516,57 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         policy: 'wideLogScan',
       },
     );
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    await this.init();
+    options.signal?.throwIfAborted();
+    const contractAddress = (
+      await this.requireContextGraphStorage().getAddress()
+    ).toLowerCase();
+    const binding = this.chainEventLogBinding;
+    const source = binding?.contextGraphAuthority;
+    const read = source?.readContextGraphFinalizedCreation;
+    if (binding === undefined
+      || source === undefined
+      || read === undefined
+      || binding.contextGraphStorageAddress !== contractAddress
+      || source.contractAddress !== contractAddress) {
+      return undefined;
+    }
+    const creation = await read.call(
+      source,
+      contextGraphId,
+      { signal: options.signal },
+    );
+    options.signal?.throwIfAborted();
+    // `getAddress()` is local for an ethers Contract but remains a Promise.
+    // Resolve it before the final synchronous generation check so there is no
+    // await between proving the binding current and handing the pair over.
+    const currentAddress = (
+      await this.requireContextGraphStorage().getAddress()
+    ).toLowerCase();
+    options.signal?.throwIfAborted();
+    if (creation === undefined
+      || currentAddress !== contractAddress
+      || !this.chainEventLogBindingIsCurrent(binding)
+      || binding.contextGraphAuthority !== source
+      || binding.contextGraphStorageAddress !== contractAddress
+      || source.contractAddress !== contractAddress) {
+      return undefined;
+    }
+    if (!ethers.isHexString(creation.nameHash, 32)
+      || creation.nameHash.toLowerCase() === ethers.ZeroHash
+      || (creation.accessPolicy !== 0 && creation.accessPolicy !== 1)) {
+      return undefined;
+    }
+    return Object.freeze({
+      nameHash: creation.nameHash.toLowerCase(),
+      accessPolicy: creation.accessPolicy,
+    });
   }
 
   /**

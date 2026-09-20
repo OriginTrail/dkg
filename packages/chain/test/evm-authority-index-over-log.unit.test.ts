@@ -56,7 +56,12 @@ const TICK_MS = 6_000;
 const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
 const storageInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
 
-function creationRow(blockNumber: number, contextGraphId: bigint, nameHash: string) {
+function creationRow(
+  blockNumber: number,
+  contextGraphId: bigint,
+  nameHash: string,
+  accessPolicy: number = 1,
+) {
   const fragment = storageInterface.getEvent('ContextGraphCreated')!;
   const encoded = storageInterface.encodeEventLog(fragment, [
     contextGraphId,
@@ -64,7 +69,7 @@ function creationRow(blockNumber: number, contextGraphId: bigint, nameHash: stri
     nameHash,
     [OWNER],
     `0x${'44'.repeat(32)}`,
-    1,
+    accessPolicy,
     0,
     `0x${'66'.repeat(20)}`,
     7n,
@@ -201,6 +206,7 @@ function makeProvider() {
 function makeReader(options: {
   store?: MemoryChainEventLogStore;
   source?: ChainEventLogAuthoritySource | undefined;
+  sourceProvider?: () => ChainEventLogAuthoritySource | undefined;
   contractAddress?: string;
   finalityConfirmations?: number;
   /** The projection cache's clock, where a test has to age a projection. */
@@ -258,7 +264,12 @@ function makeReader(options: {
     resolveContractDeployBlockNumber: async () => DEPLOY_BLOCK,
     pageSize: () => 2_000,
     finalityConfirmations: () => options.finalityConfirmations ?? 1,
-    ...(options.source === undefined ? {} : { chainEventLogAuthority: () => options.source }),
+    ...(options.sourceProvider === undefined && options.source === undefined
+      ? {}
+      : {
+          chainEventLogAuthority: options.sourceProvider
+            ?? (() => options.source),
+        }),
   });
   reader.snapshots.open();
   return { reader, calls, authorityLogs, attempts, usage };
@@ -279,6 +290,297 @@ function liveCreationLog(blockNumber: number, contextGraphId: bigint, nameHash: 
 }
 
 describe('Context Graph authority index over the one log', () => {
+  it('reads the immutable creation pair atomically with ZERO chain calls', async () => {
+    const store = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH, 1)],
+    });
+    const { reader, calls } = makeReader({ store, source: logSource(store) });
+
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toEqual({
+      nameHash: NAME_HASH,
+      accessPolicy: 1,
+    });
+    expect(calls).toEqual({ getBlock: 0, getLogs: 0, getNetwork: 0 });
+  });
+
+  it('requires exactly one canonical creation row for the requested id', async () => {
+    const missing = seededStore({
+      rows: [creationRow(20, 8n, ABSENT_NAME_HASH, 1)],
+    });
+    const duplicate = creationRow(21, 7n, NAME_HASH, 1);
+    const duplicated = seededStore({
+      rows: [
+        creationRow(20, 7n, NAME_HASH, 1),
+        { ...duplicate, logIndex: 1, transactionHash: hash(0xbb) },
+      ],
+    });
+
+    await expect(makeReader({
+      store: missing,
+      source: logSource(missing),
+    }).reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    await expect(makeReader({
+      store: duplicated,
+      source: logSource(duplicated),
+    }).reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+  });
+
+  it('refuses malformed policy and any pair whose point row disagrees with the projection', async () => {
+    const malformed = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH, 2)],
+    });
+    await expect(makeReader({
+      store: malformed,
+      source: logSource(malformed),
+    }).reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+
+    const store = seededStore();
+    const source = logSource(store);
+    const { reader } = makeReader({ store, source });
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toEqual({
+      nameHash: NAME_HASH,
+      accessPolicy: 1,
+    });
+    seedLog(store, {
+      rows: [creationRow(20, 7n, ABSENT_NAME_HASH, 1)],
+    });
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ['returns false', async () => false],
+    ['throws', async () => { throw new Error('local fence failed'); }],
+  ])('treats anchorHolds that %s as a proof miss', async (_label, anchorHolds) => {
+    const store = seededStore();
+    const source = { ...logSource(store), anchorHolds };
+    const { reader, calls } = makeReader({ store, source });
+
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    expect(calls).toEqual({ getBlock: 0, getLogs: 0, getNetwork: 0 });
+  });
+
+  it('returns a proof miss when the source generation swaps during anchorHolds', async () => {
+    const store = seededStore();
+    let release!: (value: boolean) => void;
+    let markStarted!: () => void;
+    const held = new Promise<boolean>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const sourceA = {
+      ...logSource(store),
+      anchorHolds: () => {
+        markStarted();
+        return held;
+      },
+    };
+    const sourceB = logSource(store);
+    let current: ChainEventLogAuthoritySource | undefined = sourceA;
+    const { reader, calls } = makeReader({
+      store,
+      sourceProvider: () => current,
+    });
+    const reading = reader.readContextGraphFinalizedCreation(7n);
+    await started;
+    current = sourceB;
+    release(true);
+
+    await expect(reading).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+  });
+
+  it('returns a proof miss when the source rotates during the point-row lookup', async () => {
+    const store = seededStore();
+    const original = logSource(store);
+    let release!: () => void;
+    let markStarted!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const sourceA: ChainEventLogAuthoritySource = {
+      ...original,
+      pageSource: {
+        ...original.pageSource,
+        async readContextGraphEvents(...args) {
+          const events = await original.pageSource.readContextGraphEvents(...args);
+          markStarted();
+          await held;
+          return events;
+        },
+      },
+    };
+    const sourceB = logSource(store);
+    let current: ChainEventLogAuthoritySource | undefined = sourceA;
+    const { reader, calls } = makeReader({
+      store,
+      sourceProvider: () => current,
+    });
+
+    const reading = reader.readContextGraphFinalizedCreation(7n);
+    await started;
+    current = sourceB;
+    release();
+
+    await expect(reading).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+  });
+
+  it('propagates abort after the local fence await without issuing live fallback', async () => {
+    const store = seededStore();
+    let release!: (value: boolean) => void;
+    let markStarted!: () => void;
+    const held = new Promise<boolean>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const source = {
+      ...logSource(store),
+      anchorHolds: () => {
+        markStarted();
+        return held;
+      },
+    };
+    const { reader, calls } = makeReader({ store, source });
+    const controller = new AbortController();
+
+    const reading = reader.readContextGraphFinalizedCreation(7n, {
+      signal: controller.signal,
+    });
+    await started;
+    controller.abort(new DOMException('test abort', 'AbortError'));
+    release(true);
+
+    await expect(reading).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls.getLogs).toBe(0);
+  });
+
+  it('does not optimize an existing zero-nameHash graph or invent policy zero', async () => {
+    const store = seededStore({
+      rows: [creationRow(20, 7n, ethers.ZeroHash, 0)],
+    });
+    const { reader, calls } = makeReader({
+      store,
+      source: logSource(store),
+    });
+
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+  });
+
+  it('returns a miss when the tick is outside the authority freshness window', async () => {
+    const store = seededStore();
+    const { reader, calls } = makeReader({
+      store,
+      source: logSource(store, { nowMs: NOW_MS + 3 * TICK_MS + 1 }),
+    });
+
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+    expect(calls.getBlock).toBe(0);
+  });
+
+  it('drops an orphaned creation when same-address lineage resets before the fence', async () => {
+    const store = seededStore();
+    const original = logSource(store);
+    const resetDuringFence: ChainEventLogAuthoritySource = {
+      ...original,
+      async anchorHolds(anchor) {
+        store.seed({
+          cursor: {
+            revision: 2,
+            lineage: hash(0x02),
+            deploymentBlockNumber: DEPLOY_BLOCK,
+            settledBlockNumber: HEAD - 50,
+            settledBlockHash: hash(HEAD - 50),
+            head: {
+              number: HEAD,
+              hash: hash(HEAD),
+              timestampSeconds: HEAD_TIMESTAMP_SECONDS,
+              fetchedAtMs: NOW_MS,
+            },
+            topicSetVersion: 'reset-v2',
+          },
+          coverage: [{
+            family: 'context-graph-authority',
+            address: STORAGE,
+            coveredFromBlock: DEPLOY_BLOCK,
+            coveredThroughBlock: HEAD,
+            floorBlock: DEPLOY_BLOCK,
+          }],
+        }, []);
+        return original.anchorHolds(anchor);
+      },
+    };
+    const { reader, calls } = makeReader({ store, source: resetDuringFence });
+
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+    expect(calls.getBlock).toBe(0);
+  });
+
+  it('does not resurrect an old indexed creation after deterministic same-address reset', async () => {
+    const store = seededStore();
+    const source = logSource(store);
+    const { reader, calls } = makeReader({ store, source });
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toEqual({
+      nameHash: NAME_HASH,
+      accessPolicy: 1,
+    });
+
+    // Same heights, hashes, address and numeric id; only the one-log lineage
+    // proves this is a different chain instance. The authority checkpoint from
+    // the first read is intentionally left in place to exercise the stale
+    // durable-prefix mutation the point-row validation closes.
+    store.seed({
+      cursor: {
+        revision: 2,
+        lineage: hash(0x02),
+        deploymentBlockNumber: DEPLOY_BLOCK,
+        settledBlockNumber: HEAD - 50,
+        settledBlockHash: hash(HEAD - 50),
+        head: {
+          number: HEAD,
+          hash: hash(HEAD),
+          timestampSeconds: HEAD_TIMESTAMP_SECONDS,
+          fetchedAtMs: NOW_MS,
+        },
+        topicSetVersion: 'reset-v2',
+      },
+      coverage: [{
+        family: 'context-graph-authority',
+        address: STORAGE,
+        coveredFromBlock: DEPLOY_BLOCK,
+        coveredThroughBlock: HEAD,
+        floorBlock: DEPLOY_BLOCK,
+      }],
+    }, []);
+
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    seedLog(store, {
+      rows: [creationRow(20, 7n, NAME_HASH, 0)],
+    });
+    // The old private checkpoint must not overwrite the new canonical public
+    // creation for the same address/id. Until the old checkpoint is rebuilt,
+    // the fast lane misses and the caller performs its live pair of reads.
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+    expect(calls.getBlock).toBe(0);
+  });
+
+  it('does not replace an old public checkpoint with a current private creation', async () => {
+    const store = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH, 0)],
+    });
+    const source = logSource(store);
+    const { reader, calls } = makeReader({ store, source });
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toEqual({
+      nameHash: NAME_HASH,
+      accessPolicy: 0,
+    });
+
+    seedLog(store, {
+      rows: [creationRow(20, 7n, NAME_HASH, 1)],
+    });
+    await expect(reader.readContextGraphFinalizedCreation(7n)).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+    expect(calls.getBlock).toBe(0);
+  });
+
   it('issues ZERO chain reads for an answer the log can prove', async () => {
     const store = seededStore();
     const { reader, calls } = makeReader({ store, source: logSource(store) });

@@ -105,6 +105,10 @@ export interface EvmChainIndexRuntimeOptions {
   readonly onError?: (error: unknown) => void;
   /** Injected wall clock; late-bound so a faked `Date` is honoured. */
   readonly now?: () => number;
+  /** Owner-only reader over the already-existing authority index/log. */
+  readonly readContextGraphFinalizedCreation?: ChainEventLogAuthoritySource[
+    'readContextGraphFinalizedCreation'
+  ];
 }
 
 export interface EvmChainIndexRuntime {
@@ -538,6 +542,12 @@ export function createEvmChainIndexRuntime(
           anchor,
         );
       },
+      ...(options.readContextGraphFinalizedCreation === undefined
+        ? {}
+        : {
+            readContextGraphFinalizedCreation:
+              options.readContextGraphFinalizedCreation,
+          }),
     });
 
   type MutableChainEventLogBinding = {

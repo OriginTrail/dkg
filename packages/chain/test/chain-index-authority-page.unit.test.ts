@@ -91,6 +91,49 @@ describe('chain index authority page source', () => {
     expect(page[0]!.name).toBe('ContextGraphCreated');
   });
 
+  it('point-reads only the requested indexed id at or below the held anchor', async () => {
+    const store = seeded({ from: 10, through: 100 });
+    store.seed((await store.load(SCOPE))!, [
+      creationRow(100, 7n),
+      creationRow(100, 8n),
+      creationRow(101, 7n),
+      { ...creationRow(100, 7n), address: OTHER_STORAGE },
+    ]);
+    const pageSource = source(store);
+
+    const rows = await pageSource.readContextGraphEvents(
+      7n,
+      10,
+      100,
+      new AbortController().signal,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      name: 'ContextGraphCreated',
+      contextGraphId: 7n,
+      blockNumber: 100,
+    });
+    await expect(pageSource.readContextGraphEvents(
+      9n,
+      10,
+      100,
+      new AbortController().signal,
+    )).resolves.toEqual([]);
+  });
+
+  it('point-read refuses incomplete coverage rather than caching an empty row', async () => {
+    const pageSource = source(seeded({ from: 50, through: 100 }));
+
+    const failure = await pageSource.readContextGraphEvents(
+      7n,
+      10,
+      100,
+      new AbortController().signal,
+    ).then(() => undefined, (error: unknown) => error);
+
+    expect(isContextGraphAuthorityIndexRetryableError(failure)).toBe(true);
+  });
+
   it('refuses a range the log does not cover instead of folding it as empty', async () => {
     // The log holds 50-100; the reducer asks from 10. Returning [] here would
     // fold to "Context Graph 7 was never created", which downstream is an

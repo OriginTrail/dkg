@@ -4701,6 +4701,15 @@ export class EVMChainAdapterBase {
           'assetStorage',
         ),
         readTipProvider: (label, read, opts) => this.readTipProvider(label, read, opts),
+        ...(this.contextGraphAuthorityIndexReader === undefined
+          ? {}
+          : {
+              readContextGraphFinalizedCreation: (
+                contextGraphId: bigint,
+                options?: Readonly<{ signal?: AbortSignal }>,
+              ) => this.contextGraphAuthorityIndexReader!
+                .readContextGraphFinalizedCreation(contextGraphId, options),
+            }),
         onError: (error) => {
           console.warn(
             `[chain] chain index tick failed: ${error instanceof Error ? error.message : String(error)}`,

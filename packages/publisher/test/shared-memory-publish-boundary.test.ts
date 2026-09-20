@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   TRUST_LEVEL_PREDICATE,
@@ -387,6 +388,100 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
         ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
       ]),
     );
+  });
+
+  it('uses one finalized creation pair without issuing separate name or policy reads', async () => {
+    const chain = privatePolicyChain();
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => ({
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+      accessPolicy: 1,
+    });
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      throw new Error('separate name read must not run');
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      throw new Error('separate policy read must not run');
+    };
+    const { publisher, store } = await makePublisher(chain);
+    await store.insert([
+      onChainIdQuad('1'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+      rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+    }, {
+      onChainContextGraphId: '1',
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+  });
+
+  it('does not splice live point reads onto a failed finalized creation proof', async () => {
+    const chain = privatePolicyChain({
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+    });
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => {
+      throw new Error('lineage changed');
+    };
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      return 1;
+    };
+    const { publisher, store } = await makeRealPublisher(chain);
+    await store.insert([onChainIdQuad('1')]);
+
+    await expect(publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      publishContextGraphId: '1',
+      quads: [
+        q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+  });
+
+  it('keeps the live point-read fallback when the owner fast pair is unavailable', async () => {
+    const expectedNameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+    const chain = privatePolicyChain({ nameHash: expectedNameHash });
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => undefined;
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      return expectedNameHash;
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      return 1;
+    };
+    const { publisher, store } = await makePublisher(chain);
+    await store.insert([
+      onChainIdQuad('1'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+      rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+    }, {
+      onChainContextGraphId: '1',
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 1, policyReads: 1 });
   });
 
   it('rejects trusted generated catalog floor for public direct publishes', async () => {
