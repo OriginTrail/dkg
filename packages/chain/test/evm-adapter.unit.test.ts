@@ -22,6 +22,7 @@ import {
 import {
   DEFAULT_APPROVAL_POLICY,
   DEFAULT_REPLENISH_TARGET_ALLOWANCE,
+  DEFAULT_REPLENISH_TARGET_MULTIPLE,
   DEFAULT_REFILL_BELOW_FRACTION,
   publisherPublishPlanByteSize,
   type ApprovalPolicy,
@@ -3081,53 +3082,116 @@ describe('computeApprovalAction — per-publish (default, backward-compatible)',
   });
 });
 
+/** 1 TRAC in wei-TRAC. */
+const TRAC = 10n ** 18n;
+/** A stand-in "typical publish cost" for this node: 10 TRAC. */
+const TYPICAL_PUBLISH_COST = 10n * TRAC;
+
 describe('computeApprovalAction — replenishing (recommended for mainnet)', () => {
-  // Approve a configurable ceiling once; refill when current drops below
-  // `target × refillBelowFraction`. Pre-mainnet stress run on Base Sepolia
-  // showed this would amortise approve-gas to ~1/9 of the per-publish
-  // policy at default config.
+  // Approve a ceiling sized RELATIVE to the triggering publish
+  // (`targetAllowanceMultiple × publishFloor`, default 20×); refill when
+  // current drops below `target × refillBelowFraction` (default 10%, i.e.
+  // 2× the publish cost). A flat ceiling was simultaneously too large for a
+  // small node and too small for a busy one; the multiple is scale-free.
 
   it('exposes sane defaults', () => {
-    // 1000 TRAC = 1e21 wei-TRAC
-    expect(DEFAULT_REPLENISH_TARGET_ALLOWANCE).toBe(10n ** 21n);
+    expect(DEFAULT_REPLENISH_TARGET_MULTIPLE).toBe(20);
     expect(DEFAULT_REFILL_BELOW_FRACTION).toBe(0.1);
+    // Retained for operators who deliberately want the historical flat cap,
+    // but no longer the implicit default. 1000 TRAC = 1e21 wei-TRAC.
+    expect(DEFAULT_REPLENISH_TARGET_ALLOWANCE).toBe(10n ** 21n);
   });
 
-  it('approves the default 1000 TRAC ceiling on a fresh wallet', () => {
+  it('approves 20x the publish cost on a fresh wallet (default multiple)', () => {
     const policy: ApprovalPolicy = { mode: 'replenishing' };
-    const action = computeApprovalAction(policy, 1n, 0n);
+    const action = computeApprovalAction(policy, TYPICAL_PUBLISH_COST, 0n);
     expect(action.needsApprove).toBe(true);
-    expect(action.targetAllowance).toBe(10n ** 21n);
+    expect(action.targetAllowance).toBe(20n * TYPICAL_PUBLISH_COST); // 200 TRAC
   });
 
-  it('skips approve when current is comfortably above the refill threshold', () => {
+  it('pins the refill threshold at exactly 2x the publish cost (20 x 0.1)', () => {
     const policy: ApprovalPolicy = { mode: 'replenishing' };
-    // Default target 1000 TRAC, refill at 100 TRAC. 500 TRAC current → no refill.
-    const action = computeApprovalAction(policy, 1n, 500n * (10n ** 18n));
-    expect(action.needsApprove).toBe(false);
-    expect(action.targetAllowance).toBe(10n ** 21n);
+    const C = TYPICAL_PUBLISH_COST;
+    // Exactly at the threshold → still covered, no approve.
+    expect(computeApprovalAction(policy, C, 2n * C).needsApprove).toBe(false);
+    // One wei under → refill.
+    expect(computeApprovalAction(policy, C, 2n * C - 1n).needsApprove).toBe(true);
+    // Comfortably above → no approve, and the target is unchanged either way.
+    const above = computeApprovalAction(policy, C, 15n * C);
+    expect(above.needsApprove).toBe(false);
+    expect(above.targetAllowance).toBe(20n * C);
   });
 
-  it('triggers refill when current drops below 10% of target (default fraction)', () => {
+  it('amortises to one approve per 19 publishes of comparable cost', () => {
+    // This is the number quoted in the `computeApprovalAction` docstring and
+    // in SKILL.md §8: multiple × (1 - fraction) + 1 = 20 × 0.9 + 1 = 19.
+    // Walk a real allowance ledger rather than asserting the formula.
     const policy: ApprovalPolicy = { mode: 'replenishing' };
-    // 99 TRAC current, threshold is 100 TRAC → refill.
-    const action = computeApprovalAction(policy, 1n, 99n * (10n ** 18n));
-    expect(action.needsApprove).toBe(true);
-    expect(action.targetAllowance).toBe(10n ** 21n);
+    const C = TYPICAL_PUBLISH_COST;
+    let allowance = 0n;
+    let approves = 0;
+    const approveAtPublish: number[] = [];
+    for (let publish = 1; publish <= 100; publish++) {
+      const { needsApprove, targetAllowance } = computeApprovalAction(policy, C, allowance);
+      if (needsApprove) {
+        allowance = targetAllowance;
+        approves += 1;
+        approveAtPublish.push(publish);
+      }
+      // The publish itself spends its cost out of the allowance.
+      allowance -= C;
+      // Never overspend: skipping an approve implies allowance >= threshold >= C.
+      expect(allowance >= 0n).toBe(true);
+    }
+    expect(approves).toBe(6); // ceil(100 / 19)
+    expect(approveAtPublish).toEqual([1, 20, 39, 58, 77, 96]);
+    // Gap between consecutive approves is exactly 19 publishes.
+    expect(approveAtPublish[1]! - approveAtPublish[0]!).toBe(19);
   });
 
-  it('respects a custom targetAllowance + refillBelowFraction', () => {
+  it('scales the ceiling with a custom targetAllowanceMultiple', () => {
+    const C = TYPICAL_PUBLISH_COST;
+    const tight: ApprovalPolicy = { mode: 'replenishing', targetAllowanceMultiple: 2 };
+    expect(computeApprovalAction(tight, C, 0n).targetAllowance).toBe(2n * C);
+    const loose: ApprovalPolicy = { mode: 'replenishing', targetAllowanceMultiple: 500 };
+    expect(computeApprovalAction(loose, C, 0n).targetAllowance).toBe(500n * C);
+    // multiple = 1 is legal and degenerates to per-publish sizing, without
+    // ever dropping the target below the floor.
+    const one: ApprovalPolicy = { mode: 'replenishing', targetAllowanceMultiple: 1 };
+    expect(computeApprovalAction(one, C, 0n).targetAllowance).toBe(C);
+  });
+
+  it('lets an explicit absolute targetAllowance override the multiple', () => {
+    // PRECEDENCE PIN: an operator who wrote a TRAC number meant that number.
+    // It is also the backward-compat guarantee — a config written before
+    // relative sizing existed keeps behaving exactly as it did.
     const policy: ApprovalPolicy = {
       mode: 'replenishing',
-      targetAllowance: 100n * (10n ** 18n), // 100 TRAC ceiling
-      refillBelowFraction: 0.5,              // refill at 50 TRAC
+      targetAllowance: 1000n * TRAC,      // the historical flat ceiling
+      targetAllowanceMultiple: 3,         // would derive 30 TRAC — ignored
     };
-    // Current 60 TRAC → above threshold (50 TRAC) → no refill.
-    expect(computeApprovalAction(policy, 1n, 60n * (10n ** 18n)).needsApprove).toBe(false);
-    // Current 40 TRAC → below threshold → refill to 100 TRAC.
-    const action = computeApprovalAction(policy, 1n, 40n * (10n ** 18n));
+    const action = computeApprovalAction(policy, TYPICAL_PUBLISH_COST, 0n);
     expect(action.needsApprove).toBe(true);
-    expect(action.targetAllowance).toBe(100n * (10n ** 18n));
+    expect(action.targetAllowance).toBe(1000n * TRAC);
+    // And the threshold follows the absolute target, not the multiple:
+    // 1000 × 0.1 = 100 TRAC.
+    expect(computeApprovalAction(policy, TYPICAL_PUBLISH_COST, 100n * TRAC).needsApprove)
+      .toBe(false);
+    expect(computeApprovalAction(policy, TYPICAL_PUBLISH_COST, 100n * TRAC - 1n).needsApprove)
+      .toBe(true);
+  });
+
+  it('normalizes an out-of-contract targetAllowanceMultiple back to the default', () => {
+    // Operator config is rejected loudly by `resolveApprovalPolicy` (see
+    // packages/cli/test/config.test.ts). This is the in-adapter backstop for
+    // programmatic callers: normalize, never throw on the publish hot path.
+    // A multiple < 1 must NOT silently turn `replenishing` into `per-publish`.
+    const C = TYPICAL_PUBLISH_COST;
+    for (const bad of [0, -5, 2.5, Number.NaN, Number.POSITIVE_INFINITY, 1e30]) {
+      const policy: ApprovalPolicy = { mode: 'replenishing', targetAllowanceMultiple: bad };
+      const action = computeApprovalAction(policy, C, 0n);
+      expect(action.targetAllowance).toBe(20n * C);
+    }
   });
 
   it('raises a too-low targetAllowance to at least the publish floor', () => {
@@ -3139,23 +3203,44 @@ describe('computeApprovalAction — replenishing (recommended for mainnet)', () 
     expect(action.targetAllowance).toBe(500n);
   });
 
-  it('treats targetAllowance=0n as "use publish floor"', () => {
+  it('treats targetAllowance=0n as "use publish floor" (absolute still wins)', () => {
+    // 0n is an explicit absolute value, so it overrides the multiple — and
+    // then the publish-floor clamp lifts it to something publishable.
     const policy: ApprovalPolicy = { mode: 'replenishing', targetAllowance: 0n };
     const action = computeApprovalAction(policy, 0n, 0n);
     expect(action.needsApprove).toBe(true);
     expect(action.targetAllowance).toBe(1n); // publish floor wins
   });
 
+  it('handles the zero-cost publish edge: 20 wei-TRAC, approved once, never again', () => {
+    const policy: ApprovalPolicy = { mode: 'replenishing' };
+    // publishFloor is the 1n on-chain minimum → 1 × 20 = 20 wei-TRAC of dust.
+    const fresh = computeApprovalAction(policy, 0n, 0n);
+    expect(fresh.needsApprove).toBe(true);
+    expect(fresh.targetAllowance).toBe(20n);
+    // Threshold is max(20 × 0.1, publishFloor) = 2n.
+    expect(computeApprovalAction(policy, 0n, 2n).needsApprove).toBe(false);
+    expect(computeApprovalAction(policy, 0n, 1n).needsApprove).toBe(true);
+    // A zero-cost chain never spends the allowance down, so after the first
+    // approve the node sits at 20n forever: strictly fewer approves than
+    // per-publish, which re-approves whenever the 1n dust is consumed.
+    expect(computeApprovalAction(policy, 0n, 20n).needsApprove).toBe(false);
+  });
+
   it('clamps refillBelowFraction to [0, 1]', () => {
+    const C = TYPICAL_PUBLISH_COST;
     const above: ApprovalPolicy = { mode: 'replenishing', refillBelowFraction: 2 };
-    const aboveAction = computeApprovalAction(above, 1n, 10n ** 21n - 1n);
-    expect(aboveAction.needsApprove).toBe(true); // fraction clamps to 1 → always refill below full target
+    // fraction clamps to 1 → threshold = full target (20C) → always refill
+    // below the full ceiling.
+    expect(computeApprovalAction(above, C, 20n * C - 1n).needsApprove).toBe(true);
+    expect(computeApprovalAction(above, C, 20n * C).needsApprove).toBe(false);
 
     const below: ApprovalPolicy = { mode: 'replenishing', refillBelowFraction: -1 };
-    const belowAction = computeApprovalAction(below, 1n, 0n);
-    // fraction clamps to 0 → threshold = 0, but publishFloor (1n) wins
+    const belowAction = computeApprovalAction(below, C, 0n);
+    // fraction clamps to 0 → threshold = 0, but publishFloor (C) wins
     expect(belowAction.needsApprove).toBe(true);
-    expect(belowAction.targetAllowance).toBe(10n ** 21n);
+    expect(belowAction.targetAllowance).toBe(20n * C);
+    expect(computeApprovalAction(below, C, C).needsApprove).toBe(false);
   });
 
   it('handles NaN / non-finite refillBelowFraction by falling back to the default', () => {
@@ -3163,9 +3248,10 @@ describe('computeApprovalAction — replenishing (recommended for mainnet)', () 
       mode: 'replenishing',
       refillBelowFraction: Number.NaN,
     };
-    // Default 0.1 → threshold = 100 TRAC. 99 TRAC current → refill.
-    const action = computeApprovalAction(policy, 1n, 99n * (10n ** 18n));
-    expect(action.needsApprove).toBe(true);
+    const C = TYPICAL_PUBLISH_COST;
+    // Default 0.1 → threshold = 2C. One wei under → refill.
+    expect(computeApprovalAction(policy, C, 2n * C - 1n).needsApprove).toBe(true);
+    expect(computeApprovalAction(policy, C, 2n * C).needsApprove).toBe(false);
   });
 
   it('refill threshold respects the publish floor even when fraction × target is below it', () => {
@@ -3180,7 +3266,156 @@ describe('computeApprovalAction — replenishing (recommended for mainnet)', () 
     expect(action.needsApprove).toBe(true);
     expect(action.targetAllowance).toBe(1000n); // target raised to publish floor
   });
+
+  // The honest downsides of relative sizing, pinned so the docstring's
+  // claims stay true. Neither case is "better than a flat ceiling".
+  describe('varying publish costs', () => {
+    const policy: ApprovalPolicy = { mode: 'replenishing' };
+    const C = TYPICAL_PUBLISH_COST;
+
+    const approvalCountFor = (costs: readonly bigint[]): number => {
+      let allowance = 0n;
+      let approvals = 0;
+      for (const cost of costs) {
+        const action = computeApprovalAction(policy, cost, allowance);
+        if (action.needsApprove) {
+          approvals += 1;
+          allowance = action.targetAllowance;
+        }
+        allowance -= cost;
+        expect(allowance >= 0n).toBe(true);
+      }
+      return approvals;
+    };
+
+    it('lets one outlier publish leave a standing allowance far above typical use', () => {
+      const outlier = 100n * C;
+      const approved = computeApprovalAction(policy, outlier, 0n);
+      expect(approved.targetAllowance).toBe(2000n * C); // 20 × 100C
+      // The node now coasts: ordinary publishes see 2000C >= their own 2C
+      // threshold and never re-approve, so the exposure persists. A flat
+      // `targetAllowance` would have bounded it absolutely; this does not.
+      let allowance = approved.targetAllowance - outlier; // 1900C
+      for (let i = 0; i < 50; i++) {
+        const action = computeApprovalAction(policy, C, allowance);
+        expect(action.needsApprove).toBe(false);
+        allowance -= C;
+      }
+      expect(allowance).toBe(1850n * C);
+    });
+
+    it('refills once when a sharp increase follows a cheap ceiling', () => {
+      const cheap = C / 100n;
+      const approved = computeApprovalAction(policy, cheap, 0n);
+      expect(approved.targetAllowance).toBe(20n * cheap); // 0.2C — under 2C
+      const allowance = approved.targetAllowance - cheap;
+      // The next ordinary publish is below its own threshold → re-approve.
+      const next = computeApprovalAction(policy, C, allowance);
+      expect(next.needsApprove).toBe(true);
+      // It self-corrects immediately: the ceiling is back to 20C, never to
+      // something that would brick the publish.
+      expect(next.targetAllowance).toBe(20n * C);
+      expect(next.targetAllowance >= effectivePublishAllowance(C)).toBe(true);
+    });
+
+    it('does not mistake a wide alternating or descending spread for per-publish behaviour', () => {
+      const cheap = C / 100n;
+      const alternating = Array.from(
+        { length: 20 },
+        (_, index) => index % 2 === 0 ? cheap : C,
+      );
+      expect(approvalCountFor(alternating)).toBe(2);
+      expect(approvalCountFor([100n * C, 10n * C, C, C / 10n, cheap])).toBe(1);
+    });
+
+    it('approaches per-publish only under repeated sharply ascending costs', () => {
+      const ascending = Array.from(
+        { length: 6 },
+        (_, index) => TRAC * (11n ** BigInt(index)),
+      );
+      expect(approvalCountFor(ascending)).toBe(ascending.length);
+    });
+  });
 });
+
+describe('computeApprovalAction — invariants across the (mode, tokenAmount, currentAllowance, multiple) table', () => {
+  // The two invariants the `computeApprovalAction` docstring promises. These
+  // are the ones a future sizing change is most likely to break silently.
+  const policies: ApprovalPolicy[] = [
+    { mode: 'per-publish' },
+    { mode: 'unlimited' },
+    { mode: 'replenishing' },
+    { mode: 'replenishing', targetAllowanceMultiple: 1 },
+    { mode: 'replenishing', targetAllowanceMultiple: 20 },
+    { mode: 'replenishing', targetAllowanceMultiple: 1_000_000 },
+    { mode: 'replenishing', targetAllowanceMultiple: 0 },        // normalized
+    { mode: 'replenishing', targetAllowanceMultiple: 2.5 },      // normalized
+    { mode: 'replenishing', targetAllowanceMultiple: Number.NaN }, // normalized
+    { mode: 'replenishing', targetAllowance: 1000n * TRAC },
+    { mode: 'replenishing', targetAllowance: 1000n * TRAC, targetAllowanceMultiple: 3 },
+    { mode: 'replenishing', targetAllowance: 0n },
+    { mode: 'replenishing', targetAllowance: 1n, targetAllowanceMultiple: 20 },
+    { mode: 'replenishing', targetAllowanceMultiple: 20, refillBelowFraction: 0 },
+    { mode: 'replenishing', targetAllowanceMultiple: 20, refillBelowFraction: 1 },
+    { mode: 'replenishing', targetAllowanceMultiple: 20, refillBelowFraction: 0.5 },
+  ];
+  const tokenAmounts: bigint[] = [
+    0n, 1n, 2n, 500n, TRAC, TYPICAL_PUBLISH_COST, 10n ** 24n,
+  ];
+  // Ascending — monotonicity is checked along this order.
+  const allowances: bigint[] = [
+    0n, 1n, 2n, 20n, 500n, TRAC, TYPICAL_PUBLISH_COST,
+    200n * TRAC, 10n ** 24n, 10n ** 30n, ethers.MaxUint256,
+  ];
+
+  it('never approves below the publish floor (targetAllowance >= effectivePublishAllowance)', () => {
+    for (const policy of policies) {
+      for (const tokenAmount of tokenAmounts) {
+        const floor = effectivePublishAllowance(tokenAmount);
+        for (const currentAllowance of allowances) {
+          const { targetAllowance } = computeApprovalAction(policy, tokenAmount, currentAllowance);
+          expect(
+            targetAllowance >= floor,
+            `target ${targetAllowance} < floor ${floor} for ${JSON.stringify(policy, bigintReplacer)} @ tokenAmount=${tokenAmount}`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('keeps needsApprove monotone in currentAllowance (more allowance never re-approves)', () => {
+    for (const policy of policies) {
+      for (const tokenAmount of tokenAmounts) {
+        let sawFalse = false;
+        for (const currentAllowance of allowances) {
+          const { needsApprove } = computeApprovalAction(policy, tokenAmount, currentAllowance);
+          if (!needsApprove) sawFalse = true;
+          else {
+            expect(
+              sawFalse,
+              `needsApprove flipped false→true at currentAllowance=${currentAllowance} for ${JSON.stringify(policy, bigintReplacer)} @ tokenAmount=${tokenAmount}`,
+            ).toBe(false);
+          }
+        }
+      }
+    }
+  });
+
+  it('computes targetAllowance independently of currentAllowance (the reason monotonicity holds)', () => {
+    for (const policy of policies) {
+      for (const tokenAmount of tokenAmounts) {
+        const targets = allowances.map(
+          (a) => computeApprovalAction(policy, tokenAmount, a).targetAllowance,
+        );
+        expect(new Set(targets.map(String)).size).toBe(1);
+      }
+    }
+  });
+});
+
+function bigintReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? `${value}n` : value;
+}
 
 describe('computeApprovalAction — unlimited (V9 pattern)', () => {
   const policy: ApprovalPolicy = { mode: 'unlimited' };
@@ -3546,8 +3781,12 @@ describe('ensureV10ApproveTrac — per-publish (default) approval gate', () => {
 });
 
 describe('ensureV10ApproveTrac — replenishing policy (high-volume operator default)', () => {
+  // End-to-end through the adapter seam, with a realistic 10 TRAC publish.
+  // Default sizing: target = 20 × 10 TRAC = 200 TRAC, threshold = 20 TRAC.
+  const PUBLISH_COST = 10n * (10n ** 18n);
+  const DEFAULT_TARGET = 20n * PUBLISH_COST;
 
-  it('approves the default 1000 TRAC ceiling on a fresh wallet', async () => {
+  it('approves 20x the publish cost on a fresh wallet (default multiple)', async () => {
     const { a, signer, sendSpy } = makeV10Adapter(
       { mode: 'replenishing' },
       0n,
@@ -3556,19 +3795,18 @@ describe('ensureV10ApproveTrac — replenishing policy (high-volume operator def
     await (a as any).ensureV10ApproveTrac(
       signer,
       V10_KA_ADDRESS,
-      100n,
+      PUBLISH_COST,
       'approve V10 publish TRAC',
     );
 
     const call = getApproveCallArgs(sendSpy);
-    expect(call.args).toEqual([V10_KA_ADDRESS, DEFAULT_REPLENISH_TARGET_ALLOWANCE]);
+    expect(call.args).toEqual([V10_KA_ADDRESS, DEFAULT_TARGET]); // 200 TRAC
   });
 
   it('skips approve when allowance is comfortably above the refill threshold', async () => {
-    // Default refill fraction is 0.1, so the threshold is 100 TRAC. A
-    // wallet with 500 TRAC should NOT trigger a refill on the next
-    // publish.
-    const allowance = 500n * (10n ** 18n);
+    // Threshold is 2 × the publish cost = 20 TRAC. A wallet with 100 TRAC
+    // should NOT trigger a refill on the next publish.
+    const allowance = 100n * (10n ** 18n);
     const { a, signer, sendSpy } = makeV10Adapter(
       { mode: 'replenishing' },
       allowance,
@@ -3577,7 +3815,7 @@ describe('ensureV10ApproveTrac — replenishing policy (high-volume operator def
     await (a as any).ensureV10ApproveTrac(
       signer,
       V10_KA_ADDRESS,
-      100n,
+      PUBLISH_COST,
       'approve V10 publish TRAC',
     );
 
@@ -3585,9 +3823,9 @@ describe('ensureV10ApproveTrac — replenishing policy (high-volume operator def
   });
 
   it('refills back to target when allowance drops below the refill threshold', async () => {
-    // Threshold (10% of default target) is 100 TRAC. An allowance of
-    // 50 TRAC is *below* threshold → refill to the full 1000 TRAC.
-    const allowance = 50n * (10n ** 18n);
+    // Threshold is 20 TRAC (20 × 0.1 × publish cost). An allowance of
+    // 19 TRAC is *below* it → refill to the full 200 TRAC ceiling.
+    const allowance = 19n * (10n ** 18n);
     const { a, signer, sendSpy } = makeV10Adapter(
       { mode: 'replenishing' },
       allowance,
@@ -3596,7 +3834,26 @@ describe('ensureV10ApproveTrac — replenishing policy (high-volume operator def
     await (a as any).ensureV10ApproveTrac(
       signer,
       V10_KA_ADDRESS,
-      100n,
+      PUBLISH_COST,
+      'approve V10 publish TRAC',
+    );
+
+    const call = getApproveCallArgs(sendSpy);
+    expect(call.args).toEqual([V10_KA_ADDRESS, DEFAULT_TARGET]);
+  });
+
+  it('approves the absolute targetAllowance when the operator configured one', async () => {
+    // Precedence through the adapter seam: the historical flat 1000 TRAC
+    // ceiling still works exactly as before, overriding the multiple.
+    const { a, signer, sendSpy } = makeV10Adapter(
+      { mode: 'replenishing', targetAllowance: DEFAULT_REPLENISH_TARGET_ALLOWANCE },
+      0n,
+    );
+
+    await (a as any).ensureV10ApproveTrac(
+      signer,
+      V10_KA_ADDRESS,
+      PUBLISH_COST,
       'approve V10 publish TRAC',
     );
 

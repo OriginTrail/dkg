@@ -887,33 +887,31 @@ Every V10 publish or update pulls TRAC from the operational signer via `token.tr
 | Mode | Per-publish gas | Blast radius (compromised KA) | When to use |
 |---|---|---|---|
 | `per-publish` (default) | One `approve` tx whenever `tokenAmount` exceeds prior allowance | One publish's cost ceiling | Conservative default. Low publish volume, or operators who trust nothing. |
-| `replenishing` | One `approve` per ~`targetAllowance / avgPublishCost` publishes | Capped at `targetAllowance` (1000 TRAC default) | **Recommended for mainnet at any volume.** Predictable gas profile + bounded exposure. |
+| `replenishing` | One `approve` per **19 publishes** of comparable cost, at any price | 20× the triggering publish's cost (or `targetAllowance`, if you set one) | **Recommended for mainnet at any volume.** Predictable gas profile + bounded exposure. |
 | `unlimited` | One `approve` ever per wallet | Operational wallet's full TRAC balance | High-volume operators on a contract they trust absolutely. Matches V9 behaviour. |
 
 Configuration (defaults shown):
 
 ```yaml
 chain:
-  type: evm
-  rpcUrl: https://base.llamarpc.com
-  hubAddress: '0x...'
-  finalityConfirmations: 1          # THE node's finality depth; 1 = head, no reorg buffer
   approvalPolicy:
-    mode: per-publish                # 'per-publish' | 'replenishing' | 'unlimited'
-    # `replenishing` mode only:
-    targetAllowance: '1000000000000000000000'   # decimal wei-TRAC string (1000 TRAC = 10^21)
-    refillBelowFraction: 0.1                     # refill when current < target × this (default 10%)
+    mode: per-publish              # per-publish | replenishing | unlimited
+    targetAllowanceMultiple: 20    # replenishing: integer >= 1
+    refillBelowFraction: 0.1       # replenishing: refill below 10%
+    # targetAllowance: '1000000000000000000000' # optional absolute override
 ```
 
 `finalityConfirmations` is an operator-selected positive integer and the node's **single** definition of chain finality — for writes (when a mined publish receipt becomes terminal, and the recovery proof snapshots deciding whether a publish landed) *and* for reads (the Context Graph authority index, named-Context-Graph resolution, and the RFC-64 policy and VM precommit anchors). Standard EVM counting: `1` means the block itself, `2` waits for one successor. The default is `1`. The RPC provider's own `finalized` block tag is never substituted — it is the endpoint's consensus marker (~600 blocks / ~20 min behind head on Base Sepolia), not operator-configurable, and using it made a freshly registered Context Graph invisible to the authority index for that whole window.
 
 Choosing a value is therefore a **two-sided** trade. `1` gives no successor-block buffer: a reorganization can reverse a receipt after the node released the wallet, and can move an authority read's anchor mid-read (both are detected and fail closed, then retry — never silently accepted). A larger value buys that buffer everywhere, but also pushes the authority index, named-CG resolution and both precommit anchors that many blocks behind head, so a newly registered Context Graph stays unauthorized for roughly that many block times. Raise it when reversal resistance matters more than publish speed **and** than authority freshness.
 
-`targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
+In `replenishing`, `target = publishCost × targetAllowanceMultiple` and `threshold = max(target × refillBelowFraction, publishCost)`. At the defaults the node approves `20C`, refills below `2C`, and averages one approval per 19 similar-cost publishes. Raise the multiple for fewer approvals and more standing exposure; `1` sizes like `per-publish`. Invalid multiples are rejected at startup.
 
-Mode-only shorthand is accepted for compatibility (`approvalPolicy: unlimited` is normalized to `approvalPolicy: { mode: unlimited }`). Use the object form when setting `targetAllowance` or `refillBelowFraction`.
+Only repeated sharp price increases approach per-publish gas: at the defaults, each publish rising roughly 10× above the one that last set the ceiling can require another approval. A wide spread alone does not; after an expensive refill, alternating or descending cheaper publishes continue using its larger allowance. One expensive outlier can therefore leave much more standing exposure than usual.
 
-The policy never approves *less* than the immediate publish needs — a too-low `targetAllowance` gets quietly raised to the publish's on-chain floor so misconfiguration can't brick a publish.
+Set string-valued `targetAllowance` for an absolute TRAC ceiling; it overrides the multiple and preserves legacy explicit configs. In 10.0.17, a mode-only `replenishing` config instead changes from the former implicit 1000 TRAC ceiling to relative 20× sizing and emits a startup warning. Mode shorthand such as `approvalPolicy: unlimited` is accepted, but use the object form for sizing fields.
+
+The policy never approves less than the immediate publish floor. `refillBelowFraction` must be within `[0, 1]`; `1` refills every publish, while `0` waits until the publish floor is breached. A zero-cost CG uses the on-chain 1 wei-TRAC floor, so default `replenishing` approves 20 wei-TRAC once and, because nothing is spent, does not approve again.
 
 This entire surface was empirically driven by [PR #720](https://github.com/OriginTrail/dkg/pull/720)'s `TooLowAllowance(token, 0, 1)` finding on the May 2026 Base Sepolia publish-stress run; see also `packages/chain/test/evm-adapter.unit.test.ts` for the policy's invariants and edge cases.
 
