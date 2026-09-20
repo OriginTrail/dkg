@@ -12,8 +12,67 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
+import type { ChainEventLogFamily } from './chain-index/index.js';
+
+/** One stored row, presented to the SAME parse the live branch uses. */
+type ParsedLogLike = { topics: readonly string[]; data: string; blockNumber: number; transactionHash: string };
 
 export class EventsMethods extends EVMChainAdapterBase {
+  /**
+   * Rows for `[fromBlock, toBlock]` out of the one log, or `undefined` when
+   * this reader must keep its own `eth_getLogs`.
+   *
+   * ALL-OR-NOTHING on purpose. The lane runner advances its cursor to the
+   * upper bound it asked for whether or not the scan reached it
+   * (`chain-event-lane-runner.ts:289`), so a partial answer here would skip
+   * every block between the log's coverage and that bound — permanently, and
+   * silently. Serving only a fully-covered range keeps the lane's cursor
+   * arithmetic exactly as it was; a short range falls back to the live scan
+   * that was there before the log existed.
+   */
+  private async chainEventLogRows(
+    family: ChainEventLogFamily,
+    addressKey: 'contextGraphStorageAddress' | 'knowledgeAssetStorageAddress',
+    contract: ethers.Contract,
+    eventName: string,
+    filter: EventFilter,
+  ): Promise<readonly ParsedLogLike[] | undefined> {
+    const binding = this.chainEventLogBinding;
+    if (binding === undefined) return undefined;
+    // Coverage is recorded per (family, address), so the binding is usable only
+    // while it names the SAME contract the adapter currently resolves. A
+    // write-side Hub self-heal can replace the handle before the detached index
+    // runtime has rebuilt; in that interval the retired proxy's coverage must
+    // fail closed to the live queryFilter below.
+    const address = binding[addressKey];
+    if (address === undefined) return undefined;
+    let currentAddress: string;
+    try {
+      currentAddress = (await contract.getAddress()).toLowerCase();
+    } catch {
+      return undefined;
+    }
+    if (address !== currentAddress) return undefined;
+    // ONE topic, not the whole family. A family is a filter of several
+    // signatures fetched together, so handing a lane every row at the address
+    // would feed it its siblings — a `ContextGraphDeactivated` parsed as a
+    // `ContextGraphCreated` is a graph that never existed.
+    const topic0 = contract.interface.getEvent(eventName)?.topicHash.toLowerCase();
+    if (topic0 === undefined) return undefined;
+    const fromBlock = typeof filter.fromBlock === 'number' ? filter.fromBlock : undefined;
+    const toBlock = typeof filter.toBlock === 'number' ? filter.toBlock : undefined;
+    // An open-ended range has no bound to prove coverage against.
+    if (fromBlock === undefined || toBlock === undefined) return undefined;
+    const range = await binding.subscription.servableRange(
+      family,
+      address,
+      fromBlock,
+      toBlock,
+    );
+    if (range === undefined || range.throughBlockNumber < toBlock) return undefined;
+    const rows = await binding.subscription.readRows(range);
+    return rows.filter((row) => row.topics[0]?.toLowerCase() === topic0);
+  }
   // =====================================================================
   // Events
   // =====================================================================
@@ -120,14 +179,29 @@ export class EventsMethods extends EVMChainAdapterBase {
       if (eventType === 'KnowledgeAssetRegisteredToContextGraph') {
         const cgStorage = this.contracts.contextGraphStorage;
         if (cgStorage) {
-          const eventFilter = cgStorage.filters.KnowledgeAssetRegisteredToContextGraph();
-          const logs = await this.queryFilterWithFailover(
-            cgStorage, 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+          // The one log owns this event. `txIndex` is the one field it cannot
+          // carry (the stored row has no transaction index), and this lane is
+          // explicitly a NUDGE whose consumer re-derives the ordinal with its
+          // own sweep — so an absent tiebreaker costs a sweep, not a wrong
+          // version. The publish lane, whose `txIndex` IS a last-writer-wins
+          // tiebreaker, is deliberately NOT routed here.
+          const logged = await this.chainEventLogRows(
+            'context-graph-ka',
+            'contextGraphStorageAddress',
+            cgStorage,
+            'KnowledgeAssetRegisteredToContextGraph',
+            filter,
+          );
+          const logs = logged ?? await this.queryFilterWithFailover(
+            cgStorage, 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)',
+            cgStorage.filters.KnowledgeAssetRegisteredToContextGraph(),
+            filter.fromBlock ?? 0, filter.toBlock,
           );
 
           for (const log of logs) {
             const parsed = cgStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (parsed) {
+              const txIndex = (log as { transactionIndex?: number }).transactionIndex;
               yield {
                 type: 'KnowledgeAssetRegisteredToContextGraph',
                 blockNumber: log.blockNumber,
@@ -135,7 +209,7 @@ export class EventsMethods extends EVMChainAdapterBase {
                   contextGraphId: parsed.args.contextGraphId.toString(),
                   kaId: parsed.args.kaId.toString(),
                   txHash: log.transactionHash,
-                  txIndex: log.transactionIndex,
+                  txIndex,
                 },
               };
             }
@@ -290,9 +364,20 @@ export class EventsMethods extends EVMChainAdapterBase {
       if (eventType === 'ContextGraphCreated') {
         const cgStorage = this.contracts.contextGraphStorage;
         if (cgStorage) {
-          const eventFilter = cgStorage.filters.ContextGraphCreated();
-          const logs = await this.queryFilterWithFailover(
-            cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+          // `ContextGraphCreated` is already in the tick's authority topic set,
+          // so this lane was the SECOND reader of rows the node had already
+          // fetched. Nothing in the yielded shape needs a transaction index.
+          const logged = await this.chainEventLogRows(
+            'context-graph-authority',
+            'contextGraphStorageAddress',
+            cgStorage,
+            'ContextGraphCreated',
+            filter,
+          );
+          const logs = logged ?? await this.queryFilterWithFailover(
+            cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)',
+            cgStorage.filters.ContextGraphCreated(),
+            filter.fromBlock ?? 0, filter.toBlock,
           );
           for (const log of logs) {
             const parsed = cgStorage.interface.parseLog({ topics: [...log.topics], data: log.data });

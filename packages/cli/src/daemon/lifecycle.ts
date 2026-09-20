@@ -103,6 +103,7 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
+  SqliteChainEventLogStore,
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
@@ -1793,6 +1794,13 @@ async function runDaemonInnerWithStartupOwnership(
     new SqliteContextGraphAuthorityHistoryStore(dashDb);
   const localContextGraphAuthorityIndexStore =
     new SqliteContextGraphAuthorityIndexStore(dashDb);
+  // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
+  // adapter builds the tick, starts it, and publishes the binding every other
+  // reader consults. The per-wallet publisher adapters
+  // (`createPublisherWalletChain`) are deliberately given nothing here — a
+  // second store would be a second scanner, which is what this log exists to
+  // delete.
+  const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1915,6 +1923,7 @@ async function runDaemonInnerWithStartupOwnership(
     contextGraphRegistryScanCursorStore,
     localContextGraphAuthorityHistoryStore,
     localContextGraphAuthorityIndexStore,
+    chainEventLogStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

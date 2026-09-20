@@ -720,6 +720,10 @@ function constructConfiguredChainAdapter(
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
       localContextGraphAuthorityIndexStore: config.localContextGraphAuthorityIndexStore,
+      // THE one log. Only this adapter is given the store, so only this
+      // adapter owns a tick; every other adapter in the process reads the
+      // binding it publishes.
+      chainEventLogStore: config.chainEventLogStore,
       contextGraphAuthorityIndexBootstrap,
     };
     const chain = config.chainConfig.adminPrivateKey

@@ -7,10 +7,12 @@ import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
 
 const ROTATION_EVENTS = [
-  'event NewContract(string contractName, address newContractAddress)',
   'event ContractChanged(string contractName, address newContractAddress)',
-  'event NewAssetStorage(string contractName, address newContractAddress)',
+  'event NewContract(string contractName, address newContractAddress)',
+  'event ContractRemoved(string contractName, address contractAddress)',
   'event AssetStorageChanged(string contractName, address newContractAddress)',
+  'event NewAssetStorage(string contractName, address newContractAddress)',
+  'event AssetStorageRemoved(string contractName, address contractAddress)',
 ];
 
 function hubInterface(events = ROTATION_EVENTS): ethers.Interface {
@@ -187,6 +189,39 @@ describe('HubRotationPoller', () => {
     } finally {
       poller.stop();
       vi.useRealTimers();
+    }
+  });
+
+  it('dispatches pure contract and asset-storage removals from the live fallback', async () => {
+    const iface = hubInterface();
+    const logs = [
+      rotationLog(iface, 'ContractRemoved', 'ContextGraphs', 1_001, '53'),
+      rotationLog(iface, 'AssetStorageRemoved', 'ContextGraphStorage', 1_001, '54', 1),
+    ];
+    const provider = {
+      getBlockNumber: vi.fn(async () => 1_001),
+      getLogs: vi.fn(async (filter: any) => logsInRange(logs, filter)),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+      await poller.pollOnce();
+
+      expect(onContractName).toHaveBeenCalledWith('ContextGraphs');
+      expect(onContractName).toHaveBeenCalledWith('ContextGraphStorage');
+      expect(provider.getLogs.mock.calls[0][0].topics[0]).toEqual(
+        ROTATION_EVENTS.map((event) => iface.getEvent(event.slice(6, event.indexOf('(')))!.topicHash),
+      );
+    } finally {
+      poller.stop();
     }
   });
 
@@ -404,12 +439,9 @@ describe('HubRotationPoller', () => {
         fromBlock: 951,
         toBlock: 1_001,
       });
-      expect(provider.getLogs.mock.calls[0][0].topics[0]).toEqual([
-        iface.getEvent('ContractChanged')!.topicHash,
-        iface.getEvent('NewContract')!.topicHash,
-        iface.getEvent('AssetStorageChanged')!.topicHash,
-        iface.getEvent('NewAssetStorage')!.topicHash,
-      ]);
+      expect(provider.getLogs.mock.calls[0][0].topics[0]).toEqual(
+        ROTATION_EVENTS.map((event) => iface.getEvent(event.slice(6, event.indexOf('(')))!.topicHash),
+      );
       // `skipPreferred` pins the poller's endpoint-stickiness transparency
       // (Mechanism B): a background head/log probe at the ~TTL cadence must not
       // re-probe or clear the preferred backend the read/write paths rely on.
@@ -625,6 +657,8 @@ describe('HubRotationPoller', () => {
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: vi.fn(async () => 1_000),
@@ -638,7 +672,7 @@ describe('HubRotationPoller', () => {
     });
 
     expect(() => poller.start(hubContract(iface), HUB_ADDRESS))
-      .toThrow('Hub ABI is missing required rotation event AssetStorageChanged');
+      .toThrow('Hub ABI is missing required rotation event AssetStorageRemoved');
 
     expect(provider.getBlockNumber).not.toHaveBeenCalled();
     expect(provider.getLogs).not.toHaveBeenCalled();

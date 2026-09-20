@@ -35,6 +35,14 @@ export function contextGraphAuthorityIndexScope(
  */
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS = 15_000;
 
+/** Shared stale-if-error budget for both the projection cache and one-log anchor. */
+export function resolveContextGraphAuthorityIndexStaleMs(tickMs: number): number {
+  return Math.min(
+    Math.max(3 * tickMs, CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS),
+    CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+  );
+}
+
 /**
  * How old, in CHAIN time, the head of a cached projection may be before the
  * cache stops answering for it (security review S2).
@@ -91,16 +99,45 @@ export interface ContextGraphAuthorityIndexProjectionOptions {
 }
 
 /**
- * How one finalized authority read was answered. `scan` exercised the RPC pool
- * now; `cache` was answered by a projection still inside its configured tick;
- * `stale-cache` was answered DESPITE a failed refresh and therefore proves
- * nothing about the pool.
+ * How one finalized authority read was answered.
+ *
+ *  - `scan` exercised the RPC pool NOW. This is the only member that is a
+ *    first-hand statement about the pool's liveness.
+ *  - `cache` was answered by a projection still inside its configured tick.
+ *    Second-hand, but its provenance is exact: some earlier `scan` of this
+ *    same read class produced it, and {@link ageMs} dates that scan.
+ *  - `log` was FOLDED out of the node-local chain event log's stored rows.
+ *    It contacted no endpoint at all — that is the entire point of it — so it
+ *    proves nothing whatever about the pool. The only fetch instant it can
+ *    offer belongs to the background chain-index tick, which is a DIFFERENT
+ *    actor running a DIFFERENT read policy (`watchdogPointRead`, capped) in a
+ *    provider session this read never opened. A consumer must not read it as
+ *    liveness; see the RFC-64 authority circuit breaker, which treats it as no
+ *    signal.
+ *  - `stale-cache` was answered DESPITE a failed refresh, and is therefore
+ *    evidence AGAINST the pool.
+ *
+ * ONLY `scan` and `cache` carry pool liveness. A consumer that switches on
+ * this field must default to the non-proof side, so that a member added later
+ * cannot be mistaken for health by omission.
  */
 export interface ContextGraphAuthorityProjectionServedEvidence {
-  readonly source: 'scan' | 'cache' | 'stale-cache';
+  readonly source: 'scan' | 'cache' | 'log' | 'stale-cache';
   /**
-   * Wall-clock time since the refresh began, including scan duration. This is
-   * intentionally based on `fetchedAtMs`, which is captured before any RPC.
+   * How old the DATA behind this answer is, in wall-clock milliseconds.
+   *
+   * For a refresh that asked the chain that is the time since the refresh
+   * began — captured before any RPC, so scan duration is included and the age
+   * is over-reported rather than under. For a `log` fold it is the time since
+   * the TICK asked for the head it committed, which can be up to
+   * `min(max(3T, 15s), 5m)` more — and which is stamped before that tick's own
+   * head RPC, so the tick's pass duration is inside it under the identical
+   * discipline. Both are the same statement: nothing was observed about the
+   * chain more recently than this.
+   *
+   * It dates the OBSERVATION, never the observer. On a `log` fold the instant
+   * it points at belongs to the background tick, so it cannot be read as "this
+   * read reached the pool then" — that is what {@link source} is for.
    */
   readonly ageMs: number;
 }
@@ -192,6 +229,11 @@ export class ContextGraphAuthorityIndexView {
   }
 }
 
+/** Where a completed projection obtained the chain data it contains. */
+export type ContextGraphAuthorityIndexProjectionOrigin =
+  | Readonly<{ kind: 'scan' }>
+  | Readonly<{ kind: 'log'; dataFetchedAtMs: number }>;
+
 /** What one completed refresh hands over: scanned AND past its final fence. */
 export interface ContextGraphAuthorityIndexCompletedProjection {
   /** Deployment (chainId + Hub) + physical ContextGraphStorage address. */
@@ -205,12 +247,90 @@ export interface ContextGraphAuthorityIndexCompletedProjection {
   /** True when the view contains an unpersisted reorgable tail above the durable cursor. */
   readonly requiresAnchorValidation?: boolean;
   readonly view: ContextGraphAuthorityIndexView;
+  /**
+   * Whether this refresh fetched the data itself or folded stored log rows.
+   *
+   * The discriminant is authoritative provenance. A log timestamp that is
+   * invalid or in the future is still a log answer; only its effective age
+   * falls back to the refresh-start instant. This prevents malformed timing
+   * metadata from being relabelled as evidence of a live RPC scan.
+   */
+  readonly origin: ContextGraphAuthorityIndexProjectionOrigin;
 }
 
 export interface ContextGraphAuthorityIndexProjection
   extends ContextGraphAuthorityIndexCompletedProjection {
-  /** Taken BEFORE the refresh started, so age is never under-reported. */
+  /**
+   * When this view's data was fetched: the OLDER of the instant taken before
+   * the refresh started and any instant the refresh itself reported. Age is
+   * therefore never under-reported, whichever side produced the view.
+   */
   readonly fetchedAtMs: number;
+}
+
+/** A caller projection fault deferred past refresh/transport classification. */
+export interface ContextGraphAuthorityIndexProjectionFault {
+  readonly kind: 'context-graph-authority-projection-fault';
+  readonly fault: unknown;
+}
+
+export function contextGraphAuthorityIndexProjectionFault(
+  fault: unknown,
+): ContextGraphAuthorityIndexProjectionFault {
+  return Object.freeze({ kind: 'context-graph-authority-projection-fault' as const, fault });
+}
+
+export function isContextGraphAuthorityIndexProjectionFault(
+  value: unknown,
+): value is ContextGraphAuthorityIndexProjectionFault {
+  return typeof value === 'object'
+    && value !== null
+    && (value as { kind?: unknown }).kind === 'context-graph-authority-projection-fault';
+}
+
+/**
+ * Stamp a completed refresh, producing the projection it is judged, retained,
+ * reported and aged by. THE ONLY WAY a `fetchedAtMs` is ever produced.
+ *
+ * `floorAtMs` is taken before any RPC — `#refresh`'s own pre-refresh instant,
+ * or, for the log fast path's synthetic candidate, the instant that read was
+ * asked. A scan is therefore never younger than it. A refresh that folded
+ * stored rows may prove its data is OLDER, and only older is ever believed: a
+ * reported instant at or after the floor would move age towards zero, which is
+ * the one direction `dataFetchedAtMs` exists to forbid. A value that is not a
+ * safe integer proves nothing at all and falls back with it.
+ *
+ * EXPORTED so the log fast path in `evm-context-graph-authority-index-reader`
+ * can build the candidate it runs the caller's projection against through this
+ * function instead of restating the rule. The two must not be able to disagree:
+ * the candidate a read is ADMITTED by and the projection the cache then ages
+ * and reports are the same view, and a second copy of the expression could
+ * drift from this one silently (it already had: `Math.min` believed a NaN or
+ * fractional `dataFetchedAtMs` that this resolver rejects). The floors differ —
+ * the reader's `askedAtMs` precedes the cache's stamp — and only ever in the
+ * over-reporting direction, which is the safe one.
+ */
+export function resolveProjectionFetchedAtMs(
+  refreshStartedAtMs: number,
+  origin: ContextGraphAuthorityIndexProjectionOrigin,
+): number {
+  return origin.kind === 'log'
+    && Number.isSafeInteger(origin.dataFetchedAtMs)
+    && origin.dataFetchedAtMs < refreshStartedAtMs
+    ? origin.dataFetchedAtMs
+    : refreshStartedAtMs;
+}
+
+/**
+ * Whether this view was FOLDED out of stored rows instead of fetched.
+ *
+ * Provenance is explicit and independent of timestamp validity. It survives
+ * publication because the retained projection carries the same discriminant.
+ */
+function projectionFoldedStoredRows(
+  projection: ContextGraphAuthorityIndexCompletedProjection,
+): boolean {
+  return projection.origin.kind === 'log';
 }
 
 export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
@@ -236,7 +356,9 @@ export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
     projection: ContextGraphAuthorityIndexProjection,
   ) => Promise<boolean | undefined>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
-  readonly refresh: () => Promise<ContextGraphAuthorityIndexCompletedProjection>;
+  readonly refresh: () => Promise<
+    ContextGraphAuthorityIndexCompletedProjection | ContextGraphAuthorityIndexProjectionFault
+  >;
   readonly onServed?: (evidence: ContextGraphAuthorityProjectionServedEvidence) => void;
 }
 
@@ -286,10 +408,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
 
   constructor(options: ContextGraphAuthorityIndexProjectionOptions = {}) {
     this.tickMs = resolveContextGraphAuthorityIndexTickMs(options.tickMs);
-    this.staleMs = Math.min(
-      Math.max(3 * this.tickMs, CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS),
-      CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
-    );
+    this.staleMs = resolveContextGraphAuthorityIndexStaleMs(this.tickMs);
     this.#headTimestampToleranceMs = options.headTimestampToleranceMs
       ?? CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
     if (!Number.isSafeInteger(this.#headTimestampToleranceMs)
@@ -349,8 +468,9 @@ export class ContextGraphAuthorityIndexProjectionCache {
     const state = this.#scopeState(input.scope);
     state.activeRefreshes += 1;
     const generation = state.generation;
-    const fetchedAtMs = this.#now();
+    const refreshStartedAtMs = this.#now();
     let projection: ContextGraphAuthorityIndexProjection | undefined;
+    let projectionFault: ContextGraphAuthorityIndexProjectionFault | undefined;
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     // A waiter that found the previous refresh unusable runs beside a newer
@@ -358,22 +478,43 @@ export class ContextGraphAuthorityIndexProjectionCache {
     const initiates = state.refreshing === undefined;
     if (initiates) state.refreshing = settled;
     try {
-      projection = Object.freeze({
-        ...await input.refresh(),
-        fetchedAtMs,
-      });
-      if (projection.scope !== input.scope) {
-        throw new ContextGraphAuthorityIndexRetryableError(
-          `Context Graph authority contract changed during refresh: ${input.scope} -> ${projection.scope}`,
-        );
+      const refreshed = await input.refresh();
+      if (isContextGraphAuthorityIndexProjectionFault(refreshed)) {
+        projectionFault = refreshed;
+      } else {
+        const completed = refreshed;
+        if (completed.scope !== input.scope) {
+          throw new ContextGraphAuthorityIndexRetryableError(
+            `Context Graph authority contract changed during refresh: ${input.scope} -> ${completed.scope}`,
+          );
+        }
+        // A refresh that FOLDED stored rows rather than fetching them answers as
+        // of the instant that data was fetched, not as of this read. Retaining
+        // and reporting it under `now` would reset its age to zero and buy it a
+        // further `tickMs` of service as a FRESH cache entry, so a view already
+        // `min(max(3T, 15s), 5m)` behind the chain could be served for that
+        // capped bound plus T while every consumer was told it was under T old.
+        // The age this cache ages by is the age of the DATA.
+        projection = Object.freeze({
+          ...completed,
+          fetchedAtMs: resolveProjectionFetchedAtMs(
+            refreshStartedAtMs,
+            completed.origin,
+          ),
+        });
+        if (generation === state.generation) {
+          this.#publish(state, projection);
+        }
+        // `scan` is a claim about the POOL, not about where the answer came
+        // from, so a fold may not make it. The log path reaches SQLite and
+        // nothing else; reporting it as a scan let a consumer read local rows as
+        // proof that every endpoint was alive, which is the one thing a fold
+        // cannot witness.
+        input.onServed?.(Object.freeze({
+          source: projectionFoldedStoredRows(completed) ? 'log' : 'scan',
+          ageMs: Math.max(0, this.#now() - projection.fetchedAtMs),
+        }));
       }
-      if (generation === state.generation) {
-        this.#publish(state, projection);
-      }
-      input.onServed?.(Object.freeze({
-        source: 'scan',
-        ageMs: Math.max(0, this.#now() - fetchedAtMs),
-      }));
     } catch (error) {
       // A caller that left did not observe an RPC failure.
       if (input.signal?.aborted) throw error;
@@ -401,6 +542,11 @@ export class ContextGraphAuthorityIndexProjectionCache {
       settle();
       this.#deleteScopeIfIdle(input.scope, state);
     }
+    // A caller's pure projection can reject a perfectly valid log fold. That
+    // fault travels as data through the provider session and refresh catch,
+    // then is restored here, outside both transport classifiers. It is neither
+    // an outage nor a servable projection, so it is not published or reported.
+    if (projectionFault !== undefined) throw projectionFault.fault;
     if (projection === undefined) {
       throw new Error('Context Graph authority refresh settled without a projection');
     }
@@ -424,6 +570,11 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // Once that retained head has reached T, however, keeping it would strand
     // the cache forever on a legitimate reorg/reset: every stabilized lower
     // scan would be answered to its caller but refused publication.
+    //
+    // The difference may now be NEGATIVE — a fold from the log is stamped with
+    // the tick's head-fetch instant, which can predate a live scan already
+    // retained. That is the same case, read correctly: older data at a lower
+    // head does not displace newer, and the caller is still answered.
     const previous = state.projection;
     const now = this.#now();
     if (
@@ -484,8 +635,16 @@ export class ContextGraphAuthorityIndexProjectionCache {
         return PROJECTION_CACHE_MISS;
       }
     }
+    // A RETAINED fold is still a fold. Labelling it `cache` here would relaunder
+    // exactly what `#refresh` above stopped: `cache` tells a consumer that some
+    // scan of this read class produced the entry and that `ageMs` dates that
+    // scan, and neither is true of rows the tick folded. `stale-cache` wins when
+    // it applies, because "a refresh FAILED" is the stronger statement — it is
+    // evidence against the pool, where a fold is merely silent about it.
     input.onServed?.(Object.freeze({
-      source: fresh ? 'cache' : 'stale-cache',
+      source: !fresh
+        ? 'stale-cache'
+        : (projectionFoldedStoredRows(projection) ? 'log' : 'cache'),
       ageMs,
     }));
     return { hit: true, value: projected.value };

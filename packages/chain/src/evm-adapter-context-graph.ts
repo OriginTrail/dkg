@@ -1116,9 +1116,62 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     });
   }
 
+  /**
+   * Two positive `ContextGraphStorage` views below read the ONE log first.
+   *
+   * `latest`, not `finalized`, and that is what makes them stand in for the
+   * call at all: each one replaces an UNPINNED `eth_call`, answered at the
+   * chain's current head with that head's tip-reorg exposure. Reading them at
+   * the settled cursor instead would be a DIFFERENT answer, fifty blocks behind
+   * the call it replaces, and a KA registered inside that window would read as
+   * not registered.
+   *
+   * THE EXPOSURE IS THAT CALL'S WINDOW PLUS UP TO ONE TICK INTERVAL, and it is
+   * worth stating plainly rather than claiming parity. An `eth_call` self-heals
+   * the moment its endpoint follows a reorg; a tail row does not disappear
+   * until the tick's NEXT pass replaces the tail wholesale, so a registration
+   * orphaned by a tip reorg can still be folded into a positive `bound` or a
+   * known ordinal for up to `chain.indexTickMs`. The module's
+   * write-once justification (knowledge-asset-read-model.ts) is about a SETTLED
+   * row and does not cover the tail. Bounded by the tick's own liveness gate,
+   * not attacker-choosable — the id must have been emitted on a fork this
+   * node's own tick followed — and `verifyContextGraphBinding` still
+   * cross-checks the local id on the admission path this reaches.
+   *
+   * Negative bindings and counts never use the log: unlike a durable positive
+   * binding or already-known ordinal, they may change in the block immediately
+   * after the tick's head observation. Every other refusal — a cold log, a
+   * stalled tick, a held fork suspicion, a backfill that has not reached the
+   * graph's creation block, an ordinal past what the log holds — runs the
+   * `eth_call` exactly as it did before the log existed.
+   */
+  private async knowledgeAssetsFromLogFor(contract: Contract) {
+    const binding = this.chainEventLogBinding;
+    if (binding?.knowledgeAssets === undefined
+      || binding.contextGraphStorageAddress === undefined) return undefined;
+    let currentAddress: string;
+    try {
+      currentAddress = (await contract.getAddress()).toLowerCase();
+    } catch {
+      return undefined;
+    }
+    // A Hub self-heal may resolve the successor before the detached one-log
+    // runtime has rebuilt. Never answer the successor from the retired proxy's
+    // folded rows; an address mismatch takes the existing live eth_call below.
+    return binding.contextGraphStorageAddress === currentAddress
+      ? binding.knowledgeAssets
+      : undefined;
+  }
+
   async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readContextGraphForKa(
+      kaId,
+      { view: 'latest' },
+    );
+    if (logged !== undefined) return logged.contextGraphId;
     const cgId: bigint = await this.readContractWithOptions(
       cgs,
       'cgStorage.kaToContextGraph',
@@ -1131,6 +1184,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
+    // Count is mutable. Even complete coverage only proves the tick's last
+    // observed head, while this unpinned call must include a registration that
+    // lands immediately afterwards. Keep the live call for that distinction.
     const cgs = this.requireContextGraphStorage();
     const count: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaCount', 'getContextGraphKaCount', contextGraphId,
@@ -1141,6 +1197,18 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readContextGraphKaList(
+      contextGraphId,
+      { view: 'latest' },
+    );
+    // Position IS the ordinal — the on-chain list only ever appends. An index
+    // the log does not hold is NOT an out-of-range answer to invent: the chain
+    // reverts on one, and callers read that revert, so the call below must be
+    // the thing that produces it.
+    if (logged !== undefined && index >= 0n && index < BigInt(logged.kaIds.length)) {
+      return logged.kaIds[Number(index)]!;
+    }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
     );

@@ -82,6 +82,19 @@ import {
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
+import type { ChainEventLogBinding } from './chain-event-log-binding.js';
+import {
+  createEvmChainIndexRuntime,
+  type EvmChainIndexContract,
+} from './evm-chain-index-runtime.js';
+import { EvmChainIndexRuntimeOwner } from './evm-chain-index-runtime-owner.js';
+// The tick cadence resolver lives with the projection cache because `T` is ONE
+// number on this node: the cache's answer lifetime and the log tick's interval.
+import {
+  contextGraphAuthorityIndexScope,
+  resolveContextGraphAuthorityIndexTickMs,
+} from
+  './context-graph-authority-index-projection.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';
@@ -191,6 +204,21 @@ const HUB_BINDING_INVALIDATOR_ENTRIES = [
 const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
   HUB_BINDING_INVALIDATOR_ENTRIES,
 );
+
+/**
+ * The bindings the ONE chain log is built around
+ * (`startChainIndexRuntime` — keep the two in step).
+ *
+ * A rotation of one of these does not invalidate a cache, it invalidates the
+ * whole runtime: its decoder registry is keyed by (address, topic0) and its
+ * binding publishes those addresses to every reader, both fixed at
+ * construction. Anything else in `HUB_BINDING_INVALIDATORS` is not indexed and
+ * costs the log nothing when it moves.
+ */
+const CHAIN_INDEX_CONTRACT_KEYS: ReadonlySet<HubContractCacheKey> = new Set([
+  'contextGraphStorage',
+  'knowledgeAssetStorage',
+]);
 
 /**
  * Contract names deliberately EXCLUDED from the `resolvedContractAddressCache`
@@ -832,6 +860,38 @@ export class EVMChainAdapterBase {
   protected readonly hubRotationPoller: HubRotationPoller;
 
   /**
+   * This adapter's window onto the node's ONE chain log, once something owns a
+   * tick that fills it.
+   *
+   * It is BOUND rather than constructed because the log is process-wide and
+   * adapters are not: per-wallet publisher adapters are built without a store
+   * (`publisher-runner.ts:81-88`), so an adapter that built its own log would
+   * be a SECOND scanner — exactly what this work exists to remove. While it is
+   * unset, every event reader keeps its own `queryFilter`, which is the
+   * pre-log behaviour and never a degraded one.
+   */
+  private readonly chainIndexOwner: EvmChainIndexRuntimeOwner;
+
+  protected get chainEventLogBinding(): ChainEventLogBinding | undefined {
+    return this.chainIndexOwner.binding;
+  }
+
+  /**
+   * Bind (or clear) the one log for this adapter's event readers.
+   *
+   * Safe after `init()`: the readers consult the binding per call and fall
+   * back the moment coverage cannot carry the range they were asked for.
+   */
+  attachChainEventLog(binding: ChainEventLogBinding | undefined): void {
+    this.chainIndexOwner.attach(binding);
+  }
+
+  /** The binding the process hands DOWN to every adapter that has no store. */
+  get chainEventLog(): ChainEventLogBinding | undefined {
+    return this.chainIndexOwner.binding;
+  }
+
+  /**
    * Single-flight guard for the best-effort
    * `getActiveProofingPeriodDurationInBlocks()` probe inside
    * `getActiveProofPeriodStatus()`. Codex round 5 on PR #369: the
@@ -1032,6 +1092,15 @@ export class EVMChainAdapterBase {
   protected readonly cgRegistryScanPageSize: number;
 
   /**
+   * `chain.indexTickMs` (T) as configured, unvalidated.
+   *
+   * Kept raw so every consumer normalizes through the ONE resolver
+   * (`resolveContextGraphAuthorityIndexTickMs`) and an invalid value is
+   * rejected identically wherever it is read.
+   */
+  protected readonly indexTickMs: EVMAdapterConfig['indexTickMs'];
+
+  /**
    * Reset the PR3 publish-preflight cache. Public so daemon code that
    * knows about an external chain reconfiguration (e.g. a hot-reload
    * of `chainRpcUrl` or a deliberate governance-vote test fixture)
@@ -1173,6 +1242,7 @@ export class EVMChainAdapterBase {
       config.cgRegistryScanPageSize,
       CG_REGISTRY_DEFAULT_PAGE_SIZE,
     );
+    this.indexTickMs = config.indexTickMs;
     // BUG-022 root-cause fix: force ethers' `PollingEventSubscriber`
     // (eth_getLogs over a sliding block window) instead of the default
     // `FilterIdEventSubscriber` (eth_newFilter + eth_getFilterChanges).
@@ -1286,6 +1356,14 @@ export class EVMChainAdapterBase {
         stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
       },
     );
+    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
+      config.chainEventLogStore,
+      (error) => {
+        console.warn(
+          `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
     this.receiptFinality = new EvmReceiptFinalityReader(
       this.finalityConfirmations,
       (label, read, options) => this.readProviderRetryingNull(label, read, options),
@@ -1295,6 +1373,20 @@ export class EVMChainAdapterBase {
       intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
       reorgBufferBlocks: HUB_ROTATION_REORG_BUFFER_BLOCKS,
       onContractName: (name) => this.applyHubRotationEventName(name),
+      // The one log, consulted LIVE per pass rather than captured here. The
+      // binding is attached after `initContracts` resolves the Hub, which is
+      // strictly after this constructor runs, so anything decided once at
+      // construction would pin this listener to the scan forever.
+      logSource: (lastScannedBlock, reorgBufferBlocks) => {
+        const readWindow = this.chainEventLogBinding?.readHubRotationWindow;
+        return readWindow === undefined
+          ? Promise.resolve(undefined)
+          : readWindow.call(
+            this.chainEventLogBinding,
+            lastScannedBlock,
+            reorgBufferBlocks,
+          );
+      },
     });
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
@@ -1413,6 +1505,10 @@ export class EVMChainAdapterBase {
             ),
           pageSize: () => this.cgRegistryScanPageSize,
           finalityConfirmations: () => this.finalityConfirmations,
+          // Read per call, never captured: a Hub rotation replaces the binding
+          // wholesale, and this reader must see the NEW one — or none — rather
+          // than the log built around the `ContextGraphStorage` it left.
+          chainEventLogAuthority: () => this.chainEventLogBinding?.contextGraphAuthority,
         });
     this.contextGraphAuthorityIndexReader = authorityIndexReader;
     this.contextGraphAuthorityIndexRevisionReader = authorityIndexReader;
@@ -3066,6 +3162,11 @@ export class EVMChainAdapterBase {
       // RandomSampling not deployed — proof submission unavailable
     }
 
+    // THE tick. Started here because the Hub bindings resolved above ARE its
+    // address array, and started WITHOUT an await so a cold backfill can never
+    // delay a chain write. Only the adapter the composition root gave a store
+    // does anything at all here.
+    this.startChainIndexRuntime();
     await this.startHubRotationListener();
 
     const tokenAddress: string = this.tokenAddress ?? await this.readContract(
@@ -4436,6 +4537,12 @@ export class EVMChainAdapterBase {
    * ethers implements each subscription as its own steady `eth_getLogs`
    * poller. One adapter-owned poller with an OR-topic filter preserves
    * rotation detection without four hidden idle log streams.
+   *
+   * SINCE THE ONE LOG: this listener no longer scans. Its `logSource` reads
+   * the Hub rows the tick already fetched, so `Hub_rotation_poll_getBlockNumber`
+   * and `Hub_rotation_poll_getLogs` are issued only by an adapter with no log
+   * bound, or while the log cannot prove it covers the window — the pre-log
+   * behaviour, kept as the fallback and never running beside the log.
    */
   protected async startHubRotationListener(): Promise<void> {
     if (this.hubRotationPoller.isStarted) return;
@@ -4449,6 +4556,139 @@ export class EVMChainAdapterBase {
         `[chain] Hub rotation poller setup disabled: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Start the node's ONE chain log, once, for the adapter that owns the store.
+   *
+   * DETACHED on purpose, and the caller must not await it. Resolving the Hub's
+   * deploy block is a per-backend head probe plus a `getCode` binary search,
+   * and the first pass then reads a head and one log range; `initContracts`
+   * sits on the critical path of every chain write, so neither may be allowed
+   * to delay it. Until the first pass commits, every reader's coverage check
+   * refuses and each one does exactly what it did before the log existed.
+   *
+   * A failure here is a degraded index, not a degraded node: it is reported
+   * and the adapter keeps every pre-log path.
+   *
+   * Re-entrant after a Hub rotation, and only after one:
+   * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next
+   * `initContracts` builds the log around the addresses the Hub now points at.
+   * Two builds racing are resolved by the generation counter, never by both
+   * attaching.
+  */
+  protected startChainIndexRuntime(): void {
+    // Snapshot SYNCHRONOUSLY, before the first `await`, exactly as the Hub
+    // handle already was. `initContracts` re-assigns these fields and the
+    // rotation invalidator nulls them, while this task is detached: read after
+    // an await, a rotation landing in that gap would build the log with no
+    // Context Graph or KA source at all, silently and for good.
+    const hubContract = this.contracts.hub;
+    const contextGraphStorageContract = this.contracts.contextGraphStorage;
+    const knowledgeAssetStorageContract = this.contracts.knowledgeAssetStorage;
+    this.chainIndexOwner.start(async (store) => {
+      const hub = await this.chainIndexContract(hubContract, 'Hub');
+      if (hub === undefined) throw new Error('Hub address is unresolvable');
+      const contextGraphStorage = await this.chainIndexContract(
+        contextGraphStorageContract,
+        'ContextGraphStorage',
+        'assetStorage',
+      );
+      const resumeFromBlockNumber = contextGraphStorage === undefined
+        || this.contextGraphAuthorityIndex === undefined
+        ? undefined
+        : await this.contextGraphAuthorityIndex.durableCursorBlockNumber(
+            contextGraphAuthorityIndexScope(
+              this.deploymentId,
+              contextGraphStorage.address,
+            ),
+            contextGraphStorage.deploymentBlockNumber,
+          );
+      return createEvmChainIndexRuntime({
+        // Keyed on the HUB, and deliberately NOT the authority index's scope.
+        //
+        // This one string keys the whole runtime's durable state
+        // (`store.load(options.scope)`), and that state spans every contract the
+        // tick walks — Hub, ContextGraphStorage and KnowledgeAssetStorage in one
+        // cursor. A key naming ONE of them would move for reasons the other two
+        // know nothing about: a ContextGraphStorage rotation would orphan the
+        // Hub and KA progress nothing had invalidated, and the tick would re-walk
+        // history it already held.
+        //
+        // The authority index keys per-CONTRACT on purpose — a rotated
+        // ContextGraphStorage must be a cache MISS for it
+        // (`evm-context-graph-authority-index-reader.ts`,
+        // `contextGraphAuthorityIndexScope`). That is right for a projection of
+        // one contract's events and wrong for a Hub-wide log, so the two scopes
+        // are different strings over different keyspaces by design.
+        //
+        // The Hub is the address that can carry it: it is the root of the
+        // binding registry rather than an entry in it, so no name binds it and
+        // it has no binding to be rotated off (see `chainIndexContract` below).
+        // One chain identity still holds, which is what matters: both scopes are
+        // rooted at the same `deploymentId`, which already pins chainId + Hub
+        // (`buildEvmDeploymentId`) — two keyspaces under one identity, not two
+        // identities. That makes the `hub.address` suffix redundant for
+        // identity; it stays because this is a DURABLE key, and shortening it
+        // would strand every existing node's cursor and re-walk history.
+        scope: [this.deploymentId, hub.address].join(':'),
+        store,
+        intervalMs: resolveContextGraphAuthorityIndexTickMs(this.indexTickMs),
+        // The depth the Context Graph registry scan already treats as
+        // reorg-safe. Reusing it keeps ONE definition of "settled" on this
+        // node rather than introducing a second one under the log.
+        reorgHoldbackBlocks: CG_REGISTRY_REORG_BUFFER_BLOCKS,
+        // The widest `eth_getLogs` window this node already asks a provider
+        // for, reused so the tick cannot ask for one the pool has never been
+        // sized for. It is an operator knob NAMED for the registry scan, so
+        // one lowered for a strict provider also shortens the log's backfill
+        // page and its catch-up step — slower to walk history, never wider.
+        backfillPageBlocks: this.cgRegistryScanPageSize,
+        maxCatchUpBlocks: this.cgRegistryScanPageSize,
+        ...(resumeFromBlockNumber === undefined ? {} : { resumeFromBlockNumber }),
+        hub,
+        // Both indexed storages live in the Hub's ASSET STORAGE registry
+        // (`resolveAssetStorage`), whose kind lets a rotation retire this
+        // address rather than look like an unrelated first registration.
+        contextGraphStorage,
+        knowledgeAssetStorage: await this.chainIndexContract(
+          knowledgeAssetStorageContract,
+          'DKGKnowledgeAssets',
+          'assetStorage',
+        ),
+        readTipProvider: (label, read, opts) => this.readTipProvider(label, read, opts),
+        onError: (error) => {
+          console.warn(
+            `[chain] chain index tick failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      });
+    });
+  }
+
+  /** One indexed contract, or `undefined` when the Hub binds none. */
+  private async chainIndexContract(
+    contract: Contract | undefined,
+    contractLabel: string,
+    hubRegistry?: 'contract' | 'assetStorage',
+  ): Promise<EvmChainIndexContract | undefined> {
+    if (contract === undefined) return undefined;
+    const address = (await contractAddress(contract)).toLowerCase();
+    if (address === ethers.ZeroAddress) return undefined;
+    return {
+      address,
+      contractInterface: contract.interface,
+      deploymentBlockNumber: await this.resolveContractDeployBlockNumber(
+        address,
+        'chainIndex deploy block',
+        contractLabel,
+      ),
+      // The Hub is the root of the scope, not an entry in it: no name binds it,
+      // so it has no binding to be rotated off.
+      ...(hubRegistry === undefined
+        ? {}
+        : { hubBinding: { name: contractLabel, kind: hubRegistry } }),
+    };
   }
 
   protected applyHubRotationEventName(name: string): void {
@@ -4473,7 +4713,34 @@ export class EVMChainAdapterBase {
     const policy = HUB_BINDING_INVALIDATORS.get(name);
     if (!policy) return;
     this.invalidateHubBindingOnRotation(policy);
+    this.rebuildChainIndexRuntimeOnRotation(policy);
     this.finalizeKnownHubRotation();
+  }
+
+  /**
+   * Retire the one log's runtime when a contract it INDEXES is rotated.
+   *
+   * Everything that decides which addresses the log speaks for is fixed at
+   * construction — the decoder registry, the per-family floors, and the
+   * addresses the binding publishes to every reader. So a rotation the runtime
+   * cannot be told about leaves it answering out of a retired proxy: the tick
+   * would go on fetching the old address, coverage would go on claiming its
+   * blocks, and `evm-adapter-events.ts` would read a confident empty list for
+   * events the NEW contract emitted. The lane advances past them regardless
+   * (`chain-event-lane-runner.ts:289`), so those events are skipped for good.
+   *
+   * Dropping the binding here is the fail-closed half and it takes effect
+   * immediately: every reader is back on its own scan, which is exactly what it
+   * did before the log existed. The rebuild is the other half —
+   * `finalizeKnownHubRotation` re-arms `init()`, `initContracts` re-resolves
+   * the rotated name and calls `startChainIndexRuntime()` again, which now
+   * passes its own guard. The CURSOR is untouched: it lives in the store, keyed
+   * by (deployment, Hub), so only the address set moves and no history is
+   * re-walked.
+   */
+  protected rebuildChainIndexRuntimeOnRotation(policy: HubBindingInvalidationPolicy): void {
+    if (!('contractKey' in policy) || !CHAIN_INDEX_CONTRACT_KEYS.has(policy.contractKey)) return;
+    this.chainIndexOwner.rebuild();
   }
 
   protected invalidateHubBindingOnRotation(policy: HubBindingInvalidationPolicy): void {
@@ -4519,6 +4786,11 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
+    // The bulk self-heal does not know which Hub name moved. Retire the whole
+    // one-log runtime before exposing freshly resolved handles: until a runtime
+    // built around those handles attaches, every log-backed reader must use its
+    // live fallback rather than rows indexed from a retired proxy.
+    this.chainIndexOwner.rebuild();
     for (const policy of HUB_BINDING_INVALIDATORS.values()) {
       this.invalidateHubBinding(policy);
     }
@@ -4561,6 +4833,9 @@ export class EVMChainAdapterBase {
    */
   destroy(): void {
     this.hubRotationPoller.stop();
+    // The owner disowns an in-flight build, clears the binding synchronously,
+    // and stops any current runtime without making synchronous destroy wait.
+    this.chainIndexOwner.stop();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
     for (const provider of this.providers) {

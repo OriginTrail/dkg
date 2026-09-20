@@ -2046,8 +2046,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2076,6 +2078,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2094,7 +2098,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
-        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageChanged',
+        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageRemoved',
       ));
     } finally {
       warnSpy.mockRestore();
@@ -2134,8 +2138,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       interface: new ethers.Interface([
         'event NewContract(string contractName, address newContractAddress)',
         'event ContractChanged(string contractName, address newContractAddress)',
+        'event ContractRemoved(string contractName, address contractAddress)',
         'event NewAssetStorage(string contractName, address newContractAddress)',
         'event AssetStorageChanged(string contractName, address newContractAddress)',
+        'event AssetStorageRemoved(string contractName, address contractAddress)',
       ]),
       getAddress: async () => '0x0000000000000000000000000000000000000001',
     };
@@ -2156,8 +2162,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const changed = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
       'ContextGraphs',
@@ -2211,8 +2219,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
         iface.getEvent('ContractChanged')!.topicHash,
         iface.getEvent('NewContract')!.topicHash,
+        iface.getEvent('ContractRemoved')!.topicHash,
         iface.getEvent('AssetStorageChanged')!.topicHash,
         iface.getEvent('NewAssetStorage')!.topicHash,
+        iface.getEvent('AssetStorageRemoved')!.topicHash,
       ]);
       expect(a.contracts.contextGraphs).toEqual({ stale: true });
       expect(a.cachedKav10Address).toBeUndefined();
@@ -2230,8 +2240,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),

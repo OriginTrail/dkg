@@ -411,6 +411,18 @@ export interface ChainConfig {
    * then those reads fail closed. Values above five minutes do not extend
    * cache service past the RFC-64 accepted-authority interval. A positive
    * integer; defaults to 6000.
+   *
+   * ALSO the cadence of the node's one chain-index tick
+   * (`evm-adapter-base.ts:startChainIndexRuntime`), which runs whether or not
+   * anything reads it: one head read, one block-hash re-read and one
+   * `eth_getLogs` every T for the whole indexed event set. Lowering it to
+   * freshen authority answers therefore also buys a proportionally faster
+   * background scanner. The same T bounds how stale the log's Hub rotation
+   * window may be — `max(3T, 15s)`, with no five-minute ceiling: the ceiling
+   * above exists because a stale authority answer is still bounded by the
+   * RFC-64 accepted-authority interval, whereas a rotation listener that
+   * promises never to miss a rotation has no such backstop — before that
+   * listener goes back to scanning the chain for itself.
    */
   indexTickMs?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */

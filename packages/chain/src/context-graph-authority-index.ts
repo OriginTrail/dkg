@@ -138,6 +138,27 @@ export class ContextGraphAuthorityIndex {
   }
 
   /**
+   * A structurally valid durable prefix the one-log migration may resume above.
+   *
+   * This does not admit the checkpoint against a live chain view; authority
+   * reads still perform that fence themselves. It only prevents the raw log
+   * from immediately rescanning history the already-materialized checkpoint
+   * can supply while bounded backfill independently walks down to the floor.
+   */
+  async durableCursorBlockNumber(
+    scope: string,
+    deploymentBlockNumber: number,
+  ): Promise<number | undefined> {
+    if (this.#closed) return undefined;
+    const record = await this.#repository.forScope(scope).load();
+    if (record.kind !== 'checkpoint'
+      || record.checkpoint.cursor.deploymentBlockNumber !== deploymentBlockNumber) {
+      return undefined;
+    }
+    return record.checkpoint.cursor.throughBlockNumber;
+  }
+
+  /**
    * Read-your-writes. This node just submitted an authority transaction, so
    * every projection scanned before it is known to be out of date — including
    * as a stale-if-error answer. The durable index is untouched: the next read

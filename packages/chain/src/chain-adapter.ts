@@ -1355,10 +1355,27 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
 export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
   /**
    * Finalized Context Graph authority reads only: told how the read was
-   * answered — by a scan that exercised the RPC pool, by the projection cache
-   * inside `chain.indexTickMs`, or by a stale projection after a FAILED
-   * refresh. A health governor needs the distinction; every other reader
-   * ignores it and no other read reports it.
+   * answered. FOUR ways, and a consumer that assumes three will read the
+   * fourth as something it is not:
+   *
+   *  - `scan` exercised the RPC pool now.
+   *  - `cache` came from a projection still inside `chain.indexTickMs`.
+   *  - `log` was FOLDED out of the node-local chain event log's stored rows and
+   *    touched no endpoint at all. It is neither inside `chain.indexTickMs`
+   *    (its bound is `min(max(3T, 15s), 5m)` against the background tick's last
+   *    head read, not T) nor the consequence of any failure — a healthy node
+   *    answers this way in the steady state. That combination is what makes it
+   *    worth naming here: the pre-log rule "a non-scan answer is either fresh
+   *    inside T or a failure" is no longer true of this interface.
+   *  - `stale-cache` was answered DESPITE a failed refresh.
+   *
+   * ONLY `scan` and `cache` are evidence that the pool is alive. A health
+   * governor — the RFC-64 authority circuit breaker is the one that exists —
+   * needs the distinction and must default to the no-proof side, so a member
+   * added later cannot be mistaken for health by omission.
+   * {@link ContextGraphAuthorityProjectionServedEvidence} carries the full
+   * statement of each member. Every other reader ignores this and no other read
+   * reports it.
    */
   onContextGraphAuthorityProjectionServed?: (
     evidence: ContextGraphAuthorityProjectionServedEvidence,

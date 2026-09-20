@@ -10,6 +10,7 @@ import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chai
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
+import type { ChainEventLogStore } from './chain-index/index.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
 
 export interface EVMAdapterBaseConfig {
@@ -130,6 +131,18 @@ export interface EVMAdapterBaseConfig {
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
   /** Trusted core seed plus a bounded local tail; requires a local index store. */
   contextGraphAuthorityIndexBootstrap?: ContextGraphAuthorityIndexBootstrap;
+  /**
+   * Durable backing for the node's ONE chain log. Supplying it is what makes
+   * an adapter OWN the tick: it builds the index runtime, starts the single
+   * background pass, and binds itself to the result.
+   *
+   * There must be exactly one such adapter per process — the daemon gives the
+   * store only to the agent's adapter (`lifecycle.ts`), never to the per-wallet
+   * publisher adapters (`publisher-runner.ts:createPublisherWalletChain`) —
+   * because a second one would be the second scanner this log exists to
+   * delete. An adapter without it keeps every pre-log path exactly as it was.
+   */
+  chainEventLogStore?: ChainEventLogStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish
