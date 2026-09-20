@@ -32,6 +32,14 @@ export function contextGraphAuthorityIndexScope(
  */
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS = 15_000;
 
+/** Shared stale-if-error budget for both the projection cache and one-log anchor. */
+export function resolveContextGraphAuthorityIndexStaleMs(tickMs: number): number {
+  return Math.min(
+    Math.max(3 * tickMs, CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS),
+    CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+  );
+}
+
 /**
  * How old, in CHAIN time, the head of a cached projection may be before the
  * cache stops answering for it (security review S2).
@@ -372,10 +380,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
 
   constructor(options: ContextGraphAuthorityIndexProjectionOptions = {}) {
     this.tickMs = resolveContextGraphAuthorityIndexTickMs(options.tickMs);
-    this.staleMs = Math.min(
-      Math.max(3 * this.tickMs, CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS),
-      CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
-    );
+    this.staleMs = resolveContextGraphAuthorityIndexStaleMs(this.tickMs);
     this.#headTimestampToleranceMs = options.headTimestampToleranceMs
       ?? CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS;
     if (!Number.isSafeInteger(this.#headTimestampToleranceMs)

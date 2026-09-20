@@ -23,6 +23,7 @@
 
 import {
   chainEventLogCoverageIncludes,
+  chainEventLogStateReadRefusal,
   findChainEventLogCoverage,
   normalizeChainEventLogAddress,
   type ChainEventLogRow,
@@ -119,7 +120,7 @@ export function createChainEventLogSubscription(
       // the meantime: a lane that consumes them advances its durable cursor,
       // so a later tombstone would leave replacement-chain events behind that
       // cursor forever. Refuse the log and let the caller use its live scan.
-      if (state.suspectedForkBlockNumber !== undefined) return undefined;
+      if (chainEventLogStateReadRefusal(state) !== undefined) return undefined;
       const coverage = findChainEventLogCoverage(state.coverage, family, normalized);
       if (coverage === undefined) return undefined;
 

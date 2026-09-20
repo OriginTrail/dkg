@@ -1114,7 +1114,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   }
 
   /**
-   * The three `ContextGraphStorage` views below read the ONE log first.
+   * Two positive `ContextGraphStorage` views below read the ONE log first.
    *
    * `latest`, not `finalized`, and that is what makes them stand in for the
    * call at all: each one replaces an UNPINNED `eth_call`, answered at the
@@ -1127,18 +1127,20 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * worth stating plainly rather than claiming parity. An `eth_call` self-heals
    * the moment its endpoint follows a reorg; a tail row does not disappear
    * until the tick's NEXT pass replaces the tail wholesale, so a registration
-   * orphaned by a tip reorg can still be folded into a positive `bound` (and
-   * into `getContextGraphKaCount`) for up to `chain.indexTickMs`. The module's
+   * orphaned by a tip reorg can still be folded into a positive `bound` or a
+   * known ordinal for up to `chain.indexTickMs`. The module's
    * write-once justification (knowledge-asset-read-model.ts) is about a SETTLED
    * row and does not cover the tail. Bounded by the tick's own liveness gate,
    * not attacker-choosable — the id must have been emitted on a fork this
    * node's own tick followed — and `verifyContextGraphBinding` still
    * cross-checks the local id on the admission path this reaches.
    *
-   * Every refusal — a cold log, a stalled tick, a held fork suspicion, a
-   * backfill that has not reached the graph's creation block, an ordinal past
-   * what the log holds — returns `undefined` and the `eth_call` below runs
-   * exactly as it did before the log existed.
+   * Negative bindings and counts never use the log: unlike a durable positive
+   * binding or already-known ordinal, they may change in the block immediately
+   * after the tick's head observation. Every other refusal — a cold log, a
+   * stalled tick, a held fork suspicion, a backfill that has not reached the
+   * graph's creation block, an ordinal past what the log holds — runs the
+   * `eth_call` exactly as it did before the log existed.
    */
   private get knowledgeAssetsFromLog() {
     return this.chainEventLogBinding?.knowledgeAssets;
@@ -1150,12 +1152,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       kaId,
       { view: 'latest' },
     );
-    // A `bound` answer rests on a write-once mapping; an `unbound` one rests on
-    // COMPLETE contract-wide coverage, which the read model refuses to claim
-    // without. Both are decided there, so there is no third case here.
-    if (logged !== undefined) {
-      return logged.kind === 'bound' ? logged.contextGraphId : 0n;
-    }
+    if (logged !== undefined) return logged.contextGraphId;
     const cgs = this.requireContextGraphStorage();
     const cgId: bigint = await this.readContractWithOptions(
       cgs,
@@ -1169,14 +1166,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
-    // The list is proven back to the graph's own creation block, so its LENGTH
-    // is the count: there is nowhere below it for a registration to hide, and
-    // a list folded from the middle is refused rather than truncated.
-    const logged = await this.knowledgeAssetsFromLog?.readContextGraphKaList(
-      contextGraphId,
-      { view: 'latest' },
-    );
-    if (logged !== undefined) return BigInt(logged.kaIds.length);
+    // Count is mutable. Even complete coverage only proves the tick's last
+    // observed head, while this unpinned call must include a registration that
+    // lands immediately afterwards. Keep the live call for that distinction.
     const cgs = this.requireContextGraphStorage();
     const count: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaCount', 'getContextGraphKaCount', contextGraphId,

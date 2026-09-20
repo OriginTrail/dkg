@@ -10,7 +10,7 @@
 export {
   chainEventLogCoverageIncludes,
   chainEventLogCoverageIsComplete,
-  chainEventLogHeadAgeIsServable,
+  chainEventLogStateReadRefusal,
   chainEventLogTopicSetVersion,
   extendChainEventLogCoverage,
   findChainEventLogCoverage,
@@ -24,6 +24,7 @@ export {
   type ChainEventLogQuery,
   type ChainEventLogRow,
   type ChainEventLogState,
+  type ChainEventLogStateReadRefusal,
   type ChainEventLogStore,
   type ChainEventLogTopicSet,
 } from './chain-event-log.js';

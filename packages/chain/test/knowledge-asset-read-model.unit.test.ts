@@ -6,8 +6,7 @@
  * Every case here is a "may the log answer this?" question, and the fail-closed
  * direction is always `undefined` (= one `eth_call`). The tests that matter most
  * are the ones asserting a REFUSAL: a served answer that should have been a
- * refusal is how a KA ends up bound to no graph, or verified against version 0
- * of a version-3 asset.
+ * refusal is how a KA ends up bound to no graph or an ordinal is truncated.
  */
 
 import { ethers } from 'ethers';
@@ -25,22 +24,17 @@ import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
 const SCOPE = 'evm:31337:0xhub:0xstorage';
 const CG_STORAGE = `0x${'cd'.repeat(20)}`;
-const KA_STORAGE = `0x${'ab'.repeat(20)}`;
 const CG_FLOOR = 10;
-const KA_FLOOR = 12;
 
 const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
-const root = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
 const author = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(20)}`;
 
 const cgInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
-const kaInterface = new ethers.Interface(loadAbi('DKGKnowledgeAssets'));
 
 function registry(): ChainEventDecoderRegistry {
   return new ChainEventDecoderRegistry()
     .registerContextGraphAuthority(CG_STORAGE, cgInterface)
-    .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface)
-    .registerKnowledgeAssets(KA_STORAGE, kaInterface);
+    .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface);
 }
 
 function row(
@@ -97,80 +91,9 @@ const creation = (
   { blockNumber, ...extra },
 );
 
-const created = (
-  blockNumber: number,
-  kaId: bigint,
-  merkleRoot: string,
-  authorAddress = author(0x11),
-  extra: { logIndex?: number; settled?: boolean } = {},
-): ChainEventLogRow => row(
-  kaInterface,
-  KA_STORAGE,
-  'KnowledgeAssetCreated',
-  [kaId, authorAddress, 'op-1', merkleRoot, 128n, 1n, 2n, 0n, false],
-  { blockNumber, ...extra },
-);
-
-const updated = (
-  blockNumber: number,
-  kaId: bigint,
-  merkleRoot: string,
-  authorAddress = author(0x11),
-  extra: { logIndex?: number; settled?: boolean } = {},
-): ChainEventLogRow => row(
-  kaInterface,
-  KA_STORAGE,
-  'KnowledgeAssetUpdated',
-  [kaId, authorAddress, 'op-2', merkleRoot, 256n, 0n],
-  { blockNumber, ...extra },
-);
-
-/** `KnowledgeAssetMerkleRootAdded(uint256 indexed id, bytes32 merkleRoot)`. */
-const rootAdded = (
-  blockNumber: number,
-  kaId: bigint,
-  merkleRoot: string,
-  extra: { logIndex?: number; settled?: boolean } = {},
-): ChainEventLogRow => row(
-  kaInterface,
-  KA_STORAGE,
-  'KnowledgeAssetMerkleRootAdded',
-  [kaId, merkleRoot],
-  { blockNumber, ...extra },
-);
-
-/** `…MerkleRootRemoved` names the root it REMOVES, not the one it exposes. */
-const rootRemoved = (
-  blockNumber: number,
-  kaId: bigint,
-  merkleRoot: string,
-  extra: { logIndex?: number; settled?: boolean } = {},
-): ChainEventLogRow => row(
-  kaInterface,
-  KA_STORAGE,
-  'KnowledgeAssetMerkleRootRemoved',
-  [kaId, merkleRoot],
-  { blockNumber, ...extra },
-);
-
-/** Whole-stack replacement: `MerkleRoot[]` of (publisher, merkleRoot, timestamp). */
-const rootsUpdated = (
-  blockNumber: number,
-  kaId: bigint,
-  roots: readonly string[],
-  extra: { logIndex?: number; settled?: boolean } = {},
-): ChainEventLogRow => row(
-  kaInterface,
-  KA_STORAGE,
-  'KnowledgeAssetMerkleRootsUpdated',
-  [kaId, roots.map((merkleRoot) => [author(0x55), merkleRoot, 1_700_000_000n])],
-  { blockNumber, ...extra },
-);
-
 interface SeedOptions {
   readonly cgCoverage?: Partial<ChainEventLogCoverage>;
   readonly authorityCoverage?: Partial<ChainEventLogCoverage>;
-  readonly kaCoverage?: Partial<ChainEventLogCoverage>;
   readonly settledBlockNumber?: number;
   readonly headBlockNumber?: number;
   readonly rows?: readonly ChainEventLogRow[];
@@ -214,14 +137,6 @@ function seeded(options: SeedOptions = {}): MemoryChainEventLogStore {
         floorBlock: CG_FLOOR,
         ...options.authorityCoverage,
       },
-      {
-        family: 'knowledge-asset',
-        address: KA_STORAGE.toLowerCase(),
-        coveredFromBlock: KA_FLOOR,
-        coveredThroughBlock: 105,
-        floorBlock: KA_FLOOR,
-        ...options.kaCoverage,
-      },
     ],
   }, options.rows ?? []);
   return store;
@@ -236,7 +151,6 @@ function model(
     store,
     registry: registry(),
     contextGraphStorageAddress: CG_STORAGE,
-    knowledgeAssetStorageAddress: KA_STORAGE,
     ...liveness,
   });
 }
@@ -257,8 +171,6 @@ describe('knowledge asset read model — the tick is still running', () => {
 
     expect(await stalled.readContextGraphForKa(4242n)).toBeUndefined();
     expect(await stalled.readContextGraphKaList(7n)).toBeUndefined();
-    expect(await stalled.readLatestMerkleRoot(4242n)).toBeUndefined();
-    expect(await stalled.readMaxKaNumberForAuthor(author(0x11))).toBeUndefined();
   });
 
   it('answers while the tick is inside the bound', async () => {
@@ -311,12 +223,9 @@ describe('knowledge asset read model — kaToContextGraph', () => {
     await expect(model(store).readContextGraphForKa(9999n)).resolves.toBeUndefined();
   });
 
-  it('serves a ZERO answer only under complete coverage', async () => {
+  it('never serves a negative answer, even under complete coverage', async () => {
     const store = seeded({ rows: [registration(50, 7n, 4242n)] });
-    await expect(model(store).readContextGraphForKa(9999n)).resolves.toEqual({
-      kind: 'unbound',
-      asOfBlockNumber: 100,
-    });
+    await expect(model(store).readContextGraphForKa(9999n)).resolves.toBeUndefined();
   });
 
   it('refuses mutable and negative answers while a fresh tick is still catching up', async () => {
@@ -325,7 +234,6 @@ describe('knowledge asset read model — kaToContextGraph', () => {
       rows: [
         creation(40, 7n),
         registration(50, 7n, 4242n),
-        created(30, (3n << 96n) | 7n, root(0xa1), author(0x22)),
       ],
     });
     const view = model(store);
@@ -341,26 +249,17 @@ describe('knowledge asset read model — kaToContextGraph', () => {
       .resolves.toBeUndefined();
     await expect(view.readContextGraphKaList(7n, { view: 'latest' }))
       .resolves.toBeUndefined();
-    await expect(view.readLatestMerkleRoot((3n << 96n) | 7n, { view: 'latest' }))
-      .resolves.toBeUndefined();
-    await expect(view.readMaxKaNumberForAuthor(author(0x22), { view: 'latest' }))
-      .resolves.toBeUndefined();
   });
 
   it('does not serve a tail-only binding to the finalized view', async () => {
     const store = seeded({ rows: [registration(103, 7n, 4242n, { settled: false })] });
     const answer = await model(store).readContextGraphForKa(4242n);
-    // Complete coverage still applies, so the honest finalized answer is
-    // "not bound yet" — never the unsettled binding.
-    expect(answer).toEqual({ kind: 'unbound', asOfBlockNumber: 100 });
+    expect(answer).toBeUndefined();
   });
 
   it('ignores an unsettled registration BELOW the settled cursor', async () => {
     const store = seeded({ rows: [registration(80, 7n, 4242n, { settled: false })] });
-    await expect(model(store).readContextGraphForKa(4242n)).resolves.toEqual({
-      kind: 'unbound',
-      asOfBlockNumber: 100,
-    });
+    await expect(model(store).readContextGraphForKa(4242n)).resolves.toBeUndefined();
   });
 
   it('serves a tail binding to the latest view', async () => {
@@ -497,260 +396,11 @@ describe('knowledge asset read model — KaCount / KaAt', () => {
   });
 });
 
-describe('knowledge asset read model — latest merkle root', () => {
-  it('serves root and rootIndex from a complete stack', async () => {
-    const store = seeded({
-      rows: [created(30, 55n, root(0xa1)), updated(40, 55n, root(0xa2))],
-    });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
-      merkleRoot: root(0xa2),
-      rootIndex: 1,
-      author: author(0x11),
-    });
-  });
-
-  it('refuses a stack whose creation event was never walked', async () => {
-    // Only the update is held. The top root is right and `rootIndex` would be
-    // 0 for what is really version 1 — a verifier comparing versions would
-    // reject valid content.
-    const store = seeded({ rows: [updated(40, 55n, root(0xa2))] });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toBeUndefined();
-  });
-
-  it('refuses a KA the log holds nothing for', async () => {
-    const store = seeded({ rows: [created(30, 55n, root(0xa1))] });
-    await expect(model(store).readLatestMerkleRoot(77n)).resolves.toBeUndefined();
-  });
-
-  it('ignores an unsettled row that sits BELOW the settled cursor', async () => {
-    // Capping the window at the cursor is not the same guard as reading only
-    // settled rows. A row the store still carries as tail while the cursor has
-    // moved past its height is inside the window and must STILL be refused:
-    // `settled` is the flag that says the row survived the reorg tail, and
-    // promoting a root is exactly the thing that must not be undone.
-    const store = seeded({
-      rows: [
-        created(30, 55n, root(0xa1)),
-        updated(80, 55n, root(0xa2), author(0x11), { settled: false }),
-      ],
-    });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
-      merkleRoot: root(0xa1),
-      rootIndex: 0,
-      author: author(0x11),
-    });
-  });
-
-  it('does not promote an unsettled root into the finalized view', async () => {
-    const store = seeded({
-      rows: [
-        created(30, 55n, root(0xa1)),
-        updated(103, 55n, root(0xa2), author(0x11), { settled: false }),
-      ],
-    });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
-      merkleRoot: root(0xa1),
-      rootIndex: 0,
-      author: author(0x11),
-    });
-    await expect(model(store).readLatestMerkleRoot(55n, { view: 'latest' })).resolves.toEqual({
-      merkleRoot: root(0xa2),
-      rootIndex: 1,
-      author: author(0x11),
-    });
-  });
-});
-
-describe('knowledge asset read model — the three admin root branches', () => {
-  it('MerkleRootAdded pushes a version and moves rootIndex with it', async () => {
-    const store = seeded({
-      rows: [created(30, 55n, root(0xa1)), rootAdded(40, 55n, root(0xa2))],
-    });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
-      merkleRoot: root(0xa2),
-      rootIndex: 1,
-    });
-  });
-
-  it('MerkleRootRemoved exposes the version UNDERNEATH, not the one it names', async () => {
-    // The whole reason the fold keeps the stack instead of "the latest root":
-    // the event names 0xa2, and the correct answer afterwards is 0xa1 at
-    // rootIndex 0 — which only the history below the removal can supply.
-    const store = seeded({
-      rows: [
-        created(30, 55n, root(0xa1)),
-        rootAdded(40, 55n, root(0xa2)),
-        rootRemoved(50, 55n, root(0xa2)),
-      ],
-    });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
-      merkleRoot: root(0xa1),
-      rootIndex: 0,
-      author: author(0x11),
-    });
-  });
-
-  it('refuses when MerkleRootRemoved names a root the fold does not hold on top', async () => {
-    // Either history below was never walked or the fold disagrees with the
-    // chain. Popping anyway would serve 0xa1 as the latest when the chain says
-    // something else entirely.
-    const store = seeded({
-      rows: [created(30, 55n, root(0xa1)), rootRemoved(50, 55n, root(0xa9))],
-    });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toBeUndefined();
-  });
-
-  it('MerkleRootsUpdated replaces the whole stack and re-establishes its bottom', async () => {
-    // No create is held at all, and the replacement is still servable: the
-    // event names every version the chain holds, so the bottom is known.
-    const store = seeded({
-      rows: [rootsUpdated(50, 55n, [root(0xb1), root(0xb2), root(0xb3)])],
-    });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toEqual({
-      merkleRoot: root(0xb3),
-      rootIndex: 2,
-    });
-  });
-
-  it('refuses an EMPTY replacement rather than reading it as "no versions"', async () => {
-    const store = seeded({ rows: [created(30, 55n, root(0xa1)), rootsUpdated(50, 55n, [])] });
-    await expect(model(store).readLatestMerkleRoot(55n)).resolves.toBeUndefined();
-  });
-});
-
-describe('knowledge asset read model — a partially decoded replacement', () => {
-  /**
-   * The same signature carrying a `bytes` root instead of a `bytes32` one.
-   *
-   * This is the shape the decoder's own `record.merkleRoot ?? record[0]`
-   * fallback exists for, and it is the only way to build a list in which SOME
-   * entries normalize and others do not — with the shipped `bytes32` tuple
-   * every entry is well-formed by construction, so the shipped ABI alone
-   * cannot exercise the branch at all.
-   */
-  const variantInterface = new ethers.Interface([
-    'event KnowledgeAssetCreated(uint256 indexed id, address indexed author, string operationId,'
-    + ' bytes32 merkleRoot, uint256 byteSize, uint256 epochs, uint256 tokenAmount,'
-    + ' uint256 scoreFunctionId, bool isImmutable)',
-    'event KnowledgeAssetMerkleRootsUpdated(uint256 indexed id,'
-    + ' tuple(bytes merkleRoot)[] merkleRoots)',
-  ]);
-
-  function variantModel(rows: readonly ChainEventLogRow[]) {
-    const store = seeded({ rows });
-    return createKnowledgeAssetReadModel({
-      scope: SCOPE,
-      store,
-      registry: new ChainEventDecoderRegistry()
-        .registerContextGraphAuthority(CG_STORAGE, cgInterface)
-        .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface)
-        .registerKnowledgeAssets(KA_STORAGE, variantInterface),
-      contextGraphStorageAddress: CG_STORAGE,
-      knowledgeAssetStorageAddress: KA_STORAGE,
-    });
-  }
-
-  const variantRootsUpdated = (
-    blockNumber: number,
-    kaId: bigint,
-    roots: readonly string[],
-  ): ChainEventLogRow => row(
-    variantInterface,
-    KA_STORAGE,
-    'KnowledgeAssetMerkleRootsUpdated',
-    [kaId, roots.map((merkleRoot) => [merkleRoot])],
-    { blockNumber },
-  );
-
-  it('serves a replacement every entry of which decoded', async () => {
-    const view = variantModel([variantRootsUpdated(50, 55n, [root(0xb1), root(0xb2)])]);
-    await expect(view.readLatestMerkleRoot(55n)).resolves.toEqual({
-      merkleRoot: root(0xb2),
-      rootIndex: 1,
-    });
-  });
-
-  it('refuses the WHOLE replacement when one entry does not decode', async () => {
-    // Dropping the bad entry would serve 0xb1 at rootIndex 0 for a stack whose
-    // chain top is the entry that failed. That is this branch's one way to feed
-    // a verifier a root the chain does not hold, and a shorter list is a
-    // DIFFERENT stack, not a partial one.
-    const view = variantModel([variantRootsUpdated(50, 55n, [root(0xb1), '0xdead'])]);
-    await expect(view.readLatestMerkleRoot(55n)).resolves.toBeUndefined();
-  });
-
-  it('refuses even when the entry that fails is the LAST one', async () => {
-    const view = variantModel([
-      variantRootsUpdated(50, 55n, [root(0xb1), root(0xb2), '0x00']),
-    ]);
-    await expect(view.readLatestMerkleRoot(55n)).resolves.toBeUndefined();
-  });
-});
-
-describe('knowledge asset read model — allocator floor', () => {
-  it('serves the highest ordinal under complete coverage', async () => {
-    const store = seeded({
-      rows: [
-        created(30, (3n << 96n) | 7n, root(0xa1), author(0x22)),
-        created(31, (3n << 96n) | 9n, root(0xa2), author(0x22)),
-        created(32, (3n << 96n) | 40n, root(0xa3), author(0x33)),
-      ],
-    });
-    await expect(model(store).readMaxKaNumberForAuthor(author(0x22))).resolves.toBe(9n);
-  });
-
-  it('refuses under partial coverage', async () => {
-    // A partial fold yields a LOWER floor than the truth, and a low floor hands
-    // out a KA number that is already taken.
-    const store = seeded({
-      kaCoverage: { coveredFromBlock: KA_FLOOR + 3 },
-      rows: [created(30, (3n << 96n) | 7n, root(0xa1), author(0x22))],
-    });
-    await expect(model(store).readMaxKaNumberForAuthor(author(0x22))).resolves.toBeUndefined();
-  });
-
-  it('serves zero for an author with no assets under complete coverage', async () => {
-    const store = seeded({ rows: [created(30, (3n << 96n) | 7n, root(0xa1), author(0x22))] });
-    await expect(model(store).readMaxKaNumberForAuthor(author(0x44))).resolves.toBe(0n);
-  });
-
-  it('refuses when a create in the window carried no decodable author', async () => {
-    // Coverage is complete and the fold is clean; what is missing is the ONE
-    // property the floor is actually built from. Gating on coverage alone
-    // returns 0n here — a floor below every number already handed out.
-    const authorless = new ethers.Interface([
-      'event KnowledgeAssetCreated(uint256 indexed id, string operationId, bytes32 merkleRoot)',
-    ]);
-    const store = seeded({
-      rows: [row(
-        authorless,
-        KA_STORAGE,
-        'KnowledgeAssetCreated',
-        [(3n << 96n) | 7n, 'op-1', root(0xa1)],
-        { blockNumber: 30 },
-      )],
-    });
-    const view = createKnowledgeAssetReadModel({
-      scope: SCOPE,
-      store,
-      registry: new ChainEventDecoderRegistry()
-        .registerContextGraphAuthority(CG_STORAGE, cgInterface)
-        .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface)
-        .registerKnowledgeAssets(KA_STORAGE, authorless),
-      contextGraphStorageAddress: CG_STORAGE,
-      knowledgeAssetStorageAddress: KA_STORAGE,
-    });
-    await expect(view.readMaxKaNumberForAuthor(author(0x22))).resolves.toBeUndefined();
-  });
-});
-
 describe('knowledge asset read model — no log', () => {
   it('refuses every read when the scope has no cursor', async () => {
     const store = new MemoryChainEventLogStore();
     const view = model(store);
     await expect(view.readContextGraphForKa(1n)).resolves.toBeUndefined();
     await expect(view.readContextGraphKaList(1n)).resolves.toBeUndefined();
-    await expect(view.readLatestMerkleRoot(1n)).resolves.toBeUndefined();
-    await expect(view.readMaxKaNumberForAuthor(author(0x11))).resolves.toBeUndefined();
   });
 });

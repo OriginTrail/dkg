@@ -257,6 +257,30 @@ describe('ChainIndexTick — one log', () => {
     expect(coverage.coveredThroughBlock).toBeLessThan(10_000);
   });
 
+  it('restarts coverage at the fetched range when the subscribed topic set changes', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const decoderRegistry = registry();
+    const index = tick(store, rig.ports, { registry: decoderRegistry, backfillPageBlocks: 20 });
+
+    await index.runOnce(new AbortController().signal);
+    await index.backfillOnce(new AbortController().signal);
+    const before = authorityCoverage((await store.load())!.coverage, STORAGE)!;
+
+    // Widen the same address from authority events to include KA registration.
+    // Blocks walked under the old filter prove nothing about the added topic.
+    decoderRegistry.registerContextGraphKnowledgeAssets(STORAGE, storageInterface);
+    rig.requests.length = 0;
+    rig.head = { number: 110, hash: hash(0x6e), timestampSeconds: 1_700_000_060 };
+
+    await index.runOnce(new AbortController().signal);
+
+    const fetchedFrom = rig.requests[0]!.fromBlock;
+    const after = authorityCoverage((await store.load())!.coverage, STORAGE)!;
+    expect(after.coveredFromBlock).toBe(fetchedFrom);
+    expect(after.coveredFromBlock).toBeGreaterThan(before.coveredFromBlock);
+  });
+
   it('resumes from the existing checkpoint cursor instead of rescanning history', async () => {
     const store = new MemoryChainEventLogStore();
     const rig = harness({

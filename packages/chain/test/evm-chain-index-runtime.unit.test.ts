@@ -249,7 +249,10 @@ describe('createEvmChainIndexRuntime', () => {
     const h = harness();
     expect(h.runtime.binding.contextGraphStorageAddress).toBe(CG_STORAGE_ADDRESS);
     expect(h.runtime.binding.knowledgeAssetStorageAddress).toBeUndefined();
-    expect(h.runtime.binding.knowledgeAssets).toBeUndefined();
+    // The remaining KA views consume ContextGraphStorage events only; a node
+    // does not need DKGKnowledgeAssets bound to serve positive bindings and
+    // known ordinals.
+    expect(h.runtime.binding.knowledgeAssets).toBeDefined();
   });
 
   it('refuses a Hub window before the first pass has committed anything', async () => {

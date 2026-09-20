@@ -2,8 +2,8 @@
 
 import { confirmedStateBlockAtHead } from '../evm-adapter-constants.js';
 import {
-  chainEventLogHeadAgeIsServable,
   chainEventLogCoverageIncludes,
+  chainEventLogStateReadRefusal,
   findChainEventLogCoverage,
   normalizeChainEventLogAddress,
   type ChainEventLogState,
@@ -177,17 +177,13 @@ export function resolveChainIndexAuthorityAnchor(
   // suspicion until a second pass either confirms it (tombstone) or withdraws
   // it; between the two, every row it holds may belong to a chain this node is
   // no longer on, so nothing derived from it may anchor an authority answer.
-  if (state.suspectedForkBlockNumber !== undefined) {
-    return Object.freeze({ refusal: 'fork-suspected' as const });
-  }
-
   const cursor = state.cursor;
   const head = cursor.head;
-  // FETCH time: is the tick still running? A negative age is a wall clock that
-  // stepped backwards, which proves no age at all — refuse it the same way.
-  if (!chainEventLogHeadAgeIsServable(head.fetchedAtMs, input.nowMs, input.maxHeadAgeMs)) {
-    return Object.freeze({ refusal: 'stale-head' as const });
-  }
+  const stateRefusal = chainEventLogStateReadRefusal(state, {
+    nowMs: input.nowMs,
+    maxHeadAgeMs: input.maxHeadAgeMs,
+  });
+  if (stateRefusal !== undefined) return Object.freeze({ refusal: stateRefusal });
   // CHAIN time: is the head the tick committed an answer about NOW? Only the
   // block's own timestamp can say; a lagging endpoint answers promptly.
   if (input.nowMs - head.timestampSeconds * 1_000 > input.headTimestampToleranceMs) {
@@ -329,5 +325,5 @@ export async function chainIndexAuthorityAnchorHolds(
   if (state === undefined) return false;
   return state.cursor.revision === anchor.revision
     && state.cursor.lineage === anchor.lineage
-    && state.suspectedForkBlockNumber === undefined;
+    && chainEventLogStateReadRefusal(state) === undefined;
 }

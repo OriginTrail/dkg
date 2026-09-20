@@ -506,8 +506,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
      *    bound is `max(3T, 15s)`, which equals the cache's only up to T=100s
      *    and runs LOOSER above it (450s against 300s at T=150s), so a 400s-old
      *    anchor served through the log while the cache holding the same view
-     *    refused it. `chainIndexAuthorityAnchorMaxAgeMs` carries the cap and
-     *    the argument for it.
+     *    refused it. `resolveContextGraphAuthorityIndexStaleMs` supplies the
+     *    shared value to both paths.
      *
      *    The instant both bounds measure from is the tick's HEAD-READ instant,
      *    not the commit that stored it (`ChainEventLogHead.fetchedAtMs`), so a

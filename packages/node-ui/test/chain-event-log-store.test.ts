@@ -11,7 +11,11 @@ import {
 
 const SCOPE = 'evm:31337:0xhub:0xstorage';
 const ADDRESS = `0x${'cd'.repeat(20)}`;
+const OTHER_ADDRESS = `0x${'ef'.repeat(20)}`;
 const TOPIC = `0x${'01'.repeat(32)}`;
+const OTHER_TOPIC = `0x${'02'.repeat(32)}`;
+const GRAPH_TOPIC = `0x${'03'.repeat(32)}`;
+const OTHER_GRAPH_TOPIC = `0x${'04'.repeat(32)}`;
 const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
 
 function row(
@@ -119,6 +123,31 @@ describe('SqliteChainEventLogStore', () => {
     const held = await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 20 });
     expect(held.map((entry) => entry.blockNumber)).toEqual([10, 13]);
     expect(held[0]!.data).toBe('0xsettled');
+  });
+
+  it('filters persisted rows by address, topic0 and topic1 in SQLite', async () => {
+    const { store } = createStore();
+    await store.commit(SCOPE, undefined, commit(10, 12, [
+      { ...row(10, 0, true), topics: [TOPIC, GRAPH_TOPIC] },
+      { ...row(11, 0, false), address: OTHER_ADDRESS, topics: [TOPIC, GRAPH_TOPIC] },
+      { ...row(12, 0, false), topics: [OTHER_TOPIC, OTHER_GRAPH_TOPIC] },
+    ]));
+
+    const matchingBlocks = async (query: Parameters<typeof store.readEvents>[1]) => (
+      (await store.readEvents(SCOPE, query)).map((entry) => entry.blockNumber)
+    );
+    const range = { fromBlockNumber: 0, throughBlockNumber: 20 };
+
+    await expect(matchingBlocks({ ...range, addresses: [ADDRESS] })).resolves.toEqual([10, 12]);
+    await expect(matchingBlocks({ ...range, topic0: [TOPIC] })).resolves.toEqual([10, 11]);
+    await expect(matchingBlocks({ ...range, topic1: [GRAPH_TOPIC] })).resolves.toEqual([10, 11]);
+    await expect(matchingBlocks({
+      ...range,
+      addresses: [ADDRESS],
+      topic0: [TOPIC],
+      topic1: [GRAPH_TOPIC],
+    })).resolves.toEqual([10]);
+    await expect(matchingBlocks({ ...range, topic1: [OTHER_TOPIC] })).resolves.toEqual([]);
   });
 
   it('loses the CAS when another writer advanced the cursor first', async () => {

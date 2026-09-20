@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * `kaToContextGraph`, `getContextGraphKaCount` and `getContextGraphKaAt`,
- * answered from the ONE log.
+ * Positive `kaToContextGraph` bindings and known `getContextGraphKaAt`
+ * ordinals, answered from the ONE log. Mutable counts and negative bindings
+ * stay live because a new block may land after the tick's head observation.
  *
- * Together these were ~417 `eth_call`s per measured cell. Each test below is
- * the same pair of questions: does the log answer WITHOUT a call when it can
- * prove the answer, and does the call come back the moment it cannot?
+ * Each test below asks the same pair of questions: does the log answer WITHOUT
+ * a call when a positive fact is durable, and does the call come back the
+ * moment it cannot?
  */
 
 import { ethers } from 'ethers';
@@ -162,13 +163,14 @@ describe('knowledge-asset views over the one log', () => {
     expect(calls).toEqual([]);
   });
 
-  it('answers the count and every ordinal with NO eth_call', async () => {
-    const { adapter, calls } = makeAdapter({ store: populated() });
+  it('keeps the mutable count live but answers every known ordinal locally', async () => {
+    const { adapter, calls, live } = makeAdapter({ store: populated() });
+    live.set('cgStorage.getContextGraphKaCount', 2n);
 
     expect(await adapter.getContextGraphKCCount(7n)).toBe(2n);
     expect(await adapter.getContextGraphKCAt(7n, 0n)).toBe(4242n);
     expect(await adapter.getContextGraphKCAt(7n, 1n)).toBe(4343n);
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(['cgStorage.getContextGraphKaCount']);
   });
 
   it('leaves an ordinal PAST the list to the chain, which is what reverts on one', async () => {
@@ -212,11 +214,13 @@ describe('knowledge-asset views over the one log', () => {
     expect(calls).toEqual(['cgStorage.kaToContextGraph']);
   });
 
-  it('serves an UNBOUND kaId as zero only under complete coverage', async () => {
-    // Complete: the log has walked to the floor, so "no row" is "no event".
+  it('keeps an unbound kaId live even under complete coverage', async () => {
+    // A block can land after the tick observed its head, so complete coverage
+    // of that head is not proof that an unpinned call still returns zero.
     const complete = makeAdapter({ store: populated() });
-    expect(await complete.adapter.getKAContextGraphId(9999n)).toBe(0n);
-    expect(complete.calls).toEqual([]);
+    complete.live.set('cgStorage.kaToContextGraph', 8n);
+    expect(await complete.adapter.getKAContextGraphId(9999n)).toBe(8n);
+    expect(complete.calls).toEqual(['cgStorage.kaToContextGraph']);
 
     // Incomplete: a zero here would be a claim about blocks nobody looked at.
     const partial = makeAdapter({ store: seeded([registration(50, 7n, 4242n)], 45) });
@@ -252,12 +256,13 @@ describe('knowledge-asset views over the one log', () => {
     // A registration above the settled cursor: an `eth_call` at the chain head
     // returns it, so reading at the settled cursor instead would be a
     // different — and fifty blocks staler — answer than the one replaced.
-    const { adapter, calls } = makeAdapter({
+    const { adapter, calls, live } = makeAdapter({
       store: seeded([creation(40, 7n), registration(SETTLED + 3, 7n, 4444n)]),
     });
 
+    live.set('cgStorage.getContextGraphKaCount', 1n);
     expect(await adapter.getContextGraphKCCount(7n)).toBe(1n);
     expect(await adapter.getContextGraphKCAt(7n, 0n)).toBe(4444n);
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(['cgStorage.getContextGraphKaCount']);
   });
 });

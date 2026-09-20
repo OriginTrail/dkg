@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The knowledge-asset read model: `kaToContextGraph`, `getContextGraphKaCount`,
- * `getContextGraphKaAt` and `getLatestMerkleRoot`, answered from the ONE log.
+ * The knowledge-asset read model: positive `kaToContextGraph` bindings and
+ * known `getContextGraphKaAt` ordinals, answered from the ONE log.
  *
  * Every method here returns `undefined` for "I must not answer this", and the
  * adapter then does exactly what it did before the log existed: one `eth_call`.
@@ -13,22 +13,18 @@
  * - A POSITIVE `kaToContextGraph` is write-once on chain (`ContextGraphStorage`
  *   :359, guarded :355-358, never cleared) so once a SETTLED row says kaId is
  *   bound to cg, that is permanently true and needs no coverage at all.
- * - A ZERO `kaToContextGraph` is the opposite: it is a claim about the absence
- *   of an event anywhere in history, so it needs COMPLETE contract-wide
- *   coverage and no own-write barrier. A wrong zero is a correctness bug, not a
- *   slow path — it is how a KA gets treated as belonging to no graph.
  * - An ORDINAL (`KaCount`/`KaAt`) is only correct if nothing before it was
  *   skipped, so it needs coverage down to the graph's creation block.
- * - A ROOT needs the KA's own creation event, because a root stack folded from
- *   the middle has the right top and the wrong `rootIndex`.
+ * - Negative bindings and mutable counts are deliberately not served: a tick
+ *   can observe block N immediately after a read at N-1, so absence/count at
+ *   N-1 is not equivalent to the unpinned `eth_call` these paths replace.
  */
 
 import type { RawContextGraphAuthorityIndexEvent } from
   '../context-graph-authority-index-reducer.js';
 import {
-  chainEventLogHeadAgeIsServable,
   chainEventLogCoverageIncludes,
-  chainEventLogCoverageIsComplete,
+  chainEventLogStateReadRefusal,
   findChainEventLogCoverage,
   normalizeChainEventLogAddress,
   normalizeChainEventLogBlockNumber,
@@ -37,9 +33,7 @@ import {
 } from './chain-event-log.js';
 import type { ChainEventDecoderRegistry } from './chain-event-decoders.js';
 import {
-  latestMerkleRootOf,
   reduceContextGraphKaRegistrations,
-  reduceKnowledgeAssetEvents,
   type ContextGraphKaList,
 } from './knowledge-asset-reducer.js';
 
@@ -75,8 +69,7 @@ export interface KnowledgeAssetReadOptions {
 
 /** A `kaToContextGraph` answer the log is willing to stand behind. */
 export type ContextGraphForKaAnswer =
-  | Readonly<{ kind: 'bound'; contextGraphId: bigint; asOfBlockNumber: number }>
-  | Readonly<{ kind: 'unbound'; asOfBlockNumber: number }>;
+  Readonly<{ kind: 'bound'; contextGraphId: bigint; asOfBlockNumber: number }>;
 
 export interface KnowledgeAssetReadModelOptions {
   readonly scope: string;
@@ -84,8 +77,6 @@ export interface KnowledgeAssetReadModelOptions {
   readonly registry: ChainEventDecoderRegistry;
   /** Physical `ContextGraphStorage` address these reads are bound to. */
   readonly contextGraphStorageAddress: string;
-  /** Physical `DKGKnowledgeAssets` address, when the node has one bound. */
-  readonly knowledgeAssetStorageAddress?: string;
   /**
    * How old the tick's own head read may be before NOTHING here answers.
    *
@@ -96,8 +87,8 @@ export interface KnowledgeAssetReadModelOptions {
    * staleness this model may add has to be bounded by something — and the only
    * thing that can bound it is when the log last heard from the chain.
    *
-   * `max(3T, 15s)`, supplied by the composition root, exactly as the Hub
-   * window and the authority anchor bound themselves. Omitted (tests, and
+   * `min(max(3T, 15s), 5m)`, supplied by the composition root from the same
+   * resolver as the authority projection cache. Omitted (tests, and
    * callers that build a model for rows alone) means unbounded, which is why
    * the runtime never omits it.
    */
@@ -124,22 +115,11 @@ export interface KnowledgeAssetReadModel {
     contextGraphId: bigint,
     options?: KnowledgeAssetReadOptions,
   ): Promise<ContextGraphKaList | undefined>;
-  /** `getLatestMerkleRoot(kaId)` with the `rootIndex` that names the version. */
-  readLatestMerkleRoot(
-    kaId: bigint,
-    options?: KnowledgeAssetReadOptions,
-  ): Promise<Readonly<{ merkleRoot: string; rootIndex: number; author?: string }> | undefined>;
-  /** `getMaxKaNumberForAuthor(author)`: the allocator floor. */
-  readMaxKaNumberForAuthor(
-    author: string,
-    options?: KnowledgeAssetReadOptions,
-  ): Promise<bigint | undefined>;
 }
 
 interface ResolvedWindow {
   readonly fromBlockNumber: number;
   readonly throughBlockNumber: number;
-  readonly complete: boolean;
   /** Coverage reaches the chain horizon this view claims to answer at. */
   readonly caughtUp: boolean;
 }
@@ -184,13 +164,6 @@ export function createKnowledgeAssetReadModel(
     throw new Error('Knowledge asset read model ContextGraphStorage address is invalid');
   }
   const contextGraphStorageAddress: string = normalizedContextGraphStorage;
-  const knowledgeAssetStorageAddress = options.knowledgeAssetStorageAddress === undefined
-    ? undefined
-    : normalizeChainEventLogAddress(options.knowledgeAssetStorageAddress);
-  if (options.knowledgeAssetStorageAddress !== undefined
-    && knowledgeAssetStorageAddress === undefined) {
-    throw new Error('Knowledge asset read model DKGKnowledgeAssets address is invalid');
-  }
   const { scope, store, registry, maxHeadAgeMs } = options;
   const now = options.now ?? (() => Date.now());
 
@@ -216,16 +189,9 @@ export function createKnowledgeAssetReadModel(
     // range is indistinguishable from a chain on which nothing happened — so a
     // stalled log would go on answering `kaToContextGraph` and an ordinal from
     // whenever it stopped, with no way for the caller to tell.
-    if (maxHeadAgeMs !== undefined) {
-      if (!chainEventLogHeadAgeIsServable(
-        state.cursor.head.fetchedAtMs,
-        now(),
-        maxHeadAgeMs,
-      )) return undefined;
-    }
-    // A settled-hash mismatch the tick has seen but not yet confirmed or
-    // withdrawn: the rows may belong to a chain this node is no longer on.
-    if (state.suspectedForkBlockNumber !== undefined) return undefined;
+    if (chainEventLogStateReadRefusal(state, maxHeadAgeMs === undefined
+      ? {}
+      : { nowMs: now(), maxHeadAgeMs }) !== undefined) return undefined;
     const coverage = findChainEventLogCoverage(state.coverage, family, address);
     if (coverage === undefined) return undefined;
 
@@ -253,7 +219,6 @@ export function createKnowledgeAssetReadModel(
     return Object.freeze({
       fromBlockNumber: Math.max(from, coverage.coveredFromBlock),
       throughBlockNumber: horizon,
-      complete: chainEventLogCoverageIsComplete(coverage),
       caughtUp: coverage.coveredThroughBlock >= target,
     });
   }
@@ -298,17 +263,10 @@ export function createKnowledgeAssetReadModel(
           asOfBlockNumber: window.throughBlockNumber,
         });
       }
-      // The only zero this model will ever produce. It needs BOTH ends: history
-      // back to the contract floor and coverage through this view's current
-      // chain horizon. After downtime the tick can commit a fresh head while a
-      // bounded catch-up page still stops far below it; absence in that gap is
-      // unknown, not zero. A positive binding above remains safe because the
-      // mapping is write-once.
-      if (!window.complete || !window.caughtUp) return undefined;
-      return Object.freeze({
-        kind: 'unbound' as const,
-        asOfBlockNumber: window.throughBlockNumber,
-      });
+      // Absence at the last observed head is not equivalent to an unpinned
+      // eth_call: a block can land after that observation and before this read.
+      // Keep the log for durable positive bindings only.
+      return undefined;
     },
 
     async readContextGraphKaList(
@@ -386,70 +344,6 @@ export function createKnowledgeAssetReadModel(
         kaIds: Object.freeze([]),
         throughBlockNumber,
       });
-    },
-
-    async readLatestMerkleRoot(
-      kaId: bigint,
-      readOptions: KnowledgeAssetReadOptions = {},
-    ): Promise<Readonly<{ merkleRoot: string; rootIndex: number; author?: string }> | undefined> {
-      if (knowledgeAssetStorageAddress === undefined) return undefined;
-      const view = readOptions.view ?? 'finalized';
-      const window = await resolveWindow(
-        'knowledge-asset',
-        knowledgeAssetStorageAddress,
-        view,
-        readOptions.ownWrite,
-        undefined,
-      );
-      // Unlike a positive write-once CG binding, a root can change in the gap
-      // between coverage and the freshly observed head.
-      if (window === undefined || !window.caughtUp) return undefined;
-      const rows = await store.readEvents(scope, {
-        fromBlockNumber: window.fromBlockNumber,
-        throughBlockNumber: window.throughBlockNumber,
-        addresses: [knowledgeAssetStorageAddress],
-      });
-      const horizonRows = view === 'finalized' ? rows.filter((row) => row.settled) : rows;
-      const fold = reduceKnowledgeAssetEvents(registry.decodeKnowledgeAssets(horizonRows));
-      // `latestMerkleRootOf` refuses a stack whose bottom was never seen, so a
-      // KA created below the backfill's current floor falls through to the
-      // chain instead of reporting version 0 of a version-3 asset.
-      return latestMerkleRootOf(fold.rootsByKa.get(kaId.toString()));
-    },
-
-    async readMaxKaNumberForAuthor(
-      author: string,
-      readOptions: KnowledgeAssetReadOptions = {},
-    ): Promise<bigint | undefined> {
-      if (knowledgeAssetStorageAddress === undefined) return undefined;
-      const normalized = normalizeChainEventLogAddress(author);
-      if (normalized === undefined) return undefined;
-      const view = readOptions.view ?? 'finalized';
-      const window = await resolveWindow(
-        'knowledge-asset',
-        knowledgeAssetStorageAddress,
-        view,
-        readOptions.ownWrite,
-        undefined,
-      );
-      // An allocator floor folded from partial history is LOWER than the truth,
-      // and a low floor hands out a KA number that is already taken. Complete
-      // coverage or nothing.
-      if (window === undefined || !window.complete || !window.caughtUp) return undefined;
-      const rows = await store.readEvents(scope, {
-        fromBlockNumber: window.fromBlockNumber,
-        throughBlockNumber: window.throughBlockNumber,
-        addresses: [knowledgeAssetStorageAddress],
-      });
-      const horizonRows = view === 'finalized' ? rows.filter((row) => row.settled) : rows;
-      const fold = reduceKnowledgeAssetEvents(registry.decodeKnowledgeAssets(horizonRows));
-      // Complete coverage is the wrong property ON ITS OWN. The floor is built
-      // only from creates that carried a decodable author, so an ABI that
-      // yields none folds to an empty map — and an empty map under complete
-      // coverage reads as a confident zero, which hands out a KA number the
-      // chain has already given away.
-      if (fold.authorlessCreates > 0) return undefined;
-      return fold.maxKaNumberByAuthor.get(normalized) ?? 0n;
     },
   });
 }

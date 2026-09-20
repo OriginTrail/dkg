@@ -37,7 +37,7 @@ import {
   ChainIndexRunner,
   ChainIndexTick,
   chainEventLogFloorKey,
-  chainEventLogHeadAgeIsServable,
+  chainEventLogStateReadRefusal,
   chainIndexAuthorityAnchorHolds,
   createChainEventLogSubscription,
   createChainIndexAuthorityPageSource,
@@ -55,6 +55,8 @@ import {
 } from './chain-index/index.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+  CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS,
+  resolveContextGraphAuthorityIndexStaleMs,
 } from './context-graph-authority-index-projection.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 
@@ -245,10 +247,8 @@ function chainIndexInitialBindings(
  * is about is whether the TICK is still running, and the tick's tip-sensitive
  * transport is what keeps the head it commits canonical.
  */
-const CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS = 15_000;
-
 function chainIndexHubWindowMaxAgeMs(intervalMs: number): number {
-  return Math.max(3 * intervalMs, CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS);
+  return Math.max(3 * intervalMs, CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS);
 }
 
 /**
@@ -288,10 +288,7 @@ function chainIndexHubWindowMaxAgeMs(intervalMs: number): number {
  * about it.
  */
 function chainIndexAuthorityAnchorMaxAgeMs(intervalMs: number): number {
-  return Math.min(
-    Math.max(3 * intervalMs, CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS),
-    CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
-  );
+  return resolveContextGraphAuthorityIndexStaleMs(intervalMs);
 }
 
 /**
@@ -411,17 +408,15 @@ export function createEvmChainIndexRuntime(
     // cannot distinguish those retained, possibly wrong-fork rows from a good
     // pass. Refuse before the baseline and empty-window shortcuts can suppress
     // the listener's live scan without consulting `servableRange`.
-    if (state.suspectedForkBlockNumber !== undefined) return undefined;
     // AGE FIRST, before any branch can answer. A tick that stopped committing
     // — a lagging endpoint returns before the commit, and the runner then backs
     // off to 16×T — leaves coverage frozen, and frozen coverage is exactly what
     // the "nothing new walked" window below is made of. Undefined here is the
     // listener's cue to do what it did before the log existed.
-    if (!chainEventLogHeadAgeIsServable(
-      state.cursor.head.fetchedAtMs,
-      now(),
-      chainIndexHubWindowMaxAgeMs(options.intervalMs),
-    )) return undefined;
+    if (chainEventLogStateReadRefusal(state, {
+      nowMs: now(),
+      maxHeadAgeMs: chainIndexHubWindowMaxAgeMs(options.intervalMs),
+    }) !== undefined) return undefined;
     const coverage = findChainEventLogCoverage(state.coverage, 'hub', hubAddress);
     if (coverage === undefined) return undefined;
     const through = coverage.coveredThroughBlock;
@@ -544,7 +539,7 @@ export function createEvmChainIndexRuntime(
     ...(options.knowledgeAssetStorage === undefined
       ? {}
       : { knowledgeAssetStorageAddress: options.knowledgeAssetStorage.address }),
-    ...(contextGraphStorageAddress === undefined || options.knowledgeAssetStorage === undefined
+    ...(contextGraphStorageAddress === undefined
       ? {}
       : {
         knowledgeAssets: createKnowledgeAssetReadModel({
@@ -552,7 +547,6 @@ export function createEvmChainIndexRuntime(
           store: options.store,
           registry,
           contextGraphStorageAddress,
-          knowledgeAssetStorageAddress: options.knowledgeAssetStorage.address,
           // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
           // ceiling included, because these reads answer the same catalog
           // traffic from the same stored rows and there is no reason for one of

@@ -20,6 +20,8 @@ const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
 const RETIRED_CG_STORAGE = '0x00000000000000000000000000000000000000aa';
 const ROTATED_CG_STORAGE = '0x00000000000000000000000000000000000000bb';
+const KA_STORAGE = '0x00000000000000000000000000000000000000cc';
+const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
 
 function config(store?: MemoryChainEventLogStore): EVMAdapterConfig {
   return {
@@ -88,7 +90,154 @@ function dispatchHubRotation(adapter: EVMChainAdapter, name: string): void {
     .applyHubRotationEventName(name);
 }
 
+/** Stub only the Hub/RPC boundary while preserving the real initContracts path. */
+function stubInitBoundary(adapter: EVMChainAdapter) {
+  const rpcLabels: string[] = [];
+  const contractReadLabels: string[] = [];
+  const provider = {
+    getBlock: async (tag: string | number) => ({
+      number: typeof tag === 'number' ? tag : 100,
+      hash: hash(typeof tag === 'number' ? tag : 100),
+      timestamp: Math.floor(Date.now() / 1_000),
+    }),
+    getBlockNumber: async () => 100,
+    getLogs: async () => [],
+  };
+  const contract = (abi: string, address: string) => ({
+    interface: new ethers.Interface(loadAbi(abi)),
+    getAddress: async () => ethers.getAddress(address),
+  });
+  const internals = adapter as unknown as {
+    init(): Promise<void>;
+    contracts: Record<string, unknown>;
+    resolveContract(name: string): Promise<unknown>;
+    resolveAssetStorage(name: string): Promise<unknown>;
+    resolveAndAssignRandomSamplingPair(): Promise<void>;
+    resolveContractDeployBlockNumber(): Promise<number>;
+    readProvider(label: string, read: (provider: unknown) => Promise<unknown>): Promise<unknown>;
+    readTipProvider(label: string, read: (provider: unknown) => Promise<unknown>): Promise<unknown>;
+    readContract(contract: unknown, label: string): Promise<unknown>;
+    readContractWithOptions(contract: unknown, label: string): Promise<unknown>;
+    hubRotationPoller: { pollOnce(): Promise<void> };
+  };
+  internals.contracts.hub = contract('Hub', HUB_ADDRESS);
+  internals.resolveContract = async (name) => {
+    if (['Identity', 'Profile', 'ParametersStorage', 'ContextGraphs'].includes(name)) return {};
+    throw new Error(`${name} is optional in this fixture`);
+  };
+  internals.resolveAssetStorage = async (name) => {
+    if (name === 'DKGKnowledgeAssets') return contract('DKGKnowledgeAssets', KA_STORAGE);
+    if (name === 'ContextGraphStorage') {
+      return contract('ContextGraphStorage', RETIRED_CG_STORAGE);
+    }
+    throw new Error(`${name} is optional in this fixture`);
+  };
+  internals.resolveAndAssignRandomSamplingPair = async () => {
+    throw new Error('RandomSampling is optional in this fixture');
+  };
+  internals.resolveContractDeployBlockNumber = async () => 1;
+  internals.readProvider = async (label, read) => {
+    rpcLabels.push(label);
+    return read(provider);
+  };
+  internals.readTipProvider = async (label, read) => {
+    rpcLabels.push(label);
+    return read(provider);
+  };
+  internals.readContract = async (_contract, label) => {
+    contractReadLabels.push(label);
+    return ethers.ZeroAddress;
+  };
+  internals.readContractWithOptions = async (_contract, label) => {
+    contractReadLabels.push(label);
+    return 0n;
+  };
+  return { internals, rpcLabels, contractReadLabels };
+}
+
 describe('EVMChainAdapter chain index wiring', () => {
+  it('activates every one-log reader through the real init entry point', async () => {
+    const store = new MemoryChainEventLogStore();
+    const adapter = new EVMChainAdapter({ ...config(store), indexTickMs: 60_000 });
+    const { internals, rpcLabels, contractReadLabels } = stubInitBoundary(adapter);
+
+    await internals.init();
+    await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+    await vi.waitUntil(async () => await store.load() !== undefined, { timeout: 2_000 });
+
+    const now = Date.now();
+    const contextGraphInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
+    const encode = (name: string, args: readonly unknown[], blockNumber: number, logIndex: number) => {
+      const event = contextGraphInterface.encodeEventLog(
+        contextGraphInterface.getEvent(name)!,
+        [...args],
+      );
+      return {
+        blockNumber,
+        blockHash: hash(blockNumber),
+        logIndex,
+        transactionHash: hash(0xaa),
+        address: RETIRED_CG_STORAGE.toLowerCase(),
+        topics: [...event.topics],
+        data: event.data,
+        settled: true,
+      };
+    };
+    store.seed({
+      cursor: {
+        revision: 1,
+        lineage: hash(1),
+        deploymentBlockNumber: 1,
+        settledBlockNumber: 100,
+        settledBlockHash: hash(100),
+        head: {
+          number: 100,
+          hash: hash(100),
+          timestampSeconds: Math.floor(now / 1_000),
+          fetchedAtMs: now,
+        },
+        topicSetVersion: 'init-integration',
+      },
+      coverage: ['hub', 'context-graph-authority', 'context-graph-ka'].map((family) => ({
+        family,
+        address: family === 'hub' ? HUB_ADDRESS.toLowerCase() : RETIRED_CG_STORAGE.toLowerCase(),
+        coveredFromBlock: 1,
+        coveredThroughBlock: 100,
+        floorBlock: 1,
+      })),
+    }, [
+      encode('ContextGraphCreated', [
+        7n,
+        RETIRED_CG_STORAGE,
+        hash(0x22),
+        [RETIRED_CG_STORAGE],
+        7n,
+        1,
+        0,
+        RETIRED_CG_STORAGE,
+        7n,
+      ], 40, 0),
+      encode('KnowledgeAssetRegisteredToContextGraph', [7n, 4242n], 50, 0),
+    ]);
+
+    const binding = adapter.chainEventLog!;
+    expect(binding.contextGraphAuthority).toBeDefined();
+    expect((await binding.contextGraphAuthority!.resolveAnchor({
+      deploymentBlockNumber: 1,
+      finalityConfirmations: 1,
+    })).anchor?.finalized.number).toBe(100);
+
+    rpcLabels.length = 0;
+    contractReadLabels.length = 0;
+    await internals.hubRotationPoller.pollOnce();
+    expect(rpcLabels.filter((label) => label.startsWith('Hub_rotation_poll_'))).toEqual([]);
+    expect(await adapter.getKAContextGraphId(4242n)).toBe(7n);
+    expect(await adapter.getContextGraphKCAt(7n, 0n)).toBe(4242n);
+    expect(contractReadLabels.filter((label) => label.startsWith('cgStorage.'))).toEqual([]);
+
+    adapter.destroy();
+  });
+
   it('builds NOTHING for an adapter the composition root gave no store', async () => {
     const adapter = new EVMChainAdapter(config());
     stubHub(adapter);

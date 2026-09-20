@@ -149,6 +149,32 @@ export interface ChainEventLogState {
   readonly suspectedForkBlockNumber?: number;
 }
 
+/** Why a reader must fall back instead of serving state from the one log. */
+export type ChainEventLogStateReadRefusal = 'fork-suspected' | 'stale-head';
+
+/**
+ * Apply the state-wide safety gates shared by every one-log reader.
+ *
+ * Callers that only need the lineage gate omit the age options. Readers that
+ * replace a current-chain read provide both values; providing just one is a
+ * configuration error and therefore refuses closed.
+ */
+export function chainEventLogStateReadRefusal(
+  state: ChainEventLogState,
+  options: Readonly<{ nowMs?: number; maxHeadAgeMs?: number }> = {},
+): ChainEventLogStateReadRefusal | undefined {
+  if (state.suspectedForkBlockNumber !== undefined) return 'fork-suspected';
+  const hasNow = options.nowMs !== undefined;
+  const hasMaxAge = options.maxHeadAgeMs !== undefined;
+  if (hasNow !== hasMaxAge) return 'stale-head';
+  if (hasNow && hasMaxAge && !chainEventLogHeadAgeIsServable(
+    state.cursor.head.fetchedAtMs,
+    options.nowMs!,
+    options.maxHeadAgeMs!,
+  )) return 'stale-head';
+  return undefined;
+}
+
 /** A closed block interval. Both ends are held. */
 export interface ChainEventLogBlockRange {
   readonly fromBlockNumber: number;
