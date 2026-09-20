@@ -379,17 +379,41 @@ export function withRpcUsageIssuerContext<T>(
  */
 const MAX_RPC_USAGE_CONSUMER_CHARS = 64;
 
+function isRpcUsageConsumerCharacter(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57)
+    || (code >= 65 && code <= 90)
+    || (code >= 97 && code <= 122)
+    || char === '_'
+    || char === '.'
+    || char === ':'
+    || char === '-'
+  );
+}
+
 /**
  * Bound code-owned read labels for logfmt-safe consumer attribution. Labels are
  * intentionally not derived from calldata, addresses, request ids, or peer ids.
  */
 export function normalizeRpcUsageConsumer(consumer: string | undefined): string | undefined {
   if (typeof consumer !== 'string') return undefined;
-  const normalized = consumer
-    .trim()
-    .replace(/[^A-Za-z0-9_.:-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  let normalized = '';
+  let previousWasUnderscore = false;
+  for (const char of consumer.trim()) {
+    const normalizedChar = isRpcUsageConsumerCharacter(char) ? char : '_';
+    if (normalizedChar === '_') {
+      if (normalized.length === 0 || previousWasUnderscore) continue;
+      previousWasUnderscore = true;
+    } else {
+      previousWasUnderscore = false;
+    }
+    normalized += normalizedChar;
+    // A final underscore can still be removed. Past that point, the bounded
+    // result is necessarily `other`, so never accumulate an unbounded label.
+    if (normalized.length > MAX_RPC_USAGE_CONSUMER_CHARS + 1) return 'other';
+  }
+  if (normalized.endsWith('_')) normalized = normalized.slice(0, -1);
   if (normalized.length === 0) return undefined;
   if (normalized.length > MAX_RPC_USAGE_CONSUMER_CHARS) return 'other';
   return normalized;
