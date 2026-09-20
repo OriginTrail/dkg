@@ -9,7 +9,11 @@
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AbiCoder, Contract } from 'ethers';
+import * as ts from 'typescript';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -448,7 +452,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
     expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(1);
     expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
-    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(159);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(163);
     expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
       [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
     );
@@ -464,6 +468,57 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       ['Hub.getContractAddress(Identity)', 'Hub.getContractAddress_Identity'],
       ['kas.queryFilter(KnowledgeAssetCreated)', 'kas.queryFilter_KnowledgeAssetCreated'],
     ] as const) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(raw)).toBe(normalized);
+    }
+  });
+
+  it('covers every active static resolveContract Hub label from source', () => {
+    const sourceRoot = fileURLToPath(new URL('../src', import.meta.url));
+    const files: string[] = [];
+    const visitDirectory = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          if (entry.name !== 'archive') visitDirectory(join(directory, entry.name));
+        } else if (entry.name.endsWith('.ts')) {
+          files.push(join(directory, entry.name));
+        }
+      }
+    };
+    visitDirectory(sourceRoot);
+
+    const contractNames = new Set<string>();
+    for (const path of files) {
+      const source = ts.createSourceFile(
+        path,
+        readFileSync(path, 'utf8'),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const visitNode = (node: ts.Node): void => {
+        if (
+          ts.isCallExpression(node)
+          && ts.isPropertyAccessExpression(node.expression)
+          && node.expression.name.text === 'resolveContract'
+          && ts.isStringLiteralLike(node.arguments[0])
+        ) {
+          contractNames.add(node.arguments[0].text);
+        }
+        ts.forEachChild(node, visitNode);
+      };
+      visitNode(source);
+    }
+
+    expect([...contractNames].sort()).toEqual(expect.arrayContaining([
+      'DKGStakingConvictionNFT',
+      'ShardingTableStorage',
+      'PublishingConviction',
+      'ShardingTable',
+    ]));
+    for (const name of contractNames) {
+      const raw = `Hub.getContractAddress(${name})`;
+      const normalized = normalizeRpcUsageConsumer(raw);
+      expect(normalized).toBeDefined();
+      expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toContain(normalized);
       expect(boundedRpcUsageSnapshotConsumerLabel(raw)).toBe(normalized);
     }
   });
