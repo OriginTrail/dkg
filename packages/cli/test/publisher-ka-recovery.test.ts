@@ -138,7 +138,7 @@ describe('named KA publisher recovery wiring', () => {
     const authorAddress = '0x3333333333333333333333333333333333333333';
     const kaId = (BigInt(authorAddress) << 96n) | 7n;
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
-    const knowledgeAssetsContract = '0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD';
+    const knowledgeAssetsContract = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
     const publish = {
       batchId: kaId,
       kaId,
@@ -250,7 +250,7 @@ describe('named KA publisher recovery wiring', () => {
     const kaId = (BigInt(authorAddress) << 96n) | 7n;
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
     const otherRoot = `0x${'13'.repeat(32)}` as `0x${string}`;
-    const knowledgeAssetsContract = '0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD';
+    const knowledgeAssetsContract = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
     const liveFallback = vi.fn(async () => ({ status: 'not-found' as const }));
     const publishers: PublisherChainAdapters = new Map([[walletId, {
       chainId: 'evm:31337',
