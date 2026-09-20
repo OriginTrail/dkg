@@ -162,9 +162,11 @@ export {
   normalizeRpcUsageWindow,
   normalizeRpcEndpointSlotLabel,
   rpcUsageWindowTotal,
+  RpcUsageTracker,
   // Call-site attribution: splits a funnel read (`cgStorage.getContextGraph`)
   // by the caller that wanted it. See `withRpcUsageSite`.
   withRpcUsageSite,
+  withRpcUsageConsumer,
   type RpcEndpointSlotLabel,
   type RpcUsageAttribution,
   type NormalizedRpcUsageWindow,

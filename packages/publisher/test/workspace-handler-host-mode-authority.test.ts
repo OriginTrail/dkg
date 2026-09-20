@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { RpcUsageTracker, withRpcUsageConsumer } from '../../chain/dist/rpc-usage.js';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TypedEventBus,

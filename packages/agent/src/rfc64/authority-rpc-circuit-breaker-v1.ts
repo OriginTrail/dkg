@@ -36,6 +36,11 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
   readonly retryAtMs: number | null;
 }
 
+/** Options whose `onRpcRead` marker is owned and invoked by an agent resolver. */
+export type Rfc64AgentAuthorityResolverReadOptionsV1 = ChainReadOptions & Readonly<{
+  onRpcRead: () => void;
+}>;
+
 export interface Rfc64AuthorityRpcProbeEvidenceV1 {
   /**
    * Build options for an agent authority resolver. The callbacks are the only
@@ -55,9 +60,7 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    exhaustion: the operation succeeds for its caller but proves nothing
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
-  agentReadOptions(signal?: AbortSignal): ChainReadOptions & Readonly<{
-    onRpcRead: () => void;
-  }>;
+  agentResolverReadOptions(signal?: AbortSignal): Rfc64AgentAuthorityResolverReadOptionsV1;
   /** Mark and build options for a direct finalized chain/index read. */
   chainReadOptions(signal?: AbortSignal): ChainReadOptions;
 }
@@ -138,7 +141,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * Recovery needs evidence, not merely a fulfilled callback. A read that was
  * answered from local or cached state says nothing about the pool it never
  * contacted, so only an operation that invokes the `onRpcRead` callback from
- * `agentReadOptions`, or uses `chainReadOptions`, can clear an outstanding
+ * `agentResolverReadOptions`, or uses `chainReadOptions`, can clear an outstanding
  * exhaustion. Until then the circuit stays half-open, which is a statement
  * about eligibility to probe rather than about a probe in flight.
  *
@@ -245,7 +248,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           });
         };
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
-          agentReadOptions: (signal?: AbortSignal) => Object.freeze({
+          agentResolverReadOptions: (signal?: AbortSignal) => Object.freeze({
             ...(signal === undefined ? {} : { signal }),
             onRpcRead: markRpcAttempt,
             onContextGraphAuthorityProjectionServed: observeProjectionServed,

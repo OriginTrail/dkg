@@ -3133,15 +3133,14 @@ export class EVMChainAdapterBase {
   /** Read a receipt block timestamp, reusing the hash-bound finality header. */
   protected async getFinalizedBlockTimestamp(
     blockNumber: number,
-    blockHash: string,
+    blockHash: string | null | undefined,
     options: ChainReadOptions = {},
   ): Promise<number> {
     // A memo hit must not turn a cancelled call into an answer.
     options.signal?.throwIfAborted();
-    const rememberedTimestamp = this.receiptFinality?.finalizedBlockTimestamp(
-      blockNumber,
-      blockHash,
-    );
+    const rememberedTimestamp = typeof blockHash === 'string'
+      ? this.receiptFinality?.finalizedBlockTimestamp(blockNumber, blockHash)
+      : undefined;
     return rememberedTimestamp ?? this.getBlockTimestamp(blockNumber, options);
   }
 

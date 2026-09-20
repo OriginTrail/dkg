@@ -80,6 +80,46 @@ describe('canonical finalization receipt capability', () => {
     })).resolves.toEqual({ status: 'reorged' });
   });
 
+  it('rejects a successful receipt with logs but no block hash', async () => {
+    const storageInterface = new ethers.Interface(loadAbi('DKGKnowledgeAssets'));
+    const storageAddress = '0x4444444444444444444444444444444444444444';
+    const encodedCreated = storageInterface.encodeEventLog(
+      storageInterface.getEvent('KnowledgeAssetCreated')!,
+      [
+        KA_ID,
+        AUTHOR,
+        'missing-block-hash',
+        ethers.hexlify(MERKLE_ROOT),
+        2048n,
+        1n,
+        2n,
+        100n,
+        false,
+      ],
+    );
+    const chain = adapter({
+      contracts: {
+        knowledgeAssetStorage: { interface: storageInterface, target: storageAddress },
+      },
+      getTransactionReceiptWithFailover: vi.fn(async () => ({
+        hash: TX_HASH,
+        status: 1,
+        blockNumber: 123,
+        index: 4,
+        from: AUTHOR,
+        logs: [{
+          address: storageAddress,
+          topics: encodedCreated.topics,
+          data: encodedCreated.data,
+        }],
+      })),
+    }, true);
+    delete (chain as any).getFinalizedBlockTimestamp;
+
+    await expect(chain.resolveCanonicalFinalizationReceipt(TX_HASH))
+      .resolves.toEqual({ status: 'rejected' });
+  });
+
   it('resolves canonical V10 evidence through the production receipt parser', async () => {
     const storageInterface = new ethers.Interface(loadAbi('DKGKnowledgeAssets'));
     const storageAddress = '0x4444444444444444444444444444444444444444';

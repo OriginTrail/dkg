@@ -2792,7 +2792,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           signal,
           (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
             contextGraphIds,
-            evidence.agentReadOptions(readSignal),
+            evidence.agentResolverReadOptions(readSignal),
           ),
         ),
         'batched finalized on-chain id enrichment',

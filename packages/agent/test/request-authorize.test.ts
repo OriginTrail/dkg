@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { RpcUsageTracker, withRpcUsageConsumer } from '../../chain/dist/rpc-usage.js';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { authorizePrivateSyncRequest } from '../src/sync/auth/request-authorize.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
