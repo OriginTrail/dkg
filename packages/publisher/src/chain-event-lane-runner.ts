@@ -364,6 +364,11 @@ export class ChainEventLaneRunner {
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
         signal?.throwIfAborted();
+        if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
+          leaseExpired = true;
+          throw new Error('event scan horizon lease expired before event dispatch');
+        }
+        signal?.throwIfAborted();
         await lane.spec.dispatch(event, ctx, signal);
         signal?.throwIfAborted();
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {

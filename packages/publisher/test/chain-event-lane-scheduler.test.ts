@@ -340,6 +340,50 @@ describe('ChainEventPoller scheduler', () => {
     ]);
   });
 
+  it('refuses a row when its lease expires after read but before dispatch', async () => {
+    let current = true;
+    const seen: number[] = [];
+    const saved: number[] = [];
+    const adapter = {
+      chainId: 'mock:0',
+      acquireEventScanHorizonLease: async () => scanLease(
+        100,
+        async () => current,
+      ),
+      listenForEvents: async function* (): AsyncIterable<ChainEvent> {
+        current = false;
+        yield {
+          type: 'KnowledgeAssetRegisteredToContextGraph',
+          blockNumber: 50,
+          data: {},
+        };
+      },
+    } as unknown as ChainAdapter;
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [{
+        name: 'vmReconcile',
+        enabled: () => true,
+        eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
+        requiresFullHistory: () => false,
+        cadenceMs: 20,
+        dispatch: async (event) => { seen.push(event.blockNumber); },
+      }],
+      maxRange: 9_000,
+      clock: () => 0,
+      log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: {
+        async loadLane() { return undefined; },
+        async saveLane(_lane, block) { saved.push(block); },
+      },
+    });
+
+    await runner.poll();
+
+    expect(seen).toEqual([]);
+    expect(saved).toEqual([]);
+  });
+
   it('stops A dispatch immediately after rotation and replays both B events at or below H', async () => {
     let generation: 'A' | 'B' = 'A';
     let now = 0;
