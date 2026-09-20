@@ -109,7 +109,18 @@ export class ChainEventLaneRunner {
     if (dueLanes.length === 0) return;
 
     let head: number | undefined;
-    if (this.chain.getBlockNumber) {
+    if (this.chain.getEventScanHorizon) {
+      try {
+        const horizon = await this.chain.getEventScanHorizon();
+        if (typeof horizon === 'number' && Number.isSafeInteger(horizon) && horizon >= 0) {
+          head = horizon;
+        }
+      } catch {
+        if (signal?.aborted) signal.throwIfAborted();
+        // Any refusal or uncertainty restores the live head path below.
+      }
+    }
+    if (head === undefined && this.chain.getBlockNumber) {
       try {
         head = await this.chain.getBlockNumber();
       } catch {

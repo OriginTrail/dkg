@@ -41,6 +41,12 @@ const CG_STORAGE_EVENTS = [
 
 const hubInterface = new ethers.Interface(HUB_EVENTS);
 const cgInterface = new ethers.Interface(CG_STORAGE_EVENTS);
+const EVENT_SCAN_IDENTITY = Object.freeze({
+  contextGraphStorageAddress: CG_STORAGE_ADDRESS,
+  contextGraphCreatedTopic0: cgInterface.getEvent('ContextGraphCreated')!.topicHash,
+  contextGraphKaTopic0: cgInterface
+    .getEvent('KnowledgeAssetRegisteredToContextGraph')!.topicHash,
+});
 
 /** A distinct, well-formed bytes32 per marker. */
 function hexWord(marker: number): string {
@@ -280,6 +286,120 @@ describe('createEvmChainIndexRuntime', () => {
     // does not need DKGKnowledgeAssets bound to serve positive bindings and
     // known ordinals.
     expect(h.runtime.binding.knowledgeAssets).toBeDefined();
+  });
+
+  it('refuses an event-scan horizon before the first pass commits', async () => {
+    const h = harness();
+
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+  });
+
+  it('lends the common exact-family horizon without another chain request', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    const state = (await h.store.load())!;
+    h.store.seed({
+      ...state,
+      coverage: state.coverage.map((entry) => entry.family === 'context-graph-ka'
+        ? { ...entry, coveredThroughBlock: 997 }
+        : entry),
+    });
+    const requestsBefore = h.getLogs.mock.calls.length + h.heads.mock.calls.length
+      + h.blocks.mock.calls.length;
+
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBe(997);
+    expect(
+      h.getLogs.mock.calls.length + h.heads.mock.calls.length + h.blocks.mock.calls.length,
+    ).toBe(requestsBefore);
+
+    // Corrupt/forward coverage must never turn this into a head oracle: the
+    // runtime lends at most the head whose lineage it actually observed.
+    h.store.seed({
+      ...state,
+      coverage: state.coverage.map((entry) => ({
+        ...entry,
+        coveredThroughBlock: 1_010,
+      })),
+    });
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBe(1_000);
+  });
+
+  it('refuses an event-scan horizon unless address and both topics match exactly', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+
+    await expect(h.runtime.binding.readEventScanHorizon!({
+      ...EVENT_SCAN_IDENTITY,
+      contextGraphStorageAddress: '0x00000000000000000000000000000000000000c3',
+    })).resolves.toBeUndefined();
+    await expect(h.runtime.binding.readEventScanHorizon!({
+      ...EVENT_SCAN_IDENTITY,
+      contextGraphCreatedTopic0: hexWord(91),
+    })).resolves.toBeUndefined();
+    await expect(h.runtime.binding.readEventScanHorizon!({
+      ...EVENT_SCAN_IDENTITY,
+      contextGraphKaTopic0: hexWord(92),
+    })).resolves.toBeUndefined();
+  });
+
+  it('refuses coverage committed by a different decoder topic generation', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    const state = (await h.store.load())!;
+    h.store.seed({
+      ...state,
+      cursor: { ...state.cursor, topicSetVersion: 'retired-topics' },
+    });
+
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+  });
+
+  it('refuses an event-scan horizon without exact-address coverage for both families', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    const state = (await h.store.load())!;
+    h.store.seed({
+      ...state,
+      coverage: state.coverage.map((entry) => entry.family === 'context-graph-ka'
+        ? { ...entry, address: '0x00000000000000000000000000000000000000c3' }
+        : entry),
+    });
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+
+    h.store.seed({
+      ...state,
+      coverage: state.coverage.filter((entry) => entry.family !== 'context-graph-ka'),
+    });
+
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+  });
+
+  it('refuses event-scan horizons from frozen, future-stamped or fork-suspect state', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+
+    h.advanceMs(3 * 6_000 + 1);
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+
+    h.advanceMs(-(3 * 6_000 + 2));
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+
+    h.advanceMs(1);
+    const state = (await h.store.load())!;
+    h.store.seed({
+      ...state,
+      suspectedForkBlockNumber: state.cursor.settledBlockNumber,
+    });
+    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
   });
 
   it('refuses a Hub window before the first pass has committed anything', async () => {

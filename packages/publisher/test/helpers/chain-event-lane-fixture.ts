@@ -6,18 +6,28 @@ import type { JournalEntry } from '../../src/publish-journal.js';
 
 interface ChainFixtureOptions {
   head: number | (() => number);
+  eventScanHorizon?: number | (() => number | undefined | Promise<number | undefined>);
   events?: readonly ChainEvent[];
   onListen?: (filter: EventFilter) => void;
+  onHead?: () => void;
 }
 
-export function makeChain({ head, events = [], onListen }: ChainFixtureOptions): {
+export function makeChain({ head, eventScanHorizon, events = [], onListen, onHead }: ChainFixtureOptions): {
   adapter: ChainAdapter;
   filters: EventFilter[];
 } {
   const filters: EventFilter[] = [];
   const adapter = {
     chainId: 'mock:0',
-    getBlockNumber: async () => typeof head === 'function' ? head() : head,
+    getBlockNumber: async () => {
+      onHead?.();
+      return typeof head === 'function' ? head() : head;
+    },
+    ...(eventScanHorizon === undefined ? {} : {
+      getEventScanHorizon: async () => typeof eventScanHorizon === 'function'
+        ? eventScanHorizon()
+        : eventScanHorizon,
+    }),
     listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
       filters.push(f);
       onListen?.(f);

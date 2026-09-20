@@ -4509,6 +4509,56 @@ export class EVMChainAdapterBase {
     return this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber());
   }
 
+  /**
+   * Borrow the ONE log's conservative upper bound for publisher event lanes.
+   * Every uncertainty returns `undefined`; the lane runner then performs its
+   * original live head read. The exact contract handle, address, topics and
+   * binding generation are fenced across the await so a Hub rotation or
+   * runtime rebuild cannot lend a retired generation's horizon.
+   */
+  async getEventScanHorizon(): Promise<number | undefined> {
+    const binding = this.chainEventLogBinding;
+    const readHorizon = binding?.readEventScanHorizon;
+    const contextGraphStorage = this.contracts.contextGraphStorage;
+    if (binding === undefined || readHorizon === undefined || contextGraphStorage === undefined) {
+      return undefined;
+    }
+
+    let address: string;
+    let contextGraphCreatedTopic0: string | undefined;
+    let contextGraphKaTopic0: string | undefined;
+    try {
+      address = (await contextGraphStorage.getAddress()).toLowerCase();
+      contextGraphCreatedTopic0 = contextGraphStorage.interface
+        .getEvent('ContextGraphCreated')?.topicHash.toLowerCase();
+      contextGraphKaTopic0 = contextGraphStorage.interface
+        .getEvent('KnowledgeAssetRegisteredToContextGraph')?.topicHash.toLowerCase();
+    } catch {
+      return undefined;
+    }
+    if (contextGraphCreatedTopic0 === undefined || contextGraphKaTopic0 === undefined) {
+      return undefined;
+    }
+
+    try {
+      const horizon = await readHorizon.call(binding, {
+        contextGraphStorageAddress: address,
+        contextGraphCreatedTopic0,
+        contextGraphKaTopic0,
+      });
+      if (
+        !this.chainEventLogBindingIsCurrent(binding)
+        || this.contracts.contextGraphStorage !== contextGraphStorage
+        || typeof horizon !== 'number'
+        || !Number.isSafeInteger(horizon)
+        || horizon < 0
+      ) return undefined;
+      return horizon;
+    } catch {
+      return undefined;
+    }
+  }
+
   getProvider(): JsonRpcProvider {
     return this.primaryProvider;
   }

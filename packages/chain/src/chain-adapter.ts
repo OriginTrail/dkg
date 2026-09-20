@@ -1584,6 +1584,13 @@ export interface ChainAdapter {
   // Block height (used by ChainEventPoller to seed the scan cursor)
   getBlockNumber?(): Promise<number>;
 
+  /**
+   * Conservative, possibly lagging one-log horizon for background event
+   * polling. This is not a canonical head, finality fact, or authorization
+   * input; absence makes the poller use `getBlockNumber()` exactly as before.
+   */
+  getEventScanHorizon?(): Promise<number | undefined>;
+
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
 

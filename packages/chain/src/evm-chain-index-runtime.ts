@@ -36,11 +36,13 @@ import {
   ChainIndexTick,
   chainEventLogFloorKey,
   chainEventLogStateReadRefusal,
+  chainEventLogTopicSetVersion,
   chainIndexAuthorityAnchorHolds,
   createChainEventLogSubscription,
   createChainIndexAuthorityPageSource,
   createKnowledgeAssetReadModel,
   findChainEventLogCoverage,
+  normalizeChainEventLogAddress,
   resolveChainIndexAuthorityAnchor,
   type ChainEventLogFetchedRow,
   type ChainEventLogStore,
@@ -308,6 +310,7 @@ export function createEvmChainIndexRuntime(
   options: EvmChainIndexRuntimeOptions,
 ): EvmChainIndexRuntime {
   const registry = chainIndexRegistry(options);
+  const eventScanTopicSetVersion = chainEventLogTopicSetVersion(registry.topicSet());
   const readTip = options.readTipProvider;
   const now = options.now ?? (() => Date.now());
 
@@ -483,6 +486,67 @@ export function createEvmChainIndexRuntime(
 
   const contextGraphStorageAddress = options.contextGraphStorage?.address;
 
+  const contextGraphStorageNormalized = contextGraphStorageAddress === undefined
+    ? undefined
+    : normalizeChainEventLogAddress(contextGraphStorageAddress);
+  const contextGraphCreatedTopic0 = options.contextGraphStorage?.contractInterface
+    .getEvent('ContextGraphCreated')?.topicHash.toLowerCase();
+  const contextGraphKaTopic0 = options.contextGraphStorage?.contractInterface
+    .getEvent('KnowledgeAssetRegisteredToContextGraph')?.topicHash.toLowerCase();
+
+  /**
+   * The publisher lanes may stop asking the provider for a second head only
+   * when this generation proves BOTH event families through the same block.
+   * The horizon may lag the chain; that merely delays the next scan. Frozen,
+   * fork-suspect, incomplete-identity or partially-covered state refuses to
+   * answer and restores the pre-log live-head path.
+   */
+  async function readEventScanHorizon(identity: Readonly<{
+    contextGraphStorageAddress: string;
+    contextGraphCreatedTopic0: string;
+    contextGraphKaTopic0: string;
+  }>): Promise<number | undefined> {
+    if (
+      contextGraphStorageNormalized === undefined
+      || contextGraphCreatedTopic0 === undefined
+      || contextGraphKaTopic0 === undefined
+      || normalizeChainEventLogAddress(identity.contextGraphStorageAddress)
+        !== contextGraphStorageNormalized
+      || identity.contextGraphCreatedTopic0.toLowerCase() !== contextGraphCreatedTopic0
+      || identity.contextGraphKaTopic0.toLowerCase() !== contextGraphKaTopic0
+    ) return undefined;
+
+    const state = await options.store.load(options.scope);
+    if (state === undefined) return undefined;
+    // A runtime can be attached before its first tick. Refuse coverage left by
+    // an older decoder/topic generation until this runtime commits the topic
+    // set it actually compared above.
+    if (state.cursor.topicSetVersion !== eventScanTopicSetVersion) return undefined;
+    if (chainEventLogStateReadRefusal(state, {
+      nowMs: now(),
+      maxHeadAgeMs: chainIndexHubWindowMaxAgeMs(options.intervalMs),
+    }) !== undefined) return undefined;
+
+    const authorityCoverage = findChainEventLogCoverage(
+      state.coverage,
+      'context-graph-authority',
+      contextGraphStorageNormalized,
+    );
+    const kaCoverage = findChainEventLogCoverage(
+      state.coverage,
+      'context-graph-ka',
+      contextGraphStorageNormalized,
+    );
+    if (authorityCoverage === undefined || kaCoverage === undefined) return undefined;
+
+    const horizon = Math.min(
+      authorityCoverage.coveredThroughBlock,
+      kaCoverage.coveredThroughBlock,
+      state.cursor.head.number,
+    );
+    return Number.isSafeInteger(horizon) && horizon >= 0 ? horizon : undefined;
+  }
+
   /**
    * The authority index's whole view of the chain, when the Hub binds a
    * `ContextGraphStorage`.
@@ -558,6 +622,13 @@ export function createEvmChainIndexRuntime(
     subscription,
     readHubRotationWindow,
   };
+  if (
+    contextGraphStorageNormalized !== undefined
+    && contextGraphCreatedTopic0 !== undefined
+    && contextGraphKaTopic0 !== undefined
+  ) {
+    binding.readEventScanHorizon = readEventScanHorizon;
+  }
   if (contextGraphAuthority !== undefined) {
     binding.contextGraphAuthority = contextGraphAuthority;
   }

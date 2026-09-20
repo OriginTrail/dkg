@@ -161,6 +161,80 @@ async function collect(
 }
 
 describe('listenForEvents over the one log', () => {
+  it('borrows an event-scan horizon only for the exact current address and topics', async () => {
+    const { adapter } = makeAdapter(seededStore(100, []));
+    const binding = adapter.chainEventLog!;
+    let received: unknown;
+    adapter.attachChainEventLog({
+      ...binding,
+      readEventScanHorizon: async (identity: unknown) => {
+        received = identity;
+        return 100;
+      },
+    });
+
+    await expect(adapter.getEventScanHorizon()).resolves.toBe(100);
+    expect(received).toEqual({
+      contextGraphStorageAddress: CG_STORAGE,
+      contextGraphCreatedTopic0: cgInterface.getEvent('ContextGraphCreated')!
+        .topicHash.toLowerCase(),
+      contextGraphKaTopic0: cgInterface
+        .getEvent('KnowledgeAssetRegisteredToContextGraph')!.topicHash.toLowerCase(),
+    });
+    adapter.destroy();
+  });
+
+  it('discards an event-scan horizon when its binding generation changes in flight', async () => {
+    const { adapter } = makeAdapter(seededStore(100, []));
+    const base = adapter.chainEventLog!;
+    let release = (_horizon: number): void => {};
+    let markStarted = (): void => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    adapter.attachChainEventLog({
+      ...base,
+      readEventScanHorizon: () => new Promise<number>((resolve) => {
+        release = resolve;
+        markStarted();
+      }),
+    });
+
+    const reading = adapter.getEventScanHorizon();
+    await started;
+    adapter.attachChainEventLog({
+      ...base,
+      readEventScanHorizon: async () => 101,
+    });
+    release(100);
+
+    await expect(reading).resolves.toBeUndefined();
+    await expect(adapter.getEventScanHorizon()).resolves.toBe(101);
+    adapter.destroy();
+  });
+
+  it('discards an event-scan horizon when the contract handle changes in flight', async () => {
+    const { adapter } = makeAdapter(seededStore(100, []));
+    const base = adapter.chainEventLog!;
+    const originalHandle = adapter.contracts.contextGraphStorage;
+    let release = (_horizon: number): void => {};
+    let markStarted = (): void => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    adapter.attachChainEventLog({
+      ...base,
+      readEventScanHorizon: () => new Promise<number>((resolve) => {
+        release = resolve;
+        markStarted();
+      }),
+    });
+
+    const reading = adapter.getEventScanHorizon();
+    await started;
+    adapter.contracts.contextGraphStorage = { ...originalHandle };
+    release(100);
+
+    await expect(reading).resolves.toBeUndefined();
+    adapter.destroy();
+  });
+
   it('serves ContextGraphCreated from the log and issues no queryFilter', async () => {
     const store = seededStore(100, [creationRow(50, 7n), registrationRow(51, 7n, 900n)]);
     const { adapter, liveScans } = makeAdapter(store);

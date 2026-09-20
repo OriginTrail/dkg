@@ -52,6 +52,21 @@ export interface ChainEventLogHubRotationWindow {
 }
 
 /**
+ * The exact ContextGraphStorage identity a publisher event lane is about to
+ * scan.
+ *
+ * The one-log runtime compares all three values with the address and topics it
+ * indexed before it lends out a horizon. A family name alone is not enough:
+ * two generations of the same contract, or two sibling events at one address,
+ * must never share a coverage claim.
+ */
+export interface ChainEventLogEventScanIdentity {
+  readonly contextGraphStorageAddress: string;
+  readonly contextGraphCreatedTopic0: string;
+  readonly contextGraphKaTopic0: string;
+}
+
+/**
  * Everything the #2670 Context Graph authority index needs to run over the log
  * instead of over its own `eth_getLogs` scan.
  *
@@ -119,6 +134,19 @@ export interface ChainEventLogBinding {
   readonly knowledgeAssetStorageAddress?: string;
   /** Stage-4 views. Absent while only the subscriber half is wired. */
   readonly knowledgeAssets?: KnowledgeAssetReadModel;
+  /**
+   * A conservative, possibly lagging upper bound for background publisher
+   * event scans, or `undefined` when the one log cannot prove one for the
+   * exact current ContextGraphStorage generation and both indexed topics.
+   *
+   * This is deliberately not a chain-head API and carries no authorization or
+   * finality meaning. Callers still pass each requested range through
+   * `subscription.servableRange`, whose lower-bound/floor check decides
+   * whether rows can replace that lane's live scan.
+   */
+  readEventScanHorizon?(
+    identity: ChainEventLogEventScanIdentity,
+  ): Promise<number | undefined>;
   /**
    * Hub rotations out of the log, or `undefined` when the log cannot prove it
    * covers the window the listener asked for — or cannot prove it is still
