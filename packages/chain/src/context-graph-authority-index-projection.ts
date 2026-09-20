@@ -227,6 +227,15 @@ export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
   readonly onServed?: (evidence: ContextGraphAuthorityProjectionServedEvidence) => void;
 }
 
+/** Every mutable invariant for one physical deployment/contract scope. */
+interface ContextGraphAuthorityProjectionScopeState {
+  generation: number;
+  activeRefreshes: number;
+  projection?: ContextGraphAuthorityIndexProjection;
+  refreshing?: Promise<void>;
+  failedAtMs?: number;
+}
+
 /**
  * Last COMPLETED projection per scope, in front of the reader-driven scan.
  *
@@ -259,11 +268,8 @@ export class ContextGraphAuthorityIndexProjectionCache {
   readonly staleMs: number;
   readonly #headTimestampToleranceMs: number;
   readonly #now: () => number;
-  readonly #projections = new Map<string, ContextGraphAuthorityIndexProjection>();
-  readonly #refreshing = new Map<string, Promise<void>>();
-  readonly #failedAtMs = new Map<string, number>();
-  /** Per-scope generation: an older refresh may answer its caller, never publish. */
-  readonly #generations = new Map<string, number>();
+  /** One state cell per scope, including every refresh currently in flight. */
+  readonly #scopes = new Map<string, ContextGraphAuthorityProjectionScopeState>();
 
   constructor(options: ContextGraphAuthorityIndexProjectionOptions = {}) {
     this.tickMs = resolveContextGraphAuthorityIndexTickMs(options.tickMs);
@@ -282,10 +288,13 @@ export class ContextGraphAuthorityIndexProjectionCache {
 
   /** A checkpoint tombstone or a fork proved this scope's projection wrong. */
   drop(scope: string): void {
-    this.#generations.set(scope, this.#generation(scope) + 1);
-    this.#projections.delete(scope);
-    this.#failedAtMs.delete(scope);
-    this.#refreshing.delete(scope);
+    const state = this.#scopes.get(scope);
+    if (state === undefined) return;
+    state.generation += 1;
+    delete state.projection;
+    delete state.failedAtMs;
+    delete state.refreshing;
+    this.#deleteScopeIfIdle(scope, state);
   }
 
   /**
@@ -294,17 +303,13 @@ export class ContextGraphAuthorityIndexProjectionCache {
    * already in flight may not publish.
    */
   clear(): void {
-    const scopes = new Set([
-      ...this.#projections.keys(),
-      ...this.#refreshing.keys(),
-      ...this.#failedAtMs.keys(),
-    ]);
-    for (const scope of scopes) {
-      this.#generations.set(scope, this.#generation(scope) + 1);
+    for (const [scope, state] of this.#scopes) {
+      state.generation += 1;
+      delete state.projection;
+      delete state.failedAtMs;
+      delete state.refreshing;
+      this.#deleteScopeIfIdle(scope, state);
     }
-    this.#projections.clear();
-    this.#failedAtMs.clear();
-    this.#refreshing.clear();
   }
 
   async read<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
@@ -316,7 +321,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // so no caller can be starved by a train of refreshes it cannot use: past
     // the bound it reads for itself, exactly as it did before this cache.
     for (let waits = 0; waits < MAX_REFRESH_WAITS; waits += 1) {
-      const refreshing = this.#refreshing.get(input.scope);
+      const refreshing = this.#scopes.get(input.scope)?.refreshing;
       if (refreshing === undefined) break;
       // `refreshing` never rejects: the initiator's abort, timeout or failure
       // is its own. This waiter only learns that the refresh settled.
@@ -328,22 +333,24 @@ export class ContextGraphAuthorityIndexProjectionCache {
   }
 
   async #refresh<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
-    const generation = this.#generation(input.scope);
+    const state = this.#scopeState(input.scope);
+    state.activeRefreshes += 1;
+    const generation = state.generation;
     const fetchedAtMs = this.#now();
     let projection: ContextGraphAuthorityIndexProjection | undefined;
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     // A waiter that found the previous refresh unusable runs beside a newer
     // initiator instead of queueing behind it a second time.
-    const initiates = !this.#refreshing.has(input.scope);
-    if (initiates) this.#refreshing.set(input.scope, settled);
+    const initiates = state.refreshing === undefined;
+    if (initiates) state.refreshing = settled;
     try {
       projection = Object.freeze({
         ...await input.refresh(),
         fetchedAtMs,
       });
-      if (generation === this.#generation(input.scope)) {
-        this.#publish(input.scope, projection);
+      if (generation === state.generation) {
+        this.#publish(input.scope, state, projection);
       }
       input.onServed?.(Object.freeze({
         source: 'scan',
@@ -357,24 +364,24 @@ export class ContextGraphAuthorityIndexProjectionCache {
       // old authority projection may paper over: invalidate the retained view
       // and propagate the typed failure.
       if (isContextGraphAuthorityIndexRetryableError(error)) {
-        if (generation === this.#generation(input.scope)) this.drop(input.scope);
+        if (generation === state.generation) this.drop(input.scope);
         throw error;
       }
       // Only the chain transport boundary proves an availability outage. A
       // plain/deterministic fault must never be hidden behind stale authority
       // or arm a one-tick backoff that would keep hiding it from later reads.
       if (!isChainRpcTransportError(error)) throw error;
-      if (generation === this.#generation(input.scope)) {
-        this.#failedAtMs.set(input.scope, this.#now());
+      if (generation === state.generation) {
+        state.failedAtMs = this.#now();
       }
       const stale = this.#serve(input, 'refresh-failed');
       if (stale.hit) return stale.value;
       throw error;
     } finally {
-      if (initiates && this.#refreshing.get(input.scope) === settled) {
-        this.#refreshing.delete(input.scope);
-      }
+      if (initiates && state.refreshing === settled) delete state.refreshing;
+      state.activeRefreshes -= 1;
       settle();
+      this.#deleteScopeIfIdle(input.scope, state);
     }
     if (projection === undefined) {
       throw new Error('Context Graph authority refresh settled without a projection');
@@ -384,7 +391,11 @@ export class ContextGraphAuthorityIndexProjectionCache {
     return input.project(projection).value;
   }
 
-  #publish(scope: string, projection: ContextGraphAuthorityIndexProjection): void {
+  #publish(
+    scope: string,
+    state: ContextGraphAuthorityProjectionScopeState,
+    projection: ContextGraphAuthorityIndexProjection,
+  ): void {
     // Keyed by what was actually scanned. A refresh that resolved another
     // contract than the one this read was keyed by answers its caller only.
     if (projection.scope !== scope) return;
@@ -395,17 +406,17 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // Once that retained head has reached T, however, keeping it would strand
     // the cache forever on a legitimate reorg/reset: every stabilized lower
     // scan would be answered to its caller but refused publication.
-    const previous = this.#projections.get(scope);
+    const previous = state.projection;
     if (
       previous !== undefined
       && projection.head.number < previous.head.number
       && projection.fetchedAtMs - previous.fetchedAtMs < this.tickMs
     ) {
-      this.#failedAtMs.delete(scope);
+      delete state.failedAtMs;
       return;
     }
-    this.#projections.set(scope, projection);
-    this.#failedAtMs.delete(scope);
+    state.projection = projection;
+    delete state.failedAtMs;
   }
 
   /**
@@ -418,7 +429,8 @@ export class ContextGraphAuthorityIndexProjectionCache {
     input: ContextGraphAuthorityIndexProjectionReadInput<T>,
     reason: 'backing-off' | 'refresh-failed',
   ): ProjectionCacheLookup<T> {
-    const projection = this.#projections.get(input.scope);
+    const state = this.#scopes.get(input.scope);
+    const projection = state?.projection;
     if (projection === undefined) return PROJECTION_CACHE_MISS;
     const now = this.#now();
     const ageMs = now - projection.fetchedAtMs;
@@ -429,7 +441,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     }
     const fresh = ageMs < this.tickMs;
     if (!fresh && reason === 'backing-off') {
-      const failedAtMs = this.#failedAtMs.get(input.scope);
+      const failedAtMs = state?.failedAtMs;
       if (failedAtMs === undefined) return PROJECTION_CACHE_MISS;
       const sinceFailureMs = now - failedAtMs;
       if (sinceFailureMs < 0 || sinceFailureMs >= this.tickMs) {
@@ -445,7 +457,25 @@ export class ContextGraphAuthorityIndexProjectionCache {
     return { hit: true, value: projected.value };
   }
 
-  #generation(scope: string): number {
-    return this.#generations.get(scope) ?? 0;
+  #scopeState(scope: string): ContextGraphAuthorityProjectionScopeState {
+    let state = this.#scopes.get(scope);
+    if (state === undefined) {
+      state = { generation: 0, activeRefreshes: 0 };
+      this.#scopes.set(scope, state);
+    }
+    return state;
+  }
+
+  #deleteScopeIfIdle(
+    scope: string,
+    state: ContextGraphAuthorityProjectionScopeState,
+  ): void {
+    if (
+      state.activeRefreshes === 0
+      && state.projection === undefined
+      && state.refreshing === undefined
+      && state.failedAtMs === undefined
+      && this.#scopes.get(scope) === state
+    ) this.#scopes.delete(scope);
   }
 }

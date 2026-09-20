@@ -37,14 +37,14 @@ export interface LiveOnChainAccessPolicyDependencies {
     | ((onChainId: bigint, signal?: AbortSignal) => Promise<unknown>)
     | undefined;
   /**
-   * `start` MAY receive the bounded read's own signal — the caller's abort and
+   * `start` receives the bounded read's own signal — the caller's abort and
    * this read's deadline, composed. The one-read live authority uses it: that
    * read is shared in flight, so a timed-out caller must actually LEAVE it
    * rather than walk away while its place in the flight lives on. The point
    * reads below are unshared and keep passing the caller's signal.
    */
   runBoundedRead<T>(
-    start: (signal?: AbortSignal) => Promise<T>,
+    start: (signal: AbortSignal) => Promise<T>,
     label: string,
     signal?: AbortSignal,
   ): Promise<BoundedPolicyRead<T>>;

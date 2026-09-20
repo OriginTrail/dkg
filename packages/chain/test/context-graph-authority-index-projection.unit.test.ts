@@ -391,6 +391,124 @@ describe('finalized Context Graph authority projection cache', () => {
     await Promise.all([first, second]);
   });
 
+  it('does not publish a non-initiating refresh that straddles clear', async () => {
+    const h = makeHarness();
+    const completed = await h.refresh();
+    const cache = new ContextGraphAuthorityIndexProjectionCache({
+      tickMs: T,
+      now: () => h.clock.nowMs,
+    });
+    const withHead = (number: number): ContextGraphAuthorityIndexCompletedProjection =>
+      Object.freeze({
+        ...completed,
+        head: Object.freeze({ ...completed.head, number }),
+      });
+
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let releaseDetached!: () => void;
+    let releaseParallel!: () => void;
+    let markFirstStarted!: () => void;
+    let markSecondStarted!: () => void;
+    let markDetachedStarted!: () => void;
+    let markParallelStarted!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const detachedGate = new Promise<void>((resolve) => { releaseDetached = resolve; });
+    const parallelGate = new Promise<void>((resolve) => { releaseParallel = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+    const detachedStarted = new Promise<void>((resolve) => { markDetachedStarted = resolve; });
+    const parallelStarted = new Promise<void>((resolve) => { markParallelStarted = resolve; });
+    const complete = (projection: ContextGraphAuthorityIndexCompletedProjection) => ({
+      complete: true,
+      value: projection.head.number,
+    });
+    const incomplete = (projection: ContextGraphAuthorityIndexCompletedProjection) => ({
+      complete: false,
+      value: projection.head.number,
+    });
+
+    const first = cache.read({
+      scope: h.scope,
+      project: complete,
+      refresh: async () => {
+        markFirstStarted();
+        await firstGate;
+        return withHead(25);
+      },
+    });
+    await firstStarted;
+
+    const second = cache.read({
+      scope: h.scope,
+      project: incomplete,
+      refresh: async () => {
+        markSecondStarted();
+        await secondGate;
+        return withHead(26);
+      },
+    });
+    let detached!: Promise<number>;
+    let observations = 0;
+    const parallel = cache.read({
+      scope: h.scope,
+      project: (projection) => {
+        observations += 1;
+        if (observations === 2) {
+          // The second completed projection is still unusable for this caller.
+          // Open a successor before it falls through to its own bounded scan,
+          // making that final scan a non-initiator beside the successor.
+          detached = cache.read({
+            scope: h.scope,
+            project: incomplete,
+            refresh: async () => {
+              markDetachedStarted();
+              await detachedGate;
+              return withHead(28);
+            },
+          });
+        }
+        return incomplete(projection);
+      },
+      refresh: async () => {
+        markParallelStarted();
+        await parallelGate;
+        return withHead(27);
+      },
+    });
+
+    releaseFirst();
+    await secondStarted;
+    releaseSecond();
+    await Promise.all([detachedStarted, parallelStarted]);
+
+    cache.clear();
+    await expect(cache.read({
+      scope: h.scope,
+      project: complete,
+      refresh: async () => withHead(99),
+    })).resolves.toBe(99);
+
+    releaseParallel();
+    await expect(parallel).resolves.toBe(27);
+    await expect(cache.read({
+      scope: h.scope,
+      project: complete,
+      refresh: async () => { throw new Error('cleared refresh leaked into cache'); },
+    })).resolves.toBe(99);
+
+    releaseDetached();
+    await expect(detached).resolves.toBe(28);
+    await expect(cache.read({
+      scope: h.scope,
+      project: complete,
+      refresh: async () => { throw new Error('detached refresh leaked into cache'); },
+    })).resolves.toBe(99);
+    await expect(first).resolves.toBe(25);
+    await expect(second).resolves.toBe(26);
+  });
+
   it('gives a waiter its own abort without touching the refresh it waited on', async () => {
     const h = makeHarness();
     await h.read();

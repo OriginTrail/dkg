@@ -860,7 +860,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * timed-out caller leaves any flight it was sharing.
    */
   private async raceChainPolicyRead<T>(
-    start: (signal?: AbortSignal) => Promise<T>,
+    start: (signal: AbortSignal) => Promise<T>,
     label: string,
     signal?: AbortSignal,
   ): Promise<T | typeof TIMEOUT_SENTINEL> {

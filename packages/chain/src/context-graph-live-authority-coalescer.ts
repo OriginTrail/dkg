@@ -5,7 +5,7 @@ import {
   withOwnedRpcRequestContext,
   type RpcRequestClass,
 } from './rpc-request-transport.js';
-import { waitForSignal } from './wait-for-signal.js';
+import { AbortableDeferredKeyedFlight } from './keyed-ttl-single-flight-cache.js';
 
 /**
  * In-flight de-duplication for the one-read Context Graph live authority.
@@ -73,19 +73,6 @@ type ContextGraphLiveAuthorityFlightOutcome<V> =
   | { readonly kind: 'definitive-error'; readonly error: unknown }
   | { readonly kind: 'indefinite-error'; readonly error: unknown };
 
-interface ContextGraphLiveAuthorityFlight<V> {
-  readonly controller: AbortController;
-  readonly outcome: Promise<ContextGraphLiveAuthorityFlightOutcome<V>>;
-  waiters: number;
-  dispatched: boolean;
-  settled: boolean;
-}
-
-interface ContextGraphLiveAuthorityPartition<V> {
-  /** The one flight new callers may still enrol in: created, not dispatched. */
-  readonly pending: Map<string, ContextGraphLiveAuthorityFlight<V>>;
-}
-
 export interface ContextGraphLiveAuthorityCoalescerOptions {
   /**
    * How dispatch is deferred so same-turn callers batch into one read. A
@@ -128,12 +115,6 @@ const ABANDONED_FLIGHT_MESSAGE =
 const JOIN_RETRY_EXHAUSTED_MESSAGE =
   'Context Graph live authority shared retry was exhausted';
 
-function abandonedFlightError(): Error {
-  const error = new Error(ABANDONED_FLIGHT_MESSAGE);
-  error.name = 'AbortError';
-  return error;
-}
-
 function joinRetryExhaustedError(): Error {
   const error = new Error(JOIN_RETRY_EXHAUSTED_MESSAGE);
   error.name = 'ContextGraphLiveAuthorityJoinRetryExhaustedError';
@@ -142,23 +123,28 @@ function joinRetryExhaustedError(): Error {
 
 export class ContextGraphLiveAuthorityCoalescer<V> {
   readonly #partitions: Readonly<
-    Record<RpcRequestClass, ContextGraphLiveAuthorityPartition<V>>
+    Record<
+      RpcRequestClass,
+      AbortableDeferredKeyedFlight<string, ContextGraphLiveAuthorityFlightOutcome<V>>
+    >
   >;
-
-  readonly #defer: (dispatch: () => void) => void;
 
   readonly #isDefinitiveError: (error: unknown) => boolean;
 
   constructor(options: ContextGraphLiveAuthorityCoalescerOptions = {}) {
-    this.#partitions = Object.freeze({
-      foreground: { pending: new Map<string, ContextGraphLiveAuthorityFlight<V>>() },
-      background: { pending: new Map<string, ContextGraphLiveAuthorityFlight<V>>() },
-    });
-    this.#defer = options.defer ?? ((dispatch) => {
+    const defer = options.defer ?? ((dispatch) => {
       // This is the only mechanism that starts the physical read. Keeping the
       // one-turn timer referenced lets an otherwise-idle one-shot consumer
       // finish the operation it is awaiting instead of exiting before dispatch.
       setTimeout(dispatch, 0);
+    });
+    const partition = () => new AbortableDeferredKeyedFlight<
+      string,
+      ContextGraphLiveAuthorityFlightOutcome<V>
+    >({ defer, abandonmentMessage: ABANDONED_FLIGHT_MESSAGE });
+    this.#partitions = Object.freeze({
+      foreground: partition(),
+      background: partition(),
     });
     this.#isDefinitiveError = options.isDefinitiveError ?? (() => false);
   }
@@ -177,18 +163,21 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
     const requestClass = options.requestClass ?? activeRpcRequestContext().requestClass;
     const partition = this.#partitions[requestClass];
     for (let retries = 0; ; retries += 1) {
-      const pending = partition.pending.get(key);
-      const initiated = pending === undefined;
-      const flight = pending ?? this.#open(partition, key, load, requestClass);
-      if (!initiated) flight.waiters += 1;
-      let outcome: ContextGraphLiveAuthorityFlightOutcome<V>;
-      try {
-        // The flight's promise never rejects, so this can only reject for THIS
-        // caller's own signal.
-        outcome = await waitForSignal(flight.outcome, options.signal);
-      } finally {
-        this.#leave(partition, key, flight);
-      }
+      const { initiated, value: outcome } = await partition.run(
+        key,
+        async (flightSignal) => {
+          try {
+            const value = await withOwnedRpcRequestContext(
+              { signal: flightSignal, requestClass },
+              () => load(flightSignal),
+            );
+            return { kind: 'value', value };
+          } catch (error) {
+            return this.#classify(error);
+          }
+        },
+        options.signal,
+      );
       if (outcome.kind === 'value') return outcome.value;
       if (outcome.kind === 'definitive-error') throw outcome.error;
       // Indefinite: the initiator owns the failure of the read it started.
@@ -205,60 +194,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
    * nothing it produces is retained for anyone else.
    */
   invalidateAll(): void {
-    for (const partition of Object.values(this.#partitions)) partition.pending.clear();
-  }
-
-  #open(
-    partition: ContextGraphLiveAuthorityPartition<V>,
-    key: string,
-    load: (signal: AbortSignal) => Promise<V>,
-    requestClass: RpcRequestClass,
-  ): ContextGraphLiveAuthorityFlight<V> {
-    const controller = new AbortController();
-    let settle!: (outcome: ContextGraphLiveAuthorityFlightOutcome<V>) => void;
-    const outcome = new Promise<ContextGraphLiveAuthorityFlightOutcome<V>>((resolve) => {
-      settle = resolve;
-    });
-    const flight: ContextGraphLiveAuthorityFlight<V> = {
-      controller,
-      outcome,
-      // Enrol the initiating caller before `defer` is invoked: an injected
-      // synchronous scheduler may dispatch immediately from this method.
-      waiters: 1,
-      dispatched: false,
-      settled: false,
-    };
-    const complete = (settled: ContextGraphLiveAuthorityFlightOutcome<V>) => {
-      if (flight.settled) return;
-      flight.settled = true;
-      settle(settled);
-    };
-    partition.pending.set(key, flight);
-    this.#defer(() => {
-      // Detach BEFORE any physical work starts. From here on a new caller opens
-      // a successor, so nobody is ever answered by a read issued before it
-      // asked — the property that lets a gate share a read at all.
-      if (partition.pending.get(key) === flight) partition.pending.delete(key);
-      flight.dispatched = true;
-      if (flight.waiters === 0) {
-        // Everyone left while dispatch was deferred: no read is owed.
-        controller.abort(abandonedFlightError());
-        complete({ kind: 'indefinite-error', error: abandonedFlightError() });
-        return;
-      }
-      void (async () => {
-        try {
-          const value = await withOwnedRpcRequestContext(
-            { signal: controller.signal, requestClass },
-            () => load(controller.signal),
-          );
-          complete({ kind: 'value', value });
-        } catch (error) {
-          complete(this.#classify(error));
-        }
-      })();
-    });
-    return flight;
+    for (const partition of Object.values(this.#partitions)) partition.invalidateAll();
   }
 
   /**
@@ -277,18 +213,4 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
     return { kind: 'indefinite-error', error };
   }
 
-  #leave(
-    partition: ContextGraphLiveAuthorityPartition<V>,
-    key: string,
-    flight: ContextGraphLiveAuthorityFlight<V>,
-  ): void {
-    flight.waiters -= 1;
-    if (flight.waiters > 0) return;
-    if (partition.pending.get(key) === flight) partition.pending.delete(key);
-    if (flight.settled) return;
-    // Nobody is waiting for this read any more; abandoned RPC admission must
-    // not outlive its callers. A flight abandoned before dispatch is stopped by
-    // the waiter check inside the deferred dispatch, so it costs no RPC at all.
-    flight.controller.abort(abandonedFlightError());
-  }
 }

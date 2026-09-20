@@ -18,7 +18,10 @@ function dependencies(
   return {
     isContextGraphActiveOnChain: vi.fn(async () => true),
     getContextGraphAccessPolicy: vi.fn(async () => 1),
-    runBoundedRead: async (start) => ({ kind: 'value', value: await start() }),
+    runBoundedRead: async (start) => ({
+      kind: 'value',
+      value: await start(new AbortController().signal),
+    }),
     claimMissingLivenessWarning: vi.fn(() => true),
     warn: vi.fn(),
     cacheAccessPolicy: vi.fn(),
