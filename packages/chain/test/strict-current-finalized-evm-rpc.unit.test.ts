@@ -32,7 +32,10 @@ import {
 import {
   executeStrictFinalizedAnchorPolicyV1,
 } from '../src/strict-current-finalized-evm-lifecycle.js';
-import { parseStrictFinalizedAnchorV1 } from '../src/strict-current-finalized-evm-rpc-client.js';
+import {
+  parseStrictFinalizedAnchorV1,
+  postStrictFinalizedJsonRpcV1,
+} from '../src/strict-current-finalized-evm-rpc-client.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError as sendError,
@@ -61,6 +64,24 @@ afterEach(async () => {
 });
 
 describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
+  it.each(['header not found', 'unknown block', 'block not found'])(
+    'maps a non-block RPC %s response to finalized-state-unavailable',
+    async (message) => {
+      const server = await startRpcServer((call, response) => {
+        sendError(response, call, -32_000, message);
+      });
+
+      await expect(postStrictFinalizedJsonRpcV1(
+        server.url,
+        1,
+        'eth_getBalance',
+        [TO, 'latest'],
+        CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+        new AbortController().signal,
+      )).rejects.toMatchObject({ code: 'finalized-state-unavailable' });
+    },
+  );
+
   it('preserves an undefined generic result through an authenticated numbered anchor', async () => {
     const anchor = parseStrictFinalizedAnchorV1(
       { number: '0x7b', hash: BLOCK_HASH },

@@ -37,11 +37,10 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
 }
 
 export interface Rfc64AuthorityRpcProbeEvidenceV1 {
-  /** Record that this operation actually exercised the governed RPC pool. */
-  markRpcAttempt(): void;
   /**
-   * Record how the chain adapter answered one finalized authority read; pass
-   * it as `ChainReadOptions.onContextGraphAuthorityProjectionServed`.
+   * Build options for an agent authority resolver. The callbacks are the only
+   * public evidence surface: the resolver reports when it starts an RPC read,
+   * while the chain adapter refines that claim when a projection answers.
    *
    * Callers mark an attempt BEFORE they read, because until the projection
    * cache existed every such read reached the pool. That is no longer true, so
@@ -56,8 +55,6 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    exhaustion: the operation succeeds for its caller but proves nothing
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
-  observeProjectionServed(evidence: ContextGraphAuthorityProjectionServedEvidence): void;
-  /** Options for an agent authority resolver that reports when it starts its chain read. */
   agentReadOptions(signal?: AbortSignal): ChainReadOptions & Readonly<{
     onRpcRead: () => void;
   }>;
@@ -140,9 +137,10 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  *
  * Recovery needs evidence, not merely a fulfilled callback. A read that was
  * answered from local or cached state says nothing about the pool it never
- * contacted, so only an operation that calls `markRpcAttempt` can clear an
- * outstanding exhaustion. Until then the circuit stays half-open, which is a
- * statement about eligibility to probe rather than about a probe in flight.
+ * contacted, so only an operation that invokes the `onRpcRead` callback from
+ * `agentReadOptions`, or uses `chainReadOptions`, can clear an outstanding
+ * exhaustion. Until then the circuit stays half-open, which is a statement
+ * about eligibility to probe rather than about a probe in flight.
  *
  * Only a typed `RPC_ENDPOINTS_EXHAUSTED` result trips the circuit. Contract
  * reverts and graph-specific validation failures retain their normal behavior.
@@ -247,8 +245,6 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           });
         };
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
-          markRpcAttempt,
-          observeProjectionServed,
           agentReadOptions: (signal?: AbortSignal) => Object.freeze({
             ...(signal === undefined ? {} : { signal }),
             onRpcRead: markRpcAttempt,

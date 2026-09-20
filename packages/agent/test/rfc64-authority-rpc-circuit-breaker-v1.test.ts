@@ -130,7 +130,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
 
     const recovered = breaker.run(undefined, async (_signal, evidence) => {
       calls += 1;
-      evidence.markRpcAttempt();
+      evidence.agentReadOptions().onRpcRead();
       return 'recovered';
     });
     const next = breaker.run(undefined, async () => {
@@ -169,7 +169,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
 
     await expect(breaker.run(undefined, async (_signal, evidence) => {
-      evidence.markRpcAttempt();
+      evidence.agentReadOptions().onRpcRead();
       return 'provider-recovered';
     })).resolves.toBe('provider-recovered');
     expect(breaker.snapshot()).toEqual({
@@ -199,9 +199,11 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('counts a cache hit younger than T, fetched after the exhaustion, as RPC health', async () => {
       const { breaker, clock } = await halfOpenBreaker();
       clock.now += 50;
-      // No markRpcAttempt: the projection's own account is the whole evidence.
+      // No onRpcRead callback: the projection's own account is the whole evidence.
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.observeProjectionServed({ source: 'cache', ageMs: 40 });
+        evidence.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+          source: 'cache', ageMs: 40,
+        });
         return 'served-from-cache';
       });
       expect(breaker.snapshot().state).toBe('closed');
@@ -210,7 +212,9 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('counts a completed scan as RPC health', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.observeProjectionServed({ source: 'scan', ageMs: 0 });
+        evidence.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+          source: 'scan', ageMs: 0,
+        });
         return 'scanned';
       });
       expect(breaker.snapshot().state).toBe('closed');
@@ -220,8 +224,11 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
         // Callers mark BEFORE they read; the stale answer voids that mark.
-        evidence.markRpcAttempt();
-        evidence.observeProjectionServed({ source: 'stale-cache', ageMs: T + 1 });
+        const options = evidence.agentReadOptions();
+        options.onRpcRead();
+        options.onContextGraphAuthorityProjectionServed?.({
+          source: 'stale-cache', ageMs: T + 1,
+        });
         return 'served-stale';
       });
       expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
@@ -230,9 +237,12 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('keeps unproven projection evidence sticky for the whole operation', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.observeProjectionServed({ source: 'stale-cache', ageMs: T + 1 });
-        evidence.markRpcAttempt();
-        evidence.observeProjectionServed({ source: 'scan', ageMs: 0 });
+        const options = evidence.agentReadOptions();
+        options.onContextGraphAuthorityProjectionServed?.({
+          source: 'stale-cache', ageMs: T + 1,
+        });
+        options.onRpcRead();
+        options.onContextGraphAuthorityProjectionServed?.({ source: 'scan', ageMs: 0 });
         return 'mixed-evidence';
       });
       expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
@@ -241,9 +251,10 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.markRpcAttempt();
+        const options = evidence.agentReadOptions();
+        options.onRpcRead();
         // Fetched 101ms ago: 1ms BEFORE the pool was seen exhausted.
-        evidence.observeProjectionServed({ source: 'cache', ageMs: 101 });
+        options.onContextGraphAuthorityProjectionServed?.({ source: 'cache', ageMs: 101 });
         return 'served-from-older-cache';
       });
       expect(breaker.snapshot().state).toBe('half-open');
@@ -290,7 +301,10 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         .rejects.toBeInstanceOf(ChainRpcTransportError);
       clock.now = 10_100;
       await olderBreaker.run(undefined, async (_signal, evidence) => {
-        await read(olderCache, evidence.observeProjectionServed);
+        await read(
+          olderCache,
+          evidence.agentReadOptions().onContextGraphAuthorityProjectionServed,
+        );
         return 'older-cache';
       });
       expect(olderBreaker.snapshot()).toMatchObject({ state: 'half-open' });
@@ -311,7 +325,10 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       await read(newerCache);
       clock.now = 10_201;
       await newerBreaker.run(undefined, async (_signal, evidence) => {
-        await read(newerCache, evidence.observeProjectionServed);
+        await read(
+          newerCache,
+          evidence.agentReadOptions().onContextGraphAuthorityProjectionServed,
+        );
         return 'newer-cache';
       });
       expect(newerBreaker.snapshot()).toEqual({
