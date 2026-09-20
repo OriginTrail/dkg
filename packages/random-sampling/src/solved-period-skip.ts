@@ -80,13 +80,6 @@ export class SolvedPeriodSkip {
     this.#now = now;
   }
 
-  /** Cheap guards checked both before and after the live head/epoch reads. */
-  #stillBound(record: SolvedPeriodRecord, now: number): boolean {
-    return this.#chain.isRandomSamplingReady?.() === true
-      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
-      && now < record.rereadAtMs;
-  }
-
   /**
    * Reuse a proven solved period or perform one correctly ordered live read.
    * Staleness remains fail-open: a missing head cannot force a rotation, but it
