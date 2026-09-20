@@ -1694,7 +1694,7 @@ export class EVMChainAdapterBase {
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
       isReceiptEligible: async (receipt, { deadlineMs }) => (
-        await this.readFinalCanonicalReceiptBlock(receipt, { deadlineMs })
+        await this.#readFinalCanonicalReceiptBlock(receipt, { deadlineMs })
       ) !== null,
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
@@ -1718,11 +1718,11 @@ export class EVMChainAdapterBase {
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return (await this.readFinalCanonicalReceiptBlock(receipt, options)) !== null;
+    return (await this.#readFinalCanonicalReceiptBlock(receipt, options)) !== null;
   }
 
   /** Resolve and retain the exact canonical header used by receipt finality. */
-  protected async readFinalCanonicalReceiptBlock(
+  async #readFinalCanonicalReceiptBlock(
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<ReceiptBlockHeader | null> {
