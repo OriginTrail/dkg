@@ -4,6 +4,8 @@ import {
   ChainRpcTransportError,
   RpcEndpointsExhaustedError,
 } from '@origintrail-official/dkg-chain';
+import { ContextGraphAuthorityIndexProjectionCache } from
+  '../../chain/src/context-graph-authority-index-projection.js';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -237,6 +239,78 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         return 'served-from-older-cache';
       });
       expect(breaker.snapshot().state).toBe('half-open');
+    });
+
+    it('uses the real projection cache age basis on both sides of exhaustion', async () => {
+      const scope = 'deployment:0x0000000000000000000000000000000000000001';
+      const clock = { now: 9_900 };
+      const completed = () => ({
+        scope,
+        chainId: '31337',
+        contractAddress: '0x0000000000000000000000000000000000000001',
+        finalized: { number: 10, hash: `0x${'10'.repeat(32)}` },
+        head: {
+          number: 10,
+          hash: `0x${'10'.repeat(32)}`,
+          timestampSeconds: Math.floor(clock.now / 1_000),
+        },
+        view: {} as never,
+      });
+      const read = (
+        cache: ContextGraphAuthorityIndexProjectionCache,
+        observe?: Parameters<ContextGraphAuthorityIndexProjectionCache['read']>[0]['onServed'],
+      ) => cache.read({
+        scope,
+        accepts: () => true,
+        refresh: async () => completed(),
+        ...(observe === undefined ? {} : { onServed: observe }),
+      });
+
+      const olderCache = new ContextGraphAuthorityIndexProjectionCache({
+        tickMs: T,
+        now: () => clock.now,
+      });
+      await read(olderCache);
+      clock.now = 10_000;
+      const olderBreaker = new Rfc64AuthorityReadCoordinatorV1({
+        baseBackoffMs: 100,
+        maxBackoffMs: 800,
+        jitterRatio: 0,
+        now: () => clock.now,
+      });
+      await expect(olderBreaker.run(undefined, async () => { throw exhausted(); }))
+        .rejects.toBeInstanceOf(ChainRpcTransportError);
+      clock.now = 10_100;
+      await olderBreaker.run(undefined, async (_signal, evidence) => {
+        await read(olderCache, evidence.observeProjectionServed);
+        return 'older-cache';
+      });
+      expect(olderBreaker.snapshot()).toMatchObject({ state: 'half-open' });
+
+      const newerCache = new ContextGraphAuthorityIndexProjectionCache({
+        tickMs: T,
+        now: () => clock.now,
+      });
+      const newerBreaker = new Rfc64AuthorityReadCoordinatorV1({
+        baseBackoffMs: 100,
+        maxBackoffMs: 800,
+        jitterRatio: 0,
+        now: () => clock.now,
+      });
+      await expect(newerBreaker.run(undefined, async () => { throw exhausted(); }))
+        .rejects.toBeInstanceOf(ChainRpcTransportError);
+      clock.now = 10_200;
+      await read(newerCache);
+      clock.now = 10_201;
+      await newerBreaker.run(undefined, async (_signal, evidence) => {
+        await read(newerCache, evidence.observeProjectionServed);
+        return 'newer-cache';
+      });
+      expect(newerBreaker.snapshot()).toEqual({
+        state: 'closed',
+        consecutiveExhaustions: 0,
+        retryAtMs: null,
+      });
     });
 
   });

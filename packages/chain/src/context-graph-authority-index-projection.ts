@@ -87,7 +87,10 @@ export interface ContextGraphAuthorityIndexProjectionOptions {
  */
 export interface ContextGraphAuthorityProjectionServedEvidence {
   readonly source: 'scan' | 'cache' | 'stale-cache';
-  /** Wall-clock age of the projection's head read when it was served. */
+  /**
+   * Wall-clock time since the refresh began, including scan duration. This is
+   * intentionally based on `fetchedAtMs`, which is captured before any RPC.
+   */
   readonly ageMs: number;
 }
 
