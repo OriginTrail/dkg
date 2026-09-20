@@ -23,7 +23,7 @@ export interface SolvedPeriodRecord {
   readonly rereadAtMs: number;
 }
 
-export interface CachedChallengeStaleness {
+interface CachedChallengeStaleness {
   readonly stale: boolean;
   /** Present only when the adapter successfully supplied a head. */
   readonly head?: bigint;
@@ -43,7 +43,10 @@ export type SolvedPeriodReadResult<T> =
   | Readonly<{
       kind: 'live';
       value: T;
-      challengeStaleness?: CachedChallengeStaleness;
+      currentChallenge?: Readonly<{
+        challenge: NodeChallenge;
+        stale: boolean;
+      }>;
     }>;
 
 /**
@@ -114,7 +117,10 @@ export class SolvedPeriodSkip {
     return Object.freeze({
       kind: 'live',
       value: live.value,
-      challengeStaleness: staleness,
+      currentChallenge: Object.freeze({
+        challenge: current.challenge,
+        stale: staleness.stale,
+      }),
     });
   }
 

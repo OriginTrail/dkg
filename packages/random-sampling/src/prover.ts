@@ -474,7 +474,7 @@ export class RandomSamplingProver {
       const existingIsCurrent = existing !== null
         && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
       return {
-        value: { status, existing, existingIsCurrent },
+        value: { status },
         ...(existingIsCurrent
           ? {
               currentChallenge: {
@@ -492,10 +492,8 @@ export class RandomSamplingProver {
       });
       return { kind: 'already-solved' };
     }
-    const { status, existing, existingIsCurrent } = solvedPeriodRead.value;
-    const currentExisting: NodeChallenge | null = existingIsCurrent && existing !== null
-      ? existing
-      : null;
+    const { status } = solvedPeriodRead.value;
+    const currentExisting = solvedPeriodRead.currentChallenge?.challenge ?? null;
 
     // Codex review on PR #357 flagged: short-circuiting on `existingIsCurrent && solved`
     // strands the node when the read-only `getActiveProofPeriodStatus` view is
@@ -512,7 +510,7 @@ export class RandomSamplingProver {
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
     if (currentExisting?.solved === true) {
-      if (solvedPeriodRead.challengeStaleness?.stale !== true) {
+      if (solvedPeriodRead.currentChallenge?.stale !== true) {
         this.log.info('rs.tick.already-solved', {
           epoch: currentExisting.epoch.toString(),
           periodStart: currentExisting.activeProofPeriodStartBlock.toString(),
@@ -546,7 +544,7 @@ export class RandomSamplingProver {
     // after the 2026-05-01 RS-contract Hub rotation.
     const unsolvedStale = currentExisting !== null
       && !currentExisting.solved
-      && solvedPeriodRead.challengeStaleness?.stale === true;
+      && solvedPeriodRead.currentChallenge?.stale === true;
     if (unsolvedStale) {
       this.log.info('rs.tick.forcing-rotation', {
         cachedPeriodStart: currentExisting!.activeProofPeriodStartBlock.toString(),

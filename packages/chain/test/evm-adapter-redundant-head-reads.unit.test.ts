@@ -341,14 +341,14 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     expect(p.getBlock.calls).toHaveLength(2);
   });
 
-  it('a header that carried no timestamp is not remembered — the timestamp read goes to the wire', async () => {
+  it('stores a timestamp-less header but does not reuse it for a timestamp read', async () => {
     const p = {
       getBlockNumber: recorder(async () => 500),
       getBlock: recorder(async (_tag: number | string) => ({ number: 123, hash: BLOCK_HASH })),
     };
     const a = makeAdapter([p]);
     await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
-    expect(a.receiptBlockHeadersByHash.size).toBe(1);
+    expect(a.receiptFinality.retainedHeaderCount).toBe(1);
 
     expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH })).toBe(0); // today's best-effort
     expect(p.getBlock.calls).toHaveLength(2);
@@ -389,7 +389,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     for (let n = 1; n <= 257; n += 1) {
       await a.isReceiptBlockFinalAndCanonical({ blockNumber: n, blockHash: hashOf(n) });
     }
-    expect(a.receiptBlockHeadersByHash.size).toBe(256);
+    expect(a.receiptFinality.retainedHeaderCount).toBe(256);
     const before = served;
 
     expect(await a.getBlockTimestamp(257, { blockHash: hashOf(257) })).toBe(257); // newest: served

@@ -171,7 +171,7 @@ describe('SolvedPeriodSkip', () => {
     expect((await readWithoutChallenge(skip)).result.kind).toBe('reused');
   });
 
-  it('returns the head with the cached-challenge staleness decision', async () => {
+  it('returns the current challenge with its staleness decision', async () => {
     const { chain, state, skip } = fixture();
     const unsolved = challenge({
       proofingPeriodDurationInBlocks: 20n,
@@ -179,10 +179,16 @@ describe('SolvedPeriodSkip', () => {
     });
     state.head = 1019;
     expect(await observe(skip, { challenge: unsolved, durationInBlocks: 20n }))
-      .toMatchObject({ kind: 'live', challengeStaleness: { stale: false, head: 1019n } });
+      .toMatchObject({
+        kind: 'live',
+        currentChallenge: { challenge: unsolved, stale: false },
+      });
     state.head = 1020;
     expect(await observe(skip, { challenge: unsolved, durationInBlocks: 20n }))
-      .toMatchObject({ kind: 'live', challengeStaleness: { stale: true, head: 1020n } });
+      .toMatchObject({
+        kind: 'live',
+        currentChallenge: { challenge: unsolved, stale: true },
+      });
     expect(chain.getBlockNumber).toHaveBeenCalledTimes(2);
   });
 });
