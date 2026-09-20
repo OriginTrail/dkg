@@ -398,14 +398,14 @@ export class Rfc64PublicCatalogNativeTransportV1 {
     this.requireStarted();
     const remotePeerId = snapshotPeerId(remotePeerIdInput);
     const request = parseCatalogObjectRequest(encodeRequest(requestInput));
-    const response = await this.withCurrentCatalogPolicy(
+    return this.withCurrentCatalogPolicy(
       'catalog-object-fetch-outbound',
       remotePeerId,
       request,
       'select-outbound',
-      (authorization) => {
+      async (authorization) => {
         const privateContent = authorization.accessPolicy === 1;
-        return this.router.send(
+        const response = await this.router.send(
           remotePeerId,
           privateContent
             ? RFC64_CATALOG_OBJECT_FETCH_PROTOCOL_V2
@@ -415,21 +415,13 @@ export class Rfc64PublicCatalogNativeTransportV1 {
             : encodeRequest(request),
           sendOptions,
         );
+        const envelope = parseCatalogObjectResponse(response);
+        if (envelope === null) return null;
+        assertCatalogObjectMatchesRequest(envelope, request);
+        const issuerSignature = await this.verifyExactIssuerSignature(envelope);
+        return Object.freeze({ envelope: deepFreeze(envelope), issuerSignature });
       },
     );
-    const envelope = parseCatalogObjectResponse(response);
-    if (envelope === null) return null;
-    assertCatalogObjectMatchesRequest(envelope, request);
-    const issuerSignature = await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
-      () => this.assertCatalogPolicyCurrent(
-        'catalog-object-fetch-outbound',
-        remotePeerId,
-        request,
-        'select-outbound',
-      ),
-      () => this.verifyExactIssuerSignature(envelope),
-    );
-    return Object.freeze({ envelope: deepFreeze(envelope), issuerSignature });
   }
 
   async fetchKaBundle(

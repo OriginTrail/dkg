@@ -88,9 +88,11 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
-import type {
-  AcceptRfc64CatalogAccessSnapshotInputV1,
-  AcceptedRfc64CatalogAccessSnapshotV1,
+import {
+  resolveRfc64CatalogAuthorizationRosterV1,
+  type AcceptRfc64CatalogAccessSnapshotInputV1,
+  type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogLocalAuthorizationScopeV1,
 } from './rfc64/catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogCurrentReceiverReconcilerV1,
@@ -1794,10 +1796,24 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async resolveRfc64CatalogLocalAgentAddressV1(
     this: DKGAgent,
     contextGraphId: string,
+    authorizationScope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
   ): Promise<EvmAddressV1 | null> {
-    const roster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+    // Transport authorization already owns an accepted-current, immutable
+    // policy/roster generation. Reuse its exact member set inside this one
+    // authorization attempt instead of performing another live chain roster
+    // read. Non-transport callers omit the scope and retain the live path.
+    const roster = await resolveRfc64CatalogAuthorizationRosterV1(
+      contextGraphId as ContextGraphIdV1,
+      authorizationScope,
+      () => this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId),
+    );
     if (roster === null) return null;
-    const rosterSet = new Set(roster);
+    const rosterSet = new Set<EvmAddressV1>();
+    for (const address of roster) {
+      if (!ethers.isAddress(address) || address === ethers.ZeroAddress) return null;
+      rosterSet.add(address.toLowerCase() as EvmAddressV1);
+    }
+    if (rosterSet.size === 0) return null;
     const configured = this.config.rfc64CatalogAccessPolicyAuthority
       ?.localAgentAddress
       ?.toLowerCase();
@@ -3637,8 +3653,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       localPeerId: this.peerId,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority
         ?? {
-          resolveLocalAgentAddress: (contextGraphId) =>
-            this.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId),
+          resolveLocalAgentAddress: (contextGraphId, authorizationScope) =>
+            this.resolveRfc64CatalogLocalAgentAddressV1(
+              contextGraphId,
+              authorizationScope,
+            ),
           resolveRemoteAgentAddress: (peerId, contextGraphId) =>
             this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
         },

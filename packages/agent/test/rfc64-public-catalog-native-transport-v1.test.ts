@@ -277,7 +277,6 @@ describe('RFC-64 public catalog native content transport v1', () => {
     expect(receiverAuthorizations).toEqual([
       'catalog-object-fetch-outbound',
       'catalog-object-fetch-outbound',
-      'catalog-object-fetch-outbound',
       'ka-bundle-fetch-outbound',
       'ka-bundle-fetch-outbound',
     ]);
