@@ -14,6 +14,7 @@ export interface SolvedPeriodRecord {
   readonly challengePeriodEpoch: bigint;
   readonly periodStartBlock: bigint;
   readonly bindingId: string;
+  readonly epochBindingId: string;
   readonly chronosEpoch: bigint;
   readonly rereadAtBlock: bigint;
   readonly rereadAtMs: number;
@@ -110,7 +111,9 @@ export class SolvedPeriodSkip {
       blockContext?.headBlockNumber,
     );
     if (current.challenge.solved && !staleness.stale) {
-      const context = blockContext ?? await this.#captureReadContext(bindingId);
+      const context = blockContext ?? (
+        this.#hasBlockContextCapability() ? undefined : await this.#captureReadContext(bindingId)
+      );
       this.#observe({
         context,
         challenge: current.challenge,
@@ -157,7 +160,11 @@ export class SolvedPeriodSkip {
       this.#record = undefined;
       return false;
     }
-    const context = blockContext ?? await this.#captureReadContext(observationBindingId);
+    const context = blockContext ?? (
+      this.#hasBlockContextCapability()
+        ? undefined
+        : await this.#captureReadContext(observationBindingId)
+    );
     return this.#observe({
       context,
       challenge: Object.freeze({ ...challenge, solved: true }),
@@ -200,6 +207,10 @@ export class SolvedPeriodSkip {
     } catch {
       return undefined;
     }
+  }
+
+  #hasBlockContextCapability(): boolean {
+    return typeof this.#contextReader?.readRandomSamplingBlockContext === 'function';
   }
 
   async #readCachedChallengeStaleness(
@@ -253,6 +264,7 @@ export class SolvedPeriodSkip {
       challengePeriodEpoch: challenge.epoch,
       periodStartBlock: challenge.activeProofPeriodStartBlock,
       bindingId: context.bindingId,
+      epochBindingId: context.epochBindingId ?? context.bindingId,
       chronosEpoch: context.chronosEpoch,
       rereadAtBlock: halfPeriodRereadBlock < latestOpenPeriodBlock
         ? halfPeriodRereadBlock
@@ -281,6 +293,10 @@ export class SolvedPeriodSkip {
         head = blockContext.headBlockNumber;
         context = blockContext;
       } else {
+        if (this.#hasBlockContextCapability()) {
+          this.#record = undefined;
+          return undefined;
+        }
         if (!this.#chain.getBlockNumber) {
           this.#record = undefined;
           return undefined;
@@ -296,6 +312,7 @@ export class SolvedPeriodSkip {
       context !== undefined
       && this.#stillBound(record, this.#now())
       && context.bindingId === record.bindingId
+      && (context.epochBindingId ?? context.bindingId) === record.epochBindingId
       && context.chronosEpoch === record.chronosEpoch
       && head !== undefined
       && head >= record.periodStartBlock

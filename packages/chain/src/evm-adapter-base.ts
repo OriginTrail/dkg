@@ -797,6 +797,9 @@ export class EVMChainAdapterBase {
 
   protected initialized = false;
 
+  /** Monotonic fence for physical Hub binding generations, including ABA. */
+  protected hubBindingGeneration = 0;
+
   /**
    * Single self-refreshing cache for the `RandomSampling` /
    * `RandomSamplingStorage` pair. RS is the highest-value Hub-resolved
@@ -823,13 +826,21 @@ export class EVMChainAdapterBase {
   protected readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
 
   /**
-   * Immutable Chronos schedule, scoped to the exact resolved contract address.
+   * Immutable Chronos schedule, scoped to the exact resolved contract object,
+   * address, and observed Hub generation.
    * This is not a cache of the changing epoch: every use still reads a fresh
    * canonical tip and derives the epoch from that block's timestamp. A Chronos
-   * rotation changes the key and therefore cannot reuse the old schedule.
+   * rotation advances the generation and therefore cannot reuse the old
+   * schedule, including same-address reset/ABA.
    */
   protected randomSamplingChronosSchedule:
-    | Readonly<{ bindingId: string; startTime: bigint; epochLength: bigint }>
+    | Readonly<{
+        bindingId: string;
+        contract: Contract;
+        generation: number;
+        startTime: bigint;
+        epochLength: bigint;
+      }>
     | undefined;
 
   /**
@@ -839,7 +850,13 @@ export class EVMChainAdapterBase {
    * RS/RSS pair remains current.
    */
   protected randomSamplingEligibilityObservation:
-    | Readonly<{ bindingId: string; identityId: bigint; checkedAtMs: number }>
+    | Readonly<{
+        bindingId: string;
+        identityId: bigint;
+        shardingTableAddress: string;
+        hubGeneration: number;
+        checkedAtMs: number;
+      }>
     | undefined;
 
   /** One skipped 30 s reconcile; membership is read live again by 60 s. */
@@ -4338,6 +4355,23 @@ export class EVMChainAdapterBase {
     return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
+  /** Exact physical handle used by the lifecycle-only membership observation. */
+  protected async readRandomSamplingLifecycleMembership(
+    shardingTableStorage: Contract,
+    identityId: bigint,
+  ): Promise<boolean> {
+    return Boolean(await this.readContract(
+      shardingTableStorage,
+      'shardingTableStorage.nodeExists',
+      'nodeExists',
+      identityId,
+    ));
+  }
+
+  protected contractBindingAddress(contract: Contract | undefined): string | undefined {
+    return contractHandleTargetAddress(contract)?.toLowerCase();
+  }
+
   /** One cohesive optional capability for solved-period reuse. */
   getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
     const getBindingId = (): string | undefined => {
@@ -4365,6 +4399,8 @@ export class EVMChainAdapterBase {
           // RS/RSS binding captured above is checked again after every await.
           await this.init();
           if (!isCurrent(bindingId)) return undefined;
+          const hubGeneration = this.hubBindingGeneration;
+          const randomSamplingGeneration = this.randomSamplingPairCache.currentGeneration();
           if (!this.contracts.chronos) {
             this.contracts.chronos = await this.resolveContract('Chronos');
           }
@@ -4373,7 +4409,11 @@ export class EVMChainAdapterBase {
           if (chronosBindingId === undefined) return undefined;
 
           let schedule = this.randomSamplingChronosSchedule;
-          if (schedule?.bindingId !== chronosBindingId) {
+          if (
+            schedule?.bindingId !== chronosBindingId
+            || schedule.contract !== chronos
+            || schedule.generation !== hubGeneration
+          ) {
             const [startTimeValue, epochLengthValue] = await Promise.all([
               this.readContract(chronos, 'chronos.startTime', 'startTime'),
               this.readContract(chronos, 'chronos.epochLength', 'epochLength'),
@@ -4383,9 +4423,18 @@ export class EVMChainAdapterBase {
             if (startTime <= 0n || epochLength <= 0n) return undefined;
             if (
               !isCurrent(bindingId)
+              || this.hubBindingGeneration !== hubGeneration
+              || this.randomSamplingPairCache.currentGeneration() !== randomSamplingGeneration
+              || this.contracts.chronos !== chronos
               || contractHandleTargetAddress(this.contracts.chronos)?.toLowerCase() !== chronosBindingId
             ) return undefined;
-            schedule = Object.freeze({ bindingId: chronosBindingId, startTime, epochLength });
+            schedule = Object.freeze({
+              bindingId: chronosBindingId,
+              contract: chronos,
+              generation: hubGeneration,
+              startTime,
+              epochLength,
+            });
             this.randomSamplingChronosSchedule = schedule;
           }
 
@@ -4396,6 +4445,9 @@ export class EVMChainAdapterBase {
           if (block === null) return undefined;
           if (
             !isCurrent(bindingId)
+            || this.hubBindingGeneration !== hubGeneration
+            || this.randomSamplingPairCache.currentGeneration() !== randomSamplingGeneration
+            || this.contracts.chronos !== chronos
             || contractHandleTargetAddress(this.contracts.chronos)?.toLowerCase() !== chronosBindingId
           ) return undefined;
           const timestamp = BigInt(block.timestamp);
@@ -4405,12 +4457,13 @@ export class EVMChainAdapterBase {
           return Object.freeze({
             bindingId,
             chronosEpoch,
+            epochBindingId: `${chronosBindingId}:g${hubGeneration}`,
             headBlockNumber: BigInt(block.number),
           });
         } catch {
-          // Optimization capability only. The caller falls back to the
-          // pre-existing live head + Chronos reads when this snapshot cannot
-          // be established.
+          // Optimization capability only. An unfenced context is never
+          // published or served: the caller drops its solved-period record
+          // and resumes the pre-existing live challenge/status path.
           return undefined;
         }
       },
@@ -4829,6 +4882,7 @@ export class EVMChainAdapterBase {
   }
 
   protected applyHubRotationEventName(name: string): void {
+    this.hubBindingGeneration += 1;
     // #1583 (review round-2) — flush the resolved-address memo on EVERY observed
     // Hub rotation, unconditionally and first. The memo caches the address of
     // any non-excluded name, including per-call names with no lazy binding and
@@ -4928,6 +4982,7 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
+    this.hubBindingGeneration += 1;
     // The bulk self-heal does not know which Hub name moved. Retire the whole
     // one-log runtime before exposing freshly resolved handles: until a runtime
     // built around those handles attaches, every log-backed reader must use its

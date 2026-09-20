@@ -169,6 +169,40 @@ describe('SolvedPeriodSkip', () => {
     expect(boundary.read).toHaveBeenCalledOnce();
   });
 
+  it('drops a solved record on same-address Chronos generation ABA', async () => {
+    const { state, contextReader, skip } = fixture();
+    let epochBindingId = 'chronos-a:g1';
+    contextReader.readRandomSamplingBlockContext = vi.fn(async () => ({
+      bindingId: state.bindingId!,
+      epochBindingId,
+      chronosEpoch: state.epoch,
+      headBlockNumber: BigInt(state.head),
+    }));
+
+    await observe(skip);
+    epochBindingId = 'chronos-a:g2';
+    state.head = 1040;
+    const next = await readWithoutChallenge(skip);
+    expect(next.result.kind).toBe('live');
+    expect(next.read).toHaveBeenCalledOnce();
+  });
+
+  it('does not fall back to an unfenced epoch read when block-context fencing refuses', async () => {
+    const { state, contextReader, skip } = fixture();
+    contextReader.readRandomSamplingBlockContext = vi.fn(async () => ({
+      bindingId: state.bindingId!,
+      epochBindingId: 'chronos-a:g1',
+      chronosEpoch: state.epoch,
+      headBlockNumber: BigInt(state.head),
+    }));
+    await observe(skip);
+    vi.mocked(contextReader.readRandomSamplingBlockContext).mockResolvedValue(undefined);
+
+    const next = await readWithoutChallenge(skip);
+    expect(next.result.kind).toBe('live');
+    expect(contextReader.readRandomSamplingContext).not.toHaveBeenCalled();
+  });
+
   it('records a confirmed local submission without a follow-up challenge read', async () => {
     const { state, skip } = fixture();
     const first = await readWithoutChallenge(skip);

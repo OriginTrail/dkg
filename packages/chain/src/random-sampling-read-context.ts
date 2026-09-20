@@ -4,6 +4,8 @@
 export interface RandomSamplingReadContext {
   readonly bindingId: string;
   readonly chronosEpoch: bigint;
+  /** Physical Chronos binding generation, when the adapter can expose it. */
+  readonly epochBindingId?: string;
 }
 
 /**
