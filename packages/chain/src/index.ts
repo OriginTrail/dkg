@@ -300,4 +300,16 @@ export * from './chain-index/index.js';
  * How the process hands that log DOWN to each adapter. There is one log per
  * node and many adapters, so this is a binding, never a construction.
  */
-export type { ChainEventLogBinding } from './chain-event-log-binding.js';
+export type {
+  ChainEventLogBinding,
+  ChainEventLogHubRotation,
+  ChainEventLogHubRotationWindow,
+} from './chain-event-log-binding.js';
+
+/** The ONE construction of that log. Exactly one adapter per process owns it. */
+export {
+  createEvmChainIndexRuntime,
+  type EvmChainIndexContract,
+  type EvmChainIndexRuntime,
+  type EvmChainIndexRuntimeOptions,
+} from './evm-chain-index-runtime.js';

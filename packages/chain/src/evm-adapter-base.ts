@@ -82,6 +82,11 @@ import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_T
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type { ChainEventLogBinding } from './chain-event-log-binding.js';
+import {
+  createEvmChainIndexRuntime,
+  type EvmChainIndexContract,
+  type EvmChainIndexRuntime,
+} from './evm-chain-index-runtime.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';
@@ -929,6 +934,27 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * The tick this adapter OWNS, when the composition root gave it a store.
+   *
+   * Exactly one adapter per process has one. It is constructed after the Hub
+   * bindings resolve — the tick's address array IS those bindings — and
+   * started without being awaited, because a cold node's first pass reads a
+   * head and one log range and startup must not wait on either.
+   */
+  protected chainIndexRuntime: EvmChainIndexRuntime | undefined;
+
+  /** Durable backing for the tick, or `undefined` for an adapter that owns none. */
+  protected readonly chainEventLogStore: EVMAdapterConfig['chainEventLogStore'];
+
+  /** Single-flight: `initContracts` can run again after a Hub rotation. */
+  private chainIndexStart: Promise<void> | undefined;
+
+  /** The binding the process hands DOWN to every adapter that has no store. */
+  get chainEventLog(): ChainEventLogBinding | undefined {
+    return this.chainEventLogBinding;
+  }
+
+  /**
    * Single-flight guard for the best-effort
    * `getActiveProofingPeriodDurationInBlocks()` probe inside
    * `getActiveProofPeriodStatus()`. Codex round 5 on PR #369: the
@@ -1139,6 +1165,15 @@ export class EVMChainAdapterBase {
   protected readonly cgRegistryScanPageSize: number;
 
   /**
+   * `chain.indexTickMs` (T) as configured, unvalidated.
+   *
+   * Kept raw so every consumer normalizes through the ONE resolver
+   * (`resolveContextGraphAuthorityIndexTickMs`) and an invalid value is
+   * rejected identically wherever it is read.
+   */
+  protected readonly indexTickMs: EVMAdapterConfig['indexTickMs'];
+
+  /**
    * Reset the PR3 publish-preflight cache. Public so daemon code that
    * knows about an external chain reconfiguration (e.g. a hot-reload
    * of `chainRpcUrl` or a deliberate governance-vote test fixture)
@@ -1280,6 +1315,7 @@ export class EVMChainAdapterBase {
       config.cgRegistryScanPageSize,
       CG_REGISTRY_DEFAULT_PAGE_SIZE,
     );
+    this.indexTickMs = config.indexTickMs;
     // BUG-022 root-cause fix: force ethers' `PollingEventSubscriber`
     // (eth_getLogs over a sliding block window) instead of the default
     // `FilterIdEventSubscriber` (eth_newFilter + eth_getFilterChanges).
@@ -1398,7 +1434,22 @@ export class EVMChainAdapterBase {
       intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
       reorgBufferBlocks: HUB_ROTATION_REORG_BUFFER_BLOCKS,
       onContractName: (name) => this.applyHubRotationEventName(name),
+      // The one log, consulted LIVE per pass rather than captured here. The
+      // binding is attached after `initContracts` resolves the Hub, which is
+      // strictly after this constructor runs, so anything decided once at
+      // construction would pin this listener to the scan forever.
+      logSource: (lastScannedBlock, reorgBufferBlocks) => {
+        const readWindow = this.chainEventLogBinding?.readHubRotationWindow;
+        return readWindow === undefined
+          ? Promise.resolve(undefined)
+          : readWindow.call(
+            this.chainEventLogBinding,
+            lastScannedBlock,
+            reorgBufferBlocks,
+          );
+      },
     });
+    this.chainEventLogStore = config.chainEventLogStore;
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
     // nodes that GC filters faster than ethers' polling cadence
@@ -3181,6 +3232,11 @@ export class EVMChainAdapterBase {
       // RandomSampling not deployed — proof submission unavailable
     }
 
+    // THE tick. Started here because the Hub bindings resolved above ARE its
+    // address array, and started WITHOUT an await so a cold backfill can never
+    // delay a chain write. Only the adapter the composition root gave a store
+    // does anything at all here.
+    this.startChainIndexRuntime();
     await this.startHubRotationListener();
 
     const tokenAddress: string = this.tokenAddress ?? await this.readContract(
@@ -4548,6 +4604,12 @@ export class EVMChainAdapterBase {
    * ethers implements each subscription as its own steady `eth_getLogs`
    * poller. One adapter-owned poller with an OR-topic filter preserves
    * rotation detection without four hidden idle log streams.
+   *
+   * SINCE THE ONE LOG: this listener no longer scans. Its `logSource` reads
+   * the Hub rows the tick already fetched, so `Hub_rotation_poll_getBlockNumber`
+   * and `Hub_rotation_poll_getLogs` are issued only by an adapter with no log
+   * bound, or while the log cannot prove it covers the window — the pre-log
+   * behaviour, kept as the fallback and never running beside the log.
    */
   protected async startHubRotationListener(): Promise<void> {
     if (this.hubRotationPoller.isStarted) return;
@@ -4561,6 +4623,87 @@ export class EVMChainAdapterBase {
         `[chain] Hub rotation poller setup disabled: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Start the node's ONE chain log, once, for the adapter that owns the store.
+   *
+   * DETACHED on purpose, and the caller must not await it. Resolving the Hub's
+   * deploy block is a per-backend head probe plus a `getCode` binary search,
+   * and the first pass then reads a head and one log range; `initContracts`
+   * sits on the critical path of every chain write, so neither may be allowed
+   * to delay it. Until the first pass commits, every reader's coverage check
+   * refuses and each one does exactly what it did before the log existed.
+   *
+   * A failure here is a degraded index, not a degraded node: it is reported
+   * and the adapter keeps every pre-log path.
+   */
+  protected startChainIndexRuntime(): void {
+    const store = this.chainEventLogStore;
+    if (store === undefined || this.chainIndexStart !== undefined) return;
+    this.chainIndexStart = (async () => {
+      const hub = await this.chainIndexContract(this.contracts.hub, 'Hub');
+      if (hub === undefined) throw new Error('Hub address is unresolvable');
+      const runtime = createEvmChainIndexRuntime({
+        // The SAME scope the authority index already keys its checkpoint by,
+        // so one node cannot end up with two chain identities.
+        scope: [this.deploymentId, hub.address].join(':'),
+        store,
+        intervalMs: resolveContextGraphAuthorityIndexTickMs(this.indexTickMs),
+        // The depth the Context Graph registry scan already treats as
+        // reorg-safe. Reusing it keeps ONE definition of "settled" on this
+        // node rather than introducing a second one under the log.
+        reorgHoldbackBlocks: CG_REGISTRY_REORG_BUFFER_BLOCKS,
+        backfillPageBlocks: this.cgRegistryScanPageSize,
+        maxCatchUpBlocks: this.cgRegistryScanPageSize,
+        hub,
+        contextGraphStorage: await this.chainIndexContract(
+          this.contracts.contextGraphStorage,
+          'ContextGraphStorage',
+        ),
+        knowledgeAssetStorage: await this.chainIndexContract(
+          this.contracts.knowledgeAssetStorage,
+          'DKGKnowledgeAssets',
+        ),
+        readTipProvider: (label, read, opts) => this.readTipProvider(label, read, opts),
+        onError: (error) => {
+          console.warn(
+            `[chain] chain index tick failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      });
+      this.chainIndexRuntime = runtime;
+      // Bind BEFORE starting: the binding is what every reader consults, and
+      // a reader that arrives between start and attach would fall back for no
+      // reason. Binding early is safe because coverage is still empty and
+      // every gate refuses until the first pass commits.
+      this.attachChainEventLog(runtime.binding);
+      runtime.start();
+    })().catch((err: unknown) => {
+      this.chainIndexStart = undefined;
+      console.warn(
+        `[chain] one-log chain index disabled: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  /** One indexed contract, or `undefined` when the Hub binds none. */
+  private async chainIndexContract(
+    contract: Contract | undefined,
+    contractLabel: string,
+  ): Promise<EvmChainIndexContract | undefined> {
+    if (contract === undefined) return undefined;
+    const address = (await contractAddress(contract)).toLowerCase();
+    if (address === ethers.ZeroAddress) return undefined;
+    return {
+      address,
+      contractInterface: contract.interface,
+      deploymentBlockNumber: await this.resolveContractDeployBlockNumber(
+        address,
+        'chainIndex deploy block',
+        contractLabel,
+      ),
+    };
   }
 
   protected applyHubRotationEventName(name: string): void {
@@ -4673,6 +4816,13 @@ export class EVMChainAdapterBase {
    */
   destroy(): void {
     this.hubRotationPoller.stop();
+    // The runner's own `stop()` aborts the in-flight pass and awaits it; there
+    // is nothing here for a synchronous `destroy()` to wait on, and a tick
+    // that loses its providers below simply fails its pass and is not
+    // rescheduled. The timer is `unref`'d, so it cannot hold the process open.
+    void this.chainIndexRuntime?.stop().catch(() => undefined);
+    this.chainIndexRuntime = undefined;
+    this.attachChainEventLog(undefined);
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
     for (const provider of this.providers) {
