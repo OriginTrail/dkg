@@ -264,6 +264,12 @@ describe('resolveChainIndexAuthorityAnchor depth vs resolveEvmFinalityAnchorBloc
 });
 
 describe('chainIndexAuthorityAnchorHolds', () => {
+  const holdOptions = {
+    nowMs: NOW_MS,
+    maxHeadAgeMs: 18_000,
+    headTimestampToleranceMs: 5 * 60_000,
+  } as const;
+
   const anchorOf = (input: Parameters<typeof resolve>[0] = {}) => {
     const { anchor } = resolve(input);
     expect(anchor).toBeDefined();
@@ -276,6 +282,7 @@ describe('chainIndexAuthorityAnchorHolds', () => {
     await expect(chainIndexAuthorityAnchorHolds(
       async () => state(),
       anchor,
+      holdOptions,
     )).resolves.toBe(true);
   });
 
@@ -287,6 +294,7 @@ describe('chainIndexAuthorityAnchorHolds', () => {
     await expect(chainIndexAuthorityAnchorHolds(
       async () => state({ revision: 2 }),
       anchor,
+      holdOptions,
     )).resolves.toBe(false);
   });
 
@@ -296,6 +304,7 @@ describe('chainIndexAuthorityAnchorHolds', () => {
     await expect(chainIndexAuthorityAnchorHolds(
       async () => undefined,
       anchor,
+      holdOptions,
     )).resolves.toBe(false);
   });
 
@@ -306,7 +315,31 @@ describe('chainIndexAuthorityAnchorHolds', () => {
       suspectedForkBlockNumber: 104,
     }));
 
-    await expect(chainIndexAuthorityAnchorHolds(load, anchor)).resolves.toBe(false);
+    await expect(chainIndexAuthorityAnchorHolds(load, anchor, holdOptions)).resolves.toBe(false);
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses when fetch-time freshness expires during the fold', async () => {
+    const anchor = anchorOf();
+
+    await expect(chainIndexAuthorityAnchorHolds(
+      async () => state(),
+      anchor,
+      { ...holdOptions, nowMs: NOW_MS + holdOptions.maxHeadAgeMs + 1 },
+    )).resolves.toBe(false);
+  });
+
+  it('refuses when chain-time freshness expires during the fold', async () => {
+    const anchor = anchorOf();
+
+    await expect(chainIndexAuthorityAnchorHolds(
+      async () => state(),
+      anchor,
+      {
+        nowMs: NOW_MS + holdOptions.headTimestampToleranceMs + 1,
+        maxHeadAgeMs: 60 * 60_000,
+        headTimestampToleranceMs: holdOptions.headTimestampToleranceMs,
+      },
+    )).resolves.toBe(false);
   });
 });

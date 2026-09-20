@@ -634,6 +634,12 @@ export function createEvmChainIndexRuntime(
         return chainIndexAuthorityAnchorHolds(
           () => options.store.load(options.scope),
           anchor,
+          {
+            nowMs: now(),
+            maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
+            headTimestampToleranceMs:
+              CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+          },
         );
       },
       ...(options.readContextGraphFinalizedCreation === undefined

@@ -117,6 +117,15 @@ export interface ChainIndexAnchorResult {
   readonly refusal?: ChainIndexAnchorRefusal;
 }
 
+export interface ChainIndexAuthorityAnchorHoldOptions {
+  /** Wall clock at the end of the fold, not the time the anchor was admitted. */
+  readonly nowMs: number;
+  /** The same fetch-time ceiling used when the anchor was admitted. */
+  readonly maxHeadAgeMs: number;
+  /** The same chain-time ceiling used when the anchor was admitted. */
+  readonly headTimestampToleranceMs: number;
+}
+
 export interface ResolveChainIndexAuthorityAnchorInput {
   readonly state: ChainEventLogState | undefined;
   readonly contractAddress: string;
@@ -315,15 +324,25 @@ export function resolveChainIndexAuthorityAnchor(
  * It costs no RPC, and the window it guards is a handful of local SQLite reads
  * against a tick that commits once per T — so a refusal here is rare, and it is
  * retryable: the next attempt resolves the newer anchor, or falls back to the
- * chain.
+ * chain. Fetch-time and chain-time freshness are checked again here as well:
+ * a fold admitted just before either deadline must not publish after crossing
+ * it merely because its rows and lineage stayed unchanged.
  */
 export async function chainIndexAuthorityAnchorHolds(
   load: () => Promise<ChainEventLogState | undefined>,
   anchor: ChainIndexAuthorityAnchor,
+  options: ChainIndexAuthorityAnchorHoldOptions,
 ): Promise<boolean> {
   const state = await load();
   if (state === undefined) return false;
+  if (chainEventLogStateReadRefusal(state, {
+    nowMs: options.nowMs,
+    maxHeadAgeMs: options.maxHeadAgeMs,
+  }) !== undefined) return false;
+  if (
+    options.nowMs - state.cursor.head.timestampSeconds * 1_000
+      > options.headTimestampToleranceMs
+  ) return false;
   return state.cursor.revision === anchor.revision
-    && state.cursor.lineage === anchor.lineage
-    && chainEventLogStateReadRefusal(state) === undefined;
+    && state.cursor.lineage === anchor.lineage;
 }

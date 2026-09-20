@@ -174,7 +174,15 @@ function logSource(
       });
     },
     anchorHolds(anchor) {
-      return chainIndexAuthorityAnchorHolds(() => store.load(SCOPE), anchor);
+      return chainIndexAuthorityAnchorHolds(
+        () => store.load(SCOPE),
+        anchor,
+        {
+          nowMs: options.now?.() ?? options.nowMs ?? NOW_MS,
+          maxHeadAgeMs: 3 * TICK_MS,
+          headTimestampToleranceMs: 5 * 60_000,
+        },
+      );
     },
   });
 }
