@@ -332,6 +332,46 @@ const rpcUsageSiteContext = new AsyncLocalStorage<string>();
 const rpcUsageAdapterRoleContext = new AsyncLocalStorage<RpcUsageAdapterRole>();
 
 /**
+ * Consumer attribution owned by the caller that issued one provider payload.
+ *
+ * Ethers queues `send()` calls and dispatches them later from a shared drain
+ * timer. The timer's async context belongs to whichever caller created it, so
+ * the transport must carry this context beside each queued payload instead of
+ * sampling whatever consumer happens to own the drain.
+ *
+ * Adapter role is intentionally absent: it is fixed on `RpcUsageTracker` when
+ * an adapter is constructed, so a request cannot borrow another adapter's
+ * role through async context.
+ */
+export interface RpcUsageIssuerContext {
+  readonly consumer?: string;
+  readonly site?: string;
+}
+
+/** Capture the bounded attribution context at the provider `send()` boundary. */
+export function captureRpcUsageIssuerContext(): RpcUsageIssuerContext {
+  const consumer = rpcUsageConsumerContext.getStore();
+  const site = rpcUsageSiteContext.getStore();
+  return Object.freeze({
+    ...(consumer === undefined ? {} : { consumer }),
+    ...(site === undefined ? {} : { site }),
+  });
+}
+
+/** Restore one issuer's attribution, explicitly clearing any foreign context. */
+export function withRpcUsageIssuerContext<T>(
+  context: RpcUsageIssuerContext,
+  fn: () => T,
+): T {
+  const runSite = () => context.site === undefined
+    ? rpcUsageSiteContext.exit(fn)
+    : rpcUsageSiteContext.run(context.site, fn);
+  return context.consumer === undefined
+    ? rpcUsageConsumerContext.exit(runSite)
+    : rpcUsageConsumerContext.run(context.consumer, runSite);
+}
+
+/**
  * Longest attributed consumer key that survives the daemon's logfmt token
  * guard (`packages/cli/src/daemon/rpc-usage-log.ts` `safeToken`) and this
  * module's own normalizer. A composition past it degrades to the bare read

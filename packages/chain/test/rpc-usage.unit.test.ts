@@ -939,6 +939,67 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     }
   }, 30_000);
 
+  it('keeps concurrent queued methods bound to their issuer consumers and publisher role', async () => {
+    const rpc = await startLoopbackRpc({
+      results: {
+        eth_getBlockByNumber: { number: '0x10', hash: `0x${'11'.repeat(32)}` },
+      },
+    });
+    servers.push(rpc);
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-issuer-context');
+    const tracker = new RpcUsageTracker(() => 'evm:31337', 'publisher_wallet', cumulative);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+      onRequest: (method, slot) => tracker.record(method, slot),
+    });
+
+    try {
+      // Complete provider startup before the paired calls. Both sends below
+      // then enqueue in one scheduling turn and share ethers' drain timer --
+      // the exact case where the timer owner's ALS used to label its peer.
+      await provider.getNetwork();
+      const header = withRpcUsageConsumer(
+        'chainIndex.lineage',
+        () => provider.send('eth_getBlockByNumber', ['latest', false]),
+      );
+      const authority = withRpcUsageSite(
+        CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query,
+        () => withRpcUsageConsumer(
+          CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+          () => provider.send('eth_call', [{ to: HUB, data: '0x' }, 'latest']),
+        ),
+      );
+
+      await expect(Promise.all([header, authority])).resolves.toHaveLength(2);
+      expect(rpc.hits('eth_getBlockByNumber')).toBe(1);
+      expect(rpc.hits('eth_call')).toBe(1);
+
+      const snapshot = cumulative.snapshot();
+      expect(snapshot.cumulative.methods).toMatchObject({
+        eth_getBlockByNumber: 1,
+        eth_call: 1,
+      });
+      expect(snapshot.cumulative.consumers.eth_getBlockByNumber).toEqual({
+        'chainIndex.lineage': 1,
+      });
+      expect(snapshot.cumulative.consumers.eth_call).toEqual({
+        'cgStorage.getContextGraph:cgAuth.query': 1,
+      });
+      expect(snapshot.cumulative.consumers.eth_chainId).toEqual({
+        unattributed: rpc.hits('eth_chainId'),
+      });
+      expect(snapshot.cumulative.adapterRoles.eth_getBlockByNumber).toEqual({
+        publisher_wallet: 1,
+      });
+      expect(snapshot.cumulative.adapterRoles.eth_call).toEqual({
+        publisher_wallet: 1,
+      });
+    } finally {
+      provider.destroy();
+    }
+  }, 30_000);
+
   it('attributes failover eth_call attempts to the readProvider label', async () => {
     installMeter();
     const primary = await startLoopbackRpc({ throttle: ['eth_call'] });
