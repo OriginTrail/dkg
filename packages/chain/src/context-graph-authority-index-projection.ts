@@ -186,6 +186,8 @@ export interface ContextGraphAuthorityIndexCompletedProjection {
   readonly finalized: Readonly<{ number: number; hash: string }>;
   /** The head the endpoint reported, with its CHAIN time in seconds. */
   readonly head: Readonly<{ number: number; hash: string; timestampSeconds: number }>;
+  /** True when the view contains an unpersisted reorgable tail above the durable cursor. */
+  readonly requiresAnchorValidation?: boolean;
   readonly view: ContextGraphAuthorityIndexView;
 }
 
@@ -206,6 +208,10 @@ export interface ContextGraphAuthorityIndexProjectionReadInput {
    * from a projection that was scanned for this read.
    */
   readonly accepts: (projection: ContextGraphAuthorityIndexProjection) => boolean;
+  /** Re-read the anchor before serving a projection that contains an unsettled tail. */
+  readonly validateAnchor?: (
+    projection: ContextGraphAuthorityIndexProjection,
+  ) => Promise<boolean>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
   readonly refresh: () => Promise<ContextGraphAuthorityIndexCompletedProjection>;
   readonly onServed?: (evidence: ContextGraphAuthorityProjectionServedEvidence) => void;
@@ -285,7 +291,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     input: ContextGraphAuthorityIndexProjectionReadInput,
   ): Promise<ContextGraphAuthorityIndexProjection> {
     input.signal?.throwIfAborted();
-    const cached = this.#serve(input, 'backing-off');
+    const cached = await this.#serve(input, 'backing-off');
     if (cached !== undefined) return cached;
     // Twice, so that when an initiator leaves, its waiters coalesce behind the
     // first of them to take over instead of all scanning side by side. Bounded,
@@ -297,7 +303,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
       // `refreshing` never rejects: the initiator's abort, timeout or failure
       // is its own. This waiter only learns that the refresh settled.
       await waitForAuthorityIndexOperation(refreshing, input.signal);
-      const published = this.#serve(input, 'backing-off');
+      const published = await this.#serve(input, 'backing-off');
       if (published !== undefined) return published;
     }
     return this.#refresh(input);
@@ -337,7 +343,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
         throw error;
       }
       if (epoch === this.#epoch) this.#failedAtMs.set(input.scope, this.#now());
-      const stale = this.#serve(input, 'refresh-failed');
+      const stale = await this.#serve(input, 'refresh-failed');
       if (stale !== undefined) return stale;
       throw error;
     } finally {
@@ -378,10 +384,10 @@ export class ContextGraphAuthorityIndexProjectionCache {
    * one, so an outage costs one failed pass per tick instead of one per read.
    * `refresh-failed`: this caller's own refresh just failed.
    */
-  #serve(
+  async #serve(
     input: ContextGraphAuthorityIndexProjectionReadInput,
     reason: 'backing-off' | 'refresh-failed',
-  ): ContextGraphAuthorityIndexProjection | undefined {
+  ): Promise<ContextGraphAuthorityIndexProjection | undefined> {
     const projection = this.#projections.get(input.scope);
     if (projection === undefined) return undefined;
     const now = this.#now();
@@ -392,6 +398,23 @@ export class ContextGraphAuthorityIndexProjectionCache {
       return undefined;
     }
     if (!input.accepts(projection)) return undefined;
+    if (projection.requiresAnchorValidation === true) {
+      if (input.validateAnchor === undefined) return undefined;
+      let anchorIsCurrent: boolean;
+      try {
+        anchorIsCurrent = await input.validateAnchor(projection);
+      } catch {
+        // A tail whose anchor could not be checked is not safe to serve. The
+        // ordinary refresh path below retains the original transport error.
+        input.signal?.throwIfAborted();
+        return undefined;
+      }
+      if (!anchorIsCurrent) {
+        // A mismatched anchor proves the tail projection belongs to a fork.
+        this.drop(input.scope);
+        return undefined;
+      }
+    }
     const fresh = ageMs < this.tickMs;
     if (!fresh && reason === 'backing-off') {
       const failedAtMs = this.#failedAtMs.get(input.scope);

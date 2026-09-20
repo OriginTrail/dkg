@@ -102,8 +102,6 @@ type ContextGraphRegistryScanPlan =
 
 const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
-type ContextGraphAuthorityMutation = 'addParticipantAgent' | 'removeParticipantAgent';
-
 function sendContextGraphAuthorityTransaction<T>(
   write: () => Promise<T>,
   dropProjections: () => void,
@@ -883,7 +881,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const receipt = await sendContextGraphAuthorityTransaction(
       () => this.sendContractTransaction(
         contextGraphs,
-        'addParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        'addParticipantAgent',
         [contextGraphId, ethers.getAddress(agent)],
         this.signer,
         'add context graph participant agent',
@@ -907,7 +905,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const receipt = await sendContextGraphAuthorityTransaction(
       () => this.sendContractTransaction(
         contextGraphs,
-        'removeParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        'removeParticipantAgent',
         [contextGraphId, ethers.getAddress(agent)],
         this.signer,
         'remove context graph participant agent',

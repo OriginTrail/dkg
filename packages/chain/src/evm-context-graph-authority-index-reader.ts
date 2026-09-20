@@ -528,6 +528,18 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           return false;
         }
       },
+      validateAnchor: async (cached) => dependencies.readTipProvider(
+        `${operationLabel} cached projection anchor`,
+        async (provider) => {
+          const anchor = await readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} cached projection anchor block`,
+            () => provider.getBlock(cached.finalized.number),
+            options.signal,
+          );
+          return anchor?.hash?.toLowerCase() === cached.finalized.hash.toLowerCase();
+        },
+        { signal: options.signal },
+      ),
       onServed: options.onContextGraphAuthorityProjectionServed,
       refresh: () => rescanFinalizedProjection(
         operationLabel,
@@ -540,7 +552,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             options.signal,
           )).chainId.toString(10);
           return Object.freeze({
-            scope: scan.scope, chainId, contractAddress, finalized, head, view,
+            scope: scan.scope,
+            chainId,
+            contractAddress,
+            finalized,
+            head,
+            requiresAnchorValidation: (scan.durableReorgHoldbackBlocks ?? 0) > 0,
+            view,
           });
         },
       ),

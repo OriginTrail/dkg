@@ -74,6 +74,7 @@ function makeHarness(options: Readonly<{
   const chain = {
     head: 25,
     fork: 0,
+    forkFrom: 0,
     /** Seconds the head block's own timestamp trails the wall clock. */
     headLagSeconds: 2,
     withoutTimestamp: false,
@@ -88,7 +89,8 @@ function makeHarness(options: Readonly<{
   });
   const scope = options.scope ?? SCOPE;
   const blockHash = (block: number): string => (
-    `0x${(chain.fork * 1_000_000 + block).toString(16).padStart(64, '0')}`
+    `0x${((block >= chain.forkFrom ? chain.fork : 0) * 1_000_000 + block)
+      .toString(16).padStart(64, '0')}`
   );
   let refreshGate: Promise<void> | undefined;
   let refreshFailure: Error | undefined;
@@ -128,6 +130,7 @@ function makeHarness(options: Readonly<{
           ? Number.NaN
           : Math.floor(clock.nowMs / 1_000) - chain.headLagSeconds,
       },
+      requiresAnchorValidation: (options.holdback ?? 0) > 0,
       view,
     });
   };
@@ -140,6 +143,10 @@ function makeHarness(options: Readonly<{
     scope,
     signal,
     accepts: (cached) => cached.view.has(id(contextGraphId)),
+    validateAnchor: async (cached) => {
+      reads.hashes.push(cached.finalized.number);
+      return blockHash(cached.finalized.number) === cached.finalized.hash;
+    },
     onServed: (evidence) => { served.push(evidence); },
     refresh: ownRefresh,
   });
@@ -521,6 +528,40 @@ describe('finalized Context Graph authority projection cache', () => {
     });
     expect(h.reads.refreshes).toBe(2);
     expect(after).not.toBe(before);
+  });
+
+  it('revalidates and rebuilds a cached tail after a reorg above the durable cursor', async () => {
+    const h = makeHarness({ holdback: 8 });
+    h.chain.events.push(transfer(9n, 20));
+    const before = await h.read();
+    expect(before.view.resolve(id(9n)).owner).toBe(NEXT_OWNER);
+
+    // Durable cursor is 17. Replace only the unpersisted tail at 18..25.
+    h.chain.fork = 1;
+    h.chain.forkFrom = 18;
+    h.chain.events = h.chain.events.filter((event) => event.blockNumber < 18);
+
+    const after = await h.read();
+    expect(after).not.toBe(before);
+    expect(after.view.resolve(id(9n)).owner).toBe(OWNER);
+    expect(h.reads.refreshes).toBe(2);
+    expect(h.served.at(-1)?.source).toBe('scan');
+    expect(h.store.invalidations).toHaveLength(0);
+  });
+
+  it('never serves a pre-reorg tail as stale-cache when rebuilding fails', async () => {
+    const h = makeHarness({ holdback: 8 });
+    h.chain.events.push(transfer(9n, 20));
+    await h.read();
+
+    h.chain.fork = 1;
+    h.chain.forkFrom = 18;
+    h.chain.events = h.chain.events.filter((event) => event.blockNumber < 18);
+    const outage = new Error('provider pool is down');
+    h.failRefresh(outage);
+
+    await expect(h.read()).rejects.toBe(outage);
+    expect(h.served.map((evidence) => evidence.source)).toEqual(['scan']);
   });
 
   it('keys by deployment and contract, never by the bare numeric id', async () => {
