@@ -220,6 +220,19 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     expect(unhealthy.getBlockNumber.calls).toHaveLength(1);
   });
 
+  it('depth 1: surfaces a failed head confirmation instead of masking the block error as absence', async () => {
+    const unavailable = {
+      getBlockNumber: recorder(async () => { throw new Error('head confirmation unavailable'); }),
+      getBlock: recorder(async () => { throw new Error('header not found'); }),
+    };
+    const a = makeAdapter([unavailable]);
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT))
+      .rejects.toThrow('head confirmation unavailable');
+    expect(unavailable.getBlock.calls).toEqual([[123]]);
+    expect(unavailable.getBlockNumber.calls).toHaveLength(1);
+  });
+
   it('depth 1: all above-head error responses exhaust as a false verdict', async () => {
     const first = blockErrorEndpoint(121, 'unknown block');
     const second = blockErrorEndpoint(122, 'block not found');
@@ -262,6 +275,16 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     await expect(b.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
     expect(deep.getBlockNumber.calls).toHaveLength(1);
     expect(deep.getBlock.calls).toEqual([[123]]);
+  });
+
+  it('depth 3: a block error after the depth proof surfaces without a second head read', async () => {
+    const erroring = blockErrorEndpoint(125, 'unknown block');
+    const a = makeAdapter([erroring], { finalityConfirmations: 3 });
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT))
+      .rejects.toThrow('unknown block');
+    expect(erroring.getBlockNumber.calls).toHaveLength(1);
+    expect(erroring.getBlock.calls).toEqual([[123]]);
   });
 });
 
