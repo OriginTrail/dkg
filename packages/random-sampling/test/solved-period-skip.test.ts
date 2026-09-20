@@ -145,6 +145,14 @@ describe('SolvedPeriodSkip', () => {
     expect(await new SolvedPeriodSkip(chain).captureReadContext()).toBeUndefined();
   });
 
+  it('treats a Chronos epoch read failure as unavailable context', async () => {
+    const { chain, skip } = fixture();
+    vi.mocked(chain.getCurrentEpoch!).mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
+
+    await expect(skip.captureReadContext()).resolves.toBeUndefined();
+    await expect(skip.captureReadContext()).resolves.toMatchObject({ chronosEpoch: 3n });
+  });
+
   it('returns the head with the cached-challenge staleness decision', async () => {
     const { chain, state } = fixture();
     const challenge = {

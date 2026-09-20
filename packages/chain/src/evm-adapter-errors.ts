@@ -50,6 +50,12 @@ export function collectEvmErrorText(err: unknown): string {
   return parts.join(' ').toLowerCase();
 }
 
+/** Common node phrasings for a requested block that is not locally available. */
+export function isEvmBlockUnavailableError(err: unknown): boolean {
+  return /\b(header not found|unknown block|block not found)\b/u
+    .test(collectEvmErrorText(err));
+}
+
 /**
  * Read the top-level error class name exposed by Error / DOMException shapes.
  * Unlike status and code extraction, this deliberately does not traverse

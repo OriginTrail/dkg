@@ -9,6 +9,7 @@ import {
 } from '@origintrail-official/dkg-http-utils';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
+import { isEvmBlockUnavailableError } from './evm-adapter-errors.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
   anchorDependentResourceLimited,
@@ -279,9 +280,7 @@ function classifyJsonRpcError(
   }
   if (
     method === 'eth_getBlockByNumber'
-    || message.includes('header not found')
-    || message.includes('unknown block')
-    || message.includes('block not found')
+    || isEvmBlockUnavailableError(error)
     || message.includes('canonical')
   ) {
     return new CurrentFinalizedEvmCallErrorV1(

@@ -31,7 +31,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { BoundedLruCache, floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, isEvmBlockUnavailableError, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -1733,8 +1733,7 @@ export class EVMChainAdapterBase {
         try {
           atHeight = await provider.getBlock(receipt.blockNumber);
         } catch (error) {
-          const message = collectEvmErrorText(error);
-          if (/\b(header not found|unknown block|block not found)\b/.test(message)) {
+          if (isEvmBlockUnavailableError(error)) {
             // Some clients report an above-head block as an error rather than
             // null. Confirm that narrow condition before treating it as the
             // nullable failover signal: the same bare message from an endpoint
