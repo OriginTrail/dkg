@@ -20,7 +20,10 @@ import {
 import { createChainIndexAuthorityPageSource } from
   '../src/chain-index/chain-index-authority-page.js';
 import type { ChainEventLogAuthoritySource } from '../src/chain-event-log-binding.js';
+import { RpcEndpointsExhaustedError } from '../src/chain-rpc-transport-error.js';
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import type { ContextGraphAuthorityProjectionServedEvidence } from
+  '../src/context-graph-authority-index-projection.js';
 import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
   '../src/evm-context-graph-authority-index-reader.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
@@ -34,6 +37,13 @@ const SCOPE = [DEPLOYMENT, STORAGE].join(':');
 const OWNER = `0x${'11'.repeat(20)}`;
 const NAME_HASH = `0x${'33'.repeat(32)}`;
 const ABSENT_NAME_HASH = `0x${'55'.repeat(32)}`;
+/**
+ * A name hash whose HEX contains `500`, so the ambiguity message this index
+ * raises about it satisfies `classifyRpcRetryDisposition`'s bare
+ * `429|503|502|500` alternation. ~5.9% of 32-byte hashes do; nothing about the
+ * value is otherwise special, which is the point.
+ */
+const FAILOVER_NAME_HASH = `0x500${'a'.repeat(61)}`;
 const DEPLOY_BLOCK = 10;
 const HEAD = 105;
 /** The chain the PROVIDER answers for: ahead of the log, as it always is. */
@@ -70,12 +80,19 @@ function creationRow(blockNumber: number, contextGraphId: bigint, nameHash: stri
   };
 }
 
-function seededStore(options: {
+interface SeedOptions {
   coveredFrom?: number;
   head?: number;
   fetchedAtMs?: number;
-} = {}): MemoryChainEventLogStore {
-  const store = new MemoryChainEventLogStore();
+  /** Replaces the single default creation row. */
+  rows?: readonly ReturnType<typeof creationRow>[];
+}
+
+/** Put one committed tick state into `store`, as the runner's pass would. */
+function seedLog(
+  store: MemoryChainEventLogStore,
+  options: SeedOptions = {},
+): MemoryChainEventLogStore {
   const head = options.head ?? HEAD;
   store.seed({
     cursor: {
@@ -99,8 +116,12 @@ function seededStore(options: {
       coveredThroughBlock: head,
       floorBlock: DEPLOY_BLOCK,
     }],
-  }, [creationRow(20, 7n, NAME_HASH)]);
+  }, options.rows ?? [creationRow(20, 7n, NAME_HASH)]);
   return store;
+}
+
+function seededStore(options: SeedOptions = {}): MemoryChainEventLogStore {
+  return seedLog(new MemoryChainEventLogStore(), options);
 }
 
 /**
@@ -110,7 +131,19 @@ function seededStore(options: {
  */
 function logSource(
   store: MemoryChainEventLogStore,
-  options: { nowMs?: number; contractAddress?: string } = {},
+  options: {
+    nowMs?: number;
+    /** A MOVING clock, read per anchor resolution, where a test needs one. */
+    now?: () => number;
+    contractAddress?: string;
+    /**
+     * The point read the runtime wires in for a block the log holds no event
+     * from. Most tests here fold once and never need it; a test whose DURABLE
+     * cursor advances between reads does, because re-admitting the stored
+     * cursor re-checks that block's hash.
+     */
+    readBlockHash?: (blockNumber: number) => Promise<string | null>;
+  } = {},
 ): ChainEventLogAuthoritySource {
   const contractAddress = options.contractAddress ?? STORAGE;
   return Object.freeze({
@@ -121,7 +154,7 @@ function logSource(
       registry: new ChainEventDecoderRegistry()
         .registerContextGraphAuthority(STORAGE, storageInterface),
       contractAddress: STORAGE,
-      readBlockHash: async () => null,
+      readBlockHash: options.readBlockHash ?? (async () => null),
     }),
     async resolveAnchor(input) {
       return resolveChainIndexAuthorityAnchor({
@@ -129,7 +162,7 @@ function logSource(
         contractAddress: STORAGE,
         deploymentBlockNumber: input.deploymentBlockNumber,
         finalityConfirmations: input.finalityConfirmations,
-        nowMs: options.nowMs ?? NOW_MS,
+        nowMs: options.now?.() ?? options.nowMs ?? NOW_MS,
         maxHeadAgeMs: 3 * TICK_MS,
         headTimestampToleranceMs: 5 * 60_000,
       });
@@ -167,12 +200,21 @@ function makeReader(options: {
   source?: ChainEventLogAuthoritySource | undefined;
   contractAddress?: string;
   finalityConfirmations?: number;
+  /** The projection cache's clock, where a test has to age a projection. */
+  now?: () => number;
+  /**
+   * Mirror the production failover loop's ENDING: once `isRetryable` has sent
+   * the read round every endpoint, `RpcFailoverClient` does not rethrow the
+   * last error — it throws the typed `RPC_ENDPOINTS_EXHAUSTED`, which is the
+   * only thing the projection cache reads as an availability outage.
+   */
+  exhaustsOnFailover?: boolean;
 } = {}) {
   const { provider, calls, authorityLogs } = makeProvider();
   const index = new ContextGraphAuthorityIndex(
     new MemoryAuthorityIndexStore(),
     undefined,
-    { tickMs: TICK_MS, now: () => NOW_MS },
+    { tickMs: TICK_MS, now: options.now ?? (() => NOW_MS) },
   );
   const base = new ethers.Contract(
     options.contractAddress ?? STORAGE,
@@ -193,7 +235,15 @@ function makeReader(options: {
           return await read(provider);
         } catch (error) {
           attempts.push(error);
-          if (attempt >= 1 || opts?.isRetryable?.(error) !== true) throw error;
+          if (opts?.isRetryable?.(error) !== true) throw error;
+          if (attempt >= 1) {
+            if (options.exhaustsOnFailover !== true) throw error;
+            throw new RpcEndpointsExhaustedError(
+              error instanceof Error ? error.message : String(error),
+              'mixed',
+              { cause: error },
+            );
+          }
         }
       }
     },
@@ -327,6 +377,111 @@ describe('Context Graph authority index over the one log', () => {
 
     expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH)).toBe(9n);
     expect(calls.getLogs).toBeGreaterThan(0);
+  });
+
+  it('propagates an ambiguity the fold proves, WITHOUT buying a scan first', async () => {
+    // The admission predicate is the caller's own projection and it can throw:
+    // two finalized creations committing one name hash is a deterministic,
+    // fail-closed refusal. Swallowing it (`catch { return false }` reads like
+    // hygiene and is the mutation a refactor reintroduces) does not make the
+    // read succeed — the live scan's own projection raises the same thing one
+    // paid `eth_getLogs` and two `eth_getBlock`s later. The propagation IS the
+    // saving, so it is pinned by cost, not only by message.
+    const store = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH), creationRow(30, 9n, NAME_HASH)],
+    });
+    const { reader, calls } = makeReader({ store, source: logSource(store) });
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /name hash 0x3333.* is ambiguous across 2 finalized Context Graphs/,
+    );
+    expect(calls.getLogs).toBe(0);
+    expect(calls.getBlock).toBe(0);
+  });
+
+  it('keeps that ambiguity deterministic instead of laundering it into stale authority', async () => {
+    // The predicate now runs inside the provider session AND inside the
+    // projection cache's `refresh()`, so a naked throw is read by two
+    // classifiers that are not about it. `classifyRpcRetryDisposition`
+    // alternates a bare `429|503|502|500` with NO word boundaries, and this
+    // message interpolates a 32-byte hash — so ~5.9% of name hashes turn a
+    // deterministic refusal into `failover`, then `RPC_ENDPOINTS_EXHAUSTED`,
+    // which the cache reads as an outage: it arms a scope-wide backoff and
+    // serves the RETAINED projection, which (ambiguity grows with the state
+    // set) is not ambiguous. A fail-closed check would come back as an answer.
+    const clock = { nowMs: NOW_MS };
+    // The tick has only reached block 60 so far.
+    const store = seededStore({ head: 60, rows: [creationRow(20, 7n, FAILOVER_NAME_HASH)] });
+    const evidence: ContextGraphAuthorityProjectionServedEvidence[] = [];
+    const served = { onContextGraphAuthorityProjectionServed: (e: typeof evidence[number]) => { evidence.push(e); } };
+    const { reader, calls, attempts } = makeReader({
+      store,
+      source: logSource(store, {
+        now: () => clock.nowMs,
+        readBlockHash: async (blockNumber) => hash(blockNumber),
+      }),
+      now: () => clock.nowMs,
+      exhaustsOnFailover: true,
+    });
+
+    // One unambiguous answer first, so there IS a retained projection for a
+    // stale-if-error pass to reach for.
+    expect(await reader.resolveFinalizedContextGraphIdByNameHash(FAILOVER_NAME_HASH, served))
+      .toBe(7n);
+
+    // A later tick reaches block 105 and brings a SECOND finalized creation
+    // committing the same name. The new fold is ambiguous; the projection
+    // retained from the first read — which never saw block 70 — is not.
+    clock.nowMs = NOW_MS + TICK_MS;
+    seedLog(store, {
+      fetchedAtMs: clock.nowMs,
+      rows: [creationRow(20, 7n, FAILOVER_NAME_HASH), creationRow(70, 9n, FAILOVER_NAME_HASH)],
+    });
+
+    for (const pass of [1, 2]) {
+      let caught: unknown;
+      await reader.resolveFinalizedContextGraphIdByNameHash(FAILOVER_NAME_HASH, served)
+        .then(() => { throw new Error(`pass ${pass} was answered instead of refused`); })
+        .catch((error: unknown) => { caught = error; });
+      expect((caught as Error).message).toMatch(/is ambiguous across 2 finalized Context Graphs/);
+      // The caller's own error, not a transport verdict wrapped around it.
+      expect((caught as { code?: string }).code).toBeUndefined();
+    }
+    // Never classified as failover, so never retried across the endpoint set:
+    // one attempt per pass, and the second pass proves no backoff was armed —
+    // an armed one would have served the retained projection instead.
+    expect(attempts).toHaveLength(2);
+    expect(evidence.map((e) => e.source)).not.toContain('stale-cache');
+    expect(calls.getLogs).toBe(0);
+  });
+
+  it('ages a log fold from the TICK fetch, so it cannot be re-served as fresh', async () => {
+    // The fold's data is as of the tick's head fetch, not as of this read.
+    // Retaining it under `now` resets its age to zero and buys it a further T
+    // of service as a FRESH cache entry, so a view already `max(3T,15s)` behind
+    // the chain can be served for `max(3T,15s) + T` while every consumer is
+    // told it is under T old.
+    const clock = { nowMs: NOW_MS };
+    const store = seededStore({ fetchedAtMs: NOW_MS - 5_000 });
+    const evidence: ContextGraphAuthorityProjectionServedEvidence[] = [];
+    const served = { onContextGraphAuthorityProjectionServed: (e: typeof evidence[number]) => { evidence.push(e); } };
+    const { reader, calls } = makeReader({
+      store,
+      source: logSource(store, { now: () => clock.nowMs }),
+      now: () => clock.nowMs,
+    });
+
+    expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH, served)).toBe(7n);
+    expect(evidence).toEqual([{ source: 'scan', ageMs: 5_000 }]);
+
+    // 1.5s later the fold is 6.5s old — past the tick the cache answers within.
+    clock.nowMs = NOW_MS + 1_500;
+    expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH, served)).toBe(7n);
+    expect(evidence[1]).toEqual({ source: 'scan', ageMs: 6_500 });
+    // Truthfulness is not paid for in RPC: both reads still cost nothing.
+    expect(evidence.map((e) => e.source)).not.toContain('cache');
+    expect(calls.getLogs).toBe(0);
+    expect(calls.getBlock).toBe(0);
   });
 
   it('refuses the fold when the tick committed underneath it', async () => {

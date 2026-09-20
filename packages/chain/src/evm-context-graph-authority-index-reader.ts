@@ -95,6 +95,71 @@ export function contextGraphAuthorityAnchorUnavailableV1(
 }
 
 /**
+ * A caller's projection threw while ADMITTING the log fold — carried out of two
+ * layers that would otherwise mistake it for a transport failure.
+ *
+ * The predicate that decides whether a log-anchored fold may answer is the
+ * caller's own projection, and it can legitimately throw: a name hash ambiguous
+ * across finalized Context Graphs is a deterministic, fail-CLOSED refusal about
+ * chain state. It has to be evaluated where the fall-through to the live scan
+ * is decided, which is inside the provider session AND inside the projection
+ * cache's `refresh()`. Naked, it is read there by two classifiers that are not
+ * about it at all:
+ *
+ *  1. `readTipProvider`'s `isRetryable` → `isRpcEndpointFailoverEligible` →
+ *     `classifyRpcRetryDisposition`, whose message regex alternates a bare
+ *     `429|503|502|500` with no word boundaries. The ambiguity message
+ *     interpolates a 32-byte hash, ~5.9% of which contain one of those digit
+ *     runs — so one deterministic fault in seventeen would be retried across
+ *     every endpoint and then surface as `RPC_ENDPOINTS_EXHAUSTED`.
+ *  2. The cache's `#refresh` catch, which reads that transport code as an
+ *     availability outage: it arms a scope-wide one-tick backoff and asks
+ *     `#serve(_, 'refresh-failed')` for the retained projection — which SKIPS
+ *     the tick gate, and which (ambiguity grows with the state set) may well
+ *     not be ambiguous. A fail-closed refusal would come back as a served
+ *     `stale-cache` authority answer.
+ *
+ * The wrapper's own message is FIXED text carrying no payload, and it stamps no
+ * `code`/`status`, so both classifiers see it for what it is — a deterministic
+ * fault — and neither engages. `readFinalizedProjection` unwraps it at the
+ * outermost boundary, so the caller receives the original error, from a read
+ * that made no chain request at all.
+ *
+ * Not solved by moving the predicate out of `refresh()`: the fall-through to
+ * the live scan is decided inside the provider session, so hazard 1 would
+ * survive that move, and deciding outside would cost a second session with its
+ * own anchor resolution.
+ */
+class ContextGraphAuthorityLogFoldProjectionFaultV1 extends Error {
+  constructor(readonly fault: unknown) {
+    super('Context Graph authority log fold projection failed');
+    this.name = 'ContextGraphAuthorityLogFoldProjectionFaultV1';
+  }
+}
+
+/** Run the admission predicate, keeping any fault it raises deterministic. */
+function logFoldServes<T>(predicate: (value: T) => boolean, value: T): boolean {
+  try {
+    return predicate(value);
+  } catch (fault) {
+    throw new ContextGraphAuthorityLogFoldProjectionFaultV1(fault);
+  }
+}
+
+/**
+ * Strip the carrier at the outermost boundary, so the caller sees what its own
+ * projection threw and nothing this file wrapped around it.
+ */
+async function unwrapLogFoldProjectionFaultV1<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof ContextGraphAuthorityLogFoldProjectionFaultV1) throw error.fault;
+    throw error;
+  }
+}
+
+/**
  * Shared page/hash work belongs to the authority-index lifecycle, not to the
  * first caller whose AsyncLocalStorage context starts the single flight.
  */
@@ -458,21 +523,54 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         contractAddress: string;
         finalized: Readonly<{ number: number; hash: string }>;
         head: ContextGraphAuthorityIndexCompletedProjection['head'];
+        /**
+         * When the head above was FETCHED, on the log path only. The live path
+         * omits it: it is fetching right now, so the cache's own pre-refresh
+         * stamp is already the conservative answer.
+         */
+        dataFetchedAtMs?: number;
       }>,
     ) => Promise<T>,
     /**
      * Whether an answer folded from the LOG is one this read may be given.
      *
-     * The projection cache already refuses to serve a cached view that cannot
-     * answer the caller's targets, so that "a graph registered seconds ago must
-     * become visible at today's speed, and absence is only ever reported from a
-     * projection that was scanned for this read". A log-anchored fold is at
-     * most `max(3T, 15s)` behind the chain, which is the same order of
-     * staleness — so it inherits the same rule rather than a weaker one: an
-     * answer the caller would have rejected from the cache is discarded here
-     * too, and the live scan below runs exactly as it did before the log
-     * existed. `undefined` means the caller consumes no view (the durable
-     * refresh), so there is no absence for it to mistake.
+     * THE RULE, EXACTLY. `#serve` in the projection cache applies four gates to
+     * a cached candidate, and this path is equivalent on three of them:
+     *
+     *  - FETCH-TIME AGE. The cache refuses past `staleMs`
+     *    (`min(max(3T, 15s), 5m)`); the log refuses past its anchor's
+     *    `maxHeadAgeMs` (`max(3T, 15s)`) in
+     *    `resolveChainIndexAuthorityAnchor`. The same bound below a 100s tick,
+     *    and the log's is the stricter one above it.
+     *  - CHAIN-TIME TOLERANCE. Literally the same constant, checked on the
+     *    tick's own head in the same resolver.
+     *  - `project(candidate).complete`. THIS predicate, which is the caller's
+     *    own projection and not a restatement of it — so a target the caller
+     *    would have rejected from the cache is rejected here too, an absence
+     *    still costs a live scan at a live head, and the answer the log retires
+     *    is the one it can actually produce.
+     *
+     * NOT EQUIVALENT, deliberately: the cache's TICK GATE. `#serve` refuses any
+     * candidate that has reached `tickMs`, so the cache re-scans every T. This
+     * path does not, and cannot usefully: the background tick is itself the
+     * refresh, it is self-scheduling with a fixed DELAY of T after each pass,
+     * and the cache's miss lands at exactly `stamp + T` — which is a tick
+     * commit instant plus T, always strictly before the next commit. A gate of
+     * "younger than T" would therefore refuse the log on the very read that
+     * follows each of its own successes, every window, for any pass duration at
+     * all. Measured at T=6s that is ~290 live scans per 30 minutes against 1 —
+     * i.e. exactly the per-tick scan rate the projection cache already
+     * delivered without a log, so the log would retire nothing.
+     *
+     * What this costs is stated rather than hidden: an answer from this path is
+     * as old as the tick's last committed head, bounded by `max(3T, 15s)` and
+     * by the chain-time tolerance, NOT by T. The fold is reported and retained
+     * under that true instant (`context.dataFetchedAtMs` above), so the cache ages
+     * it from when its data was fetched, `onServed` reports that age, and it
+     * can never be re-served as a FRESH cache entry for a further T.
+     *
+     * `undefined` means the caller consumes no view (the durable refresh), so
+     * there is no absence for it to mistake.
      */
     logAnswerServes?: (value: T) => boolean,
   ): Promise<T> => {
@@ -533,10 +631,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                 contractAddress,
                 finalized: anchor.finalized,
                 head: anchor.head,
+                // The tick's head-fetch instant, which is when this fold's data
+                // was observed. Carried so the cache ages and reports the fold
+                // by its own age instead of by this read's clock.
+                dataFetchedAtMs: anchor.fetchedAtMs,
               }),
             );
             await logged.stabilize();
-            if (logAnswerServes === undefined || logAnswerServes(logged.value)) {
+            if (logAnswerServes === undefined || logFoldServes(logAnswerServes, logged.value)) {
               return logged.value;
             }
           }
@@ -629,10 +731,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       dependencies.deploymentId,
       await dependencies.requireContextGraphStorage().getAddress(),
     );
-    // Taken here, before the cache takes its own, so the synthetic candidate
-    // built for `logAnswerServes` below can only OVER-report its age.
+    // A floor for the synthetic candidate below, taken before the cache takes
+    // its own: a fold that reports no fetch instant of its own is treated as
+    // being as of this read, which can only OVER-report its age.
     const askedAtMs = Date.now();
-    const projected = await dependencies.index.projection({
+    const projected = await unwrapLogFoldProjectionFaultV1(() => dependencies.index.projection({
       scope,
       signal: options.signal,
       project: read,
@@ -640,7 +743,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       refresh: () => rescanFinalizedProjection(
         operationLabel,
         options,
-        async (scan, { provider, contractAddress, finalized, head }) => {
+        async (scan, { provider, contractAddress, finalized, head, dataFetchedAtMs }) => {
           const view = await dependencies.index.view(scan);
           const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
             `${operationLabel} network`,
@@ -649,6 +752,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           )).chainId.toString(10);
           return Object.freeze({
             scope: scan.scope, chainId, contractAddress, finalized, head, view,
+            // Present only on the log path, where the data predates this read.
+            // The cache keeps the older of this and its own pre-refresh stamp.
+            ...(dataFetchedAtMs === undefined ? {} : { dataFetchedAtMs }),
           });
         },
         // The SAME predicate the cache admits a projection by, applied to the
@@ -662,13 +768,17 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // here and again on the projection the cache publishes costs only the
         // projection.
         //
-        // `fetchedAtMs` is the one field a completed projection lacks. It is
-        // supplied from before the cache took its own, so any age derived from
-        // it is over-reported, never under-reported — the direction the field
-        // exists to guarantee. Nothing consumes it on this path today: no
-        // projection this reader passes to `readFinalizedProjection` reads it,
-        // and the candidate is never retained, the cache stamping its own
-        // `fetchedAtMs` on the fold it publishes.
+        // `fetchedAtMs` is the one field the PROJECTION type adds, so the
+        // candidate has to supply it. A fold from the log knows the answer —
+        // `dataFetchedAtMs`, the tick's head-fetch instant, up to
+        // `max(3T, 15s)` before this read — and that is what it must carry:
+        // stamping this read's clock would move the age towards zero, the
+        // single direction the field exists to forbid. `askedAtMs` is only the
+        // floor for a refresh that reported none (the live scan, which is
+        // fetching now), and the `min` keeps a store that somehow reports a
+        // future instant from under-reporting too. It is the same value the
+        // cache retains the fold under, so the candidate this predicate judges
+        // and the projection the cache ages cannot disagree.
         //
         // Exceptions PROPAGATE. A projection that throws on the fold throws
         // again on the live scan's own projection — the conditions it throws on
@@ -677,10 +787,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // later anchor only ever sees MORE of — so swallowing here would buy a
         // paid scan and then rethrow the same error, which is exactly the
         // "exceptions never become cache misses or extra paid scans" the cache
-        // documents.
-        (completed) => read({ ...completed, fetchedAtMs: askedAtMs }).complete,
+        // documents. `logFoldServes` keeps that throw deterministic across the
+        // two layers it has to cross; see its own comment.
+        (completed) => read({
+          ...completed,
+          fetchedAtMs: Math.min(askedAtMs, completed.dataFetchedAtMs ?? askedAtMs),
+        }).complete,
       ),
-    });
+    }));
     options.signal?.throwIfAborted();
     return projected;
   };

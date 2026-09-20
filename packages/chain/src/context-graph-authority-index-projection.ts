@@ -96,8 +96,14 @@ export interface ContextGraphAuthorityIndexProjectionOptions {
 export interface ContextGraphAuthorityProjectionServedEvidence {
   readonly source: 'scan' | 'cache' | 'stale-cache';
   /**
-   * Wall-clock time since the refresh began, including scan duration. This is
-   * intentionally based on `fetchedAtMs`, which is captured before any RPC.
+   * How old the DATA behind this answer is, in wall-clock milliseconds.
+   *
+   * For a refresh that asked the chain that is the time since the refresh
+   * began — captured before any RPC, so scan duration is included and the age
+   * is over-reported rather than under. For a refresh that folded rows the
+   * node-local chain event log had already fetched, it is the time since THAT
+   * fetch, which can be up to `max(3T, 15s)` more. Both are the same
+   * statement: nothing was observed about the chain more recently than this.
    */
   readonly ageMs: number;
 }
@@ -200,12 +206,56 @@ export interface ContextGraphAuthorityIndexCompletedProjection {
   /** The head the endpoint reported, with its CHAIN time in seconds. */
   readonly head: Readonly<{ number: number; hash: string; timestampSeconds: number }>;
   readonly view: ContextGraphAuthorityIndexView;
+  /**
+   * When this view's DATA was fetched, for a refresh that did not fetch it.
+   *
+   * A refresh that asks the chain is as fresh as the moment it started, which
+   * is what the cache stamps by default. A refresh that FOLDS STORED ROWS is
+   * not: the node-local chain event log answers at the anchor its background
+   * tick reached, so the data can be up to `max(3T, 15s)` older than the read
+   * that folded it. Such a refresh reports that instant here, and the cache
+   * keeps the OLDER of the two (see {@link resolveProjectionFetchedAtMs}).
+   *
+   * Omitted means "as of the refresh", which is the conservative default and
+   * exactly what every live scan wants.
+   *
+   * DELIBERATELY not named `fetchedAtMs`. That is the field the PROJECTION
+   * type adds, so a refresh assembled by spreading an existing projection —
+   * which callers and tests do — would silently inherit that projection's
+   * stamp and pin the new view to an age it never had. Opting in has to be an
+   * act, not a spread.
+   */
+  readonly dataFetchedAtMs?: number;
 }
 
 export interface ContextGraphAuthorityIndexProjection
   extends ContextGraphAuthorityIndexCompletedProjection {
-  /** Taken BEFORE the refresh started, so age is never under-reported. */
+  /**
+   * When this view's data was fetched: the OLDER of the instant taken before
+   * the refresh started and any instant the refresh itself reported. Age is
+   * therefore never under-reported, whichever side produced the view.
+   */
   readonly fetchedAtMs: number;
+}
+
+/**
+ * The stamp a completed refresh is retained and reported under.
+ *
+ * `refreshStartedAtMs` is taken before any RPC, so a scan is never younger
+ * than it. A refresh that folded stored rows may prove its data is OLDER, and
+ * only older is ever believed: a reported instant at or after the refresh
+ * started would move age towards zero, which is the one direction this field
+ * exists to forbid.
+ */
+function resolveProjectionFetchedAtMs(
+  refreshStartedAtMs: number,
+  dataFetchedAtMs: number | undefined,
+): number {
+  return dataFetchedAtMs !== undefined
+    && Number.isSafeInteger(dataFetchedAtMs)
+    && dataFetchedAtMs < refreshStartedAtMs
+    ? dataFetchedAtMs
+    : refreshStartedAtMs;
 }
 
 export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
@@ -336,7 +386,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     const state = this.#scopeState(input.scope);
     state.activeRefreshes += 1;
     const generation = state.generation;
-    const fetchedAtMs = this.#now();
+    const refreshStartedAtMs = this.#now();
     let projection: ContextGraphAuthorityIndexProjection | undefined;
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
@@ -345,16 +395,27 @@ export class ContextGraphAuthorityIndexProjectionCache {
     const initiates = state.refreshing === undefined;
     if (initiates) state.refreshing = settled;
     try {
+      const completed = await input.refresh();
+      // A refresh that FOLDED stored rows rather than fetching them answers as
+      // of the instant that data was fetched, not as of this read. Retaining
+      // and reporting it under `now` would reset its age to zero and buy it a
+      // further `tickMs` of service as a FRESH cache entry, so a view already
+      // `max(3T, 15s)` behind the chain could be served for `max(3T, 15s) + T`
+      // while every consumer was told it was under T old. The age this cache
+      // ages by is the age of the DATA.
       projection = Object.freeze({
-        ...await input.refresh(),
-        fetchedAtMs,
+        ...completed,
+        fetchedAtMs: resolveProjectionFetchedAtMs(
+          refreshStartedAtMs,
+          completed.dataFetchedAtMs,
+        ),
       });
       if (generation === state.generation) {
         this.#publish(state, projection);
       }
       input.onServed?.(Object.freeze({
         source: 'scan',
-        ageMs: Math.max(0, this.#now() - fetchedAtMs),
+        ageMs: Math.max(0, this.#now() - projection.fetchedAtMs),
       }));
     } catch (error) {
       // A caller that left did not observe an RPC failure.
@@ -406,6 +467,11 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // Once that retained head has reached T, however, keeping it would strand
     // the cache forever on a legitimate reorg/reset: every stabilized lower
     // scan would be answered to its caller but refused publication.
+    //
+    // The difference may now be NEGATIVE — a fold from the log is stamped with
+    // the tick's head-fetch instant, which can predate a live scan already
+    // retained. That is the same case, read correctly: older data at a lower
+    // head does not displace newer, and the caller is still answered.
     const previous = state.projection;
     if (
       previous !== undefined
