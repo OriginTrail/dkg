@@ -536,7 +536,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             () => provider.getBlock(cached.finalized.number),
             options.signal,
           );
-          return anchor?.hash?.toLowerCase() === cached.finalized.hash.toLowerCase();
+          if (anchor?.hash == null) return undefined;
+          return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();
         },
         { signal: options.signal },
       ),

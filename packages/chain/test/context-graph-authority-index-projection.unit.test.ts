@@ -77,6 +77,7 @@ function makeHarness(options: Readonly<{
     forkFrom: 0,
     /** Seconds the head block's own timestamp trails the wall clock. */
     headLagSeconds: 2,
+    anchorUnavailable: false,
     withoutTimestamp: false,
     events: [creation(9n, 10)] as ContextGraphAuthorityIndexEvent[],
   };
@@ -145,6 +146,7 @@ function makeHarness(options: Readonly<{
     accepts: (cached) => cached.view.has(id(contextGraphId)),
     validateAnchor: async (cached) => {
       reads.hashes.push(cached.finalized.number);
+      if (chain.anchorUnavailable) return undefined;
       return blockHash(cached.finalized.number) === cached.finalized.hash;
     },
     onServed: (evidence) => { served.push(evidence); },
@@ -562,6 +564,23 @@ describe('finalized Context Graph authority projection cache', () => {
 
     await expect(h.read()).rejects.toBe(outage);
     expect(h.served.map((evidence) => evidence.source)).toEqual(['scan']);
+  });
+
+  it('retains a warm tail when anchor validation is unavailable', async () => {
+    const h = makeHarness({ holdback: 8 });
+    const before = await h.read();
+    const outage = new Error('provider pool is down');
+    h.chain.anchorUnavailable = true;
+    h.failRefresh(outage);
+
+    await expect(h.read()).rejects.toBe(outage);
+    expect(h.reads.refreshes).toBe(2);
+
+    h.chain.anchorUnavailable = false;
+    h.failRefresh(undefined);
+    expect(await h.read()).toBe(before);
+    expect(h.reads.refreshes).toBe(2);
+    expect(h.served.map((evidence) => evidence.source)).toEqual(['scan', 'cache']);
   });
 
   it('keys by deployment and contract, never by the bare numeric id', async () => {

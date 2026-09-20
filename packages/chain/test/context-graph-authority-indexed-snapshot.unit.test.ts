@@ -1773,6 +1773,37 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     expect(harness.evidence.headReads).toEqual([30, 30]);
   });
 
+  it.each(['confirmed', 'lost its receipt'] as const)(
+    'reads its own createOnChainContextGraph write back although T has not passed (%s)',
+    async (outcome) => {
+      const harness = makeTimedAdapter();
+      const adapter = harness.adapter as any;
+      adapter.contracts.contextGraphs = {};
+      adapter.contracts.contextGraphStorage.interface = {
+        parseLog: () => ({ name: 'ContextGraphCreated', args: { contextGraphId: 10n } }),
+      };
+      adapter.sendContractTransaction = async () => {
+        if (outcome !== 'confirmed') throw new Error('receipt lookup failed');
+        return {
+          hash: `0x${'ab'.repeat(32)}`,
+          blockNumber: 31,
+          index: 0,
+          status: 1,
+          logs: [{ topics: [], data: '0x' }],
+        };
+      };
+      await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+      const write = adapter.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 });
+      await (outcome === 'confirmed'
+        ? expect(write).resolves.toMatchObject({ success: true, contextGraphId: 10n })
+        : expect(write).rejects.toThrow('receipt lookup failed'));
+      await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+      expect(harness.evidence.headReads).toEqual([30, 30]);
+    },
+  );
+
   it('misses for a rotated ContextGraphStorage address although nothing cleared the index', async () => {
     const harness = makeTimedAdapter();
     const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;

@@ -22,7 +22,6 @@ export interface SolvedPeriodObservation {
 export interface SolvedPeriodRecord {
   readonly challengePeriodEpoch: bigint;
   readonly periodStartBlock: bigint;
-  readonly periodEndBlock: bigint;
   readonly bindingId: string;
   readonly chronosEpoch: bigint;
   readonly rereadAtBlock: bigint;
@@ -138,7 +137,6 @@ export class SolvedPeriodSkip {
     this.#record = Object.freeze({
       challengePeriodEpoch: challenge.epoch,
       periodStartBlock: challenge.activeProofPeriodStartBlock,
-      periodEndBlock,
       bindingId: context.bindingId,
       chronosEpoch: context.chronosEpoch,
       rereadAtBlock: halfPeriodRereadBlock < latestOpenPeriodBlock
@@ -173,7 +171,6 @@ export class SolvedPeriodSkip {
       this.#stillBound(record, this.#now())
       && epoch === record.chronosEpoch
       && head >= record.periodStartBlock
-      && head < record.periodEndBlock
       && head < record.rereadAtBlock
     );
     if (!stillReusable) {

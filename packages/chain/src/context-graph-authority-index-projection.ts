@@ -208,10 +208,14 @@ export interface ContextGraphAuthorityIndexProjectionReadInput {
    * from a projection that was scanned for this read.
    */
   readonly accepts: (projection: ContextGraphAuthorityIndexProjection) => boolean;
-  /** Re-read the anchor before serving a projection that contains an unsettled tail. */
+  /**
+   * Re-read the anchor before serving a projection that contains an unsettled
+   * tail. `undefined` means the provider could not answer; `false` proves a
+   * mismatch and invalidates the retained projection.
+   */
   readonly validateAnchor?: (
     projection: ContextGraphAuthorityIndexProjection,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | undefined>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
   readonly refresh: () => Promise<ContextGraphAuthorityIndexCompletedProjection>;
   readonly onServed?: (evidence: ContextGraphAuthorityProjectionServedEvidence) => void;
@@ -400,7 +404,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     if (!input.accepts(projection)) return undefined;
     if (projection.requiresAnchorValidation === true) {
       if (input.validateAnchor === undefined) return undefined;
-      let anchorIsCurrent: boolean;
+      let anchorIsCurrent: boolean | undefined;
       try {
         anchorIsCurrent = await input.validateAnchor(projection);
       } catch {
@@ -409,6 +413,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
         input.signal?.throwIfAborted();
         return undefined;
       }
+      if (anchorIsCurrent === undefined) return undefined;
       if (!anchorIsCurrent) {
         // A mismatched anchor proves the tail projection belongs to a fork.
         this.drop(input.scope);
