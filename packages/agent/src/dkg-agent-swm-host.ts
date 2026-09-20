@@ -2759,6 +2759,30 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (numeric <= 0n) return;
 
     const numericStr = numeric.toString();
+    // Discard the hint ONLY when it's empty or literally the on-chain numeric
+    // id (no information) — NOT merely because it's all-digits: a public CG's
+    // local cleartext id can be numeric (e.g. "1" is a valid contextGraphId
+    // elsewhere in the repo), and rejecting it would wrongly key the row under
+    // the on-chain id and miss the hosted KA after restart.
+    const cleartextHint = swmGraphId && swmGraphId !== numericStr
+      ? swmGraphId
+      : undefined;
+    const resolveLocalCgId = (): string =>
+      this.resolveLocalCgIdByOnChainId(numeric) ?? cleartextHint ?? numericStr;
+    const alreadyRecorded = (localCgId: string): boolean => {
+      const row = this.subscribedContextGraphs.get(localCgId);
+      return row?.coreHosted === true && row.onChainId === numericStr;
+    };
+
+    // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
+    // StorageACK sign, so checking "already recorded" only after the liveness +
+    // policy reads cost two RPC requests per ACK forever on a hosted public CG,
+    // just to reach a no-op. Nothing is decided here: the row was recorded from
+    // a live-then-policy read on its first observation, and an already-recorded
+    // row is left untouched whatever the chain says now. Every path that can
+    // still RECORD a graph falls through to the fresh reads below.
+    if (alreadyRecorded(resolveLocalCgId())) return;
+
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
     // this specific CG registration is live enough for host tracking.
@@ -2776,17 +2800,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the reconciler + active-fetch would sync/promote against the wrong graph
     // and miss the KA this core already ACKed. The cleartext hint keeps the
     // row under the same id the reconciler uses.
-    // Discard the hint ONLY when it's empty or literally the on-chain numeric
-    // id (no information) — NOT merely because it's all-digits: a public CG's
-    // local cleartext id can be numeric (e.g. "1" is a valid contextGraphId
-    // elsewhere in the repo), and rejecting it would wrongly key the row under
-    // the on-chain id and miss the hosted KA after restart.
-    const cleartextHint = swmGraphId && swmGraphId !== numericStr
-      ? swmGraphId
-      : undefined;
-    const localCgId = this.resolveLocalCgIdByOnChainId(numeric) ?? cleartextHint ?? numericStr;
+    // Re-resolved after the await: the local mapping may have changed, and a
+    // concurrent first ACK for the same CG may have recorded it meanwhile.
+    const localCgId = resolveLocalCgId();
+    if (alreadyRecorded(localCgId)) return;
     const existing = this.subscribedContextGraphs.get(localCgId);
-    if (existing?.coreHosted && existing.onChainId === numericStr) return; // already recorded
 
     let next: ContextGraphSub;
     if (existing) {

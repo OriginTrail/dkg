@@ -916,6 +916,48 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     expect(evidence.staticCalls).toEqual([]);
   });
 
+  it('head-probes for the immutable deploy block ONCE — later snapshots and index projections issue no eth_blockNumber', async () => {
+    // Both indexed consumers keep only `fromBlock`. The REAL deploy-block resolver runs here
+    // (the fixture's stub is removed) so a regression to the probing variant is observable as
+    // one `getBlockNumber()` per scan — ~1:1 with authority getLogs on a receiver.
+    const { adapter, evidence, provider, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
+      secondContextGraph: true,
+    });
+    const raw = adapter as any;
+    delete raw.resolveContractDeployBlock;
+    raw.ensureConfiguredStaticChainIdValidated = async () => 31337n;
+    let headProbes = 0;
+    const codeReads: Array<number | undefined> = [];
+    raw.providers = [{
+      ...provider,
+      getBlockNumber: async () => { headProbes += 1; return 30; },
+      getCode: async (_address: string, block?: number) => {
+        codeReads.push(block);
+        return block === undefined || block >= 7 ? '0x6000' : '0x';
+      },
+    }];
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(headProbes).toBe(1); // the one-off miss: probe + binary search, as before
+    expect(codeReads.length).toBeGreaterThan(1);
+    expect(evidence.indexRanges[0]?.[0]).toBe(7); // the scan is anchored at the searched deploy block
+    const searchReads = codeReads.length;
+
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(headProbes).toBe(1); // snapshot path: cache hit, no probe
+
+    await reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]);
+    await reader.readContextGraphAuthorityIndexSnapshots!([authorityIndexId('10')]);
+    expect(headProbes).toBe(1); // index-reader dependency: cache hit, no probe
+
+    advanceAuthorityHead();
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(evidence.indexRanges.at(-1)).toEqual([31, 35]); // a real scan ran — still no probe
+    expect(headProbes).toBe(1);
+    expect(codeReads).toHaveLength(searchReads);
+  });
+
   it('bounds the ID-based snapshot network read as a physical durable RPC', async () => {
     vi.useFakeTimers();
     try {

@@ -29,9 +29,10 @@ import type {
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
-import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
+import { BoundedLruCache, floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, isEvmBlockUnavailableError } from './evm-error-text.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -96,6 +97,16 @@ import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
+
+interface ReceiptBlockTimestampReadOptions extends ChainReadOptions {
+  readonly blockHash?: string;
+}
+
+interface ReceiptBlockHeader {
+  readonly number: number;
+  readonly hash: string;
+  readonly timestamp?: number;
+}
 
 type ContractWriteSender = (
   contract: Contract,
@@ -293,6 +304,9 @@ import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 // replacing four hidden ethers subscription pollers with one owned log poller.
 const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
+
+/** Memory bound for the by-hash receipt block headers; entries never go stale. */
+const RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES = 256;
 
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
@@ -910,6 +924,14 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
+  /**
+   * Headers the receipt finality read already fetched, keyed by lowercase block
+   * hash. The stored height is checked before reuse so a mismatched identity
+   * pair cannot return a plausible timestamp for the wrong requested block.
+   */
+  protected readonly receiptBlockHeadersByHash =
+    new BoundedLruCache<string, ReceiptBlockHeader>(RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES);
+
   /** Lazily constructed by the base-owned internal accessor below. */
   protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
 
@@ -1010,6 +1032,7 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
+    this.receiptBlockHeadersByHash.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
@@ -1355,9 +1378,13 @@ export class EVMChainAdapterBase {
             read,
             options,
           ),
-          resolveContractDeployBlock: (address, operationLabel, contractLabel) => (
-            this.resolveContractDeployBlock(address, operationLabel, contractLabel)
-          ),
+          // The index reader consumes only the deploy block: no head probe on a cache hit.
+          resolveContractDeployBlockNumber: (address, operationLabel, contractLabel) =>
+            this.resolveContractDeployBlockNumber(
+              address,
+              operationLabel,
+              contractLabel,
+            ),
           pageSize: () => this.cgRegistryScanPageSize,
           finalityConfirmations: () => this.finalityConfirmations,
         });
@@ -1647,6 +1674,52 @@ export class EVMChainAdapterBase {
     return contract.connect(runner) as Contract;
   }
 
+  /** One finality decision shared by polling and public checks; also memoizes the observed header. */
+  protected async readFinalCanonicalReceiptBlock(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    options: ChainReadOptions & { deadlineMs?: number },
+  ): Promise<boolean> {
+    const resolved = await this.readProviderRetryingNull(
+      'publish receipt finality',
+      async (provider) => {
+        const requiredBlockNumber = requiredHeadBlockForReceipt(
+          receipt.blockNumber,
+          this.finalityConfirmations,
+        );
+        let providerHead: number | undefined;
+        if (requiredBlockNumber > receipt.blockNumber) {
+          providerHead = await provider.getBlockNumber();
+          if (providerHead < requiredBlockNumber) return null;
+        }
+        let atHeight;
+        try {
+          atHeight = await provider.getBlock(receipt.blockNumber);
+        } catch (error) {
+          if (isEvmBlockUnavailableError(error)) {
+            // Some clients report an above-head block as an error rather than
+            // null. Confirm that narrow condition before treating it as the
+            // nullable failover signal: the same bare message from an endpoint
+            // already at this height indicates a sync/restart fault and must
+            // surface instead of turning into a ten-minute receipt poll.
+            providerHead ??= await provider.getBlockNumber();
+            if (providerHead < receipt.blockNumber) return null;
+          }
+          throw error;
+        }
+        if (!atHeight?.hash) return null;
+        const header = Object.freeze({
+          number: atHeight.number,
+          hash: atHeight.hash.toLowerCase(),
+          ...(atHeight.timestamp == null ? {} : { timestamp: Number(atHeight.timestamp) }),
+        });
+        this.receiptBlockHeadersByHash.set(header.hash, header);
+        return header.hash === receipt.blockHash.toLowerCase();
+      },
+      { signal: options.signal, deadlineMs: options.deadlineMs },
+    );
+    return resolved === true;
+  }
+
   protected async waitForReceiptWithFailover(
     txHash: string,
     label: string,
@@ -1656,10 +1729,8 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
-      isReceiptEligible: (receipt, { deadlineMs }) => this.isReceiptBlockFinalAndCanonical(
-        receipt,
-        { deadlineMs },
-      ),
+      isReceiptEligible: (receipt, { deadlineMs }) =>
+        this.readFinalCanonicalReceiptBlock(receipt, { deadlineMs }),
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
@@ -1671,26 +1742,18 @@ export class EVMChainAdapterBase {
    * Return true only when the receipt has the configured canonical depth.
    * The head and block-hash reads use one provider, so a reorg cannot splice
    * facts from different endpoints into a successful result.
+   *
+   * At depth 1 the required head IS the receipt block, so the block-hash read
+   * alone decides: a provider that serves a block at that height has a head at
+   * or above it, and a provider that has not reached it answers null exactly as
+   * the head comparison did. The separate `eth_blockNumber` (one per mined tx)
+   * is therefore issued only for depths > 1, where it is still the proof.
    */
   async isReceiptBlockFinalAndCanonical(
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return (await this.readProviderRetryingNull(
-      'publish receipt finality',
-      async (provider) => {
-        const latestBlockNumber = await provider.getBlockNumber();
-        const requiredBlockNumber = requiredHeadBlockForReceipt(
-          receipt.blockNumber,
-          this.finalityConfirmations,
-        );
-        if (latestBlockNumber < requiredBlockNumber) return null;
-        const atHeight = await provider.getBlock(receipt.blockNumber);
-        if (!atHeight?.hash) return null;
-        return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
-      },
-      { signal: options.signal, deadlineMs: options.deadlineMs },
-    )) ?? false;
+    return this.readFinalCanonicalReceiptBlock(receipt, options);
   }
 
   protected async signPopulatedTransaction(
@@ -3055,8 +3118,21 @@ export class EVMChainAdapterBase {
 
   protected async getBlockTimestamp(
     blockNumber: number,
-    options: ChainReadOptions = {},
+    options: ReceiptBlockTimestampReadOptions = {},
   ): Promise<number> {
+    // The receipt finality check usually fetched this very block a moment ago.
+    // Reuse its timestamp only when the caller names the block by HASH (from the
+    // receipt): the hash commits to the timestamp, so this can never serve a
+    // reorged-out header. A miss falls through to the by-number read unchanged.
+    // An already-aborted caller rejects here exactly as the read below would
+    // have: a memo hit must not turn a cancelled call into an answer.
+    options.signal?.throwIfAborted();
+    const remembered = options.blockHash == null
+      ? undefined
+      : this.receiptBlockHeadersByHash.get(options.blockHash.toLowerCase());
+    if (remembered?.number === blockNumber && remembered.timestamp !== undefined) {
+      return remembered.timestamp;
+    }
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most
     // likely to already have the block). It is NOT a `skipPreferred` tip read:
@@ -3462,6 +3538,27 @@ export class EVMChainAdapterBase {
     return { head: reachable[0].backendHead, scanProviders: reachable };
   }
 
+  /**
+   * Deploy block ONLY, for callers that anchor a scan's lower bound and take
+   * their head from elsewhere (the authority index/snapshot paths discard
+   * `head`/`scanProviders`). A cached deploy block is immutable, so a hit is
+   * answered without `resolveContractDeployBlock`'s per-backend
+   * `eth_blockNumber` probe — that probe's result was thrown away on every
+   * authority scan. A miss (first resolution, or the uncached degraded `0`)
+   * still takes the full probe + search below, unchanged.
+   */
+  protected async resolveContractDeployBlockNumber(
+    address: string,
+    operationLabel: string,
+    contractLabel: string,
+  ): Promise<number> {
+    const cached = this.cachedContractDeployBlocks.get(
+      this.#contractDeployBlockCacheKey(address),
+    );
+    if (cached !== undefined) return cached;
+    return (await this.resolveContractDeployBlock(address, operationLabel, contractLabel)).fromBlock;
+  }
+
   protected async resolveContractDeployBlock(
     address: string,
     operationLabel: string,
@@ -3515,7 +3612,7 @@ export class EVMChainAdapterBase {
     // 2. Deploy block (immutable): cache hit, else binary-search a backend that
     //    serves historical getCode — each search uses ITS OWN head (self-
     //    consistent); fail over across backends, freshest-first.
-    const cacheKey = address.toLowerCase();
+    const cacheKey = this.#contractDeployBlockCacheKey(address);
     const cached = this.cachedContractDeployBlocks.get(cacheKey);
     if (cached !== undefined) return { fromBlock: cached, head, scanProviders: reachable };
     let throttle: unknown; // a transient rate-limit/throttle seen during the search
@@ -3584,6 +3681,10 @@ export class EVMChainAdapterBase {
     const scanProviders = reachable.filter((r) => !throttledProviders.has(r.provider));
     if (scanProviders.length === 0) throw throttle;
     return { fromBlock: 0, head, scanProviders, degradedFromGenesis: true };
+  }
+
+  #contractDeployBlockCacheKey(address: string): string {
+    return address.toLowerCase();
   }
 
   /**
@@ -4042,7 +4143,10 @@ export class EVMChainAdapterBase {
     // estimate). Absent for a non-PCA publish → the UI badge degrades hidden.
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    const blockTimestamp = await this.getBlockTimestamp(
+      receipt.blockNumber,
+      { blockHash: receipt.blockHash },
+    );
 
     return {
       batchId: kaId,
@@ -4078,6 +4182,25 @@ export class EVMChainAdapterBase {
 
   isRandomSamplingReady(): boolean {
     return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
+  }
+
+  /** Synchronous identity derived from the handles that reads actually use. */
+  getRandomSamplingBindingId(): string | undefined {
+    const rsTarget = this.contracts.randomSampling?.target;
+    const rssTarget = this.contracts.randomSamplingStorage?.target;
+    if (typeof rsTarget !== 'string' || typeof rssTarget !== 'string') return undefined;
+    return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
+  }
+
+  async getCurrentEpoch(): Promise<bigint> {
+    if (!this.contracts.chronos) {
+      this.contracts.chronos = await this.resolveContract('Chronos');
+    }
+    return BigInt(await this.readContract(
+      this.contracts.chronos,
+      'chronos.getCurrentEpoch',
+      'getCurrentEpoch',
+    ));
   }
 
   async getBlockNumber(): Promise<number> {

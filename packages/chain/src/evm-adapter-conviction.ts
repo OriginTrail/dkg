@@ -251,12 +251,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       let discountedCost = (baseCost * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
       if (discountedCost === 0n && baseCost > 0n) discountedCost = 1n;
 
-      if (!this.contracts.chronos) {
-        this.contracts.chronos = await this.resolveContract('Chronos');
-      }
-      const currentEpoch: bigint = BigInt(await this.readContract(
-        this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
-      ));
+      const currentEpoch = await this.getCurrentEpoch();
       const remaining: bigint = await this.readContract(
         this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRemainingAllowance',
         'getRemainingAllowance', accountId, currentEpoch,
@@ -432,12 +427,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
             );
             info.primaryNode = BigInt(acct[9]);
             info.lastPrimaryNodeChangeEpoch = Number(acct[10]);
-            if (!this.contracts.chronos) {
-              this.contracts.chronos = await this.resolveContract('Chronos');
-            }
-            const currentEpoch: bigint = BigInt(await this.readContract(
-              this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
-            ));
+            const currentEpoch = await this.getCurrentEpoch();
             info.currentEpoch = Number(currentEpoch);
             info.remainingAllowance = BigInt(await this.readContract(
               convictionNft, 'pcaNFT.getRemainingAllowance',
