@@ -66,7 +66,23 @@ describe('DKGAgent chain cursor wiring', () => {
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);
     expect((agent as any).chain.contextGraphAuthorityIndex?.projectionTickMs).toBe(12_000);
-    expect((agent as any).chain.chainEventLogStore).toBe(chainEventLogStore);
+    // The adapter delegates ownership of the durable store to the extracted
+    // runtime owner. Exercise that boundary instead of asserting the removed
+    // adapter implementation field.
+    let receivedStore: unknown;
+    const runtime = {
+      binding: undefined,
+      start: vi.fn(),
+      stop: vi.fn(async () => {}),
+    };
+    const owner = (agent as any).chain.chainIndexOwner;
+    owner.start(async (store: unknown) => {
+      receivedStore = store;
+      return runtime;
+    });
+    await owner.starting;
+    expect(receivedStore).toBe(chainEventLogStore);
+    expect(runtime.start).toHaveBeenCalledOnce();
     expect((agent as any).chain.indexTickMs).toBe(12_000);
   });
 

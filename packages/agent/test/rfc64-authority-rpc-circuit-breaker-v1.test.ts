@@ -274,6 +274,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
           timestampSeconds: Math.floor(clock.now / 1_000),
         },
         view: {} as never,
+        origin: { kind: 'scan' as const },
       });
       const read = (
         cache: ContextGraphAuthorityIndexProjectionCache,
@@ -380,7 +381,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
           timestampSeconds: Math.floor(clock.now / 1_000),
         },
         view: {} as never,
-        dataFetchedAtMs,
+        origin: { kind: 'log' as const, dataFetchedAtMs },
       });
       const evidence: { source: string; ageMs: number }[] = [];
       const readFold = async (
@@ -419,7 +420,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       // fetch post-dates the exhaustion, and this one's does.
       clock.now = 10_200;
       await breaker.run(undefined, async (_signal, probe) => {
-        await readFold(probe.agentReadOptions().onContextGraphAuthorityProjectionServed);
+        await readFold(probe.agentResolverReadOptions().onContextGraphAuthorityProjectionServed);
         return 're-served-fold';
       });
       expect(breaker.snapshot()).toMatchObject({
@@ -431,7 +432,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       // And a real scan still closes it, so this is a truthfulness fix and not
       // a circuit that can no longer recover.
       await breaker.run(undefined, async (_signal, probe) => {
-        probe.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+        probe.agentResolverReadOptions().onContextGraphAuthorityProjectionServed?.({
           source: 'scan', ageMs: 0,
         });
         return 'scanned';
