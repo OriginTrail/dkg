@@ -5134,6 +5134,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.hubBindingGeneration += 1;
     this.knowledgeAssetStorageBindingGeneration += 1;
     this.hubRotationPoller.stop();
     // The owner disowns an in-flight build, clears the binding synchronously,

@@ -356,6 +356,68 @@ it('does not serve a late block context after same-address Chronos ABA during th
   await expect(pending).resolves.toBeUndefined();
 });
 
+it('does not publish a late Chronos schedule after adapter teardown', async () => {
+  const chain = adapter();
+  (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
+  (chain as any).contracts.randomSamplingStorage = new Contract(
+    deployedAddresses.RandomSamplingStorage!,
+    [],
+  );
+  (chain as any).contracts.chronos = new Contract(
+    '0x0000000000000000000000000000000000000005',
+    [],
+  );
+  const startGate = deferred<bigint>();
+  const entered = deferred<void>();
+  vi.spyOn(chain as any, 'readContract').mockImplementation(
+    async (_contract: unknown, label: string) => {
+      if (label === 'chronos.startTime') {
+        entered.resolve();
+        return startGate.promise;
+      }
+      return 10n;
+    },
+  );
+  vi.spyOn(chain as any, 'readTipProvider').mockResolvedValue({ number: 17, timestamp: 119 });
+
+  const pending = chain.getRandomSamplingReadContextReader().readRandomSamplingBlockContext!();
+  await entered.promise;
+  chain.destroy();
+  startGate.resolve(100n);
+
+  await expect(pending).resolves.toBeUndefined();
+  expect((chain as any).randomSamplingChronosSchedule).toBeUndefined();
+});
+
+it('does not return a late Random Sampling block context after adapter teardown', async () => {
+  const chain = adapter();
+  (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
+  (chain as any).contracts.randomSamplingStorage = new Contract(
+    deployedAddresses.RandomSamplingStorage!,
+    [],
+  );
+  (chain as any).contracts.chronos = new Contract(
+    '0x0000000000000000000000000000000000000005',
+    [],
+  );
+  vi.spyOn(chain as any, 'readContract').mockImplementation(
+    async (_contract: unknown, label: string) => label === 'chronos.startTime' ? 100n : 10n,
+  );
+  const headGate = deferred<{ number: number; timestamp: number }>();
+  const entered = deferred<void>();
+  vi.spyOn(chain as any, 'readTipProvider').mockImplementation(async () => {
+    entered.resolve();
+    return headGate.promise;
+  });
+
+  const pending = chain.getRandomSamplingReadContextReader().readRandomSamplingBlockContext!();
+  await entered.promise;
+  chain.destroy();
+  headGate.resolve({ number: 17, timestamp: 119 });
+
+  await expect(pending).resolves.toBeUndefined();
+});
+
 it('fails a real adapter context read open when the pair rotates during the epoch read', async () => {
   const chain = adapter();
   const reader = chain.getRandomSamplingReadContextReader();
