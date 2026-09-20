@@ -569,6 +569,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
      * it from when its data was fetched, `onServed` reports that age, and it
      * can never be re-served as a FRESH cache entry for a further T.
      *
+     * That field is also the cache's PROVENANCE signal: supplying it is this
+     * path declaring "I folded stored rows, I fetched nothing", which is why
+     * `onServed` reports `log` for this answer and never `scan`. An answer
+     * that touched no endpoint may not be handed to a consumer as evidence
+     * that the endpoints are alive — the RFC-64 authority circuit breaker is
+     * one, and a fold reported as `scan` could close it while every endpoint
+     * was still down.
+     *
      * `undefined` means the caller consumes no view (the durable refresh), so
      * there is no absence for it to mistake.
      */

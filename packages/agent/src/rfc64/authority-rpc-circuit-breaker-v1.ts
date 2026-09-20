@@ -50,8 +50,9 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    configured tick, and it counts as health provided that scan started AFTER the
    *    outstanding exhaustion. Without this, a node served entirely from the
    *    cache would keep being judged by a failure it has long recovered from.
-   *  - anything else — `stale-cache` (the refresh FAILED and an older
-   *    projection answered instead) or a cache hit that predates the
+   *  - anything else — `log` (folded from the node-local chain event log,
+   *    which contacted no endpoint), `stale-cache` (the refresh FAILED and an
+   *    older projection answered instead) or a cache hit that predates the
    *    exhaustion: the operation succeeds for its caller but proves nothing
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
@@ -231,9 +232,42 @@ export class Rfc64AuthorityReadCoordinatorV1 {
               poolEvidence.value = 'unproven';
             }
           } else {
+            // `log`, `stale-cache`, a cache hit that predates the exhaustion —
+            // and, DELIBERATELY, any member added to `source` later. The
+            // default here is the non-proof side, so a new way of answering an
+            // authority read cannot close this circuit by being unrecognised.
+            //
+            // WHY `log` GETS NO CREDIT AT ALL, rather than the dated treatment
+            // `cache` gets above. A `cache` entry's provenance is exact: some
+            // earlier `durablePagedLogScan` through THIS pool produced it, and
+            // `ageMs` dates that scan, so "it started after the exhaustion" is
+            // a real statement about the thing this breaker governs. A `log`
+            // fold has no such scan behind it. Its only fetch instant belongs
+            // to the background chain-index tick — a different actor, in a
+            // provider session this operation never opened, running
+            // `watchdogPointRead` (capped at 4s) where the authority read runs
+            // an uncapped paged scan. A pool that still answers cheap capped
+            // point reads while heavy uncapped scans exhaust is not a corner
+            // case; it is the ordinary shape of a rate-limited endpoint, and
+            // `resolveCapMs` separates the two policies precisely because they
+            // fail apart. Crediting the tick's heartbeat would let the circuit
+            // reopen on each exhaustion and close again on each tick commit —
+            // decorative exactly while the pool is degraded, which is the one
+            // time it has to hold.
+            //
+            // Staying unproven is cheap: half-open still ADMITS reads once the
+            // retry deadline passes (`now < #retryAtMs` is what refuses them),
+            // so the cost is only that the next exhaustion escalates from the
+            // current backoff step instead of the base. The log refuses past
+            // `max(3T, 15s)` and on any coverage, depth or lineage gap, so a
+            // genuine recovery produces a genuine `scan` soon enough to close
+            // this honestly.
+            //
             // Sticky for this whole compound operation: later subreads cannot
-            // turn an answer served despite a failed refresh into proof of
-            // pool recovery. A subsequent operation may prove recovery.
+            // turn an answer that proved nothing into proof of pool recovery,
+            // and — the case that matters on the `chainReadOptions` path — it
+            // voids the eager `markRpcAttempt` taken before the read. A
+            // subsequent operation may prove recovery.
             poolEvidence.value = 'unproven';
           }
         };

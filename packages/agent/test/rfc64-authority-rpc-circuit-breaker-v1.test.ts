@@ -338,6 +338,107 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       });
     });
 
+    it('keeps the circuit open when the one log serves while the pool is exhausted', async () => {
+      // A fold out of node-local SQLite rows contacted NO endpoint. Reported
+      // as `scan` it closed this circuit unconditionally (`provePool()`), so a
+      // node answering every authority read from its own log looked healthy
+      // while every provider was down — and then the whole refresh fan-out was
+      // re-admitted against a pool that had never recovered.
+      //
+      // The anchor here is stamped AFTER the exhaustion on purpose. That is
+      // the discriminating case: it is exactly when a `cache`-shaped branch
+      // (prove if the fetch post-dates `#exhaustedAtMs`) would have credited
+      // the fold. It must not, because the instant belongs to the background
+      // tick's capped point read, not to a paged scan through this pool.
+      const scope = 'deployment:0x0000000000000000000000000000000000000002';
+      const clock = { now: 10_000 };
+      const breaker = new Rfc64AuthorityReadCoordinatorV1({
+        baseBackoffMs: 100,
+        maxBackoffMs: 800,
+        jitterRatio: 0,
+        now: () => clock.now,
+      });
+      await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+        .rejects.toBeInstanceOf(ChainRpcTransportError);
+      clock.now = 10_100;
+      expect(breaker.snapshot().state).toBe('half-open');
+
+      const cache = new ContextGraphAuthorityIndexProjectionCache({
+        tickMs: T,
+        now: () => clock.now,
+      });
+      // What the log fast path hands the cache: a completed projection that
+      // declares the instant its DATA was fetched, because it fetched none.
+      const folded = (dataFetchedAtMs: number) => async () => ({
+        scope,
+        chainId: '31337',
+        contractAddress: '0x0000000000000000000000000000000000000002',
+        finalized: { number: 10, hash: `0x${'10'.repeat(32)}` },
+        head: {
+          number: 10,
+          hash: `0x${'10'.repeat(32)}`,
+          timestampSeconds: Math.floor(clock.now / 1_000),
+        },
+        view: {} as never,
+        dataFetchedAtMs,
+      });
+      const evidence: { source: string; ageMs: number }[] = [];
+      const readFold = async (
+        forward: Parameters<ContextGraphAuthorityIndexProjectionCache['read']>[0]['onServed'],
+      ) => cache.read({
+        scope,
+        project: (projection) => ({ complete: true, value: projection }),
+        // 50ms after the exhaustion: newer than `#exhaustedAtMs`, and still a fold.
+        refresh: folded(10_050),
+        onServed: (served) => {
+          evidence.push({ ...served });
+          forward?.(served);
+        },
+      });
+
+      await breaker.run(undefined, async (_signal, probe) => {
+        // Building `chainReadOptions` IS the eager `markRpcAttempt` — the
+        // hazard at the top of this path. Nothing else here proves the pool,
+        // so if the fold merely declined to prove it, that mark would stand
+        // and the circuit would close on a read that touched no endpoint. The
+        // fold has to VOID it.
+        const options = probe.chainReadOptions();
+        await readFold(options.onContextGraphAuthorityProjectionServed);
+        return 'folded-from-the-log';
+      });
+      // The BEHAVIOUR first, so a regression reports what actually broke — a
+      // circuit closed by local rows — rather than only a changed string.
+      expect(breaker.snapshot()).toMatchObject({
+        state: 'half-open',
+        consecutiveExhaustions: 1,
+      });
+      expect(evidence).toEqual([{ source: 'log', ageMs: 50 }]);
+
+      // The RETAINED fold, re-served by `#serve` inside the same tick. It must
+      // not be relabelled `cache` on the way out: `cache` is credited when its
+      // fetch post-dates the exhaustion, and this one's does.
+      clock.now = 10_200;
+      await breaker.run(undefined, async (_signal, probe) => {
+        await readFold(probe.agentReadOptions().onContextGraphAuthorityProjectionServed);
+        return 're-served-fold';
+      });
+      expect(breaker.snapshot()).toMatchObject({
+        state: 'half-open',
+        consecutiveExhaustions: 1,
+      });
+      expect(evidence.at(-1)).toEqual({ source: 'log', ageMs: 150 });
+
+      // And a real scan still closes it, so this is a truthfulness fix and not
+      // a circuit that can no longer recover.
+      await breaker.run(undefined, async (_signal, probe) => {
+        probe.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+          source: 'scan', ageMs: 0,
+        });
+        return 'scanned';
+      });
+      expect(breaker.snapshot().state).toBe('closed');
+    });
+
     it('forwards real adapter projection evidence through stale fallback and recovery', async () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(10_000);

@@ -88,22 +88,43 @@ export interface ContextGraphAuthorityIndexProjectionOptions {
 }
 
 /**
- * How one finalized authority read was answered. `scan` exercised the RPC pool
- * now; `cache` was answered by a projection still inside its configured tick;
- * `stale-cache` was answered DESPITE a failed refresh and therefore proves
- * nothing about the pool.
+ * How one finalized authority read was answered.
+ *
+ *  - `scan` exercised the RPC pool NOW. This is the only member that is a
+ *    first-hand statement about the pool's liveness.
+ *  - `cache` was answered by a projection still inside its configured tick.
+ *    Second-hand, but its provenance is exact: some earlier `scan` of this
+ *    same read class produced it, and {@link ageMs} dates that scan.
+ *  - `log` was FOLDED out of the node-local chain event log's stored rows.
+ *    It contacted no endpoint at all — that is the entire point of it — so it
+ *    proves nothing whatever about the pool. The only fetch instant it can
+ *    offer belongs to the background chain-index tick, which is a DIFFERENT
+ *    actor running a DIFFERENT read policy (`watchdogPointRead`, capped) in a
+ *    provider session this read never opened. A consumer must not read it as
+ *    liveness; see the RFC-64 authority circuit breaker, which treats it as no
+ *    signal.
+ *  - `stale-cache` was answered DESPITE a failed refresh, and is therefore
+ *    evidence AGAINST the pool.
+ *
+ * ONLY `scan` and `cache` carry pool liveness. A consumer that switches on
+ * this field must default to the non-proof side, so that a member added later
+ * cannot be mistaken for health by omission.
  */
 export interface ContextGraphAuthorityProjectionServedEvidence {
-  readonly source: 'scan' | 'cache' | 'stale-cache';
+  readonly source: 'scan' | 'cache' | 'log' | 'stale-cache';
   /**
    * How old the DATA behind this answer is, in wall-clock milliseconds.
    *
    * For a refresh that asked the chain that is the time since the refresh
    * began — captured before any RPC, so scan duration is included and the age
-   * is over-reported rather than under. For a refresh that folded rows the
-   * node-local chain event log had already fetched, it is the time since THAT
-   * fetch, which can be up to `max(3T, 15s)` more. Both are the same
-   * statement: nothing was observed about the chain more recently than this.
+   * is over-reported rather than under. For a `log` fold it is the time since
+   * the TICK fetched the head, which can be up to `max(3T, 15s)` more. Both
+   * are the same statement: nothing was observed about the chain more recently
+   * than this.
+   *
+   * It dates the OBSERVATION, never the observer. On a `log` fold the instant
+   * it points at belongs to the background tick, so it cannot be read as "this
+   * read reached the pool then" — that is what {@link source} is for.
    */
   readonly ageMs: number;
 }
@@ -256,6 +277,33 @@ function resolveProjectionFetchedAtMs(
     && dataFetchedAtMs < refreshStartedAtMs
     ? dataFetchedAtMs
     : refreshStartedAtMs;
+}
+
+/**
+ * Whether this view was FOLDED out of stored rows instead of fetched.
+ *
+ * The discriminator is the PRESENCE of `dataFetchedAtMs`, not the stamp
+ * {@link resolveProjectionFetchedAtMs} derived from it. Supplying that field
+ * is a refresh declaring "I did not fetch this now" — which is exactly the
+ * question `source` answers — and it is opt-in, so a live scan can never
+ * acquire it by accident (the field is deliberately not named `fetchedAtMs`;
+ * see its own comment).
+ *
+ * Deriving the source from the stamp instead would be wrong in the one case
+ * the resolver rejects: a reported instant at or after the refresh started
+ * (a wall clock that stepped backwards) falls back to `refreshStartedAtMs`,
+ * and a stamp-based test would then read that fold as a live scan and hand a
+ * consumer proof of a pool nothing touched. Only the AGE may fall back; the
+ * provenance never does.
+ *
+ * It survives publication: `ContextGraphAuthorityIndexProjection` extends the
+ * completed shape, and `#refresh` retains the completed projection by spread,
+ * so a fold re-served from the cache one tick later is still known to be one.
+ */
+function projectionFoldedStoredRows(
+  projection: ContextGraphAuthorityIndexCompletedProjection,
+): boolean {
+  return projection.dataFetchedAtMs !== undefined;
 }
 
 export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
@@ -413,8 +461,13 @@ export class ContextGraphAuthorityIndexProjectionCache {
       if (generation === state.generation) {
         this.#publish(state, projection);
       }
+      // `scan` is a claim about the POOL, not about where the answer came
+      // from, so a fold may not make it. The log path reaches SQLite and
+      // nothing else; reporting it as a scan let a consumer read local rows as
+      // proof that every endpoint was alive, which is the one thing a fold
+      // cannot witness.
       input.onServed?.(Object.freeze({
-        source: 'scan',
+        source: projectionFoldedStoredRows(completed) ? 'log' : 'scan',
         ageMs: Math.max(0, this.#now() - projection.fetchedAtMs),
       }));
     } catch (error) {
@@ -516,8 +569,16 @@ export class ContextGraphAuthorityIndexProjectionCache {
     }
     const projected = input.project(projection);
     if (!projected.complete) return PROJECTION_CACHE_MISS;
+    // A RETAINED fold is still a fold. Labelling it `cache` here would relaunder
+    // exactly what `#refresh` above stopped: `cache` tells a consumer that some
+    // scan of this read class produced the entry and that `ageMs` dates that
+    // scan, and neither is true of rows the tick folded. `stale-cache` wins when
+    // it applies, because "a refresh FAILED" is the stronger statement — it is
+    // evidence against the pool, where a fold is merely silent about it.
     input.onServed?.(Object.freeze({
-      source: fresh ? 'cache' : 'stale-cache',
+      source: !fresh
+        ? 'stale-cache'
+        : (projectionFoldedStoredRows(projection) ? 'log' : 'cache'),
       ageMs,
     }));
     return { hit: true, value: projected.value };

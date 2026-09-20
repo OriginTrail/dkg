@@ -472,14 +472,52 @@ describe('Context Graph authority index over the one log', () => {
     });
 
     expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH, served)).toBe(7n);
-    expect(evidence).toEqual([{ source: 'scan', ageMs: 5_000 }]);
+    expect(evidence).toEqual([{ source: 'log', ageMs: 5_000 }]);
 
     // 1.5s later the fold is 6.5s old — past the tick the cache answers within.
     clock.nowMs = NOW_MS + 1_500;
     expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH, served)).toBe(7n);
-    expect(evidence[1]).toEqual({ source: 'scan', ageMs: 6_500 });
+    expect(evidence[1]).toEqual({ source: 'log', ageMs: 6_500 });
     // Truthfulness is not paid for in RPC: both reads still cost nothing.
     expect(evidence.map((e) => e.source)).not.toContain('cache');
+    expect(calls.getLogs).toBe(0);
+    expect(calls.getBlock).toBe(0);
+  });
+
+  it('never reports a fold as a scan, whether it is fresh, retained or both', async () => {
+    // `scan` is the ONE member that means "this read exercised the RPC pool",
+    // and the RFC-64 authority circuit breaker closes on it unconditionally.
+    // A fold exercises nothing, so it may not carry that word on any path out
+    // of the cache — not from `#refresh`, and not from `#serve` one read later
+    // when the retained fold is still inside the tick and would otherwise be
+    // relabelled `cache` (which the breaker credits whenever the fetch
+    // post-dates the outage).
+    const clock = { nowMs: NOW_MS };
+    // 1s old: comfortably inside T, so `#serve` would call the retained entry
+    // FRESH and the `cache` relabel is live rather than hypothetical.
+    const store = seededStore({ fetchedAtMs: NOW_MS - 1_000 });
+    const evidence: ContextGraphAuthorityProjectionServedEvidence[] = [];
+    const served = { onContextGraphAuthorityProjectionServed: (e: typeof evidence[number]) => { evidence.push(e); } };
+    const { reader, calls } = makeReader({
+      store,
+      source: logSource(store, { now: () => clock.nowMs }),
+      now: () => clock.nowMs,
+    });
+
+    // Pass 1 folds and publishes; pass 2 is answered by `#serve` from what
+    // pass 1 retained — no second anchor resolution, no second fold.
+    expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH, served)).toBe(7n);
+    clock.nowMs = NOW_MS + 500;
+    expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH, served)).toBe(7n);
+
+    expect(evidence).toEqual([
+      { source: 'log', ageMs: 1_000 },
+      { source: 'log', ageMs: 1_500 },
+    ]);
+    // Both ages are under T, so the second answer really did take the `fresh`
+    // branch of `#serve` — it is `log` because of its PROVENANCE, not because
+    // it aged out into `stale-cache`.
+    expect(evidence.every((e) => e.ageMs < 6_000)).toBe(true);
     expect(calls.getLogs).toBe(0);
     expect(calls.getBlock).toBe(0);
   });
