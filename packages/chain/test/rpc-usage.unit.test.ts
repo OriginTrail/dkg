@@ -29,9 +29,11 @@ import {
   normalizeRpcUsageConsumer,
   RPC_ENDPOINT_SLOT_LABELS,
   rpcUsageWindowTotal,
+  RpcUsageCumulativeAccumulator,
   RpcUsageTracker,
   type RpcUsageDrainable,
   withRpcUsageConsumer,
+  withRpcUsageAdapterRole,
   withRpcUsageSite,
 } from '../src/rpc-usage.js';
 import {
@@ -310,6 +312,158 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(w.byMethod['eth_call']).toBe(1);
     expect(w.byMethod['debug_traceTransaction']).toBe(1); // NOT sanitized to 'other'
     expect(w.byMethod['other']).toBe(2);
+  });
+
+  it('non-draining cumulative snapshots remain stable across repeated snapshots and drains', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-fixed');
+    const t = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
+    withRpcUsageConsumer('unit.header', () => t.record('eth_getBlockByNumber'));
+    t.record('eth_call');
+
+    const clock = {
+      utcNow: () => new Date('2026-09-20T12:00:00.000Z'),
+      monotonicNowMs: () => 123,
+    };
+    const beforeDrain = cumulative.snapshot(clock);
+    const repeated = cumulative.snapshot(clock);
+    expect(repeated).toEqual(beforeDrain);
+    expect(t.drainWindow().byMethod).toEqual({ eth_getBlockByNumber: 1, eth_call: 1 });
+    expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
+    expect(t.drainWindow().byMethod).toEqual({});
+    expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
+    expect(beforeDrain).toEqual({
+      schemaVersion: 1,
+      processEpoch: 'epoch-fixed',
+      capturedAtUtc: '2026-09-20T12:00:00.000Z',
+      capturedAtMonotonicMs: 123,
+      completeness: {
+        complete: true,
+        reasons: [],
+        populationEpoch: 1,
+        sources: {
+          mainAgent: { status: 'included', totalRegisteredTrackers: 1, totalsRetained: true },
+          publisherWallets: { status: 'included', totalRegisteredTrackers: 0, totalsRetained: true },
+          routeRuntimes: { status: 'included', totalRegisteredTrackers: 0, totalsRetained: true },
+          other: { status: 'included', totalRegisteredTrackers: 0, totalsRetained: true },
+        },
+      },
+      cumulative: {
+        methods: { eth_getBlockByNumber: 1, eth_call: 1 },
+        consumers: {
+          eth_getBlockByNumber: { 'unit.header': 1 },
+          eth_call: { unattributed: 1 },
+        },
+        adapterRoles: {
+          eth_getBlockByNumber: { main_agent: 1 },
+          eth_call: { main_agent: 1 },
+        },
+      },
+    });
+    expect(Object.isFrozen(beforeDrain)).toBe(true);
+    expect(Object.isFrozen(beforeDrain.cumulative.methods)).toBe(true);
+    expect(Object.isFrozen(beforeDrain.cumulative.consumers.eth_call)).toBe(true);
+  });
+
+  it('retains retired tracker attempts and separates bounded adapter roles exactly once', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-lifecycle');
+    const retired = new RpcUsageTracker(() => 'evm:31337', 'publisher_wallet', cumulative);
+    retired.record('eth_call');
+    retired.record('eth_getBlockByHash');
+    retired.drainWindow();
+
+    const replacement = new RpcUsageTracker(() => 'evm:31337', 'publisher_wallet', cumulative);
+    replacement.record('eth_call');
+    const route = new RpcUsageTracker(() => 'evm:31337', 'route_runtime', cumulative);
+    route.record('eth_blockNumber');
+
+    const snapshot = cumulative.snapshot();
+    expect(snapshot.completeness).toMatchObject({
+      populationEpoch: 3,
+      sources: {
+        mainAgent: { totalRegisteredTrackers: 0 },
+        publisherWallets: { totalRegisteredTrackers: 2 },
+        routeRuntimes: { totalRegisteredTrackers: 1 },
+        other: { totalRegisteredTrackers: 0 },
+      },
+    });
+    expect(Object.values(snapshot.completeness.sources)
+      .reduce((sum, source) => sum + source.totalRegisteredTrackers, 0))
+      .toBe(snapshot.completeness.populationEpoch);
+    expect(snapshot.cumulative.methods).toEqual({
+      eth_call: 2,
+      eth_getBlockByHash: 1,
+      eth_blockNumber: 1,
+    });
+    expect(snapshot.cumulative.adapterRoles).toEqual({
+      eth_call: { publisher_wallet: 2 },
+      eth_getBlockByHash: { publisher_wallet: 1 },
+      eth_blockNumber: { route_runtime: 1 },
+    });
+    for (const [method, total] of Object.entries(snapshot.cumulative.methods)) {
+      expect(Object.values(snapshot.cumulative.consumers[method] ?? {})
+        .reduce((sum, count) => sum + count, 0)).toBe(total);
+      expect(Object.values(snapshot.cumulative.adapterRoles[method] ?? {})
+        .reduce((sum, count) => sum + count, 0)).toBe(total);
+    }
+  });
+
+  it('detects process replacement by epoch and bounds cumulative label storage', () => {
+    const first = new RpcUsageCumulativeAccumulator('epoch-a');
+    const restarted = new RpcUsageCumulativeAccumulator('epoch-b');
+    expect(first.snapshot().processEpoch).not.toBe(restarted.snapshot().processEpoch);
+
+    const t = new RpcUsageTracker(() => 'evm:31337', 'main_agent', first);
+    for (let i = 0; i < RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD + 5; i += 1) {
+      withRpcUsageConsumer(`consumer.${i}`, () => t.record('eth_getBlockByNumber'));
+      t.drainWindow();
+    }
+    const consumers = first.snapshot().cumulative.consumers.eth_getBlockByNumber;
+    expect(Object.keys(consumers)).toHaveLength(
+      RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD + 1,
+    );
+    expect(consumers.other).toBe(5);
+  });
+
+  it('captures a construction role once and never carries arbitrary role labels', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-role');
+    const publisher = withRpcUsageAdapterRole(
+      'publisher_wallet',
+      () => new RpcUsageTracker(() => 'evm:31337', undefined, cumulative),
+    );
+    publisher.record('eth_call');
+    const unknown = new RpcUsageTracker(
+      () => 'evm:31337',
+      'secret-wallet-address' as never,
+      cumulative,
+    );
+    unknown.record('eth_call');
+    expect(cumulative.snapshot().cumulative.adapterRoles.eth_call).toEqual({
+      publisher_wallet: 1,
+      other: 1,
+    });
+  });
+
+  it('attributes every header request with an explicit unattributed remainder', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('chainIndex.head', () => {
+      t.record('eth_blockNumber');
+      t.record('eth_getBlockByNumber');
+    });
+    t.record('eth_getBlockByNumber');
+    t.record('eth_getBlockByHash');
+
+    const usage = t.drainWindow();
+    expect(usage.attributions).toEqual([
+      { method: 'eth_blockNumber', consumer: 'chainIndex.head', count: 1 },
+      { method: 'eth_getBlockByNumber', consumer: 'chainIndex.head', count: 1 },
+      { method: 'eth_getBlockByNumber', consumer: 'unattributed', count: 1 },
+      { method: 'eth_getBlockByHash', consumer: 'unattributed', count: 1 },
+    ]);
+    for (const method of ['eth_blockNumber', 'eth_getBlockByNumber', 'eth_getBlockByHash']) {
+      expect(usage.attributions
+        .filter((entry) => entry.method === method)
+        .reduce((sum, entry) => sum + entry.count, 0)).toBe(usage.byMethod[method]);
+    }
   });
 
   it('attributes eth_call to the current bounded consumer without changing aggregate totals', () => {
@@ -616,7 +770,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('attributes ethers-internal eth_getLogs retries to the same endpoint slot', async () => {
     const rpc = await startLoopbackRpc({ throttle: ['eth_getLogs'] });
     servers.push(rpc);
-    const tracker = new RpcUsageTracker(() => 'evm:31337');
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-retry');
+    const tracker = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
     const provider = createRpcRequestProvider(rpc.url, {
       maxRetries: 1,
       providerOptions: { batchMaxCount: 1 },
@@ -637,6 +792,12 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       expect(usage.attributions).toEqual([
         { method: 'eth_getLogs', consumer: 'unit.getLogs.retry', endpointSlot: 'fallback_3', count: hits },
       ]);
+      const snapshot = cumulative.snapshot();
+      expect(snapshot.cumulative.methods.eth_getLogs).toBe(hits);
+      expect(snapshot.cumulative.consumers.eth_getLogs).toEqual({
+        'unit.getLogs.retry': hits,
+      });
+      expect(snapshot.cumulative.adapterRoles.eth_getLogs).toEqual({ main_agent: hits });
     } finally {
       provider.destroy();
     }

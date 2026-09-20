@@ -66,6 +66,7 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
+  snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
@@ -196,6 +197,7 @@ import {
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
   decodeVmReconcileNegativeRow,
@@ -3559,6 +3561,19 @@ async function runDaemonInnerWithStartupOwnership(
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
+
+      // Auth runs first and the route also requires a loopback peer. Snapshot
+      // capture is pure in-memory accounting: it never drains counters or
+      // initiates chain reconciliation/RPC.
+      if (handleRpcUsageSnapshotRequest({
+        req,
+        res,
+        url: reqUrl,
+        // Unlike ordinary routes, local-only diagnostics are unavailable when
+        // the operator explicitly disables API authentication.
+        authenticated: authEnabled,
+        snapshot: snapshotProcessRpcUsage,
+      })) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked

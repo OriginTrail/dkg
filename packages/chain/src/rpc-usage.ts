@@ -12,16 +12,20 @@
  * providers with `batchMaxCount: 1` (see evm-adapter-base), so one `send()` ==
  * one HTTP JSON-RPC request == one billable unit — the count is exact.
  *
- * Two consumers, one tracker:
+ * Three consumers, one tracker:
  *  - OTel counter `dkg.chain.rpc.requests.total{rpc_method, chain_id}` — for
  *    the metrics backend once one is provisioned.
  *  - `drainWindow()` — per-window DELTA counts the daemon logs as structured
  *    `rpc_usage` lines every minute, which ride the already-deployed
  *    OTLP-logs → Alloy → Loki path so Grafana can chart RPC usage per node /
  *    per method TODAY, with exact sums (deltas, not cumulative gauges).
+ *  - `snapshotProcessRpcUsage()` — non-draining, process-lifetime cumulative
+ *    totals for authenticated diagnostic interval measurements.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
@@ -65,6 +69,22 @@ export function boundedRpcMethodLabel(method: string): string {
   return KNOWN_RPC_METHODS.has(method) ? method : 'other';
 }
 
+/** Fixed process-level source roles. Values never derive from operator or peer input. */
+export const RPC_USAGE_ADAPTER_ROLES = Object.freeze([
+  'main_agent',
+  'publisher_wallet',
+  'route_runtime',
+  'other',
+] as const);
+export type RpcUsageAdapterRole = typeof RPC_USAGE_ADAPTER_ROLES[number];
+const RPC_USAGE_ADAPTER_ROLE_SET: ReadonlySet<string> = new Set(RPC_USAGE_ADAPTER_ROLES);
+
+export function normalizeRpcUsageAdapterRole(value: unknown): RpcUsageAdapterRole {
+  return typeof value === 'string' && RPC_USAGE_ADAPTER_ROLE_SET.has(value)
+    ? value as RpcUsageAdapterRole
+    : 'other';
+}
+
 /** The complete bounded vocabulary for individually attributed endpoint slots. */
 export const RPC_ENDPOINT_SLOT_LABELS = Object.freeze([
   'primary',
@@ -93,6 +113,14 @@ const RPC_ENDPOINT_SLOT_LABEL_SET: ReadonlySet<string> = new Set(RPC_ENDPOINT_SL
 export type RpcUsageAttribution =
   | { readonly method: 'eth_call'; readonly consumer: string; readonly count: number }
   | {
+      readonly method:
+        | 'eth_blockNumber'
+        | 'eth_getBlockByNumber'
+        | 'eth_getBlockByHash';
+      readonly consumer: string;
+      readonly count: number;
+    }
+  | {
       readonly method: 'eth_getLogs';
       readonly consumer: string;
       readonly endpointSlot: RpcEndpointSlotLabel;
@@ -114,9 +142,14 @@ function normalizeRpcUsageAttribution(value: unknown): RpcUsageAttribution | und
   if (typeof candidate.consumer !== 'string' || typeof candidate.count !== 'number') {
     return undefined;
   }
-  if (candidate.method === 'eth_call') {
+  if (
+    candidate.method === 'eth_call'
+    || candidate.method === 'eth_blockNumber'
+    || candidate.method === 'eth_getBlockByNumber'
+    || candidate.method === 'eth_getBlockByHash'
+  ) {
     return {
-      method: 'eth_call',
+      method: candidate.method,
       consumer: candidate.consumer,
       count: candidate.count,
     };
@@ -211,9 +244,9 @@ export function mergeRpcUsageWindows(
     const w = normalizeRpcUsageWindow(input);
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
     for (const attribution of w.attributions) {
-      const key = attribution.method === 'eth_call'
-        ? `${attribution.method}\0${attribution.consumer}`
-        : `${attribution.method}\0${attribution.consumer}\0${attribution.endpointSlot}`;
+      const key = attribution.method === 'eth_getLogs'
+        ? `${attribution.method}\0${attribution.consumer}\0${attribution.endpointSlot}`
+        : `${attribution.method}\0${attribution.consumer}`;
       const current = attributions.get(key);
       attributions.set(key, {
         ...attribution,
@@ -295,6 +328,7 @@ export function rpcUsageWindowTotal(window: Pick<RpcUsageWindow, 'byMethod'>): n
 
 const rpcUsageConsumerContext = new AsyncLocalStorage<string>();
 const rpcUsageSiteContext = new AsyncLocalStorage<string>();
+const rpcUsageAdapterRoleContext = new AsyncLocalStorage<RpcUsageAdapterRole>();
 
 /**
  * Longest attributed consumer key that survives the daemon's logfmt token
@@ -325,6 +359,14 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
   const normalized = normalizeRpcUsageConsumer(consumer);
   if (!normalized) return fn();
   return rpcUsageConsumerContext.run(normalized, fn);
+}
+
+/**
+ * Assign a fixed role to trackers constructed inside `fn`. The role is read
+ * once at construction, so later asynchronous work cannot drift between roles.
+ */
+export function withRpcUsageAdapterRole<T>(role: RpcUsageAdapterRole, fn: () => T): T {
+  return rpcUsageAdapterRoleContext.run(normalizeRpcUsageAdapterRole(role), fn);
 }
 
 /**
@@ -359,6 +401,151 @@ function activeRpcUsageConsumer(): string | undefined {
 /** Current call-site label, if some caller up the stack established one. */
 function activeRpcUsageSite(): string | undefined {
   return rpcUsageSiteContext.getStore();
+}
+
+function activeRpcUsageAdapterRole(): RpcUsageAdapterRole | undefined {
+  return rpcUsageAdapterRoleContext.getStore();
+}
+
+export interface RpcUsageSnapshotCompleteness {
+  readonly complete: boolean;
+  readonly reasons: readonly string[];
+  /** Monotonic tracker-registration generation within this process epoch. */
+  readonly populationEpoch: number;
+  readonly sources: Readonly<{
+    mainAgent: RpcUsageSnapshotSourcePopulation;
+    publisherWallets: RpcUsageSnapshotSourcePopulation;
+    routeRuntimes: RpcUsageSnapshotSourcePopulation;
+    other: RpcUsageSnapshotSourcePopulation;
+  }>;
+}
+
+export interface RpcUsageSnapshotSourcePopulation {
+  readonly status: 'included';
+  /** Cumulative registrations, not a live-object count or stable identity. */
+  readonly totalRegisteredTrackers: number;
+  /** Attempts survive source retirement/replacement in the process aggregate. */
+  readonly totalsRetained: true;
+}
+
+export interface RpcUsageCumulativeSnapshot {
+  readonly schemaVersion: 1;
+  readonly processEpoch: string;
+  readonly capturedAtUtc: string;
+  readonly capturedAtMonotonicMs: number;
+  readonly completeness: RpcUsageSnapshotCompleteness;
+  readonly cumulative: Readonly<{
+    /** Authoritative physical-attempt totals. */
+    methods: Readonly<Record<string, number>>;
+    /** Overlapping detail dimension; each method reconciles to `methods`. */
+    consumers: Readonly<Record<string, Readonly<Record<string, number>>>>;
+    /** Overlapping detail dimension; each method reconciles to `methods`. */
+    adapterRoles: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  }>;
+}
+
+export interface RpcUsageSnapshotClock {
+  readonly utcNow?: () => Date;
+  readonly monotonicNowMs?: () => number;
+}
+
+function incrementBoundedCounter(map: Map<string, number>, key: string): void {
+  const current = map.get(key) ?? 0;
+  map.set(key, current >= Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : current + 1);
+}
+
+function frozenRecord(map: ReadonlyMap<string, number>): Readonly<Record<string, number>> {
+  return Object.freeze(Object.fromEntries(map));
+}
+
+/**
+ * Process-lifetime physical-attempt accumulator. It retains only bounded,
+ * code-owned dimensions, so adapter retirement cannot make totals decrease and
+ * no per-adapter identity remains resident.
+ */
+export class RpcUsageCumulativeAccumulator {
+  static readonly MAX_CONSUMERS_PER_METHOD = 128;
+
+  private readonly methods = new Map<string, number>();
+  private readonly consumers = new Map<string, Map<string, number>>();
+  private readonly adapterRoles = new Map<string, Map<string, number>>();
+  private readonly registeredTrackers = new Map<RpcUsageAdapterRole, number>();
+
+  constructor(readonly processEpoch: string = randomUUID()) {}
+
+  registerTracker(adapterRole: RpcUsageAdapterRole): void {
+    const role = normalizeRpcUsageAdapterRole(adapterRole);
+    incrementBoundedCounter(this.registeredTrackers, role);
+  }
+
+  record(method: string, consumer: string | undefined, adapterRole: RpcUsageAdapterRole): void {
+    const methodLabel = boundedRpcMethodLabel(method);
+    incrementBoundedCounter(this.methods, methodLabel);
+
+    const byConsumer = this.consumers.get(methodLabel) ?? new Map<string, number>();
+    if (!this.consumers.has(methodLabel)) this.consumers.set(methodLabel, byConsumer);
+    const requestedConsumer = normalizeRpcUsageConsumer(consumer) ?? 'unattributed';
+    const consumerLabel = byConsumer.has(requestedConsumer)
+      || byConsumer.size < RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD
+      ? requestedConsumer
+      : 'other';
+    incrementBoundedCounter(byConsumer, consumerLabel);
+
+    const byRole = this.adapterRoles.get(methodLabel) ?? new Map<string, number>();
+    if (!this.adapterRoles.has(methodLabel)) this.adapterRoles.set(methodLabel, byRole);
+    incrementBoundedCounter(byRole, normalizeRpcUsageAdapterRole(adapterRole));
+  }
+
+  snapshot(clock: RpcUsageSnapshotClock = {}): RpcUsageCumulativeSnapshot {
+    const consumers = Object.fromEntries(
+      [...this.consumers].map(([method, counts]) => [method, frozenRecord(counts)]),
+    );
+    const adapterRoles = Object.fromEntries(
+      [...this.adapterRoles].map(([method, counts]) => [method, frozenRecord(counts)]),
+    );
+    const source = (role: RpcUsageAdapterRole): RpcUsageSnapshotSourcePopulation =>
+      Object.freeze({
+        status: 'included' as const,
+        totalRegisteredTrackers: this.registeredTrackers.get(role) ?? 0,
+        totalsRetained: true as const,
+      });
+    const sources = Object.freeze({
+      mainAgent: source('main_agent'),
+      publisherWallets: source('publisher_wallet'),
+      routeRuntimes: source('route_runtime'),
+      other: source('other'),
+    });
+    const populationEpoch = Object.values(sources).reduce(
+      (sum, value) => sum + value.totalRegisteredTrackers,
+      0,
+    );
+    return Object.freeze({
+      schemaVersion: 1 as const,
+      processEpoch: this.processEpoch,
+      capturedAtUtc: (clock.utcNow?.() ?? new Date()).toISOString(),
+      capturedAtMonotonicMs: clock.monotonicNowMs?.() ?? performance.now(),
+      completeness: Object.freeze({
+        complete: true,
+        reasons: Object.freeze([]) as readonly string[],
+        populationEpoch,
+        sources,
+      }),
+      cumulative: Object.freeze({
+        methods: frozenRecord(this.methods),
+        consumers: Object.freeze(consumers),
+        adapterRoles: Object.freeze(adapterRoles),
+      }),
+    });
+  }
+}
+
+const processRpcUsage = new RpcUsageCumulativeAccumulator();
+
+/** Non-draining process snapshot; taking it performs no chain I/O. */
+export function snapshotProcessRpcUsage(
+  clock: RpcUsageSnapshotClock = {},
+): RpcUsageCumulativeSnapshot {
+  return processRpcUsage.snapshot(clock);
 }
 
 /**
@@ -410,6 +597,10 @@ export function boundedRpcEndpointSlotLabel(
 export class RpcUsageTracker {
   private window = new Map<string, number>();
   private ethCallConsumers = new Map<string, number>();
+  private headerAttributions = new Map<
+    string,
+    { method: 'eth_blockNumber' | 'eth_getBlockByNumber' | 'eth_getBlockByHash'; consumer: string; count: number }
+  >();
   private ethGetLogsAttributions = new Map<
     string,
     { consumer: string; endpointSlot: RpcEndpointSlotLabel; count: number }
@@ -419,7 +610,13 @@ export class RpcUsageTracker {
     // Live thunk (matches RpcFailoverClient): the adapter assigns `chainId`
     // after construction, so resolve it at record time.
     private readonly chainId: () => string,
-  ) {}
+    private readonly adapterRole: RpcUsageAdapterRole =
+      activeRpcUsageAdapterRole() ?? 'main_agent',
+    private readonly cumulative: RpcUsageCumulativeAccumulator = processRpcUsage,
+  ) {
+    this.adapterRole = normalizeRpcUsageAdapterRole(this.adapterRole);
+    this.cumulative.registerTracker(this.adapterRole);
+  }
 
   /**
    * Count one raw JSON-RPC request. Called from the provider's `_send` and the
@@ -437,6 +634,7 @@ export class RpcUsageTracker {
   static readonly MAX_WINDOW_CONSUMERS = 128;
   static readonly MAX_TRACKED_ENDPOINT_SLOTS = RPC_ENDPOINT_SLOT_LABELS.length;
   static readonly MAX_WINDOW_GET_LOGS_ATTRIBUTIONS = 256;
+  static readonly MAX_WINDOW_HEADER_ATTRIBUTIONS = 128;
 
   record(method: string, endpointSlot?: number): void {
     // Authoritative window/lifetime state first, OUTSIDE any try — pure map
@@ -456,6 +654,27 @@ export class RpcUsageTracker {
           ? normalizedConsumer
           : 'other';
         this.ethCallConsumers.set(consumerKey, (this.ethCallConsumers.get(consumerKey) ?? 0) + 1);
+      }
+    }
+    if (
+      raw === 'eth_blockNumber'
+      || raw === 'eth_getBlockByNumber'
+      || raw === 'eth_getBlockByHash'
+    ) {
+      const consumer = normalizeRpcUsageConsumer(activeRpcUsageConsumer()) ?? 'unattributed';
+      const rawKey = `${raw}\0${consumer}`;
+      const overflowKey = `${raw}\0other`;
+      const overflow = !this.headerAttributions.has(rawKey)
+        && this.headerAttributions.size >= RpcUsageTracker.MAX_WINDOW_HEADER_ATTRIBUTIONS;
+      const key = overflow ? overflowKey : rawKey;
+      const existing = this.headerAttributions.get(key);
+      if (existing) existing.count += 1;
+      else {
+        this.headerAttributions.set(key, {
+          method: raw,
+          consumer: overflow ? 'other' : consumer,
+          count: 1,
+        });
       }
     }
     if (raw === 'eth_getLogs') {
@@ -481,6 +700,11 @@ export class RpcUsageTracker {
         });
       }
     }
+    const activeConsumer = activeRpcUsageConsumer();
+    const cumulativeConsumer = raw === 'eth_call' && activeConsumer !== undefined
+      ? composeRpcUsageConsumer(activeConsumer, activeRpcUsageSite())
+      : activeConsumer;
+    this.cumulative.record(raw, cumulativeConsumer, this.adapterRole);
     this.lifetime += 1;
     // Best-effort applies ONLY to the OTel side effect (and the chainId
     // thunk it evaluates) — a throwing metrics backend must not break the
@@ -519,8 +743,12 @@ export class RpcUsageTracker {
           count,
         }),
       ),
+      ...[...this.headerAttributions.values()].map(
+        ({ method, consumer, count }): RpcUsageAttribution => ({ method, consumer, count }),
+      ),
     ];
     this.ethGetLogsAttributions.clear();
+    this.headerAttributions.clear();
     return {
       byMethod,
       ethCallByConsumer,
@@ -540,8 +768,11 @@ export interface RpcUsageRecorder extends RpcUsageDrainable {
   record(method: string, endpointSlot?: number): void;
 }
 
-export function createRpcUsageRecorder(chainId: () => string): RpcUsageRecorder {
-  const tracker = new RpcUsageTracker(chainId);
+export function createRpcUsageRecorder(
+  chainId: () => string,
+  adapterRole: RpcUsageAdapterRole = activeRpcUsageAdapterRole() ?? 'other',
+): RpcUsageRecorder {
+  const tracker = new RpcUsageTracker(chainId, adapterRole);
   return Object.freeze({
     record: (method: string, endpointSlot?: number) => tracker.record(method, endpointSlot),
     drainRpcUsage: () => tracker.drainWindow(),

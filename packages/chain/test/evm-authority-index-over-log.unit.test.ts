@@ -27,6 +27,7 @@ import type { ContextGraphAuthorityProjectionServedEvidence } from
 import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
   '../src/evm-context-graph-authority-index-reader.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { RpcUsageTracker } from '../src/rpc-usage.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
@@ -176,10 +177,12 @@ function logSource(
 /** One provider that counts every chain round trip this read could make. */
 function makeProvider() {
   const calls = { getBlock: 0, getLogs: 0, getNetwork: 0 };
+  const usage = new RpcUsageTracker(() => 'evm:31337');
   const authorityLogs: ethers.Log[] = [];
   const provider = {
     async getBlock(tag: ethers.BlockTag) {
       calls.getBlock += 1;
+      usage.record('eth_getBlockByNumber');
       const number = tag === 'latest' ? LIVE_HEAD : Number(tag);
       return { number, hash: hash(number), timestamp: HEAD_TIMESTAMP_SECONDS };
     },
@@ -192,7 +195,7 @@ function makeProvider() {
       return { chainId: 31337n };
     },
   } as unknown as JsonRpcProvider;
-  return { provider, calls, authorityLogs };
+  return { provider, calls, authorityLogs, usage };
 }
 
 function makeReader(options: {
@@ -210,7 +213,7 @@ function makeReader(options: {
    */
   exhaustsOnFailover?: boolean;
 } = {}) {
-  const { provider, calls, authorityLogs } = makeProvider();
+  const { provider, calls, authorityLogs, usage } = makeProvider();
   const index = new ContextGraphAuthorityIndex(
     new MemoryAuthorityIndexStore(),
     undefined,
@@ -258,7 +261,7 @@ function makeReader(options: {
     ...(options.source === undefined ? {} : { chainEventLogAuthority: () => options.source }),
   });
   reader.snapshots.open();
-  return { reader, calls, authorityLogs, attempts };
+  return { reader, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -291,7 +294,7 @@ describe('Context Graph authority index over the one log', () => {
 
   it('keeps its live scan while the log holds no cursor at all', async () => {
     const cold = new MemoryChainEventLogStore();
-    const { reader, calls, authorityLogs } = makeReader({
+    const { reader, calls, authorityLogs, usage } = makeReader({
       store: cold,
       source: logSource(cold),
     });
@@ -300,6 +303,11 @@ describe('Context Graph authority index over the one log', () => {
     expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
     expect(calls.getLogs).toBeGreaterThan(0);
     expect(calls.getBlock).toBeGreaterThan(0);
+    const headerConsumers = usage.drainWindow().attributions
+      .filter((entry) => entry.method === 'eth_getBlockByNumber')
+      .map((entry) => entry.consumer);
+    expect(headerConsumers).toContain('authorityIndex.head');
+    expect(headerConsumers).toContain('authorityIndex.stabilize');
   });
 
   it('keeps its live scan while the backfill has not reached the deploy block', async () => {

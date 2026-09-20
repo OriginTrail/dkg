@@ -48,6 +48,7 @@ import {
   withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
+import { withRpcUsageConsumer } from './rpc-usage.js';
 
 /**
  * Keep authority-index eth_getLogs requests inside the strictest production
@@ -254,10 +255,13 @@ function authorityIndexScanInputV1(
   return {
     ...authorityIndexScanBoundsV1(input),
     readBlockHash: async (blockNumber, lifecycleSignal) => (
-      (await readOwnedAuthorityIndexRpcV1(
-        lifecycleSignal,
-        `${input.stabilizationOperation} block ${blockNumber}`,
-        () => input.provider.getBlock(blockNumber),
+      (await withRpcUsageConsumer(
+        'authorityIndex.lineage',
+        () => readOwnedAuthorityIndexRpcV1(
+          lifecycleSignal,
+          `${input.stabilizationOperation} block ${blockNumber}`,
+          () => input.provider.getBlock(blockNumber),
+        ),
       ))?.hash ?? null
     ),
     readPage: async (fromBlock, toBlock, lifecycleSignal) => {
@@ -308,10 +312,13 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
         }
         return;
       }
-      const stable = await readEvmContextGraphAuthorityIndexRpcV1(
-        `${input.stabilizationOperation} stabilization block`,
-        () => input.provider.getBlock(input.finalized.number),
-        input.signal,
+      const stable = await withRpcUsageConsumer(
+        'authorityIndex.stabilize',
+        () => readEvmContextGraphAuthorityIndexRpcV1(
+          `${input.stabilizationOperation} stabilization block`,
+          () => input.provider.getBlock(input.finalized.number),
+          input.signal,
+        ),
       );
       if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
         // Anchored at the operator's depth the anchor can be the head, so a
@@ -631,15 +638,21 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // same provider, so the pair can never be spliced across endpoints.
         const { finalized, head } = await resolveEvmFinalityAnchorWithHeadV1({
           finalityConfirmations: dependencies.finalityConfirmations(),
-          readHead: () => readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} chain head`,
-            () => provider.getBlock('latest'),
-            options.signal,
+          readHead: () => withRpcUsageConsumer(
+            'authorityIndex.head',
+            () => readEvmContextGraphAuthorityIndexRpcV1(
+              `${operationLabel} chain head`,
+              () => provider.getBlock('latest'),
+              options.signal,
+            ),
           ),
-          readBlockAt: (anchorBlockNumber) => readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} anchor block ${anchorBlockNumber}`,
-            () => provider.getBlock(anchorBlockNumber),
-            options.signal,
+          readBlockAt: (anchorBlockNumber) => withRpcUsageConsumer(
+            'authorityIndex.anchor',
+            () => readEvmContextGraphAuthorityIndexRpcV1(
+              `${operationLabel} anchor block ${anchorBlockNumber}`,
+              () => provider.getBlock(anchorBlockNumber),
+              options.signal,
+            ),
           ),
           unavailable: contextGraphAuthorityAnchorUnavailableV1,
         });
@@ -721,10 +734,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       validateAnchor: async (cached) => dependencies.readTipProvider(
         `${operationLabel} cached projection anchor`,
         async (provider) => {
-          const anchor = await readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} cached projection anchor block`,
-            () => provider.getBlock(cached.finalized.number),
-            options.signal,
+          const anchor = await withRpcUsageConsumer(
+            'authorityProjection.validateAnchor',
+            () => readEvmContextGraphAuthorityIndexRpcV1(
+              `${operationLabel} cached projection anchor block`,
+              () => provider.getBlock(cached.finalized.number),
+              options.signal,
+            ),
           );
           if (anchor?.hash == null) return undefined;
           return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();

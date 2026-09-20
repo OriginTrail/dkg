@@ -313,7 +313,11 @@ export function createEvmChainIndexRuntime(
         const block = await readTip(
           'chainIndex tick head',
           (provider) => provider.getBlock('latest'),
-          { signal, policy: 'watchdogPointRead' },
+          {
+            signal,
+            policy: 'watchdogPointRead',
+            rpcUsageConsumer: 'chainIndex.head',
+          },
         );
         if (block === null || block.hash === null) {
           throw new Error('chain index head is unavailable');
@@ -329,7 +333,11 @@ export function createEvmChainIndexRuntime(
         (await readTip(
           `chainIndex tick block ${blockNumber}`,
           (provider) => provider.getBlock(blockNumber),
-          { signal, policy: 'watchdogPointRead' },
+          {
+            signal,
+            policy: 'watchdogPointRead',
+            rpcUsageConsumer: 'chainIndex.lineage',
+          },
         ))?.hash ?? null
       ),
       readLogs: async (
@@ -495,7 +503,11 @@ export function createEvmChainIndexRuntime(
           (await readTip(
             `chainIndex authority block ${blockNumber}`,
             (provider) => provider.getBlock(blockNumber),
-            { signal, policy: 'watchdogPointRead' },
+            {
+              signal,
+              policy: 'watchdogPointRead',
+              rpcUsageConsumer: 'chainIndex.authorityLineage',
+            },
           ))?.hash ?? null
         ),
       }),

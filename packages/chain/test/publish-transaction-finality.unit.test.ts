@@ -21,6 +21,7 @@ import {
   type ReceiptFinalityProviderReader,
 } from '../src/evm-adapter-receipt-finality.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
+import { RpcUsageTracker } from '../src/rpc-usage.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}`;
 const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
@@ -111,6 +112,31 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
 });
 
 describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
+  it('attributes receipt head and canonical header transport attempts separately', async () => {
+    const usage = new RpcUsageTracker(() => 'evm:31337');
+    const provider = {
+      getBlockNumber: async () => {
+        usage.record('eth_blockNumber');
+        return 124;
+      },
+      getBlock: async () => {
+        usage.record('eth_getBlockByNumber');
+        return { number: 123, hash: BLOCK_HASH };
+      },
+    };
+    const reader = new EvmReceiptFinalityReader(
+      2,
+      async (_label, read) => read(provider as never),
+    );
+
+    await expect(reader.read({ blockNumber: 123, blockHash: BLOCK_HASH }))
+      .resolves.toMatchObject({ number: 123, hash: BLOCK_HASH });
+    expect(usage.drainWindow().attributions).toEqual([
+      { method: 'eth_blockNumber', consumer: 'receiptFinality.head', count: 1 },
+      { method: 'eth_getBlockByNumber', consumer: 'receiptFinality.header', count: 1 },
+    ]);
+  });
+
   function chainOver(script: {
     latestBlockNumber: number;
     atHeight: { number: number; hash: string } | null;

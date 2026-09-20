@@ -79,6 +79,7 @@ interface Harness {
   readonly getLogs: ReturnType<typeof vi.fn>;
   readonly blocks: ReturnType<typeof vi.fn>;
   readonly labels: string[];
+  readonly usageConsumers: string[];
   readonly runtime: ReturnType<typeof createEvmChainIndexRuntime>;
   /** Wall clock the runtime reads, so a quiet tick can be aged on demand. */
   advanceMs(ms: number): void;
@@ -106,6 +107,7 @@ function harness(options?: {
   let nowMs = 1_700_000_000_000;
   const store = new MemoryChainEventLogStore();
   const labels: string[] = [];
+  const usageConsumers: string[] = [];
   // Honours the ADDRESS array, not only the range. A fake that ignored it
   // would hand the Hub's own rotation back to the re-request the tick issues
   // for the newly bound address, and the duplicate would read as a decoder bug.
@@ -160,8 +162,11 @@ function harness(options?: {
       // rotation of this name a MOVE off this address.
       hubBinding: { name: 'ContextGraphStorage', kind: 'assetStorage' },
     },
-    readTipProvider: async (label, read) => {
+    readTipProvider: async (label, read, readOptions) => {
       labels.push(label);
+      if (typeof readOptions?.rpcUsageConsumer === 'string') {
+        usageConsumers.push(readOptions.rpcUsageConsumer);
+      }
       return read(provider as never);
     },
     now: () => nowMs,
@@ -172,6 +177,7 @@ function harness(options?: {
     getLogs,
     blocks,
     labels,
+    usageConsumers,
     runtime,
     advanceMs: (ms: number) => { nowMs += ms; },
   };
@@ -202,6 +208,8 @@ describe('createEvmChainIndexRuntime', () => {
     // per-contract probe.
     expect(h.heads).toHaveBeenCalledTimes(1);
     expect(h.labels.filter((label) => label === 'chainIndex tick getLogs')).toHaveLength(1);
+    expect(h.usageConsumers).toContain('chainIndex.head');
+    expect(h.usageConsumers).toContain('chainIndex.lineage');
   });
 
   it('asks for every indexed address in ONE filter', async () => {
