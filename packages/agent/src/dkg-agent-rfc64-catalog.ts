@@ -2202,11 +2202,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             undefined,
             async (readSignal, evidence) => {
               try {
-              return await readSnapshots.call(
-                indexedReader,
-                targets,
-                evidence.chainReadOptions(readSignal),
-              );
+                return await readSnapshots.call(
+                  indexedReader,
+                  targets,
+                  evidence.chainReadOptions(readSignal),
+                );
               } finally {
                 await indexedReader.whenIdle();
               }

@@ -226,7 +226,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
     });
 
-    it('keeps unproven projection evidence sticky for the whole operation', async () => {
+    it('lets a later completed scan override earlier unproven projection evidence', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
         const options = evidence.agentReadOptions();
@@ -237,7 +237,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         options.onContextGraphAuthorityProjectionServed?.({ source: 'scan', ageMs: 0 });
         return 'mixed-evidence';
       });
-      expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
+      expect(breaker.snapshot()).toMatchObject({ state: 'closed', consecutiveExhaustions: 0 });
     });
 
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {

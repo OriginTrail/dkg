@@ -32,6 +32,7 @@ const authorityIndexId = (value: string): ContextGraphAuthorityIndexId => (
 interface IndexedAuthorityEvidence {
   readonly blockReads: Array<string | number>;
   readonly headReads: number[];
+  readonly networkReads: bigint[];
   readonly filters: Array<readonly [string, ...unknown[]]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly readOptions: Array<Readonly<{
@@ -117,6 +118,7 @@ function makeIndexedAuthorityAdapter(
   const evidence: IndexedAuthorityEvidence = {
     blockReads: [],
     headReads: [],
+    networkReads: [],
     filters: [],
     staticCalls: [],
     readOptions: [],
@@ -184,7 +186,10 @@ function makeIndexedAuthorityAdapter(
       else evidence.blockReads.push(tag);
       return block;
     },
-    getNetwork: async () => ({ chainId: 31337n }),
+    getNetwork: async () => {
+      evidence.networkReads.push(31337n);
+      return { chainId: 31337n };
+    },
     getLogs: async (filter) => {
       const requestSignal = activeRpcRequestAbortSignal();
       if (requestSignal !== undefined) evidence.indexPageSignals.push(requestSignal);
@@ -1639,7 +1644,11 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
   }
 
   const rpcReads = ({ evidence }: IndexedAuthorityHarness): number => (
-    evidence.headReads.length + evidence.blockReads.length + evidence.indexRanges.length
+    evidence.headReads.length
+    + evidence.blockReads.length
+    + evidence.indexRanges.length
+    + evidence.staticCalls.length
+    + evidence.networkReads.length
   );
 
   it('answers the snapshot read and every index reader from one projection with zero RPC', async () => {
