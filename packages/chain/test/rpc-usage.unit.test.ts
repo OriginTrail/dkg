@@ -23,6 +23,7 @@ import { MockChainAdapter } from '../src/mock-adapter.js';
 import {
   boundedRpcEndpointSlotLabel,
   boundedRpcMethodLabel,
+  boundedRpcUsageSnapshotConsumerLabel,
   mergeRpcUsageWindows,
   normalizeRpcEndpointSlotLabel,
   normalizeRpcUsageWindow,
@@ -441,6 +442,45 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       publisher_wallet: 1,
       other: 1,
     });
+  });
+
+  it('redacts credential, address, key-material, and opaque-id consumers before cumulative storage', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-private');
+    const tracker = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
+    const unsafeConsumers = [
+      'Bearer fixture-secret-token',
+      `wallet.0x${'ab'.repeat(20)}`,
+      `privateKey.${'cd'.repeat(32)}`,
+      'request.550e8400-e29b-41d4-a716-446655440000',
+      'job.12345678',
+      'opaque.AbCdEfGhIjKlMnOpQrStUvWxYz012345',
+      'sk-live-fixtureCredential123',
+      'eyJfixtureHeader1.eyJfixturePayload2.fixtureSignature3',
+    ];
+    for (const consumer of unsafeConsumers) {
+      withRpcUsageConsumer(consumer, () => tracker.record('eth_call'));
+    }
+    for (const consumer of [
+      'listContextGraphsFromChain',
+      'authorityProjection.validateAnchor',
+      'token.balanceOf',
+    ]) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(consumer);
+      withRpcUsageConsumer(consumer, () => tracker.record('eth_call'));
+    }
+
+    const snapshot = cumulative.snapshot();
+    expect(snapshot.cumulative.methods.eth_call).toBe(unsafeConsumers.length + 3);
+    expect(snapshot.cumulative.consumers.eth_call).toEqual({
+      other: unsafeConsumers.length,
+      listContextGraphsFromChain: 1,
+      'authorityProjection.validateAnchor': 1,
+      'token.balanceOf': 1,
+    });
+    const serialized = JSON.stringify(snapshot).toLowerCase();
+    for (const fragment of ['fixture-secret-token', '550e8400', '12345678', 'abcdef']) {
+      expect(serialized).not.toContain(fragment);
+    }
   });
 
   it('attributes every header request with an explicit unattributed remainder', () => {

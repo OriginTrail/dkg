@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { RpcUsageCumulativeSnapshot } from '@origintrail-official/dkg-chain';
+import {
+  RpcUsageCumulativeAccumulator,
+  RpcUsageTracker,
+  withRpcUsageConsumer,
+  type RpcUsageCumulativeSnapshot,
+} from '@origintrail-official/dkg-chain';
 import {
   handleRpcUsageSnapshotRequest,
   isLoopbackAddress,
@@ -90,6 +95,27 @@ describe('RPC usage snapshot diagnostic route', () => {
       'Cache-Control': 'no-store',
     });
     expect(JSON.parse(out.body() ?? '')).toEqual(snapshot());
+  });
+
+  it('never serializes a credential-shaped consumer from retained accounting', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-private-route');
+    const tracker = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
+    withRpcUsageConsumer('Bearer fixture-secret-token', () => tracker.record('eth_call'));
+    const out = response();
+
+    expect(handleRpcUsageSnapshotRequest({
+      req: request('GET', '127.0.0.1'),
+      res: out.res,
+      url: new URL(`http://127.0.0.1${RPC_USAGE_SNAPSHOT_PATH}`),
+      authenticated: true,
+      snapshot: () => cumulative.snapshot(),
+    })).toBe(true);
+
+    expect(out.status()).toBe(200);
+    expect(out.body()).not.toContain('Bearer');
+    expect(out.body()).not.toContain('fixture-secret-token');
+    const body = JSON.parse(out.body() ?? '') as RpcUsageCumulativeSnapshot;
+    expect(body.cumulative.consumers.eth_call).toEqual({ other: 1 });
   });
 
   it('does not capture for unauthenticated, non-local, or non-GET requests', () => {

@@ -67,6 +67,10 @@ reconciliation, provider selection, or counter drain.
 - Zero-count methods are omitted. Method, consumer, and adapter-role storage is
   bounded and code-owned. RPC URLs, addresses, graph identifiers, query text,
   request identifiers, tickets, and credentials are never stored.
+- Consumer labels cross a second fail-closed privacy boundary before cumulative
+  storage. Credential markers, address/key-shaped hexadecimal material, UUIDs,
+  long numeric identifiers, JWTs, common key prefixes, and opaque mixed
+  alphanumeric identifiers collapse to `other`; raw values are not retained.
 - `processEpoch` changes on process restart and invalidates a start/end interval.
   `populationEpoch` starts at zero and increases once per tracker construction;
   it equals the sum of `totalRegisteredTrackers` across the four source entries.

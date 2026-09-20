@@ -163,6 +163,7 @@ export {
   normalizeRpcUsageWindow,
   normalizeRpcUsageAdapterRole,
   normalizeRpcEndpointSlotLabel,
+  boundedRpcUsageSnapshotConsumerLabel,
   rpcUsageWindowTotal,
   snapshotProcessRpcUsage,
   RpcUsageTracker,

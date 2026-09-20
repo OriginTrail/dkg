@@ -354,6 +354,53 @@ export function normalizeRpcUsageConsumer(consumer: string | undefined): string 
   return normalized;
 }
 
+const RPC_USAGE_SNAPSHOT_SENSITIVE_MARKER =
+  /(?:^|[_.:-])(?:bearer|authorization|credentials?|password|passwd|secret|mnemonic|seed(?:phrase)?|private[-_.:]?key|api[-_.:]?key|access[-_.:]?token|refresh[-_.:]?token|auth[-_.:]?token|rpc[-_.:]?url)(?:$|[_.:-])/i;
+const RPC_USAGE_SNAPSHOT_HEX_MATERIAL =
+  /0x[0-9a-f]{16,}|(?:^|[_.:-])[0-9a-f]{32,}(?:$|[_.:-])/i;
+const RPC_USAGE_SNAPSHOT_UUID =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
+const RPC_USAGE_SNAPSHOT_LONG_DECIMAL = /(?:^|[_.:-])\d{8,}(?:$|[_.:-])/;
+const RPC_USAGE_SNAPSHOT_KNOWN_KEY_PREFIX =
+  /(?:^|[_.:-])(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{8,}|(?:^|[_.:-])AKIA[A-Z0-9]{12,}/i;
+const RPC_USAGE_SNAPSHOT_JWT =
+  /(?:^|[_.:-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:$|[_.:-])/;
+
+/**
+ * Final privacy boundary for consumer labels retained by process snapshots.
+ *
+ * Existing window drains keep their diagnostic labels, but the authenticated
+ * cumulative route is long-lived and machine-readable. Even an accidentally
+ * caller-supplied label must therefore fail closed before it reaches retained
+ * storage. Code-owned descriptive labels remain intact; credential, address,
+ * key-material and opaque-id shapes collapse to the fixed `other` bucket.
+ */
+export function boundedRpcUsageSnapshotConsumerLabel(
+  consumer: string | undefined,
+): string | undefined {
+  const normalized = normalizeRpcUsageConsumer(consumer);
+  if (normalized === undefined || normalized === 'other' || normalized === 'unattributed') {
+    return normalized;
+  }
+  if (
+    RPC_USAGE_SNAPSHOT_SENSITIVE_MARKER.test(normalized)
+    || RPC_USAGE_SNAPSHOT_HEX_MATERIAL.test(normalized)
+    || RPC_USAGE_SNAPSHOT_UUID.test(normalized)
+    || RPC_USAGE_SNAPSHOT_LONG_DECIMAL.test(normalized)
+    || RPC_USAGE_SNAPSHOT_KNOWN_KEY_PREFIX.test(normalized)
+    || RPC_USAGE_SNAPSHOT_JWT.test(normalized)
+  ) return 'other';
+
+  for (const component of normalized.split(/[_.:-]/)) {
+    if (
+      component.length >= 32
+      && /[A-Za-z]/.test(component)
+      && /\d/.test(component)
+    ) return 'other';
+  }
+  return normalized;
+}
+
 /** Run a provider read under a bounded diagnostic consumer label. */
 export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
   const normalized = normalizeRpcUsageConsumer(consumer);
@@ -484,7 +531,7 @@ export class RpcUsageCumulativeAccumulator {
 
     const byConsumer = this.consumers.get(methodLabel) ?? new Map<string, number>();
     if (!this.consumers.has(methodLabel)) this.consumers.set(methodLabel, byConsumer);
-    const requestedConsumer = normalizeRpcUsageConsumer(consumer) ?? 'unattributed';
+    const requestedConsumer = boundedRpcUsageSnapshotConsumerLabel(consumer) ?? 'unattributed';
     const consumerLabel = byConsumer.has(requestedConsumer)
       || byConsumer.size < RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD
       ? requestedConsumer
