@@ -23,6 +23,8 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
+import type { ContextGraphAuthorityRpcSite } from
+  './context-graph-authority-rpc-sites.js';
 
 /**
  * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
@@ -340,7 +342,7 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
  * labelled caller sits above it. Sites are code-owned constants, never derived
  * from peer input, and an already-established site costs one ALS read.
  */
-export function withRpcUsageSite<T>(site: string, fn: () => T): T {
+export function withRpcUsageSite<T>(site: ContextGraphAuthorityRpcSite, fn: () => T): T {
   if (rpcUsageSiteContext.getStore() !== undefined) return fn();
   const normalized = normalizeRpcUsageConsumer(site);
   if (!normalized) return fn();
@@ -362,7 +364,7 @@ function activeRpcUsageSite(): string | undefined {
  * otherwise. Both halves are already normalized, so the composition only has
  * to stay inside the logfmt token bound.
  */
-export function composeRpcUsageConsumer(
+function composeRpcUsageConsumer(
   consumer: string,
   site: string | undefined,
 ): string {

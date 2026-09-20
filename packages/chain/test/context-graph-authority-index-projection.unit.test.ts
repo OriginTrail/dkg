@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
 import { ContextGraphAuthorityIndexRetryableError } from
@@ -139,7 +139,10 @@ function makeHarness(options: Readonly<{
   ) => index.projection({
     scope,
     signal,
-    accepts: (cached) => cached.view.has(id(contextGraphId)),
+    project: (cached) => ({
+      complete: cached.view.has(id(contextGraphId)),
+      value: cached,
+    }),
     onServed: (evidence) => { served.push(evidence); },
     refresh: ownRefresh,
   });
@@ -229,6 +232,20 @@ describe('finalized Context Graph authority projection cache', () => {
 
     expect(refreshed.view.resolve(id(9n)).owner).toBe(NEXT_OWNER);
     expect(refreshed.head.number).toBe(26);
+    expect(h.reads.refreshes).toBe(2);
+  });
+
+  it('projects exactly once on the cache-expiry refresh path', async () => {
+    const h = makeHarness();
+    await h.read();
+    h.clock.nowMs += T;
+    const project = vi.fn((projection: ContextGraphAuthorityIndexCompletedProjection & {
+      fetchedAtMs: number;
+    }) => ({ complete: true, value: projection }));
+
+    await h.index.projection({ scope: h.scope, project, refresh: h.refresh });
+
+    expect(project).toHaveBeenCalledTimes(1);
     expect(h.reads.refreshes).toBe(2);
   });
 
@@ -531,7 +548,7 @@ describe('finalized Context Graph authority projection cache', () => {
     let rotatedRefreshes = 0;
     await expect(h.index.projection({
       scope: 'evm:31337:0xhub:0xrotated',
-      accepts: (cached) => cached.view.has(id(9n)),
+      project: (cached) => ({ complete: cached.view.has(id(9n)), value: cached }),
       refresh: async () => {
         rotatedRefreshes += 1;
         throw new Error('rotated contract must be scanned, not answered');

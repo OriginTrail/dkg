@@ -428,6 +428,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           ),
           unavailable: contextGraphAuthorityAnchorUnavailableV1,
         });
+        const head = observed.head;
+        if (head?.hash == null) {
+          throw contextGraphAuthorityAnchorUnavailableV1(
+            'chain head was not retained after finality resolution',
+          );
+        }
+        const headHash = head.hash;
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
@@ -455,9 +462,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             finalized: { number: finalized.number, hash: finalized.hash },
             // The anchor resolver already failed closed on an unusable head.
             head: {
-              number: observed.head!.number,
-              hash: observed.head!.hash!,
-              timestampSeconds: evmContextGraphAuthorityHeadTimestampSecondsV1(observed.head),
+              number: head.number,
+              hash: headHash,
+              timestampSeconds: evmContextGraphAuthorityHeadTimestampSecondsV1(head),
             },
           }),
         );
@@ -509,25 +516,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       dependencies.deploymentId,
       await dependencies.requireContextGraphStorage().getAddress(),
     );
-    let selected: Readonly<{
-      projection: ContextGraphAuthorityIndexProjection;
-      value: T;
-    }> | undefined;
-    const projection = await dependencies.index.projection({
+    const projected = await dependencies.index.projection({
       scope,
       signal: options.signal,
-      // Project once. An incomplete cached answer forces a fresh scan, while
-      // the same projection result is reused when the cache accepts it.
-      accepts: (cached) => {
-        try {
-          const result = read(cached);
-          if (!result.complete) return false;
-          selected = { projection: cached, value: result.value };
-          return true;
-        } catch {
-          return false;
-        }
-      },
+      project: read,
       onServed: options.onContextGraphAuthorityProjectionServed,
       refresh: () => scanFinalizedProjection(
         operationLabel,
@@ -546,9 +538,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       ),
     });
     options.signal?.throwIfAborted();
-    return selected?.projection === projection
-      ? selected.value
-      : read(projection).value;
+    return projected;
   };
 
   const resolveFinalizedIdsByNameHashes = async (

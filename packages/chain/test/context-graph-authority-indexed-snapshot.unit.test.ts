@@ -1663,6 +1663,23 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     expect(served).toEqual(['scan', 'cache', 'cache', 'cache', 'cache', 'cache']);
   });
 
+  it('rejects an already-cancelled warm read without touching chain or index RPC', async () => {
+    const harness = makeTimedAdapter();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    const reads = rpcReads(harness);
+    const reason = new Error('warm authority caller already left');
+    const signal = AbortSignal.abort(reason);
+
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n, { signal }))
+      .rejects.toBe(reason);
+    await expect(reader.readContextGraphAuthorityIndexRevisions(
+      [authorityIndexId('9')],
+      { signal },
+    )).rejects.toBe(reason);
+    expect(rpcReads(harness)).toBe(reads);
+  });
+
   it('re-scans at T and only then observes authority the chain changed meanwhile', async () => {
     const harness = makeTimedAdapter();
     const before = await harness.adapter.getContextGraphAuthoritySnapshot(9n);

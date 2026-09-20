@@ -116,6 +116,22 @@ describe('EVM adapter: one-read live context graph authority', () => {
     }
   });
 
+  it('shares the production predicate\'s definitive unsupported error', async () => {
+    const f = fixture();
+    const failure = new ContextGraphLiveAuthorityUnsupportedError('tuple layout');
+    f.readContractWithOptions.mockRejectedValue(failure);
+
+    const settled = await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n).catch((error: unknown) => error),
+      f.adapter.getContextGraphLiveAuthority(7n).catch((error: unknown) => error),
+    ]);
+
+    expect(settled[0]).toBe(settled[1]);
+    expect(settled[0]).toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+    expect((settled[0] as Error & { cause?: unknown }).cause).toBe(failure);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
   it('partitions flights by the CONTRACT bound now, never by the bare numeric id', async () => {
     const f = fixture();
     f.readContractWithOptions.mockResolvedValue(TUPLE);

@@ -234,9 +234,7 @@ export class ContextGraphAuthorityIndex {
    * caller's complete read, which ends in {@link view}. See
    * `ContextGraphAuthorityIndexProjectionCache` for the staleness contract.
    */
-  async projection(
-    input: ContextGraphAuthorityIndexProjectionReadInput,
-  ): Promise<ContextGraphAuthorityIndexProjection> {
+  async projection<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
     if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
     return this.#projections.read(input);
   }

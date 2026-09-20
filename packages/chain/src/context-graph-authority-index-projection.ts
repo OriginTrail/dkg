@@ -192,17 +192,18 @@ export interface ContextGraphAuthorityIndexProjection
   readonly fetchedAtMs: number;
 }
 
-export interface ContextGraphAuthorityIndexProjectionReadInput {
+export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
   readonly scope: string;
   /** Bounds only THIS caller's wait; it never reaches another caller's refresh. */
   readonly signal?: AbortSignal;
   /**
-   * False when a CACHED projection cannot answer this read, which forces a
-   * fresh one. Callers use it for absent targets: a graph registered seconds
-   * ago must become visible at today's speed, so absence is only ever reported
-   * from a projection that was scanned for this read.
+   * Project the caller's result once. An incomplete CACHED result forces a
+   * fresh scan; the same incomplete result from that fresh projection is
+   * authoritative, so absence is only ever reported after scanning for it.
    */
-  readonly accepts: (projection: ContextGraphAuthorityIndexProjection) => boolean;
+  readonly project: (
+    projection: ContextGraphAuthorityIndexProjection,
+  ) => Readonly<{ complete: boolean; value: T }>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
   readonly refresh: () => Promise<ContextGraphAuthorityIndexCompletedProjection>;
   readonly onServed?: (evidence: ContextGraphAuthorityProjectionServedEvidence) => void;
@@ -278,9 +279,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     this.#refreshing.clear();
   }
 
-  async read(
-    input: ContextGraphAuthorityIndexProjectionReadInput,
-  ): Promise<ContextGraphAuthorityIndexProjection> {
+  async read<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
     input.signal?.throwIfAborted();
     const cached = this.#serve(input, 'backing-off');
     if (cached !== undefined) return cached;
@@ -300,11 +299,10 @@ export class ContextGraphAuthorityIndexProjectionCache {
     return this.#refresh(input);
   }
 
-  async #refresh(
-    input: ContextGraphAuthorityIndexProjectionReadInput,
-  ): Promise<ContextGraphAuthorityIndexProjection> {
+  async #refresh<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
     const epoch = this.#epoch;
     const fetchedAtMs = this.#now();
+    let projection: ContextGraphAuthorityIndexProjection | undefined;
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     // A waiter that found the previous refresh unusable runs beside a newer
@@ -312,7 +310,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     const initiates = !this.#refreshing.has(input.scope);
     if (initiates) this.#refreshing.set(input.scope, settled);
     try {
-      const projection: ContextGraphAuthorityIndexProjection = Object.freeze({
+      projection = Object.freeze({
         ...await input.refresh(),
         fetchedAtMs,
       });
@@ -321,7 +319,6 @@ export class ContextGraphAuthorityIndexProjectionCache {
         source: 'scan',
         ageMs: Math.max(0, this.#now() - fetchedAtMs),
       }));
-      return projection;
     } catch (error) {
       // A caller that left did not observe an RPC failure.
       if (input.signal?.aborted) throw error;
@@ -343,6 +340,12 @@ export class ContextGraphAuthorityIndexProjectionCache {
       }
       settle();
     }
+    if (projection === undefined) {
+      throw new Error('Context Graph authority refresh settled without a projection');
+    }
+    // Projection faults are caller/read-shape faults, not refresh failures;
+    // never turn them into stale-if-error service or provider backoff.
+    return input.project(projection).value;
   }
 
   #publish(scope: string, projection: ContextGraphAuthorityIndexProjection): void {
@@ -375,10 +378,10 @@ export class ContextGraphAuthorityIndexProjectionCache {
    * one, so an outage costs one failed pass per tick instead of one per read.
    * `refresh-failed`: this caller's own refresh just failed.
    */
-  #serve(
-    input: ContextGraphAuthorityIndexProjectionReadInput,
+  #serve<T>(
+    input: ContextGraphAuthorityIndexProjectionReadInput<T>,
     reason: 'backing-off' | 'refresh-failed',
-  ): ContextGraphAuthorityIndexProjection | undefined {
+  ): T | undefined {
     const projection = this.#projections.get(input.scope);
     if (projection === undefined) return undefined;
     const now = this.#now();
@@ -388,7 +391,6 @@ export class ContextGraphAuthorityIndexProjectionCache {
     if (now - projection.head.timestampSeconds * 1_000 > this.#headTimestampToleranceMs) {
       return undefined;
     }
-    if (!input.accepts(projection)) return undefined;
     const fresh = ageMs < this.tickMs;
     if (!fresh && reason === 'backing-off') {
       const failedAtMs = this.#failedAtMs.get(input.scope);
@@ -396,10 +398,17 @@ export class ContextGraphAuthorityIndexProjectionCache {
       const sinceFailureMs = now - failedAtMs;
       if (sinceFailureMs < 0 || sinceFailureMs >= this.tickMs) return undefined;
     }
+    let projected: Readonly<{ complete: boolean; value: T }>;
+    try {
+      projected = input.project(projection);
+    } catch {
+      return undefined;
+    }
+    if (!projected.complete) return undefined;
     input.onServed?.(Object.freeze({
       source: fresh ? 'cache' : 'stale-cache',
       ageMs,
     }));
-    return projection;
+    return projected.value;
   }
 }
