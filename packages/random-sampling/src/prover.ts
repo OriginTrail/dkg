@@ -48,6 +48,10 @@ import {
   type ProverWal,
 } from './wal.js';
 import { InMemoryProverWal } from './wal.js';
+import {
+  readCachedChallengeStaleness,
+  SolvedPeriodSkip,
+} from './solved-period-skip.js';
 
 /**
  * Outcome reported by `tick()`. The orchestrator's caller (the
@@ -218,6 +222,7 @@ export class RandomSamplingProver {
   private inflight: Promise<TickOutcome> | null = null;
   private readonly repairOperations = new Set<RandomSamplingRepairOperation>();
   private readonly dataCorruptionCooldown = new Map<bigint, number>();
+  private readonly solvedPeriodSkip: SolvedPeriodSkip;
 
   /**
    * Proof material pinned for the active proof period. The prover already pins
@@ -248,6 +253,7 @@ export class RandomSamplingProver {
     this.wal = deps.wal ?? new InMemoryProverWal();
     this.log = deps.log ?? noopLog;
     this.repairMissingKnowledgeAsset = deps.repairMissingKnowledgeAsset;
+    this.solvedPeriodSkip = new SolvedPeriodSkip(deps.chain);
   }
 
   /** Single-flight tick. Concurrent callers await the same result. */
@@ -290,54 +296,6 @@ export class RandomSamplingProver {
     }
     await this.builder.close();
     await this.wal.close();
-  }
-
-  /**
-   * Detect "the cached challenge's proof period has already elapsed in
-   * wall-clock terms, even though no on-chain tx has advanced the
-   * `activeProofPeriodStartBlock` storage cursor yet". Returns true
-   * when we should force a `createChallenge` to make the chain rotate.
-   *
-   * Applies to BOTH solved-and-stale (poll-after-success while period
-   * actually rotated) AND unsolved-and-stale (testnet 2026-05-01: an
-   * RS-contract Hub rotation left every node holding an unsolvable
-   * challenge from a long-expired period; with no tx ever calling
-   * submitProof / createChallenge the cursor froze, so
-   * `existingIsCurrent` stayed truthy forever and the prover never
-   * tried to rotate. Wall-clock comparison breaks the deadlock.)
-   *
-   * Codex round 2 on PR #369 — the on-chain
-   * `updateAndGetActiveProofPeriodStartBlock()` rolls forward using
-   * the CURRENT epoch's
-   * `RandomSampling.getActiveProofingPeriodDurationInBlocks()`, NOT
-   * whatever duration was baked into a cached `NodeChallenge` at
-   * creation time. If governance shortens the proofing duration
-   * mid-flight, the cached duration overstates expiry and the same
-   * `kc-not-synced` deadlock reappears at the rollover. So when the
-   * adapter exposes the live duration on `ProofPeriodStatus`
-   * (modern EVM/mock adapters), prefer it; fall back to
-   * `existing.proofingPeriodDurationInBlocks` only for legacy adapters
-   * that don't yet populate the field.
-   *
-   * Robust to chain adapters that don't expose `getBlockNumber` (mock
-   * / test): falls back to "not stale" so the existing short-circuit
-   * behaviour is preserved.
-   */
-  private async isCachedChallengeStale(
-    existing: NodeChallenge,
-    liveDurationInBlocks?: bigint,
-  ): Promise<boolean> {
-    if (!this.chain.getBlockNumber) return false;
-    const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
-    if (duration <= 0n) return false;
-    let currentBlock: number;
-    try {
-      currentBlock = await this.chain.getBlockNumber();
-    } catch {
-      return false;
-    }
-    const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
-    return BigInt(currentBlock) >= periodEndBlock;
   }
 
   /** Reuse the proof material already verified for this exact challenge, if any. */
@@ -497,6 +455,23 @@ export class RandomSamplingProver {
       );
     }
 
+    // The collaborator owns every reuse guard. On any doubt it forgets the
+    // record and this method falls through to the historical full read.
+    const reusableSolvedPeriod = await this.solvedPeriodSkip.reusable();
+    if (reusableSolvedPeriod) {
+      this.log.info('rs.tick.already-solved', {
+        epoch: reusableSolvedPeriod.challengePeriodEpoch.toString(),
+        periodStart: reusableSolvedPeriod.periodStartBlock.toString(),
+      });
+      return { kind: 'already-solved' };
+    }
+
+    // Pair identity + Chronos epoch BEFORE the reads: a rotation or epoch
+    // boundary landing while they are in flight invalidates the record on the
+    // next tick instead of attributing an old observation to new bindings or
+    // to a duration schedule that may have changed.
+    const solvedReadContext = await this.solvedPeriodSkip.captureReadContext();
+
     // Read the period status + existing challenge in parallel. We
     // *don't* short-circuit on `!status.isValid`: that view-side
     // check stalls single-tenant deployments indefinitely because no
@@ -520,6 +495,13 @@ export class RandomSamplingProver {
     const existingIsCurrent =
       existing !== null
       && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
+    const staleness = existingIsCurrent
+      ? await readCachedChallengeStaleness(
+        this.chain,
+        existing,
+        status.proofingPeriodDurationInBlocks,
+      )
+      : { stale: false };
 
     // Codex review on PR #357 flagged: short-circuiting on `existingIsCurrent && solved`
     // strands the node when the read-only `getActiveProofPeriodStatus` view is
@@ -536,11 +518,18 @@ export class RandomSamplingProver {
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
     if (existingIsCurrent && existing.solved) {
-      const isStale = await this.isCachedChallengeStale(
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      );
-      if (!isStale) {
+      if (!staleness.stale) {
+        // Remember the period so later ticks skip these reads — only when
+        // everything the skip window is built from was actually read this
+        // tick: derived pair identity, Chronos epoch, head, and LIVE duration.
+        // The epoch guard ends reuse before a pending governance duration can
+        // take effect; a duration-probe timeout simply defers recording.
+        this.solvedPeriodSkip.observe({
+          context: solvedReadContext,
+          challenge: existing,
+          staleness,
+          durationInBlocks: status.proofingPeriodDurationInBlocks,
+        });
         this.log.info('rs.tick.already-solved', {
           epoch: existing.epoch.toString(),
           periodStart: existing.activeProofPeriodStartBlock.toString(),
@@ -574,10 +563,7 @@ export class RandomSamplingProver {
     // after the 2026-05-01 RS-contract Hub rotation.
     const unsolvedStale = existingIsCurrent
       && !existing.solved
-      && (await this.isCachedChallengeStale(
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      ));
+      && staleness.stale;
     if (unsolvedStale) {
       this.log.info('rs.tick.forcing-rotation', {
         cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),

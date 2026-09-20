@@ -131,16 +131,16 @@ it('retries a transient finality read inside the receipt deadline', async () => 
     adapter.providers = [{
       getNetwork: async () => ({ chainId: 31337n }),
       getTransactionReceipt: async () => receipt,
-      getBlockNumber: async () => {
+      // At the default depth 1 the finality read IS the block-hash read (no eth_blockNumber).
+      getBlock: async () => {
         finalityAttempt += 1;
         if (finalityAttempt === 1) {
           const error = new Error('temporary finality RPC failure') as Error & { code: string };
           error.code = 'NETWORK_ERROR';
           throw error;
         }
-        return 10;
+        return { number: 10, hash: blockHash };
       },
-      getBlock: async () => ({ number: 10, hash: blockHash }),
     }];
     const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish');
     await vi.advanceTimersByTimeAsync(RPC_RECEIPT_POLL_INTERVAL_MS + 1);
@@ -161,8 +161,7 @@ it('bounds a stalled finality read by the receipt deadline', async () => {
     adapter.providers = [{
       getNetwork: async () => ({ chainId: 31337n }),
       getTransactionReceipt: async () => receipt,
-      getBlockNumber: async () => new Promise<number>(() => {}),
-      getBlock: async () => ({ number: 10, hash: blockHash }),
+      getBlock: async () => new Promise<never>(() => {}),
     }];
     const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish').then(
       (value: unknown) => ({ ok: true as const, value }),
@@ -2319,6 +2318,47 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((a as any).contracts.randomSamplingStorage).toBe(freshPair.rss);
   });
 
+  it('getRandomSamplingBindingId fails closed when a resolved handle has no string target', async () => {
+    // The prover reuses a remembered read only while the address-derived id is
+    // available, so "cannot tell" must land on the side of a chain re-read.
+    const a = new EVMChainAdapter(minimalConfig());
+    const pairs = [
+      { rs: { opaque: 'rs-1' }, rss: { opaque: 'rss-1' } },
+      { rs: { opaque: 'rs-2' }, rss: { opaque: 'rss-2' } },
+    ];
+    (a as any).randomSamplingPairCache = {
+      currentGeneration: () => 0,
+      get: async () => pairs.shift(),
+    };
+
+    await (a as any).resolveAndAssignRandomSamplingPair();
+    expect(a.getRandomSamplingBindingId()).toBeUndefined();
+    await (a as any).resolveAndAssignRandomSamplingPair();
+    expect(a.getRandomSamplingBindingId()).toBeUndefined();
+  });
+
+  it('getCurrentEpoch resolves Chronos once and reads the live epoch', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const chronos = { target: '0x0000000000000000000000000000000000000004' };
+    const resolveContract = vi.spyOn(a as any, 'resolveContract').mockResolvedValue(chronos);
+    const readContract = vi.spyOn(a as any, 'readContract')
+      .mockResolvedValueOnce('17')
+      .mockResolvedValueOnce(18n);
+
+    await expect(a.getCurrentEpoch()).resolves.toBe(17n);
+    await expect(a.getCurrentEpoch()).resolves.toBe(18n);
+
+    expect(resolveContract).toHaveBeenCalledOnce();
+    expect(resolveContract).toHaveBeenCalledWith('Chronos');
+    expect(readContract).toHaveBeenNthCalledWith(
+      1,
+      chronos,
+      'chronos.getCurrentEpoch',
+      'getCurrentEpoch',
+    );
+    expect(readContract).toHaveBeenCalledTimes(2);
+  });
+
   it('isContractMissingRevert recognises both the legacy (ZeroAddress→string) shape and ContractDoesNotExist revert (Codex N16)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     expect((a as any).isContractMissingRevert(new Error('reverted with custom error ContractDoesNotExist("RandomSampling")'))).toBe(true);
@@ -4212,6 +4252,32 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.message).toContain(walletB.address);
     expect(caught.message).toMatch(/Fund one of these wallets/i);
     expect(caught.cause).toBeDefined(); // original error preserved
+  });
+
+  it('forwards the publish receipt block hash to the timestamp reader', async () => {
+    // This parser-level test pins the hash pass-through. The real receipt-wait
+    // memo population and zero-extra-read behavior are covered in the focused
+    // redundant-head-reads suite without stubbing `getBlockTimestamp`.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    const kasInterface = new ethers.Interface(['event KnowledgeAssetCreated(uint256 id, address author)']);
+    const created = kasInterface.encodeEventLog('KnowledgeAssetCreated', [55n, ethers.ZeroAddress]);
+    const blockHash = `0x${'cd'.repeat(32)}`;
+    (a as any).contracts.knowledgeAssetStorage = { target: PARITY_KA_ADDRESS, interface: kasInterface };
+    (a as any).dispatchSerializedV10Write = recorder(async () => ({
+      hash: `0x${'ab'.repeat(32)}`,
+      blockNumber: 123,
+      blockHash,
+      index: 0,
+      logs: [{ address: PARITY_KA_ADDRESS, topics: created.topics, data: created.data }],
+    }));
+    const getBlockTimestamp = recorder(async (..._args: unknown[]) => 1_700);
+    (a as any).getBlockTimestamp = getBlockTimestamp;
+
+    const result = await a.createKnowledgeAssets(makeV10PublishParams());
+
+    expect(result.kaId).toBe(55n);
+    expect(result.blockTimestamp).toBe(1_700);
+    expect(getBlockTimestamp.calls).toEqual([[123, { blockHash }]]);
   });
 
   it('kill-switch keeps legacy routing balance-blind but cannot bypass strict publish planning', async () => {

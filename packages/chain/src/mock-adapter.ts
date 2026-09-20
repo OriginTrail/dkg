@@ -1547,6 +1547,15 @@ export class MockChainAdapter implements ChainAdapter {
     return true;
   }
 
+  /** The mock's in-memory RandomSampling state is one fixed "pair" — it never rotates. */
+  getRandomSamplingBindingId(): string {
+    return 'mock-random-sampling:mock-random-sampling-storage';
+  }
+
+  async getCurrentEpoch(): Promise<bigint> {
+    return this.rsEpoch;
+  }
+
   async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
     try {
       if (!this.isRandomSamplingReady()) {

@@ -617,6 +617,133 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(saved.length).toBe(savesAfterFirst); // no second persist
   });
 
+  it('issues no chain read for an ACK on an already-recorded hosted public CG', async () => {
+    // RPC budget: the pre-sign hook fires on EVERY StorageACK. Once the row is
+    // recorded the outcome is a no-op, so it must not cost liveness + policy
+    // reads per ACK.
+    const internals = await boot();
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+
+    await internals.recordCoreHostedPublicCg('1', 'devnet-test');
+    expect(internals.subscribedContextGraphs.get('devnet-test')?.coreHosted).toBe(true);
+    // First observation still proves liveness, then reads the policy.
+    expect(isContextGraphActiveOnChain.calls).toEqual([[1n]]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([[1n]]);
+
+    for (let ack = 0; ack < 5; ack += 1) {
+      await internals.recordCoreHostedPublicCg('1', 'devnet-test');
+    }
+
+    expect(isContextGraphActiveOnChain.calls).toHaveLength(1);
+    expect(getContextGraphAccessPolicy.calls).toHaveLength(1);
+  });
+
+  it('issues no chain read for a hosted public CG restored from the persisted row', async () => {
+    const internals = await boot();
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, syncMode: 'always-on', onChainId: '1', coreHosted: true,
+    });
+
+    await internals.recordCoreHostedPublicCg('1');
+
+    expect(isContextGraphActiveOnChain.calls).toEqual([]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([]);
+    expect(saved).toHaveLength(0);
+  });
+
+  it('reads liveness BEFORE policy on the first observation of a hosted CG', async () => {
+    const internals = await boot();
+    const order: string[] = [];
+    internals.chain.isContextGraphActiveOnChain = async () => { order.push('live'); return true; };
+    internals.chain.getContextGraphAccessPolicy = async () => { order.push('policy'); return 0; };
+
+    await internals.recordCoreHostedPublicCg('11', 'first-observation');
+
+    expect(order).toEqual(['live', 'policy']);
+    expect(internals.subscribedContextGraphs.get('first-observation')?.coreHosted).toBe(true);
+  });
+
+  it('still reads chain when a core-hosted row is bound to a DIFFERENT on-chain id', async () => {
+    // The early-out is keyed on the on-chain id, not just the local row: a
+    // local id re-created under a new chain graph is a first observation.
+    const internals = await boot();
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
+    });
+
+    await internals.recordCoreHostedPublicCg('9', 'devnet-test');
+
+    expect(isContextGraphActiveOnChain.calls).toEqual([[9n]]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([[9n]]);
+    const sub = internals.subscribedContextGraphs.get('devnet-test');
+    expect(sub!.onChainId).toBe('9');
+    expect(sub!.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('never rebinds a core-hosted row to a DEACTIVATED on-chain id', async () => {
+    const internals = await boot();
+    internals.chain.isContextGraphActiveOnChain = async (id) => id !== 9n;
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
+    });
+
+    await internals.recordCoreHostedPublicCg('9', 'devnet-test');
+
+    expect(getContextGraphAccessPolicy.calls).toEqual([]); // liveness gates the policy read
+    expect(internals.subscribedContextGraphs.get('devnet-test')).toMatchObject({
+      onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    expect(saved).toHaveLength(0);
+  });
+
+  it('persists once when first ACKs for the same hosted CG race', async () => {
+    // Both calls pass the pre-read early-out; the post-read check must still
+    // stop the loser from re-persisting and re-triggering the reconcile.
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    const origSet = (internals as any).setContextGraphSubscription.bind(internals);
+    const setContextGraphSubscription = recorder((...a: unknown[]) => origSet(...a));
+    (internals as any).setContextGraphSubscription = setContextGraphSubscription;
+
+    await Promise.all([
+      internals.recordCoreHostedPublicCg('12', 'raced-first-ack'),
+      internals.recordCoreHostedPublicCg('12', 'raced-first-ack'),
+    ]);
+
+    expect(internals.subscribedContextGraphs.get('raced-first-ack')?.coreHosted).toBe(true);
+    expect(setContextGraphSubscription.calls).toHaveLength(1);
+  });
+
+  it('keys the host row under a local mapping that appears while the chain reads are in flight', async () => {
+    const internals = await boot();
+    let resolvePolicy!: (value: number) => void;
+    internals.chain.getContextGraphAccessPolicy = () => new Promise<number>((resolve) => {
+      resolvePolicy = resolve;
+    });
+    (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+
+    const recording = internals.recordCoreHostedPublicCg('13', 'publisher-hint');
+    internals.subscribedContextGraphs.set('local-name', { subscribed: true, onChainId: '13' });
+    resolvePolicy(0);
+    await recording;
+
+    expect(internals.subscribedContextGraphs.get('local-name')?.coreHosted).toBe(true);
+    expect(internals.subscribedContextGraphs.get('publisher-hint')).toBeUndefined();
+  });
+
   it('preserves a pre-existing member subscription while adding coreHosted', async () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => 0;

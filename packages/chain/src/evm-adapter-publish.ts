@@ -863,7 +863,10 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
+    const blockTimestamp = await this.getBlockTimestamp(
+      receipt.blockNumber,
+      { ...options, blockHash: receipt.blockHash },
+    );
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -923,7 +926,10 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
+    const blockTimestamp = await this.getBlockTimestamp(
+      receipt.blockNumber,
+      { ...options, blockHash: receipt.blockHash },
+    );
 
     return {
       batchId,
@@ -1002,16 +1008,11 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     let currentEpoch = 0n;
     const needsGrowthSizing = params.newByteSize > currentByteSize;
-    if (needsGrowthSizing && !this.contracts.chronos) {
-      throw new Error(
-        'Chronos contract binding required for byte-size growth update tokenAmount sizing',
-      );
-    }
-    if (this.contracts.chronos) {
+    if (needsGrowthSizing) {
       try {
-        currentEpoch = BigInt(await this.readContract(
-          this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
-        ));
+        // Growth sizing is the only path that needs the epoch. The shared
+        // helper owns lazy Chronos resolution when init has not bound it yet.
+        currentEpoch = await this.getCurrentEpoch();
       } catch (err) {
         throw new Error(
           `Failed to read Chronos currentEpoch for update tokenAmount sizing: ${(err as Error).message}`,
