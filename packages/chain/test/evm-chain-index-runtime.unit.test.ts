@@ -51,8 +51,12 @@ function rotationLog(
   contractName: string,
   blockNumber: number,
   index: number,
+  // The Hub keeps contracts and asset storages in two registries with two event
+  // sets (`Hub.sol:189-222`); the indexed storages live in the second one, so
+  // that is what a rotation of THEM looks like.
+  eventName: 'ContractChanged' | 'AssetStorageChanged' = 'ContractChanged',
 ): ethers.Log {
-  const encoded = hubInterface.encodeEventLog(hubInterface.getEvent('ContractChanged')!, [
+  const encoded = hubInterface.encodeEventLog(hubInterface.getEvent(eventName)!, [
     contractName,
     '0x00000000000000000000000000000000000000c1',
   ]);
@@ -130,6 +134,10 @@ function harness(options?: {
       address: CG_STORAGE_ADDRESS,
       contractInterface: cgInterface,
       deploymentBlockNumber: 2,
+      // Exactly what the adapter passes: the registry this address was
+      // resolved through. It seeds the tick's bindings, which is what makes a
+      // rotation of this name a MOVE off this address.
+      hubBinding: { name: 'ContextGraphStorage', kind: 'assetStorage' },
     },
     readTipProvider: async (label, read) => {
       labels.push(label);
@@ -180,6 +188,23 @@ describe('createEvmChainIndexRuntime', () => {
       fromBlock: 998,
       toBlock: 1_000,
     });
+  });
+
+  it('caps the rotated-away storage at its rebind block, end to end', async () => {
+    const h = harness({
+      logs: [rotationLog('ContextGraphStorage', 998, 0, 'AssetStorageChanged')],
+    });
+    await h.runtime.tick.runOnce(new AbortController().signal);
+
+    const coverage = (await h.store.load('scope'))!.coverage.find((entry) => (
+      entry.family === 'context-graph-authority'
+      && entry.address === CG_STORAGE_ADDRESS.toLowerCase()
+    ))!;
+    // The composition root is the only place that knows which Hub name each
+    // indexed address was resolved under, so this is where "a rotation retires
+    // the old address" is either true for the running node or true only in the
+    // tick's unit test.
+    expect(coverage.coveredThroughBlock).toBe(997);
   });
 
   it('refuses a log it cannot place on a fork rather than storing it', async () => {

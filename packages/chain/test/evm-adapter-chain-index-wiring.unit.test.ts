@@ -18,6 +18,8 @@ import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
+const RETIRED_CG_STORAGE = '0x00000000000000000000000000000000000000aa';
+const ROTATED_CG_STORAGE = '0x00000000000000000000000000000000000000bb';
 
 function config(store?: MemoryChainEventLogStore): EVMAdapterConfig {
   return {
@@ -60,6 +62,21 @@ function stubHub(adapter: EVMChainAdapter): void {
 
 function startChainIndex(adapter: EVMChainAdapter): void {
   (adapter as unknown as { startChainIndexRuntime(): void }).startChainIndexRuntime();
+}
+
+/** `ContextGraphStorage` as `initContracts` would have resolved it. */
+function stubContextGraphStorage(adapter: EVMChainAdapter, address: string): void {
+  (adapter as unknown as { contracts: Record<string, unknown> })
+    .contracts.contextGraphStorage = {
+      interface: new ethers.Interface(loadAbi('ContextGraphStorage')),
+      getAddress: async () => ethers.getAddress(address),
+    };
+}
+
+/** What the Hub rotation listener calls when it sees a name move. */
+function dispatchHubRotation(adapter: EVMChainAdapter, name: string): void {
+  (adapter as unknown as { applyHubRotationEventName(name: string): void })
+    .applyHubRotationEventName(name);
 }
 
 describe('EVMChainAdapter chain index wiring', () => {
@@ -113,6 +130,84 @@ describe('EVMChainAdapter chain index wiring', () => {
 
     await started;
     expect(adapter.chainEventLog).toBeDefined();
+    adapter.destroy();
+  });
+
+  it('MOVES the binding when the Hub rotates a contract the log indexes', async () => {
+    const store = new MemoryChainEventLogStore();
+    const adapter = new EVMChainAdapter(config(store));
+    stubHub(adapter);
+    stubContextGraphStorage(adapter, RETIRED_CG_STORAGE);
+    startChainIndex(adapter);
+    await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(RETIRED_CG_STORAGE);
+
+    // The Hub rebinds the name; `initContracts` re-resolves it, which is what
+    // this assignment stands in for.
+    stubContextGraphStorage(adapter, ROTATED_CG_STORAGE);
+    dispatchHubRotation(adapter, 'ContextGraphStorage');
+
+    // FIRST, and synchronously: the binding is gone. Everything the runtime
+    // decides — its decoders, its floors, the addresses it publishes — was
+    // fixed at construction, so until it is rebuilt the only honest thing it
+    // can say is nothing, and every reader goes back to its own scan.
+    expect(adapter.chainEventLog).toBeUndefined();
+
+    startChainIndex(adapter);
+    await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+    // The one that matters. A binding still naming the retired proxy is a log
+    // that answers "covered, and nothing happened" for every event the new
+    // contract emits, and the lanes advance past them for good.
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(ROTATED_CG_STORAGE);
+    adapter.destroy();
+  });
+
+  it('builds from the contracts it held when it STARTED, not from after the await', async () => {
+    const store = new MemoryChainEventLogStore();
+    const adapter = new EVMChainAdapter(config(store));
+    stubHub(adapter);
+    stubContextGraphStorage(adapter, RETIRED_CG_STORAGE);
+    const internals = adapter as unknown as {
+      contracts: Record<string, unknown>;
+      resolveContractDeployBlockNumber: unknown;
+      chainIndexStart?: Promise<void>;
+    };
+    let release = (): void => {};
+    const searching = new Promise<void>((resolve) => { release = () => { resolve(); }; });
+    internals.resolveContractDeployBlockNumber = async () => {
+      await searching;
+      return 1;
+    };
+
+    startChainIndex(adapter);
+    // What `invalidateHubBinding` does, landing while this detached build sits
+    // inside a deploy-block search.
+    internals.contracts.contextGraphStorage = undefined;
+    release();
+    await internals.chainIndexStart;
+
+    // Read after the await, that null would have built a log with no Context
+    // Graph source at all — every reader falling back forever, for the lifetime
+    // of the process, with nothing but a `console.warn` to say so.
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(RETIRED_CG_STORAGE);
+    adapter.destroy();
+  });
+
+  it('leaves the log alone for a rotation of a contract it does not index', async () => {
+    const store = new MemoryChainEventLogStore();
+    const adapter = new EVMChainAdapter(config(store));
+    stubHub(adapter);
+    stubContextGraphStorage(adapter, RETIRED_CG_STORAGE);
+    startChainIndex(adapter);
+    await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+    const binding = adapter.chainEventLog;
+
+    // `ParametersStorage` is not in the tick's address array, so nothing about
+    // the log became wrong. Tearing it down would spend a fresh deploy-block
+    // search and a cold pass on every unrelated rotation.
+    dispatchHubRotation(adapter, 'ParametersStorage');
+
+    expect(adapter.chainEventLog).toBe(binding);
     adapter.destroy();
   });
 

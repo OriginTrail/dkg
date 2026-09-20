@@ -71,11 +71,13 @@ export {
 
 export {
   currentHubBinding,
+  hubBindingSuccessions,
   hubBoundAddressesForRange,
   reduceHubBindings,
   splitRangeAtHubRotations,
   type HubBinding,
   type HubBindingReduction,
+  type HubBindingSuccession,
 } from './hub-bindings.js';
 
 export {

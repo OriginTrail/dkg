@@ -10,6 +10,7 @@ import {
   type ChainIndexLogRequest,
   type ChainIndexTickPorts,
 } from '../src/chain-index/chain-index-tick.js';
+import type { ChainEventLogCoverage } from '../src/chain-index/chain-event-log.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
@@ -118,6 +119,22 @@ function hubLog(
     topics: [...encoded.topics],
     data: encoded.data,
   };
+}
+
+/** `ContextGraphStorage` as the adapter resolved it, before any rotation. */
+const BOUND_STORAGE = Object.freeze([Object.freeze({
+  name: 'ContextGraphStorage',
+  kind: 'contract' as const,
+  address: STORAGE.toLowerCase(),
+  fromBlock: 10,
+})]);
+
+function authorityCoverage(
+  coverage: readonly ChainEventLogCoverage[],
+  address: string,
+): ChainEventLogCoverage | undefined {
+  return coverage.find((entry) => entry.family === 'context-graph-authority'
+    && entry.address === address.toLowerCase());
 }
 
 function tick(
@@ -270,6 +287,61 @@ describe('ChainIndexTick — one log', () => {
     ));
     expect(requeried).toHaveLength(1);
     expect(requeried[0]!.fromBlock).toBe(98);
+  });
+
+  it('STOPS the retired address covering blocks past the one it was rebound at', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    rig.logs = (request) => (
+      request.addresses.includes(HUB.toLowerCase())
+        ? [hubLog(98, 0, 'NewContract', 'ContextGraphStorage', ROTATED_STORAGE)]
+        : []
+    );
+    // The binding the adapter resolved out of the Hub. Without it the rotation
+    // is a name seen for the FIRST time, nothing is retired, and the coverage
+    // below marches on over a contract the Hub no longer points at.
+    const index = tick(store, rig.ports, { initialBindings: BOUND_STORAGE });
+
+    await index.runOnce(new AbortController().signal);
+
+    const coverage = (await store.load())!.coverage;
+    const retired = authorityCoverage(coverage, STORAGE)!;
+    // The pass read through the head at 100 and its request array still carried
+    // the old address — but 98 is where the Hub stopped meaning it, and 98
+    // itself holds the rebind transaction, so the top it may claim is 97.
+    // Everything above that is refused, which is the only thing that stops a
+    // lane advancing past events the NEW contract emitted.
+    expect(retired.coveredThroughBlock).toBe(97);
+    // And the blocks the same pass DID re-query for the new address are
+    // recorded under it, instead of being rows nothing can ever serve.
+    const successor = authorityCoverage(coverage, ROTATED_STORAGE)!;
+    expect(successor).toBeDefined();
+    expect(successor.coveredFromBlock).toBe(98);
+    expect(successor.coveredThroughBlock).toBe(100);
+    // The rebind block, not the old contract's floor: nothing below it was
+    // this name's history.
+    expect(successor.floorBlock).toBe(98);
+  });
+
+  it('keeps the retired address frozen at the rebind block on every later pass', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    rig.logs = (request) => (
+      request.addresses.includes(HUB.toLowerCase())
+        ? [hubLog(98, 0, 'NewContract', 'ContextGraphStorage', ROTATED_STORAGE)]
+        : []
+    );
+    const index = tick(store, rig.ports, { initialBindings: BOUND_STORAGE });
+    await index.runOnce(new AbortController().signal);
+
+    // The rotation now sits BELOW the settled cursor, so no later pass re-reads
+    // the Hub row that announced it. The ceiling has to survive that.
+    rig.logs = () => [];
+    rig.head = { number: 140, hash: hash(0x8c), timestampSeconds: 1_700_000_120 };
+    await index.runOnce(new AbortController().signal);
+
+    expect(authorityCoverage((await store.load())!.coverage, STORAGE)!.coveredThroughBlock)
+      .toBe(97);
   });
 
   it('treats the Hub emitting NewContract then ContractChanged as one rotation', async () => {

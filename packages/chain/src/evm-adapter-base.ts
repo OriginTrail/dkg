@@ -270,6 +270,21 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
 );
 
 /**
+ * The bindings the ONE chain log is built around
+ * (`startChainIndexRuntime` — keep the two in step).
+ *
+ * A rotation of one of these does not invalidate a cache, it invalidates the
+ * whole runtime: its decoder registry is keyed by (address, topic0) and its
+ * binding publishes those addresses to every reader, both fixed at
+ * construction. Anything else in `HUB_BINDING_INVALIDATORS` is not indexed and
+ * costs the log nothing when it moves.
+ */
+const CHAIN_INDEX_CONTRACT_KEYS: ReadonlySet<HubContractCacheKey> = new Set([
+  'contextGraphStorage',
+  'knowledgeAssetStorage',
+]);
+
+/**
  * Contract names deliberately EXCLUDED from the `resolvedContractAddressCache`
  * address memo (#1583 — the 100-KA publish-burst RPC read amplifier that funnels
  * ~150-250 redundant `Hub.getContractAddress` eth_calls through the chain RPC).
@@ -948,6 +963,16 @@ export class EVMChainAdapterBase {
 
   /** Single-flight: `initContracts` can run again after a Hub rotation. */
   private chainIndexStart: Promise<void> | undefined;
+
+  /**
+   * Which build of the log is the current one.
+   *
+   * A rotation of an indexed contract retires the whole runtime — its decoder
+   * registry, its family floors and the addresses its binding publishes are all
+   * pinned at construction — so the rebuild bumps this, and a build that
+   * finishes after it is dropped instead of attached.
+   */
+  private chainIndexGeneration = 0;
 
   /** The binding the process hands DOWN to every adapter that has no store. */
   get chainEventLog(): ChainEventLogBinding | undefined {
@@ -4637,12 +4662,27 @@ export class EVMChainAdapterBase {
    *
    * A failure here is a degraded index, not a degraded node: it is reported
    * and the adapter keeps every pre-log path.
+   *
+   * Re-entrant after a Hub rotation, and only after one:
+   * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next
+   * `initContracts` builds the log around the addresses the Hub now points at.
+   * Two builds racing are resolved by the generation counter, never by both
+   * attaching.
    */
   protected startChainIndexRuntime(): void {
     const store = this.chainEventLogStore;
     if (store === undefined || this.chainIndexStart !== undefined) return;
+    // Snapshot SYNCHRONOUSLY, before the first `await`, exactly as the Hub
+    // handle already was. `initContracts` re-assigns these fields and the
+    // rotation invalidator nulls them, while this task is detached: read after
+    // an await, a rotation landing in that gap would build the log with no
+    // Context Graph or KA source at all, silently and for good.
+    const hubContract = this.contracts.hub;
+    const contextGraphStorageContract = this.contracts.contextGraphStorage;
+    const knowledgeAssetStorageContract = this.contracts.knowledgeAssetStorage;
+    const generation = ++this.chainIndexGeneration;
     this.chainIndexStart = (async () => {
-      const hub = await this.chainIndexContract(this.contracts.hub, 'Hub');
+      const hub = await this.chainIndexContract(hubContract, 'Hub');
       if (hub === undefined) throw new Error('Hub address is unresolvable');
       const runtime = createEvmChainIndexRuntime({
         // The SAME scope the authority index already keys its checkpoint by,
@@ -4654,16 +4694,28 @@ export class EVMChainAdapterBase {
         // reorg-safe. Reusing it keeps ONE definition of "settled" on this
         // node rather than introducing a second one under the log.
         reorgHoldbackBlocks: CG_REGISTRY_REORG_BUFFER_BLOCKS,
+        // The widest `eth_getLogs` window this node already asks a provider
+        // for, reused so the tick cannot ask for one the pool has never been
+        // sized for. It is an operator knob NAMED for the registry scan, so
+        // one lowered for a strict provider also shortens the log's backfill
+        // page and its catch-up step — slower to walk history, never wider.
         backfillPageBlocks: this.cgRegistryScanPageSize,
         maxCatchUpBlocks: this.cgRegistryScanPageSize,
         hub,
         contextGraphStorage: await this.chainIndexContract(
-          this.contracts.contextGraphStorage,
+          contextGraphStorageContract,
           'ContextGraphStorage',
+          // Both indexed storages live in the Hub's ASSET STORAGE registry
+          // (`resolveAssetStorage`), which emits its own event pair
+          // (`Hub.sol:217-222`). The tick matches a rotation to a binding by
+          // (kind, name), so naming the registry here is what makes the
+          // rotation close this address's binding.
+          'assetStorage',
         ),
         knowledgeAssetStorage: await this.chainIndexContract(
-          this.contracts.knowledgeAssetStorage,
+          knowledgeAssetStorageContract,
           'DKGKnowledgeAssets',
+          'assetStorage',
         ),
         readTipProvider: (label, read, opts) => this.readTipProvider(label, read, opts),
         onError: (error) => {
@@ -4672,6 +4724,14 @@ export class EVMChainAdapterBase {
           );
         },
       });
+      // A rotation observed while this was building already asked for a
+      // runtime around the NEW addresses. Attaching this one would pin the
+      // retired ones for the lifetime of the process, which is the whole
+      // defect the rebuild exists to close; drop it instead.
+      if (generation !== this.chainIndexGeneration) {
+        await runtime.stop();
+        return;
+      }
       this.chainIndexRuntime = runtime;
       // Bind BEFORE starting: the binding is what every reader consults, and
       // a reader that arrives between start and attach would fall back for no
@@ -4680,7 +4740,7 @@ export class EVMChainAdapterBase {
       this.attachChainEventLog(runtime.binding);
       runtime.start();
     })().catch((err: unknown) => {
-      this.chainIndexStart = undefined;
+      if (generation === this.chainIndexGeneration) this.chainIndexStart = undefined;
       console.warn(
         `[chain] one-log chain index disabled: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -4691,6 +4751,7 @@ export class EVMChainAdapterBase {
   private async chainIndexContract(
     contract: Contract | undefined,
     contractLabel: string,
+    hubRegistry?: 'contract' | 'assetStorage',
   ): Promise<EvmChainIndexContract | undefined> {
     if (contract === undefined) return undefined;
     const address = (await contractAddress(contract)).toLowerCase();
@@ -4703,6 +4764,11 @@ export class EVMChainAdapterBase {
         'chainIndex deploy block',
         contractLabel,
       ),
+      // The Hub is the root of the scope, not an entry in it: no name binds it,
+      // so it has no binding to be rotated off.
+      ...(hubRegistry === undefined
+        ? {}
+        : { hubBinding: { name: contractLabel, kind: hubRegistry } }),
     };
   }
 
@@ -4728,7 +4794,45 @@ export class EVMChainAdapterBase {
     const policy = HUB_BINDING_INVALIDATORS.get(name);
     if (!policy) return;
     this.invalidateHubBindingOnRotation(policy);
+    this.rebuildChainIndexRuntimeOnRotation(policy);
     this.finalizeKnownHubRotation();
+  }
+
+  /**
+   * Retire the one log's runtime when a contract it INDEXES is rotated.
+   *
+   * Everything that decides which addresses the log speaks for is fixed at
+   * construction — the decoder registry, the per-family floors, and the
+   * addresses the binding publishes to every reader. So a rotation the runtime
+   * cannot be told about leaves it answering out of a retired proxy: the tick
+   * would go on fetching the old address, coverage would go on claiming its
+   * blocks, and `evm-adapter-events.ts` would read a confident empty list for
+   * events the NEW contract emitted. The lane advances past them regardless
+   * (`chain-event-lane-runner.ts:289`), so those events are skipped for good.
+   *
+   * Dropping the binding here is the fail-closed half and it takes effect
+   * immediately: every reader is back on its own scan, which is exactly what it
+   * did before the log existed. The rebuild is the other half —
+   * `finalizeKnownHubRotation` re-arms `init()`, `initContracts` re-resolves
+   * the rotated name and calls `startChainIndexRuntime()` again, which now
+   * passes its own guard. The CURSOR is untouched: it lives in the store, keyed
+   * by (deployment, Hub), so only the address set moves and no history is
+   * re-walked.
+   */
+  protected rebuildChainIndexRuntimeOnRotation(policy: HubBindingInvalidationPolicy): void {
+    if (this.chainEventLogStore === undefined) return;
+    if (!('contractKey' in policy) || !CHAIN_INDEX_CONTRACT_KEYS.has(policy.contractKey)) return;
+    this.chainIndexGeneration += 1;
+    const runtime = this.chainIndexRuntime;
+    this.chainIndexRuntime = undefined;
+    this.chainIndexStart = undefined;
+    this.attachChainEventLog(undefined);
+    // Not awaited, for the same reason the start is not: this runs inside the
+    // rotation callback and `stop()` awaits an in-flight pass. A pass already
+    // in flight is harmless either way — it records the blocks it actually
+    // looked at, and the rebind block is the ceiling of what the retired
+    // address may ever claim (`hubBindingSuccessions`).
+    void runtime?.stop().catch(() => undefined);
   }
 
   protected invalidateHubBindingOnRotation(policy: HubBindingInvalidationPolicy): void {
@@ -4820,6 +4924,10 @@ export class EVMChainAdapterBase {
     // is nothing here for a synchronous `destroy()` to wait on, and a tick
     // that loses its providers below simply fails its pass and is not
     // rescheduled. The timer is `unref`'d, so it cannot hold the process open.
+    //
+    // The generation bump disowns a build still IN FLIGHT as well, which would
+    // otherwise attach its binding to a destroyed adapter and start its timer.
+    this.chainIndexGeneration += 1;
     void this.chainIndexRuntime?.stop().catch(() => undefined);
     this.chainIndexRuntime = undefined;
     this.attachChainEventLog(undefined);

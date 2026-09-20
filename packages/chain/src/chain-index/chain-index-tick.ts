@@ -19,10 +19,12 @@ import {
   type ChainEventDecoderRegistry,
 } from './chain-event-decoders.js';
 import {
+  hubBindingSuccessions,
   hubBoundAddressesForRange,
   reduceHubBindings,
   splitRangeAtHubRotations,
   type HubBinding,
+  type HubBindingSuccession,
 } from './hub-bindings.js';
 
 export const CHAIN_EVENT_LOG_ZERO_HASH = `0x${'00'.repeat(32)}`;
@@ -101,6 +103,22 @@ export interface ChainIndexTickOptions {
    * it holds nothing BELOW this block and lets the backfill walk down.
    */
   readonly resumeFromBlockNumber?: number;
+  /**
+   * The Hub bindings the indexed addresses were resolved FROM.
+   *
+   * Without them the tick starts believing nothing is bound, and the first
+   * rotation of a contract it was built with reads as a name being registered
+   * for the first time: no binding is closed, so nothing marks the old address
+   * retired, and its coverage marches straight past the rebind block while the
+   * readers still hold that address. Seeding the current binding of each
+   * indexed name is what makes that rotation a MOVE
+   * ({@link hubBindingSuccessions}) instead of a first sighting.
+   *
+   * `fromBlock` is the contract's deploy block rather than the block the Hub
+   * bound it at, which the adapter does not know: it is only ever used as a
+   * lower bound, and the binding is the current one either way.
+   */
+  readonly initialBindings?: readonly HubBinding[];
   readonly now?: () => number;
 }
 
@@ -142,6 +160,18 @@ interface ChainIndexFetchResult {
   readonly logRequests: number;
   /** Per address, the lowest block this fetch actually looked at. */
   readonly lookedFrom: ReadonlyMap<string, number>;
+  /**
+   * Per address, the highest block this fetch may CLAIM.
+   *
+   * The top of what it looked at — except for an address the Hub has rebound a
+   * name off, which is capped BELOW the rebind block however far the pass
+   * actually read. Past that block the address is no longer the contract the
+   * node means, and the only honest answer about those blocks is "not covered,
+   * go and scan".
+   */
+  readonly lookedThrough: ReadonlyMap<string, number>;
+  /** Names that moved off an indexed address, as of this pass. */
+  readonly successions: readonly HubBindingSuccession[];
 }
 
 /**
@@ -184,7 +214,7 @@ export class ChainIndexTick {
     signal.throwIfAborted();
     const { scope, store, registry } = this.#options;
     const state = await store.load(scope);
-    this.#bindings = this.#seedBindings(state);
+    this.#bindings = this.#seedBindings();
 
     const head = await this.ports.readHead(signal);
     let blockRequests = 1;
@@ -282,13 +312,13 @@ export class ChainIndexTick {
       // Exactly the blocks this pass re-fetched. The store replaces the tail
       // only inside it, so nothing coverage claims can go missing.
       replacedRange: { fromBlockNumber: fetchFrom, throughBlockNumber: fetchThrough },
-      // `fetchThrough`, NOT the head: coverage is what was actually looked at.
-      // Claiming the head while a catch-up is still climbing is exactly how an
-      // unindexed range becomes an "indexed and absent" answer.
+      // What was actually LOOKED AT, per address, and never the head. Claiming
+      // the head while a catch-up is still climbing is exactly how an unindexed
+      // range becomes an "indexed and absent" answer — and so is claiming a
+      // rebound contract's blocks for the proxy it was rebound off.
       coverage: this.#extendCoverage(
         state.coverage,
-        fetch.lookedFrom,
-        fetchThrough,
+        fetch,
         topicSetVersion !== cursor.topicSetVersion,
       ),
       clearsForkSuspicion: verification.verified,
@@ -371,10 +401,17 @@ export class ChainIndexTick {
     return Math.min(headBlockNumber, settledBlockNumber + max);
   }
 
-  #seedBindings(state: ChainEventLogState | undefined): readonly HubBinding[] {
+  /**
+   * What the tick believes is bound before it has read a single Hub row.
+   *
+   * The pairs the adapter resolved, once, and then whatever the passes have
+   * folded on top. Starting from nothing is what made the FIRST rotation of an
+   * indexed contract invisible as a rotation: `reduceHubBindings` had no open
+   * binding to close, so nothing was ever marked retired.
+   */
+  #seedBindings(): readonly HubBinding[] {
     if (this.#bindings.length > 0) return this.#bindings;
-    if (state === undefined) return [];
-    return this.#bindings;
+    return this.#options.initialBindings ?? [];
   }
 
   /**
@@ -433,7 +470,7 @@ export class ChainIndexTick {
       },
       rows: this.#flagRows(fetch.rows, settled.number),
       replacedRange: { fromBlockNumber: liveFrom, throughBlockNumber: fetchThrough },
-      coverage: this.#extendCoverage([], fetch.lookedFrom, fetchThrough, true),
+      coverage: this.#extendCoverage([], fetch, true),
     });
     return this.#result(revision === undefined ? 'cas-lost' : 'advanced', {
       head,
@@ -584,13 +621,22 @@ export class ChainIndexTick {
     const topicSet = registry.topicSet();
     const rows: ChainEventLogFetchedRow[] = [];
     const lookedFrom = new Map<string, number>();
+    const lookedThrough = new Map<string, number>();
     let logRequests = 0;
     let bindings = this.#bindings;
 
-    const note = (addresses: readonly string[], rangeFrom: number): void => {
+    const note = (
+      addresses: readonly string[],
+      rangeFrom: number,
+      rangeThrough: number,
+    ): void => {
       for (const address of addresses) {
-        const previous = lookedFrom.get(address);
-        if (previous === undefined || rangeFrom < previous) lookedFrom.set(address, rangeFrom);
+        const lowest = lookedFrom.get(address);
+        if (lowest === undefined || rangeFrom < lowest) lookedFrom.set(address, rangeFrom);
+        const highest = lookedThrough.get(address);
+        if (highest === undefined || rangeThrough > highest) {
+          lookedThrough.set(address, rangeThrough);
+        }
       }
     };
     const request = async (
@@ -600,7 +646,7 @@ export class ChainIndexTick {
     ): Promise<readonly ChainEventLogFetchedRow[]> => {
       if (addresses.length === 0 || rangeThrough < rangeFrom) return [];
       logRequests += 1;
-      note(addresses, rangeFrom);
+      note(addresses, rangeFrom, rangeThrough);
       return this.ports.readLogs({
         addresses,
         topic0: topicSet.topic0,
@@ -639,11 +685,28 @@ export class ChainIndexTick {
       }
     }
 
+    // Applied AFTER the whole range, and to the final bindings rather than to
+    // this page's rotations alone: a rebind stays in force for every later
+    // pass, and the pass that first sees it is the last one that would notice
+    // it from its own rows.
+    const successions = hubBindingSuccessions(bindings);
+    for (const succession of successions) {
+      const claimed = lookedThrough.get(succession.retiredAddress);
+      if (claimed === undefined) continue;
+      // `fromBlock - 1`, not `fromBlock`: the rebind transaction sits INSIDE
+      // that block, so the rest of it belongs to the new contract, whose logs
+      // this address's rows cannot account for.
+      const ceiling = succession.fromBlock - 1;
+      if (ceiling < claimed) lookedThrough.set(succession.retiredAddress, ceiling);
+    }
+
     return Object.freeze({
       rows: Object.freeze(rows),
       bindings,
       logRequests,
       lookedFrom,
+      lookedThrough,
+      successions,
     });
   }
 
@@ -663,27 +726,64 @@ export class ChainIndexTick {
     })));
   }
 
+  /**
+   * Every (family, address) this pass may record coverage for.
+   *
+   * The registry's own addresses, plus the address a rotation moved each of
+   * them to. The successor inherits the families of the address it replaced —
+   * the registry cannot name it, because the registry was built before the
+   * rotation — and its floor is the REBIND block: nothing below that was this
+   * name's history, and the adapter's rebuilt runtime lowers the floor to the
+   * contract's deploy block when it re-resolves it.
+   */
+  #coveredAddresses(
+    family: typeof CHAIN_EVENT_LOG_FAMILIES[number],
+    successions: readonly HubBindingSuccession[],
+  ): readonly Readonly<{ address: string; floorBlock: number }>[] {
+    const { registry, familyFloorBlocks, deploymentBlockNumber } = this.#options;
+    const registered = registry.addressesFor(family);
+    const covered = registered.map((address) => Object.freeze({
+      address,
+      floorBlock: familyFloorBlocks?.get(chainEventLogFloorKey(family, address))
+        ?? familyFloorBlocks?.get(address)
+        ?? deploymentBlockNumber,
+    }));
+    for (const succession of successions) {
+      if (!registered.includes(succession.retiredAddress)) continue;
+      // A name rebound onto an address the registry already knows needs no
+      // second entry; a duplicate would only make the commit's two rows for it
+      // order-dependent.
+      if (registered.includes(succession.address)) continue;
+      covered.push(Object.freeze({
+        address: succession.address,
+        floorBlock: succession.fromBlock,
+      }));
+    }
+    return Object.freeze(covered);
+  }
+
   #extendCoverage(
     previous: readonly ChainEventLogCoverage[],
-    lookedFrom: ReadonlyMap<string, number>,
-    throughBlock: number,
+    fetch: ChainIndexFetchResult,
     topicSetChanged: boolean,
   ): readonly ChainEventLogCoverage[] {
-    const { registry, familyFloorBlocks, deploymentBlockNumber } = this.#options;
     const extended: ChainEventLogCoverage[] = [];
     for (const family of CHAIN_EVENT_LOG_FAMILIES) {
-      for (const address of registry.addressesFor(family)) {
-        const from = lookedFrom.get(address);
-        if (from === undefined) continue;
-        const floorBlock = familyFloorBlocks?.get(chainEventLogFloorKey(family, address))
-          ?? familyFloorBlocks?.get(address)
-          ?? deploymentBlockNumber;
+      for (const { address, floorBlock } of this.#coveredAddresses(family, fetch.successions)) {
+        const from = fetch.lookedFrom.get(address);
+        const through = fetch.lookedThrough.get(address);
+        if (from === undefined || through === undefined) continue;
+        // A retired address whose ceiling has fallen below everything this pass
+        // looked at claims NOTHING new. Omitting the row leaves the stored one
+        // exactly where the rebind stopped it (the store upserts per entry), so
+        // every reader above that block refuses and keeps its own scan.
+        if (through < from) continue;
         const next: ChainEventLogCoverage = Object.freeze({
           family,
           address,
           floorBlock,
           coveredFromBlock: from,
-          coveredThroughBlock: throughBlock,
+          coveredThroughBlock: through,
         });
         // A widened filter invalidates what the already-walked blocks PROVE:
         // they were walked without this topic. Restart that family's coverage

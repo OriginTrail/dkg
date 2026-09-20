@@ -14,7 +14,11 @@ import type { HubRotationEvent } from './chain-event-decoders.js';
  * NOT DURABLE YET, despite the `hub_bindings` table existing. `ChainEventLogStore`
  * has no binding method and nothing writes that table, so bindings live only in
  * the tick's process memory: after a restart the tick resumes above its settled
- * cursor and never re-sees the `NewContract` that established one. It degrades
+ * cursor and never re-sees the `NewContract` that established one. What a fresh
+ * process DOES start from is {@link ChainIndexTickOptions.initialBindings} —
+ * the (name → address) pairs the adapter resolved out of the Hub — so the
+ * CURRENT binding of every indexed name is always known and a rotation of one
+ * is always a move rather than a first sighting. It degrades
  * fail-closed — coverage is recorded only for addresses the registry knows, so
  * an un-queried historical address simply has none and nothing may be reported
  * absent for it — but "replayable after a restart" is not true until the store
@@ -115,6 +119,65 @@ export function reduceHubBindings(
         || left.name.localeCompare(right.name))),
     rebound: Object.freeze(rebound),
   });
+}
+
+/** One name's move off an address the tick indexes, and onto another. */
+export interface HubBindingSuccession {
+  /** The address the name points at NOW. Lowercased. */
+  readonly address: string;
+  /** An address the same name used to point at, and no longer does. */
+  readonly retiredAddress: string;
+  /** The block the Hub rebound the name. The whole point of this record. */
+  readonly fromBlock: number;
+}
+
+/**
+ * Every address a still-bound name has MOVED OFF, and the block it moved.
+ *
+ * This is what stops the one log answering out of a retired proxy. A rebind
+ * does not stop the old contract from existing or from emitting: it stops it
+ * being the contract the node means. So from the rebind block on, the old
+ * address's coverage must not grow — otherwise the log goes on reporting
+ * "covered, and nothing happened" for blocks whose events were emitted
+ * somewhere else entirely, and a lane that trusts coverage advances straight
+ * past them, permanently and silently.
+ *
+ * Keyed by (kind, name) like {@link reduceHubBindings}, because the Hub keeps
+ * contracts and asset storages in two registries that emit two event sets
+ * (`Hub.sol:189-222`) and a name may exist in both.
+ *
+ * An address that some name still points at is NOT retired, however many other
+ * names moved off it: one proxy bound under two names is still live. Where a
+ * name moved more than once, the EARLIEST move wins, because under-claiming
+ * coverage costs a live scan and over-claiming costs a skipped event.
+ */
+export function hubBindingSuccessions(
+  bindings: readonly HubBinding[],
+): readonly HubBindingSuccession[] {
+  const current = new Map<string, HubBinding>();
+  const currentAddresses = new Set<string>();
+  for (const binding of bindings) {
+    if (binding.toBlock !== undefined) continue;
+    currentAddresses.add(binding.address);
+    const held = current.get(bindingKeyOf(binding.kind, binding.name));
+    if (held === undefined || binding.fromBlock > held.fromBlock) {
+      current.set(bindingKeyOf(binding.kind, binding.name), binding);
+    }
+  }
+  const successions = new Map<string, HubBindingSuccession>();
+  for (const binding of bindings) {
+    if (currentAddresses.has(binding.address)) continue;
+    const open = current.get(bindingKeyOf(binding.kind, binding.name));
+    if (open === undefined || open.address === binding.address) continue;
+    const held = successions.get(binding.address);
+    if (held !== undefined && held.fromBlock <= open.fromBlock) continue;
+    successions.set(binding.address, Object.freeze({
+      address: open.address,
+      retiredAddress: binding.address,
+      fromBlock: open.fromBlock,
+    }));
+  }
+  return Object.freeze([...successions.values()]);
 }
 
 /** The address a name points at now, or `undefined` if nothing is bound. */

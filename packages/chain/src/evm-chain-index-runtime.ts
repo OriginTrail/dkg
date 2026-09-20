@@ -15,8 +15,14 @@
  * {@link ChainEventLogStore}, and the daemon gives exactly one
  * (`lifecycle.ts`); the per-wallet publisher adapters
  * (`publisher-runner.ts:createPublisherWalletChain`) get none, so they cannot
- * become a second scanner. They read the log through the same
- * {@link ChainEventLogBinding} instead.
+ * become a second TICK.
+ *
+ * They are not yet READERS of it either, and nothing in this file makes them
+ * one: the binding is handed to the owning adapter alone
+ * (`evm-adapter-base.ts:attachChainEventLog`), so every per-wallet adapter
+ * keeps its full live scanner set, its own Hub rotation poll included. Threading
+ * the binding down to them is the step that would make
+ * `Hub_rotation_poll_getLogs` read zero on every wallet rather than on one.
  */
 
 import { ethers, type JsonRpcProvider } from 'ethers';
@@ -38,6 +44,7 @@ import {
   type ChainIndexLogRequest,
   type ChainIndexObservedHead,
   type ChainIndexTickResult,
+  type HubBinding,
 } from './chain-index/index.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 
@@ -47,6 +54,13 @@ export interface EvmChainIndexContract {
   readonly contractInterface: ethers.Interface;
   /** Block this contract was deployed at; the floor of its families. */
   readonly deploymentBlockNumber: number;
+  /**
+   * The Hub registry entry this address was resolved THROUGH, when there is
+   * one. It seeds {@link ChainIndexTickOptions.initialBindings}, which is what
+   * lets the tick recognise a rotation of this contract as a move off this
+   * address rather than as a name it is seeing for the first time.
+   */
+  readonly hubBinding?: Pick<HubBinding, 'name' | 'kind'>;
 }
 
 export type EvmChainIndexReadProvider = <T>(
@@ -172,6 +186,32 @@ function chainIndexFloorBlocks(
 }
 
 /**
+ * The Hub bindings these addresses were resolved from.
+ *
+ * Seeded rather than learned, because the tick only ever learns a binding from
+ * a rotation it witnesses — and the rotation that matters most is the FIRST one
+ * of a contract the runtime was built with. Without a binding to close, that
+ * rotation would leave the retired proxy looking current and its coverage would
+ * keep growing over blocks the contract no longer speaks for.
+ */
+function chainIndexInitialBindings(
+  options: EvmChainIndexRuntimeOptions,
+): readonly HubBinding[] {
+  const bindings: HubBinding[] = [];
+  for (const contract of [options.contextGraphStorage, options.knowledgeAssetStorage]) {
+    const hubBinding = contract?.hubBinding;
+    if (contract === undefined || hubBinding === undefined) continue;
+    bindings.push(Object.freeze({
+      name: hubBinding.name,
+      kind: hubBinding.kind,
+      address: contract.address,
+      fromBlock: contract.deploymentBlockNumber,
+    }));
+  }
+  return Object.freeze(bindings);
+}
+
+/**
  * Construct — and only construct — the one log for this process.
  *
  * `start()` is separate from construction and never awaited by the caller: a
@@ -244,6 +284,7 @@ export function createEvmChainIndexRuntime(
       reorgHoldbackBlocks: options.reorgHoldbackBlocks,
       backfillPageBlocks: options.backfillPageBlocks,
       maxCatchUpBlocks: options.maxCatchUpBlocks,
+      initialBindings: chainIndexInitialBindings(options),
     },
   );
 
