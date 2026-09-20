@@ -7,6 +7,7 @@ import {
   RpcRequestGovernor,
   buildKnowledgeAssetUal,
   mergeRpcUsageWindows,
+  withRpcUsageAdapterRole,
   type CanonicalFinalizationReceipt,
   type ChainAdapter,
   type ChainEventLogBindingSource,
@@ -85,12 +86,12 @@ export function createPublisherWalletChain(
   chainEventLogBindingSource?: ChainEventLogBindingSource,
 ): ChainAdapter {
   return chainBase
-    ? new EVMChainAdapter({
-        ...chainBase,
-        privateKey,
-        allowNoAdminSigner: true,
-        chainEventLogBindingSource,
-      })
+    ? withRpcUsageAdapterRole('publisher_wallet', () => new EVMChainAdapter({
+      ...chainBase,
+      privateKey,
+      allowNoAdminSigner: true,
+      chainEventLogBindingSource,
+    }))
     : new NoChainAdapter();
 }
 
