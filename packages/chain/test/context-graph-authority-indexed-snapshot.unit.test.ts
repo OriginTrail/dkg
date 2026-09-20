@@ -716,6 +716,15 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
+  it('rejects malformed finalized reverse-binding hashes before scanning', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .resolveFinalizedContextGraphIdByNameHash!('not-a-hash'))
+      .rejects.toThrow('name-hash target must be bytes32');
+    expect(evidence.indexRanges).toEqual([]);
+  });
+
   it('projects many finalized name bindings through one index read', async () => {
     const { adapter, evidence } = makeIndexedAuthorityAdapter({
       secondContextGraph: true,

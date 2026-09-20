@@ -3,7 +3,7 @@
 import type { ChainAdapter, NodeChallenge } from '@origintrail-official/dkg-chain';
 
 /** Re-read even inside a long stable proof period. */
-export const SOLVED_PERIOD_MAX_SKIP_MS = 5 * 60_000;
+export const SOLVED_PERIOD_MAX_SKIP_MS = 60_000;
 
 export interface SolvedPeriodReadContext {
   /** Derived identity of the currently bound RandomSampling contract pair. */
@@ -73,8 +73,10 @@ export async function readCachedChallengeStaleness(
  * `RandomSamplingStorage.clearOutstandingChallenges` deletes the challenge
  * struct even though the separately earned score survives. That operation or
  * a reorg can therefore invalidate the observed solved flag in-period. The
- * block safety bound is capped inside the open period, and the five-minute
- * bound applies independently, so the premise is always revalidated.
+ * block safety bound is capped inside the open period, and the one-minute
+ * bound applies independently. At the default 30-second prover cadence this
+ * skips at most one full status/challenge read before revalidating a possible
+ * admin clear or reorg.
  */
 export class SolvedPeriodSkip {
   readonly #chain: ChainAdapter;
