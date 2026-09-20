@@ -9,7 +9,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 
 /** Re-read even inside a long stable proof period. */
-export const SOLVED_PERIOD_MAX_SKIP_MS = 5 * 60_000;
+export const SOLVED_PERIOD_MAX_SKIP_MS = 60_000;
 
 export type SolvedPeriodReadContext = RandomSamplingReadContext;
 
@@ -58,8 +58,10 @@ export type SolvedPeriodReadResult<T> =
  * `RandomSamplingStorage.clearOutstandingChallenges` deletes the challenge
  * struct even though the separately earned score survives. That operation or
  * a reorg can therefore invalidate the observed solved flag in-period. The
- * block safety bound is capped inside the open period, and the five-minute
- * bound applies independently, so the premise is always revalidated.
+ * block safety bound is capped inside the open period, and the one-minute
+ * bound applies independently. At the default 30-second prover cadence this
+ * skips at most one full status/challenge read before revalidating a possible
+ * admin clear or reorg.
  *
  * The collaborator owns the full read sequence. Callers provide only the live
  * status/challenge read: this class checks reuse, captures the binding and
@@ -76,6 +78,13 @@ export class SolvedPeriodSkip {
     this.#chain = chain;
     this.#contextReader = bindRandomSamplingReadContextReader(chain);
     this.#now = now;
+  }
+
+  /** Cheap guards checked both before and after the live head/epoch reads. */
+  #stillBound(record: SolvedPeriodRecord, now: number): boolean {
+    return this.#chain.isRandomSamplingReady?.() === true
+      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
+      && now < record.rereadAtMs;
   }
 
   /**
