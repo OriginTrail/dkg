@@ -330,6 +330,38 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // both methods per-test. EVM-only — same family as the on-chain-derived
   // helpers above.
   'verifyContractSignature',
+  // The node's ONE chain log, and the four helpers that build, key, rebuild and
+  // read it. None of the five is on the `ChainAdapter` interface
+  // (`chain-adapter.ts` names none of them), so the CH-8 hazard this list exists
+  // for — a mock-mode user flipping `chain.type` to `evm` and hitting "method
+  // not implemented" — cannot reach them: `chainEventLogRows` and
+  // `chainIndexContract` are TS-`private`, `startChainIndexRuntime` and
+  // `rebuildChainIndexRuntimeOnRotation` are `protected`, and they appear in
+  // this audit only because TS visibility is erased at runtime (same category as
+  // `nextSigner` / `resolveContract` above). `attachChainEventLog` is public on
+  // the concrete EVM class but absent from the interface, its only non-test
+  // callers are inside `evm-adapter-base.ts` itself, and its parameter is a
+  // `ChainEventLogBinding` — an object only `createEvmChainIndexRuntime` builds,
+  // out of resolved Hub bindings, `ethers.Interface`s and one failover
+  // transport.
+  //
+  // THE DESIGN CALL — does a mock chain adapter have a one-log? No, and not
+  // because the mock stubs things: because of what the log IS. It is ONE per
+  // node, built only for the adapter handed a `ChainEventLogStore`
+  // (`evm-chain-index-runtime.ts`), and it exists solely so each event reader
+  // stops running its own `queryFilter` against a real RPC endpoint. The mock
+  // has no endpoint and no `queryFilter` — `listenForEvents` serves from
+  // in-process arrays and its blocks come from an internal `advanceBlock()`
+  // counter — so there is no RPC cost for an index to remove and nothing to
+  // index. Mirroring these would hand the mock a no-op claiming a log it does
+  // not have, which is a WORSE parity story than the honest absence: the log's
+  // whole contract is "this read cost zero chain RPC, provably", and a mock
+  // stub can prove nothing. EVM-only, like the Hub plumbing it is built from.
+  'chainEventLogRows',
+  'attachChainEventLog',
+  'startChainIndexRuntime',
+  'chainIndexContract',
+  'rebuildChainIndexRuntimeOnRotation',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([
