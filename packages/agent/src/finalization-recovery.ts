@@ -149,6 +149,12 @@ export interface FinalizationRecoveryReplayInput {
   ual: string;
   merkleRoot: string;
   kaId: string;
+  /** Coherent version evidence owned by this reconciliation operation. */
+  versionSnapshot?: {
+    latestRoot: string;
+    rootCount: string;
+    blockNumber: number;
+  };
 }
 
 export type FinalizationRecoveryReplayOutcome =
@@ -1517,8 +1523,11 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return [];
     if (
-      !this.chain?.getLatestMerkleRoot
-      || !this.chain.getMerkleRootCount
+      !this.chain
+      || (!input.versionSnapshot && (
+        !this.chain.getLatestMerkleRoot
+        || !this.chain.getMerkleRootCount
+      ))
       || !this.chain.getKAContextGraphId
     ) return [];
 
@@ -1545,11 +1554,26 @@ export class FinalizationRecovery<
     let rootCount: bigint;
     let boundContextGraphId: bigint | null | undefined;
     try {
-      [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-        this.chain.getLatestMerkleRoot(BigInt(input.kaId)),
-        this.chain.getMerkleRootCount(BigInt(input.kaId)),
-        this.chain.getKAContextGraphId(BigInt(input.kaId)),
-      ]);
+      const suppliedSnapshot = input.versionSnapshot;
+      if (suppliedSnapshot) {
+        latestRoot = ethers.getBytes(suppliedSnapshot.latestRoot);
+        rootCount = BigInt(suppliedSnapshot.rootCount);
+        if (
+          latestRoot.length !== 32
+          || rootCount <= 0n
+          || !Number.isSafeInteger(suppliedSnapshot.blockNumber)
+          || suppliedSnapshot.blockNumber < 0
+        ) return settled;
+        // KA -> CG binding remains a live recovery gate. Only the version
+        // tuple is reused from the operation's pinned snapshot.
+        boundContextGraphId = await this.chain.getKAContextGraphId(BigInt(input.kaId));
+      } else {
+        [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
+          this.chain.getLatestMerkleRoot!(BigInt(input.kaId)),
+          this.chain.getMerkleRootCount!(BigInt(input.kaId)),
+          this.chain.getKAContextGraphId(BigInt(input.kaId)),
+        ]);
+      }
     } catch (error) {
       this.log.info(
         `Finalization recovery chain state is not settled for ${input.ual}: `

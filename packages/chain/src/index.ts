@@ -39,6 +39,7 @@ export {
   type PublicFinalizedMaterializationAuthorityRequest,
   type PublicFinalizedMaterializationAuthorityResult,
   type PublicFinalizedMaterializationAuthorityUnavailableReason,
+  type PublicFinalizedMaterializationVersionSnapshot,
 } from './public-finalized-materialization-authority.js';
 export {
   CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,

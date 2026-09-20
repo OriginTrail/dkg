@@ -42,6 +42,7 @@ import {
   resolvePublicFinalizedMaterializationAuthority,
   type ChainAdapter,
   type EventFilter,
+  type PublicFinalizedMaterializationVersionSnapshot,
 } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -380,6 +381,8 @@ export interface ChainReconciledKCInput {
   batchId: bigint;
   versionBlock: number;
   authorAddress?: string;
+  /** Operation-scoped coherent snapshot; never retained across exact fetches. */
+  versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
   subGraphName?: string;
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
 }
@@ -705,6 +708,15 @@ export class FinalizationHandler {
       ual: input.ual,
       merkleRoot: ethers.hexlify(input.merkleRoot),
       kaId: input.kaId.toString(),
+      ...(input.versionSnapshot
+        ? {
+            versionSnapshot: {
+              latestRoot: ethers.hexlify(input.versionSnapshot.latestRoot),
+              rootCount: input.versionSnapshot.rootCount.toString(),
+              blockNumber: input.versionSnapshot.blockNumber,
+            },
+          }
+        : {}),
     });
   }
 
@@ -1650,6 +1662,7 @@ export class FinalizationHandler {
     batchId: bigint;
     versionBlock: number;
     authorAddress?: string;
+    versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
     subGraphName?: string;
     trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
   }, ctx: OperationContext): Promise<
@@ -1671,6 +1684,7 @@ export class FinalizationHandler {
       batchId,
       versionBlock,
       authorAddress,
+      versionSnapshot,
       subGraphName,
       trustedAssertionEvidence,
     } = input;
@@ -1947,6 +1961,7 @@ export class FinalizationHandler {
           merkleRoot,
           batchId: reconciliationBatchId,
           versionBlock,
+          versionSnapshot,
           subGraphName,
           verifiedLayer: {
             layer: MemoryLayer.VerifiableMemory,
@@ -2024,6 +2039,7 @@ export class FinalizationHandler {
         merkleRoot,
         batchId: reconciliationBatchId,
         versionBlock,
+        versionSnapshot,
         subGraphName,
         verifiedLayer: {
           layer: MemoryLayer.SharedWorkingMemory,
@@ -2090,6 +2106,7 @@ export class FinalizationHandler {
     merkleRoot: Uint8Array;
     batchId: bigint;
     versionBlock: number;
+    versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
     subGraphName?: string;
     verifiedLayer: VerifiedPublicFinalizedLayer;
     /** VM repair keeps the receipt recovery diagnostic in its defer log. */
@@ -2105,6 +2122,7 @@ export class FinalizationHandler {
       merkleRoot,
       batchId,
       versionBlock,
+      versionSnapshot,
       subGraphName,
       verifiedLayer,
       unavailableReason,
@@ -2117,6 +2135,8 @@ export class FinalizationHandler {
       kaId: batchId,
       assertionVersion: scope.assertionVersion,
       merkleRoot,
+      versionBlock,
+      versionSnapshot,
     });
     if (publicAuthorityResult.kind === 'unavailable') {
       if (publicAuthorityResult.detail) {
@@ -3321,7 +3341,7 @@ export class FinalizationHandler {
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
       kaId, batchId, versionBlock, authorAddress, subGraphName,
-      trustedAssertionEvidence, assertionVersion,
+      trustedAssertionEvidence, assertionVersion, versionSnapshot,
     } = input;
 
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
@@ -3361,6 +3381,7 @@ export class FinalizationHandler {
       batchId,
       versionBlock,
       authorAddress,
+      versionSnapshot,
       subGraphName,
       trustedAssertionEvidence,
     }, ctx);

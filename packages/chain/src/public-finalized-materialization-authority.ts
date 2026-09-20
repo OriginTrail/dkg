@@ -23,12 +23,27 @@ export type PublicFinalizedMaterializationAuthorityResult =
     detail?: string;
   };
 
+/**
+ * One coherent, finalized Knowledge Asset version observation. Callers may
+ * carry this only within the operation which obtained it from
+ * `readKnowledgeAssetVersionSnapshot`; it is not a cache entry.
+ */
+export interface PublicFinalizedMaterializationVersionSnapshot {
+  latestRoot: Uint8Array;
+  rootCount: bigint;
+  latestAuthor: string;
+  latestPublisher: string;
+  blockNumber: number;
+}
+
 export interface PublicFinalizedMaterializationAuthorityRequest {
   chain?: ChainAdapter;
   onChainContextGraphId?: string;
   kaId: bigint;
   assertionVersion: string;
   merkleRoot: Uint8Array;
+  versionBlock?: number;
+  versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
 }
 
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
@@ -54,8 +69,10 @@ export async function resolvePublicFinalizedMaterializationAuthority(
     || chain.chainId === 'none'
     || !chain.isContextGraphActiveOnChain
     || !chain.getContextGraphAccessPolicy
-    || !chain.getMerkleRootCount
-    || !chain.getLatestMerkleRoot
+    || (!request.versionSnapshot && (
+      !chain.getMerkleRootCount
+      || !chain.getLatestMerkleRoot
+    ))
     || !request.onChainContextGraphId
   ) {
     return { kind: 'unavailable', reason: 'capability-unavailable' };
@@ -74,33 +91,72 @@ export async function resolvePublicFinalizedMaterializationAuthority(
   }
 
   try {
-    const [active, accessPolicy, rootCountBefore] = await Promise.all([
+    // Keep the legacy root-count read concurrent with the live CG gates. A
+    // supplied coherent snapshot owns that value already and starts no extra
+    // version RPC here.
+    const rootCountBeforeRead = request.versionSnapshot
+      ? Promise.resolve<bigint | undefined>(undefined)
+      : chain.getMerkleRootCount!(request.kaId);
+    const [active, accessPolicy, legacyRootCountBefore] = await Promise.all([
       chain.isContextGraphActiveOnChain(onChainContextGraphId),
       chain.getContextGraphAccessPolicy(onChainContextGraphId),
-      chain.getMerkleRootCount(request.kaId),
+      rootCountBeforeRead,
     ]);
-    const latestRoot = await chain.getLatestMerkleRoot(request.kaId);
-    let authorAddress: string | undefined;
-    let authorUnavailableReason: string | undefined;
-    if (chain.getLatestMerkleRootAuthor) {
-      try {
-        const candidate = await chain.getLatestMerkleRootAuthor(request.kaId);
-        if (ethers.isAddress(candidate) && candidate !== ethers.ZeroAddress) {
-          authorAddress = ethers.getAddress(candidate);
-        }
-      } catch (error) {
-        authorUnavailableReason = error instanceof Error ? error.message : String(error);
-      }
-    }
-
-    // Sandwich the latest-root and optional author reads between monotonic
-    // root-count reads. Until an adapter supplies a block-tagged snapshot,
-    // this is the conservative coherence fence, including same-root updates.
-    const rootCountAfter = await chain.getMerkleRootCount(request.kaId);
     if (!active) return { kind: 'unavailable', reason: 'inactive-context-graph' };
     if (accessPolicy !== 0) {
       return { kind: 'unavailable', reason: 'non-public-context-graph' };
     }
+
+    const suppliedSnapshot = request.versionSnapshot;
+    let rootCountBefore: bigint;
+    let rootCountAfter: bigint;
+    let latestRoot: Uint8Array;
+    let authorAddress: string | undefined;
+    let authorUnavailableReason: string | undefined;
+
+    if (suppliedSnapshot) {
+      if (
+        suppliedSnapshot.rootCount <= 0n
+        || suppliedSnapshot.latestRoot.length !== 32
+        || !Number.isSafeInteger(suppliedSnapshot.blockNumber)
+        || suppliedSnapshot.blockNumber < 0
+        || request.versionBlock !== suppliedSnapshot.blockNumber
+        || !ethers.isAddress(suppliedSnapshot.latestPublisher)
+        || suppliedSnapshot.latestPublisher === ethers.ZeroAddress
+      ) {
+        return { kind: 'unavailable', reason: 'invalid-input' };
+      }
+      rootCountBefore = suppliedSnapshot.rootCount;
+      rootCountAfter = suppliedSnapshot.rootCount;
+      latestRoot = suppliedSnapshot.latestRoot;
+      if (
+        ethers.isAddress(suppliedSnapshot.latestAuthor)
+        && suppliedSnapshot.latestAuthor !== ethers.ZeroAddress
+      ) {
+        authorAddress = ethers.getAddress(suppliedSnapshot.latestAuthor);
+      } else {
+        authorUnavailableReason = 'invalid author in coherent version snapshot';
+      }
+    } else {
+      // Capability validation above guarantees the legacy read exists.
+      rootCountBefore = legacyRootCountBefore!;
+      latestRoot = await chain.getLatestMerkleRoot!(request.kaId);
+      if (chain.getLatestMerkleRootAuthor) {
+        try {
+          const candidate = await chain.getLatestMerkleRootAuthor(request.kaId);
+          if (ethers.isAddress(candidate) && candidate !== ethers.ZeroAddress) {
+            authorAddress = ethers.getAddress(candidate);
+          }
+        } catch (error) {
+          authorUnavailableReason = error instanceof Error ? error.message : String(error);
+        }
+      }
+      // Sandwich the latest-root and optional author reads between monotonic
+      // root-count reads. Callers without a block-pinned snapshot retain this
+      // conservative coherence fence, including same-root updates.
+      rootCountAfter = await chain.getMerkleRootCount!(request.kaId);
+    }
+
     if (rootCountBefore !== rootCountAfter) {
       return { kind: 'unavailable', reason: 'root-count-drift' };
     }

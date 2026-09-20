@@ -1777,6 +1777,58 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('reuses coherent operation version evidence while retaining the live KA binding gate', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-snapshot-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const getLatestMerkleRoot = vi.fn(async () => {
+        throw new Error('operation snapshot must replace root reread');
+      });
+      const getMerkleRootCount = vi.fn(async () => {
+        throw new Error('operation snapshot must replace root-count reread');
+      });
+      const getKAContextGraphId = vi.fn(async () => 42n);
+      const chain = recoveryChain({
+        getLatestMerkleRoot,
+        getMerkleRootCount,
+        getKAContextGraphId,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.matchingEntries({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+        versionSnapshot: {
+          latestRoot: `0x${'00'.repeat(32)}`,
+          rootCount: '1',
+          blockNumber: 321,
+        },
+      })).resolves.toHaveLength(1);
+
+      expect(getLatestMerkleRoot).not.toHaveBeenCalled();
+      expect(getMerkleRootCount).not.toHaveBeenCalled();
+      expect(getKAContextGraphId).toHaveBeenCalledOnce();
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes reorged block placement from permanent receipt content mismatch', async () => {
     const resolve = async (
       receipt: CanonicalFinalizationReceipt,

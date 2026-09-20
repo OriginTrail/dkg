@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { resolvePublicFinalizedMaterializationAuthority } from '../src/public-finalized-materialization-authority.js';
 
 const ROOT = new Uint8Array(32).fill(7);
 const AUTHOR = `0x${'11'.repeat(20)}`;
+const PUBLISHER = `0x${'22'.repeat(20)}`;
 
 function authorityChain() {
   const chain = new MockChainAdapter();
@@ -73,5 +75,85 @@ describe('public finalized materialization authority', () => {
       kind: 'resolved',
       authorUnavailableReason: 'author RPC unavailable',
     });
+  });
+
+  it('reuses one operation-scoped finalized snapshot while keeping live public gates', async () => {
+    const chain = authorityChain();
+    const active = vi.mocked(chain.isContextGraphActiveOnChain!);
+    const access = vi.mocked(chain.getContextGraphAccessPolicy!);
+    const rootCount = vi.mocked(chain.getMerkleRootCount!);
+    const latestRoot = vi.mocked(chain.getLatestMerkleRoot!);
+    const latestAuthor = vi.mocked(chain.getLatestMerkleRootAuthor!);
+
+    await expect(resolvePublicFinalizedMaterializationAuthority({
+      chain,
+      onChainContextGraphId: '298',
+      kaId: 42n,
+      assertionVersion: '1',
+      merkleRoot: ROOT,
+      versionBlock: 321,
+      versionSnapshot: {
+        latestRoot: ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 321,
+      },
+    })).resolves.toEqual({ kind: 'resolved', authorAddress: AUTHOR });
+
+    expect(active).toHaveBeenCalledOnce();
+    expect(access).toHaveBeenCalledOnce();
+    expect(rootCount).not.toHaveBeenCalled();
+    expect(latestRoot).not.toHaveBeenCalled();
+    expect(latestAuthor).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['assertion-version-mismatch', { rootCount: 2n }],
+    ['latest-root-mismatch', { latestRoot: new Uint8Array(32).fill(8) }],
+    ['invalid-input', { blockNumber: 322 }],
+    ['invalid-input', { latestPublisher: ethers.ZeroAddress }],
+  ] as const)(
+    'fails closed with %s when operation snapshot evidence is mutated',
+    async (reason, mutation) => {
+      const chain = authorityChain();
+      const versionSnapshot = Object.assign({
+        latestRoot: ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 321,
+      }, mutation);
+      await expect(resolvePublicFinalizedMaterializationAuthority({
+        chain,
+        onChainContextGraphId: '298',
+        kaId: 42n,
+        assertionVersion: '1',
+        merkleRoot: ROOT,
+        versionBlock: 321,
+        versionSnapshot,
+      })).resolves.toEqual({ kind: 'unavailable', reason });
+    },
+  );
+
+  it('does not let a coherent version snapshot bypass the live liveness gate', async () => {
+    const chain = authorityChain();
+    chain.isContextGraphActiveOnChain = vi.fn(async () => false);
+
+    await expect(resolvePublicFinalizedMaterializationAuthority({
+      chain,
+      onChainContextGraphId: '298',
+      kaId: 42n,
+      assertionVersion: '1',
+      merkleRoot: ROOT,
+      versionBlock: 321,
+      versionSnapshot: {
+        latestRoot: ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 321,
+      },
+    })).resolves.toEqual({ kind: 'unavailable', reason: 'inactive-context-graph' });
   });
 });
