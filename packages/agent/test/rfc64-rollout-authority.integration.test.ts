@@ -4319,6 +4319,9 @@ describe('RFC-64 rollout authority integration', () => {
     expect(recoveryGate).not.toHaveBeenCalled();
 
     confirmedMeta.mockResolvedValue(true);
+    recoveryGate.mockRejectedValueOnce(new Error('member recovery gate unavailable'));
+    await expect(edge.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
+      .resolves.toBeNull();
     recoveryGate.mockResolvedValue([AUTHOR]);
     await expect(edge.hasRfc64VerifiedPrivateMembershipV1(contextGraphId))
       .resolves.toBe(false);
