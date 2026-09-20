@@ -20,6 +20,8 @@ import {
   Rfc64AuthorityReadCoordinatorV1,
   isRfc64AuthorityRpcCircuitOpenErrorV1,
 } from '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
+  '../src/rfc64/catalog-authority-config-v1.js';
 
 function exhausted(retryAfterMs?: number): ChainRpcTransportError {
   return new RpcEndpointsExhaustedError(
@@ -36,6 +38,11 @@ function deterministicFailure(): Error {
 }
 
 describe('RFC-64 authority RPC circuit breaker', () => {
+  it('keeps projection stale-if-error reuse inside the RFC-64 refresh interval', () => {
+    expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 180_000 }).staleMs)
+      .toBeLessThanOrEqual(RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs);
+  });
+
   it('shares one open circuit across queued graph refreshes', async () => {
     let now = 1_000;
     let calls = 0;
@@ -130,7 +137,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
 
     const recovered = breaker.run(undefined, async (_signal, evidence) => {
       calls += 1;
-      evidence.agentReadOptions().onRpcRead();
+      evidence.agentResolverReadOptions().onRpcRead();
       return 'recovered';
     });
     const next = breaker.run(undefined, async () => {
@@ -169,7 +176,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
 
     await expect(breaker.run(undefined, async (_signal, evidence) => {
-      evidence.agentReadOptions().onRpcRead();
+      evidence.agentResolverReadOptions().onRpcRead();
       return 'provider-recovered';
     })).resolves.toBe('provider-recovered');
     expect(breaker.snapshot()).toEqual({
@@ -201,7 +208,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       clock.now += 50;
       // No onRpcRead callback: the projection's own account is the whole evidence.
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+        evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed?.({
           source: 'cache', ageMs: 40,
         });
         return 'served-from-cache';
@@ -212,7 +219,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('counts a completed scan as RPC health', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+        evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed?.({
           source: 'scan', ageMs: 0,
         });
         return 'scanned';
@@ -224,7 +231,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
         // Callers mark BEFORE they read; the stale answer voids that mark.
-        const options = evidence.agentReadOptions();
+        const options = evidence.agentResolverReadOptions();
         options.onRpcRead();
         options.onContextGraphAuthorityProjectionServed?.({
           source: 'stale-cache', ageMs: T + 1,
@@ -234,10 +241,10 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
     });
 
-    it('keeps unproven projection evidence sticky for the whole operation', async () => {
+    it('lets a later completed scan override earlier unproven projection evidence', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        const options = evidence.agentReadOptions();
+        const options = evidence.agentResolverReadOptions();
         options.onContextGraphAuthorityProjectionServed?.({
           source: 'stale-cache', ageMs: T + 1,
         });
@@ -245,13 +252,13 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         options.onContextGraphAuthorityProjectionServed?.({ source: 'scan', ageMs: 0 });
         return 'mixed-evidence';
       });
-      expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
+      expect(breaker.snapshot()).toMatchObject({ state: 'closed', consecutiveExhaustions: 0 });
     });
 
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        const options = evidence.agentReadOptions();
+        const options = evidence.agentResolverReadOptions();
         options.onRpcRead();
         // Fetched 101ms ago: 1ms BEFORE the pool was seen exhausted.
         options.onContextGraphAuthorityProjectionServed?.({ source: 'cache', ageMs: 101 });
@@ -303,7 +310,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       await olderBreaker.run(undefined, async (_signal, evidence) => {
         await read(
           olderCache,
-          evidence.agentReadOptions().onContextGraphAuthorityProjectionServed,
+          evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed,
         );
         return 'older-cache';
       });
@@ -327,7 +334,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       await newerBreaker.run(undefined, async (_signal, evidence) => {
         await read(
           newerCache,
-          evidence.agentReadOptions().onContextGraphAuthorityProjectionServed,
+          evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed,
         );
         return 'newer-cache';
       });
@@ -446,7 +453,6 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         vi.useRealTimers();
       }
     });
-
   });
 
   it('applies deterministic fleet jitter when no provider hint overrides it', async () => {

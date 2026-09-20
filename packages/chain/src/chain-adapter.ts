@@ -1,7 +1,7 @@
 import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
-import type { RandomSamplingReadContext } from './random-sampling-read-context.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
@@ -2034,10 +2034,8 @@ export interface ChainAdapter {
   isRandomSamplingReady?(): boolean;
   /** Refresh RandomSampling bindings and read membership through one typed capability. */
   resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
-  /** Read one pair-and-epoch context for solved-period reuse, or fail open. */
-  readRandomSamplingContext?(): Promise<RandomSamplingReadContext | undefined>;
-  /** Cheap synchronous guard for a previously sampled Random Sampling binding. */
-  isRandomSamplingReadContextCurrent?(context: RandomSamplingReadContext): boolean;
+  /** Cohesive binding/epoch capability used for solved-period reuse. */
+  getRandomSamplingReadContextReader?(): RandomSamplingReadContextReader | undefined;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.

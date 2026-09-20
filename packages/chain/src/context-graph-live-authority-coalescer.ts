@@ -193,8 +193,8 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
    * they are already sharing: it is still a live read they asked for, and
    * nothing it produces is retained for anyone else.
    */
-  invalidateAll(): void {
-    for (const partition of Object.values(this.#partitions)) partition.invalidateAll();
+  detachAll(): void {
+    for (const partition of Object.values(this.#partitions)) partition.detachAll();
   }
 
   /**

@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -719,7 +719,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetsV1(
     this: DKGAgent,
     contextGraphIds: readonly string[],
-    options: ChainReadOptions & Readonly<{
+    options: ContextGraphAuthorityReadOptions & Readonly<{
       onRpcRead?: () => void;
     }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
@@ -870,7 +870,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetV1(
     this: DKGAgent,
     contextGraphId: string,
-    options: ChainReadOptions & Readonly<{
+    options: ContextGraphAuthorityReadOptions & Readonly<{
       onRpcRead?: () => void;
     }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {

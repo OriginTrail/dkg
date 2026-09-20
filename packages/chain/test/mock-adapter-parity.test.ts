@@ -157,6 +157,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'initContracts',          // TS-private: init() body extracted so RPC-exhaustion can be wrapped as RPC_ENDPOINTS_EXHAUSTED
   'requireV9',
   'getBlockTimestamp',
+  'getFinalizedBlockTimestamp',
   // TS-private half of the EVM sign/broadcast/receipt split. The mock has no
   // raw RPC transport or signed-transaction acceptance boundary to emulate.
   'broadcastSignedTransactionWithRetries',
@@ -400,6 +401,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
     expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
+  });
+
+  it('does not leak the shared receipt-finality decision onto either adapter prototype', () => {
+    expect(EVM_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(MOCK_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
   });
 
   it('does not leak the authority revision operation onto the adapter prototype', () => {

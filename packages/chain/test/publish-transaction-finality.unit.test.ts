@@ -16,13 +16,17 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
+import {
+  EvmReceiptFinalityReader,
+  type ReceiptFinalityProviderReader,
+} from '../src/evm-adapter-receipt-finality.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}`;
 const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
 
 function adapter(overrides: Record<string, unknown> = {}) {
-  return Object.assign(Object.create(PublishMethods.prototype), {
+  const chain = Object.assign(Object.create(PublishMethods.prototype), {
     init: vi.fn(async () => undefined),
     finalityConfirmations: 1,
     receiptBlockHeadersByHash: new Map(),
@@ -32,7 +36,16 @@ function adapter(overrides: Record<string, unknown> = {}) {
     getBlockTimestamp: vi.fn(async () => 1_234_567),
     parseV10PublishReceipt: vi.fn(async () => null),
     ...overrides,
-  }) as PublishMethods;
+  }) as PublishMethods & {
+    finalityConfirmations: number;
+    receiptFinality: EvmReceiptFinalityReader;
+    readProviderRetryingNull: ReceiptFinalityProviderReader;
+  };
+  chain.receiptFinality = new EvmReceiptFinalityReader(
+    chain.finalityConfirmations,
+    (...args) => chain.readProviderRetryingNull(...args),
+  );
+  return chain;
 }
 
 function receipt(status: number) {

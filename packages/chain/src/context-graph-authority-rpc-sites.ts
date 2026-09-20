@@ -23,6 +23,9 @@
  *   G2  whether content is written or gossiped in PLAINTEXT (public downgrade);
  *   G3  who may QUERY / READ, including inbound sync authorization.
  */
+export const CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER =
+  'cgStorage.getContextGraph';
+
 export const CONTEXT_GRAPH_AUTHORITY_RPC_SITES = Object.freeze({
   // --- funnel entries: reported only when no labelled caller sits above ---
   /** `resolveContextGraphAgentGateAuthority` — the shared agent-gate funnel. */

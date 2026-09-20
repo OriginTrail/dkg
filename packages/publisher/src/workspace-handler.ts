@@ -2229,7 +2229,7 @@ export class SharedMemoryHandler {
       try {
         const chainAgents = await withRpcUsageSite(
           CG_AUTH_RPC_SITES.hostAdmit,
-          () => chainAgentGateOracle(contextGraphId),
+          () => chainAgentGateOracle.call(this, contextGraphId),
         );
         if (chainAgents && chainAgents.length > 0) {
           const normalised = chainAgents

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ChainAdapter } from './chain-adapter.js';
-
 /** Evidence that makes one solved-period observation reusable across ticks. */
 export interface RandomSamplingReadContext {
   readonly bindingId: string;
@@ -14,23 +12,7 @@ export interface RandomSamplingReadContext {
  * binding guard; consumers either receive the whole capability or none of it.
  */
 export interface RandomSamplingReadContextReader {
+  getRandomSamplingBindingId(): string | undefined;
   readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined>;
-  isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean;
-}
-
-/** Bind the optional broad-adapter methods into one all-or-nothing capability. */
-export function bindRandomSamplingReadContextReader(
-  adapter: ChainAdapter,
-): RandomSamplingReadContextReader | undefined {
-  const readContext = adapter.readRandomSamplingContext;
-  const isCurrent = adapter.isRandomSamplingReadContextCurrent;
-  if (
-    typeof readContext !== 'function'
-    || typeof isCurrent !== 'function'
-  ) return undefined;
-  return Object.freeze({
-    readRandomSamplingContext: () => readContext.call(adapter),
-    isRandomSamplingReadContextCurrent: (context: RandomSamplingReadContext) =>
-      isCurrent.call(adapter, context),
-  });
+  isRandomSamplingBindingCurrent(bindingId: string): boolean;
 }

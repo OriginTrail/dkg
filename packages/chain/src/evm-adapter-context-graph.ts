@@ -47,6 +47,8 @@ import {
   './evm-context-graph-authority-index-reader.js';
 import { normalizeContextGraphAuthorityHash } from
   './context-graph-authority-generation.js';
+import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
+  './context-graph-authority-rpc-sites.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -104,6 +106,7 @@ const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 type ContextGraphAuthorityMutation = 'addParticipantAgent' | 'removeParticipantAgent';
 
+/** Every authority writer invalidates projections, even when its receipt is lost. */
 function sendContextGraphAuthorityTransaction<T>(
   write: () => Promise<T>,
   dropProjections: () => void,
@@ -750,7 +753,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         try {
           raw = await this.readContractWithOptions(
             cgs,
-            'cgStorage.getContextGraph',
+            CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
             'getContextGraph',
             [contextGraphId],
             { signal: flightSignal },
@@ -1172,7 +1175,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       try {
         const cg = await this.readContractWithOptions(
           cgs,
-          'cgStorage.getContextGraph',
+          CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
           'getContextGraph',
           [contextGraphId],
           { signal: options.signal },
@@ -1293,106 +1296,104 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           contextGraphId,
           { blockTag: finalized.number },
         );
-        const readAuthorityHistory = (() => {
-          const cache = this.contextGraphAuthorityHistory;
-          const cacheKey = [
-            this.deploymentId,
+        const cache = this.contextGraphAuthorityHistory;
+        const cacheKey = [
+          this.deploymentId,
+          contractAddress,
+          contextGraphId.toString(10),
+        ].join(':');
+        const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
+        const readAuthorityEvents = async (
+          name: 'ContextGraphCreated' | ContextGraphAuthorityHistoryEventQuery['name'],
+          targetContextGraphId: bigint,
+          fromBlock: number,
+          toBlock: number,
+        ): Promise<ethers.EventLog[]> => {
+          let filter = authorityFilters.get(name);
+          if (filter === undefined) {
+            filter = name === 'Transfer'
+              ? filters[name]!(null, null, targetContextGraphId)
+              : filters[name]!(targetContextGraphId);
+            authorityFilters.set(name, filter);
+          }
+          return readAdaptiveEvmLogRange({
+            read: async (rangeFrom, rangeTo) => (
+              (await contract.queryFilter(filter!, rangeFrom, rangeTo))
+                .map((rawEvent) => rawEvent as ethers.EventLog)
+            ),
+            fromBlock,
+            toBlock,
+            signal: options.signal,
+          });
+        };
+        const readAuthorityHistory = () => resolveContextGraphAuthorityHistory({
+          cache,
+          cacheKey,
+          readScope: provider,
+          contextGraphId,
+          finalized: { number: finalized.number, hash: finalizedHash },
+          pageSize: this.cgRegistryScanPageSize,
+          signal: options.signal,
+          loadColdFromBlock: () => this.resolveContractDeployBlockNumber(
             contractAddress,
-            contextGraphId.toString(10),
-          ].join(':');
-          const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
-          const readAuthorityEvents = async (
-            name: 'ContextGraphCreated' | ContextGraphAuthorityHistoryEventQuery['name'],
-            targetContextGraphId: bigint,
-            fromBlock: number,
-            toBlock: number,
-          ): Promise<ethers.EventLog[]> => {
-            let filter = authorityFilters.get(name);
-            if (filter === undefined) {
-              filter = name === 'Transfer'
-                ? filters[name]!(null, null, targetContextGraphId)
-                : filters[name]!(targetContextGraphId);
-              authorityFilters.set(name, filter);
-            }
-            return readAdaptiveEvmLogRange({
-              read: async (rangeFrom, rangeTo) => (
-                (await contract.queryFilter(filter!, rangeFrom, rangeTo))
-                  .map((rawEvent) => rawEvent as ethers.EventLog)
-              ),
+            'getContextGraphAuthoritySnapshot',
+            'ContextGraphStorage',
+          ),
+          readBlockHash: async (blockNumber) => (
+            (await provider.getBlock(blockNumber))?.hash ?? null
+          ),
+          readCreationEvents: async (targetContextGraphId, fromBlock, toBlock) => (
+            readAuthorityEvents(
+              'ContextGraphCreated',
+              targetContextGraphId,
               fromBlock,
               toBlock,
-              signal: options.signal,
-            });
-          };
-          return () => resolveContextGraphAuthorityHistory({
-              cache,
-              cacheKey,
-              readScope: provider,
-              contextGraphId,
-              finalized: { number: finalized.number, hash: finalizedHash },
-              pageSize: this.cgRegistryScanPageSize,
-              signal: options.signal,
-              loadColdFromBlock: () => this.resolveContractDeployBlockNumber(
-                contractAddress,
-                'getContextGraphAuthoritySnapshot',
-                'ContextGraphStorage',
-              ),
-              readBlockHash: async (blockNumber) => (
-                (await provider.getBlock(blockNumber))?.hash ?? null
-              ),
-              readCreationEvents: async (targetContextGraphId, fromBlock, toBlock) => (
-                readAuthorityEvents(
-                  'ContextGraphCreated',
-                  targetContextGraphId,
-                  fromBlock,
-                  toBlock,
-                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => {
-                  const nameHash = normalizeContextGraphAuthorityHash(
-                    event.args.nameHash ?? event.args[2],
-                  );
-                  if (nameHash === undefined) {
-                    throw new Error(
-                      'ContextGraphStorage returned an invalid ContextGraphCreated name hash',
-                    );
-                  }
-                  return {
-                    blockNumber: event.blockNumber,
-                    blockHash: event.blockHash,
-                    index: event.index,
-                    nameHash,
-                  };
-                }))
-              ),
-              readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
-                const { name } = query;
-                const rawEvents = await readAuthorityEvents(
-                  name,
-                  query.contextGraphId,
-                  fromBlock,
-                  toBlock,
+            ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => {
+              const nameHash = normalizeContextGraphAuthorityHash(
+                event.args.nameHash ?? event.args[2],
+              );
+              if (nameHash === undefined) {
+                throw new Error(
+                  'ContextGraphStorage returned an invalid ContextGraphCreated name hash',
                 );
-                const normalized: ContextGraphAuthorityHistoryEvent[] = [];
-                for (const rawEvent of rawEvents) {
-                  const event = rawEvent;
-                  if (name === 'Transfer') {
-                    const from = String(event.args.from ?? event.args[0]).toLowerCase();
-                    const to = String(event.args.to ?? event.args[1]).toLowerCase();
-                    if (!ethers.isAddress(from)
-                      || !ethers.isAddress(to)
-                      || from === ethers.ZeroAddress
-                      || to === ethers.ZeroAddress
-                      || from === to) continue;
-                  }
-                  normalized.push({
-                    blockNumber: event.blockNumber,
-                    blockHash: event.blockHash,
-                    index: event.index,
-                  });
-                }
-                return normalized;
-              },
-            });
-        })();
+              }
+              return {
+                blockNumber: event.blockNumber,
+                blockHash: event.blockHash,
+                index: event.index,
+                nameHash,
+              };
+            }))
+          ),
+          readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
+            const { name } = query;
+            const rawEvents = await readAuthorityEvents(
+              name,
+              query.contextGraphId,
+              fromBlock,
+              toBlock,
+            );
+            const normalized: ContextGraphAuthorityHistoryEvent[] = [];
+            for (const rawEvent of rawEvents) {
+              const event = rawEvent;
+              if (name === 'Transfer') {
+                const from = String(event.args.from ?? event.args[0]).toLowerCase();
+                const to = String(event.args.to ?? event.args[1]).toLowerCase();
+                if (!ethers.isAddress(from)
+                  || !ethers.isAddress(to)
+                  || from === ethers.ZeroAddress
+                  || to === ethers.ZeroAddress
+                  || from === to) continue;
+              }
+              normalized.push({
+                blockNumber: event.blockNumber,
+                blockHash: event.blockHash,
+                index: event.index,
+              });
+            }
+            return normalized;
+          },
+        });
         const [rawCurrent, history] = await Promise.all([
           readCurrentState(),
           readAuthorityHistory(),

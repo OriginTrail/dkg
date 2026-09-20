@@ -3646,7 +3646,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const resolution = await raceVmReconcileAbort(
             this.resolveFinalizedContextGraphAuthorityTargetsV1(
               [localCgId],
-              evidence.agentReadOptions(readSignal),
+              evidence.agentResolverReadOptions(readSignal),
             ),
             signal,
           );

@@ -33,6 +33,7 @@ const authorityIndexId = (value: string): ContextGraphAuthorityIndexId => (
 interface IndexedAuthorityEvidence {
   readonly blockReads: Array<string | number>;
   readonly headReads: number[];
+  readonly networkReads: bigint[];
   readonly filters: Array<readonly [string, ...unknown[]]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly readOptions: Array<Readonly<{
@@ -118,6 +119,7 @@ function makeIndexedAuthorityAdapter(
   const evidence: IndexedAuthorityEvidence = {
     blockReads: [],
     headReads: [],
+    networkReads: [],
     filters: [],
     staticCalls: [],
     readOptions: [],
@@ -185,7 +187,10 @@ function makeIndexedAuthorityAdapter(
       else evidence.blockReads.push(tag);
       return block;
     },
-    getNetwork: async () => ({ chainId: 31337n }),
+    getNetwork: async () => {
+      evidence.networkReads.push(31337n);
+      return { chainId: 31337n };
+    },
     getLogs: async (filter) => {
       const requestSignal = activeRpcRequestAbortSignal();
       if (requestSignal !== undefined) evidence.indexPageSignals.push(requestSignal);
@@ -1640,7 +1645,11 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
   }
 
   const rpcReads = ({ evidence }: IndexedAuthorityHarness): number => (
-    evidence.headReads.length + evidence.blockReads.length + evidence.indexRanges.length
+    evidence.headReads.length
+    + evidence.blockReads.length
+    + evidence.indexRanges.length
+    + evidence.staticCalls.length
+    + evidence.networkReads.length
   );
 
   it('answers the snapshot read and every index reader from one projection with zero RPC', async () => {
@@ -1851,14 +1860,31 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     },
   );
 
-  it('misses for a rotated ContextGraphStorage address although nothing cleared the index', async () => {
+  it('invalidates a warm projection when a Context Graph create loses its receipt', async () => {
+    const harness = makeTimedAdapter();
+    const adapter = harness.adapter as any;
+    adapter.contracts.contextGraphs = {};
+    adapter.sendContractTransaction = async () => { throw new Error('receipt lookup failed'); };
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    await expect(harness.adapter.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 }))
+      .rejects.toThrow('receipt lookup failed');
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+  });
+
+  it('rejects when the requested and scanned ContextGraphStorage addresses diverge', async () => {
     const harness = makeTimedAdapter();
     const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
     await harness.adapter.getContextGraphAuthoritySnapshot(9n);
     (harness.adapter as any).contracts.contextGraphStorage.getAddress = async () => MEMBER;
 
-    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
-    await reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]);
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).rejects.toThrow(
+      'Context Graph authority contract changed during refresh',
+    );
+    await expect(reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .rejects.toThrow('Context Graph authority contract changed during refresh');
 
     expect(harness.evidence.headReads).toEqual([30, 30, 30]);
   });

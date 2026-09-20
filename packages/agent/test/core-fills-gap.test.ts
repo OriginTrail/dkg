@@ -564,14 +564,26 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(persisted?.coreHosted).toBe(true);
   });
 
-  it('ignores a numeric swmGraphId hint and falls back to the numeric id', async () => {
+  it('uses an equal numeric swmGraphId hint as the same local id', async () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => 0;
 
-    // A numeric (or equal-to-cgId) hint carries no cleartext info → numericStr.
     await internals.recordCoreHostedPublicCg('8', '8');
 
     expect(internals.subscribedContextGraphs.get('8')?.coreHosted).toBe(true);
+  });
+
+  it('keeps an all-digit cleartext hint that differs from the on-chain id', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+
+    await internals.recordCoreHostedPublicCg('5', '99');
+
+    expect(internals.subscribedContextGraphs.get('99')).toMatchObject({
+      coreHosted: true,
+      onChainId: '5',
+    });
+    expect(internals.subscribedContextGraphs.get('5')).toBeUndefined();
   });
 
   it('does NOT mark a CURATED CG (Cores host curated as opaque ciphertext, not VM)', async () => {

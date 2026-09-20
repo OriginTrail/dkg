@@ -82,6 +82,21 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     },
   );
 
+  it('does not classify an unavailable-block phrase found only in error data', async () => {
+    const server = await startRpcServer((call, response) => {
+      sendError(response, call, -32000, 'request failed', 'header not found');
+    });
+
+    await expect(postStrictFinalizedJsonRpcV1(
+      server.url,
+      1,
+      'eth_call',
+      Object.freeze([]),
+      CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: 'rpc-unavailable' });
+  });
+
   it('preserves an undefined generic result through an authenticated numbered anchor', async () => {
     const anchor = parseStrictFinalizedAnchorV1(
       { number: '0x7b', hash: BLOCK_HASH },

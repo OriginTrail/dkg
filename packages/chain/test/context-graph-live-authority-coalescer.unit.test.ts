@@ -375,13 +375,13 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('invalidation stops new joiners without disturbing the callers already sharing a read', async () => {
+  it('detachment stops new joiners without disturbing callers already sharing a read', async () => {
     const scheduler = manualScheduler();
     const flight = coalescer(scheduler);
     const { load, calls } = controllableLoader();
 
     const enrolled = flight.run(KEY, load, {});
-    flight.invalidateAll();
+    flight.detachAll();
     const afterRotation = flight.run(KEY, load, {});
     await scheduler.flush();
     expect(calls).toHaveLength(2);

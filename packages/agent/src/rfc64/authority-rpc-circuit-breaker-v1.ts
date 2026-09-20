@@ -3,6 +3,7 @@
 import {
   isRpcEndpointsExhaustedError,
   type ChainReadOptions,
+  type ContextGraphAuthorityReadOptions,
   type ContextGraphAuthorityProjectionServedEvidence,
   type RpcEndpointsExhaustedErrorLike,
 } from '@origintrail-official/dkg-chain';
@@ -36,6 +37,11 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
   readonly retryAtMs: number | null;
 }
 
+/** Options whose `onRpcRead` marker is owned and invoked by an agent resolver. */
+export type Rfc64AgentAuthorityResolverReadOptionsV1 = ContextGraphAuthorityReadOptions & Readonly<{
+  onRpcRead: () => void;
+}>;
+
 export interface Rfc64AuthorityRpcProbeEvidenceV1 {
   /**
    * Build options for an agent authority resolver. The callbacks are the only
@@ -55,9 +61,7 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    exhaustion: the operation succeeds for its caller but proves nothing
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
-  agentReadOptions(signal?: AbortSignal): ChainReadOptions & Readonly<{
-    onRpcRead: () => void;
-  }>;
+  agentResolverReadOptions(signal?: AbortSignal): Rfc64AgentAuthorityResolverReadOptionsV1;
   /** Mark and build options for a direct finalized chain/index read. */
   chainReadOptions(signal?: AbortSignal): ChainReadOptions;
 }
@@ -138,7 +142,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * Recovery needs evidence, not merely a fulfilled callback. A read that was
  * answered from local or cached state says nothing about the pool it never
  * contacted, so only an operation that invokes the `onRpcRead` callback from
- * `agentReadOptions`, or uses `chainReadOptions`, can clear an outstanding
+ * `agentResolverReadOptions`, or uses `chainReadOptions`, can clear an outstanding
  * exhaustion. Until then the circuit stays half-open, which is a statement
  * about eligibility to probe rather than about a probe in flight.
  *
@@ -207,33 +211,27 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           );
         }
 
-        const poolEvidence: { value: 'none' | 'pool' | 'unproven' } = { value: 'none' };
-        const provePool = () => {
-          if (poolEvidence.value !== 'unproven') poolEvidence.value = 'pool';
+        const poolEvidence: {
+          value: 'none' | 'attempt' | 'proven' | 'unproven';
+        } = { value: 'none' };
+        const markRpcAttempt = () => {
+          if (poolEvidence.value !== 'proven') poolEvidence.value = 'attempt';
         };
-        const markRpcAttempt = provePool;
         const observeProjectionServed = (
           served: ContextGraphAuthorityProjectionServedEvidence,
         ) => {
           if (served.source === 'scan') {
-            provePool();
-          } else if (served.source === 'cache') {
-            // `ageMs` is a duration, while `#exhaustedAtMs` is an epoch on
-            // this breaker's clock. Reconstruct the cache fetch instant
-            // explicitly before comparing values on the same time base.
-            const fetchedAtMs = this.#now() - served.ageMs;
-            if (fetchedAtMs > this.#exhaustedAtMs) {
-              provePool();
-            } else {
-              // Sticky for this whole compound operation: later subreads cannot
-              // turn an answer served despite a failed refresh into proof of
-              // pool recovery. A subsequent operation may prove recovery.
-              poolEvidence.value = 'unproven';
-            }
-          } else {
-            // Sticky for this whole compound operation: later subreads cannot
-            // turn an answer served despite a failed refresh into proof of
-            // pool recovery. A subsequent operation may prove recovery.
+            // A completed scan is definitive pool evidence and must outrank an
+            // earlier stale-cache answer from another subread in this operation.
+            poolEvidence.value = 'proven';
+          } else if (
+            served.source === 'cache'
+            && this.#now() - served.ageMs > this.#exhaustedAtMs
+          ) {
+            poolEvidence.value = 'proven';
+          } else if (poolEvidence.value !== 'proven') {
+            // A stale/old cache answer voids a preceding attempt marker, but it
+            // cannot erase a completed scan proven by another subread.
             poolEvidence.value = 'unproven';
           }
         };
@@ -245,7 +243,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           });
         };
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
-          agentReadOptions: (signal?: AbortSignal) => Object.freeze({
+          agentResolverReadOptions: (signal?: AbortSignal) => Object.freeze({
             ...(signal === undefined ? {} : { signal }),
             onRpcRead: markRpcAttempt,
             onContextGraphAuthorityProjectionServed: observeProjectionServed,
@@ -259,7 +257,8 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           // answer served DESPITE a failed refresh proves the opposite.
           if (
             this.#consecutiveExhaustions === 0
-            || poolEvidence.value === 'pool'
+            || poolEvidence.value === 'attempt'
+            || poolEvidence.value === 'proven'
           ) {
             this.#consecutiveExhaustions = 0;
             this.#retryAtMs = 0;
