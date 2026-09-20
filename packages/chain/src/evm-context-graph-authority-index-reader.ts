@@ -347,7 +347,7 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
     read: (provider: JsonRpcProvider) => Promise<T>,
     options?: ReadOpts,
   ) => Promise<T>;
-  readonly resolveContractDeployBlock: (
+  readonly resolveContractDeployBlockNumber: (
     address: string,
     operationLabel: string,
     contractLabel: string,
@@ -564,7 +564,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
-        const deploymentBlockNumber = await dependencies.resolveContractDeployBlock(
+        const deploymentBlockNumber = await dependencies.resolveContractDeployBlockNumber(
           contractAddress,
           operationLabel,
           'ContextGraphStorage',
@@ -718,6 +718,19 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       scope,
       signal: options.signal,
       project: read,
+      validateAnchor: async (cached) => dependencies.readTipProvider(
+        `${operationLabel} cached projection anchor`,
+        async (provider) => {
+          const anchor = await readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} cached projection anchor block`,
+            () => provider.getBlock(cached.finalized.number),
+            options.signal,
+          );
+          if (anchor?.hash == null) return undefined;
+          return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();
+        },
+        { signal: options.signal },
+      ),
       onServed: options.onContextGraphAuthorityProjectionServed,
       refresh: () => rescanFinalizedProjection(
         operationLabel,
@@ -730,7 +743,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             options.signal,
           )).chainId.toString(10);
           return Object.freeze({
-            scope: scan.scope, chainId, contractAddress, finalized, head, view, origin,
+            scope: scan.scope,
+            chainId,
+            contractAddress,
+            finalized,
+            head,
+            requiresAnchorValidation: (scan.durableReorgHoldbackBlocks ?? 0) > 0,
+            view,
+            origin,
           });
         },
         // The SAME predicate the cache admits a projection by, applied to the

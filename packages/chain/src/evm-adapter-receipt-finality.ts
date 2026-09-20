@@ -5,7 +5,7 @@ import { BoundedLruCache } from '@origintrail-official/dkg-core';
 
 import type { ChainReadOptions } from './chain-adapter.js';
 import { requiredHeadBlockForReceipt } from './evm-adapter-constants.js';
-import { isEvmBlockUnavailableError } from './evm-adapter-errors.js';
+import { isEvmBlockUnavailableError } from './evm-error-text.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 
 const RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES = 256;

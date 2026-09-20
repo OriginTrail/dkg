@@ -244,6 +244,8 @@ export interface ContextGraphAuthorityIndexCompletedProjection {
   readonly finalized: Readonly<{ number: number; hash: string }>;
   /** The head the endpoint reported, with its CHAIN time in seconds. */
   readonly head: Readonly<{ number: number; hash: string; timestampSeconds: number }>;
+  /** True when the view contains an unpersisted reorgable tail above the durable cursor. */
+  readonly requiresAnchorValidation?: boolean;
   readonly view: ContextGraphAuthorityIndexView;
   /**
    * Whether this refresh fetched the data itself or folded stored log rows.
@@ -345,6 +347,14 @@ export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
   readonly project: (
     projection: ContextGraphAuthorityIndexProjection,
   ) => Readonly<{ complete: boolean; value: T }>;
+  /**
+   * Re-read the anchor before serving a projection that contains an unsettled
+   * tail. `undefined` means the provider could not answer; `false` proves a
+   * mismatch and invalidates the retained projection.
+   */
+  readonly validateAnchor?: (
+    projection: ContextGraphAuthorityIndexProjection,
+  ) => Promise<boolean | undefined>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
   readonly refresh: () => Promise<
     ContextGraphAuthorityIndexCompletedProjection | ContextGraphAuthorityIndexProjectionFault
@@ -436,7 +446,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
 
   async read<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
     input.signal?.throwIfAborted();
-    const cached = this.#serve(input, 'backing-off');
+    const cached = await this.#serve(input, 'backing-off');
     if (cached.hit) return cached.value;
     // Twice, so that when an initiator leaves, its waiters coalesce behind the
     // first of them to take over instead of all scanning side by side. Bounded,
@@ -448,7 +458,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
       // `refreshing` never rejects: the initiator's abort, timeout or failure
       // is its own. This waiter only learns that the refresh settled.
       await waitForSignal(refreshing, input.signal);
-      const published = this.#serve(input, 'backing-off');
+      const published = await this.#serve(input, 'backing-off');
       if (published.hit) return published.value;
     }
     return this.#refresh(input);
@@ -523,7 +533,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
       if (generation === state.generation) {
         state.failedAtMs = this.#now();
       }
-      const stale = this.#serve(input, 'refresh-failed');
+      const stale = await this.#serve(input, 'refresh-failed');
       if (stale.hit) return stale.value;
       throw error;
     } finally {
@@ -586,10 +596,10 @@ export class ContextGraphAuthorityIndexProjectionCache {
    * one, so an outage costs one failed pass per tick instead of one per read.
    * `refresh-failed`: this caller's own refresh just failed.
    */
-  #serve<T>(
+  async #serve<T>(
     input: ContextGraphAuthorityIndexProjectionReadInput<T>,
     reason: 'backing-off' | 'refresh-failed',
-  ): ProjectionCacheLookup<T> {
+  ): Promise<ProjectionCacheLookup<T>> {
     const state = this.#scopes.get(input.scope);
     const projection = state?.projection;
     if (projection === undefined) return PROJECTION_CACHE_MISS;
@@ -607,6 +617,24 @@ export class ContextGraphAuthorityIndexProjectionCache {
     }
     const projected = input.project(projection);
     if (!projected.complete) return PROJECTION_CACHE_MISS;
+    if (projection.requiresAnchorValidation === true) {
+      if (input.validateAnchor === undefined) return PROJECTION_CACHE_MISS;
+      let anchorIsCurrent: boolean | undefined;
+      try {
+        anchorIsCurrent = await input.validateAnchor(projection);
+      } catch {
+        // A tail whose anchor could not be checked is not safe to serve. The
+        // ordinary refresh path below retains the original transport error.
+        input.signal?.throwIfAborted();
+        return PROJECTION_CACHE_MISS;
+      }
+      if (anchorIsCurrent === undefined) return PROJECTION_CACHE_MISS;
+      if (!anchorIsCurrent) {
+        // A mismatched anchor proves the tail projection belongs to a fork.
+        this.drop(input.scope);
+        return PROJECTION_CACHE_MISS;
+      }
+    }
     // A RETAINED fold is still a fold. Labelling it `cache` here would relaunder
     // exactly what `#refresh` above stopped: `cache` tells a consumer that some
     // scan of this read class produced the entry and that `ageMs` dates that

@@ -19,7 +19,6 @@ import {
 } from './strict-current-finalized-evm-errors.js';
 import type { FinalizedAnchorV1 } from './strict-current-finalized-evm-types.js';
 import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
-import { evmErrorTextIndicatesUnavailableBlock } from './evm-adapter-errors.js';
 
 interface RpcErrorEnvelopeV1 {
   readonly code: number;
@@ -280,7 +279,9 @@ function classifyJsonRpcError(
   }
   if (
     method === 'eth_getBlockByNumber'
-    || evmErrorTextIndicatesUnavailableBlock(message)
+    || message.includes('header not found')
+    || message.includes('unknown block')
+    || message.includes('block not found')
     || message.includes('canonical')
   ) {
     return new CurrentFinalizedEvmCallErrorV1(

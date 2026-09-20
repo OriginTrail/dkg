@@ -20,6 +20,8 @@ import {
   Rfc64AuthorityReadCoordinatorV1,
   isRfc64AuthorityRpcCircuitOpenErrorV1,
 } from '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
+  '../src/rfc64/catalog-authority-config-v1.js';
 
 function exhausted(retryAfterMs?: number): ChainRpcTransportError {
   return new RpcEndpointsExhaustedError(
@@ -36,6 +38,11 @@ function deterministicFailure(): Error {
 }
 
 describe('RFC-64 authority RPC circuit breaker', () => {
+  it('keeps projection stale-if-error reuse inside the RFC-64 refresh interval', () => {
+    expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 180_000 }).staleMs)
+      .toBeLessThanOrEqual(RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs);
+  });
+
   it('shares one open circuit across queued graph refreshes', async () => {
     let now = 1_000;
     let calls = 0;
@@ -234,7 +241,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
     });
 
-    it('keeps unproven projection evidence sticky for the whole operation', async () => {
+    it('lets a later completed scan override earlier unproven projection evidence', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
         const options = evidence.agentResolverReadOptions();
@@ -245,7 +252,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         options.onContextGraphAuthorityProjectionServed?.({ source: 'scan', ageMs: 0 });
         return 'mixed-evidence';
       });
-      expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
+      expect(breaker.snapshot()).toMatchObject({ state: 'closed', consecutiveExhaustions: 0 });
     });
 
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
@@ -548,7 +555,6 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         vi.useRealTimers();
       }
     });
-
   });
 
   it('applies deterministic fleet jitter when no provider hint overrides it', async () => {

@@ -212,66 +212,29 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           );
         }
 
-        const poolEvidence: { value: 'none' | 'pool' | 'unproven' } = { value: 'none' };
-        const provePool = () => {
-          if (poolEvidence.value !== 'unproven') poolEvidence.value = 'pool';
+        const poolEvidence: {
+          value: 'none' | 'attempt' | 'proven' | 'unproven';
+        } = { value: 'none' };
+        const markRpcAttempt = () => {
+          if (poolEvidence.value !== 'proven') poolEvidence.value = 'attempt';
         };
-        const markRpcAttempt = provePool;
         const observeProjectionServed = (
           served: ContextGraphAuthorityProjectionServedEvidence,
         ) => {
           if (served.source === 'scan') {
-            provePool();
-          } else if (served.source === 'cache') {
-            // `ageMs` is a duration, while `#exhaustedAtMs` is an epoch on
-            // this breaker's clock. Reconstruct the cache fetch instant
-            // explicitly before comparing values on the same time base.
-            const fetchedAtMs = this.#now() - served.ageMs;
-            if (fetchedAtMs > this.#exhaustedAtMs) {
-              provePool();
-            } else {
-              // Sticky for this whole compound operation: later subreads cannot
-              // turn an answer served despite a failed refresh into proof of
-              // pool recovery. A subsequent operation may prove recovery.
-              poolEvidence.value = 'unproven';
-            }
-          } else {
-            // `log`, `stale-cache`, a cache hit that predates the exhaustion —
-            // and, DELIBERATELY, any member added to `source` later. The
-            // default here is the non-proof side, so a new way of answering an
-            // authority read cannot close this circuit by being unrecognised.
-            //
-            // WHY `log` GETS NO CREDIT AT ALL, rather than the dated treatment
-            // `cache` gets above. A `cache` entry's provenance is exact: some
-            // earlier `durablePagedLogScan` through THIS pool produced it, and
-            // `ageMs` dates that scan, so "it started after the exhaustion" is
-            // a real statement about the thing this breaker governs. A `log`
-            // fold has no such scan behind it. Its only fetch instant belongs
-            // to the background chain-index tick — a different actor, in a
-            // provider session this operation never opened, running
-            // `watchdogPointRead` (capped at 4s) where the authority read runs
-            // an uncapped paged scan. A pool that still answers cheap capped
-            // point reads while heavy uncapped scans exhaust is not a corner
-            // case; it is the ordinary shape of a rate-limited endpoint, and
-            // `resolveCapMs` separates the two policies precisely because they
-            // fail apart. Crediting the tick's heartbeat would let the circuit
-            // reopen on each exhaustion and close again on each tick commit —
-            // decorative exactly while the pool is degraded, which is the one
-            // time it has to hold.
-            //
-            // Staying unproven is cheap: half-open still ADMITS reads once the
-            // retry deadline passes (`now < #retryAtMs` is what refuses them),
-            // so the cost is only that the next exhaustion escalates from the
-            // current backoff step instead of the base. The log refuses past
-            // `max(3T, 15s)` and on any coverage, depth or lineage gap, so a
-            // genuine recovery produces a genuine `scan` soon enough to close
-            // this honestly.
-            //
-            // Sticky for this whole compound operation: later subreads cannot
-            // turn an answer that proved nothing into proof of pool recovery,
-            // and — the case that matters on the `chainReadOptions` path — it
-            // voids the eager `markRpcAttempt` taken before the read. A
-            // subsequent operation may prove recovery.
+            // A completed scan is definitive pool evidence and must outrank an
+            // earlier stale-cache answer from another subread in this operation.
+            poolEvidence.value = 'proven';
+          } else if (
+            served.source === 'cache'
+            && this.#now() - served.ageMs > this.#exhaustedAtMs
+          ) {
+            poolEvidence.value = 'proven';
+          } else if (poolEvidence.value !== 'proven') {
+            // A stale/old cache or a node-local log fold voids a preceding
+            // attempt marker, but cannot erase a completed scan proven by
+            // another subread. A log fold contacted no endpoint in this read,
+            // so its tick timestamp is never evidence that this pool recovered.
             poolEvidence.value = 'unproven';
           }
         };
@@ -297,7 +260,8 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           // answer served DESPITE a failed refresh proves the opposite.
           if (
             this.#consecutiveExhaustions === 0
-            || poolEvidence.value === 'pool'
+            || poolEvidence.value === 'attempt'
+            || poolEvidence.value === 'proven'
           ) {
             this.#consecutiveExhaustions = 0;
             this.#retryAtMs = 0;

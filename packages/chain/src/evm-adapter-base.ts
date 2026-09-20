@@ -38,7 +38,8 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText } from './evm-error-text.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -1004,7 +1005,6 @@ export class EVMChainAdapterBase {
       isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError
         || (error instanceof Error && error.name === 'ContextGraphLiveAuthorityUnsupportedError'),
     });
-
   /** Lazily constructed by the base-owned internal accessor below. */
   protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
 
@@ -1497,7 +1497,7 @@ export class EVMChainAdapterBase {
             options,
           ),
           // The index reader consumes only the deploy block: no head probe on a cache hit.
-          resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+          resolveContractDeployBlockNumber: (address, operationLabel, contractLabel) =>
             this.resolveContractDeployBlockNumber(
               address,
               operationLabel,

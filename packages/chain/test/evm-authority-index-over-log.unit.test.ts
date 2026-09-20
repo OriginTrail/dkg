@@ -252,7 +252,7 @@ function makeReader(options: {
     // `{ fromBlock, head, scanProviders }` search result. Handing the object
     // over made every anchor unresolvable and sent all of these through the
     // live scan they exist to prove is skipped.
-    resolveContractDeployBlock: async () => DEPLOY_BLOCK,
+    resolveContractDeployBlockNumber: async () => DEPLOY_BLOCK,
     pageSize: () => 2_000,
     finalityConfirmations: () => options.finalityConfirmations ?? 1,
     ...(options.source === undefined ? {} : { chainEventLogAuthority: () => options.source }),

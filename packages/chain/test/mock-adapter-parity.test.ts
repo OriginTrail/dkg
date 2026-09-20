@@ -117,6 +117,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // The public ChainAdapter method remains `getKnowledgeAssetUpdateContext`,
   // which MockChainAdapter implements and the parity suite still requires.
   'readKnowledgeAssetUpdateContext',
+  // One-log contract-binding guard used only by EVM KA reads. It compares the
+  // current Hub-resolved ContextGraphStorage address with the persisted log
+  // binding before the public read either folds rows or falls back live. The
+  // mock has neither Hub rotation nor a persisted chain-event log to model.
+  'knowledgeAssetsFromLogFor',
   'resolveFundedPublisherPublishPlan', // protected EVM pool/PCA planning state machine
   'publisherConvictionPlanReader', // protected typed bridge from publish planning to the conviction mixin
   // Dispatcher Phase 3/4 selector seam + RS send plumbing — TS-protected
@@ -439,6 +444,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
     expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
+  });
+
+  it('does not leak the shared receipt-finality decision onto either adapter prototype', () => {
+    expect(EVM_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(MOCK_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
   });
 
   it('does not leak the authority revision operation onto the adapter prototype', () => {
