@@ -1674,7 +1674,7 @@ export class EVMChainAdapterBase {
   }
 
   /** One finality decision shared by polling and public checks; also memoizes the observed header. */
-  async #isReceiptBlockFinalAndCanonical(
+  protected async readFinalCanonicalReceiptBlock(
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number },
   ): Promise<boolean> {
@@ -1729,7 +1729,7 @@ export class EVMChainAdapterBase {
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
       isReceiptEligible: (receipt, { deadlineMs }) =>
-        this.#isReceiptBlockFinalAndCanonical(receipt, { deadlineMs }),
+        this.readFinalCanonicalReceiptBlock(receipt, { deadlineMs }),
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
@@ -1752,7 +1752,7 @@ export class EVMChainAdapterBase {
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return this.#isReceiptBlockFinalAndCanonical(receipt, options);
+    return this.readFinalCanonicalReceiptBlock(receipt, options);
   }
 
   protected async signPopulatedTransaction(
