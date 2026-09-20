@@ -524,9 +524,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         finalized: Readonly<{ number: number; hash: string }>;
         head: ContextGraphAuthorityIndexCompletedProjection['head'];
         /**
-         * When the head above was FETCHED, on the log path only. The live path
-         * omits it: it is fetching right now, so the cache's own pre-refresh
-         * stamp is already the conservative answer.
+         * When the tick ASKED for the head above, on the log path only — the
+         * instant it stamped before its own head RPC, not the commit that
+         * stored it. The live path omits it: it is fetching right now, so the
+         * cache's own pre-refresh stamp is already the conservative answer.
          */
         dataFetchedAtMs?: number;
       }>,
@@ -537,11 +538,20 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
      * THE RULE, EXACTLY. `#serve` in the projection cache applies four gates to
      * a cached candidate, and this path is equivalent on three of them:
      *
-     *  - FETCH-TIME AGE. The cache refuses past `staleMs`
-     *    (`min(max(3T, 15s), 5m)`); the log refuses past its anchor's
-     *    `maxHeadAgeMs` (`max(3T, 15s)`) in
-     *    `resolveChainIndexAuthorityAnchor`. The same bound below a 100s tick,
-     *    and the log's is the stricter one above it.
+     *  - FETCH-TIME AGE. The cache refuses past `staleMs`; the log refuses past
+     *    its anchor's `maxHeadAgeMs` in `resolveChainIndexAuthorityAnchor`.
+     *    Both are `min(max(3T, 15s), 5m)` — the SAME number at every T, the
+     *    ceiling included. The ceiling is not decoration: without it the log's
+     *    bound is `max(3T, 15s)`, which equals the cache's only up to T=100s
+     *    and runs LOOSER above it (450s against 300s at T=150s), so a 400s-old
+     *    anchor served through the log while the cache holding the same view
+     *    refused it. `chainIndexAuthorityAnchorMaxAgeMs` carries the cap and
+     *    the argument for it.
+     *
+     *    The instant both bounds measure from is the tick's HEAD-READ instant,
+     *    not the commit that stored it (`ChainEventLogHead.fetchedAtMs`), so a
+     *    slow pass spends its own duration out of this budget instead of being
+     *    handed a fresh one at commit.
      *  - CHAIN-TIME TOLERANCE. Literally the same constant, checked on the
      *    tick's own head in the same resolver.
      *  - `project(candidate).complete`. THIS predicate, which is the caller's
@@ -563,11 +573,12 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
      * delivered without a log, so the log would retire nothing.
      *
      * What this costs is stated rather than hidden: an answer from this path is
-     * as old as the tick's last committed head, bounded by `max(3T, 15s)` and
-     * by the chain-time tolerance, NOT by T. The fold is reported and retained
-     * under that true instant (`context.dataFetchedAtMs` above), so the cache ages
-     * it from when its data was fetched, `onServed` reports that age, and it
-     * can never be re-served as a FRESH cache entry for a further T.
+     * as old as the moment the tick's last committed pass ASKED for its head,
+     * bounded by `min(max(3T, 15s), 5m)` and by the chain-time tolerance, NOT
+     * by T. The fold is reported and retained under that true instant
+     * (`context.dataFetchedAtMs` above), so the cache ages it from when its
+     * data was fetched, `onServed` reports that age, and it can never be
+     * re-served as a FRESH cache entry for a further T.
      *
      * That field is also the cache's PROVENANCE signal: supplying it is this
      * path declaring "I folded stored rows, I fetched nothing", which is why
@@ -639,9 +650,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                 contractAddress,
                 finalized: anchor.finalized,
                 head: anchor.head,
-                // The tick's head-fetch instant, which is when this fold's data
-                // was observed. Carried so the cache ages and reports the fold
-                // by its own age instead of by this read's clock.
+                // The instant the tick asked for this head — stamped before its
+                // head RPC, so the pass that fetched these rows is INSIDE the
+                // age rather than in front of it. Carried so the cache ages and
+                // reports the fold by its own age instead of by this read's
+                // clock.
                 dataFetchedAtMs: anchor.fetchedAtMs,
               }),
             );
@@ -778,8 +791,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         //
         // `fetchedAtMs` is the one field the PROJECTION type adds, so the
         // candidate has to supply it. A fold from the log knows the answer —
-        // `dataFetchedAtMs`, the tick's head-fetch instant, up to
-        // `max(3T, 15s)` before this read — and that is what it must carry:
+        // `dataFetchedAtMs`, the instant the tick asked for the head it
+        // committed, up to `min(max(3T, 15s), 5m)` before this read — and that
+        // is what it must carry:
         // stamping this read's clock would move the age towards zero, the
         // single direction the field exists to forbid. `askedAtMs` is only the
         // floor for a refresh that reported none (the live scan, which is

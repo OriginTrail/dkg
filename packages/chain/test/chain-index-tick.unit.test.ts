@@ -11,6 +11,7 @@ import {
   type ChainIndexTickPorts,
 } from '../src/chain-index/chain-index-tick.js';
 import type { ChainEventLogCoverage } from '../src/chain-index/chain-event-log.js';
+import { resolveChainIndexAuthorityAnchor } from '../src/chain-index/chain-index-anchor.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
@@ -578,5 +579,151 @@ describe('ChainIndexTick — one log', () => {
     const result = await index.backfillOnce(new AbortController().signal);
     expect(result.outcome).toBe('idle');
     expect(rig.requests).toHaveLength(0);
+  });
+});
+
+/**
+ * `cursor.head.fetchedAtMs`, through the tick that writes it.
+ *
+ * The shipped authority-over-log pins seed this field straight into the store
+ * and never construct a `ChainIndexTick`, so the stamping site itself was
+ * unreachable from any test: a stamp taken at the END of the pass and called
+ * the head's fetch instant survived a whole review round. These run the real
+ * pass, with a clock that only moves inside the ports, so the distance between
+ * the head read and the commit is a number the test controls.
+ */
+describe('ChainIndexTick — the head stamp dates the head READ, not the commit', () => {
+  const START_MS = 1_700_000_000_000;
+  /** A slow-but-not-failing `eth_getLogs`, well inside `watchdogWideLogScan`. */
+  const LOG_SCAN_MS = 8_000;
+  const POINT_READ_MS = 1_000;
+
+  interface SlowRig {
+    readonly rig: Harness;
+    readonly ports: ChainIndexTickPorts;
+    /** The clock's value at each entry into `readHead` — the stamp's value. */
+    readonly headAskedAtMs: number[];
+    nowMs(): number;
+  }
+
+  /**
+   * The harness's ports, with wall clock burned where the real pass burns it:
+   * every port call costs time, and the log scan costs most of it.
+   */
+  function slowRig(overrides: Partial<Harness> = {}): SlowRig {
+    const rig = harness(overrides);
+    let nowMs = START_MS;
+    const headAskedAtMs: number[] = [];
+    const ports: ChainIndexTickPorts = {
+      readHead: async (signal) => {
+        headAskedAtMs.push(nowMs);
+        const head = await rig.ports.readHead(signal);
+        nowMs += POINT_READ_MS;
+        return head;
+      },
+      readBlockHash: async (blockNumber, signal) => {
+        const hashAt = await rig.ports.readBlockHash(blockNumber, signal);
+        nowMs += POINT_READ_MS;
+        return hashAt;
+      },
+      readLogs: async (request, signal) => {
+        const rows = await rig.ports.readLogs(request, signal);
+        nowMs += LOG_SCAN_MS;
+        return rows;
+      },
+    };
+    return { rig, ports, headAskedAtMs, nowMs: () => nowMs };
+  }
+
+  it('cold start: the stamp is the pre-RPC instant, not the commit', async () => {
+    const store = new MemoryChainEventLogStore();
+    const slow = slowRig();
+    const index = tick(store, slow.ports, { now: slow.nowMs });
+
+    await index.runOnce(new AbortController().signal);
+
+    const committed = (await store.load())!.cursor.head.fetchedAtMs;
+    // The lineage read, the log scan and the boundary read all landed between
+    // the two, so this is not a distinction without a difference.
+    expect(slow.nowMs()).toBeGreaterThan(START_MS + LOG_SCAN_MS);
+    expect(committed).toBe(START_MS);
+    expect(committed).toBe(slow.headAskedAtMs[0]);
+  });
+
+  it('advanced: the stamp is the pre-RPC instant of THIS pass', async () => {
+    const store = new MemoryChainEventLogStore();
+    const slow = slowRig();
+    const index = tick(store, slow.ports, { now: slow.nowMs });
+    await index.runOnce(new AbortController().signal);
+    slow.rig.head = { number: 130, hash: hash(0x82), timestampSeconds: 1_700_000_060 };
+
+    const result = await index.runOnce(new AbortController().signal);
+
+    expect(result.outcome).toBe('advanced');
+    const askedAtMs = slow.headAskedAtMs[1]!;
+    expect(slow.nowMs() - askedAtMs).toBeGreaterThan(LOG_SCAN_MS);
+    expect((await store.load())!.cursor.head.fetchedAtMs).toBe(askedAtMs);
+  });
+
+  it('idle: a pass that fetches nothing still dates its head from the ask', async () => {
+    const store = new MemoryChainEventLogStore();
+    // Holdback 0 settles at the head itself, so the identity re-read on the
+    // next pass asks for the HEAD's hash: the fixture has to agree with itself
+    // about that block, or this lands on `fork-suspected` instead of `idle`.
+    const slow = slowRig({
+      head: { number: 100, hash: hash(100), timestampSeconds: 1_700_000_000 },
+    });
+    // Holdback 0 settles the whole range, so the next pass has nothing above
+    // the cursor and takes the idle commit.
+    const index = tick(store, slow.ports, { now: slow.nowMs, reorgHoldbackBlocks: 0 });
+    await index.runOnce(new AbortController().signal);
+
+    const result = await index.runOnce(new AbortController().signal);
+
+    expect(result.outcome).toBe('idle');
+    const askedAtMs = slow.headAskedAtMs[1]!;
+    // An idle pass still verifies the chain identity before it commits.
+    expect(slow.nowMs()).toBeGreaterThan(askedAtMs);
+    expect((await store.load())!.cursor.head.fetchedAtMs).toBe(askedAtMs);
+  });
+
+  it('the anchor gate bounds the DATA, so a slow pass spends its own duration', async () => {
+    // Finding A, concretely. T=6s, so `maxHeadAgeMs` is 18s. The pass reads its
+    // head at t=0 and commits at t=11s. Stamped at the commit, a read at
+    // t=25s measured 14s, served, and reported `{ source: 'log', ageMs: 14_000 }`
+    // over a head that was really 25s old. Stamped at the ask, the same read
+    // measures 25s and refuses to the live scan.
+    const store = new MemoryChainEventLogStore();
+    const slow = slowRig();
+    const index = tick(store, slow.ports, { now: slow.nowMs, backfillPageBlocks: 10_000 });
+    await index.runOnce(new AbortController().signal);
+    // Coverage has to reach the deployment block before the anchor is even a
+    // candidate, or this would refuse for a reason that is not the one asserted.
+    for (let pass = 0; pass < 8; pass += 1) {
+      if ((await index.backfillOnce(new AbortController().signal)).outcome === 'idle') break;
+    }
+
+    const state = await store.load();
+    const askedAtMs = slow.headAskedAtMs[0]!;
+    const committedAtMs = slow.nowMs();
+    expect(committedAtMs - askedAtMs).toBeGreaterThanOrEqual(LOG_SCAN_MS);
+    const anchorAt = (nowMs: number) => resolveChainIndexAuthorityAnchor({
+      state,
+      contractAddress: STORAGE,
+      deploymentBlockNumber: 10,
+      finalityConfirmations: 1,
+      nowMs,
+      maxHeadAgeMs: 18_000,
+      // Out of the way: this test is about the FETCH-time gate, and the
+      // fixture's head timestamp is unrelated to the injected wall clock.
+      headTimestampToleranceMs: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(anchorAt(askedAtMs + 17_999).anchor).toBeDefined();
+    expect(anchorAt(askedAtMs + 18_001).refusal).toBe('stale-head');
+    // The distance the bug bought: with the commit stamp these two were
+    // servable, because the gate was reading `commit + 18s` as `head + 18s`.
+    expect(anchorAt(committedAtMs + 1).refusal).toBe('stale-head');
+    expect(anchorAt(committedAtMs + 17_999).refusal).toBe('stale-head');
   });
 });

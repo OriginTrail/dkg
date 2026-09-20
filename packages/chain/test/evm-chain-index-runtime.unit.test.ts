@@ -86,6 +86,17 @@ function harness(options?: {
   headNumber?: number;
   logs?: readonly ethers.Log[];
   reorgHoldbackBlocks?: number;
+  /** T. Only the age bounds derived from it care, so it defaults. */
+  intervalMs?: number;
+  /**
+   * Seconds added to every block timestamp the fake returns.
+   *
+   * A head stamped AHEAD of the host clock is a case both the cache and the
+   * anchor treat as normal (skew, or a devnet after `evm_increaseTime`), and it
+   * is what lets a test move the wall clock without the one-sided CHAIN-time
+   * guard firing first and masking the fetch-time bound under test.
+   */
+  chainTimeLeadSeconds?: number;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -105,15 +116,16 @@ function harness(options?: {
       && log.blockNumber <= filter.toBlock
       && wanted.has(log.address.toLowerCase()));
   });
+  const blockTimestamp = 1_700_000_000 + (options?.chainTimeLeadSeconds ?? 0);
   const heads = vi.fn(async () => ({
     number: headNumber,
     hash: hexWord(headNumber),
-    timestamp: 1_700_000_000,
+    timestamp: blockTimestamp,
   }));
   const blocks = vi.fn(async (blockNumber: number) => ({
     number: blockNumber,
     hash: hexWord(blockNumber),
-    timestamp: 1_700_000_000,
+    timestamp: blockTimestamp,
   }));
   const provider = {
     getBlock: async (tag: string | number) => (
@@ -124,7 +136,7 @@ function harness(options?: {
   const runtime = createEvmChainIndexRuntime({
     scope: 'evm:31337:hub=0xa1:0xa1',
     store,
-    intervalMs: 6_000,
+    intervalMs: options?.intervalMs ?? 6_000,
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
     backfillPageBlocks: 100,
     maxCatchUpBlocks: 10_000,
@@ -310,6 +322,35 @@ describe('createEvmChainIndexRuntime', () => {
     // one from a log that cannot say how old its own answer is.
     await expect(h.runtime.binding.readHubRotationWindow!(undefined, 50))
       .resolves.toBeUndefined();
+  });
+
+  it('caps the authority anchor age at the ceiling the projection cache caps staleMs at', async () => {
+    // The log path is documented as the cache's gates minus the tick gate, so
+    // it must not answer where the cache would refuse. `max(3T, 15s)` alone
+    // breaks that above T=100s: at T=150s the cache stops at 300s and an
+    // uncapped log ran to 450s, and `resolveContextGraphAuthorityIndexTickMs`
+    // accepts that T. The ceiling is the cache's own.
+    const h = harness({ intervalMs: 150_000, chainTimeLeadSeconds: 3_600 });
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    // Coverage must reach the ContextGraphStorage deploy block first, or the
+    // anchor refuses for a reason that is not the age.
+    for (let pass = 0; pass < 20; pass += 1) {
+      if ((await h.runtime.tick.backfillOnce(new AbortController().signal)).outcome === 'idle') {
+        break;
+      }
+    }
+    const anchor = () => h.runtime.binding.contextGraphAuthority!.resolveAnchor({
+      deploymentBlockNumber: 2,
+      finalityConfirmations: 1,
+    });
+    await expect(anchor()).resolves.toMatchObject({ anchor: expect.anything() });
+
+    // 3T is 450s. The cache's `staleMs` is min(450s, 5m) = 300s, and so is this.
+    h.advanceMs(299_000);
+    await expect(anchor()).resolves.toMatchObject({ anchor: expect.anything() });
+    h.advanceMs(2_000);
+
+    await expect(anchor()).resolves.toEqual({ refusal: 'stale-head' });
   });
 
   it('reports an empty window rather than re-dispatching a block it already served', async () => {

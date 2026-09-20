@@ -216,11 +216,40 @@ export class ChainIndexTick {
     const state = await store.load(scope);
     this.#bindings = this.#seedBindings();
 
+    // STAMPED BEFORE THE RPC, and carried unchanged into whichever commit this
+    // pass reaches. `fetchedAtMs` is read as "when the tick fetched that head",
+    // and every consumer measures an AGE against it — so the stamp must be no
+    // YOUNGER than the observation it dates.
+    //
+    // Stamping at the commit instead, as this did, put the whole pass between
+    // the two: `#verifyChainIdentity` (a capped `watchdogPointRead`),
+    // `#fetchRange` (a capped `watchdogWideLogScan`) and
+    // `#resolveSettledBoundary` (another capped point read) all run AFTER the
+    // head is read, so the committed stamp was `headFetch + D` for a pass
+    // duration D bounded only by those policy caps. Every age measured off it
+    // was then SHORT by D — the one direction an age field must never move —
+    // and the authority anchor's own fetch-time gate was loosened to
+    // `max(3T, 15s) + D` with it.
+    //
+    // Before, not after, is the identical discipline the sibling projection
+    // cache states for its live path
+    // (`context-graph-authority-index-projection.ts`, `ageMs`): captured before
+    // any RPC, so the fetch's own duration lands INSIDE the age and the age is
+    // over-reported rather than under.
+    //
+    // Every reader of this field is fail-closed on it — the authority anchor,
+    // the knowledge-asset read model and the Hub rotation window all answer
+    // "go to the chain" when the age exceeds their bound — so over-reporting
+    // costs at worst the live read that was there before the log existed,
+    // while under-reporting serves a stale answer under a fresh age.
+    const headFetchedAtMs = this.#now();
     const head = await this.ports.readHead(signal);
     let blockRequests = 1;
     const observedHead = this.#normalizeHead(head);
 
-    if (state === undefined) return this.#coldStart(observedHead, blockRequests, signal);
+    if (state === undefined) {
+      return this.#coldStart(observedHead, headFetchedAtMs, blockRequests, signal);
+    }
 
     const cursor = state.cursor;
     // BEFORE the lagging return, not after it. A head below the cursor is the
@@ -235,7 +264,7 @@ export class ChainIndexTick {
         await store.tombstone(scope, cursor.revision);
       } else {
         await store.commit(scope, cursor.revision, {
-          cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: this.#now() } },
+          cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: headFetchedAtMs } },
           rows: [],
           // No `replacedRange`: this pass fetched no logs, so it re-supplies no
           // tail and must not drop the one coverage still claims.
@@ -272,7 +301,7 @@ export class ChainIndexTick {
       // Nothing above the cursor and nothing new subscribed: record the fresh
       // head so the age guards see a live tick, and issue no log request.
       const revision = await store.commit(scope, cursor.revision, {
-        cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: this.#now() } },
+        cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: headFetchedAtMs } },
         rows: [],
         // No `replacedRange` here either: an idle pass looked at no block, so
         // the tail it holds is still the best account of those blocks there is.
@@ -303,7 +332,7 @@ export class ChainIndexTick {
       deploymentBlockNumber: cursor.deploymentBlockNumber,
       settledBlockNumber: settled.number,
       settledBlockHash: settled.hash,
-      head: { ...observedHead, fetchedAtMs: this.#now() },
+      head: { ...observedHead, fetchedAtMs: headFetchedAtMs },
       topicSetVersion,
     };
     const revision = await store.commit(scope, cursor.revision, {
@@ -433,6 +462,8 @@ export class ChainIndexTick {
    */
   async #coldStart(
     head: ChainIndexObservedHead,
+    /** `runOnce`'s pre-RPC stamp for the head above; see its comment. */
+    headFetchedAtMs: number,
     blockRequests: number,
     signal: AbortSignal,
   ): Promise<ChainIndexTickResult> {
@@ -476,7 +507,7 @@ export class ChainIndexTick {
         deploymentBlockNumber,
         settledBlockNumber: settled.number,
         settledBlockHash: settled.hash,
-        head: { ...head, fetchedAtMs: this.#now() },
+        head: { ...head, fetchedAtMs: headFetchedAtMs },
         topicSetVersion,
       },
       rows: this.#flagRows(fetch.rows, settled.number),
