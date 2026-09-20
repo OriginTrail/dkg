@@ -102,6 +102,14 @@ type ContextGraphRegistryScanPlan =
 
 const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
+/** Every authority writer invalidates projections, even when its receipt is lost. */
+function sendContextGraphAuthorityTransaction<T>(
+  write: () => Promise<T>,
+  dropProjections: () => void,
+): Promise<T> {
+  return write().finally(dropProjections);
+}
+
 function normalizePageBudget(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) >= 1
     ? Math.floor(value ?? 0)
@@ -258,11 +266,6 @@ function buildCursorContextGraphRegistryScanPlan(
 }
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
-  /** Every authority writer invalidates projections, even when its receipt is lost. */
-  private sendContextGraphAuthorityTransaction<T>(write: () => Promise<T>): Promise<T> {
-    return write().finally(() => this.contextGraphAuthorityIndex?.dropProjections());
-  }
-
   /**
    * Legacy cost-independent authorized signer selection. New publish flows use
    * resolvePublisherPublishPlan once byte size is known so signer, lifetime,
@@ -783,7 +786,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // approve it to the facade and retry once. The common path (deposit dormant)
     // is a single tx with NO extra eth_call, so it never perturbs timing-
     // sensitive integration tests.
-    const receipt = await this.sendContextGraphAuthorityTransaction(async () => {
+    const receipt = await sendContextGraphAuthorityTransaction(async () => {
       try {
         return await submitCreate();
       } catch (err) {
@@ -834,7 +837,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
         return submitCreate();
       }
-    });
+    }, () => this.contextGraphAuthorityIndex?.dropProjections());
 
     let contextGraphId: bigint | undefined;
     for (const log of receipt.logs) {
@@ -875,7 +878,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContextGraphAuthorityTransaction(
+    const receipt = await sendContextGraphAuthorityTransaction(
       () => this.sendContractTransaction(
         contextGraphs,
         'addParticipantAgent',
@@ -883,6 +886,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         this.signer,
         'add context graph participant agent',
       ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
     );
     return {
       hash: receipt.hash,
@@ -898,7 +902,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContextGraphAuthorityTransaction(
+    const receipt = await sendContextGraphAuthorityTransaction(
       () => this.sendContractTransaction(
         contextGraphs,
         'removeParticipantAgent',
@@ -906,6 +910,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         this.signer,
         'remove context graph participant agent',
       ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
     );
     return {
       hash: receipt.hash,
