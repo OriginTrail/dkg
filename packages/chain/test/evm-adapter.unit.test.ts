@@ -2330,7 +2330,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((a as any).contracts.randomSamplingStorage).toBe(freshPair.rss);
   });
 
-  it('getRandomSamplingBindingId fails closed when a resolved handle has no string target', async () => {
+  it('Random Sampling read context fails closed when a resolved handle has no string target', async () => {
     // The prover reuses a remembered read only while the address-derived id is
     // available, so "cannot tell" must land on the side of a chain re-read.
     const a = new EVMChainAdapter(minimalConfig());
@@ -2342,11 +2342,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       currentGeneration: () => 0,
       get: async () => pairs.shift(),
     };
+    const reader = a.getRandomSamplingReadContextReader();
 
     await (a as any).resolveAndAssignRandomSamplingPair();
-    expect(a.getRandomSamplingBindingId()).toBeUndefined();
+    expect(reader.getRandomSamplingBindingId()).toBeUndefined();
     await (a as any).resolveAndAssignRandomSamplingPair();
-    expect(a.getRandomSamplingBindingId()).toBeUndefined();
+    expect(reader.getRandomSamplingBindingId()).toBeUndefined();
   });
 
   it('getCurrentEpoch resolves Chronos once and reads the live epoch', async () => {
@@ -4281,14 +4282,14 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       index: 0,
       logs: [{ address: PARITY_KA_ADDRESS, topics: created.topics, data: created.data }],
     }));
-    const getBlockTimestamp = recorder(async (..._args: unknown[]) => 1_700);
-    (a as any).getBlockTimestamp = getBlockTimestamp;
+    const getFinalizedBlockTimestamp = recorder(async (..._args: unknown[]) => 1_700);
+    (a as any).getFinalizedBlockTimestamp = getFinalizedBlockTimestamp;
 
     const result = await a.createKnowledgeAssets(makeV10PublishParams());
 
     expect(result.kaId).toBe(55n);
     expect(result.blockTimestamp).toBe(1_700);
-    expect(getBlockTimestamp.calls).toEqual([[123, { blockHash }]]);
+    expect(getFinalizedBlockTimestamp.calls).toEqual([[123, blockHash]]);
   });
 
   it('kill-switch keeps legacy routing balance-blind but cannot bypass strict publish planning', async () => {

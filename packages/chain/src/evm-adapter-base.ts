@@ -36,9 +36,9 @@ import type {
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
-import { BoundedLruCache, floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
+import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isEvmBlockUnavailableError, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -98,9 +98,9 @@ import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fenc
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
-import type { RandomSamplingReadContext } from './random-sampling-read-context.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -115,18 +115,9 @@ import {
 } from
   './evm-context-graph-authority-index-reader.js';
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
+import { EvmReceiptFinalityReader } from './evm-adapter-receipt-finality.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
-
-interface ReceiptBlockTimestampReadOptions extends ChainReadOptions {
-  readonly blockHash?: string;
-}
-
-interface ReceiptBlockHeader {
-  readonly number: number;
-  readonly hash: string;
-  readonly timestamp?: number;
-}
 
 type ContractWriteSender = (
   contract: Contract,
@@ -153,69 +144,6 @@ type SerializedSignerWriteContext = {
 function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
   const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
   return createRpcReadDescriptor(label, consumer);
-}
-
-type ReceiptFinalityReadResult = {
-  header: ReceiptBlockHeader;
-  canonical: boolean;
-};
-
-type ReceiptFinalityProviderReader = (
-  label: string,
-  read: (provider: JsonRpcProvider) => Promise<ReceiptFinalityReadResult | null>,
-  options?: ReadOpts,
-) => Promise<ReceiptFinalityReadResult | null>;
-
-/** Keep receipt-finality mechanics off the adapter prototype surface. */
-async function readFinalCanonicalReceiptBlock(
-  receipt: { txHash?: string; blockNumber: number; blockHash: string },
-  finalityConfirmations: number,
-  options: ChainReadOptions & { deadlineMs?: number },
-  readProviderRetryingNull: ReceiptFinalityProviderReader,
-  retainHeader: (header: ReceiptBlockHeader) => void,
-): Promise<ReceiptBlockHeader | null> {
-  const resolved = await readProviderRetryingNull(
-    'publish receipt finality',
-    async (provider) => {
-      const requiredBlockNumber = requiredHeadBlockForReceipt(
-        receipt.blockNumber,
-        finalityConfirmations,
-      );
-      let providerHead: number | undefined;
-      if (requiredBlockNumber > receipt.blockNumber) {
-        providerHead = await provider.getBlockNumber();
-        if (providerHead < requiredBlockNumber) return null;
-      }
-      let atHeight;
-      try {
-        atHeight = await provider.getBlock(receipt.blockNumber);
-      } catch (error) {
-        if (isEvmBlockUnavailableError(error)) {
-          // Some clients report an above-head block as an error rather than
-          // null. Confirm that narrow condition before treating it as the
-          // nullable failover signal: the same bare message from an endpoint
-          // already at this height indicates a sync/restart fault and must
-          // surface instead of turning into a ten-minute receipt poll.
-          providerHead ??= await provider.getBlockNumber();
-          if (providerHead < receipt.blockNumber) return null;
-        }
-        throw error;
-      }
-      if (!atHeight?.hash) return null;
-      const header = Object.freeze({
-        number: atHeight.number,
-        hash: atHeight.hash.toLowerCase(),
-        ...(atHeight.timestamp == null ? {} : { timestamp: Number(atHeight.timestamp) }),
-      });
-      retainHeader(header);
-      return {
-        header,
-        canonical: header.hash === receipt.blockHash.toLowerCase(),
-      };
-    },
-    { signal: options.signal, deadlineMs: options.deadlineMs },
-  );
-  return resolved?.canonical === true ? resolved.header : null;
 }
 
 /**
@@ -402,9 +330,6 @@ import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 // replacing four hidden ethers subscription pollers with one owned log poller.
 const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
-
-/** Memory bound for the by-hash receipt block headers; entries never go stale. */
-const RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES = 256;
 
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
@@ -748,6 +673,7 @@ export class EVMChainAdapterBase {
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
   protected readonly finalityConfirmations: number;
+  protected readonly receiptFinality: EvmReceiptFinalityReader;
 
   protected readonly maxFeePerGasWei?: bigint;
 
@@ -1063,15 +989,6 @@ export class EVMChainAdapterBase {
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
   /**
-   * Timestamps of blocks the receipt finality check already fetched, keyed by
-   * lowercase block HASH — never by number. A hash commits to its header's
-   * timestamp, so an entry cannot go stale (a reorg yields a different hash,
-   * i.e. a miss) and needs no TTL; the bound only caps memory.
-   */
-  protected readonly receiptBlockHeadersByHash =
-    new BoundedLruCache<string, ReceiptBlockHeader>(RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES);
-
-  /**
    * In-flight sharing for the one-read Context Graph live authority. An
    * instance FIELD, not a lazy accessor: two empty maps cost nothing, and the
    * adapter's prototype API surface is audited for mock parity. Retains no
@@ -1198,12 +1115,12 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
-    this.receiptBlockHeadersByHash.clear();
+    this.receiptFinality.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     // Rotation cannot poison a shared flight — the key carries the contract
     // address — but a flight opened against the pre-rotation binding must stop
     // taking new callers all the same.
-    this.contextGraphLiveAuthorityCoalescer.invalidateAll();
+    this.contextGraphLiveAuthorityCoalescer.detachAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
@@ -1443,6 +1360,10 @@ export class EVMChainAdapterBase {
           `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
+    );
+    this.receiptFinality = new EvmReceiptFinalityReader(
+      this.finalityConfirmations,
+      (label, read, options) => this.readProviderRetryingNull(label, read, options),
     );
     this.hubRotationPoller = new HubRotationPoller({
       readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
@@ -1883,13 +1804,7 @@ export class EVMChainAdapterBase {
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
       isReceiptEligible: async (receipt, { deadlineMs }) => (
-        await readFinalCanonicalReceiptBlock(
-          receipt,
-          this.finalityConfirmations,
-          { deadlineMs },
-          (readLabel, read, readOptions) => this.readProviderRetryingNull(readLabel, read, readOptions),
-          (header) => this.receiptBlockHeadersByHash.set(header.hash, header),
-        )
+        await this.receiptFinality.read(receipt, { deadlineMs })
       ) !== null,
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
@@ -1913,13 +1828,7 @@ export class EVMChainAdapterBase {
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return (await readFinalCanonicalReceiptBlock(
-      receipt,
-      this.finalityConfirmations,
-      options,
-      (readLabel, read, readOptions) => this.readProviderRetryingNull(readLabel, read, readOptions),
-      (header) => this.receiptBlockHeadersByHash.set(header.hash, header),
-    )) !== null;
+    return (await this.receiptFinality.read(receipt, options)) !== null;
   }
 
   protected async signPopulatedTransaction(
@@ -3289,21 +3198,8 @@ export class EVMChainAdapterBase {
 
   protected async getBlockTimestamp(
     blockNumber: number,
-    options: ReceiptBlockTimestampReadOptions = {},
+    options: ChainReadOptions = {},
   ): Promise<number> {
-    // The receipt finality check usually fetched this very block a moment ago.
-    // Reuse its timestamp only when the caller names the block by HASH (from the
-    // receipt): the hash commits to the timestamp, so this can never serve a
-    // reorged-out header. A miss falls through to the by-number read unchanged.
-    // An already-aborted caller rejects here exactly as the read below would
-    // have: a memo hit must not turn a cancelled call into an answer.
-    options.signal?.throwIfAborted();
-    const remembered = options.blockHash == null
-      ? undefined
-      : this.receiptBlockHeadersByHash.get(options.blockHash.toLowerCase());
-    if (remembered?.number === blockNumber && remembered.timestamp !== undefined) {
-      return remembered.timestamp;
-    }
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most
     // likely to already have the block). It is NOT a `skipPreferred` tip read:
@@ -3327,6 +3223,20 @@ export class EVMChainAdapterBase {
       },
     );
     return block?.timestamp != null ? Number(block.timestamp) : 0;
+  }
+
+  /** Read a receipt block timestamp, reusing the hash-bound finality header. */
+  protected async getFinalizedBlockTimestamp(
+    blockNumber: number,
+    blockHash: string | null | undefined,
+    options: ChainReadOptions = {},
+  ): Promise<number> {
+    // A memo hit must not turn a cancelled call into an answer.
+    options.signal?.throwIfAborted();
+    const rememberedTimestamp = typeof blockHash === 'string'
+      ? this.receiptFinality.finalizedBlockTimestamp(blockNumber, blockHash)
+      : undefined;
+    return rememberedTimestamp ?? this.getBlockTimestamp(blockNumber, options);
   }
 
   // =====================================================================
@@ -4314,9 +4224,9 @@ export class EVMChainAdapterBase {
 
     // waitForReceipt already checked this exact canonical hash and memoized
     // its header; naming the hash makes timestamp reuse explicit and reorg-safe.
-    const blockTimestamp = await this.getBlockTimestamp(
+    const blockTimestamp = await this.getFinalizedBlockTimestamp(
       receipt.blockNumber,
-      { blockHash: receipt.blockHash },
+      receipt.blockHash,
     );
 
     return {
@@ -4355,12 +4265,27 @@ export class EVMChainAdapterBase {
     return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
-  /** Synchronous identity derived from the handles that reads actually use. */
-  getRandomSamplingBindingId(): string | undefined {
-    const rsTarget = contractHandleTargetAddress(this.contracts.randomSampling);
-    const rssTarget = contractHandleTargetAddress(this.contracts.randomSamplingStorage);
-    if (rsTarget === undefined || rssTarget === undefined) return undefined;
-    return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
+  /** One cohesive optional capability for solved-period reuse. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = (): string | undefined => {
+      const rsTarget = contractHandleTargetAddress(this.contracts.randomSampling);
+      const rssTarget = contractHandleTargetAddress(this.contracts.randomSamplingStorage);
+      if (rsTarget === undefined || rssTarget === undefined) return undefined;
+      return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
+    };
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && getBindingId() === bindingId;
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        const bindingId = getBindingId();
+        if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
+        const chronosEpoch = await this.getCurrentEpoch();
+        const context = Object.freeze({ bindingId, chronosEpoch });
+        return isCurrent(context.bindingId) ? context : undefined;
+      },
+      isRandomSamplingBindingCurrent: isCurrent,
+    });
   }
 
   async getCurrentEpoch(): Promise<bigint> {
@@ -4372,19 +4297,6 @@ export class EVMChainAdapterBase {
       'chronos.getCurrentEpoch',
       'getCurrentEpoch',
     ));
-  }
-
-  async readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined> {
-    const bindingId = this.getRandomSamplingBindingId();
-    if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
-    const chronosEpoch = await this.getCurrentEpoch();
-    const context = Object.freeze({ bindingId, chronosEpoch });
-    return this.isRandomSamplingReadContextCurrent(context) ? context : undefined;
-  }
-
-  isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean {
-    return this.isRandomSamplingReady()
-      && this.getRandomSamplingBindingId() === context.bindingId;
   }
 
   async getBlockNumber(): Promise<number> {

@@ -1842,14 +1842,17 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     },
   );
 
-  it('misses for a rotated ContextGraphStorage address although nothing cleared the index', async () => {
+  it('rejects when the requested and scanned ContextGraphStorage addresses diverge', async () => {
     const harness = makeTimedAdapter();
     const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
     await harness.adapter.getContextGraphAuthoritySnapshot(9n);
     (harness.adapter as any).contracts.contextGraphStorage.getAddress = async () => MEMBER;
 
-    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
-    await reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]);
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).rejects.toThrow(
+      'Context Graph authority contract changed during refresh',
+    );
+    await expect(reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .rejects.toThrow('Context Graph authority contract changed during refresh');
 
     expect(harness.evidence.headReads).toEqual([30, 30, 30]);
   });

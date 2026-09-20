@@ -162,9 +162,11 @@ export {
   normalizeRpcUsageWindow,
   normalizeRpcEndpointSlotLabel,
   rpcUsageWindowTotal,
+  RpcUsageTracker,
   // Call-site attribution: splits a funnel read (`cgStorage.getContextGraph`)
   // by the caller that wanted it. See `withRpcUsageSite`.
   withRpcUsageSite,
+  withRpcUsageConsumer,
   type RpcEndpointSlotLabel,
   type RpcUsageAttribution,
   type NormalizedRpcUsageWindow,
@@ -174,11 +176,11 @@ export {
 } from './rpc-usage.js';
 // The bounded census of call sites that reach `cgStorage.getContextGraph`.
 export {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
   type ContextGraphAuthorityRpcSite,
 } from './context-graph-authority-rpc-sites.js';
 export {
-  bindRandomSamplingReadContextReader,
   type RandomSamplingReadContext,
   type RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';

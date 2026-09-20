@@ -1848,7 +1848,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
             contextGraphId,
-            evidence.agentReadOptions(readSignal),
+            evidence.agentResolverReadOptions(readSignal),
           );
           readSignal.throwIfAborted();
           if (target === null) return null;
@@ -2145,7 +2145,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
             registeredCandidates,
-            evidence.agentReadOptions(readSignal),
+            evidence.agentResolverReadOptions(readSignal),
           );
         } finally {
           await indexedReader.whenIdle();

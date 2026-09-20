@@ -130,7 +130,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
 
     const recovered = breaker.run(undefined, async (_signal, evidence) => {
       calls += 1;
-      evidence.agentReadOptions().onRpcRead();
+      evidence.agentResolverReadOptions().onRpcRead();
       return 'recovered';
     });
     const next = breaker.run(undefined, async () => {
@@ -169,7 +169,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
 
     await expect(breaker.run(undefined, async (_signal, evidence) => {
-      evidence.agentReadOptions().onRpcRead();
+      evidence.agentResolverReadOptions().onRpcRead();
       return 'provider-recovered';
     })).resolves.toBe('provider-recovered');
     expect(breaker.snapshot()).toEqual({
@@ -201,7 +201,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       clock.now += 50;
       // No onRpcRead callback: the projection's own account is the whole evidence.
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+        evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed?.({
           source: 'cache', ageMs: 40,
         });
         return 'served-from-cache';
@@ -212,7 +212,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('counts a completed scan as RPC health', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        evidence.agentReadOptions().onContextGraphAuthorityProjectionServed?.({
+        evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed?.({
           source: 'scan', ageMs: 0,
         });
         return 'scanned';
@@ -224,7 +224,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
         // Callers mark BEFORE they read; the stale answer voids that mark.
-        const options = evidence.agentReadOptions();
+        const options = evidence.agentResolverReadOptions();
         options.onRpcRead();
         options.onContextGraphAuthorityProjectionServed?.({
           source: 'stale-cache', ageMs: T + 1,
@@ -237,7 +237,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('keeps unproven projection evidence sticky for the whole operation', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        const options = evidence.agentReadOptions();
+        const options = evidence.agentResolverReadOptions();
         options.onContextGraphAuthorityProjectionServed?.({
           source: 'stale-cache', ageMs: T + 1,
         });
@@ -251,7 +251,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
-        const options = evidence.agentReadOptions();
+        const options = evidence.agentResolverReadOptions();
         options.onRpcRead();
         // Fetched 101ms ago: 1ms BEFORE the pool was seen exhausted.
         options.onContextGraphAuthorityProjectionServed?.({ source: 'cache', ageMs: 101 });
@@ -303,7 +303,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       await olderBreaker.run(undefined, async (_signal, evidence) => {
         await read(
           olderCache,
-          evidence.agentReadOptions().onContextGraphAuthorityProjectionServed,
+          evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed,
         );
         return 'older-cache';
       });
@@ -327,7 +327,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       await newerBreaker.run(undefined, async (_signal, evidence) => {
         await read(
           newerCache,
-          evidence.agentReadOptions().onContextGraphAuthorityProjectionServed,
+          evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed,
         );
         return 'newer-cache';
       });

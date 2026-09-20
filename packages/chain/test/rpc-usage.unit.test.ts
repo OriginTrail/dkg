@@ -34,7 +34,10 @@ import {
   withRpcUsageConsumer,
   withRpcUsageSite,
 } from '../src/rpc-usage.js';
-import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES } from
+import {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
+} from
   '../src/context-graph-authority-rpc-sites.js';
 import { createRpcRequestProvider } from '../src/rpc-request-transport.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
@@ -348,7 +351,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('keeps overlapping async consumer scopes isolated', async () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     await Promise.all([
-      withRpcUsageConsumer('cgStorage.getContextGraph', async () => {
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, async () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         t.record('eth_call');
       }),
@@ -362,7 +365,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const w = t.drainWindow();
     expect(w.byMethod).toEqual({ eth_call: 3 });
     expect(w.ethCallByConsumer).toEqual({
-      'cgStorage.getContextGraph': 1,
+      [CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER]: 1,
       'pcaNFT.getAccountInfo': 2,
     });
   });
@@ -372,21 +375,21 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     // The transport establishes the read label INNERMOST, exactly as
     // rpc-failover-client does, so this is the real nesting order.
     withRpcUsageSite('cgAuth.syncAuthz', () => {
-      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
     });
     withRpcUsageSite('cgAuth.curatedProbe', () => {
-      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
-      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
     });
     // No site in scope: the bare read label is preserved, unchanged.
-    withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+    withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
 
     const w = t.drainWindow();
     expect(w.byMethod).toEqual({ eth_call: 4 });
     expect(w.ethCallByConsumer).toEqual({
-      'cgStorage.getContextGraph:cgAuth.syncAuthz': 1,
-      'cgStorage.getContextGraph:cgAuth.curatedProbe': 2,
-      'cgStorage.getContextGraph': 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.syncAuthz`]: 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.curatedProbe`]: 2,
+      [CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER]: 1,
     });
   });
 
@@ -395,7 +398,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(new Set(sites).size).toBe(sites.length);
     for (const site of sites) {
       expect(normalizeRpcUsageConsumer(site)).toBe(site);
-      expect(`cgStorage.getContextGraph:${site}`.length).toBeLessThanOrEqual(64);
+      expect(`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:${site}`.length).toBeLessThanOrEqual(64);
     }
   });
 
@@ -414,28 +417,30 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     withRpcUsageSite('cgAuth.syncAuthz', () => {
       // The funnel entry labels itself too; the caller above must win.
       withRpcUsageSite('cgAuth.gate', () => {
-        withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+        withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
       });
     });
     // Unlabelled caller: the funnel entry's own label is what gets reported.
     withRpcUsageSite('cgAuth.gate', () => {
-      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
     });
 
     expect(t.drainWindow().ethCallByConsumer).toEqual({
-      'cgStorage.getContextGraph:cgAuth.syncAuthz': 1,
-      'cgStorage.getContextGraph:cgAuth.gate': 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.syncAuthz`]: 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.gate`]: 1,
     });
   });
 
   it('keeps composed consumer keys inside the logfmt token bound', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     withRpcUsageSite('x'.repeat(60), () => {
-      withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
     });
     // Degrading to the bare read label keeps the read attributed; composing
     // past 64 chars would be rewritten to `other` by the daemon formatter.
-    expect(t.drainWindow().ethCallByConsumer).toEqual({ 'cgStorage.getContextGraph': 1 });
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      [CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER]: 1,
+    });
   });
 
   it('keeps overlapping async call sites isolated', async () => {
@@ -443,16 +448,16 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     await Promise.all([
       withRpcUsageSite('cgAuth.vmReconcile', async () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
-        withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+        withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
       }),
       withRpcUsageSite('cgAuth.recipients', async () => {
-        withRpcUsageConsumer('cgStorage.getContextGraph', () => t.record('eth_call'));
+        withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
       }),
     ]);
 
     expect(t.drainWindow().ethCallByConsumer).toEqual({
-      'cgStorage.getContextGraph:cgAuth.vmReconcile': 1,
-      'cgStorage.getContextGraph:cgAuth.recipients': 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.vmReconcile`]: 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.recipients`]: 1,
     });
   });
 
@@ -804,7 +809,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
     const usage = a.drainRpcUsage();
     expect(usage.ethCallByConsumer).toEqual({
-      'cgStorage.getContextGraph:cgAuth.syncAuthz': rpc.hits('eth_call'),
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.syncAuthz`]: rpc.hits('eth_call'),
     });
     expect(rpc.hits('eth_call')).toBeGreaterThanOrEqual(1);
   }, 30_000);
