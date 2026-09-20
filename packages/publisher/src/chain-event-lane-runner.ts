@@ -134,7 +134,7 @@ export class ChainEventLaneRunner {
     }
     signal?.throwIfAborted();
     const currentResults = await this.revalidateScanResults(scanResults, now, ctx, signal);
-    await this.persistScanResults(currentResults, activeLanes);
+    await this.persistScanResults(currentResults, activeLanes, now, ctx, signal);
   }
 
   private async readLiveHead(signal?: AbortSignal): Promise<number | undefined> {
@@ -244,6 +244,9 @@ export class ChainEventLaneRunner {
   private async persistScanResults(
     scanResults: readonly ChainEventPollerLaneScanResult[],
     activeLanes: readonly ChainEventPollerLaneRuntime[],
+    now: number,
+    ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!this.cursorStore) return;
     const advancedResults = scanResults.filter((result) => result.advanced && result.blockNumber > 0);
@@ -251,6 +254,8 @@ export class ChainEventLaneRunner {
 
     if (this.cursorStore.kind === 'lane') {
       for (const result of advancedResults) {
+        signal?.throwIfAborted();
+        if (!await this.scanResultLeaseHoldsForPersistence(result, now, ctx, signal)) continue;
         try {
           await this.cursorStore.saveLane(result.lane.spec.name, result.blockNumber);
         } catch {
@@ -259,6 +264,38 @@ export class ChainEventLaneRunner {
       }
       return;
     }
+
+    const leasedResults = advancedResults.filter((
+      result,
+    ): result is ChainEventPollerLaneScanResult & {
+      lease: EventScanHorizonLease;
+      stateBefore: ChainEventPollerLaneState;
+    } => result.lease !== undefined && result.stateBefore !== undefined);
+    if (leasedResults.length > 1) {
+      // A legacy cursor persists all lanes in one scalar. Independent leases
+      // cannot be proven atomically: while the second awaits, the first can
+      // retire. Refuse the aggregate and replay every leased lane instead of
+      // composing separately-current observations into one stale commit.
+      for (const result of leasedResults) {
+        this.retireScanResult(
+          result,
+          result.stateBefore,
+          now,
+          ctx,
+          'legacy aggregate cursor persistence',
+        );
+      }
+      return;
+    }
+    if (
+      leasedResults[0] !== undefined
+      && !await this.scanResultLeaseHoldsForPersistence(
+        leasedResults[0],
+        now,
+        ctx,
+        signal,
+      )
+    ) return;
 
     const legacySafeCursor = this.legacyAggregateCursorToSave(activeLanes);
     if (legacySafeCursor > 0) {
@@ -329,6 +366,11 @@ export class ChainEventLaneRunner {
         signal?.throwIfAborted();
         await lane.spec.dispatch(event, ctx, signal);
         signal?.throwIfAborted();
+        if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
+          leaseExpired = true;
+          throw new Error('event scan horizon lease expired after event dispatch');
+        }
+        signal?.throwIfAborted();
       }
 
       signal?.throwIfAborted();
@@ -373,19 +415,51 @@ export class ChainEventLaneRunner {
         continue;
       }
 
-      this.restoreLaneState(result.lane.state, result.stateBefore);
-      this.applyLaneSchedule(result.lane, { kind: 'failure', now });
-      this.log.warn(
+      current.push(this.retireScanResult(
+        result,
+        result.stateBefore,
+        now,
         ctx,
-        `Poll lane ${result.lane.spec.name} lease expired before cursor persistence; range will replay`,
-      );
-      current.push({
-        lane: result.lane,
-        blockNumber: result.lane.state.lastBlock,
-        advanced: false,
-      });
+        'cursor persistence',
+      ));
     }
     return current;
+  }
+
+  private async scanResultLeaseHoldsForPersistence(
+    result: ChainEventPollerLaneScanResult,
+    now: number,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (result.lease === undefined || result.stateBefore === undefined) return true;
+    signal?.throwIfAborted();
+    if (await this.eventScanLeaseHolds(result.lease)) {
+      signal?.throwIfAborted();
+      return true;
+    }
+    this.retireScanResult(result, result.stateBefore, now, ctx, 'cursor save');
+    return false;
+  }
+
+  private retireScanResult(
+    result: ChainEventPollerLaneScanResult,
+    stateBefore: ChainEventPollerLaneState,
+    now: number,
+    ctx: OperationContext,
+    phase: string,
+  ): ChainEventPollerLaneScanResult {
+    this.restoreLaneState(result.lane.state, stateBefore);
+    this.applyLaneSchedule(result.lane, { kind: 'failure', now });
+    this.log.warn(
+      ctx,
+      `Poll lane ${result.lane.spec.name} lease expired before ${phase}; range will replay`,
+    );
+    return {
+      lane: result.lane,
+      blockNumber: result.lane.state.lastBlock,
+      advanced: false,
+    };
   }
 
   private async eventScanLeaseHolds(lease: EventScanHorizonLease): Promise<boolean> {

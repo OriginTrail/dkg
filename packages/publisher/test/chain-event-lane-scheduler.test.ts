@@ -340,7 +340,7 @@ describe('ChainEventPoller scheduler', () => {
     ]);
   });
 
-  it('refuses an A-generation commit after rotation and replays a B event at or below H', async () => {
+  it('stops A dispatch immediately after rotation and replays both B events at or below H', async () => {
     let generation: 'A' | 'B' = 'A';
     let now = 0;
     const filters: EventFilter[] = [];
@@ -362,11 +362,14 @@ describe('ChainEventPoller scheduler', () => {
       },
       listenForEvents: async function* (filter: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(filter);
-        yield {
-          type: 'KnowledgeAssetRegisteredToContextGraph',
-          blockNumber: 50,
-          data: { generation },
-        };
+        const scanGeneration = generation;
+        for (const row of [1, 2]) {
+          yield {
+            type: 'KnowledgeAssetRegisteredToContextGraph',
+            blockNumber: 49 + row,
+            data: { generation: scanGeneration, row },
+          };
+        }
       },
     } as unknown as ChainAdapter;
     const runner = new ChainEventLaneRunner({
@@ -378,9 +381,9 @@ describe('ChainEventPoller scheduler', () => {
         requiresFullHistory: () => false,
         cadenceMs: 20,
         dispatch: async (event) => {
-          const observed = String(event.data['generation']);
+          const observed = `${String(event.data['generation'])}:${String(event.data['row'])}`;
           seen.push(observed);
-          if (observed === 'A') {
+          if (observed === 'A:1') {
             markDispatchStarted();
             await new Promise<void>((resolve) => { releaseDispatch = resolve; });
           }
@@ -403,6 +406,7 @@ describe('ChainEventPoller scheduler', () => {
 
     expect(saved).toEqual([]);
     expect(filters.map((filter) => [filter.fromBlock, filter.toBlock])).toEqual([[1, 100]]);
+    expect(seen).toEqual(['A:1']);
 
     now = 60_000;
     await runner.poll();
@@ -411,8 +415,121 @@ describe('ChainEventPoller scheduler', () => {
       [1, 100],
       [1, 100],
     ]);
-    expect(seen).toEqual(['A', 'B']);
+    expect(seen).toEqual(['A:1', 'B:1', 'B:2']);
     expect(saved).toEqual([100]);
+  });
+
+  it('rechecks each lease at its own cursor save after another lane blocks validation', async () => {
+    let laneOneCurrent = true;
+    let laneOneHolds = 0;
+    let laneTwoHolds = 0;
+    let releaseLaneTwoValidation = (): void => {};
+    let markLaneTwoValidationStarted = (): void => {};
+    const laneTwoValidationStarted = new Promise<void>((resolve) => {
+      markLaneTwoValidationStarted = resolve;
+    });
+    const saved: ChainEventPollerLane[] = [];
+    const adapter = {
+      chainId: 'mock:0',
+      acquireEventScanHorizonLease: async (eventTypes: readonly string[]) => {
+        if (eventTypes[0] === 'ContextGraphCreated') {
+          return scanLease(100, async () => {
+            laneOneHolds += 1;
+            return laneOneCurrent;
+          });
+        }
+        return scanLease(100, async () => {
+          laneTwoHolds += 1;
+          if (laneTwoHolds === 2) {
+            markLaneTwoValidationStarted();
+            await new Promise<void>((resolve) => { releaseLaneTwoValidation = resolve; });
+          }
+          return true;
+        });
+      },
+      listenForEvents: async function* (): AsyncIterable<ChainEvent> {
+        // Empty successful ranges still advance, and therefore still require
+        // their own currentness proof at the exact persistence boundary.
+      },
+    } as unknown as ChainAdapter;
+    const lanes: ChainEventPollerLaneSpec[] = [
+      {
+        name: 'contextGraphDiscovery',
+        enabled: () => true,
+        eventTypes: () => ['ContextGraphCreated'],
+        requiresFullHistory: () => false,
+        cadenceMs: 20,
+        dispatch: async () => { /* no rows */ },
+      },
+      {
+        name: 'vmReconcile',
+        enabled: () => true,
+        eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
+        requiresFullHistory: () => false,
+        cadenceMs: 20,
+        dispatch: async () => { /* no rows */ },
+      },
+    ];
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes,
+      maxRange: 9_000,
+      clock: () => 0,
+      log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: {
+        async loadLane() { return undefined; },
+        async saveLane(lane) { saved.push(lane); },
+      },
+    });
+
+    const poll = runner.poll();
+    await laneTwoValidationStarted;
+    expect(laneOneHolds).toBe(2);
+    laneOneCurrent = false;
+    releaseLaneTwoValidation();
+    await poll;
+
+    expect(laneOneHolds).toBe(3);
+    expect(laneTwoHolds).toBe(3);
+    expect(saved).toEqual(['vmReconcile']);
+  });
+
+  it('rechecks a lease at the legacy aggregate save boundary', async () => {
+    let holds = 0;
+    const saved: number[] = [];
+    const adapter = {
+      chainId: 'mock:0',
+      acquireEventScanHorizonLease: async () => scanLease(100, async () => {
+        holds += 1;
+        return holds < 3;
+      }),
+      listenForEvents: async function* (): AsyncIterable<ChainEvent> {
+        // no rows
+      },
+    } as unknown as ChainAdapter;
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [{
+        name: 'vmReconcile',
+        enabled: () => true,
+        eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
+        requiresFullHistory: () => false,
+        cadenceMs: 20,
+        dispatch: async () => { /* no rows */ },
+      }],
+      maxRange: 9_000,
+      clock: () => 0,
+      log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: {
+        async load() { return undefined; },
+        async save(block) { saved.push(block); },
+      },
+    });
+
+    await runner.poll();
+
+    expect(holds).toBe(3);
+    expect(saved).toEqual([]);
   });
 
   it('backs off a failed context graph discovery lane and retries the same range later', async () => {
