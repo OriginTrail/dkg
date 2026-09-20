@@ -25,6 +25,7 @@ function adapter(overrides: Record<string, unknown> = {}) {
   return Object.assign(Object.create(PublishMethods.prototype), {
     init: vi.fn(async () => undefined),
     finalityConfirmations: 1,
+    receiptBlockHeadersByHash: new Map(),
     contracts: { knowledgeAssetStorage: {} },
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
