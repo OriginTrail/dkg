@@ -3,7 +3,6 @@
 import type {
   ChainAdapter,
   NodeChallenge,
-  RandomSamplingReadContext,
   RandomSamplingReadContextReader,
 } from '@origintrail-official/dkg-chain';
 import { describe, expect, it, vi } from 'vitest';
@@ -28,8 +27,8 @@ function fixture() {
       state.ready && state.bindingId !== undefined
         ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.epoch })
         : undefined),
-    isRandomSamplingReadContextCurrent: vi.fn((context: RandomSamplingReadContext) =>
-      state.ready && state.bindingId === context.bindingId),
+    isRandomSamplingBindingCurrent: vi.fn((bindingId: string) =>
+      state.ready && state.bindingId === bindingId),
   };
   const chain = {
     getBlockNumber: vi.fn(async () => state.head),

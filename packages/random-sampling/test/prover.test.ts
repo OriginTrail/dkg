@@ -121,8 +121,8 @@ function makeChain(state: FakeChainState): TestChain {
         state.randomSamplingReady && state.bindingId !== undefined && state.currentEpoch !== undefined
           ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.currentEpoch })
           : undefined),
-      isRandomSamplingReadContextCurrent: vi.fn((context) =>
-        state.randomSamplingReady === true && state.bindingId === context.bindingId),
+      isRandomSamplingBindingCurrent: vi.fn((bindingId) =>
+        state.randomSamplingReady === true && state.bindingId === bindingId),
     };
     chain.getRandomSamplingReadContextReader = vi.fn(() => contextReader);
   }
@@ -1947,7 +1947,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       chain.getRandomSamplingReadContextReader = vi.fn(() => ({
         getRandomSamplingBindingId: vi.fn(() => undefined),
         readRandomSamplingContext: vi.fn(async () => undefined),
-        isRandomSamplingReadContextCurrent: vi.fn(() => false),
+        isRandomSamplingBindingCurrent: vi.fn(() => false),
       }));
     }
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });

@@ -333,7 +333,7 @@ export interface AbortableDeferredKeyedFlightOptions {
 }
 
 /**
- * A keyed flight that is joinable only until dispatch. Invalidation detaches
+ * A keyed flight that is joinable only until dispatch. Detachment removes
  * keys but does not disturb callers already enrolled in a live read.
  */
 export class AbortableDeferredKeyedFlight<K, V> {
@@ -356,7 +356,7 @@ export class AbortableDeferredKeyedFlight<K, V> {
     return this.#core.run(key, load, waiterSignal);
   }
 
-  invalidateAll(): void {
+  detachAll(): void {
     this.#core.detachAll();
   }
 }

@@ -42,10 +42,7 @@ import type {
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
-import type {
-  RandomSamplingReadContext,
-  RandomSamplingReadContextReader,
-} from './random-sampling-read-context.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
@@ -1556,8 +1553,8 @@ export class MockChainAdapter implements ChainAdapter {
   /** The mock exposes the same cohesive solved-period capability as EVM. */
   getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
     const getBindingId = () => 'mock-random-sampling:mock-random-sampling-storage';
-    const isCurrent = (context: RandomSamplingReadContext): boolean =>
-      this.isRandomSamplingReady() && context.bindingId === getBindingId();
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && bindingId === getBindingId();
     return Object.freeze({
       getRandomSamplingBindingId: getBindingId,
       readRandomSamplingContext: async () => {
@@ -1567,7 +1564,7 @@ export class MockChainAdapter implements ChainAdapter {
           chronosEpoch: await this.getCurrentEpoch(),
         });
       },
-      isRandomSamplingReadContextCurrent: isCurrent,
+      isRandomSamplingBindingCurrent: isCurrent,
     });
   }
 

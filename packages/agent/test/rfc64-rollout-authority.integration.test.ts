@@ -34,7 +34,7 @@ import {
   RpcEndpointsExhaustedError,
   withRpcRequestContext,
   type ChainAdapter,
-  type ChainReadOptions,
+  type ContextGraphAuthorityReadOptions,
   type ContextGraphAuthorityIndexId,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -316,7 +316,7 @@ describe('RFC-64 rollout authority integration', () => {
     let observedProjectionEvidence = false;
     const readRevisions = vi.fn(async (
       _contextGraphIds: readonly string[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ) => {
       observedSignal = options.signal;
       await governor.acquireActiveRequest();
@@ -358,7 +358,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
     const readRevisions = vi.fn(async (
       _contextGraphIds: readonly string[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ) => {
       options.onContextGraphAuthorityProjectionServed?.({
         source: 'stale-cache',
@@ -2502,7 +2502,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     const resolveSnapshots = vi.fn(async (
       _nameHashes: readonly string[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ) => {
       options.onContextGraphAuthorityProjectionServed?.({
         source: 'scan',
@@ -2560,7 +2560,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     const resolveSnapshots = vi.fn(async (
       _nameHashes: readonly string[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ) => {
       options.onContextGraphAuthorityProjectionServed?.({
         source: 'stale-cache',
@@ -2756,7 +2756,7 @@ describe('RFC-64 rollout authority integration', () => {
   async function prepareAuthorityRefreshLifecycle(
     readRevisions?: (
       contextGraphIds: readonly string[],
-      options?: ChainReadOptions,
+      options?: ContextGraphAuthorityReadOptions,
     ) => Promise<ReadonlyMap<string, string>>,
     whenRevisionReadsIdle: () => Promise<void> = async () => undefined,
   ) {

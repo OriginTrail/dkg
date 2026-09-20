@@ -88,10 +88,7 @@ import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fenc
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
-import type {
-  RandomSamplingReadContext,
-  RandomSamplingReadContextReader,
-} from './random-sampling-read-context.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
@@ -1057,7 +1054,7 @@ export class EVMChainAdapterBase {
     // Rotation cannot poison a shared flight — the key carries the contract
     // address — but a flight opened against the pre-rotation binding must stop
     // taking new callers all the same.
-    this.contextGraphLiveAuthorityCoalescer.invalidateAll();
+    this.contextGraphLiveAuthorityCoalescer.detachAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
@@ -3139,7 +3136,7 @@ export class EVMChainAdapterBase {
     // A memo hit must not turn a cancelled call into an answer.
     options.signal?.throwIfAborted();
     const rememberedTimestamp = typeof blockHash === 'string'
-      ? this.receiptFinality?.finalizedBlockTimestamp(blockNumber, blockHash)
+      ? this.receiptFinality.finalizedBlockTimestamp(blockNumber, blockHash)
       : undefined;
     return rememberedTimestamp ?? this.getBlockTimestamp(blockNumber, options);
   }
@@ -4178,8 +4175,8 @@ export class EVMChainAdapterBase {
       if (rsTarget === undefined || rssTarget === undefined) return undefined;
       return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
     };
-    const isCurrent = (context: RandomSamplingReadContext): boolean =>
-      this.isRandomSamplingReady() && getBindingId() === context.bindingId;
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && getBindingId() === bindingId;
     return Object.freeze({
       getRandomSamplingBindingId: getBindingId,
       readRandomSamplingContext: async () => {
@@ -4187,9 +4184,9 @@ export class EVMChainAdapterBase {
         if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
         const chronosEpoch = await this.getCurrentEpoch();
         const context = Object.freeze({ bindingId, chronosEpoch });
-        return isCurrent(context) ? context : undefined;
+        return isCurrent(context.bindingId) ? context : undefined;
       },
-      isRandomSamplingReadContextCurrent: isCurrent,
+      isRandomSamplingBindingCurrent: isCurrent,
     });
   }
 

@@ -125,10 +125,7 @@ export class SolvedPeriodSkip {
 
   /** Cheap guards checked both before and after the live head/epoch reads. */
   #stillBound(record: SolvedPeriodRecord, now: number): boolean {
-    return this.#contextReader?.isRandomSamplingReadContextCurrent({
-      bindingId: record.bindingId,
-      chronosEpoch: record.chronosEpoch,
-    }) === true
+    return this.#contextReader?.isRandomSamplingBindingCurrent(record.bindingId) === true
       && now < record.rereadAtMs;
   }
 

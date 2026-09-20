@@ -3,6 +3,7 @@
 import {
   isRpcEndpointsExhaustedError,
   type ChainReadOptions,
+  type ContextGraphAuthorityReadOptions,
   type ContextGraphAuthorityProjectionServedEvidence,
   type RpcEndpointsExhaustedErrorLike,
 } from '@origintrail-official/dkg-chain';
@@ -37,7 +38,7 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
 }
 
 /** Options whose `onRpcRead` marker is owned and invoked by an agent resolver. */
-export type Rfc64AgentAuthorityResolverReadOptionsV1 = ChainReadOptions & Readonly<{
+export type Rfc64AgentAuthorityResolverReadOptionsV1 = ContextGraphAuthorityReadOptions & Readonly<{
   onRpcRead: () => void;
 }>;
 

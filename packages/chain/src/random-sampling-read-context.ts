@@ -14,5 +14,5 @@ export interface RandomSamplingReadContext {
 export interface RandomSamplingReadContextReader {
   getRandomSamplingBindingId(): string | undefined;
   readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined>;
-  isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean;
+  isRandomSamplingBindingCurrent(bindingId: string): boolean;
 }

@@ -112,7 +112,7 @@ it('makes the mock read context unavailable whenever its pair is not ready', asy
   expect(context).toBeDefined();
   vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(false);
   await expect(reader.readRandomSamplingContext()).resolves.toBeUndefined();
-  expect(reader.isRandomSamplingReadContextCurrent(context!)).toBe(false);
+  expect(reader.isRandomSamplingBindingCurrent(context!.bindingId)).toBe(false);
 });
 
 it('reads and revalidates a real adapter Random Sampling context as one binding', async () => {
@@ -132,13 +132,13 @@ it('reads and revalidates a real adapter Random Sampling context as one binding'
     bindingId: `${deployedAddresses.RandomSampling}:${deployedAddresses.RandomSamplingStorage}`,
     chronosEpoch: 17n,
   });
-  expect(reader.isRandomSamplingReadContextCurrent(context!)).toBe(true);
+  expect(reader.isRandomSamplingBindingCurrent(context!.bindingId)).toBe(true);
 
   (chain as any).contracts.randomSampling = new Contract(
     '0x00000000000000000000000000000000000000aa',
     [],
   );
-  expect(reader.isRandomSamplingReadContextCurrent(context!)).toBe(false);
+  expect(reader.isRandomSamplingBindingCurrent(context!.bindingId)).toBe(false);
 });
 
 it('fails a real adapter context read open when the pair rotates during the epoch read', async () => {
