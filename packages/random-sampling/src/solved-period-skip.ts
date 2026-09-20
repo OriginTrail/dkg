@@ -147,11 +147,7 @@ export class SolvedPeriodSkip {
       this.#record = undefined;
       return undefined;
     }
-    if (
-      this.#chain.isRandomSamplingReady?.() !== true
-      || this.#chain.getRandomSamplingBindingId?.() !== record.bindingId
-      || this.#now() >= record.rereadAtMs
-    ) {
+    if (!this.#matchesCurrentBindingAndWindow(record)) {
       this.#record = undefined;
       return undefined;
     }
@@ -165,9 +161,7 @@ export class SolvedPeriodSkip {
       return undefined;
     }
     const stillReusable = (
-      this.#chain.isRandomSamplingReady?.() === true
-      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
-      && this.#now() < record.rereadAtMs
+      this.#matchesCurrentBindingAndWindow(record)
       && epoch === record.chronosEpoch
       && head >= record.periodStartBlock
       && head < record.periodEndBlock
@@ -178,5 +172,12 @@ export class SolvedPeriodSkip {
       return undefined;
     }
     return record;
+  }
+
+  /** Synchronous guards checked both before and after the evidence RPCs. */
+  #matchesCurrentBindingAndWindow(record: SolvedPeriodRecord): boolean {
+    return this.#chain.isRandomSamplingReady?.() === true
+      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
+      && this.#now() < record.rereadAtMs;
   }
 }
