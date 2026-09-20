@@ -261,7 +261,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         observe?: Parameters<ContextGraphAuthorityIndexProjectionCache['read']>[0]['onServed'],
       ) => cache.read({
         scope,
-        accepts: () => true,
+        project: (projection) => ({ complete: true, value: projection }),
         refresh: async () => completed(),
         ...(observe === undefined ? {} : { onServed: observe }),
       });
