@@ -41,11 +41,15 @@ const CG_STORAGE_EVENTS = [
 
 const hubInterface = new ethers.Interface(HUB_EVENTS);
 const cgInterface = new ethers.Interface(CG_STORAGE_EVENTS);
-const EVENT_SCAN_IDENTITY = Object.freeze({
+const CONTEXT_GRAPH_CREATED_SCAN_IDENTITY = Object.freeze({
+  eventType: 'ContextGraphCreated' as const,
   contextGraphStorageAddress: CG_STORAGE_ADDRESS,
-  contextGraphCreatedTopic0: cgInterface.getEvent('ContextGraphCreated')!.topicHash,
-  contextGraphKaTopic0: cgInterface
-    .getEvent('KnowledgeAssetRegisteredToContextGraph')!.topicHash,
+  topic0: cgInterface.getEvent('ContextGraphCreated')!.topicHash,
+});
+const CONTEXT_GRAPH_KA_SCAN_IDENTITY = Object.freeze({
+  eventType: 'KnowledgeAssetRegisteredToContextGraph' as const,
+  contextGraphStorageAddress: CG_STORAGE_ADDRESS,
+  topic0: cgInterface.getEvent('KnowledgeAssetRegisteredToContextGraph')!.topicHash,
 });
 
 /** A distinct, well-formed bytes32 per marker. */
@@ -291,11 +295,11 @@ describe('createEvmChainIndexRuntime', () => {
   it('refuses an event-scan horizon before the first pass commits', async () => {
     const h = harness();
 
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_CREATED_SCAN_IDENTITY))
       .resolves.toBeUndefined();
   });
 
-  it('lends the common exact-family horizon without another chain request', async () => {
+  it('lends each exact-family lease without another chain request', async () => {
     const h = harness();
     await h.runtime.tick.runOnce(new AbortController().signal);
     const state = (await h.store.load())!;
@@ -308,8 +312,16 @@ describe('createEvmChainIndexRuntime', () => {
     const requestsBefore = h.getLogs.mock.calls.length + h.heads.mock.calls.length
       + h.blocks.mock.calls.length;
 
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
-      .resolves.toBe(997);
+    const created = await h.runtime.binding.readEventScanLease!(
+      CONTEXT_GRAPH_CREATED_SCAN_IDENTITY,
+    );
+    const registered = await h.runtime.binding.readEventScanLease!(
+      CONTEXT_GRAPH_KA_SCAN_IDENTITY,
+    );
+    expect(created?.throughBlockNumber).toBe(1_000);
+    expect(registered?.throughBlockNumber).toBe(997);
+    await expect(created!.holds()).resolves.toBe(true);
+    await expect(registered!.holds()).resolves.toBe(true);
     expect(
       h.getLogs.mock.calls.length + h.heads.mock.calls.length + h.blocks.mock.calls.length,
     ).toBe(requestsBefore);
@@ -323,25 +335,27 @@ describe('createEvmChainIndexRuntime', () => {
         coveredThroughBlock: 1_010,
       })),
     });
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
-      .resolves.toBe(1_000);
+    const capped = await h.runtime.binding.readEventScanLease!(
+      CONTEXT_GRAPH_CREATED_SCAN_IDENTITY,
+    );
+    expect(capped?.throughBlockNumber).toBe(1_000);
   });
 
-  it('refuses an event-scan horizon unless address and both topics match exactly', async () => {
+  it('refuses an event-scan lease unless its address and selected topic match exactly', async () => {
     const h = harness();
     await h.runtime.tick.runOnce(new AbortController().signal);
 
-    await expect(h.runtime.binding.readEventScanHorizon!({
-      ...EVENT_SCAN_IDENTITY,
+    await expect(h.runtime.binding.readEventScanLease!({
+      ...CONTEXT_GRAPH_CREATED_SCAN_IDENTITY,
       contextGraphStorageAddress: '0x00000000000000000000000000000000000000c3',
     })).resolves.toBeUndefined();
-    await expect(h.runtime.binding.readEventScanHorizon!({
-      ...EVENT_SCAN_IDENTITY,
-      contextGraphCreatedTopic0: hexWord(91),
+    await expect(h.runtime.binding.readEventScanLease!({
+      ...CONTEXT_GRAPH_CREATED_SCAN_IDENTITY,
+      topic0: hexWord(91),
     })).resolves.toBeUndefined();
-    await expect(h.runtime.binding.readEventScanHorizon!({
-      ...EVENT_SCAN_IDENTITY,
-      contextGraphKaTopic0: hexWord(92),
+    await expect(h.runtime.binding.readEventScanLease!({
+      ...CONTEXT_GRAPH_KA_SCAN_IDENTITY,
+      topic0: hexWord(92),
     })).resolves.toBeUndefined();
   });
 
@@ -354,11 +368,11 @@ describe('createEvmChainIndexRuntime', () => {
       cursor: { ...state.cursor, topicSetVersion: 'retired-topics' },
     });
 
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_CREATED_SCAN_IDENTITY))
       .resolves.toBeUndefined();
   });
 
-  it('refuses an event-scan horizon without exact-address coverage for both families', async () => {
+  it('refuses an event-scan lease without exact-address coverage for its family', async () => {
     const h = harness();
     await h.runtime.tick.runOnce(new AbortController().signal);
     const state = (await h.store.load())!;
@@ -368,7 +382,7 @@ describe('createEvmChainIndexRuntime', () => {
         ? { ...entry, address: '0x00000000000000000000000000000000000000c3' }
         : entry),
     });
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_KA_SCAN_IDENTITY))
       .resolves.toBeUndefined();
 
     h.store.seed({
@@ -376,8 +390,25 @@ describe('createEvmChainIndexRuntime', () => {
       coverage: state.coverage.filter((entry) => entry.family !== 'context-graph-ka'),
     });
 
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_KA_SCAN_IDENTITY))
       .resolves.toBeUndefined();
+  });
+
+  it('retires a lease when the underlying log revision changes', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    const lease = await h.runtime.binding.readEventScanLease!(
+      CONTEXT_GRAPH_CREATED_SCAN_IDENTITY,
+    );
+    expect(lease).toBeDefined();
+    await expect(lease!.holds()).resolves.toBe(true);
+
+    const state = (await h.store.load())!;
+    h.store.seed({
+      ...state,
+      cursor: { ...state.cursor, revision: state.cursor.revision + 1 },
+    });
+    await expect(lease!.holds()).resolves.toBe(false);
   });
 
   it('refuses event-scan horizons from frozen, future-stamped or fork-suspect state', async () => {
@@ -385,11 +416,11 @@ describe('createEvmChainIndexRuntime', () => {
     await h.runtime.tick.runOnce(new AbortController().signal);
 
     h.advanceMs(3 * 6_000 + 1);
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_CREATED_SCAN_IDENTITY))
       .resolves.toBeUndefined();
 
     h.advanceMs(-(3 * 6_000 + 2));
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_CREATED_SCAN_IDENTITY))
       .resolves.toBeUndefined();
 
     h.advanceMs(1);
@@ -398,7 +429,7 @@ describe('createEvmChainIndexRuntime', () => {
       ...state,
       suspectedForkBlockNumber: state.cursor.settledBlockNumber,
     });
-    await expect(h.runtime.binding.readEventScanHorizon!(EVENT_SCAN_IDENTITY))
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_CREATED_SCAN_IDENTITY))
       .resolves.toBeUndefined();
   });
 

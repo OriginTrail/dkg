@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   activeRpcRequestContext,
+  type ChainAdapter,
   type ChainEvent,
+  type EventFilter,
+  type EventScanHorizonLease,
 } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import type { ChainEventPollerLane } from '../src/chain-event-poller.js';
@@ -9,6 +12,11 @@ import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
 import { ChainEventLaneRunner } from '../src/chain-event-lane-runner.js';
 import type { ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
+
+const scanLease = (
+  throughBlockNumber: number,
+  holds: () => Promise<boolean> = async () => true,
+): EventScanHorizonLease => ({ throughBlockNumber, holds });
 
 describe('ChainEventPoller scheduler', () => {
   it('classifies every poller RPC as background work', async () => {
@@ -127,11 +135,14 @@ describe('ChainEventPoller scheduler', () => {
     expect(filters[3].toBlock).toBe(1100);
   });
 
-  it('uses one conservative event horizon for both indexed lanes without reading a live head', async () => {
+  it('keeps a mixed lane live while an exact indexed lane uses its lease', async () => {
     let liveHeadCalls = 0;
     const { adapter, filters } = makeChain({
       head: 1_000,
-      eventScanHorizon: 100,
+      eventScanLease: (eventTypes) => eventTypes.length === 1
+        && eventTypes[0] === 'KnowledgeAssetRegisteredToContextGraph'
+        ? scanLease(100)
+        : undefined,
       onHead: () => { liveHeadCalls += 1; },
     });
     const poller = new ChainEventPoller({
@@ -145,30 +156,63 @@ describe('ChainEventPoller scheduler', () => {
 
     await (poller as unknown as { poll(): Promise<void> }).poll();
 
-    expect(liveHeadCalls).toBe(0);
+    expect(liveHeadCalls).toBe(1);
     expect(filters.map((filter) => ({
       events: filter.eventTypes,
       from: filter.fromBlock,
       to: filter.toBlock,
     }))).toEqual([
-      { events: ['NameClaimed', 'ContextGraphCreated'], from: 1, to: 100 },
+      { events: ['NameClaimed', 'ContextGraphCreated'], from: 501, to: 1_000 },
       { events: ['KnowledgeAssetRegisteredToContextGraph'], from: 1, to: 100 },
     ]);
   });
 
-  it('falls back to the live head for absent, throwing or invalid horizons', async () => {
-    const horizonReaders: Array<() => number | undefined> = [
+  it('keeps a sole unsupported lane on the live head', async () => {
+    let liveHeadCalls = 0;
+    const requested: string[][] = [];
+    const { adapter, filters } = makeChain({
+      head: 1_000,
+      eventScanLease: (eventTypes) => {
+        requested.push([...eventTypes]);
+        return undefined;
+      },
+      onHead: () => { liveHeadCalls += 1; },
+    });
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [{
+        name: 'allowListUpdates',
+        enabled: () => true,
+        eventTypes: () => ['AllowListUpdated'],
+        requiresFullHistory: () => false,
+        cadenceMs: 20,
+        dispatch: async () => { /* sink */ },
+      }],
+      maxRange: 9_000,
+      clock: () => 0,
+      log: { info() {}, warn() {}, error() {} } as any,
+    });
+
+    await runner.poll();
+
+    expect(requested).toEqual([['AllowListUpdated']]);
+    expect(liveHeadCalls).toBe(1);
+    expect(filters).toMatchObject([{ fromBlock: 501, toBlock: 1_000 }]);
+  });
+
+  it('falls back to the live head for absent, throwing or invalid leases', async () => {
+    const leaseReaders: Array<() => EventScanHorizonLease | undefined> = [
       () => undefined,
       () => { throw new Error('log unavailable'); },
-      () => -1,
-      () => 10.5,
+      () => scanLease(-1),
+      () => scanLease(10.5),
     ];
 
-    for (const eventScanHorizon of horizonReaders) {
+    for (const eventScanLease of leaseReaders) {
       let liveHeadCalls = 0;
       const { adapter, filters } = makeChain({
         head: 1_000,
-        eventScanHorizon,
+        eventScanLease,
         onHead: () => { liveHeadCalls += 1; },
       });
       const lane: ChainEventPollerLaneSpec = {
@@ -194,23 +238,21 @@ describe('ChainEventPoller scheduler', () => {
     }
   });
 
-  it('catches a delayed event after the conservative horizon advances', async () => {
+  it('catches a delayed event after the conservative lease advances', async () => {
     let now = 0;
     let horizon = 100;
     const delayed: ChainEvent = {
-      type: 'ContextGraphCreated',
+      type: 'KnowledgeAssetRegisteredToContextGraph',
       blockNumber: 110,
       data: {
         contextGraphId: '42',
-        creator: '0x' + 'a1'.repeat(20),
-        accessPolicy: 0,
-        publishPolicy: 1,
-        nameHash: '0x' + 'ab'.repeat(32),
+        kaId: '7',
+        txHash: '0x' + 'ab'.repeat(32),
       },
     };
     const { adapter, filters } = makeChain({
       head: 1_000,
-      eventScanHorizon: () => horizon,
+      eventScanLease: () => scanLease(horizon),
       events: [delayed],
     });
     const seen: number[] = [];
@@ -219,7 +261,7 @@ describe('ChainEventPoller scheduler', () => {
       publishHandler: makeHandler(),
       intervalMs: 20,
       clock: () => now,
-      onContextGraphCreated: async (event) => { seen.push(event.blockNumber); },
+      onKARegisteredToContextGraph: async (event) => { seen.push(event.blockNumber); },
     });
 
     await (poller as unknown as { poll(): Promise<void> }).poll();
@@ -241,7 +283,7 @@ describe('ChainEventPoller scheduler', () => {
     const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     const { adapter, filters } = makeChain({
       head: 1_000,
-      eventScanHorizon: 100,
+      eventScanLease: scanLease(100),
       onListen: (filter) => {
         if (failDiscovery && filter.eventTypes.includes('ContextGraphCreated')) {
           failDiscovery = false;
@@ -296,6 +338,81 @@ describe('ChainEventPoller scheduler', () => {
       { lane: 'vmReconcile', block: 100 },
       { lane: 'contextGraphDiscovery', block: 100 },
     ]);
+  });
+
+  it('refuses an A-generation commit after rotation and replays a B event at or below H', async () => {
+    let generation: 'A' | 'B' = 'A';
+    let now = 0;
+    const filters: EventFilter[] = [];
+    const saved: number[] = [];
+    const seen: string[] = [];
+    let releaseDispatch = (): void => {};
+    let markDispatchStarted = (): void => {};
+    const dispatchStarted = new Promise<void>((resolve) => { markDispatchStarted = resolve; });
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => 1_000,
+      acquireEventScanHorizonLease: async (eventTypes: readonly string[]) => {
+        if (
+          eventTypes.length !== 1
+          || eventTypes[0] !== 'KnowledgeAssetRegisteredToContextGraph'
+        ) return undefined;
+        const issuedFor = generation;
+        return scanLease(100, async () => generation === issuedFor);
+      },
+      listenForEvents: async function* (filter: EventFilter): AsyncIterable<ChainEvent> {
+        filters.push(filter);
+        yield {
+          type: 'KnowledgeAssetRegisteredToContextGraph',
+          blockNumber: 50,
+          data: { generation },
+        };
+      },
+    } as unknown as ChainAdapter;
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [{
+        name: 'vmReconcile',
+        enabled: () => true,
+        eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
+        requiresFullHistory: () => false,
+        cadenceMs: 20,
+        dispatch: async (event) => {
+          const observed = String(event.data['generation']);
+          seen.push(observed);
+          if (observed === 'A') {
+            markDispatchStarted();
+            await new Promise<void>((resolve) => { releaseDispatch = resolve; });
+          }
+        },
+      }],
+      maxRange: 9_000,
+      clock: () => now,
+      log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: {
+        async loadLane() { return undefined; },
+        async saveLane(_lane, block) { saved.push(block); },
+      },
+    });
+
+    const firstPoll = runner.poll();
+    await dispatchStarted;
+    generation = 'B';
+    releaseDispatch();
+    await firstPoll;
+
+    expect(saved).toEqual([]);
+    expect(filters.map((filter) => [filter.fromBlock, filter.toBlock])).toEqual([[1, 100]]);
+
+    now = 60_000;
+    await runner.poll();
+
+    expect(filters.map((filter) => [filter.fromBlock, filter.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
+    ]);
+    expect(seen).toEqual(['A', 'B']);
+    expect(saved).toEqual([100]);
   });
 
   it('backs off a failed context graph discovery lane and retries the same range later', async () => {

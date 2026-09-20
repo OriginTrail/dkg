@@ -467,6 +467,17 @@ export interface ChainEvent {
 }
 
 /**
+ * A process-local, non-serializable lease over one conservative background
+ * event-scan boundary. It has no chain-head, finality or authorization
+ * meaning. Consumers must re-check `holds()` after every awaited dispatch and
+ * immediately before advancing or persisting their cursor.
+ */
+export interface EventScanHorizonLease {
+  readonly throughBlockNumber: number;
+  holds(): Promise<boolean>;
+}
+
+/**
  * Why an off-chain ACK signer pre-flight rejected a recovered signer.
  * Mirrors the two on-chain gates in
  * `KnowledgeAssetsV10._verifyACKSignature` plus an explicit
@@ -1589,7 +1600,9 @@ export interface ChainAdapter {
    * polling. This is not a canonical head, finality fact, or authorization
    * input; absence makes the poller use `getBlockNumber()` exactly as before.
    */
-  getEventScanHorizon?(): Promise<number | undefined>;
+  acquireEventScanHorizonLease?(
+    eventTypes: readonly string[],
+  ): Promise<EventScanHorizonLease | undefined>;
 
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;

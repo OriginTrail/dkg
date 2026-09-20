@@ -60,10 +60,27 @@ export interface ChainEventLogHubRotationWindow {
  * two generations of the same contract, or two sibling events at one address,
  * must never share a coverage claim.
  */
+export type ChainEventLogIndexedEventType =
+  | 'ContextGraphCreated'
+  | 'KnowledgeAssetRegisteredToContextGraph';
+
 export interface ChainEventLogEventScanIdentity {
+  readonly eventType: ChainEventLogIndexedEventType;
   readonly contextGraphStorageAddress: string;
-  readonly contextGraphCreatedTopic0: string;
-  readonly contextGraphKaTopic0: string;
+  readonly topic0: string;
+}
+
+/**
+ * A revision-pinned claim over one exact indexed event family.
+ *
+ * `holds()` reloads the store and requires the same cursor revision, topic set,
+ * clean lineage and coverage. A tick, reorg repair or runtime rebuild while a
+ * consumer awaits dispatch therefore retires the lease instead of allowing a
+ * cursor to advance over rows from a different log generation.
+ */
+export interface ChainEventLogEventScanLease {
+  readonly throughBlockNumber: number;
+  holds(): Promise<boolean>;
 }
 
 /**
@@ -137,16 +154,16 @@ export interface ChainEventLogBinding {
   /**
    * A conservative, possibly lagging upper bound for background publisher
    * event scans, or `undefined` when the one log cannot prove one for the
-   * exact current ContextGraphStorage generation and both indexed topics.
+   * exact current ContextGraphStorage generation and requested indexed topic.
    *
    * This is deliberately not a chain-head API and carries no authorization or
    * finality meaning. Callers still pass each requested range through
    * `subscription.servableRange`, whose lower-bound/floor check decides
    * whether rows can replace that lane's live scan.
    */
-  readEventScanHorizon?(
+  readEventScanLease?(
     identity: ChainEventLogEventScanIdentity,
-  ): Promise<number | undefined>;
+  ): Promise<ChainEventLogEventScanLease | undefined>;
   /**
    * Hub rotations out of the log, or `undefined` when the log cannot prove it
    * covers the window the listener asked for — or cannot prove it is still

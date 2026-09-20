@@ -318,6 +318,8 @@ export type {
   ChainEventLogBinding,
   ChainEventLogBindingSource,
   ChainEventLogEventScanIdentity,
+  ChainEventLogEventScanLease,
+  ChainEventLogIndexedEventType,
   ChainEventLogHubRotation,
   ChainEventLogHubRotationWindow,
 } from './chain-event-log-binding.js';

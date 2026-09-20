@@ -1,18 +1,25 @@
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
-import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
+import type {
+  ChainAdapter,
+  ChainEvent,
+  EventFilter,
+  EventScanHorizonLease,
+} from '@origintrail-official/dkg-chain';
 import { PublishHandler } from '../../src/publish-handler.js';
 import type { JournalEntry } from '../../src/publish-journal.js';
 
 interface ChainFixtureOptions {
   head: number | (() => number);
-  eventScanHorizon?: number | (() => number | undefined | Promise<number | undefined>);
+  eventScanLease?: EventScanHorizonLease | ((
+    eventTypes: readonly string[],
+  ) => EventScanHorizonLease | undefined | Promise<EventScanHorizonLease | undefined>);
   events?: readonly ChainEvent[];
   onListen?: (filter: EventFilter) => void;
   onHead?: () => void;
 }
 
-export function makeChain({ head, eventScanHorizon, events = [], onListen, onHead }: ChainFixtureOptions): {
+export function makeChain({ head, eventScanLease, events = [], onListen, onHead }: ChainFixtureOptions): {
   adapter: ChainAdapter;
   filters: EventFilter[];
 } {
@@ -23,10 +30,11 @@ export function makeChain({ head, eventScanHorizon, events = [], onListen, onHea
       onHead?.();
       return typeof head === 'function' ? head() : head;
     },
-    ...(eventScanHorizon === undefined ? {} : {
-      getEventScanHorizon: async () => typeof eventScanHorizon === 'function'
-        ? eventScanHorizon()
-        : eventScanHorizon,
+    ...(eventScanLease === undefined ? {} : {
+      acquireEventScanHorizonLease: async (eventTypes: readonly string[]) =>
+        typeof eventScanLease === 'function'
+          ? eventScanLease(eventTypes)
+          : eventScanLease,
     }),
     listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
       filters.push(f);

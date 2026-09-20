@@ -25,6 +25,7 @@ import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-author
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  EventScanHorizonLease,
   ContextGraphLiveAuthority,
   ContextGraphAuthorityIndexRevisionReader,
   KnowledgeAssetUpdateContext,
@@ -4516,44 +4517,75 @@ export class EVMChainAdapterBase {
    * binding generation are fenced across the await so a Hub rotation or
    * runtime rebuild cannot lend a retired generation's horizon.
    */
-  async getEventScanHorizon(): Promise<number | undefined> {
+  async acquireEventScanHorizonLease(
+    eventTypes: readonly string[],
+  ): Promise<EventScanHorizonLease | undefined> {
+    if (eventTypes.length !== 1) return undefined;
+    const eventType = eventTypes[0] === 'ContextGraphCreated'
+      ? 'ContextGraphCreated' as const
+      : eventTypes[0] === 'KnowledgeAssetRegisteredToContextGraph'
+        ? 'KnowledgeAssetRegisteredToContextGraph' as const
+        : undefined;
+    if (eventType === undefined) return undefined;
+
     const binding = this.chainEventLogBinding;
-    const readHorizon = binding?.readEventScanHorizon;
+    const readLease = binding?.readEventScanLease;
     const contextGraphStorage = this.contracts.contextGraphStorage;
-    if (binding === undefined || readHorizon === undefined || contextGraphStorage === undefined) {
+    if (binding === undefined || readLease === undefined || contextGraphStorage === undefined) {
       return undefined;
     }
 
     let address: string;
-    let contextGraphCreatedTopic0: string | undefined;
-    let contextGraphKaTopic0: string | undefined;
+    let topic0: string | undefined;
     try {
       address = (await contextGraphStorage.getAddress()).toLowerCase();
-      contextGraphCreatedTopic0 = contextGraphStorage.interface
-        .getEvent('ContextGraphCreated')?.topicHash.toLowerCase();
-      contextGraphKaTopic0 = contextGraphStorage.interface
-        .getEvent('KnowledgeAssetRegisteredToContextGraph')?.topicHash.toLowerCase();
+      topic0 = contextGraphStorage.interface.getEvent(eventType)?.topicHash.toLowerCase();
     } catch {
       return undefined;
     }
-    if (contextGraphCreatedTopic0 === undefined || contextGraphKaTopic0 === undefined) {
-      return undefined;
-    }
+    if (topic0 === undefined) return undefined;
 
     try {
-      const horizon = await readHorizon.call(binding, {
+      const logLease = await readLease.call(binding, {
+        eventType,
         contextGraphStorageAddress: address,
-        contextGraphCreatedTopic0,
-        contextGraphKaTopic0,
+        topic0,
       });
       if (
-        !this.chainEventLogBindingIsCurrent(binding)
+        logLease === undefined
+        || !this.chainEventLogBindingIsCurrent(binding)
         || this.contracts.contextGraphStorage !== contextGraphStorage
-        || typeof horizon !== 'number'
-        || !Number.isSafeInteger(horizon)
-        || horizon < 0
+        || !Number.isSafeInteger(logLease.throughBlockNumber)
+        || logLease.throughBlockNumber < 0
       ) return undefined;
-      return horizon;
+
+      const contractGenerationHolds = async (): Promise<boolean> => {
+        if (
+          !this.chainEventLogBindingIsCurrent(binding)
+          || this.contracts.contextGraphStorage !== contextGraphStorage
+        ) return false;
+        try {
+          const currentAddress = (await contextGraphStorage.getAddress()).toLowerCase();
+          const currentTopic0 = contextGraphStorage.interface
+            .getEvent(eventType)?.topicHash.toLowerCase();
+          return this.chainEventLogBindingIsCurrent(binding)
+            && this.contracts.contextGraphStorage === contextGraphStorage
+            && currentAddress === address
+            && currentTopic0 === topic0;
+        } catch {
+          return false;
+        }
+      };
+      if (!await contractGenerationHolds()) return undefined;
+
+      return Object.freeze({
+        throughBlockNumber: logLease.throughBlockNumber,
+        holds: async (): Promise<boolean> => {
+          if (!await contractGenerationHolds()) return false;
+          if (!await logLease.holds()) return false;
+          return contractGenerationHolds();
+        },
+      });
     } catch {
       return undefined;
     }

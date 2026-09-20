@@ -1,4 +1,9 @@
-import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
+import type {
+  ChainAdapter,
+  ChainEvent,
+  EventFilter,
+  EventScanHorizonLease,
+} from '@origintrail-official/dkg-chain';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   createLaneCursorStore,
@@ -52,6 +57,13 @@ interface ChainEventPollerLaneScanResult {
   lane: ChainEventPollerLaneRuntime;
   blockNumber: number;
   advanced: boolean;
+  lease?: EventScanHorizonLease;
+  stateBefore?: ChainEventPollerLaneState;
+}
+
+interface ChainEventLaneBoundary {
+  readonly head: number | undefined;
+  readonly lease?: EventScanHorizonLease;
 }
 
 type ChainEventLaneScheduleOutcome =
@@ -108,34 +120,54 @@ export class ChainEventLaneRunner {
     const dueLanes = activeLanes.filter((lane) => this.laneDue(lane, now));
     if (dueLanes.length === 0) return;
 
-    let head: number | undefined;
-    if (this.chain.getEventScanHorizon) {
-      try {
-        const horizon = await this.chain.getEventScanHorizon();
-        if (typeof horizon === 'number' && Number.isSafeInteger(horizon) && horizon >= 0) {
-          head = horizon;
-        }
-      } catch {
-        if (signal?.aborted) signal.throwIfAborted();
-        // Any refusal or uncertainty restores the live head path below.
-      }
-    }
-    if (head === undefined && this.chain.getBlockNumber) {
-      try {
-        head = await this.chain.getBlockNumber();
-      } catch {
-        if (signal?.aborted) signal.throwIfAborted();
-        // Head is optional; lanes can still scan their next bounded range.
-      }
-    }
+    let liveHeadRead: Promise<number | undefined> | undefined;
+    const readLiveHead = (): Promise<number | undefined> => {
+      liveHeadRead ??= this.readLiveHead(signal);
+      return liveHeadRead;
+    };
 
     const scanResults: ChainEventPollerLaneScanResult[] = [];
     for (const lane of dueLanes) {
       signal?.throwIfAborted();
-      scanResults.push(await this.scanLane(lane, head, now, ctx, signal));
+      const boundary = await this.eventScanBoundary(lane, readLiveHead, signal);
+      scanResults.push(await this.scanLane(lane, boundary, now, ctx, signal));
     }
     signal?.throwIfAborted();
-    await this.persistScanResults(scanResults, activeLanes);
+    const currentResults = await this.revalidateScanResults(scanResults, now, ctx, signal);
+    await this.persistScanResults(currentResults, activeLanes);
+  }
+
+  private async readLiveHead(signal?: AbortSignal): Promise<number | undefined> {
+    if (!this.chain.getBlockNumber) return undefined;
+    try {
+      return await this.chain.getBlockNumber();
+    } catch {
+      if (signal?.aborted) signal.throwIfAborted();
+      // Head is optional; lanes can still scan their next bounded range.
+      return undefined;
+    }
+  }
+
+  private async eventScanBoundary(
+    lane: ChainEventPollerLaneRuntime,
+    readLiveHead: () => Promise<number | undefined>,
+    signal?: AbortSignal,
+  ): Promise<ChainEventLaneBoundary> {
+    const acquire = this.chain.acquireEventScanHorizonLease;
+    if (acquire !== undefined) {
+      try {
+        const lease = await acquire.call(this.chain, lane.eventTypes);
+        if (
+          lease !== undefined
+          && Number.isSafeInteger(lease.throughBlockNumber)
+          && lease.throughBlockNumber >= 0
+        ) return { head: lease.throughBlockNumber, lease };
+      } catch {
+        if (signal?.aborted) signal.throwIfAborted();
+        // Refusal or uncertainty restores this lane's live-head path.
+      }
+    }
+    return { head: await readLiveHead() };
   }
 
   private activeLaneSpecs(): ChainEventPollerLaneRuntime[] {
@@ -252,12 +284,14 @@ export class ChainEventLaneRunner {
 
   private async scanLane(
     lane: ChainEventPollerLaneRuntime,
-    head: number | undefined,
+    boundary: ChainEventLaneBoundary,
     now: number,
     ctx: OperationContext,
     signal?: AbortSignal,
   ): Promise<ChainEventPollerLaneScanResult> {
     const state = lane.state;
+    const stateBefore = { ...state };
+    const { head, lease } = boundary;
 
     this.applyHistoryModeTransition(lane, head, ctx);
 
@@ -288,6 +322,7 @@ export class ChainEventLaneRunner {
     };
     const caughtUp = head != null && upperBound >= head;
     let advanced = false;
+    let leaseExpired = false;
 
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
@@ -297,15 +332,79 @@ export class ChainEventLaneRunner {
       }
 
       signal?.throwIfAborted();
+      if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
+        leaseExpired = true;
+        throw new Error('event scan horizon lease expired before cursor advance');
+      }
+      signal?.throwIfAborted();
       state.lastBlock = upperBound;
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       if (signal?.aborted) signal.throwIfAborted();
+      if (leaseExpired) this.restoreLaneState(state, stateBefore);
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       this.applyLaneSchedule(lane, { kind: 'failure', now });
     }
-    return { lane, blockNumber: state.lastBlock, advanced };
+    return {
+      lane,
+      blockNumber: state.lastBlock,
+      advanced,
+      ...(advanced && lease !== undefined ? { lease, stateBefore } : {}),
+    };
+  }
+
+  private async revalidateScanResults(
+    scanResults: readonly ChainEventPollerLaneScanResult[],
+    now: number,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<readonly ChainEventPollerLaneScanResult[]> {
+    const current: ChainEventPollerLaneScanResult[] = [];
+    for (const result of scanResults) {
+      if (!result.advanced || result.lease === undefined || result.stateBefore === undefined) {
+        current.push(result);
+        continue;
+      }
+      signal?.throwIfAborted();
+      if (await this.eventScanLeaseHolds(result.lease)) {
+        signal?.throwIfAborted();
+        current.push(result);
+        continue;
+      }
+
+      this.restoreLaneState(result.lane.state, result.stateBefore);
+      this.applyLaneSchedule(result.lane, { kind: 'failure', now });
+      this.log.warn(
+        ctx,
+        `Poll lane ${result.lane.spec.name} lease expired before cursor persistence; range will replay`,
+      );
+      current.push({
+        lane: result.lane,
+        blockNumber: result.lane.state.lastBlock,
+        advanced: false,
+      });
+    }
+    return current;
+  }
+
+  private async eventScanLeaseHolds(lease: EventScanHorizonLease): Promise<boolean> {
+    try {
+      return await lease.holds();
+    } catch {
+      return false;
+    }
+  }
+
+  private restoreLaneState(
+    state: ChainEventPollerLaneState,
+    previous: ChainEventPollerLaneState,
+  ): void {
+    state.lastBlock = previous.lastBlock;
+    state.headKnown = previous.headKnown;
+    state.requiresFullHistory = previous.requiresFullHistory;
+    state.nextRunAtMs = previous.nextRunAtMs;
+    state.failureBackoffMs = previous.failureBackoffMs;
   }
 
   private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {

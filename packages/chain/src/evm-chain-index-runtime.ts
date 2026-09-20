@@ -495,25 +495,37 @@ export function createEvmChainIndexRuntime(
     .getEvent('KnowledgeAssetRegisteredToContextGraph')?.topicHash.toLowerCase();
 
   /**
-   * The publisher lanes may stop asking the provider for a second head only
-   * when this generation proves BOTH event families through the same block.
-   * The horizon may lag the chain; that merely delays the next scan. Frozen,
-   * fork-suspect, incomplete-identity or partially-covered state refuses to
-   * answer and restores the pre-log live-head path.
+   * The publisher may borrow a boundary only for ONE exact event family. The
+   * revision fence is deliberate: rows can be replaced under the same runtime
+   * during a reorg pass, so contract/binding identity alone cannot prove that
+   * the rows iterated before an awaited dispatch are still the held rows.
    */
-  async function readEventScanHorizon(identity: Readonly<{
+  async function readEventScanLease(identity: Readonly<{
+    eventType: 'ContextGraphCreated' | 'KnowledgeAssetRegisteredToContextGraph';
     contextGraphStorageAddress: string;
-    contextGraphCreatedTopic0: string;
-    contextGraphKaTopic0: string;
-  }>): Promise<number | undefined> {
+    topic0: string;
+  }>): Promise<Readonly<{
+    throughBlockNumber: number;
+    holds(): Promise<boolean>;
+  }> | undefined> {
+    const event = identity.eventType === 'ContextGraphCreated'
+      ? {
+          family: 'context-graph-authority' as const,
+          topic0: contextGraphCreatedTopic0,
+        }
+      : identity.eventType === 'KnowledgeAssetRegisteredToContextGraph'
+        ? {
+            family: 'context-graph-ka' as const,
+            topic0: contextGraphKaTopic0,
+          }
+        : undefined;
     if (
-      contextGraphStorageNormalized === undefined
-      || contextGraphCreatedTopic0 === undefined
-      || contextGraphKaTopic0 === undefined
+      event === undefined
+      || contextGraphStorageNormalized === undefined
+      || event.topic0 === undefined
       || normalizeChainEventLogAddress(identity.contextGraphStorageAddress)
         !== contextGraphStorageNormalized
-      || identity.contextGraphCreatedTopic0.toLowerCase() !== contextGraphCreatedTopic0
-      || identity.contextGraphKaTopic0.toLowerCase() !== contextGraphKaTopic0
+      || identity.topic0.toLowerCase() !== event.topic0
     ) return undefined;
 
     const state = await options.store.load(options.scope);
@@ -527,24 +539,42 @@ export function createEvmChainIndexRuntime(
       maxHeadAgeMs: chainIndexHubWindowMaxAgeMs(options.intervalMs),
     }) !== undefined) return undefined;
 
-    const authorityCoverage = findChainEventLogCoverage(
+    const coverage = findChainEventLogCoverage(
       state.coverage,
-      'context-graph-authority',
+      event.family,
       contextGraphStorageNormalized,
     );
-    const kaCoverage = findChainEventLogCoverage(
-      state.coverage,
-      'context-graph-ka',
-      contextGraphStorageNormalized,
-    );
-    if (authorityCoverage === undefined || kaCoverage === undefined) return undefined;
+    if (coverage === undefined) return undefined;
 
     const horizon = Math.min(
-      authorityCoverage.coveredThroughBlock,
-      kaCoverage.coveredThroughBlock,
+      coverage.coveredThroughBlock,
       state.cursor.head.number,
     );
-    return Number.isSafeInteger(horizon) && horizon >= 0 ? horizon : undefined;
+    if (!Number.isSafeInteger(horizon) || horizon < 0) return undefined;
+    const revision = state.cursor.revision;
+    return Object.freeze({
+      throughBlockNumber: horizon,
+      async holds(): Promise<boolean> {
+        const current = await options.store.load(options.scope);
+        if (
+          current === undefined
+          || current.cursor.revision !== revision
+          || current.cursor.topicSetVersion !== eventScanTopicSetVersion
+          || chainEventLogStateReadRefusal(current, {
+            nowMs: now(),
+            maxHeadAgeMs: chainIndexHubWindowMaxAgeMs(options.intervalMs),
+          }) !== undefined
+        ) return false;
+        const currentCoverage = findChainEventLogCoverage(
+          current.coverage,
+          event.family,
+          contextGraphStorageNormalized,
+        );
+        return currentCoverage !== undefined
+          && currentCoverage.coveredThroughBlock >= horizon
+          && current.cursor.head.number >= horizon;
+      },
+    });
   }
 
   /**
@@ -627,7 +657,7 @@ export function createEvmChainIndexRuntime(
     && contextGraphCreatedTopic0 !== undefined
     && contextGraphKaTopic0 !== undefined
   ) {
-    binding.readEventScanHorizon = readEventScanHorizon;
+    binding.readEventScanLease = readEventScanLease;
   }
   if (contextGraphAuthority !== undefined) {
     binding.contextGraphAuthority = contextGraphAuthority;

@@ -161,75 +161,130 @@ async function collect(
 }
 
 describe('listenForEvents over the one log', () => {
-  it('borrows an event-scan horizon only for the exact current address and topics', async () => {
+  it('borrows an event-scan lease only for the exact selected address and topic', async () => {
     const { adapter } = makeAdapter(seededStore(100, []));
     const binding = adapter.chainEventLog!;
     let received: unknown;
     adapter.attachChainEventLog({
       ...binding,
-      readEventScanHorizon: async (identity: unknown) => {
+      readEventScanLease: async (identity: unknown) => {
         received = identity;
-        return 100;
+        return { throughBlockNumber: 100, holds: async () => true };
       },
     });
 
-    await expect(adapter.getEventScanHorizon()).resolves.toBe(100);
+    const lease = await adapter.acquireEventScanHorizonLease(['ContextGraphCreated']);
+    expect(lease?.throughBlockNumber).toBe(100);
+    await expect(lease!.holds()).resolves.toBe(true);
     expect(received).toEqual({
+      eventType: 'ContextGraphCreated',
       contextGraphStorageAddress: CG_STORAGE,
-      contextGraphCreatedTopic0: cgInterface.getEvent('ContextGraphCreated')!
-        .topicHash.toLowerCase(),
-      contextGraphKaTopic0: cgInterface
-        .getEvent('KnowledgeAssetRegisteredToContextGraph')!.topicHash.toLowerCase(),
+      topic0: cgInterface.getEvent('ContextGraphCreated')!.topicHash.toLowerCase(),
     });
     adapter.destroy();
   });
 
-  it('discards an event-scan horizon when its binding generation changes in flight', async () => {
+  it('refuses sole unsupported and mixed event sets before consulting the log', async () => {
+    const { adapter } = makeAdapter(seededStore(100, []));
+    const binding = adapter.chainEventLog!;
+    let reads = 0;
+    adapter.attachChainEventLog({
+      ...binding,
+      readEventScanLease: async () => {
+        reads += 1;
+        return { throughBlockNumber: 100, holds: async () => true };
+      },
+    });
+
+    await expect(adapter.acquireEventScanHorizonLease(['AllowListUpdated']))
+      .resolves.toBeUndefined();
+    await expect(adapter.acquireEventScanHorizonLease([
+      'NameClaimed',
+      'ContextGraphCreated',
+    ])).resolves.toBeUndefined();
+    expect(reads).toBe(0);
+    adapter.destroy();
+  });
+
+  it('discards an event-scan lease when its binding generation changes in flight', async () => {
     const { adapter } = makeAdapter(seededStore(100, []));
     const base = adapter.chainEventLog!;
-    let release = (_horizon: number): void => {};
+    let release = (_lease: { throughBlockNumber: number; holds(): Promise<boolean> }): void => {};
     let markStarted = (): void => {};
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
     adapter.attachChainEventLog({
       ...base,
-      readEventScanHorizon: () => new Promise<number>((resolve) => {
+      readEventScanLease: () => new Promise<{
+        throughBlockNumber: number;
+        holds(): Promise<boolean>;
+      }>((resolve) => {
         release = resolve;
         markStarted();
       }),
     });
 
-    const reading = adapter.getEventScanHorizon();
+    const reading = adapter.acquireEventScanHorizonLease(['ContextGraphCreated']);
     await started;
     adapter.attachChainEventLog({
       ...base,
-      readEventScanHorizon: async () => 101,
+      readEventScanLease: async () => ({
+        throughBlockNumber: 101,
+        holds: async () => true,
+      }),
     });
-    release(100);
+    release({
+      throughBlockNumber: 100,
+      holds: async () => true,
+    });
 
     await expect(reading).resolves.toBeUndefined();
-    await expect(adapter.getEventScanHorizon()).resolves.toBe(101);
+    await expect(adapter.acquireEventScanHorizonLease(['ContextGraphCreated']))
+      .resolves.toMatchObject({ throughBlockNumber: 101 });
     adapter.destroy();
   });
 
-  it('discards an event-scan horizon when the contract handle changes in flight', async () => {
+  it('retires an issued event-scan lease when its binding generation changes', async () => {
+    const { adapter } = makeAdapter(seededStore(100, []));
+    const base = adapter.chainEventLog!;
+    adapter.attachChainEventLog({
+      ...base,
+      readEventScanLease: async () => ({
+        throughBlockNumber: 100,
+        holds: async () => true,
+      }),
+    });
+    const lease = await adapter.acquireEventScanHorizonLease([
+      'KnowledgeAssetRegisteredToContextGraph',
+    ]);
+    expect(lease).toBeDefined();
+
+    adapter.attachChainEventLog({ ...base });
+    await expect(lease!.holds()).resolves.toBe(false);
+    adapter.destroy();
+  });
+
+  it('discards an event-scan lease when the contract handle changes in flight', async () => {
     const { adapter } = makeAdapter(seededStore(100, []));
     const base = adapter.chainEventLog!;
     const originalHandle = adapter.contracts.contextGraphStorage;
-    let release = (_horizon: number): void => {};
+    let release = (_lease: { throughBlockNumber: number; holds(): Promise<boolean> }): void => {};
     let markStarted = (): void => {};
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
     adapter.attachChainEventLog({
       ...base,
-      readEventScanHorizon: () => new Promise<number>((resolve) => {
+      readEventScanLease: () => new Promise<{
+        throughBlockNumber: number;
+        holds(): Promise<boolean>;
+      }>((resolve) => {
         release = resolve;
         markStarted();
       }),
     });
 
-    const reading = adapter.getEventScanHorizon();
+    const reading = adapter.acquireEventScanHorizonLease(['ContextGraphCreated']);
     await started;
     adapter.contracts.contextGraphStorage = { ...originalHandle };
-    release(100);
+    release({ throughBlockNumber: 100, holds: async () => true });
 
     await expect(reading).resolves.toBeUndefined();
     adapter.destroy();
