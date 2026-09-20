@@ -10,7 +10,10 @@ import type { ContextGraphAuthorityIndexId } from
 import { normalizeContextGraphAuthorityHash as normalizeHash } from
   './context-graph-authority-generation.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
-import { isContextGraphAuthorityIndexRetryableError } from
+import {
+  ContextGraphAuthorityIndexRetryableError,
+  isContextGraphAuthorityIndexRetryableError,
+} from
   './context-graph-authority-index-errors.js';
 import { waitForSignal } from './wait-for-signal.js';
 
@@ -349,6 +352,11 @@ export class ContextGraphAuthorityIndexProjectionCache {
         ...await input.refresh(),
         fetchedAtMs,
       });
+      if (projection.scope !== input.scope) {
+        throw new ContextGraphAuthorityIndexRetryableError(
+          `Context Graph authority contract changed during refresh: ${input.scope} -> ${projection.scope}`,
+        );
+      }
       if (generation === state.generation) {
         this.#publish(state, projection);
       }
@@ -395,9 +403,9 @@ export class ContextGraphAuthorityIndexProjectionCache {
     state: ContextGraphAuthorityProjectionScopeState,
     projection: ContextGraphAuthorityIndexProjection,
   ): void {
-    // Derive the publication key from what was actually scanned. A refresh
-    // that resolved another contract than the initiating read answers its
-    // caller only; it cannot publish through that read's state cell.
+    // Derive the publication key from what was actually scanned. The refresh
+    // boundary has already rejected a contract rotation, and this remains the
+    // publication-side invariant protecting the state cell.
     if (this.#scopes.get(projection.scope) !== state) return;
     // No chain time, no cache: the S2 guard could never be evaluated.
     if (!Number.isSafeInteger(projection.head.timestampSeconds)
@@ -407,10 +415,12 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // the cache forever on a legitimate reorg/reset: every stabilized lower
     // scan would be answered to its caller but refused publication.
     const previous = state.projection;
+    const now = this.#now();
     if (
       previous !== undefined
       && projection.head.number < previous.head.number
-      && projection.fetchedAtMs - previous.fetchedAtMs < this.tickMs
+      && now - previous.fetchedAtMs < this.tickMs
+      && this.#isWithinServiceWindow(previous, now)
     ) {
       delete state.failedAtMs;
       return;
@@ -434,11 +444,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     if (projection === undefined) return PROJECTION_CACHE_MISS;
     const now = this.#now();
     const ageMs = now - projection.fetchedAtMs;
-    // A wall clock that stepped backwards proves no age at all.
-    if (ageMs < 0 || ageMs > this.staleMs) return PROJECTION_CACHE_MISS;
-    if (now - projection.head.timestampSeconds * 1_000 > this.#headTimestampToleranceMs) {
-      return PROJECTION_CACHE_MISS;
-    }
+    if (!this.#isWithinServiceWindow(projection, now)) return PROJECTION_CACHE_MISS;
     const fresh = ageMs < this.tickMs;
     if (!fresh && reason === 'backing-off') {
       const failedAtMs = state?.failedAtMs;
@@ -455,6 +461,21 @@ export class ContextGraphAuthorityIndexProjectionCache {
       ageMs,
     }));
     return { hit: true, value: projected.value };
+  }
+
+  /** Time-only cache admission shared by serving and lower-head publication. */
+  #isWithinServiceWindow(
+    projection: ContextGraphAuthorityIndexProjection,
+    now: number,
+  ): boolean {
+    const ageMs = now - projection.fetchedAtMs;
+    // A wall clock that stepped backwards proves no age at all.
+    return ageMs >= 0
+      && ageMs <= this.staleMs
+      && Number.isSafeInteger(projection.head.timestampSeconds)
+      && projection.head.timestampSeconds >= 0
+      && now - projection.head.timestampSeconds * 1_000
+        <= this.#headTimestampToleranceMs;
   }
 
   #scopeState(scope: string): ContextGraphAuthorityProjectionScopeState {

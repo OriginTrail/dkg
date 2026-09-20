@@ -344,6 +344,9 @@ describe('finalized Context Graph authority projection cache', () => {
   it('lets a caller refresh for itself after two settled unusable refreshes', async () => {
     const h = makeHarness();
     const completed = await h.refresh();
+    const withoutTarget = makeHarness({ scope: h.scope });
+    withoutTarget.chain.events = [];
+    const unusableProjection = await withoutTarget.refresh();
     let attempts = 0;
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;
@@ -356,19 +359,18 @@ describe('finalized Context Graph authority projection cache', () => {
     const unusable = (
       started: () => void,
       gate: Promise<void>,
-      suffix: string,
     ) => async () => {
       attempts += 1;
       started();
       await gate;
-      return Object.freeze({ ...completed, scope: `${h.scope}:${suffix}` });
+      return unusableProjection;
     };
 
-    const first = h.read(9n, undefined, unusable(markFirstStarted, firstGate, 'first'));
+    const first = h.read(9n, undefined, unusable(markFirstStarted, firstGate));
     await firstStarted;
     // Registration order is intentional: this caller takes over first, while
     // the final caller observes and waits behind both unusable refreshes.
-    const second = h.read(9n, undefined, unusable(markSecondStarted, secondGate, 'second'));
+    const second = h.read(9n, undefined, unusable(markSecondStarted, secondGate));
     const bounded = h.read(9n, undefined, async () => {
       attempts += 1;
       return completed;
@@ -585,6 +587,32 @@ describe('finalized Context Graph authority projection cache', () => {
         ...newer,
         finalized: { number: 24, hash: `0x${'24'.padStart(64, '0')}` },
         head: { ...newer.head, number: 24, hash: `0x${'24'.padStart(64, '0')}` },
+      });
+    });
+    expect(lower.head.number).toBe(24);
+
+    h.clock.nowMs += 1;
+    expect(await h.read()).toBe(lower);
+    expect(h.reads.refreshes).toBe(2);
+    expect(h.served.at(-1)?.source).toBe('cache');
+  });
+
+  it('publishes a lower head once the retained projection is outside the timestamp tolerance', async () => {
+    const tickMs = CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS * 2;
+    const h = makeHarness({ tickMs });
+    const newer = await h.read();
+    h.clock.nowMs += CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS + 1;
+    const lower = await h.read(9n, undefined, async () => {
+      h.reads.refreshes += 1;
+      return Object.freeze({
+        ...newer,
+        finalized: { number: 24, hash: `0x${'24'.padStart(64, '0')}` },
+        head: {
+          ...newer.head,
+          number: 24,
+          hash: `0x${'24'.padStart(64, '0')}`,
+          timestampSeconds: Math.floor(h.clock.nowMs / 1_000) - 2,
+        },
       });
     });
     expect(lower.head.number).toBe(24);
@@ -814,10 +842,12 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(rotatedRefreshes).toBe(1);
   });
 
-  it('does not retain a projection scanned for another scope than the one that was read', async () => {
+  it('rejects a projection scanned for another scope than the one that was read', async () => {
     const h = makeHarness();
     const foreign = async () => ({ ...(await h.refresh()), scope: 'evm:31337:0xhub:0xrotated' });
-    await h.read(9n, undefined, foreign);
+    await expect(h.read(9n, undefined, foreign)).rejects.toThrow(
+      'Context Graph authority contract changed during refresh',
+    );
     await h.read();
     expect(h.reads.refreshes).toBe(2);
   });
