@@ -4693,8 +4693,32 @@ export class EVMChainAdapterBase {
       const hub = await this.chainIndexContract(hubContract, 'Hub');
       if (hub === undefined) throw new Error('Hub address is unresolvable');
       const runtime = createEvmChainIndexRuntime({
-        // The SAME scope the authority index already keys its checkpoint by,
-        // so one node cannot end up with two chain identities.
+        // Keyed on the HUB, and deliberately NOT the authority index's scope.
+        //
+        // This one string keys the whole runtime's durable state
+        // (`store.load(options.scope)`), and that state spans every contract the
+        // tick walks — Hub, ContextGraphStorage and KnowledgeAssetStorage in one
+        // cursor. A key naming ONE of them would move for reasons the other two
+        // know nothing about: a ContextGraphStorage rotation would orphan the
+        // Hub and KA progress nothing had invalidated, and the tick would re-walk
+        // history it already held.
+        //
+        // The authority index keys per-CONTRACT on purpose — a rotated
+        // ContextGraphStorage must be a cache MISS for it
+        // (`evm-context-graph-authority-index-reader.ts`,
+        // `contextGraphAuthorityIndexScope`). That is right for a projection of
+        // one contract's events and wrong for a Hub-wide log, so the two scopes
+        // are different strings over different keyspaces by design.
+        //
+        // The Hub is the address that can carry it: it is the root of the
+        // binding registry rather than an entry in it, so no name binds it and
+        // it has no binding to be rotated off (see `chainIndexContract` below).
+        // One chain identity still holds, which is what matters: both scopes are
+        // rooted at the same `deploymentId`, which already pins chainId + Hub
+        // (`buildEvmDeploymentId`) — two keyspaces under one identity, not two
+        // identities. That makes the `hub.address` suffix redundant for
+        // identity; it stays because this is a DURABLE key, and shortening it
+        // would strand every existing node's cursor and re-walk history.
         scope: [this.deploymentId, hub.address].join(':'),
         store,
         intervalMs: resolveContextGraphAuthorityIndexTickMs(this.indexTickMs),

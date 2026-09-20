@@ -202,8 +202,12 @@ export function resolveChainIndexAuthorityAnchor(
   // when it is shallow. A participant revoked thirty blocks ago would still be in
   // the served roster. Neither age guard says anything about it: both are about
   // `cursor.head`, coverage is satisfied BY DEFINITION at a lower anchor, and the
-  // reader's `accepts` predicate is presence-only, so an existing graph's stale
-  // state is accepted rather than discarded. Equality is the only bound that
+  // reader admits a fold by running the CALLER'S OWN projection over it and
+  // taking it iff that projection completes — a rule about whether the caller's
+  // target is THERE, never about how old its state is. A projection over a
+  // present-but-stale graph completes exactly as one over a fresh graph does, so
+  // an existing graph's stale state is accepted rather than discarded; only an
+  // ABSENT target falls through to the live scan. Equality is the only bound that
   // holds at EVERY `finalityConfirmations`, and missing it costs exactly the
   // live scan that was here before the log existed.
   //
