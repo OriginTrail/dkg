@@ -20,6 +20,7 @@ void legacyNormalizedWindow;
 
 const snapshotV1: RpcUsageCumulativeSnapshot = {
   schemaVersion: 1,
+  consumerVocabularyVersion: RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
   processEpoch: 'process-epoch',
   capturedAtUtc: '2026-09-20T12:00:00.000Z',
   capturedAtMonotonicMs: 1,

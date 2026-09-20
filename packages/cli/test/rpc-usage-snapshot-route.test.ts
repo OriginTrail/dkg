@@ -45,6 +45,7 @@ function response(): {
 function snapshot(): RpcUsageCumulativeSnapshot {
   return {
     schemaVersion: 1,
+    consumerVocabularyVersion: 1,
     processEpoch: 'epoch-1',
     capturedAtUtc: '2026-09-20T12:00:00.000Z',
     capturedAtMonotonicMs: 123,
@@ -95,6 +96,7 @@ describe('RPC usage snapshot diagnostic route', () => {
       'Cache-Control': 'no-store',
     });
     expect(JSON.parse(out.body() ?? '')).toEqual(snapshot());
+    expect(JSON.parse(out.body() ?? '').consumerVocabularyVersion).toBe(1);
   });
 
   it('serializes unknown credentials, IDs, graph names, and query labels only as other', () => {
@@ -131,6 +133,7 @@ describe('RPC usage snapshot diagnostic route', () => {
       expect(out.body()).not.toContain(fragment);
     }
     const body = JSON.parse(out.body() ?? '') as RpcUsageCumulativeSnapshot;
+    expect(body.consumerVocabularyVersion).toBe(1);
     expect(body.cumulative.consumers.eth_call).toEqual({ other: unknownConsumers.length });
   });
 

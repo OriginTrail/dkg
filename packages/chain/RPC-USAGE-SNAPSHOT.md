@@ -8,6 +8,7 @@ reconciliation, provider selection, or counter drain.
 ```json
 {
   "schemaVersion": 1,
+  "consumerVocabularyVersion": 1,
   "processEpoch": "opaque-process-uuid",
   "capturedAtUtc": "2026-09-20T12:00:00.000Z",
   "capturedAtMonotonicMs": 123.5,
@@ -73,6 +74,9 @@ reconciliation, provider selection, or counter drain.
   unknown value collapses to `other`. Adding a legitimate label therefore
   requires an explicit code and contract-test change. Raw unknown values are
   never retained.
+- `consumerVocabularyVersion` identifies that exact closed vocabulary. A
+  collector must reject unsupported values rather than interpreting labels
+  against a different census.
 - `processEpoch` changes on process restart and invalidates a start/end interval.
   `populationEpoch` starts at zero and increases once per tracker construction;
   it equals the sum of `totalRegisteredTrackers` across the four source entries.

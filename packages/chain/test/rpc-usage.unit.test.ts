@@ -340,6 +340,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
     expect(beforeDrain).toEqual({
       schemaVersion: 1,
+      consumerVocabularyVersion: 1,
       processEpoch: 'epoch-fixed',
       capturedAtUtc: '2026-09-20T12:00:00.000Z',
       capturedAtMonotonicMs: 123,

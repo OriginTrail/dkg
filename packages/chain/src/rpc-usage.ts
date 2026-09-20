@@ -623,6 +623,7 @@ export interface RpcUsageSnapshotSourcePopulation {
 
 export interface RpcUsageCumulativeSnapshot {
   readonly schemaVersion: 1;
+  readonly consumerVocabularyVersion: typeof RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION;
   readonly processEpoch: string;
   readonly capturedAtUtc: string;
   readonly capturedAtMonotonicMs: number;
@@ -714,6 +715,7 @@ export class RpcUsageCumulativeAccumulator {
     );
     return Object.freeze({
       schemaVersion: 1 as const,
+      consumerVocabularyVersion: RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
       processEpoch: this.processEpoch,
       capturedAtUtc: (clock.utcNow?.() ?? new Date()).toISOString(),
       capturedAtMonotonicMs: clock.monotonicNowMs?.() ?? performance.now(),
