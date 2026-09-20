@@ -102,6 +102,16 @@ type ContextGraphRegistryScanPlan =
 
 const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
+type ContextGraphAuthorityMutation = 'addParticipantAgent' | 'removeParticipantAgent';
+
+function sendContextGraphAuthorityTransaction<T>(
+  write: () => Promise<T>,
+  dropProjections: () => void,
+): Promise<T> {
+  // Also on failure: a submission whose receipt was lost may still have landed.
+  return write().finally(dropProjections);
+}
+
 function normalizePageBudget(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) >= 1
     ? Math.floor(value ?? 0)
@@ -870,14 +880,16 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContractTransaction(
-      contextGraphs,
-      'addParticipantAgent',
-      [contextGraphId, ethers.getAddress(agent)],
-      this.signer,
-      'add context graph participant agent',
-    // Also on failure: a submission whose receipt was lost may still have landed.
-    ).finally(() => this.contextGraphAuthorityIndex?.dropProjections());
+    const receipt = await sendContextGraphAuthorityTransaction(
+      () => this.sendContractTransaction(
+        contextGraphs,
+        'addParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        [contextGraphId, ethers.getAddress(agent)],
+        this.signer,
+        'add context graph participant agent',
+      ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
+    );
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -892,14 +904,16 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContractTransaction(
-      contextGraphs,
-      'removeParticipantAgent',
-      [contextGraphId, ethers.getAddress(agent)],
-      this.signer,
-      'remove context graph participant agent',
-    // Also on failure: a submission whose receipt was lost may still have landed.
-    ).finally(() => this.contextGraphAuthorityIndex?.dropProjections());
+    const receipt = await sendContextGraphAuthorityTransaction(
+      () => this.sendContractTransaction(
+        contextGraphs,
+        'removeParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        [contextGraphId, ethers.getAddress(agent)],
+        this.signer,
+        'remove context graph participant agent',
+      ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
+    );
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
