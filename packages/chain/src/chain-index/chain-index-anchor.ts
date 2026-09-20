@@ -2,6 +2,7 @@
 
 import { confirmedStateBlockAtHead } from '../evm-adapter-constants.js';
 import {
+  chainEventLogHeadAgeIsServable,
   chainEventLogCoverageIncludes,
   findChainEventLogCoverage,
   normalizeChainEventLogAddress,
@@ -184,8 +185,7 @@ export function resolveChainIndexAuthorityAnchor(
   const head = cursor.head;
   // FETCH time: is the tick still running? A negative age is a wall clock that
   // stepped backwards, which proves no age at all — refuse it the same way.
-  const headAgeMs = input.nowMs - head.fetchedAtMs;
-  if (!(headAgeMs >= 0) || headAgeMs > input.maxHeadAgeMs) {
+  if (!chainEventLogHeadAgeIsServable(head.fetchedAtMs, input.nowMs, input.maxHeadAgeMs)) {
     return Object.freeze({ refusal: 'stale-head' as const });
   }
   // CHAIN time: is the head the tick committed an answer about NOW? Only the

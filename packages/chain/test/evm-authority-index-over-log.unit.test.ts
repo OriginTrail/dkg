@@ -447,10 +447,10 @@ describe('Context Graph authority index over the one log', () => {
       // The caller's own error, not a transport verdict wrapped around it.
       expect((caught as { code?: string }).code).toBeUndefined();
     }
-    // Never classified as failover, so never retried across the endpoint set:
-    // one attempt per pass, and the second pass proves no backoff was armed —
-    // an armed one would have served the retained projection instead.
-    expect(attempts).toHaveLength(2);
+    // The explicit fault result crosses the provider session as data, so the
+    // transport classifier is never invoked at all. The second pass proves no
+    // cache backoff was armed — one would serve the retained projection.
+    expect(attempts).toHaveLength(0);
     expect(evidence.map((e) => e.source)).not.toContain('stale-cache');
     expect(calls.getLogs).toBe(0);
   });

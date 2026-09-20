@@ -64,6 +64,15 @@ function startChainIndex(adapter: EVMChainAdapter): void {
   (adapter as unknown as { startChainIndexRuntime(): void }).startChainIndexRuntime();
 }
 
+function chainIndexOwner(adapter: EVMChainAdapter): Readonly<{
+  starting?: Promise<void>;
+  runtime?: unknown;
+}> {
+  return (adapter as unknown as {
+    chainIndexOwner: Readonly<{ starting?: Promise<void>; runtime?: unknown }>;
+  }).chainIndexOwner;
+}
+
 /** `ContextGraphStorage` as `initContracts` would have resolved it. */
 function stubContextGraphStorage(adapter: EVMChainAdapter, address: string): void {
   (adapter as unknown as { contracts: Record<string, unknown> })
@@ -87,12 +96,11 @@ describe('EVMChainAdapter chain index wiring', () => {
     // Await the detached start itself, not a turn of the loop: a fixed number
     // of microtasks would let this pass simply by not having run yet, which is
     // the vacuous version of exactly this assertion.
-    await (adapter as unknown as { chainIndexStart?: Promise<void> }).chainIndexStart;
+    await chainIndexOwner(adapter).starting;
 
     // This is the "never two scanners" guarantee, stated where it is enforced.
     expect(adapter.chainEventLog).toBeUndefined();
-    expect((adapter as unknown as { chainIndexRuntime: unknown }).chainIndexRuntime)
-      .toBeUndefined();
+    expect(chainIndexOwner(adapter).runtime).toBeUndefined();
     adapter.destroy();
   });
 
@@ -114,7 +122,6 @@ describe('EVMChainAdapter chain index wiring', () => {
   it('starts at most ONE runtime however often initContracts runs again', async () => {
     const store = new MemoryChainEventLogStore();
     const adapter = new EVMChainAdapter(config(store));
-    const internals = adapter as unknown as { chainIndexStart?: Promise<void> };
     stubHub(adapter);
     startChainIndex(adapter);
     // A Hub rotation re-runs `initContracts`; a second tick on the same cursor
@@ -122,11 +129,11 @@ describe('EVMChainAdapter chain index wiring', () => {
     // single-flight is asserted on the PROMISE, not on the field it assigns:
     // a later start overwrites that field asynchronously, so comparing it
     // would pass simply because the second attempt had not landed yet.
-    const started = internals.chainIndexStart;
+    const started = chainIndexOwner(adapter).starting;
     expect(started).toBeDefined();
     startChainIndex(adapter);
     startChainIndex(adapter);
-    expect(internals.chainIndexStart).toBe(started);
+    expect(chainIndexOwner(adapter).starting).toBe(started);
 
     await started;
     expect(adapter.chainEventLog).toBeDefined();
@@ -170,7 +177,6 @@ describe('EVMChainAdapter chain index wiring', () => {
     const internals = adapter as unknown as {
       contracts: Record<string, unknown>;
       resolveContractDeployBlockNumber: unknown;
-      chainIndexStart?: Promise<void>;
     };
     let release = (): void => {};
     const searching = new Promise<void>((resolve) => { release = () => { resolve(); }; });
@@ -184,7 +190,7 @@ describe('EVMChainAdapter chain index wiring', () => {
     // inside a deploy-block search.
     internals.contracts.contextGraphStorage = undefined;
     release();
-    await internals.chainIndexStart;
+    await chainIndexOwner(adapter).starting;
 
     // Read after the await, that null would have built a log with no Context
     // Graph source at all — every reader falling back forever, for the lifetime
@@ -216,7 +222,7 @@ describe('EVMChainAdapter chain index wiring', () => {
     const rejected = new EVMChainAdapter({ ...config(store), indexTickMs: 0 });
     stubHub(rejected);
     startChainIndex(rejected);
-    await (rejected as unknown as { chainIndexStart?: Promise<void> }).chainIndexStart;
+    await chainIndexOwner(rejected).starting;
 
     // An operator who mis-set T must not silently get a tick on some other
     // cadence: every staleness bound on this node is derived from that number.
@@ -226,7 +232,7 @@ describe('EVMChainAdapter chain index wiring', () => {
     const accepted = new EVMChainAdapter({ ...config(store), indexTickMs: 12_000 });
     stubHub(accepted);
     startChainIndex(accepted);
-    await (accepted as unknown as { chainIndexStart?: Promise<void> }).chainIndexStart;
+    await chainIndexOwner(accepted).starting;
     expect(accepted.chainEventLog).toBeDefined();
     accepted.destroy();
   });

@@ -10,6 +10,7 @@
 export {
   chainEventLogCoverageIncludes,
   chainEventLogCoverageIsComplete,
+  chainEventLogHeadAgeIsServable,
   chainEventLogTopicSetVersion,
   extendChainEventLogCoverage,
   findChainEventLogCoverage,
@@ -45,9 +46,7 @@ export {
   latestMerkleRootOf,
   reduceContextGraphKaRegistrations,
   reduceKnowledgeAssetEvents,
-  reduceKnowledgeAssetFold,
   type ContextGraphKaList,
-  type KnowledgeAssetFold,
   type KnowledgeAssetRootStack,
   type KnowledgeAssetRootVersion,
 } from './knowledge-asset-reducer.js';
@@ -70,7 +69,6 @@ export {
 } from './knowledge-asset-read-model.js';
 
 export {
-  currentHubBinding,
   hubBindingSuccessions,
   hubBoundAddressesForRange,
   reduceHubBindings,

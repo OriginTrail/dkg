@@ -26,6 +26,7 @@
 import type { RawContextGraphAuthorityIndexEvent } from
   '../context-graph-authority-index-reducer.js';
 import {
+  chainEventLogHeadAgeIsServable,
   chainEventLogCoverageIncludes,
   chainEventLogCoverageIsComplete,
   findChainEventLogCoverage,
@@ -139,6 +140,8 @@ interface ResolvedWindow {
   readonly fromBlockNumber: number;
   readonly throughBlockNumber: number;
   readonly complete: boolean;
+  /** Coverage reaches the chain horizon this view claims to answer at. */
+  readonly caughtUp: boolean;
 }
 
 /**
@@ -214,8 +217,11 @@ export function createKnowledgeAssetReadModel(
     // stalled log would go on answering `kaToContextGraph` and an ordinal from
     // whenever it stopped, with no way for the caller to tell.
     if (maxHeadAgeMs !== undefined) {
-      const ageMs = now() - state.cursor.head.fetchedAtMs;
-      if (!(ageMs >= 0) || ageMs > maxHeadAgeMs) return undefined;
+      if (!chainEventLogHeadAgeIsServable(
+        state.cursor.head.fetchedAtMs,
+        now(),
+        maxHeadAgeMs,
+      )) return undefined;
     }
     // A settled-hash mismatch the tick has seen but not yet confirmed or
     // withdrawn: the rows may belong to a chain this node is no longer on.
@@ -223,9 +229,10 @@ export function createKnowledgeAssetReadModel(
     const coverage = findChainEventLogCoverage(state.coverage, family, address);
     if (coverage === undefined) return undefined;
 
-    const horizon = view === 'finalized'
-      ? Math.min(coverage.coveredThroughBlock, state.cursor.settledBlockNumber)
-      : coverage.coveredThroughBlock;
+    const target = view === 'finalized'
+      ? state.cursor.settledBlockNumber
+      : state.cursor.head.number;
+    const horizon = Math.min(coverage.coveredThroughBlock, target);
     if (horizon < coverage.coveredFromBlock) return undefined;
 
     if (ownWrite !== undefined) {
@@ -247,6 +254,7 @@ export function createKnowledgeAssetReadModel(
       fromBlockNumber: Math.max(from, coverage.coveredFromBlock),
       throughBlockNumber: horizon,
       complete: chainEventLogCoverageIsComplete(coverage),
+      caughtUp: coverage.coveredThroughBlock >= target,
     });
   }
 
@@ -290,10 +298,13 @@ export function createKnowledgeAssetReadModel(
           asOfBlockNumber: window.throughBlockNumber,
         });
       }
-      // The only zero this model will ever produce. Anything less than complete
-      // contract-wide coverage and the honest answer is "I do not know", which
-      // is `undefined` and costs one `eth_call`.
-      if (!window.complete) return undefined;
+      // The only zero this model will ever produce. It needs BOTH ends: history
+      // back to the contract floor and coverage through this view's current
+      // chain horizon. After downtime the tick can commit a fresh head while a
+      // bounded catch-up page still stops far below it; absence in that gap is
+      // unknown, not zero. A positive binding above remains safe because the
+      // mapping is write-once.
+      if (!window.complete || !window.caughtUp) return undefined;
       return Object.freeze({
         kind: 'unbound' as const,
         asOfBlockNumber: window.throughBlockNumber,
@@ -322,7 +333,7 @@ export function createKnowledgeAssetReadModel(
         readOptions.ownWrite,
         undefined,
       );
-      if (creationWindow === undefined) return undefined;
+      if (creationWindow === undefined || !creationWindow.caughtUp) return undefined;
       const rows = await store.readEvents(scope, {
         fromBlockNumber: creationWindow.fromBlockNumber,
         throughBlockNumber: creationWindow.throughBlockNumber,
@@ -347,7 +358,7 @@ export function createKnowledgeAssetReadModel(
         readOptions.ownWrite,
         createdBlockNumber,
       );
-      if (window === undefined) return undefined;
+      if (window === undefined || !window.caughtUp) return undefined;
       // Never above what was actually read. The two families keep separate
       // coverage on the same address, so the KA family can claim a block this
       // one read stopped below; folding to the lower of the two under-reports
@@ -390,7 +401,9 @@ export function createKnowledgeAssetReadModel(
         readOptions.ownWrite,
         undefined,
       );
-      if (window === undefined) return undefined;
+      // Unlike a positive write-once CG binding, a root can change in the gap
+      // between coverage and the freshly observed head.
+      if (window === undefined || !window.caughtUp) return undefined;
       const rows = await store.readEvents(scope, {
         fromBlockNumber: window.fromBlockNumber,
         throughBlockNumber: window.throughBlockNumber,
@@ -422,7 +435,7 @@ export function createKnowledgeAssetReadModel(
       // An allocator floor folded from partial history is LOWER than the truth,
       // and a low floor hands out a KA number that is already taken. Complete
       // coverage or nothing.
-      if (window === undefined || !window.complete) return undefined;
+      if (window === undefined || !window.complete || !window.caughtUp) return undefined;
       const rows = await store.readEvents(scope, {
         fromBlockNumber: window.fromBlockNumber,
         throughBlockNumber: window.throughBlockNumber,

@@ -172,12 +172,14 @@ interface SeedOptions {
   readonly authorityCoverage?: Partial<ChainEventLogCoverage>;
   readonly kaCoverage?: Partial<ChainEventLogCoverage>;
   readonly settledBlockNumber?: number;
+  readonly headBlockNumber?: number;
   readonly rows?: readonly ChainEventLogRow[];
 }
 
 function seeded(options: SeedOptions = {}): MemoryChainEventLogStore {
   const store = new MemoryChainEventLogStore();
   const settledBlockNumber = options.settledBlockNumber ?? 100;
+  const headBlockNumber = options.headBlockNumber ?? settledBlockNumber + 5;
   store.seed({
     cursor: {
       revision: 1,
@@ -186,8 +188,8 @@ function seeded(options: SeedOptions = {}): MemoryChainEventLogStore {
       settledBlockNumber,
       settledBlockHash: hash(settledBlockNumber),
       head: {
-        number: settledBlockNumber + 5,
-        hash: hash(settledBlockNumber + 5),
+        number: headBlockNumber,
+        hash: hash(headBlockNumber),
         timestampSeconds: 1_700_000_000,
         fetchedAtMs: 1_700_000_000_000,
       },
@@ -315,6 +317,34 @@ describe('knowledge asset read model — kaToContextGraph', () => {
       kind: 'unbound',
       asOfBlockNumber: 100,
     });
+  });
+
+  it('refuses mutable and negative answers while a fresh tick is still catching up', async () => {
+    const store = seeded({
+      headBlockNumber: 2_105,
+      rows: [
+        creation(40, 7n),
+        registration(50, 7n, 4242n),
+        created(30, (3n << 96n) | 7n, root(0xa1), author(0x22)),
+      ],
+    });
+    const view = model(store);
+
+    // A real write-once row stays useful even while the range above it is a
+    // bounded catch-up gap.
+    await expect(view.readContextGraphForKa(4242n, { view: 'latest' })).resolves.toMatchObject({
+      kind: 'bound',
+      contextGraphId: 7n,
+    });
+    // Every answer whose truth can change in the unwalked gap falls back.
+    await expect(view.readContextGraphForKa(9999n, { view: 'latest' }))
+      .resolves.toBeUndefined();
+    await expect(view.readContextGraphKaList(7n, { view: 'latest' }))
+      .resolves.toBeUndefined();
+    await expect(view.readLatestMerkleRoot((3n << 96n) | 7n, { view: 'latest' }))
+      .resolves.toBeUndefined();
+    await expect(view.readMaxKaNumberForAuthor(author(0x22), { view: 'latest' }))
+      .resolves.toBeUndefined();
   });
 
   it('does not serve a tail-only binding to the finalized view', async () => {

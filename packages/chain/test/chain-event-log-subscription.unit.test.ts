@@ -50,6 +50,31 @@ function registrationRow(blockNumber: number, cgId: bigint, kaId: bigint): Chain
   };
 }
 
+function authorityRow(blockNumber: number, cgId: bigint): ChainEventLogRow {
+  const fragment = cgInterface.getEvent('ContextGraphCreated')!;
+  const encoded = cgInterface.encodeEventLog(fragment, [
+    cgId,
+    `0x${'11'.repeat(20)}`,
+    `0x${'22'.repeat(32)}`,
+    [`0x${'11'.repeat(20)}`],
+    `0x${'33'.repeat(32)}`,
+    1,
+    0,
+    `0x${'44'.repeat(20)}`,
+    0n,
+  ]);
+  return {
+    blockNumber,
+    blockHash: hash(blockNumber),
+    logIndex: 1,
+    transactionHash: hash(0xbb),
+    address: CG_STORAGE,
+    topics: [...encoded.topics],
+    data: encoded.data,
+    settled: true,
+  };
+}
+
 function seeded(
   coveredFromBlock: number,
   coveredThroughBlock: number,
@@ -91,7 +116,12 @@ describe('chain event log subscription', () => {
     const store = seeded(10, 90, 85);
     const range = await subscription(store).servableRange('context-graph-ka', CG_STORAGE, 50, 200);
     // The lane asked through 200; it may only advance its cursor to 90.
-    expect(range).toEqual({ fromBlockNumber: 50, throughBlockNumber: 90 });
+    expect(range).toEqual({
+      family: 'context-graph-ka',
+      address: CG_STORAGE,
+      fromBlockNumber: 50,
+      throughBlockNumber: 90,
+    });
   });
 
   it('refuses when the lane cursor sits below the log floor', async () => {
@@ -131,7 +161,12 @@ describe('chain event log subscription', () => {
     const store = seeded(10, 90, 85);
     await expect(
       subscription(store).servableRange('context-graph-ka', CG_STORAGE, 50, 90, 'finalized'),
-    ).resolves.toEqual({ fromBlockNumber: 50, throughBlockNumber: 85 });
+    ).resolves.toEqual({
+      family: 'context-graph-ka',
+      address: CG_STORAGE,
+      fromBlockNumber: 50,
+      throughBlockNumber: 85,
+    });
   });
 
   it('decodes registrations over an approved range', async () => {
@@ -141,9 +176,23 @@ describe('chain event log subscription', () => {
     ]);
     const view = subscription(store);
     const range = await view.servableRange('context-graph-ka', CG_STORAGE, 10, 90);
-    const events = await view.readKaRegistrations(CG_STORAGE, range!);
+    const events = await view.readKaRegistrations(range!);
     expect(events.map((event) => event.kaId)).toEqual([100n, 101n]);
     expect(events[0]?.contextGraphId).toBe(7n);
+  });
+
+  it('binds an approved range to its family when two families share an address', async () => {
+    const store = seeded(10, 90, 85, [
+      registrationRow(50, 7n, 100n),
+      authorityRow(60, 7n),
+    ]);
+    const view = subscription(store);
+    const range = await view.servableRange('context-graph-ka', CG_STORAGE, 10, 90);
+
+    const rows = await view.readRows(range!);
+
+    expect(rows).toHaveLength(1);
+    expect(registry().familyOf(rows[0]!)).toBe('context-graph-ka');
   });
 });
 

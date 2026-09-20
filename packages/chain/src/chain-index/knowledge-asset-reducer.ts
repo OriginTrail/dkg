@@ -59,19 +59,6 @@ export interface ContextGraphKaList {
   readonly throughBlockNumber: number;
 }
 
-export interface KnowledgeAssetFold {
-  readonly listsByContextGraph: ReadonlyMap<string, ContextGraphKaList>;
-  /** `kaToContextGraph`. Write-once on chain, so this never changes once set. */
-  readonly contextGraphByKa: ReadonlyMap<string, bigint>;
-  readonly rootsByKa: ReadonlyMap<string, KnowledgeAssetRootStack>;
-  /** `getMaxKaNumberForAuthor`: the highest low-96-bit ordinal seen per author. */
-  readonly maxKaNumberByAuthor: ReadonlyMap<string, bigint>;
-  /** Creates with no decodable author; any at all void the allocator floor. */
-  readonly authorlessCreates: number;
-  /** Highest block any folded row came from; 0 when nothing was folded. */
-  readonly throughBlockNumber: number;
-}
-
 /** OT-RFC-43 Option 1: the per-author ordinal is the low 96 bits of the id. */
 const KA_NUMBER_MASK = (1n << 96n) - 1n;
 
@@ -269,23 +256,6 @@ export function reduceKnowledgeAssetEvents(
     maxKaNumberByAuthor,
     authorlessCreates,
     throughBlockNumber,
-  });
-}
-
-/** Both folds together, as the read model consumes them. */
-export function reduceKnowledgeAssetFold(
-  registrations: readonly ContextGraphKaRegistration[],
-  knowledgeAssets: readonly KnowledgeAssetEvent[],
-): KnowledgeAssetFold {
-  const lists = reduceContextGraphKaRegistrations(registrations);
-  const roots = reduceKnowledgeAssetEvents(knowledgeAssets);
-  return Object.freeze({
-    listsByContextGraph: lists.listsByContextGraph,
-    contextGraphByKa: lists.contextGraphByKa,
-    rootsByKa: roots.rootsByKa,
-    maxKaNumberByAuthor: roots.maxKaNumberByAuthor,
-    authorlessCreates: roots.authorlessCreates,
-    throughBlockNumber: Math.max(lists.throughBlockNumber, roots.throughBlockNumber),
   });
 }
 

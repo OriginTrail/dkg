@@ -62,7 +62,7 @@ export class EventsMethods extends EVMChainAdapterBase {
       toBlock,
     );
     if (range === undefined || range.throughBlockNumber < toBlock) return undefined;
-    const rows = await binding.subscription.readRows(address, range);
+    const rows = await binding.subscription.readRows(range);
     return rows.filter((row) => row.topics[0]?.toLowerCase() === topic0);
   }
   // =====================================================================

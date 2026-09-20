@@ -339,6 +339,15 @@ describe('createEvmChainIndexRuntime', () => {
       .resolves.toBeUndefined();
   });
 
+  it('refuses a Hub window when the wall clock is behind its fetch stamp', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    h.advanceMs(-1);
+
+    await expect(h.runtime.binding.readHubRotationWindow!(undefined, 50))
+      .resolves.toBeUndefined();
+  });
+
   it('caps the authority anchor age at the ceiling the projection cache caps staleMs at', async () => {
     // The log path is documented as the cache's gates minus the tick gate, so
     // it must not answer where the cache would refuse. `max(3T, 15s)` alone

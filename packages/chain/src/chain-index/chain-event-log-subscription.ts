@@ -44,6 +44,10 @@ export interface ChainEventLogSubscriptionOptions {
 
 /** A range the log has PROVEN it holds, clamped to its coverage. */
 export interface ChainEventLogServableRange {
+  /** The exact event family whose coverage proved this range. */
+  readonly family: ChainEventLogFamily;
+  /** The normalized emitter address whose coverage proved this range. */
+  readonly address: string;
   readonly fromBlockNumber: number;
   readonly throughBlockNumber: number;
 }
@@ -65,17 +69,14 @@ export interface ChainEventLogSubscription {
   ): Promise<ChainEventLogServableRange | undefined>;
   /** Raw rows of one family over a range `servableRange` already approved. */
   readRows(
-    address: string,
     range: ChainEventLogServableRange,
     view?: KnowledgeAssetReadView,
   ): Promise<readonly ChainEventLogRow[]>;
   readKaRegistrations(
-    address: string,
     range: ChainEventLogServableRange,
     view?: KnowledgeAssetReadView,
   ): Promise<readonly ContextGraphKaRegistration[]>;
   readHubRotations(
-    address: string,
     range: ChainEventLogServableRange,
     view?: KnowledgeAssetReadView,
   ): Promise<readonly HubRotationEvent[]>;
@@ -87,18 +88,16 @@ export function createChainEventLogSubscription(
   const { scope, store, registry } = options;
 
   async function rowsFor(
-    address: string,
     range: ChainEventLogServableRange,
     view: KnowledgeAssetReadView,
   ): Promise<readonly ChainEventLogRow[]> {
-    const normalized = normalizeChainEventLogAddress(address);
-    if (normalized === undefined) return Object.freeze([]);
     const rows = await store.readEvents(scope, {
       fromBlockNumber: range.fromBlockNumber,
       throughBlockNumber: range.throughBlockNumber,
-      addresses: [normalized],
+      addresses: [range.address],
     });
-    return view === 'finalized' ? rows.filter((row) => row.settled) : rows;
+    return rows.filter((row) =>
+      registry.familyOf(row) === range.family && (view !== 'finalized' || row.settled));
   }
 
   return Object.freeze({
@@ -133,31 +132,33 @@ export function createChainEventLogSubscription(
       const through = Math.min(requestedThroughBlockNumber, horizon);
       if (through < fromBlockNumber) return undefined;
       if (!chainEventLogCoverageIncludes(coverage, fromBlockNumber, through)) return undefined;
-      return Object.freeze({ fromBlockNumber, throughBlockNumber: through });
+      return Object.freeze({
+        family,
+        address: normalized,
+        fromBlockNumber,
+        throughBlockNumber: through,
+      });
     },
 
     readRows(
-      address: string,
       range: ChainEventLogServableRange,
       view: KnowledgeAssetReadView = 'latest',
     ): Promise<readonly ChainEventLogRow[]> {
-      return rowsFor(address, range, view);
+      return rowsFor(range, view);
     },
 
     async readKaRegistrations(
-      address: string,
       range: ChainEventLogServableRange,
       view: KnowledgeAssetReadView = 'latest',
     ): Promise<readonly ContextGraphKaRegistration[]> {
-      return registry.decodeContextGraphKaRegistrations(await rowsFor(address, range, view));
+      return registry.decodeContextGraphKaRegistrations(await rowsFor(range, view));
     },
 
     async readHubRotations(
-      address: string,
       range: ChainEventLogServableRange,
       view: KnowledgeAssetReadView = 'latest',
     ): Promise<readonly HubRotationEvent[]> {
-      return registry.decodeHubRotations(await rowsFor(address, range, view));
+      return registry.decodeHubRotations(await rowsFor(range, view));
     },
   });
 }

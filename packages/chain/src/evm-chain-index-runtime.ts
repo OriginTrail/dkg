@@ -37,6 +37,7 @@ import {
   ChainIndexRunner,
   ChainIndexTick,
   chainEventLogFloorKey,
+  chainEventLogHeadAgeIsServable,
   chainIndexAuthorityAnchorHolds,
   createChainEventLogSubscription,
   createChainIndexAuthorityPageSource,
@@ -416,8 +417,11 @@ export function createEvmChainIndexRuntime(
     // off to 16×T — leaves coverage frozen, and frozen coverage is exactly what
     // the "nothing new walked" window below is made of. Undefined here is the
     // listener's cue to do what it did before the log existed.
-    const ageMs = now() - state.cursor.head.fetchedAtMs;
-    if (ageMs > chainIndexHubWindowMaxAgeMs(options.intervalMs)) return undefined;
+    if (!chainEventLogHeadAgeIsServable(
+      state.cursor.head.fetchedAtMs,
+      now(),
+      chainIndexHubWindowMaxAgeMs(options.intervalMs),
+    )) return undefined;
     const coverage = findChainEventLogCoverage(state.coverage, 'hub', hubAddress);
     if (coverage === undefined) return undefined;
     const through = coverage.coveredThroughBlock;
@@ -457,7 +461,7 @@ export function createEvmChainIndexRuntime(
     // deduplicated, so holding a rotation back to the settled cursor would
     // make every Hub rotation `reorgHoldbackBlocks` later to invalidate than
     // it is today. The listener re-scans the buffer and is idempotent.
-    const rotations = await subscription.readHubRotations(hubAddress, range);
+    const rotations = await subscription.readHubRotations(range);
     return Object.freeze({
       fromBlockNumber: range.fromBlockNumber,
       throughBlockNumber: range.throughBlockNumber,

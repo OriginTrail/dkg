@@ -357,11 +357,9 @@ export class DashboardDB {
     /**
      * The node's ONE chain log.
      *
-     * One cursor, one raw event table, one coverage record, one set of Hub
-     * bindings, and the row-per-entity Context Graph state the authority
-     * checkpoint used to carry as a whole-blob JSON rewrite on every commit.
-     * Everything that needs an indexed on-chain event reads these tables; there
-     * is deliberately no second cursor, table or scan anywhere in the node.
+     * One cursor, one raw event table, and one coverage record. Everything that
+     * needs an indexed on-chain event reads these tables; there is deliberately
+     * no second cursor, table or scan anywhere in the node.
      */
     const ensureChainEventLogSchema = () => this.db.exec(`
       CREATE TABLE IF NOT EXISTS chain_index_cursor (
@@ -414,41 +412,6 @@ export class DashboardDB {
         floor_block INTEGER NOT NULL CHECK (floor_block >= 0),
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (scope, family, address)
-      );
-      CREATE TABLE IF NOT EXISTS hub_bindings (
-        scope TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('contract', 'assetStorage')),
-        name TEXT NOT NULL,
-        address TEXT NOT NULL,
-        from_block INTEGER NOT NULL CHECK (from_block >= 0),
-        to_block INTEGER,
-        PRIMARY KEY (scope, kind, name, from_block)
-      );
-      CREATE TABLE IF NOT EXISTS cg_state (
-        scope TEXT NOT NULL,
-        context_graph_id TEXT NOT NULL,
-        owner TEXT NOT NULL,
-        active INTEGER NOT NULL CHECK (active IN (0, 1)),
-        access_policy INTEGER NOT NULL,
-        publish_policy INTEGER NOT NULL,
-        publish_authority TEXT NOT NULL,
-        publish_authority_account_id TEXT NOT NULL,
-        name_hash TEXT NOT NULL,
-        ownership_era INTEGER NOT NULL,
-        policy_version INTEGER NOT NULL,
-        roster_version INTEGER NOT NULL,
-        source_block_number INTEGER NOT NULL,
-        source_block_hash TEXT NOT NULL,
-        PRIMARY KEY (scope, context_graph_id)
-      );
-      CREATE TABLE IF NOT EXISTS cg_participants (
-        scope TEXT NOT NULL,
-        context_graph_id TEXT NOT NULL,
-        -- The checkpoint's own ordering. Preserved verbatim so the rebuilt
-        -- wire format and its integrity digest are byte-identical.
-        position INTEGER NOT NULL CHECK (position >= 0),
-        agent TEXT NOT NULL,
-        PRIMARY KEY (scope, context_graph_id, position)
       );
     `);
     const ensureLocalContextGraphOriginSchema = () => this.db.exec(`

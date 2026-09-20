@@ -92,11 +92,25 @@ export interface ChainEventLogHead {
    *    answer. It still catches every frozen tick, because a stamp becomes
    *    visible to a reader only by being committed.
    *  - DATA AGE. The authority reader hands this instant to the projection
-   *    cache as `dataFetchedAtMs`, which is what `onServed.ageMs` reports and
-   *    what the RFC-64 breaker dates its evidence by. That number must never
-   *    move towards zero.
+   *    cache in its explicit `log` origin, which is what `onServed.ageMs`
+   *    reports and what the RFC-64 breaker dates its evidence by. That number
+   *    must never move towards zero.
    */
   readonly fetchedAtMs: number;
+}
+
+/**
+ * Whether a stored head-fetch stamp proves a non-negative age inside a
+ * reader's freshness budget. All one-log read paths use this fail-closed clock
+ * rule even when their maximum ages deliberately differ.
+ */
+export function chainEventLogHeadAgeIsServable(
+  fetchedAtMs: number,
+  nowMs: number,
+  maxAgeMs: number,
+): boolean {
+  const ageMs = nowMs - fetchedAtMs;
+  return ageMs >= 0 && ageMs <= maxAgeMs;
 }
 
 /**

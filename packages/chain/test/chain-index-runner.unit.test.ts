@@ -157,7 +157,7 @@ describe('ChainIndexRunner', () => {
     await harness.runner.stop();
   });
 
-  it('stops scheduling once stopped, and runNow refuses', async () => {
+  it('stops scheduling once stopped', async () => {
     const harness = rig();
     harness.runner.start();
     await harness.fire();
@@ -167,17 +167,5 @@ describe('ChainIndexRunner', () => {
     await harness.fire();
 
     expect(harness.delays).toHaveLength(scheduled);
-    expect(await harness.runner.runNow()).toBeUndefined();
-  });
-
-  it('runNow answers from a pass of its own, as a read-your-writes barrier', async () => {
-    const harness = rig();
-    harness.runner.start();
-
-    const result = await harness.runner.runNow();
-
-    expect(result?.outcome).toBe('advanced');
-    expect(harness.calls).toContain('tick');
-    await harness.runner.stop();
   });
 });

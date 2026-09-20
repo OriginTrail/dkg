@@ -85,8 +85,8 @@ import type { ChainEventLogBinding } from './chain-event-log-binding.js';
 import {
   createEvmChainIndexRuntime,
   type EvmChainIndexContract,
-  type EvmChainIndexRuntime,
 } from './evm-chain-index-runtime.js';
+import { EvmChainIndexRuntimeOwner } from './evm-chain-index-runtime-owner.js';
 // The tick cadence resolver lives with the projection cache because `T` is ONE
 // number on this node: the cache's answer lifetime and the log tick's interval.
 import { resolveContextGraphAuthorityIndexTickMs } from
@@ -940,7 +940,11 @@ export class EVMChainAdapterBase {
    * unset, every event reader keeps its own `queryFilter`, which is the
    * pre-log behaviour and never a degraded one.
    */
-  protected chainEventLogBinding: ChainEventLogBinding | undefined;
+  private readonly chainIndexOwner: EvmChainIndexRuntimeOwner;
+
+  protected get chainEventLogBinding(): ChainEventLogBinding | undefined {
+    return this.chainIndexOwner.binding;
+  }
 
   /**
    * Bind (or clear) the one log for this adapter's event readers.
@@ -949,38 +953,12 @@ export class EVMChainAdapterBase {
    * back the moment coverage cannot carry the range they were asked for.
    */
   attachChainEventLog(binding: ChainEventLogBinding | undefined): void {
-    this.chainEventLogBinding = binding;
+    this.chainIndexOwner.attach(binding);
   }
-
-  /**
-   * The tick this adapter OWNS, when the composition root gave it a store.
-   *
-   * Exactly one adapter per process has one. It is constructed after the Hub
-   * bindings resolve — the tick's address array IS those bindings — and
-   * started without being awaited, because a cold node's first pass reads a
-   * head and one log range and startup must not wait on either.
-   */
-  protected chainIndexRuntime: EvmChainIndexRuntime | undefined;
-
-  /** Durable backing for the tick, or `undefined` for an adapter that owns none. */
-  protected readonly chainEventLogStore: EVMAdapterConfig['chainEventLogStore'];
-
-  /** Single-flight: `initContracts` can run again after a Hub rotation. */
-  private chainIndexStart: Promise<void> | undefined;
-
-  /**
-   * Which build of the log is the current one.
-   *
-   * A rotation of an indexed contract retires the whole runtime — its decoder
-   * registry, its family floors and the addresses its binding publishes are all
-   * pinned at construction — so the rebuild bumps this, and a build that
-   * finishes after it is dropped instead of attached.
-   */
-  private chainIndexGeneration = 0;
 
   /** The binding the process hands DOWN to every adapter that has no store. */
   get chainEventLog(): ChainEventLogBinding | undefined {
-    return this.chainEventLogBinding;
+    return this.chainIndexOwner.binding;
   }
 
   /**
@@ -1458,6 +1436,14 @@ export class EVMChainAdapterBase {
         stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
       },
     );
+    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
+      config.chainEventLogStore,
+      (error) => {
+        console.warn(
+          `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
     this.hubRotationPoller = new HubRotationPoller({
       readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
       intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
@@ -1478,7 +1464,6 @@ export class EVMChainAdapterBase {
           );
       },
     });
-    this.chainEventLogStore = config.chainEventLogStore;
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
     // nodes that GC filters faster than ethers' polling cadence
@@ -4676,10 +4661,8 @@ export class EVMChainAdapterBase {
    * `initContracts` builds the log around the addresses the Hub now points at.
    * Two builds racing are resolved by the generation counter, never by both
    * attaching.
-   */
+  */
   protected startChainIndexRuntime(): void {
-    const store = this.chainEventLogStore;
-    if (store === undefined || this.chainIndexStart !== undefined) return;
     // Snapshot SYNCHRONOUSLY, before the first `await`, exactly as the Hub
     // handle already was. `initContracts` re-assigns these fields and the
     // rotation invalidator nulls them, while this task is detached: read after
@@ -4688,11 +4671,10 @@ export class EVMChainAdapterBase {
     const hubContract = this.contracts.hub;
     const contextGraphStorageContract = this.contracts.contextGraphStorage;
     const knowledgeAssetStorageContract = this.contracts.knowledgeAssetStorage;
-    const generation = ++this.chainIndexGeneration;
-    this.chainIndexStart = (async () => {
+    this.chainIndexOwner.start(async (store) => {
       const hub = await this.chainIndexContract(hubContract, 'Hub');
       if (hub === undefined) throw new Error('Hub address is unresolvable');
-      const runtime = createEvmChainIndexRuntime({
+      return createEvmChainIndexRuntime({
         // Keyed on the HUB, and deliberately NOT the authority index's scope.
         //
         // This one string keys the whole runtime's durable state
@@ -4756,26 +4738,6 @@ export class EVMChainAdapterBase {
           );
         },
       });
-      // A rotation observed while this was building already asked for a
-      // runtime around the NEW addresses. Attaching this one would pin the
-      // retired ones for the lifetime of the process, which is the whole
-      // defect the rebuild exists to close; drop it instead.
-      if (generation !== this.chainIndexGeneration) {
-        await runtime.stop();
-        return;
-      }
-      this.chainIndexRuntime = runtime;
-      // Bind BEFORE starting: the binding is what every reader consults, and
-      // a reader that arrives between start and attach would fall back for no
-      // reason. Binding early is safe because coverage is still empty and
-      // every gate refuses until the first pass commits.
-      this.attachChainEventLog(runtime.binding);
-      runtime.start();
-    })().catch((err: unknown) => {
-      if (generation === this.chainIndexGeneration) this.chainIndexStart = undefined;
-      console.warn(
-        `[chain] one-log chain index disabled: ${err instanceof Error ? err.message : String(err)}`,
-      );
     });
   }
 
@@ -4852,19 +4814,8 @@ export class EVMChainAdapterBase {
    * re-walked.
    */
   protected rebuildChainIndexRuntimeOnRotation(policy: HubBindingInvalidationPolicy): void {
-    if (this.chainEventLogStore === undefined) return;
     if (!('contractKey' in policy) || !CHAIN_INDEX_CONTRACT_KEYS.has(policy.contractKey)) return;
-    this.chainIndexGeneration += 1;
-    const runtime = this.chainIndexRuntime;
-    this.chainIndexRuntime = undefined;
-    this.chainIndexStart = undefined;
-    this.attachChainEventLog(undefined);
-    // Not awaited, for the same reason the start is not: this runs inside the
-    // rotation callback and `stop()` awaits an in-flight pass. A pass already
-    // in flight is harmless either way — it records the blocks it actually
-    // looked at, and the rebind block is the ceiling of what the retired
-    // address may ever claim (`hubBindingSuccessions`).
-    void runtime?.stop().catch(() => undefined);
+    this.chainIndexOwner.rebuild();
   }
 
   protected invalidateHubBindingOnRotation(policy: HubBindingInvalidationPolicy): void {
@@ -4952,17 +4903,9 @@ export class EVMChainAdapterBase {
    */
   destroy(): void {
     this.hubRotationPoller.stop();
-    // The runner's own `stop()` aborts the in-flight pass and awaits it; there
-    // is nothing here for a synchronous `destroy()` to wait on, and a tick
-    // that loses its providers below simply fails its pass and is not
-    // rescheduled. The timer is `unref`'d, so it cannot hold the process open.
-    //
-    // The generation bump disowns a build still IN FLIGHT as well, which would
-    // otherwise attach its binding to a destroyed adapter and start its timer.
-    this.chainIndexGeneration += 1;
-    void this.chainIndexRuntime?.stop().catch(() => undefined);
-    this.chainIndexRuntime = undefined;
-    this.attachChainEventLog(undefined);
+    // The owner disowns an in-flight build, clears the binding synchronously,
+    // and stops any current runtime without making synchronous destroy wait.
+    this.chainIndexOwner.stop();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
     for (const provider of this.providers) {

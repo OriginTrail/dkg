@@ -11,11 +11,10 @@ import type { HubRotationEvent } from './chain-event-decoders.js';
  * — today the only thing that catches a rotation the node slept through is a
  * 30s address memo TTL, which is not a record of anything.
  *
- * NOT DURABLE YET, despite the `hub_bindings` table existing. `ChainEventLogStore`
- * has no binding method and nothing writes that table, so bindings live only in
- * the tick's process memory: after a restart the tick resumes above its settled
- * cursor and never re-sees the `NewContract` that established one. What a fresh
- * process DOES start from is {@link ChainIndexTickOptions.initialBindings} —
+ * NOT DURABLE YET. `ChainEventLogStore` has no binding method, so bindings live
+ * only in the tick's process memory: after a restart the tick resumes above its
+ * settled cursor and never re-sees the `NewContract` that established one. What
+ * a fresh process DOES start from is {@link ChainIndexTickOptions.initialBindings} —
  * the (name → address) pairs the adapter resolved out of the Hub — so the
  * CURRENT binding of every indexed name is always known and a rotation of one
  * is always a move rather than a first sighting. It degrades
@@ -178,17 +177,6 @@ export function hubBindingSuccessions(
     }));
   }
   return Object.freeze([...successions.values()]);
-}
-
-/** The address a name points at now, or `undefined` if nothing is bound. */
-export function currentHubBinding(
-  bindings: readonly HubBinding[],
-  kind: HubBinding['kind'],
-  name: string,
-): HubBinding | undefined {
-  return bindings.find((binding) => (
-    binding.toBlock === undefined && binding.kind === kind && binding.name === name
-  ));
 }
 
 /**

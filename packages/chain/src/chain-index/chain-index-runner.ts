@@ -85,18 +85,6 @@ export class ChainIndexRunner {
     await this.#inFlight?.catch(() => undefined);
   }
 
-  /**
-   * Run one pass now and wait for it. Callers use this as a read-your-writes
-   * barrier: after a receipt, the next answer must come from a tick that has
-   * seen at least that block.
-   */
-  async runNow(): Promise<ChainIndexTickResult | undefined> {
-    const abort = this.#abort;
-    if (abort === undefined) return undefined;
-    await this.#inFlight?.catch(() => undefined);
-    return this.tick.runOnce(abort.signal);
-  }
-
   #schedule(delayMs: number): void {
     if (this.#abort === undefined) return;
     this.#timer = this.#setTimer(() => {

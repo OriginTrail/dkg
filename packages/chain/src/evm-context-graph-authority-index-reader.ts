@@ -15,9 +15,11 @@ import {
 import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
 import {
+  contextGraphAuthorityIndexProjectionFault,
   contextGraphAuthorityIndexScope,
   type ContextGraphAuthorityIndexCompletedProjection,
   type ContextGraphAuthorityIndexProjection,
+  type ContextGraphAuthorityIndexProjectionFault,
 } from './context-graph-authority-index-projection.js';
 import type {
   ContextGraphAuthorityIndexSnapshots,
@@ -94,69 +96,30 @@ export function contextGraphAuthorityAnchorUnavailableV1(
   );
 }
 
-/**
- * A caller's projection threw while ADMITTING the log fold — carried out of two
- * layers that would otherwise mistake it for a transport failure.
- *
- * The predicate that decides whether a log-anchored fold may answer is the
- * caller's own projection, and it can legitimately throw: a name hash ambiguous
- * across finalized Context Graphs is a deterministic, fail-CLOSED refusal about
- * chain state. It has to be evaluated where the fall-through to the live scan
- * is decided, which is inside the provider session AND inside the projection
- * cache's `refresh()`. Naked, it is read there by two classifiers that are not
- * about it at all:
- *
- *  1. `readTipProvider`'s `isRetryable` → `isRpcEndpointFailoverEligible` →
- *     `classifyRpcRetryDisposition`, whose message regex alternates a bare
- *     `429|503|502|500` with no word boundaries. The ambiguity message
- *     interpolates a 32-byte hash, ~5.9% of which contain one of those digit
- *     runs — so one deterministic fault in seventeen would be retried across
- *     every endpoint and then surface as `RPC_ENDPOINTS_EXHAUSTED`.
- *  2. The cache's `#refresh` catch, which reads that transport code as an
- *     availability outage: it arms a scope-wide one-tick backoff and asks
- *     `#serve(_, 'refresh-failed')` for the retained projection — which SKIPS
- *     the tick gate, and which (ambiguity grows with the state set) may well
- *     not be ambiguous. A fail-closed refusal would come back as a served
- *     `stale-cache` authority answer.
- *
- * The wrapper's own message is FIXED text carrying no payload, and it stamps no
- * `code`/`status`, so both classifiers see it for what it is — a deterministic
- * fault — and neither engages. `readFinalizedProjection` unwraps it at the
- * outermost boundary, so the caller receives the original error, from a read
- * that made no chain request at all.
- *
- * Not solved by moving the predicate out of `refresh()`: the fall-through to
- * the live scan is decided inside the provider session, so hazard 1 would
- * survive that move, and deciding outside would cost a second session with its
- * own anchor resolution.
- */
-class ContextGraphAuthorityLogFoldProjectionFaultV1 extends Error {
-  constructor(readonly fault: unknown) {
-    super('Context Graph authority log fold projection failed');
-    this.name = 'ContextGraphAuthorityLogFoldProjectionFaultV1';
-  }
-}
+type ContextGraphAuthorityLogFoldAdmission =
+  | Readonly<{ kind: 'served' }>
+  | Readonly<{ kind: 'fallback' }>
+  | Readonly<{ kind: 'fault'; fault: unknown }>;
 
-/** Run the admission predicate, keeping any fault it raises deterministic. */
-function logFoldServes<T>(predicate: (value: T) => boolean, value: T): boolean {
+/** Decide a log fold explicitly, without throwing through transport layers. */
+function admitContextGraphAuthorityLogFold<T>(
+  predicate: ((value: T) => boolean) | undefined,
+  value: T,
+): ContextGraphAuthorityLogFoldAdmission {
+  if (predicate === undefined) return Object.freeze({ kind: 'served' as const });
   try {
-    return predicate(value);
+    return Object.freeze({ kind: predicate(value) ? 'served' as const : 'fallback' as const });
   } catch (fault) {
-    throw new ContextGraphAuthorityLogFoldProjectionFaultV1(fault);
+    return Object.freeze({ kind: 'fault' as const, fault });
   }
 }
 
-/**
- * Strip the carrier at the outermost boundary, so the caller sees what its own
- * projection threw and nothing this file wrapped around it.
- */
-async function unwrapLogFoldProjectionFaultV1<T>(read: () => Promise<T>): Promise<T> {
-  try {
-    return await read();
-  } catch (error) {
-    if (error instanceof ContextGraphAuthorityLogFoldProjectionFaultV1) throw error.fault;
-    throw error;
-  }
+function isContextGraphAuthorityProjectionFault(
+  value: unknown,
+): value is ContextGraphAuthorityIndexProjectionFault {
+  return typeof value === 'object'
+    && value !== null
+    && (value as { kind?: unknown }).kind === 'context-graph-authority-projection-fault';
 }
 
 /**
@@ -524,12 +487,10 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         finalized: Readonly<{ number: number; hash: string }>;
         head: ContextGraphAuthorityIndexCompletedProjection['head'];
         /**
-         * When the tick ASKED for the head above, on the log path only — the
-         * instant it stamped before its own head RPC, not the commit that
-         * stored it. The live path omits it: it is fetching right now, so the
-         * cache's own pre-refresh stamp is already the conservative answer.
+         * Explicit data provenance. The log path carries the instant the tick
+         * stamped before its own head RPC; the live path identifies its scan.
          */
-        dataFetchedAtMs?: number;
+        origin: ContextGraphAuthorityIndexCompletedProjection['origin'];
       }>,
     ) => Promise<T>,
     /**
@@ -576,12 +537,12 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
      * as old as the moment the tick's last committed pass ASKED for its head,
      * bounded by `min(max(3T, 15s), 5m)` and by the chain-time tolerance, NOT
      * by T. The fold is reported and retained under that true instant
-     * (`context.dataFetchedAtMs` above), so the cache ages it from when its
+     * (`context.origin` above), so the cache ages it from when its
      * data was fetched, `onServed` reports that age, and it can never be
      * re-served as a FRESH cache entry for a further T.
      *
-     * That field is also the cache's PROVENANCE signal: supplying it is this
-     * path declaring "I folded stored rows, I fetched nothing", which is why
+     * That discriminant is also the cache's PROVENANCE signal: `kind: 'log'`
+     * declares "I folded stored rows, I fetched nothing", which is why
      * `onServed` reports `log` for this answer and never `scan`. An answer
      * that touched no endpoint may not be handed to a consumer as evidence
      * that the endpoints are alive — the RFC-64 authority circuit breaker is
@@ -592,7 +553,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
      * there is no absence for it to mistake.
      */
     logAnswerServes?: (value: T) => boolean,
-  ): Promise<T> => {
+  ): Promise<T | ContextGraphAuthorityIndexProjectionFault> => {
     assertOpen();
     const projectionSignal = lifecycleAbort.signal;
     options.signal?.throwIfAborted();
@@ -655,12 +616,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                 // age rather than in front of it. Carried so the cache ages and
                 // reports the fold by its own age instead of by this read's
                 // clock.
-                dataFetchedAtMs: anchor.fetchedAtMs,
+                origin: Object.freeze({ kind: 'log' as const, dataFetchedAtMs: anchor.fetchedAtMs }),
               }),
             );
             await logged.stabilize();
-            if (logAnswerServes === undefined || logFoldServes(logAnswerServes, logged.value)) {
-              return logged.value;
+            const admission = admitContextGraphAuthorityLogFold(logAnswerServes, logged.value);
+            if (admission.kind === 'served') return logged.value;
+            if (admission.kind === 'fault') {
+              return contextGraphAuthorityIndexProjectionFault(admission.fault);
             }
           }
         }
@@ -702,6 +665,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               hash: headHash,
               timestampSeconds: evmContextGraphAuthorityHeadTimestampSecondsV1(head),
             },
+            origin: Object.freeze({ kind: 'scan' as const }),
           }),
         );
         await indexed.stabilize();
@@ -756,7 +720,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     // its own: a fold that reports no fetch instant of its own is treated as
     // being as of this read, which can only OVER-report its age.
     const askedAtMs = Date.now();
-    const projected = await unwrapLogFoldProjectionFaultV1(() => dependencies.index.projection({
+    const projected = await dependencies.index.projection({
       scope,
       signal: options.signal,
       project: read,
@@ -764,7 +728,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       refresh: () => rescanFinalizedProjection(
         operationLabel,
         options,
-        async (scan, { provider, contractAddress, finalized, head, dataFetchedAtMs }) => {
+        async (scan, { provider, contractAddress, finalized, head, origin }) => {
           const view = await dependencies.index.view(scan);
           const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
             `${operationLabel} network`,
@@ -772,10 +736,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             options.signal,
           )).chainId.toString(10);
           return Object.freeze({
-            scope: scan.scope, chainId, contractAddress, finalized, head, view,
-            // Present only on the log path, where the data predates this read.
-            // The cache keeps the older of this and its own pre-refresh stamp.
-            ...(dataFetchedAtMs === undefined ? {} : { dataFetchedAtMs }),
+            scope: scan.scope, chainId, contractAddress, finalized, head, view, origin,
           });
         },
         // The SAME predicate the cache admits a projection by, applied to the
@@ -791,7 +752,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         //
         // `fetchedAtMs` is the one field the PROJECTION type adds, so the
         // candidate has to supply it. A fold from the log knows the answer —
-        // `dataFetchedAtMs`, the instant the tick asked for the head it
+        // `origin.dataFetchedAtMs`, the instant the tick asked for the head it
         // committed, up to `min(max(3T, 15s), 5m)` before this read — and that
         // is what it must carry:
         // stamping this read's clock would move the age towards zero, the
@@ -809,14 +770,19 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // later anchor only ever sees MORE of — so swallowing here would buy a
         // paid scan and then rethrow the same error, which is exactly the
         // "exceptions never become cache misses or extra paid scans" the cache
-        // documents. `logFoldServes` keeps that throw deterministic across the
-        // two layers it has to cross; see its own comment.
+        // documents. Admission returns faults as data until the projection
+        // cache has crossed both transport-classification boundaries.
         (completed) => read({
           ...completed,
-          fetchedAtMs: Math.min(askedAtMs, completed.dataFetchedAtMs ?? askedAtMs),
+          fetchedAtMs: Math.min(
+            askedAtMs,
+            completed.origin.kind === 'log'
+              ? completed.origin.dataFetchedAtMs
+              : askedAtMs,
+          ),
         }).complete,
       ),
-    }));
+    });
     options.signal?.throwIfAborted();
     return projected;
   };
@@ -880,9 +846,15 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         if (closed || request?.scope !== ownScope) return null;
         return dependencies.index.exportSnapshot(request);
       },
-      refresh(options: ContextGraphAuthorityReadOptions = {}): Promise<void> {
-        return rescanFinalizedProjection('refreshContextGraphAuthorityIndex', options,
-          (scan) => dependencies.index.refresh(scan));
+      async refresh(options: ContextGraphAuthorityReadOptions = {}): Promise<void> {
+        const result = await rescanFinalizedProjection(
+          'refreshContextGraphAuthorityIndex',
+          options,
+          (scan) => dependencies.index.refresh(scan),
+        );
+        // This call supplies no log admission predicate, so the fault arm is
+        // unreachable. Keep the guard at the boundary if that ever changes.
+        if (isContextGraphAuthorityProjectionFault(result)) throw result.fault;
       },
     } satisfies ContextGraphAuthorityIndexSnapshots),
     async whenIdle(): Promise<void> {

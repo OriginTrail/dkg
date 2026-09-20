@@ -56,7 +56,12 @@ const creation = (blockNumber: number, contextGraphId: bigint) => row(
 const registration = (blockNumber: number, contextGraphId: bigint, kaId: bigint, logIndex = 0) =>
   row('KnowledgeAssetRegisteredToContextGraph', [contextGraphId, kaId], blockNumber, logIndex);
 
-function seeded(rows: readonly ChainEventLogRow[], coveredFromBlock = FLOOR) {
+function seeded(
+  rows: readonly ChainEventLogRow[],
+  coveredFromBlock = FLOOR,
+  headNumber = COVERED_THROUGH,
+  coveredThroughBlock = COVERED_THROUGH,
+) {
   const store = new MemoryChainEventLogStore();
   store.seed({
     cursor: {
@@ -66,8 +71,8 @@ function seeded(rows: readonly ChainEventLogRow[], coveredFromBlock = FLOOR) {
       settledBlockNumber: SETTLED,
       settledBlockHash: hash(SETTLED),
       head: {
-        number: COVERED_THROUGH,
-        hash: hash(COVERED_THROUGH),
+        number: headNumber,
+        hash: hash(headNumber),
         timestampSeconds: 1_700_000_000,
         fetchedAtMs: FETCHED_AT_MS,
       },
@@ -77,7 +82,7 @@ function seeded(rows: readonly ChainEventLogRow[], coveredFromBlock = FLOOR) {
       family,
       address: CG_STORAGE.toLowerCase(),
       coveredFromBlock,
-      coveredThroughBlock: COVERED_THROUGH,
+      coveredThroughBlock,
       floorBlock: FLOOR,
     })),
   }, [...rows]);
@@ -218,6 +223,29 @@ describe('knowledge-asset views over the one log', () => {
     partial.live.set('cgStorage.kaToContextGraph', 7n);
     expect(await partial.adapter.getKAContextGraphId(9999n)).toBe(7n);
     expect(partial.calls).toEqual(['cgStorage.kaToContextGraph']);
+  });
+
+  it('falls back during bounded catch-up but keeps a known write-once binding local', async () => {
+    const catchingUp = seeded(
+      [creation(40, 7n), registration(50, 7n, 4242n)],
+      FLOOR,
+      COVERED_THROUGH + 2_000,
+      COVERED_THROUGH,
+    );
+
+    const positive = makeAdapter({ store: catchingUp });
+    expect(await positive.adapter.getKAContextGraphId(4242n)).toBe(7n);
+    expect(positive.calls).toEqual([]);
+
+    const absent = makeAdapter({ store: catchingUp });
+    absent.live.set('cgStorage.kaToContextGraph', 9n);
+    expect(await absent.adapter.getKAContextGraphId(9999n)).toBe(9n);
+    expect(absent.calls).toEqual(['cgStorage.kaToContextGraph']);
+
+    const list = makeAdapter({ store: catchingUp });
+    list.live.set('cgStorage.getContextGraphKaCount', 3n);
+    expect(await list.adapter.getContextGraphKCCount(7n)).toBe(3n);
+    expect(list.calls).toEqual(['cgStorage.getContextGraphKaCount']);
   });
 
   it('includes the UNSETTLED tail, because the call it replaces is unpinned', async () => {

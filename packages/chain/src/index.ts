@@ -290,11 +290,8 @@ export {
   type LegacyRandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';
 
-/**
- * The node's ONE chain log: tick, cursor, raw events, coverage, backfill.
- * Everything that needs an indexed on-chain event subscribes here.
- */
-export * from './chain-index/index.js';
+/** Store contract supplied by the daemon to the one-log runtime. */
+export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
 
 /**
  * How the process hands that log DOWN to each adapter. There is one log per

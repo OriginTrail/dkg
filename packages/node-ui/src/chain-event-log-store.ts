@@ -311,9 +311,6 @@ export class SqliteChainEventLogStore {
       for (const table of [
         'chain_events',
         'chain_index_coverage',
-        'hub_bindings',
-        'cg_state',
-        'cg_participants',
       ]) {
         this.db.prepare(`DELETE FROM ${table} WHERE scope = ?`).run(scope);
       }

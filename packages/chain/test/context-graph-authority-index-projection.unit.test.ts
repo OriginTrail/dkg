@@ -131,6 +131,7 @@ function makeHarness(options: Readonly<{
           : Math.floor(clock.nowMs / 1_000) - chain.headLagSeconds,
       },
       view,
+      origin: Object.freeze({ kind: 'scan' as const }),
     });
   };
 
@@ -231,6 +232,32 @@ describe('finalized Context Graph authority projection cache', () => {
       { source: 'cache', ageMs: T - 1 },
     ]);
   });
+
+  it.each([Number.NaN, START_MS + 1])(
+    'keeps log provenance when its data timestamp is unusable (%s)',
+    async (dataFetchedAtMs) => {
+      const h = makeHarness();
+      const completed = await h.refresh();
+      const evidence: ContextGraphAuthorityProjectionServedEvidence[] = [];
+      const cache = new ContextGraphAuthorityIndexProjectionCache({
+        tickMs: T,
+        now: () => h.clock.nowMs,
+      });
+
+      const projection = await cache.read({
+        scope: h.scope,
+        project: (candidate) => ({ complete: true, value: candidate }),
+        refresh: async () => Object.freeze({
+          ...completed,
+          origin: Object.freeze({ kind: 'log' as const, dataFetchedAtMs }),
+        }),
+        onServed: (served) => { evidence.push(served); },
+      });
+
+      expect(projection.fetchedAtMs).toBe(START_MS);
+      expect(evidence).toEqual([{ source: 'log', ageMs: 0 }]);
+    },
+  );
 
   it('refreshes once the projection is T old, and sees what the chain did meanwhile', async () => {
     const h = makeHarness();

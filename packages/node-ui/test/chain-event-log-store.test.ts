@@ -140,13 +140,6 @@ describe('SqliteChainEventLogStore', () => {
   it('a tombstone wipes every derived row and its token never repeats', async () => {
     const { store, db } = createStore();
     await store.commit(SCOPE, undefined, commit(10, 12, [row(10, 0, true)]));
-    db.db.prepare(`
-      INSERT INTO cg_state (
-        scope, context_graph_id, owner, active, access_policy, publish_policy,
-        publish_authority, publish_authority_account_id, name_hash, ownership_era,
-        policy_version, roster_version, source_block_number, source_block_hash
-      ) VALUES (?, '7', ?, 1, 1, 0, ?, '7', ?, 1, 1, 1, 10, ?)
-    `).run(SCOPE, ADDRESS, ADDRESS, hash(0x22), hash(10));
 
     // Assert the scope IS loadable first, so the checks below cannot pass
     // simply because nothing was ever there.
@@ -157,7 +150,7 @@ describe('SqliteChainEventLogStore', () => {
     expect(await store.load(SCOPE)).toBeUndefined();
     expect(await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 99 }))
       .toEqual([]);
-    expect(db.db.prepare(`SELECT COUNT(*) AS n FROM cg_state WHERE scope = ?`)
+    expect(db.db.prepare(`SELECT COUNT(*) AS n FROM chain_index_coverage WHERE scope = ?`)
       .get(SCOPE)).toEqual({ n: 0 });
 
     // A cold start after the tombstone must not reuse the dead token.
