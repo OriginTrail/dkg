@@ -134,6 +134,69 @@ function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
   return createRpcReadDescriptor(label, consumer);
 }
 
+type ReceiptFinalityReadResult = {
+  header: ReceiptBlockHeader;
+  canonical: boolean;
+};
+
+type ReceiptFinalityProviderReader = (
+  label: string,
+  read: (provider: JsonRpcProvider) => Promise<ReceiptFinalityReadResult | null>,
+  options?: ReadOpts,
+) => Promise<ReceiptFinalityReadResult | null>;
+
+/** Keep receipt-finality mechanics off the adapter prototype surface. */
+async function readFinalCanonicalReceiptBlock(
+  receipt: { txHash?: string; blockNumber: number; blockHash: string },
+  finalityConfirmations: number,
+  options: ChainReadOptions & { deadlineMs?: number },
+  readProviderRetryingNull: ReceiptFinalityProviderReader,
+  retainHeader: (header: ReceiptBlockHeader) => void,
+): Promise<ReceiptBlockHeader | null> {
+  const resolved = await readProviderRetryingNull(
+    'publish receipt finality',
+    async (provider) => {
+      const requiredBlockNumber = requiredHeadBlockForReceipt(
+        receipt.blockNumber,
+        finalityConfirmations,
+      );
+      let providerHead: number | undefined;
+      if (requiredBlockNumber > receipt.blockNumber) {
+        providerHead = await provider.getBlockNumber();
+        if (providerHead < requiredBlockNumber) return null;
+      }
+      let atHeight;
+      try {
+        atHeight = await provider.getBlock(receipt.blockNumber);
+      } catch (error) {
+        if (isEvmBlockUnavailableError(error)) {
+          // Some clients report an above-head block as an error rather than
+          // null. Confirm that narrow condition before treating it as the
+          // nullable failover signal: the same bare message from an endpoint
+          // already at this height indicates a sync/restart fault and must
+          // surface instead of turning into a ten-minute receipt poll.
+          providerHead ??= await provider.getBlockNumber();
+          if (providerHead < receipt.blockNumber) return null;
+        }
+        throw error;
+      }
+      if (!atHeight?.hash) return null;
+      const header = Object.freeze({
+        number: atHeight.number,
+        hash: atHeight.hash.toLowerCase(),
+        ...(atHeight.timestamp == null ? {} : { timestamp: Number(atHeight.timestamp) }),
+      });
+      retainHeader(header);
+      return {
+        header,
+        canonical: header.hash === receipt.blockHash.toLowerCase(),
+      };
+    },
+    { signal: options.signal, deadlineMs: options.deadlineMs },
+  );
+  return resolved?.canonical === true ? resolved.header : null;
+}
+
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
  *
@@ -1683,7 +1746,13 @@ export class EVMChainAdapterBase {
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
       isReceiptEligible: async (receipt, { deadlineMs }) => (
-        await this.#readFinalCanonicalReceiptBlock(receipt, { deadlineMs })
+        await readFinalCanonicalReceiptBlock(
+          receipt,
+          this.finalityConfirmations,
+          { deadlineMs },
+          (readLabel, read, readOptions) => this.readProviderRetryingNull(readLabel, read, readOptions),
+          (header) => this.receiptBlockHeadersByHash.set(header.hash, header),
+        )
       ) !== null,
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
@@ -1707,58 +1776,13 @@ export class EVMChainAdapterBase {
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return (await this.#readFinalCanonicalReceiptBlock(receipt, options)) !== null;
-  }
-
-  /** Resolve and retain the exact canonical header used by receipt finality. */
-  async #readFinalCanonicalReceiptBlock(
-    receipt: { txHash?: string; blockNumber: number; blockHash: string },
-    options: ChainReadOptions & { deadlineMs?: number } = {},
-  ): Promise<ReceiptBlockHeader | null> {
-    const resolved = await this.readProviderRetryingNull(
-      'publish receipt finality',
-      async (provider) => {
-        const requiredBlockNumber = requiredHeadBlockForReceipt(
-          receipt.blockNumber,
-          this.finalityConfirmations,
-        );
-        let providerHead: number | undefined;
-        if (
-          requiredBlockNumber > receipt.blockNumber
-        ) {
-          providerHead = await provider.getBlockNumber();
-          if (providerHead < requiredBlockNumber) return null;
-        }
-        let atHeight;
-        try {
-          atHeight = await provider.getBlock(receipt.blockNumber);
-        } catch (error) {
-          if (isEvmBlockUnavailableError(error)) {
-            // Some clients report an above-head block as an error rather than
-            // null. Confirm that narrow condition before treating it as the
-            // nullable failover signal: the same bare message from an endpoint
-            // already at this height indicates a sync/restart fault and must
-            // surface instead of turning into a ten-minute receipt poll.
-            providerHead ??= await provider.getBlockNumber();
-            if (providerHead < receipt.blockNumber) return null;
-          }
-          throw error;
-        }
-        if (!atHeight?.hash) return null;
-        const header = Object.freeze({
-          number: atHeight.number,
-          hash: atHeight.hash.toLowerCase(),
-          ...(atHeight.timestamp == null ? {} : { timestamp: Number(atHeight.timestamp) }),
-        });
-        this.receiptBlockHeadersByHash.set(header.hash, header);
-        return {
-          header,
-          canonical: header.hash === receipt.blockHash.toLowerCase(),
-        };
-      },
-      { signal: options.signal, deadlineMs: options.deadlineMs },
-    );
-    return resolved?.canonical === true ? resolved.header : null;
+    return (await readFinalCanonicalReceiptBlock(
+      receipt,
+      this.finalityConfirmations,
+      options,
+      (readLabel, read, readOptions) => this.readProviderRetryingNull(readLabel, read, readOptions),
+      (header) => this.receiptBlockHeadersByHash.set(header.hash, header),
+    )) !== null;
   }
 
   protected async signPopulatedTransaction(
