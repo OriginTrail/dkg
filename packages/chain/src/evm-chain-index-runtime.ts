@@ -28,6 +28,7 @@
 import { ethers, type JsonRpcProvider } from 'ethers';
 
 import type {
+  ChainEventLogAuthoritySource,
   ChainEventLogBinding,
   ChainEventLogHubRotationWindow,
 } from './chain-event-log-binding.js';
@@ -36,16 +37,24 @@ import {
   ChainIndexRunner,
   ChainIndexTick,
   chainEventLogFloorKey,
+  chainIndexAuthorityAnchorHolds,
   createChainEventLogSubscription,
+  createChainIndexAuthorityPageSource,
   createKnowledgeAssetReadModel,
   findChainEventLogCoverage,
+  resolveChainIndexAuthorityAnchor,
   type ChainEventLogFetchedRow,
   type ChainEventLogStore,
+  type ChainIndexAnchorResult,
+  type ChainIndexAuthorityAnchor,
   type ChainIndexLogRequest,
   type ChainIndexObservedHead,
   type ChainIndexTickResult,
   type HubBinding,
 } from './chain-index/index.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+} from './context-graph-authority-index-projection.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 
 /** One contract the tick indexes, as the adapter already holds it. */
@@ -242,6 +251,19 @@ function chainIndexHubWindowMaxAgeMs(intervalMs: number): number {
 }
 
 /**
+ * How old the tick's head may be before it can no longer ANCHOR an authority
+ * read.
+ *
+ * Deliberately the same `max(3T, floor)` as the Hub window above and as the
+ * projection cache's stale-if-error window: T is the one cadence this node has,
+ * so a node with three consecutive missed passes is a node whose log is not
+ * describing the chain right now, whichever reader is asking.
+ */
+function chainIndexAuthorityAnchorMaxAgeMs(intervalMs: number): number {
+  return Math.max(3 * intervalMs, CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS);
+}
+
+/**
  * Construct — and only construct — the one log for this process.
  *
  * `start()` is separate from construction and never awaited by the caller: a
@@ -412,9 +434,68 @@ export function createEvmChainIndexRuntime(
   }
 
   const contextGraphStorageAddress = options.contextGraphStorage?.address;
+
+  /**
+   * The authority index's whole view of the chain, when the Hub binds a
+   * `ContextGraphStorage`.
+   *
+   * Built here and not by the reader because everything the guards need — the
+   * scope, the store, the tick interval that sizes every age bound — lives in
+   * this composition root, and a reader that assembled its own would be free to
+   * assemble a weaker one.
+   */
+  const contextGraphAuthority: ChainEventLogAuthoritySource | undefined =
+    contextGraphStorageAddress === undefined ? undefined : Object.freeze({
+      contractAddress: contextGraphStorageAddress,
+      pageSource: createChainIndexAuthorityPageSource({
+        scope: options.scope,
+        store: options.store,
+        registry,
+        contractAddress: contextGraphStorageAddress,
+        // The log knows the hash of every block that emitted an indexed event
+        // plus its own cursor; an EMPTY block in between still needs the chain,
+        // and this is a point read, never a scan.
+        readBlockHash: async (blockNumber, signal) => (
+          (await readTip(
+            `chainIndex authority block ${blockNumber}`,
+            (provider) => provider.getBlock(blockNumber),
+            { signal, policy: 'watchdogPointRead' },
+          ))?.hash ?? null
+        ),
+      }),
+      async resolveAnchor(input: Readonly<{
+        deploymentBlockNumber: number;
+        finalityConfirmations: number;
+        requiredBlockNumber?: number;
+      }>): Promise<ChainIndexAnchorResult> {
+        return resolveChainIndexAuthorityAnchor({
+          state: await options.store.load(options.scope),
+          contractAddress: contextGraphStorageAddress,
+          deploymentBlockNumber: input.deploymentBlockNumber,
+          finalityConfirmations: input.finalityConfirmations,
+          nowMs: now(),
+          maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
+          // The SAME chain-time tolerance the projection cache refuses to serve
+          // a cached head past. One number, so a scan anchored on the log can
+          // never be older than an answer the cache would already have dropped.
+          headTimestampToleranceMs: CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
+          ...(input.requiredBlockNumber === undefined
+            ? {}
+            : { requiredBlockNumber: input.requiredBlockNumber }),
+        });
+      },
+      anchorHolds(anchor: ChainIndexAuthorityAnchor): Promise<boolean> {
+        return chainIndexAuthorityAnchorHolds(
+          () => options.store.load(options.scope),
+          anchor,
+        );
+      },
+    });
+
   const binding: ChainEventLogBinding = Object.freeze({
     subscription,
     readHubRotationWindow,
+    ...(contextGraphAuthority === undefined ? {} : { contextGraphAuthority }),
     // The binding carries the addresses the TICK walked, not the ones a reader
     // resolves later: coverage is recorded per (family, address), so proving a
     // range against one address while reading another compares a range to

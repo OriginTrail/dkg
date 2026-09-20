@@ -99,6 +99,7 @@ export {
 } from './chain-index-runner.js';
 
 export {
+  chainIndexAuthorityAnchorHolds,
   resolveChainIndexAuthorityAnchor,
   type ChainIndexAnchorRefusal,
   type ChainIndexAnchorResult,

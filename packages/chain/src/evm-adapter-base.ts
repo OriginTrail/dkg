@@ -1592,6 +1592,10 @@ export class EVMChainAdapterBase {
             ),
           pageSize: () => this.cgRegistryScanPageSize,
           finalityConfirmations: () => this.finalityConfirmations,
+          // Read per call, never captured: a Hub rotation replaces the binding
+          // wholesale, and this reader must see the NEW one — or none — rather
+          // than the log built around the `ContextGraphStorage` it left.
+          chainEventLogAuthority: () => this.chainEventLogBinding?.contextGraphAuthority,
         });
     this.contextGraphAuthorityIndexReader = authorityIndexReader;
     this.contextGraphAuthorityIndexRevisionReader = authorityIndexReader;

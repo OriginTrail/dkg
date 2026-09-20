@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { confirmedStateBlockAtHead } from '../evm-adapter-constants.js';
 import {
   chainEventLogCoverageIncludes,
   findChainEventLogCoverage,
@@ -17,6 +18,35 @@ import {
  * a fresh head probe of its own: an anchor above the log's coverage is an
  * anchor the log cannot answer for, and answering it anyway from the rows it
  * happens to hold is how an unindexed range becomes an absence.
+ *
+ * THE FOUR THINGS A LIVE ANCHOR GAVE FOR FREE, and where each one now comes
+ * from. `resolveEvmFinalityAnchorBlockV1` + `stabilize()` are what stand
+ * between a moved anchor and a served authority answer that gates catalog
+ * admission, and none of it may be lost by reading the log instead:
+ *
+ * 1. FRESHNESS IN FETCH TIME. A live head is zero milliseconds old by
+ *    construction; a stored one is only as fresh as the last pass that
+ *    committed it. {@link ResolveChainIndexAuthorityAnchorInput.maxHeadAgeMs}
+ *    is that bound — the same `max(3T, 15s)` shape the Hub window and the
+ *    projection cache already use — and it is what makes a tick that stopped
+ *    committing refuse instead of pinning its last head forever.
+ * 2. FRESHNESS IN CHAIN TIME. A responsive but LAGGING endpoint answers a head
+ *    probe instantly with an old block, so fetch time alone proves nothing
+ *    about what the answer is an answer about. The head's own block timestamp
+ *    is the only evidence of that, and it is checked here for the SCAN, not
+ *    only — as before — for a cached projection.
+ * 3. DEPTH. The anchor must sit no shallower than
+ *    `confirmedStateBlockAtHead(head, chain.finalityConfirmations)`, the node's
+ *    single definition of finality. The log can name exactly two blocks with a
+ *    hash — its observed head and its settled boundary — and the HIGHEST of
+ *    those that satisfies the operator's depth is chosen, so at the default
+ *    depth of 1 the anchor is the head, exactly as the live resolver's is.
+ * 4. LINEAGE. A held fork suspicion means the tick saw its settled hash change
+ *    and has not yet been able to confirm or withdraw it; nothing derived from
+ *    that scope may be served until it does.
+ *
+ * The `stabilize()` fence is the fifth, and it is
+ * {@link chainIndexAuthorityAnchorHolds}.
  */
 export interface ChainIndexAuthorityAnchor {
   /** Highest block the log can answer for, with its verified hash. */
@@ -33,6 +63,16 @@ export interface ChainIndexAuthorityAnchor {
    * may answer absent from the log.
    */
   readonly complete: boolean;
+  /**
+   * The store's CAS token at the moment the anchor was resolved.
+   *
+   * This is what {@link chainIndexAuthorityAnchorHolds} compares, and it is the
+   * whole of the `stabilize()` replacement. See that function for why a token
+   * is a STRONGER fence here than the hash re-read it stands in for.
+   */
+  readonly revision: number;
+  /** Binds the anchor to one chain instance, exactly as the cursor does. */
+  readonly lineage: string;
 }
 
 export type ChainIndexAnchorRefusal =
@@ -41,7 +81,15 @@ export type ChainIndexAnchorRefusal =
   /** The tick has not reached the block the reader needs. */
   | 'below-required-block'
   /** The log holds no settled prefix yet, so there is nothing to anchor on. */
-  | 'nothing-settled';
+  | 'nothing-settled'
+  /** The tick has stopped committing; its last head proves nothing now. */
+  | 'stale-head'
+  /** The head the tick committed is too old IN CHAIN TIME to anchor a read. */
+  | 'head-behind-chain-time'
+  /** Nothing the log can name with a hash is as deep as the operator asked. */
+  | 'below-finality-depth'
+  /** A settled-hash mismatch is held and not yet confirmed or withdrawn. */
+  | 'fork-suspected';
 
 export interface ChainIndexAnchorResult {
   readonly anchor?: ChainIndexAuthorityAnchor;
@@ -52,6 +100,28 @@ export interface ResolveChainIndexAuthorityAnchorInput {
   readonly state: ChainEventLogState | undefined;
   readonly contractAddress: string;
   readonly deploymentBlockNumber: number;
+  /**
+   * `chain.finalityConfirmations` — the node's SINGLE definition of finality,
+   * read per call so a re-resolved configuration cannot leave a reader pinned
+   * to a stale depth. Confirmation 1 is the head, matching
+   * `resolveEvmFinalityAnchorBlockV1`.
+   */
+  readonly finalityConfirmations: number;
+  /** Wall clock, injected so a faked `Date` is honoured by every age guard. */
+  readonly nowMs: number;
+  /**
+   * How old the tick's last head read may be in FETCH time. `max(3T, 15s)`:
+   * three missed passes for an operator-sized T, never shorter than one slow
+   * failover pass.
+   */
+  readonly maxHeadAgeMs: number;
+  /**
+   * How old that head may be in CHAIN time. ONE-SIDED, exactly as the
+   * projection cache's guard is: a head stamped in the future is clock skew or
+   * a devnet's `evm_increaseTime`, never the lagging endpoint this bound
+   * exists for.
+   */
+  readonly headTimestampToleranceMs: number;
   /**
    * Own-write barrier (review S6). A read that follows this node's own receipt
    * must not be answered by a log that has not yet reached that block — and
@@ -77,44 +147,125 @@ export function resolveChainIndexAuthorityAnchor(
   const contractAddress = normalizeChainEventLogAddress(input.contractAddress);
   if (contractAddress === undefined) return Object.freeze({ refusal: 'no-coverage' as const });
 
+  // LINEAGE FIRST. A scope whose settled hash was seen to change is under
+  // suspicion until a second pass either confirms it (tombstone) or withdraws
+  // it; between the two, every row it holds may belong to a chain this node is
+  // no longer on, so nothing derived from it may anchor an authority answer.
+  if (state.suspectedForkBlockNumber !== undefined) {
+    return Object.freeze({ refusal: 'fork-suspected' as const });
+  }
+
   const cursor = state.cursor;
+  const head = cursor.head;
+  // FETCH time: is the tick still running? A negative age is a wall clock that
+  // stepped backwards, which proves no age at all — refuse it the same way.
+  const headAgeMs = input.nowMs - head.fetchedAtMs;
+  if (!(headAgeMs >= 0) || headAgeMs > input.maxHeadAgeMs) {
+    return Object.freeze({ refusal: 'stale-head' as const });
+  }
+  // CHAIN time: is the head the tick committed an answer about NOW? Only the
+  // block's own timestamp can say; a lagging endpoint answers promptly.
+  if (input.nowMs - head.timestampSeconds * 1_000 > input.headTimestampToleranceMs) {
+    return Object.freeze({ refusal: 'head-behind-chain-time' as const });
+  }
+
   if (cursor.settledBlockNumber < input.deploymentBlockNumber) {
     return Object.freeze({ refusal: 'nothing-settled' as const });
   }
+
+  // DEPTH, from the node's single definition of it. The candidates are the two
+  // blocks the log can name WITH A HASH; the highest admissible one wins, so
+  // the default depth anchors on the head just as the live resolver does and a
+  // deeper one falls back to the settled boundary rather than to a block whose
+  // hash this log never recorded.
+  //
+  // The depth is re-validated here rather than trusted from the caller, for the
+  // same reason `resolveEvmFinalityAnchorBlockV1` re-validates it: a depth of 0
+  // resolves to `head + 1`, an anchor ABOVE the head, which would admit the
+  // head unconditionally and make the check decorative.
+  const confirmations = input.finalityConfirmations;
+  if (!Number.isSafeInteger(confirmations) || confirmations < 1) {
+    return Object.freeze({ refusal: 'below-finality-depth' as const });
+  }
+  const deepestAdmissible = confirmedStateBlockAtHead(head.number, confirmations);
+  if (deepestAdmissible === null) {
+    return Object.freeze({ refusal: 'below-finality-depth' as const });
+  }
+  const finalized = head.number <= deepestAdmissible
+    ? { number: head.number, hash: head.hash }
+    : (cursor.settledBlockNumber <= deepestAdmissible
+      ? { number: cursor.settledBlockNumber, hash: cursor.settledBlockHash }
+      : undefined);
+  if (finalized === undefined) {
+    return Object.freeze({ refusal: 'below-finality-depth' as const });
+  }
+
   const coverage = findChainEventLogCoverage(
     state.coverage,
     'context-graph-authority',
     contractAddress,
   );
-  // The anchor is the settled cursor, so the range that must be held is
-  // everything from the contract's deployment up to it.
+  // The range that must be held is everything from the contract's deployment
+  // up to the anchor — which is also what makes the family COMPLETE, so an
+  // absence read off these rows is an absence the log actually looked for.
   if (!chainEventLogCoverageIncludes(
     coverage,
     input.deploymentBlockNumber,
-    cursor.settledBlockNumber,
+    finalized.number,
   )) {
     return Object.freeze({ refusal: 'no-coverage' as const });
   }
   if (input.requiredBlockNumber !== undefined
-    && cursor.settledBlockNumber < input.requiredBlockNumber) {
+    && finalized.number < input.requiredBlockNumber) {
     return Object.freeze({ refusal: 'below-required-block' as const });
   }
 
   return Object.freeze({
     anchor: Object.freeze({
-      finalized: Object.freeze({
-        number: cursor.settledBlockNumber,
-        hash: cursor.settledBlockHash,
-      }),
+      finalized: Object.freeze(finalized),
       head: Object.freeze({
-        number: cursor.head.number,
-        hash: cursor.head.hash,
-        timestampSeconds: cursor.head.timestampSeconds,
+        number: head.number,
+        hash: head.hash,
+        timestampSeconds: head.timestampSeconds,
       }),
-      fetchedAtMs: cursor.head.fetchedAtMs,
+      fetchedAtMs: head.fetchedAtMs,
       // `coverage` is non-undefined here: `chainEventLogCoverageIncludes`
       // already refused an absent record above.
       complete: coverage!.coveredFromBlock <= coverage!.floorBlock,
+      revision: cursor.revision,
+      lineage: cursor.lineage,
     }),
   });
+}
+
+/**
+ * The `stabilize()` fence, moved to the side that owns the rows.
+ *
+ * A live scan re-reads the anchor block's hash after folding and refuses when
+ * it changed, because the pages it just read could have come from a fork the
+ * chain has since dropped. A fold over the log has exactly the same exposure —
+ * the anchor is the head at the default depth, and the tick replaces the whole
+ * tail every pass — so it needs the same fence.
+ *
+ * The CAS token is that fence, and it is strictly stronger than the hash
+ * re-read it replaces. Every way the rows under a fold can change is a COMMIT:
+ * a tail replacement, a newly recorded fork suspicion, and the tombstone that a
+ * confirmed fork writes all move the revision, and the store never reuses one.
+ * So "the revision is what it was" means "not one row under this fold moved",
+ * where the live fence only ever established that ONE block hash still matched.
+ *
+ * It costs no RPC, and the window it guards is a handful of local SQLite reads
+ * against a tick that commits once per T — so a refusal here is rare, and it is
+ * retryable: the next attempt resolves the newer anchor, or falls back to the
+ * chain.
+ */
+export async function chainIndexAuthorityAnchorHolds(
+  load: () => Promise<ChainEventLogState | undefined>,
+  anchor: ChainIndexAuthorityAnchor,
+): Promise<boolean> {
+  const state = await load();
+  if (state === undefined) return false;
+  return state.cursor.revision === anchor.revision
+    && state.cursor.lineage === anchor.lineage
+    && state.suspectedForkBlockNumber === undefined;
 }

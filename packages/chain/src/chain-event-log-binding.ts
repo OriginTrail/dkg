@@ -18,6 +18,9 @@
 
 import type {
   ChainEventLogSubscription,
+  ChainIndexAnchorResult,
+  ChainIndexAuthorityAnchor,
+  ChainIndexAuthorityPageSource,
   KnowledgeAssetReadModel,
 } from './chain-index/index.js';
 
@@ -48,8 +51,44 @@ export interface ChainEventLogHubRotationWindow {
   readonly rotations: readonly ChainEventLogHubRotation[];
 }
 
+/**
+ * Everything the #2670 Context Graph authority index needs to run over the log
+ * instead of over its own `eth_getLogs` scan.
+ *
+ * The three parts are inseparable and that is why they are ONE value: the
+ * anchor says which block the fold may reach, the page source serves only rows
+ * inside coverage, and the fence proves nothing moved underneath the fold. A
+ * reader handed the pages without the anchor would fold an unbounded range; one
+ * handed the anchor without the fence would keep today's staleness story and
+ * lose `stabilize()`.
+ */
+export interface ChainEventLogAuthoritySource {
+  /**
+   * The physical `ContextGraphStorage` the TICK walked, lowercased. A reader
+   * must compare it with the address it resolved itself and fall back when they
+   * differ: coverage is recorded per (family, address), so proving a range
+   * against one address while reading another compares a range to coverage that
+   * was never about it.
+   */
+  readonly contractAddress: string;
+  readonly pageSource: ChainIndexAuthorityPageSource;
+  /** The anchor for one read, or the reason there is none. Never throws. */
+  resolveAnchor(input: Readonly<{
+    deploymentBlockNumber: number;
+    finalityConfirmations: number;
+    requiredBlockNumber?: number;
+  }>): Promise<ChainIndexAnchorResult>;
+  /** The `stabilize()` equivalent: false means the fold must be discarded. */
+  anchorHolds(anchor: ChainIndexAuthorityAnchor): Promise<boolean>;
+}
+
 export interface ChainEventLogBinding {
   readonly subscription: ChainEventLogSubscription;
+  /**
+   * Absent when the Hub binds no `ContextGraphStorage`, so a reader with no
+   * source keeps the live scan rather than guessing an address.
+   */
+  readonly contextGraphAuthority?: ChainEventLogAuthoritySource;
   /**
    * The physical `ContextGraphStorage` the tick indexed, lowercased. Absent
    * when the Hub binds none — `initContracts` tolerates that deployment, and a
