@@ -355,13 +355,15 @@ describe('RFC-64 D26 catalog access authorization', () => {
         .resolves.toEqual({ accessPolicy: 1, policyDigest });
       await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
         .resolves.toEqual({ accessPolicy: 1, policyDigest });
+      await expect(subject.authorize(authInput('fetch-outbound', policyDigest)))
+        .resolves.toEqual({ accessPolicy: 1, policyDigest });
       await expect(subject.authorize({
         ...authInput('fetch-inbound', policyDigest),
         remotePeerId: '12D3KooOtherRemote',
       })).resolves.toEqual({ accessPolicy: 1, policyDigest });
     });
 
-    expect(scopes).toHaveLength(3);
+    expect(scopes).toHaveLength(4);
     expect(scopes[0]).toBeUndefined();
     expect(scopes[1]).toEqual({
       networkId: NETWORK,
@@ -377,10 +379,11 @@ describe('RFC-64 D26 catalog access authorization', () => {
     expect(Object.isFrozen(scopes[1])).toBe(true);
     expect(Object.isFrozen(scopes[1]!.memberAddresses)).toBe(true);
     expect(scopes[2]).toBeUndefined();
+    expect(scopes[3]).toBeUndefined();
 
     await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
       .resolves.toEqual({ accessPolicy: 1, policyDigest });
-    expect(scopes[3]).toBeUndefined();
+    expect(scopes[4]).toBeUndefined();
   });
 
   it('binds transport pre/post-await checks to one authorization scope', async () => {

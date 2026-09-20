@@ -17,6 +17,8 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
+import type { Rfc64CatalogLocalAuthorizationScopeV1 } from
+  '../src/rfc64/catalog-access-policy-v1.js';
 import { mintRfc64CatalogNativeScopedReadCapabilityV1 } from '../src/rfc64/catalog-native-scoped-read-capability-v1-internal.js';
 import {
   RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
@@ -631,6 +633,96 @@ describe('RFC-64 public catalog native content transport v1', () => {
     expect(send).toHaveBeenCalledOnce();
     expect(authorizationChecks).toBe(2);
   });
+
+  it('shares one live private roster across exact native outbound and inbound operations', async () => {
+    const [authorNode, receiverNode] = await Promise.all([startNode(), startNode()]);
+    await connect(receiverNode, authorNode);
+    const bundle = encodeOpaqueKaBundleV1(UTF8.encode('private-scope'), new Uint8Array());
+    const contextGraphId =
+      '0x1111111111111111111111111111111111111111/native-private-scope' as ContextGraphIdV1;
+    const requestScope = Object.freeze({
+      networkId: 'otp:20430' as const,
+      contextGraphId,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      catalogEra: '0' as never,
+      catalogVersion: '1' as never,
+      policyDigest: POLICY_DIGEST,
+      catalogHeadObjectDigest: `0x${'81'.repeat(32)}` as Digest32V1,
+    }) satisfies Rfc64PublicCatalogNativeFetchScopeV1;
+    const authorScopes: Array<Rfc64CatalogLocalAuthorizationScopeV1 | undefined> = [];
+    const receiverScopes: Array<Rfc64CatalogLocalAuthorizationScopeV1 | undefined> = [];
+    const authorPolicy = createRfc64CatalogAccessPolicyRegistryFixture({
+      localAgentAddress: LOCAL_MEMBER,
+      remoteAgentAddress: REMOTE_MEMBER,
+      contextGraphId,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      policyDigest: POLICY_DIGEST,
+      ownerAddress: AUTHOR,
+      curatorAddress: CURATOR,
+      resolveLocalAgentAddress: async (_contextGraphId, scope) => {
+        authorScopes.push(scope);
+        return LOCAL_MEMBER;
+      },
+    });
+    const receiverPolicy = createRfc64CatalogAccessPolicyRegistryFixture({
+      localAgentAddress: REMOTE_MEMBER,
+      remoteAgentAddress: LOCAL_MEMBER,
+      contextGraphId,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      policyDigest: POLICY_DIGEST,
+      ownerAddress: AUTHOR,
+      curatorAddress: CURATOR,
+      resolveLocalAgentAddress: async (_contextGraphId, scope) => {
+        receiverScopes.push(scope);
+        return REMOTE_MEMBER;
+      },
+    });
+    const authorTransport = new Rfc64PublicCatalogNativeTransportV1(
+      new ProtocolRouter(authorNode),
+      {
+        readCatalogObjectByDigest: async () => null,
+        readKaBundleByDigest: async () => bundle.bundleBytes,
+        resolveScopedReadCapability: scopeBoundResolver({
+          scope: requestScope,
+          allowedObjectDigests: new Set(),
+          allowedBundleDigests: new Set([bundle.blobDigest]),
+          readCatalogObjectByDigest: async () => null,
+          readKaBundleByDigest: async () => bundle.bundleBytes,
+        }),
+        authorizeCatalogOperation: authorPolicy.authorize,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      },
+    );
+    const receiverTransport = new Rfc64PublicCatalogNativeTransportV1(
+      new ProtocolRouter(receiverNode),
+      {
+        readCatalogObjectByDigest: async () => null,
+        readKaBundleByDigest: async () => null,
+        authorizeCatalogOperation: receiverPolicy.authorize,
+        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+      },
+    );
+    transports.push(authorTransport, receiverTransport);
+    authorTransport.start();
+    receiverTransport.start();
+
+    await expect(receiverTransport.fetchKaBundle(authorNode.peerId, {
+      kind: RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_KIND_V1,
+      ...requestScope,
+      blobDigest: bundle.blobDigest,
+      byteLength: bundle.bundleBytes.byteLength.toString() as never,
+    })).resolves.toEqual(bundle.bundleBytes);
+
+    expect(receiverScopes[0]).toBeUndefined();
+    expect(receiverScopes.slice(1).every((scope) => scope !== undefined)).toBe(true);
+    expect(authorScopes[0]).toBeUndefined();
+    expect(authorScopes.slice(1).every((scope) => scope !== undefined)).toBe(true);
+    expect(authorScopes.length).toBeGreaterThan(1);
+    expect(receiverScopes.length).toBeGreaterThan(1);
+  }, 15_000);
 
   it('rejects a stale registry digest before sending a native fetch request', async () => {
     const send = vi.fn(async () => Uint8Array.of(0));
