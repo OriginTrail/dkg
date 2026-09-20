@@ -408,6 +408,17 @@ export class ChainIndexTick {
    * folded on top. Starting from nothing is what made the FIRST rotation of an
    * indexed contract invisible as a rotation: `reduceHubBindings` had no open
    * binding to close, so nothing was ever marked retired.
+   *
+   * RESIDUAL, written down because the coverage model cannot represent it.
+   * Bindings are process memory (hub-bindings.ts), so a rotation REBUILD seeds
+   * only the addresses that are current now and carries no record that the old
+   * one was retired at block R. Inert while a retired address is never read
+   * again — which is what the reader's address equality and the retired-address
+   * ceiling enforce — but a rotate-BACK (A -> B -> A) would hand A a single
+   * interval coverage record spanning the B era it never walked, and
+   * `chainEventLogCoverageIncludes` is a plain `from <= x && through >= y` with
+   * no hole in it. A `topicSetVersion` bump on rebuild would force the backfill
+   * that closes it.
    */
   #seedBindings(): readonly HubBinding[] {
     if (this.#bindings.length > 0) return this.#bindings;

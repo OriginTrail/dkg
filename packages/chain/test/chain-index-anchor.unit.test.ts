@@ -7,6 +7,8 @@ import {
   resolveChainIndexAuthorityAnchor,
 } from '../src/chain-index/chain-index-anchor.js';
 import type { ChainEventLogState } from '../src/chain-index/chain-event-log.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from '../src/evm-adapter-constants.js';
+import { resolveEvmFinalityAnchorBlockV1 } from '../src/evm-finality-anchor.js';
 
 const STORAGE = `0x${'cd'.repeat(20)}`;
 const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
@@ -14,6 +16,18 @@ const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').r
 /** Chain time and wall clock agree in the fixture; each guard moves one of them. */
 const HEAD_TIMESTAMP_SECONDS = 1_700_000_000;
 const NOW_MS = HEAD_TIMESTAMP_SECONDS * 1_000;
+
+/**
+ * The PRODUCTION shape, not a convenient one: the tick holds its settled
+ * boundary `reorgHoldbackBlocks` under the head (evm-adapter-base.ts, which
+ * passes `CG_REGISTRY_REORG_BUFFER_BLOCKS`). A fixture with a shorter tail
+ * makes the live and log anchors agree by arithmetic accident at exactly the
+ * depths a test happens to pick, which is how a 49-block gap stayed invisible.
+ */
+const SETTLED = 100;
+const HEAD = SETTLED + CG_REGISTRY_REORG_BUFFER_BLOCKS;
+/** The ONE depth below the head that the settled boundary itself satisfies. */
+const SETTLED_DEPTH = HEAD - SETTLED + 1;
 
 function state(overrides: {
   settled?: number;
@@ -26,8 +40,8 @@ function state(overrides: {
   headTimestampSeconds?: number;
   suspectedForkBlockNumber?: number;
 } = {}): ChainEventLogState {
-  const settled = overrides.settled ?? 100;
-  const head = overrides.head ?? settled + 5;
+  const settled = overrides.settled ?? SETTLED;
+  const head = overrides.head ?? settled + CG_REGISTRY_REORG_BUFFER_BLOCKS;
   return {
     cursor: {
       revision: overrides.revision ?? 1,
@@ -75,25 +89,36 @@ describe('resolveChainIndexAuthorityAnchor', () => {
 
     // The same block `resolveEvmFinalityAnchorBlockV1` pins at depth 1, so
     // moving the authority index onto the log does not move its horizon.
-    expect(anchor?.finalized).toEqual({ number: 105, hash: hash(105) });
+    expect(anchor?.finalized).toEqual({ number: HEAD, hash: hash(HEAD) });
     expect(anchor?.head.timestampSeconds).toBe(HEAD_TIMESTAMP_SECONDS);
     expect(anchor?.complete).toBe(true);
     expect(anchor?.revision).toBe(1);
   });
 
-  it('drops to the settled boundary once the operator asks for depth', () => {
-    // head 105, depth 6 → the deepest admissible block is 100, which the head
-    // is not; the settled boundary is, and it is the only other block the log
+  it('takes the settled boundary only when the depth lands ON it', () => {
+    // head 150, depth 51 → the deepest admissible block is 100, which the head
+    // is not; the settled boundary IS, and it is the only other block the log
     // can name with a hash.
-    const { anchor } = resolve({ finalityConfirmations: 6 });
+    const { anchor } = resolve({ finalityConfirmations: SETTLED_DEPTH });
 
-    expect(anchor?.finalized).toEqual({ number: 100, hash: hash(100) });
+    expect(anchor?.finalized).toEqual({ number: SETTLED, hash: hash(SETTLED) });
+  });
+
+  it('refuses a depth whose anchor sits between the two blocks the log can name', () => {
+    // head 150, depth 6 → the live read would pin 145. The log can name 150
+    // (too shallow) and 100 (45 blocks STALER than 145, which no age guard
+    // here bounds), so there is no anchor to serve — only the live scan.
+    const result = resolve({ finalityConfirmations: 6 });
+
+    expect(result.anchor).toBeUndefined();
+    expect(result.refusal).toBe('behind-finality-anchor');
   });
 
   it('refuses when nothing the log can name is as DEEP as the operator asked', () => {
-    // depth 10 → deepest admissible is 96; the settled boundary is 100, above
-    // it, and the log holds no hash for 96.
-    expect(resolve({ finalityConfirmations: 10 }).refusal).toBe('below-finality-depth');
+    // depth 52 → deepest admissible is 99; the settled boundary is 100, above
+    // it, and the log holds no hash for 99.
+    expect(resolve({ finalityConfirmations: SETTLED_DEPTH + 1 }).refusal)
+      .toBe('below-finality-depth');
   });
 
   it('refuses a depth that is not an integer >= 1, rather than anchoring above the head', () => {
@@ -120,7 +145,7 @@ describe('resolveChainIndexAuthorityAnchor', () => {
 
   it('refuses when coverage stops below the anchor the depth selected', () => {
     // A catch-up still climbing: the head is known, the blocks under it are not.
-    const result = resolve({ state: state({ coveredThrough: 103 }) });
+    const result = resolve({ state: state({ coveredThrough: HEAD - 2 }) });
 
     expect(result.refusal).toBe('no-coverage');
   });
@@ -133,7 +158,7 @@ describe('resolveChainIndexAuthorityAnchor', () => {
   });
 
   it('S6: refuses an answer below this node own just-written block', () => {
-    expect(resolve({ requiredBlockNumber: 140 }).refusal).toBe('below-required-block');
+    expect(resolve({ requiredBlockNumber: HEAD + 1 }).refusal).toBe('below-required-block');
     expect(resolve({ requiredBlockNumber: 90 }).anchor).toBeDefined();
   });
 
@@ -171,6 +196,56 @@ describe('resolveChainIndexAuthorityAnchor', () => {
     const result = resolve({ state: state({ suspectedForkBlockNumber: 98 }) });
 
     expect(result.refusal).toBe('fork-suspected');
+  });
+});
+
+/**
+ * The one equivalence the module claims, measured against the function it
+ * claims equivalence WITH, at the production tail length.
+ *
+ * `resolveEvmFinalityAnchorBlockV1` is what every reader used before the log
+ * existed and what it falls back to on a refusal, so the property is not "the
+ * log anchor is deep enough" — deeper is the weaker side for a staleness-
+ * sensitive read — but "the log anchor is that block, or there is none".
+ */
+describe('resolveChainIndexAuthorityAnchor depth vs resolveEvmFinalityAnchorBlockV1', () => {
+  /** The live anchor over the same synthetic chain the fixture's cursor names. */
+  const liveAnchorAt = async (finalityConfirmations: number) => (
+    resolveEvmFinalityAnchorBlockV1({
+      finalityConfirmations,
+      readHead: async () => ({ number: HEAD, hash: hash(HEAD) }),
+      readBlockAt: async (blockNumber) => ({ number: blockNumber, hash: hash(blockNumber) }),
+      unavailable: (detail) => new Error(detail),
+    })
+  );
+
+  it.each([1, 2, 6, 25, 51, 52])(
+    'at depth %i serves the live anchor block itself or refuses outright',
+    async (finalityConfirmations) => {
+      const live = await liveAnchorAt(finalityConfirmations);
+      const { anchor, refusal } = resolve({ finalityConfirmations });
+
+      if (anchor === undefined) {
+        expect(refusal).toBeDefined();
+        return;
+      }
+      expect(anchor.finalized).toEqual({ number: live.number, hash: live.hash });
+    },
+  );
+
+  it('serves exactly the two depths the log can name, and refuses the rest', () => {
+    // Without this the ladder above is vacuous: refusing EVERY depth would
+    // satisfy it. Depth 1 is the head and depth 51 is the settled boundary —
+    // the two blocks the cursor carries a hash for — and nothing between or
+    // beyond them may be served.
+    expect(resolve({ finalityConfirmations: 1 }).anchor?.finalized)
+      .toEqual({ number: HEAD, hash: hash(HEAD) });
+    expect(resolve({ finalityConfirmations: SETTLED_DEPTH }).anchor?.finalized)
+      .toEqual({ number: SETTLED, hash: hash(SETTLED) });
+    expect(resolve({ finalityConfirmations: 2 }).refusal).toBe('behind-finality-anchor');
+    expect(resolve({ finalityConfirmations: 25 }).refusal).toBe('behind-finality-anchor');
+    expect(resolve({ finalityConfirmations: SETTLED_DEPTH + 1 }).refusal)
+      .toBe('below-finality-depth');
   });
 });
 

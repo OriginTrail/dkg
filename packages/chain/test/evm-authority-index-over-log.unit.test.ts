@@ -166,6 +166,7 @@ function makeReader(options: {
   store?: MemoryChainEventLogStore;
   source?: ChainEventLogAuthoritySource | undefined;
   contractAddress?: string;
+  finalityConfirmations?: number;
 } = {}) {
   const { provider, calls, authorityLogs } = makeProvider();
   const index = new ContextGraphAuthorityIndex(
@@ -198,7 +199,7 @@ function makeReader(options: {
     },
     resolveContractDeployBlock: async () => ({ fromBlock: DEPLOY_BLOCK }),
     pageSize: () => 2_000,
-    finalityConfirmations: () => 1,
+    finalityConfirmations: () => options.finalityConfirmations ?? 1,
     ...(options.source === undefined ? {} : { chainEventLogAuthority: () => options.source }),
   });
   reader.snapshots.open();
@@ -269,6 +270,31 @@ describe('Context Graph authority index over the one log', () => {
 
     expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
     expect(calls.getLogs).toBeGreaterThan(0);
+  });
+
+  it('keeps its live scan at a depth the log anchor would answer STALER than', async () => {
+    // The operator raised `chain.finalityConfirmations` to 2 — the first thing
+    // anyone does to be safer. The live read would pin head-1; the log can only
+    // name its settled boundary, 50 blocks under the head, and an authority
+    // roster read 49 blocks stale is how a participant revoked in between stays
+    // admitted. Nothing about the rows, the coverage or the clock changed.
+    const store = seededStore();
+    const { reader, calls, authorityLogs } = makeReader({
+      store,
+      source: logSource(store),
+      finalityConfirmations: 2,
+    });
+    authorityLogs.push(liveCreationLog(20, 7n, NAME_HASH));
+
+    expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+    // Fails CLOSED to the scan, never to an error, a 0 or an absence.
+    expect(calls.getLogs).toBeGreaterThan(0);
+
+    // And the depth is the ONLY reason: the same store, the same source and the
+    // same fold at the default depth still cost nothing.
+    const cheap = makeReader({ store, source: logSource(store) });
+    expect(await cheap.reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+    expect(cheap.calls.getLogs).toBe(0);
   });
 
   it('never reads a log bound to the ContextGraphStorage the Hub rotated away from', async () => {

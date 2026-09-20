@@ -122,7 +122,7 @@ interface EventRow {
 const TOMBSTONE_LINEAGE = '';
 
 function placeholders(count: number): string {
-  return new Array(count).fill('?').join(', ');
+  return Array.from({ length: count }, () => '?').join(', ');
 }
 
 /** The re-fetched range, or `undefined` when this commit replaces no tail. */

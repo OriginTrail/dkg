@@ -334,6 +334,13 @@ describe('knowledge asset read model — kaToContextGraph', () => {
   });
 
   it('serves a tail binding to the latest view', async () => {
+    // THE DOCUMENTED EXPOSURE, stated rather than glossed: the module's
+    // write-once justification is about a SETTLED row, so a tail row folded
+    // into a positive `bound` is an answer a tip reorg could still orphan. It
+    // stands because this view replaces an UNPINNED `eth_call` with the same
+    // tip exposure — plus up to one tick interval, because the tail is only
+    // replaced on the tick's NEXT pass. The `knowledgeAssetsFromLog` comment
+    // in evm-adapter-context-graph.ts carries that window.
     const store = seeded({ rows: [registration(103, 7n, 4242n, { settled: false })] });
     await expect(model(store).readContextGraphForKa(4242n, { view: 'latest' })).resolves.toEqual({
       kind: 'bound',

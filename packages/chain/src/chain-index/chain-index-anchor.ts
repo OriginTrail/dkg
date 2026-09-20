@@ -35,12 +35,21 @@ import {
  *    about what the answer is an answer about. The head's own block timestamp
  *    is the only evidence of that, and it is checked here for the SCAN, not
  *    only — as before — for a cached projection.
- * 3. DEPTH. The anchor must sit no shallower than
- *    `confirmedStateBlockAtHead(head, chain.finalityConfirmations)`, the node's
- *    single definition of finality. The log can name exactly two blocks with a
- *    hash — its observed head and its settled boundary — and the HIGHEST of
- *    those that satisfies the operator's depth is chosen, so at the default
- *    depth of 1 the anchor is the head, exactly as the live resolver's is.
+ * 3. DEPTH. The anchor must be the block
+ *    `confirmedStateBlockAtHead(head, chain.finalityConfirmations)` names, the
+ *    node's single definition of finality — that block EXACTLY, never merely
+ *    one at least as deep. "At least as deep" is only safe on the reorg axis;
+ *    on the STALENESS axis a deeper anchor is strictly weaker, and staleness is
+ *    what decides whether a revoked participant is still in the served roster.
+ *    Neither age guard above covers it: both are statements about `cursor.head`
+ *    and say nothing about `anchor.finalized`. The log can name exactly two
+ *    blocks with a hash — its observed head and its settled boundary — so at
+ *    the default depth of 1 the anchor is the head, exactly as the live
+ *    resolver's is, and at any other depth it is the settled boundary or there
+ *    is no anchor at all. Naming `head - confirmations + 1` for an arbitrary
+ *    depth would need the tick to record that block's hash; until it does, a
+ *    depth the two nameable blocks do not land on is a refusal, which is the
+ *    live scan.
  * 4. LINEAGE. A held fork suspicion means the tick saw its settled hash change
  *    and has not yet been able to confirm or withdraw it; nothing derived from
  *    that scope may be served until it does.
@@ -88,6 +97,13 @@ export type ChainIndexAnchorRefusal =
   | 'head-behind-chain-time'
   /** Nothing the log can name with a hash is as deep as the operator asked. */
   | 'below-finality-depth'
+  /**
+   * The deepest block the log can name is DEEPER than the finality anchor, so
+   * serving it would answer staler than the live read the caller would have
+   * done. Deeper is only "safer" against reorgs; against staleness it is the
+   * weaker side, and nothing else here bounds the distance.
+   */
+  | 'behind-finality-anchor'
   /** A settled-hash mismatch is held and not yet confirmed or withdrawn. */
   | 'fork-suspected';
 
@@ -174,10 +190,22 @@ export function resolveChainIndexAuthorityAnchor(
   }
 
   // DEPTH, from the node's single definition of it. The candidates are the two
-  // blocks the log can name WITH A HASH; the highest admissible one wins, so
-  // the default depth anchors on the head just as the live resolver does and a
-  // deeper one falls back to the settled boundary rather than to a block whose
-  // hash this log never recorded.
+  // blocks the log can name WITH A HASH, and the anchor is whichever of them IS
+  // `confirmedStateBlockAtHead` — the same block `resolveEvmFinalityAnchorBlockV1`
+  // would have pinned for this read, not merely one at least that deep.
+  //
+  // WHY EQUALITY, and not "deep enough". Taking the settled boundary whenever it
+  // clears the depth reads as the safe direction and is not: with the production
+  // `reorgHoldbackBlocks` of 50 it puts the anchor up to 49 blocks BELOW the live
+  // one the moment an operator raises the depth to 2 — and an authority answer
+  // this index gates catalog admission on is wrong when it is STALE, not only
+  // when it is shallow. A participant revoked thirty blocks ago would still be in
+  // the served roster. Neither age guard says anything about it: both are about
+  // `cursor.head`, coverage is satisfied BY DEFINITION at a lower anchor, and the
+  // reader's `accepts` predicate is presence-only, so an existing graph's stale
+  // state is accepted rather than discarded. Equality is the only bound that
+  // holds at EVERY `finalityConfirmations`, and missing it costs exactly the
+  // live scan that was here before the log existed.
   //
   // The depth is re-validated here rather than trusted from the caller, for the
   // same reason `resolveEvmFinalityAnchorBlockV1` re-validates it: a depth of 0
@@ -191,13 +219,20 @@ export function resolveChainIndexAuthorityAnchor(
   if (deepestAdmissible === null) {
     return Object.freeze({ refusal: 'below-finality-depth' as const });
   }
-  const finalized = head.number <= deepestAdmissible
+  const finalized = head.number === deepestAdmissible
     ? { number: head.number, hash: head.hash }
-    : (cursor.settledBlockNumber <= deepestAdmissible
+    : (cursor.settledBlockNumber === deepestAdmissible
       ? { number: cursor.settledBlockNumber, hash: cursor.settledBlockHash }
       : undefined);
   if (finalized === undefined) {
-    return Object.freeze({ refusal: 'below-finality-depth' as const });
+    // Two ways to miss it, and they are not the same failure. Above the anchor
+    // the log is too SHALLOW to answer at this depth; below it the log can only
+    // answer STALER than the caller's own read would have. Both refuse.
+    return Object.freeze({
+      refusal: cursor.settledBlockNumber > deepestAdmissible
+        ? ('below-finality-depth' as const)
+        : ('behind-finality-anchor' as const),
+    });
   }
 
   const coverage = findChainEventLogCoverage(

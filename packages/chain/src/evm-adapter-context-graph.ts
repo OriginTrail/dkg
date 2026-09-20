@@ -1116,13 +1116,24 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
    * The three `ContextGraphStorage` views below read the ONE log first.
    *
-   * `latest`, not `finalized`, and that is the whole reason they are safe to
-   * move: each one stands in for an UNPINNED `eth_call`, which is answered at
-   * the chain's current head and has exactly the tip-reorg exposure the
-   * `latest` view has — no more, and, bounded by the tick's own liveness gate,
-   * no staler than one interval. Reading them at the settled cursor instead
-   * would be a DIFFERENT answer, fifty blocks behind the call it replaces, and
-   * a KA registered inside that window would read as not registered.
+   * `latest`, not `finalized`, and that is what makes them stand in for the
+   * call at all: each one replaces an UNPINNED `eth_call`, answered at the
+   * chain's current head with that head's tip-reorg exposure. Reading them at
+   * the settled cursor instead would be a DIFFERENT answer, fifty blocks behind
+   * the call it replaces, and a KA registered inside that window would read as
+   * not registered.
+   *
+   * THE EXPOSURE IS THAT CALL'S WINDOW PLUS UP TO ONE TICK INTERVAL, and it is
+   * worth stating plainly rather than claiming parity. An `eth_call` self-heals
+   * the moment its endpoint follows a reorg; a tail row does not disappear
+   * until the tick's NEXT pass replaces the tail wholesale, so a registration
+   * orphaned by a tip reorg can still be folded into a positive `bound` (and
+   * into `getContextGraphKaCount`) for up to `chain.indexTickMs`. The module's
+   * write-once justification (knowledge-asset-read-model.ts) is about a SETTLED
+   * row and does not cover the tail. Bounded by the tick's own liveness gate,
+   * not attacker-choosable — the id must have been emitted on a fork this
+   * node's own tick followed — and `verifyContextGraphBinding` still
+   * cross-checks the local id on the admission path this reaches.
    *
    * Every refusal — a cold log, a stalled tick, a held fork suspicion, a
    * backfill that has not reached the graph's creation block, an ordinal past
