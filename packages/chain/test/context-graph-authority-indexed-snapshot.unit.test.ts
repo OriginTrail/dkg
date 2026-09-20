@@ -1796,6 +1796,52 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     expect(harness.evidence.headReads).toEqual([30, 30]);
   });
 
+  it.each([
+    ['duplicate', NAME_HASH, 'ambiguous'],
+    ['unique', LATE_NAME_HASH, '11'],
+  ] as const)(
+    'invalidates a warm projection after a %s-name Context Graph create',
+    async (_case, createdNameHash, expected) => {
+      const harness = makeTimedAdapter({ lateContextGraphNameHash: createdNameHash });
+      const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+      await expect(reader.resolveFinalizedContextGraphIdByNameHash!(NAME_HASH)).resolves.toBe(9n);
+
+      const adapter = harness.adapter as any;
+      adapter.contracts.contextGraphs = {};
+      adapter.contracts.contextGraphStorage.interface = {
+        parseLog: () => ({
+          name: 'ContextGraphCreated',
+          args: { contextGraphId: 11n },
+        }),
+      };
+      adapter.sendContractTransaction = async () => {
+        harness.advanceAuthorityHead();
+        return {
+          hash: `0x${'ab'.repeat(32)}`,
+          blockNumber: 31,
+          index: 0,
+          status: 1,
+          logs: [{ topics: [], data: '0x' }],
+        };
+      };
+
+      await expect(harness.adapter.createOnChainContextGraph({
+        accessPolicy: 1,
+        publishPolicy: 0,
+        nameHash: createdNameHash,
+      })).resolves.toMatchObject({ success: true, contextGraphId: 11n });
+
+      const read = reader.resolveFinalizedContextGraphIdByNameHash!(createdNameHash);
+      if (expected === 'ambiguous') {
+        await expect(read).rejects.toThrow('ambiguous across 2 finalized Context Graphs');
+      } else {
+        await expect(read).resolves.toBe(11n);
+      }
+      expect(harness.evidence.headReads).toEqual([30, 35]);
+      expect(harness.evidence.indexRanges.at(-1)).toEqual([31, 35]);
+    },
+  );
+
   it('misses for a rotated ContextGraphStorage address although nothing cleared the index', async () => {
     const harness = makeTimedAdapter();
     const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;

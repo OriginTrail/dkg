@@ -53,9 +53,7 @@ export function collectEvmErrorText(err: unknown): string {
 /** Client-independent text boundary for a requested block the endpoint cannot serve. */
 export function evmErrorTextIndicatesUnavailableBlock(text: string): boolean {
   const normalized = text.toLowerCase();
-  return normalized.includes('header not found')
-    || normalized.includes('unknown block')
-    || normalized.includes('block not found');
+  return /\b(?:header not found|unknown block|block not found)\b/u.test(normalized);
 }
 
 /** Flatten provider wrappers before applying the shared block-unavailable classifier. */

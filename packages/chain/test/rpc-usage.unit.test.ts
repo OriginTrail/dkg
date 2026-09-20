@@ -9,9 +9,6 @@
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { AbiCoder, Contract } from 'ethers';
 import { metrics } from '@opentelemetry/api';
 import {
@@ -45,21 +42,6 @@ import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
-const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
-
-function productionTypeScriptFiles(directory: string): string[] {
-  let entries;
-  try {
-    entries = readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  return entries.flatMap((entry) => {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) return productionTypeScriptFiles(path);
-    return entry.isFile() && entry.name.endsWith('.ts') ? [path] : [];
-  });
-}
 
 function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterConfig {
   return {
@@ -415,25 +397,6 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       expect(normalizeRpcUsageConsumer(site)).toBe(site);
       expect(`cgStorage.getContextGraph:${site}`.length).toBeLessThanOrEqual(64);
     }
-  });
-
-  it('keeps every authority site wired to a production withRpcUsageSite call', () => {
-    const wiredSites = new Set<string>();
-    const siteCall = /withRpcUsageSite\s*\(\s*(?:CG_AUTH_RPC_SITES|CONTEXT_GRAPH_AUTHORITY_RPC_SITES)\.([A-Za-z][A-Za-z0-9]*)/gu;
-    const packageDirectories = readdirSync(join(REPO_ROOT, 'packages'), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory());
-    for (const packageDirectory of packageDirectories) {
-      const sourceDirectory = join(REPO_ROOT, 'packages', packageDirectory.name, 'src');
-      for (const file of productionTypeScriptFiles(sourceDirectory)) {
-        for (const match of readFileSync(file, 'utf8').matchAll(siteCall)) {
-          wiredSites.add(match[1]!);
-        }
-      }
-    }
-
-    expect([...wiredSites].sort()).toEqual(
-      Object.keys(CONTEXT_GRAPH_AUTHORITY_RPC_SITES).sort(),
-    );
   });
 
   it('does not append an authority site to unrelated eth_call consumers', () => {

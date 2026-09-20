@@ -813,58 +813,61 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // approve it to the facade and retry once. The common path (deposit dormant)
     // is a single tx with NO extra eth_call, so it never perturbs timing-
     // sensitive integration tests.
-    const receipt = await (async () => {
-      try {
-        return await submitCreate();
-      } catch (err) {
-        // Only the deposit-allowance revert is recoverable here. Mirror the
-        // publish/update allowance recovery (`isTooLowAllowanceError`): an
-        // unrelated first-attempt revert (invalid access/publish policy, PCA
-        // coherence failure, paused contract, insufficient balance, RPC error)
-        // must NOT trigger a state-changing TRAC approval before re-failing.
-        if (!isTooLowAllowanceError(err)) {
-          throw err;
-        }
-        // #1340: read the deposit through the RPC-failover facade (`readContract`),
-        // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
-        // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
-        // approve + retry below never run, defeating failover for a new CG's first
-        // publish. `readContract` fails over on transport errors (429/5xx/timeout)
-        // and rethrows a decoded revert unchanged; the catch → 0n now fires only
-        // when ALL endpoints fail or the deposit is genuinely dormant.
-        const ps = this.contracts.parametersStorage as Contract | undefined;
-        let deposit = 0n;
+    const receipt = await sendContextGraphAuthorityTransaction(
+      async () => {
         try {
-          deposit = ps
-            ? await this.readContract<bigint>(
-                ps,
-                'parametersStorage.contextGraphRegistrationDeposit',
-                'contextGraphRegistrationDeposit',
-              )
-            : 0n;
-        } catch {
-          deposit = 0n;
+          return await submitCreate();
+        } catch (err) {
+          // Only the deposit-allowance revert is recoverable here. Mirror the
+          // publish/update allowance recovery (`isTooLowAllowanceError`): an
+          // unrelated first-attempt revert (invalid access/publish policy, PCA
+          // coherence failure, paused contract, insufficient balance, RPC error)
+          // must NOT trigger a state-changing TRAC approval before re-failing.
+          if (!isTooLowAllowanceError(err)) {
+            throw err;
+          }
+          // #1340: read the deposit through the RPC-failover facade (`readContract`),
+          // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
+          // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
+          // approve + retry below never run, defeating failover for a new CG's first
+          // publish. `readContract` fails over on transport errors (429/5xx/timeout)
+          // and rethrows a decoded revert unchanged; the catch → 0n now fires only
+          // when ALL endpoints fail or the deposit is genuinely dormant.
+          const ps = this.contracts.parametersStorage as Contract | undefined;
+          let deposit = 0n;
+          try {
+            deposit = ps
+              ? await this.readContract<bigint>(
+                  ps,
+                  'parametersStorage.contextGraphRegistrationDeposit',
+                  'contextGraphRegistrationDeposit',
+                )
+              : 0n;
+          } catch {
+            deposit = 0n;
+          }
+          if (deposit === 0n) throw err;
+          try {
+            await this.ensureV10ApproveTrac(
+              this.signer,
+              await contextGraphs.getAddress(),
+              deposit,
+              'cg registration deposit',
+              true,
+            );
+          } catch (approvalError) {
+            // The initial create attempt has definitively reverted with
+            // TooLowAllowance and the retry has not been submitted yet. Even if
+            // the approval receipt itself is ambiguous, it cannot have created
+            // the Context Graph. Preserve that distinction for the agent's
+            // durable registration state machine.
+            throw markContextGraphRegistrationNotSubmitted(approvalError);
+          }
+          return submitCreate();
         }
-        if (deposit === 0n) throw err;
-        try {
-          await this.ensureV10ApproveTrac(
-            this.signer,
-            await contextGraphs.getAddress(),
-            deposit,
-            'cg registration deposit',
-            true,
-          );
-        } catch (approvalError) {
-          // The initial create attempt has definitively reverted with
-          // TooLowAllowance and the retry has not been submitted yet. Even if
-          // the approval receipt itself is ambiguous, it cannot have created
-          // the Context Graph. Preserve that distinction for the agent's
-          // durable registration state machine.
-          throw markContextGraphRegistrationNotSubmitted(approvalError);
-        }
-        return submitCreate();
-      }
-    })();
+      },
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
+    );
 
     let contextGraphId: bigint | undefined;
     for (const log of receipt.logs) {

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ChainAdapter } from './chain-adapter.js';
+
 /** Evidence that makes one solved-period observation reusable across ticks. */
 export interface RandomSamplingReadContext {
   readonly bindingId: string;
@@ -16,21 +18,19 @@ export interface RandomSamplingReadContextReader {
   isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean;
 }
 
-/** Bind the all-or-nothing capability without widening ChainAdapter. */
+/** Bind the optional broad-adapter methods into one all-or-nothing capability. */
 export function bindRandomSamplingReadContextReader(
-  value: unknown,
+  adapter: ChainAdapter,
 ): RandomSamplingReadContextReader | undefined {
-  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
-    return undefined;
-  }
-  const candidate = value as Partial<RandomSamplingReadContextReader>;
+  const readContext = adapter.readRandomSamplingContext;
+  const isCurrent = adapter.isRandomSamplingReadContextCurrent;
   if (
-    typeof candidate.readRandomSamplingContext !== 'function'
-    || typeof candidate.isRandomSamplingReadContextCurrent !== 'function'
+    typeof readContext !== 'function'
+    || typeof isCurrent !== 'function'
   ) return undefined;
   return Object.freeze({
-    readRandomSamplingContext: () => candidate.readRandomSamplingContext!.call(value),
+    readRandomSamplingContext: () => readContext.call(adapter),
     isRandomSamplingReadContextCurrent: (context: RandomSamplingReadContext) =>
-      candidate.isRandomSamplingReadContextCurrent!.call(value, context),
+      isCurrent.call(adapter, context),
   });
 }
