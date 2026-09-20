@@ -68,9 +68,11 @@ reconciliation, provider selection, or counter drain.
   bounded and code-owned. RPC URLs, addresses, graph identifiers, query text,
   request identifiers, tickets, and credentials are never stored.
 - Consumer labels cross a second fail-closed privacy boundary before cumulative
-  storage. Credential markers, address/key-shaped hexadecimal material, UUIDs,
-  long numeric identifiers, JWTs, common key prefixes, and opaque mixed
-  alphanumeric identifiers collapse to `other`; raw values are not retained.
+  storage. Only the frozen, code-owned
+  `RPC_USAGE_SNAPSHOT_CONSUMERS` vocabulary (version 1) can be retained; every
+  unknown value collapses to `other`. Adding a legitimate label therefore
+  requires an explicit code and contract-test change. Raw unknown values are
+  never retained.
 - `processEpoch` changes on process restart and invalidates a start/end interval.
   `populationEpoch` starts at zero and increases once per tracker construction;
   it equals the sum of `totalRegisteredTrackers` across the four source entries.

@@ -100,7 +100,13 @@ export class EvmReceiptFinalityReader {
           canonical: header.hash === receipt.blockHash.toLowerCase(),
         };
       },
-      { signal: options.signal, deadlineMs: options.deadlineMs },
+      {
+        signal: options.signal,
+        deadlineMs: options.deadlineMs,
+        // The callback assigns the two physical header reads separately. Do
+        // not let the outer failover label overwrite those fixed consumers.
+        rpcUsageConsumer: null,
+      },
     );
     return resolved?.canonical === true ? resolved.header : null;
   }

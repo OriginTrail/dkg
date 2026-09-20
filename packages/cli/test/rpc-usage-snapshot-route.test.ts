@@ -97,10 +97,19 @@ describe('RPC usage snapshot diagnostic route', () => {
     expect(JSON.parse(out.body() ?? '')).toEqual(snapshot());
   });
 
-  it('never serializes a credential-shaped consumer from retained accounting', () => {
+  it('serializes unknown credentials, IDs, graph names, and query labels only as other', () => {
     const cumulative = new RpcUsageCumulativeAccumulator('epoch-private-route');
     const tracker = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
-    withRpcUsageConsumer('Bearer fixture-secret-token', () => tracker.record('eth_call'));
+    const unknownConsumers = [
+      'Bearer fixture-secret-token',
+      'request.01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      'request.cuidclh0am13x0000w5a0k2q4g',
+      'graph.customer-private',
+      'query.select_name_from_graph',
+    ];
+    for (const consumer of unknownConsumers) {
+      withRpcUsageConsumer(consumer, () => tracker.record('eth_call'));
+    }
     const out = response();
 
     expect(handleRpcUsageSnapshotRequest({
@@ -112,10 +121,17 @@ describe('RPC usage snapshot diagnostic route', () => {
     })).toBe(true);
 
     expect(out.status()).toBe(200);
-    expect(out.body()).not.toContain('Bearer');
-    expect(out.body()).not.toContain('fixture-secret-token');
+    for (const fragment of [
+      'Bearer',
+      '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      'cuidclh0am13x0000w5a0k2q4g',
+      'customer-private',
+      'select_name_from_graph',
+    ]) {
+      expect(out.body()).not.toContain(fragment);
+    }
     const body = JSON.parse(out.body() ?? '') as RpcUsageCumulativeSnapshot;
-    expect(body.cumulative.consumers.eth_call).toEqual({ other: 1 });
+    expect(body.cumulative.consumers.eth_call).toEqual({ other: unknownConsumers.length });
   });
 
   it('does not capture for unauthenticated, non-local, or non-GET requests', () => {

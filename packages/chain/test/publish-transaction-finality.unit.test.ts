@@ -124,10 +124,10 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
         return { number: 123, hash: BLOCK_HASH };
       },
     };
-    const reader = new EvmReceiptFinalityReader(
-      2,
+    const readProvider: ReceiptFinalityProviderReader = vi.fn(
       async (_label, read) => read(provider as never),
     );
+    const reader = new EvmReceiptFinalityReader(2, readProvider);
 
     await expect(reader.read({ blockNumber: 123, blockHash: BLOCK_HASH }))
       .resolves.toMatchObject({ number: 123, hash: BLOCK_HASH });
@@ -135,6 +135,11 @@ describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
       { method: 'eth_blockNumber', consumer: 'receiptFinality.head', count: 1 },
       { method: 'eth_getBlockByNumber', consumer: 'receiptFinality.header', count: 1 },
     ]);
+    expect(readProvider).toHaveBeenCalledWith(
+      'publish receipt finality',
+      expect.any(Function),
+      expect.objectContaining({ rpcUsageConsumer: null }),
+    );
   });
 
   function chainOver(script: {

@@ -29,6 +29,7 @@ import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
   type ContextGraphAuthorityRpcSite,
 } from './context-graph-authority-rpc-sites.js';
 
@@ -354,17 +355,176 @@ export function normalizeRpcUsageConsumer(consumer: string | undefined): string 
   return normalized;
 }
 
-const RPC_USAGE_SNAPSHOT_SENSITIVE_MARKER =
-  /(?:^|[_.:-])(?:bearer|authorization|credentials?|password|passwd|secret|mnemonic|seed(?:phrase)?|private[-_.:]?key|api[-_.:]?key|access[-_.:]?token|refresh[-_.:]?token|auth[-_.:]?token|rpc[-_.:]?url)(?:$|[_.:-])/i;
-const RPC_USAGE_SNAPSHOT_HEX_MATERIAL =
-  /0x[0-9a-f]{16,}|(?:^|[_.:-])[0-9a-f]{32,}(?:$|[_.:-])/i;
-const RPC_USAGE_SNAPSHOT_UUID =
-  /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
-const RPC_USAGE_SNAPSHOT_LONG_DECIMAL = /(?:^|[_.:-])\d{8,}(?:$|[_.:-])/;
-const RPC_USAGE_SNAPSHOT_KNOWN_KEY_PREFIX =
-  /(?:^|[_.:-])(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{8,}|(?:^|[_.:-])AKIA[A-Z0-9]{12,}/i;
-const RPC_USAGE_SNAPSHOT_JWT =
-  /(?:^|[_.:-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:$|[_.:-])/;
+const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
+  // Explicit remainder and overflow buckets.
+  'unattributed',
+  'other',
+
+  // Fixed header reads.
+  'chainIndex.head',
+  'chainIndex.lineage',
+  'chainIndex.authorityLineage',
+  'authorityIndex.head',
+  'authorityIndex.anchor',
+  'authorityIndex.lineage',
+  'authorityIndex.stabilize',
+  'authorityProjection.validateAnchor',
+  'receiptFinality.head',
+  'receiptFinality.header',
+
+  // Event-log scans.
+  'eventLogPageScan',
+  'getMaxKaNumberForAuthor',
+  'listContextGraphsFromChain',
+  'repairContextGraphRegistry',
+  'resolveContextGraphIdByNameHash',
+  'kasV9.queryFilter(KnowledgeBatchCreated)',
+  'cgStorage.queryFilter(ContextGraphExpanded)',
+  'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)',
+  'kas.queryFilter(KnowledgeAssetCreated)',
+  'kas.queryFilter(KnowledgeAssetsMinted)',
+  'kas.queryFilter(Transfer)',
+  'cgNameRegistry.queryFilter(NameClaimed)',
+  'cgStorage.queryFilter(ContextGraphCreated)',
+  'profileStorage.queryFilter(RelayCapabilityUpdated)',
+
+  // Provider reads and fixed projection operations.
+  'transaction lookup',
+  'publish wallet native balance',
+  'allowance visibility poll',
+  'getBlock',
+  'getBlockNumber',
+  'getNetwork (chainId)',
+  'validate configured chainId',
+  'hasContractCode getCode',
+  'DKGKnowledgeAssets.getMaxKaNumberForAuthor',
+  'DKGKnowledgeAssets getCode',
+  'Hub rotation poll getBlockNumber',
+  'Hub rotation poll getLogs',
+  'Hub rotation poll initial getBlockNumber',
+  'resolveContextGraphIdByNameHash current-slot anchor',
+  'resolveContextGraphIdByNameHash validate current-slot anchor',
+  'getContextGraphAuthoritySnapshot',
+  'conviction getBlock',
+  'confirmation-depth chain-proof snapshot',
+  'publish receipt finality',
+  'resolveFinalizedContextGraphIdByNameHash',
+  'resolveFinalizedContextGraphIdsByNameHashes',
+  'resolveFinalizedContextGraphAuthoritySnapshotByNameHash',
+  'resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes',
+  'readContextGraphAuthorityIndexRevisions',
+  'readContextGraphAuthorityIndexSnapshots',
+
+  // Browser-wallet RPC labels are generated from the closed method union.
+  'browser wallet rpc eth_chainId',
+  'browser wallet rpc eth_call',
+  'browser wallet rpc eth_getTransactionReceipt',
+  'browser wallet rpc eth_getTransactionByHash',
+  'browser wallet rpc eth_blockNumber',
+  'browser wallet rpc eth_getBlockByNumber',
+
+  // Fixed contract-view labels.
+  'parametersStorage.minimumRequiredSignatures',
+  'parametersStorage.contextGraphRegistrationDeposit',
+  'shardingTableStorage.nodeExists',
+  'shardingTable.getShardingTable',
+  'identityStorage.getIdentityId',
+  'identityStorage.keyHasPurpose',
+  'contextGraphs.isAuthorizedPublisher',
+  'token.allowance',
+  'token.balanceOf',
+  'IERC1271.isValidSignature',
+  'chronos.getCurrentEpoch',
+  'cgStorage.isContextGraphActive',
+  'cgStorage.kaToContextGraph',
+  'cgStorage.getContextGraphKaCount',
+  'cgStorage.getContextGraphKaAt',
+  'cgStorage.getAccessPolicy',
+  'cgStorage.getPublishPolicy',
+  'cgStorage.getParticipantAgents',
+  'cgStorage.getNameHash',
+  'pcaNFT.agentToAccountId',
+  'pcaNFT.accounts',
+  'pcaNFT.getRemainingAllowance',
+  'pcaNFT.ownerOf',
+  'pcaNFT.getAccountInfo',
+  'pcaNFT.isAgent',
+  'pcaNFT.balanceOf',
+  'pcaNFT.tokenOfOwnerByIndex',
+  'pcaNFT.getRegisteredAgents',
+  'profileStorage.getRelayCapable',
+  'askStorage.getStakeWeightedAverageAsk',
+  'kas.getLatestMerkleRoot',
+  'kas.getKnowledgeAssetUpdateContext',
+  'kas.getMerkleRootsAtUpdateBlock',
+  'kas.getMerkleRootsBeforeUpdateBlock',
+  'kas.getTokenAmount',
+  'kas.getMerkleRoots',
+  'kas.getLatestMerkleRootPublisher',
+  'kas.getLatestMerkleRootAuthor',
+  'kas.getMerkleLeafCount',
+  'kas.getCatalogRoot',
+  'kas.getCatalogLeafCount',
+  'kasV9.getBatchPublisher',
+  'kasV9.getPublisherRangesCount',
+  'kasV9.getPublisherRange',
+  'DKGKnowledgeAssets.ownerOf',
+  'rss.getNodeChallenge',
+  'rss.getNodeEpochProofPeriodScore',
+] as const;
+
+const RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES = [
+  'RandomSampling',
+  'RandomSamplingStorage',
+  'IdentityStorage',
+  'ConvictionStakingStorage',
+  'StakingStorage',
+  'Identity',
+  'Profile',
+  'ParametersStorage',
+  'Staking',
+  'ProfileStorage',
+  'KnowledgeAssets',
+  'AskStorage',
+  'ContextGraphNameRegistry',
+  'ContextGraphs',
+  'KnowledgeAssetsLifecycle',
+  'DKGPublishingConvictionNFT',
+  'Chronos',
+  'Token',
+  'StakingV10',
+] as const;
+
+const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
+  'DKGKnowledgeAssets',
+  'KnowledgeAssetsStorage',
+  'ContextGraphStorage',
+] as const;
+
+/** Update deliberately when a new code-owned consumer is added. */
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 1 as const;
+
+/** Complete closed vocabulary that the cumulative diagnostic may serialize. */
+export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(
+  [...new Set([
+    ...RPC_USAGE_SNAPSHOT_RAW_CONSUMERS,
+    ...RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES.map(
+      (name) => `Hub.getContractAddress(${name})`,
+    ),
+    ...RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES.map(
+      (name) => `Hub.getAssetStorageAddress(${name})`,
+    ),
+    CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+    ...Object.values(CONTEXT_GRAPH_AUTHORITY_RPC_SITES).map(
+      (site) => `${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:${site}`,
+    ),
+  ])]
+    .map((consumer) => normalizeRpcUsageConsumer(consumer) ?? 'other')
+    .sort(),
+);
+
+const RPC_USAGE_SNAPSHOT_CONSUMER_SET: ReadonlySet<string> =
+  new Set(RPC_USAGE_SNAPSHOT_CONSUMERS);
 
 /**
  * Final privacy boundary for consumer labels retained by process snapshots.
@@ -372,33 +532,15 @@ const RPC_USAGE_SNAPSHOT_JWT =
  * Existing window drains keep their diagnostic labels, but the authenticated
  * cumulative route is long-lived and machine-readable. Even an accidentally
  * caller-supplied label must therefore fail closed before it reaches retained
- * storage. Code-owned descriptive labels remain intact; credential, address,
- * key-material and opaque-id shapes collapse to the fixed `other` bucket.
+ * storage. Only the exported, versioned code-owned vocabulary can survive;
+ * every unknown value collapses to the fixed `other` bucket.
  */
 export function boundedRpcUsageSnapshotConsumerLabel(
   consumer: string | undefined,
 ): string | undefined {
   const normalized = normalizeRpcUsageConsumer(consumer);
-  if (normalized === undefined || normalized === 'other' || normalized === 'unattributed') {
-    return normalized;
-  }
-  if (
-    RPC_USAGE_SNAPSHOT_SENSITIVE_MARKER.test(normalized)
-    || RPC_USAGE_SNAPSHOT_HEX_MATERIAL.test(normalized)
-    || RPC_USAGE_SNAPSHOT_UUID.test(normalized)
-    || RPC_USAGE_SNAPSHOT_LONG_DECIMAL.test(normalized)
-    || RPC_USAGE_SNAPSHOT_KNOWN_KEY_PREFIX.test(normalized)
-    || RPC_USAGE_SNAPSHOT_JWT.test(normalized)
-  ) return 'other';
-
-  for (const component of normalized.split(/[_.:-]/)) {
-    if (
-      component.length >= 32
-      && /[A-Za-z]/.test(component)
-      && /\d/.test(component)
-    ) return 'other';
-  }
-  return normalized;
+  if (normalized === undefined) return undefined;
+  return RPC_USAGE_SNAPSHOT_CONSUMER_SET.has(normalized) ? normalized : 'other';
 }
 
 /** Run a provider read under a bounded diagnostic consumer label. */

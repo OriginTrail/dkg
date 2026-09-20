@@ -29,6 +29,8 @@ import {
   normalizeRpcUsageWindow,
   normalizeRpcUsageConsumer,
   RPC_ENDPOINT_SLOT_LABELS,
+  RPC_USAGE_SNAPSHOT_CONSUMERS,
+  RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
   rpcUsageWindowTotal,
   RpcUsageCumulativeAccumulator,
   RpcUsageTracker,
@@ -318,7 +320,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('non-draining cumulative snapshots remain stable across repeated snapshots and drains', () => {
     const cumulative = new RpcUsageCumulativeAccumulator('epoch-fixed');
     const t = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
-    withRpcUsageConsumer('unit.header', () => t.record('eth_getBlockByNumber'));
+    withRpcUsageConsumer('chainIndex.head', () => t.record('eth_getBlockByNumber'));
     t.record('eth_call');
 
     const clock = {
@@ -351,7 +353,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       cumulative: {
         methods: { eth_getBlockByNumber: 1, eth_call: 1 },
         consumers: {
-          eth_getBlockByNumber: { 'unit.header': 1 },
+          eth_getBlockByNumber: { 'chainIndex.head': 1 },
           eth_call: { unattributed: 1 },
         },
         adapterRoles: {
@@ -408,7 +410,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     }
   });
 
-  it('detects process replacement by epoch and bounds cumulative label storage', () => {
+  it('detects process replacement and collapses every unknown consumer into one bucket', () => {
     const first = new RpcUsageCumulativeAccumulator('epoch-a');
     const restarted = new RpcUsageCumulativeAccumulator('epoch-b');
     expect(first.snapshot().processEpoch).not.toBe(restarted.snapshot().processEpoch);
@@ -419,10 +421,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       t.drainWindow();
     }
     const consumers = first.snapshot().cumulative.consumers.eth_getBlockByNumber;
-    expect(Object.keys(consumers)).toHaveLength(
-      RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD + 1,
-    );
-    expect(consumers.other).toBe(5);
+    expect(consumers).toEqual({
+      other: RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD + 5,
+    });
   });
 
   it('captures a construction role once and never carries arbitrary role labels', () => {
@@ -444,41 +445,80 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     });
   });
 
-  it('redacts credential, address, key-material, and opaque-id consumers before cumulative storage', () => {
+  it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
+    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(1);
+    expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(159);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
+      [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
+    );
+    for (const consumer of RPC_USAGE_SNAPSHOT_CONSUMERS) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(consumer);
+    }
+    for (const site of Object.values(CONTEXT_GRAPH_AUTHORITY_RPC_SITES)) {
+      const composed = `${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:${site}`;
+      expect(boundedRpcUsageSnapshotConsumerLabel(composed)).toBe(composed);
+    }
+    for (const [raw, normalized] of [
+      ['getNetwork (chainId)', 'getNetwork_chainId'],
+      ['Hub.getContractAddress(Identity)', 'Hub.getContractAddress_Identity'],
+      ['kas.queryFilter(KnowledgeAssetCreated)', 'kas.queryFilter_KnowledgeAssetCreated'],
+    ] as const) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(raw)).toBe(normalized);
+    }
+  });
+
+  it('maps credentials and every unknown arbitrary identifier to other before storage', () => {
     const cumulative = new RpcUsageCumulativeAccumulator('epoch-private');
     const tracker = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
     const unsafeConsumers = [
       'Bearer fixture-secret-token',
       `wallet.0x${'ab'.repeat(20)}`,
-      `privateKey.${'cd'.repeat(32)}`,
-      'request.550e8400-e29b-41d4-a716-446655440000',
-      'job.12345678',
-      'opaque.AbCdEfGhIjKlMnOpQrStUvWxYz012345',
-      'sk-live-fixtureCredential123',
-      'eyJfixtureHeader1.eyJfixturePayload2.fixtureSignature3',
+      'request.01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      'request.cuidclh0am13x0000w5a0k2q4g',
+      'request.4ER7u3vQ',
+      'graph.customer-private',
+      'query.select_name_from_graph',
     ];
     for (const consumer of unsafeConsumers) {
       withRpcUsageConsumer(consumer, () => tracker.record('eth_call'));
     }
-    for (const consumer of [
+    const legitimateConsumers = [
       'listContextGraphsFromChain',
       'authorityProjection.validateAnchor',
       'token.balanceOf',
-    ]) {
-      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(consumer);
+      'pcaNFT.getAccountInfo',
+      'Hub.getContractAddress(Identity)',
+      'eventLogPageScan',
+    ];
+    for (const consumer of legitimateConsumers) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(
+        normalizeRpcUsageConsumer(consumer),
+      );
       withRpcUsageConsumer(consumer, () => tracker.record('eth_call'));
     }
 
     const snapshot = cumulative.snapshot();
-    expect(snapshot.cumulative.methods.eth_call).toBe(unsafeConsumers.length + 3);
+    expect(snapshot.cumulative.methods.eth_call).toBe(
+      unsafeConsumers.length + legitimateConsumers.length,
+    );
     expect(snapshot.cumulative.consumers.eth_call).toEqual({
       other: unsafeConsumers.length,
       listContextGraphsFromChain: 1,
       'authorityProjection.validateAnchor': 1,
       'token.balanceOf': 1,
+      'pcaNFT.getAccountInfo': 1,
+      'Hub.getContractAddress_Identity': 1,
+      eventLogPageScan: 1,
     });
     const serialized = JSON.stringify(snapshot).toLowerCase();
-    for (const fragment of ['fixture-secret-token', '550e8400', '12345678', 'abcdef']) {
+    for (const fragment of [
+      'fixture-secret-token',
+      '01arz3nd',
+      'cuidclh0',
+      'customer-private',
+      'select_name_from_graph',
+    ]) {
       expect(serialized).not.toContain(fragment);
     }
   });
@@ -821,7 +861,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
     try {
       await expect(withRpcUsageConsumer(
-        'unit.getLogs.retry',
+        'eventLogPageScan',
         () => provider.send('eth_getLogs', [{ fromBlock: '0x0', toBlock: '0x1' }]),
       )).rejects.toBeTruthy();
 
@@ -830,12 +870,12 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       expect(hits).toBe(2);
       expect(usage.byMethod.eth_getLogs).toBe(hits);
       expect(usage.attributions).toEqual([
-        { method: 'eth_getLogs', consumer: 'unit.getLogs.retry', endpointSlot: 'fallback_3', count: hits },
+        { method: 'eth_getLogs', consumer: 'eventLogPageScan', endpointSlot: 'fallback_3', count: hits },
       ]);
       const snapshot = cumulative.snapshot();
       expect(snapshot.cumulative.methods.eth_getLogs).toBe(hits);
       expect(snapshot.cumulative.consumers.eth_getLogs).toEqual({
-        'unit.getLogs.retry': hits,
+        eventLogPageScan: hits,
       });
       expect(snapshot.cumulative.adapterRoles.eth_getLogs).toEqual({ main_agent: hits });
     } finally {

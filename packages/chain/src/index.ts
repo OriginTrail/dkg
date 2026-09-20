@@ -160,6 +160,8 @@ export {
   mergeRpcUsageWindows,
   RPC_ENDPOINT_SLOT_LABELS,
   RPC_USAGE_ADAPTER_ROLES,
+  RPC_USAGE_SNAPSHOT_CONSUMERS,
+  RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
   normalizeRpcUsageWindow,
   normalizeRpcUsageAdapterRole,
   normalizeRpcEndpointSlotLabel,
