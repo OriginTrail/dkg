@@ -16,6 +16,7 @@ import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
 import {
   contextGraphAuthorityIndexProjectionFault,
+  isContextGraphAuthorityIndexProjectionFault,
   resolveProjectionFetchedAtMs,
   contextGraphAuthorityIndexScope,
   type ContextGraphAuthorityIndexCompletedProjection,
@@ -113,14 +114,6 @@ function admitContextGraphAuthorityLogFold<T>(
   } catch (fault) {
     return Object.freeze({ kind: 'fault' as const, fault });
   }
-}
-
-function isContextGraphAuthorityProjectionFault(
-  value: unknown,
-): value is ContextGraphAuthorityIndexProjectionFault {
-  return typeof value === 'object'
-    && value !== null
-    && (value as { kind?: unknown }).kind === 'context-graph-authority-projection-fault';
 }
 
 /**
@@ -866,7 +859,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         );
         // This call supplies no log admission predicate, so the fault arm is
         // unreachable. Keep the guard at the boundary if that ever changes.
-        if (isContextGraphAuthorityProjectionFault(result)) throw result.fault;
+        if (isContextGraphAuthorityIndexProjectionFault(result)) throw result.fault;
       },
     } satisfies ContextGraphAuthorityIndexSnapshots),
     async whenIdle(): Promise<void> {

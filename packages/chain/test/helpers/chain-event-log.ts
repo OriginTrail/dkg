@@ -8,6 +8,7 @@ import type {
   ChainEventLogState,
   ChainEventLogStore,
 } from '../../src/chain-index/chain-event-log.js';
+import { CHAIN_EVENT_LOG_ZERO_HASH } from '../../src/chain-index/chain-index-tick.js';
 
 /**
  * In-memory twin of the SQLite log store.
@@ -114,6 +115,12 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
   }
 
   async blockHashAt(_scope: string, blockNumber: number): Promise<string | undefined> {
+    const cursor = this.#state?.cursor;
+    if (cursor?.settledBlockNumber === blockNumber
+      && cursor.settledBlockHash !== CHAIN_EVENT_LOG_ZERO_HASH) {
+      return cursor.settledBlockHash;
+    }
+    if (cursor?.head.number === blockNumber) return cursor.head.hash;
     return this.#rows.find((row) => row.blockNumber === blockNumber)?.blockHash;
   }
 

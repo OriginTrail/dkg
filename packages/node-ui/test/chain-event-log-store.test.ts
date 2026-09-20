@@ -205,6 +205,21 @@ describe('SqliteChainEventLogStore', () => {
     expect(await store.blockHashAt(SCOPE, 9)).toBeUndefined();
   });
 
+  it('never serves the zero settled-hash sentinel as a block hash', async () => {
+    const { store } = createStore();
+    const initial = commit(10, 12, []);
+    await store.commit(SCOPE, undefined, {
+      ...initial,
+      cursor: {
+        ...initial.cursor,
+        settledBlockHash: `0x${'00'.repeat(32)}`,
+      },
+    });
+
+    expect(await store.blockHashAt(SCOPE, 10)).toBeUndefined();
+    expect(await store.blockHashAt(SCOPE, 12)).toBe(hash(12));
+  });
+
   /**
    * THE invariant: coverage claims a range ⇒ the rows that range held are still
    * in the table.

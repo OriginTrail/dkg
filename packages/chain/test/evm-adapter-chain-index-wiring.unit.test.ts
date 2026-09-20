@@ -14,7 +14,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { createContextGraphAuthorityIndexCheckpoint } from
+  '../src/context-graph-authority-index-checkpoint.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
+import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
@@ -265,6 +268,37 @@ describe('EVMChainAdapter chain index wiring', () => {
     // No ContextGraphStorage in this Hub, so no address is claimed — a reader
     // with none falls back rather than proving a range against a guess.
     expect(binding.contextGraphStorageAddress).toBeUndefined();
+    adapter.destroy();
+  });
+
+  it('resumes the first one-log pass above the existing authority checkpoint', async () => {
+    const store = new MemoryChainEventLogStore();
+    const authorityStore = new MemoryAuthorityIndexStore();
+    authorityStore.record = Object.freeze({
+      token: 1,
+      value: createContextGraphAuthorityIndexCheckpoint({
+        deploymentBlockNumber: 1,
+        throughBlockNumber: 400,
+        throughBlockHash: hash(40),
+      }, []),
+    });
+    const adapter = new EVMChainAdapter({
+      ...config(store),
+      localContextGraphAuthorityIndexStore: authorityStore,
+    });
+    stubHub(adapter);
+    stubContextGraphStorage(adapter, RETIRED_CG_STORAGE);
+
+    startChainIndex(adapter);
+    await chainIndexOwner(adapter).starting;
+    await vi.waitUntil(async () => await store.load() !== undefined, { timeout: 2_000 });
+
+    const authorityCoverage = (await store.load())?.coverage.find(
+      (entry) => entry.family === 'context-graph-authority',
+    );
+    // The fixture head is 500: a cold start would begin at 450 (50-block
+    // holdback), while the migrated prefix makes the first raw range 401.
+    expect(authorityCoverage?.coveredFromBlock).toBe(401);
     adapter.destroy();
   });
 

@@ -241,6 +241,45 @@ describe('ChainIndexTick — one log', () => {
     expect(await store.load()).toBeUndefined();
   });
 
+  it('keeps the verified settled boundary when the next boundary hash is unavailable', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const index = tick(store, rig.ports);
+    await index.runOnce(new AbortController().signal);
+    const verified = (await store.load())!.cursor;
+
+    rig.head = { number: 151, hash: hash(0x97), timestampSeconds: 1_700_000_100 };
+    const nextBoundary = rig.head.number - 5;
+    rig.blockHashes.set(nextBoundary, null);
+    await index.runOnce(new AbortController().signal);
+
+    const retained = (await store.load())!.cursor;
+    expect(retained.settledBlockNumber).toBe(verified.settledBlockNumber);
+    expect(retained.settledBlockHash).toBe(verified.settledBlockHash);
+    expect(await store.blockHashAt(SCOPE, retained.settledBlockNumber))
+      .toBe(verified.settledBlockHash);
+
+    // The retained real hash remains the next pass's deep-reorg fence.
+    rig.blockHashes.set(verified.settledBlockNumber, hash(0xfe));
+    const mismatch = await index.runOnce(new AbortController().signal);
+    expect(mismatch.outcome).toBe('fork-suspected');
+  });
+
+  it('does not expose a cold-start zero boundary as a known block hash', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness({ logs: () => [creationLog(95, 0, 4n)] });
+    rig.blockHashes.set(95, null);
+    const index = tick(store, rig.ports);
+
+    await index.runOnce(new AbortController().signal);
+
+    const cursor = (await store.load())!.cursor;
+    expect(cursor.settledBlockNumber).toBe(94);
+    expect(await store.blockHashAt(SCOPE, cursor.settledBlockNumber)).toBeUndefined();
+    expect(store.rows()).toHaveLength(1);
+    expect(store.rows()[0]?.settled).toBe(false);
+  });
+
   it('coverage reports what was looked at, not the head, while catching up', async () => {
     const store = new MemoryChainEventLogStore();
     const rig = harness({

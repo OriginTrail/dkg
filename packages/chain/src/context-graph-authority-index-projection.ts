@@ -278,10 +278,12 @@ export function contextGraphAuthorityIndexProjectionFault(
   return Object.freeze({ kind: 'context-graph-authority-projection-fault' as const, fault });
 }
 
-function isContextGraphAuthorityIndexProjectionFault(
-  value: ContextGraphAuthorityIndexCompletedProjection | ContextGraphAuthorityIndexProjectionFault,
+export function isContextGraphAuthorityIndexProjectionFault(
+  value: unknown,
 ): value is ContextGraphAuthorityIndexProjectionFault {
-  return 'kind' in value && value.kind === 'context-graph-authority-projection-fault';
+  return typeof value === 'object'
+    && value !== null
+    && (value as { kind?: unknown }).kind === 'context-graph-authority-projection-fault';
 }
 
 /**

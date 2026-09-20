@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import type { DashboardDB } from './db.js';
 
+const CHAIN_EVENT_LOG_ZERO_HASH = `0x${'00'.repeat(32)}`;
+
 /**
  * SQLite backing for the node's ONE chain log.
  *
@@ -366,7 +368,9 @@ export class SqliteChainEventLogStore {
     `).get(scope, TOMBSTONE_LINEAGE) as Pick<
       CursorRow, 'settled_block' | 'settled_hash' | 'head_block' | 'head_hash'
     > | undefined;
-    if (cursor?.settled_block === blockNumber && cursor.settled_hash.length > 0) {
+    if (cursor?.settled_block === blockNumber
+      && cursor.settled_hash.length > 0
+      && cursor.settled_hash !== CHAIN_EVENT_LOG_ZERO_HASH) {
       return cursor.settled_hash;
     }
     if (cursor?.head_block === blockNumber) return cursor.head_hash;

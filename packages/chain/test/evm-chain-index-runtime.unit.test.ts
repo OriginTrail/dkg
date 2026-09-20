@@ -99,6 +99,7 @@ function harness(options?: {
    * guard firing first and masking the fetch-time bound under test.
    */
   chainTimeLeadSeconds?: number;
+  resumeFromBlockNumber?: number;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -142,6 +143,9 @@ function harness(options?: {
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
     backfillPageBlocks: 100,
     maxCatchUpBlocks: 10_000,
+    ...(options?.resumeFromBlockNumber === undefined
+      ? {}
+      : { resumeFromBlockNumber: options.resumeFromBlockNumber }),
     hub: {
       address: HUB_ADDRESS,
       contractInterface: hubInterface,
@@ -174,6 +178,19 @@ function harness(options?: {
 }
 
 describe('createEvmChainIndexRuntime', () => {
+  it('threads the existing authority cursor into the first one-log range', async () => {
+    const h = harness({ headNumber: 5_000, resumeFromBlockNumber: 4_000 });
+
+    await h.runtime.tick.runOnce(new AbortController().signal);
+
+    expect(h.getLogs).toHaveBeenCalled();
+    expect(h.getLogs.mock.calls[0]![0].fromBlock).toBe(4_001);
+    const authority = (await h.store.load())?.coverage.find(
+      (entry) => entry.family === 'context-graph-authority',
+    );
+    expect(authority?.coveredFromBlock).toBe(4_001);
+  });
+
   it('spends ONE eth_getLogs and ONE head read on a pass', async () => {
     const h = harness();
     const result = await h.runtime.tick.runOnce(new AbortController().signal);

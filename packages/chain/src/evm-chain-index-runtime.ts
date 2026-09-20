@@ -90,6 +90,8 @@ export interface EvmChainIndexRuntimeOptions {
   readonly reorgHoldbackBlocks: number;
   readonly backfillPageBlocks: number;
   readonly maxCatchUpBlocks: number;
+  /** Existing authority-index prefix used only for the first one-log pass. */
+  readonly resumeFromBlockNumber?: number;
   readonly hub: EvmChainIndexContract;
   readonly contextGraphStorage?: EvmChainIndexContract;
   readonly knowledgeAssetStorage?: EvmChainIndexContract;
@@ -365,6 +367,7 @@ export function createEvmChainIndexRuntime(
       reorgHoldbackBlocks: options.reorgHoldbackBlocks,
       backfillPageBlocks: options.backfillPageBlocks,
       maxCatchUpBlocks: options.maxCatchUpBlocks,
+      resumeFromBlockNumber: options.resumeFromBlockNumber,
       initialBindings: chainIndexInitialBindings(options),
       ...(options.now === undefined ? {} : { now: options.now }),
     },
@@ -527,42 +530,41 @@ export function createEvmChainIndexRuntime(
       },
     });
 
-  const binding: ChainEventLogBinding = Object.freeze({
+  type MutableChainEventLogBinding = {
+    -readonly [Key in keyof ChainEventLogBinding]: ChainEventLogBinding[Key];
+  };
+  const binding: MutableChainEventLogBinding = {
     subscription,
     readHubRotationWindow,
-    ...(contextGraphAuthority === undefined ? {} : { contextGraphAuthority }),
-    // The binding carries the addresses the TICK walked, not the ones a reader
-    // resolves later: coverage is recorded per (family, address), so proving a
-    // range against one address while reading another compares a range to
-    // coverage that was never about it.
-    ...(contextGraphStorageAddress === undefined ? {} : { contextGraphStorageAddress }),
-    ...(options.knowledgeAssetStorage === undefined
-      ? {}
-      : { knowledgeAssetStorageAddress: options.knowledgeAssetStorage.address }),
-    ...(contextGraphStorageAddress === undefined
-      ? {}
-      : {
-        knowledgeAssets: createKnowledgeAssetReadModel({
-          scope: options.scope,
-          store: options.store,
-          registry,
-          contextGraphStorageAddress,
-          // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
-          // ceiling included, because these reads answer the same catalog
-          // traffic from the same stored rows and there is no reason for one of
-          // them to outlive the other. The Hub window's bound is the same
-          // `max(3T, 15s)` without the ceiling; see
-          // {@link chainIndexAuthorityAnchorMaxAgeMs} for why that one is left
-          // where it is. Every reader of a frozen tick must degrade to the
-          // chain, not to the last thing it heard.
-          maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
-          now,
-        }),
-      }),
-  });
+  };
+  if (contextGraphAuthority !== undefined) {
+    binding.contextGraphAuthority = contextGraphAuthority;
+  }
+  // The binding carries the addresses the TICK walked, not the ones a reader
+  // resolves later: coverage is recorded per (family, address), so proving a
+  // range against one address while reading another compares a range to
+  // coverage that was never about it.
+  if (contextGraphStorageAddress !== undefined) {
+    binding.contextGraphStorageAddress = contextGraphStorageAddress;
+    binding.knowledgeAssets = createKnowledgeAssetReadModel({
+      scope: options.scope,
+      store: options.store,
+      registry,
+      contextGraphStorageAddress,
+      // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
+      // ceiling included, because these reads answer the same catalog traffic
+      // from the same stored rows and there is no reason for one to outlive the
+      // other. Every reader of a frozen tick degrades to the chain.
+      maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
+      now,
+    });
+  }
+  if (options.knowledgeAssetStorage !== undefined) {
+    binding.knowledgeAssetStorageAddress = options.knowledgeAssetStorage.address;
+  }
 
   return Object.freeze({
-    binding,
+    binding: Object.freeze(binding),
     tick,
     start(): void {
       runner.start();

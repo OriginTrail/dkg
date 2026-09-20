@@ -89,7 +89,10 @@ import {
 import { EvmChainIndexRuntimeOwner } from './evm-chain-index-runtime-owner.js';
 // The tick cadence resolver lives with the projection cache because `T` is ONE
 // number on this node: the cache's answer lifetime and the log tick's interval.
-import { resolveContextGraphAuthorityIndexTickMs } from
+import {
+  contextGraphAuthorityIndexScope,
+  resolveContextGraphAuthorityIndexTickMs,
+} from
   './context-graph-authority-index-projection.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { ContextGraphRegistryRepairCoordinator } from
@@ -4586,6 +4589,21 @@ export class EVMChainAdapterBase {
     this.chainIndexOwner.start(async (store) => {
       const hub = await this.chainIndexContract(hubContract, 'Hub');
       if (hub === undefined) throw new Error('Hub address is unresolvable');
+      const contextGraphStorage = await this.chainIndexContract(
+        contextGraphStorageContract,
+        'ContextGraphStorage',
+        'assetStorage',
+      );
+      const resumeFromBlockNumber = contextGraphStorage === undefined
+        || this.contextGraphAuthorityIndex === undefined
+        ? undefined
+        : await this.contextGraphAuthorityIndex.durableCursorBlockNumber(
+            contextGraphAuthorityIndexScope(
+              this.deploymentId,
+              contextGraphStorage.address,
+            ),
+            contextGraphStorage.deploymentBlockNumber,
+          );
       return createEvmChainIndexRuntime({
         // Keyed on the HUB, and deliberately NOT the authority index's scope.
         //
@@ -4627,17 +4645,12 @@ export class EVMChainAdapterBase {
         // page and its catch-up step — slower to walk history, never wider.
         backfillPageBlocks: this.cgRegistryScanPageSize,
         maxCatchUpBlocks: this.cgRegistryScanPageSize,
+        ...(resumeFromBlockNumber === undefined ? {} : { resumeFromBlockNumber }),
         hub,
-        contextGraphStorage: await this.chainIndexContract(
-          contextGraphStorageContract,
-          'ContextGraphStorage',
-          // Both indexed storages live in the Hub's ASSET STORAGE registry
-          // (`resolveAssetStorage`), which emits its own event pair
-          // (`Hub.sol:217-222`). The tick matches a rotation to a binding by
-          // (kind, name), so naming the registry here is what makes the
-          // rotation close this address's binding.
-          'assetStorage',
-        ),
+        // Both indexed storages live in the Hub's ASSET STORAGE registry
+        // (`resolveAssetStorage`), whose kind lets a rotation retire this
+        // address rather than look like an unrelated first registration.
+        contextGraphStorage,
         knowledgeAssetStorage: await this.chainIndexContract(
           knowledgeAssetStorageContract,
           'DKGKnowledgeAssets',

@@ -496,7 +496,12 @@ export class ChainIndexTick {
       Math.min(fetchThrough, head.number - this.#options.reorgHoldbackBlocks),
     );
     const settled = settledTarget >= liveFrom
-      ? await this.#readBoundary(settledTarget, head, signal)
+      ? await this.#readBoundary(
+          settledTarget,
+          head,
+          { number: liveFrom - 1, hash: CHAIN_EVENT_LOG_ZERO_HASH },
+          signal,
+        )
       : { number: liveFrom - 1, hash: CHAIN_EVENT_LOG_ZERO_HASH, blockRequests: 0 };
     blockRequests += settled.blockRequests;
 
@@ -623,12 +628,18 @@ export class ChainIndexTick {
         blockRequests: 0,
       });
     }
-    return this.#readBoundary(settledTarget, head, signal);
+    return this.#readBoundary(
+      settledTarget,
+      head,
+      { number: cursor.settledBlockNumber, hash: cursor.settledBlockHash },
+      signal,
+    );
   }
 
   async #readBoundary(
     settledTarget: number,
     head: ChainIndexObservedHead,
+    previous: Readonly<{ number: number; hash: string }>,
     signal: AbortSignal,
   ): Promise<Readonly<{ number: number; hash: string; blockRequests: number }>> {
     if (settledTarget === head.number) {
@@ -638,11 +649,13 @@ export class ChainIndexTick {
       await this.ports.readBlockHash(settledTarget, signal),
     );
     if (hash === undefined) {
-      // Do not settle what cannot be named. The rows stay in the tail and the
-      // next pass tries again; nothing is lost and nothing is fixed in place.
+      // Do not settle what cannot be named. Keep the previously VERIFIED
+      // boundary exactly: neither advancing its height nor replacing its hash
+      // with the zero sentinel may turn an unread prefix into settled history.
+      // The fetched rows stay in the tail and the next pass tries again.
       return Object.freeze({
-        number: settledTarget - 1,
-        hash: CHAIN_EVENT_LOG_ZERO_HASH,
+        number: previous.number,
+        hash: previous.hash,
         blockRequests: 1,
       });
     }
