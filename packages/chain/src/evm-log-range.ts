@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { collectEvmErrorText } from './evm-adapter-errors.js';
+import { collectEvmErrorText } from './evm-block-unavailable-error.js';
 
 /** Provider-declared eth_getLogs range caps that are safe to retry by splitting. */
 export function isEvmLogRangeLimitError(err: unknown): boolean {

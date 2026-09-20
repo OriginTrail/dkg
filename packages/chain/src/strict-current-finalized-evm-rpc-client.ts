@@ -9,7 +9,7 @@ import {
 } from '@origintrail-official/dkg-http-utils';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
-import { isEvmBlockUnavailableError } from './evm-adapter-errors.js';
+import { isEvmBlockUnavailableError } from './evm-block-unavailable-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
   anchorDependentResourceLimited,

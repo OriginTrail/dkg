@@ -31,7 +31,8 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { BoundedLruCache, floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, isEvmBlockUnavailableError, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, isEvmBlockUnavailableError } from './evm-block-unavailable-error.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
