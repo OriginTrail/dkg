@@ -355,6 +355,35 @@ export class DashboardDB {
       );
     `);
     /**
+     * Drop the log's derived entity tables when they predate the address key.
+     *
+     * LOSSLESS by construction, and reachable only on a development database.
+     * `cg_state` and `cg_participants` arrived with the one log and nothing has
+     * ever written either — `ChainEventLogStore` has no method that touches
+     * them — so every row count is zero wherever this runs.
+     *
+     * It has to exist because `CREATE TABLE IF NOT EXISTS` cannot widen a
+     * primary key and the repair path re-runs the ensure at the CURRENT
+     * `SCHEMA_VERSION`. A node that already opened a database on this branch
+     * would otherwise keep the address-less key for good, and the first fold
+     * to land would write into it. Shape-checked rather than version-gated so
+     * it stays idempotent and does not make every node at 38 look like an
+     * upgraded one to the retention default below.
+     */
+    const ensureChainEventLogEntityAddressKey = () => {
+      const present = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'cg_state'
+      `).get() as { found: number } | undefined;
+      if (present === undefined) return;
+      const columns = this.db.prepare('PRAGMA table_info(cg_state)')
+        .all() as Array<{ name: string }>;
+      if (columns.some((column) => column.name === 'contract_address')) return;
+      this.db.exec(`
+        DROP TABLE IF EXISTS cg_state;
+        DROP TABLE IF EXISTS cg_participants;
+      `);
+    };
+    /**
      * The node's ONE chain log.
      *
      * One cursor, one raw event table, one coverage record, one set of Hub
@@ -424,8 +453,29 @@ export class DashboardDB {
         to_block INTEGER,
         PRIMARY KEY (scope, kind, name, from_block)
       );
+      -- Derived entity state is keyed by the ADDRESS it was folded from, for
+      -- exactly the reason chain_index_coverage above is.
+      --
+      -- The scope is HUB-keyed and deliberately so (evm-adapter-base.ts,
+      -- startChainIndexRuntime): it spans every contract the tick walks, so a
+      -- ContextGraphStorage rotation does NOT move it. That is right for a
+      -- cursor and wrong for a projection of ONE contract's events. Without
+      -- the address in the key, rows folded from the retired storage would sit
+      -- under the same (scope, context_graph_id) the new one answers at, and
+      -- nothing in the log would ever invalidate them: tombstone fires only on
+      -- a fork or a chain reset, and the coverage refusal that fails every
+      -- other log read closed cannot reach a row that carries no address.
+      -- A revoked participant on the retired contract would go on reading as
+      -- current for as long as the row survived.
+      --
+      -- With the address in the key a rotation is a MISS by construction, the
+      -- same way it already is for the authority index
+      -- (contextGraphAuthorityIndexScope), and no future reader has to
+      -- remember to compare addresses for the guarantee to hold.
       CREATE TABLE IF NOT EXISTS cg_state (
         scope TEXT NOT NULL,
+        -- Lowercased ContextGraphStorage whose events this row was folded from.
+        contract_address TEXT NOT NULL,
         context_graph_id TEXT NOT NULL,
         owner TEXT NOT NULL,
         active INTEGER NOT NULL CHECK (active IN (0, 1)),
@@ -439,16 +489,20 @@ export class DashboardDB {
         roster_version INTEGER NOT NULL,
         source_block_number INTEGER NOT NULL,
         source_block_hash TEXT NOT NULL,
-        PRIMARY KEY (scope, context_graph_id)
+        PRIMARY KEY (scope, contract_address, context_graph_id)
       );
       CREATE TABLE IF NOT EXISTS cg_participants (
         scope TEXT NOT NULL,
+        -- Carried here too, and not joined out of cg_state: the roster is
+        -- the field a gate would read, so it must be unreachable for a retired
+        -- address on its own terms rather than via another table's key.
+        contract_address TEXT NOT NULL,
         context_graph_id TEXT NOT NULL,
         -- The checkpoint's own ordering. Preserved verbatim so the rebuilt
         -- wire format and its integrity digest are byte-identical.
         position INTEGER NOT NULL CHECK (position >= 0),
         agent TEXT NOT NULL,
-        PRIMARY KEY (scope, context_graph_id, position)
+        PRIMARY KEY (scope, contract_address, context_graph_id, position)
       );
     `);
     const ensureLocalContextGraphOriginSchema = () => this.db.exec(`
@@ -481,6 +535,7 @@ export class DashboardDB {
       ensureJoinPolicyAuditCapTrigger();
       ensureContextGraphAuthorityIndexSchema();
       ensureLocalContextGraphOriginSchema();
+      ensureChainEventLogEntityAddressKey();
       ensureChainEventLogSchema();
       installRoutineLogRetentionSchema(this.db);
       return;
@@ -1434,6 +1489,7 @@ export class DashboardDB {
       // The one chain log. Empty on arrival: the existing authority checkpoint
       // keeps its revision and its folded prefix, so the first tick resumes at
       // that cursor and no node rescans history to adopt this table.
+      ensureChainEventLogEntityAddressKey();
       ensureChainEventLogSchema();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);

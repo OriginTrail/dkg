@@ -194,6 +194,18 @@ export interface ChainEventLogQuery {
 /**
  * Durable side of the one log. Opaque to `node-ui`: it stores and returns rows,
  * it never decides what a row means.
+ *
+ * ONE RULE for anything DERIVED that is added here later (the `cg_state` /
+ * `cg_participants` fold is the first): a derived row is keyed by the EMITTING
+ * ADDRESS as well as by the scope, exactly as {@link ChainEventLogCoverage} is.
+ * The scope is Hub-keyed and stays put across a ContextGraphStorage rotation
+ * (`evm-adapter-base.ts`, `startChainIndexRuntime`), so an address-less key
+ * would leave the retired contract's fold sitting under the very key the new
+ * one answers at, with nothing to invalidate it: {@link tombstone} is the
+ * fork/reset path and never fires on a rotation, and the coverage refusal that
+ * fails every raw-row read closed cannot reach a row that carries no address.
+ * Keyed by address, a rotation is a MISS by construction and no reader has to
+ * remember to compare anything for that to hold.
  */
 export interface ChainEventLogStore {
   load(scope: string): Promise<ChainEventLogState | undefined>;

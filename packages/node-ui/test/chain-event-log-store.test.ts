@@ -69,6 +69,44 @@ function commit(
   };
 }
 
+/** The ContextGraphStorage the Hub binds first, and the one it rotates to. */
+const STORAGE_A = `0x${'a1'.repeat(20)}`;
+const STORAGE_B = `0x${'b2'.repeat(20)}`;
+
+/**
+ * Fold one Context Graph into the derived tables, as the reducer will.
+ *
+ * Raw SQL on purpose: `ChainEventLogStore` has no method that writes these two
+ * tables yet, and what is under test is the SHAPE of their key — which is what
+ * every future writer and reader inherits, and which cannot be fixed later
+ * without a migration that has real rows in it.
+ */
+function foldContextGraph(
+  db: DashboardDB,
+  scope: string,
+  contractAddress: string,
+  contextGraphId: string,
+  participants: readonly string[],
+): void {
+  db.db.prepare(`
+    INSERT INTO cg_state (
+      scope, contract_address, context_graph_id, owner, active, access_policy,
+      publish_policy, publish_authority, publish_authority_account_id, name_hash,
+      ownership_era, policy_version, roster_version, source_block_number,
+      source_block_hash
+    ) VALUES (?, ?, ?, ?, 1, 1, 0, ?, ?, ?, 1, 1, 1, 10, ?)
+  `).run(
+    scope, contractAddress, contextGraphId, ADDRESS, ADDRESS, contextGraphId,
+    hash(0x22), hash(10),
+  );
+  participants.forEach((agent, position) => {
+    db.db.prepare(`
+      INSERT INTO cg_participants (scope, contract_address, context_graph_id, position, agent)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(scope, contractAddress, contextGraphId, position, agent);
+  });
+}
+
 describe('SqliteChainEventLogStore', () => {
   const directories: string[] = [];
 
@@ -140,13 +178,7 @@ describe('SqliteChainEventLogStore', () => {
   it('a tombstone wipes every derived row and its token never repeats', async () => {
     const { store, db } = createStore();
     await store.commit(SCOPE, undefined, commit(10, 12, [row(10, 0, true)]));
-    db.db.prepare(`
-      INSERT INTO cg_state (
-        scope, context_graph_id, owner, active, access_policy, publish_policy,
-        publish_authority, publish_authority_account_id, name_hash, ownership_era,
-        policy_version, roster_version, source_block_number, source_block_hash
-      ) VALUES (?, '7', ?, 1, 1, 0, ?, '7', ?, 1, 1, 1, 10, ?)
-    `).run(SCOPE, ADDRESS, ADDRESS, hash(0x22), hash(10));
+    foldContextGraph(db, SCOPE, STORAGE_A, '7', ['agent-1']);
 
     // Assert the scope IS loadable first, so the checks below cannot pass
     // simply because nothing was ever there.
@@ -159,9 +191,107 @@ describe('SqliteChainEventLogStore', () => {
       .toEqual([]);
     expect(db.db.prepare(`SELECT COUNT(*) AS n FROM cg_state WHERE scope = ?`)
       .get(SCOPE)).toEqual({ n: 0 });
+    expect(db.db.prepare(`SELECT COUNT(*) AS n FROM cg_participants WHERE scope = ?`)
+      .get(SCOPE)).toEqual({ n: 0 });
 
     // A cold start after the tombstone must not reuse the dead token.
     expect(await store.commit(SCOPE, undefined, commit(20, 22, []))).toBe(3);
+  });
+
+  /**
+   * A ContextGraphStorage rotation must not be answerable from the retired
+   * contract's fold.
+   *
+   * The scope does NOT move when the Hub rebinds the name: it is keyed on
+   * (deployment, Hub) so that one cursor can span Hub, ContextGraphStorage and
+   * KnowledgeAssetStorage (`evm-adapter-base.ts`, `startChainIndexRuntime`).
+   * Nothing else in the log invalidates these rows either — `tombstone` is the
+   * fork/reset path, and coverage refusal is keyed per (family, address) and so
+   * cannot speak about a row that carries no address. The contract address in
+   * the PRIMARY KEY is therefore the whole of the guarantee, and these two
+   * cases are what hold it there.
+   */
+  describe('a rotated ContextGraphStorage', () => {
+    it('cannot be answered from the retired contract\'s folded rows', () => {
+      const { db } = createStore();
+      // Contract A said this graph's only member is the agent later revoked.
+      foldContextGraph(db, SCOPE, STORAGE_A, '7', ['revoked-agent']);
+      // The Hub rotates. The scope is unchanged, by design; the fold for the
+      // contract now bound is simply absent, because the tick has not walked
+      // it yet. A point lookup at the SAME key must therefore miss.
+      const afterRotation = db.db.prepare(`
+        SELECT context_graph_id FROM cg_state WHERE scope = ? AND contract_address = ?
+      `).all(SCOPE, STORAGE_B);
+      expect(afterRotation).toEqual([]);
+
+      const roster = db.db.prepare(`
+        SELECT agent FROM cg_participants
+         WHERE scope = ? AND contract_address = ? AND context_graph_id = '7'
+      `).all(SCOPE, STORAGE_B);
+      expect(roster).toEqual([]);
+
+      // And A's rows are still there, so the miss above is the KEY refusing to
+      // match rather than an empty table.
+      expect(db.db.prepare(`
+        SELECT agent FROM cg_participants
+         WHERE scope = ? AND contract_address = ? AND context_graph_id = '7'
+      `).all(SCOPE, STORAGE_A)).toEqual([{ agent: 'revoked-agent' }]);
+    });
+
+    it('folds alongside the retired one instead of colliding with it', () => {
+      const { db } = createStore();
+      foldContextGraph(db, SCOPE, STORAGE_A, '7', ['revoked-agent']);
+      // THE mutation guard. With an address-less primary key this second fold
+      // is a UNIQUE violation, and a writer using INSERT OR REPLACE would
+      // instead silently overwrite — either way the two contracts share one
+      // row and the address can no longer decide which one answered.
+      expect(() => foldContextGraph(db, SCOPE, STORAGE_B, '7', ['current-agent']))
+        .not.toThrow();
+
+      expect(db.db.prepare(`
+        SELECT contract_address, agent FROM cg_participants
+         WHERE scope = ? AND context_graph_id = '7'
+         ORDER BY contract_address
+      `).all(SCOPE)).toEqual([
+        { contract_address: STORAGE_A, agent: 'revoked-agent' },
+        { contract_address: STORAGE_B, agent: 'current-agent' },
+      ]);
+    });
+
+    it('repairs a database that predates the address key', () => {
+      const { db, dataDir } = createStore();
+      // Recreate the shipped-but-never-written shape this branch first had.
+      db.db.exec(`
+        DROP TABLE cg_state;
+        DROP TABLE cg_participants;
+        CREATE TABLE cg_state (
+          scope TEXT NOT NULL, context_graph_id TEXT NOT NULL, owner TEXT NOT NULL,
+          active INTEGER NOT NULL, access_policy INTEGER NOT NULL,
+          publish_policy INTEGER NOT NULL, publish_authority TEXT NOT NULL,
+          publish_authority_account_id TEXT NOT NULL, name_hash TEXT NOT NULL,
+          ownership_era INTEGER NOT NULL, policy_version INTEGER NOT NULL,
+          roster_version INTEGER NOT NULL, source_block_number INTEGER NOT NULL,
+          source_block_hash TEXT NOT NULL,
+          PRIMARY KEY (scope, context_graph_id)
+        );
+        CREATE TABLE cg_participants (
+          scope TEXT NOT NULL, context_graph_id TEXT NOT NULL,
+          position INTEGER NOT NULL, agent TEXT NOT NULL,
+          PRIMARY KEY (scope, context_graph_id, position)
+        );
+      `);
+      db.close();
+
+      // Re-opening at the SAME schema version must still fix the shape: this
+      // is the repair path, and `CREATE TABLE IF NOT EXISTS` cannot widen a
+      // primary key on its own.
+      const reopened = new DashboardDB({ dataDir });
+      expect((reopened.db.prepare('PRAGMA table_info(cg_state)').all() as Array<{ name: string }>)
+        .map((column) => column.name)).toContain('contract_address');
+      expect(() => foldContextGraph(reopened, SCOPE, STORAGE_A, '7', ['agent-1']))
+        .not.toThrow();
+      reopened.close();
+    });
   });
 
   it('survives a restart of the daemon', async () => {
