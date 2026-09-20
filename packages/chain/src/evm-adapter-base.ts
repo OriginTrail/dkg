@@ -87,6 +87,10 @@ import {
   type EvmChainIndexContract,
   type EvmChainIndexRuntime,
 } from './evm-chain-index-runtime.js';
+// The tick cadence resolver lives with the projection cache because `T` is ONE
+// number on this node: the cache's answer lifetime and the log tick's interval.
+import { resolveContextGraphAuthorityIndexTickMs } from
+  './context-graph-authority-index-projection.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';

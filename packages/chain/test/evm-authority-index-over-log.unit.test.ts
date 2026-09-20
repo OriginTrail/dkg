@@ -197,7 +197,12 @@ function makeReader(options: {
         }
       }
     },
-    resolveContractDeployBlock: async () => ({ fromBlock: DEPLOY_BLOCK }),
+    // The NUMBER the reader declares, which is what the adapter wires in
+    // (`resolveContractDeployBlockNumber`), not the adapter's own
+    // `{ fromBlock, head, scanProviders }` search result. Handing the object
+    // over made every anchor unresolvable and sent all of these through the
+    // live scan they exist to prove is skipped.
+    resolveContractDeployBlock: async () => DEPLOY_BLOCK,
     pageSize: () => 2_000,
     finalityConfirmations: () => options.finalityConfirmations ?? 1,
     ...(options.source === undefined ? {} : { chainEventLogAuthority: () => options.source }),

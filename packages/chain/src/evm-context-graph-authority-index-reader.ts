@@ -629,6 +629,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       dependencies.deploymentId,
       await dependencies.requireContextGraphStorage().getAddress(),
     );
+    // Taken here, before the cache takes its own, so the synthetic candidate
+    // built for `logAnswerServes` below can only OVER-report its age.
+    const askedAtMs = Date.now();
     const projected = await dependencies.index.projection({
       scope,
       signal: options.signal,
@@ -652,9 +655,30 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // log-anchored fold. An absent target therefore still costs a live scan
         // at a live head; what the log retires is the reads whose answer it can
         // actually produce, which is the steady state.
-        (completed) => {
-          try { return accepts(completed.view); } catch { return false; }
-        },
+        //
+        // That predicate IS `project(candidate).complete` — `read` here — so
+        // the fold is admitted by the identical rule and not by a restatement
+        // of it that could drift. `read` is a pure projection, so evaluating it
+        // here and again on the projection the cache publishes costs only the
+        // projection.
+        //
+        // `fetchedAtMs` is the one field a completed projection lacks. It is
+        // supplied from before the cache took its own, so any age derived from
+        // it is over-reported, never under-reported — the direction the field
+        // exists to guarantee. Nothing consumes it on this path today: no
+        // projection this reader passes to `readFinalizedProjection` reads it,
+        // and the candidate is never retained, the cache stamping its own
+        // `fetchedAtMs` on the fold it publishes.
+        //
+        // Exceptions PROPAGATE. A projection that throws on the fold throws
+        // again on the live scan's own projection — the conditions it throws on
+        // (an invalid target, a name hash ambiguous across finalized graphs)
+        // are properties of the caller's targets and of chain state that a
+        // later anchor only ever sees MORE of — so swallowing here would buy a
+        // paid scan and then rethrow the same error, which is exactly the
+        // "exceptions never become cache misses or extra paid scans" the cache
+        // documents.
+        (completed) => read({ ...completed, fetchedAtMs: askedAtMs }).complete,
       ),
     });
     options.signal?.throwIfAborted();
