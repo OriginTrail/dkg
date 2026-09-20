@@ -18,6 +18,8 @@ import { HubRotationPoller } from '../src/hub-rotation-poller.js';
 import type { ChainEventLogHubRotationWindow } from '../src/chain-event-log-binding.js';
 
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
+const FIRST_TARGET = '0x00000000000000000000000000000000000000b1';
+const SECOND_TARGET = '0x00000000000000000000000000000000000000c1';
 
 function hubContract(): Contract {
   return {
@@ -35,7 +37,12 @@ function hubContract(): Contract {
 function window(
   fromBlockNumber: number,
   throughBlockNumber: number,
-  rotations: ReadonlyArray<{ blockNumber: number; logIndex: number; contractName: string }>,
+  rotations: ReadonlyArray<{
+    blockNumber: number;
+    logIndex: number;
+    contractName: string;
+    contractAddress: string;
+  }>,
 ): ChainEventLogHubRotationWindow {
   return Object.freeze({ fromBlockNumber, throughBlockNumber, rotations: Object.freeze(rotations) });
 }
@@ -73,7 +80,12 @@ describe('HubRotationPoller over the one log', () => {
     const h = harness([
       window(1_001, 1_000, []),
       window(951, 1_050, [
-        { blockNumber: 1_010, logIndex: 0, contractName: 'ContextGraphStorage' },
+        {
+          blockNumber: 1_010,
+          logIndex: 0,
+          contractName: 'ContextGraphStorage',
+          contractAddress: FIRST_TARGET,
+        },
       ]),
     ]);
     h.poller.start(hubContract(), HUB_ADDRESS);
@@ -90,7 +102,12 @@ describe('HubRotationPoller over the one log', () => {
   it('takes its BASELINE from the log and dispatches nothing for it', async () => {
     const h = harness([
       window(1_001, 1_000, [
-        { blockNumber: 500, logIndex: 0, contractName: 'ShouldNeverBeReplayed' },
+        {
+          blockNumber: 500,
+          logIndex: 0,
+          contractName: 'ShouldNeverBeReplayed',
+          contractAddress: FIRST_TARGET,
+        },
       ]),
       window(951, 1_000, []),
     ]);
@@ -106,7 +123,12 @@ describe('HubRotationPoller over the one log', () => {
   });
 
   it('dispatches a contract name only once across overlapping windows', async () => {
-    const rotation = { blockNumber: 1_010, logIndex: 0, contractName: 'ContextGraphStorage' };
+    const rotation = {
+      blockNumber: 1_010,
+      logIndex: 0,
+      contractName: 'ContextGraphStorage',
+      contractAddress: FIRST_TARGET,
+    };
     const h = harness([
       window(1_001, 1_000, []),
       window(951, 1_050, [rotation]),
@@ -125,11 +147,21 @@ describe('HubRotationPoller over the one log', () => {
     const h = harness([
       window(1_001, 1_000, []),
       window(951, 1_050, [
-        { blockNumber: 1_010, logIndex: 0, contractName: 'ContextGraphStorage' },
+        {
+          blockNumber: 1_010,
+          logIndex: 0,
+          contractName: 'ContextGraphStorage',
+          contractAddress: FIRST_TARGET,
+        },
       ]),
       // A reorg put another rotation at the same (block, index).
       window(1_001, 1_060, [
-        { blockNumber: 1_010, logIndex: 0, contractName: 'ParametersStorage' },
+        {
+          blockNumber: 1_010,
+          logIndex: 0,
+          contractName: 'ParametersStorage',
+          contractAddress: SECOND_TARGET,
+        },
       ]),
     ]);
     h.poller.start(hubContract(), HUB_ADDRESS);
@@ -137,6 +169,30 @@ describe('HubRotationPoller over the one log', () => {
     await h.poller.pollOnce();
 
     expect(h.names).toEqual(['ContextGraphStorage', 'ParametersStorage']);
+    h.poller.stop();
+  });
+
+  it('dispatches the same name again when a reorg replaces its target address', async () => {
+    const h = harness([
+      window(1_001, 1_000, []),
+      window(951, 1_050, [{
+        blockNumber: 1_010,
+        logIndex: 0,
+        contractName: 'ContextGraphStorage',
+        contractAddress: FIRST_TARGET,
+      }]),
+      window(1_001, 1_060, [{
+        blockNumber: 1_010,
+        logIndex: 0,
+        contractName: 'ContextGraphStorage',
+        contractAddress: SECOND_TARGET,
+      }]),
+    ]);
+    h.poller.start(hubContract(), HUB_ADDRESS);
+    await h.poller.pollOnce();
+    await h.poller.pollOnce();
+
+    expect(h.names).toEqual(['ContextGraphStorage', 'ContextGraphStorage']);
     h.poller.stop();
   });
 

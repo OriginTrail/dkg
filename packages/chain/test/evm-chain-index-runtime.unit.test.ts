@@ -506,6 +506,7 @@ describe('createEvmChainIndexRuntime', () => {
       blockNumber: 998,
       logIndex: 0,
       contractName: 'ContextGraphStorage',
+      contractAddress: CG_STORAGE_ADDRESS.toLowerCase(),
     }]);
   });
 

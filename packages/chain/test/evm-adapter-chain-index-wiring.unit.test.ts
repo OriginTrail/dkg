@@ -601,6 +601,7 @@ describe('EVMChainAdapter chain index wiring', () => {
           blockNumber: 101,
           logIndex: 0,
           contractName: 'ContextGraphStorage',
+          contractAddress: '0x00000000000000000000000000000000000000b1',
         }],
       }),
     };
@@ -613,6 +614,7 @@ describe('EVMChainAdapter chain index wiring', () => {
         blockNumber: 11,
         logIndex: 0,
         contractName: 'DKGKnowledgeAssets',
+        contractAddress: '0x00000000000000000000000000000000000000c1',
       }],
     });
     await oldPoll;

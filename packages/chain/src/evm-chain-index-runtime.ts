@@ -480,6 +480,7 @@ export function createEvmChainIndexRuntime(
         blockNumber: rotation.blockNumber,
         logIndex: rotation.logIndex,
         contractName: rotation.contractName,
+        contractAddress: rotation.contractAddress,
       }))),
     });
   }

@@ -35,6 +35,8 @@ export interface ChainEventLogHubRotation {
   readonly blockNumber: number;
   readonly logIndex: number;
   readonly contractName: string;
+  /** Lowercased target (or removed) address carried by the Hub event. */
+  readonly contractAddress: string;
 }
 
 /**

@@ -139,12 +139,12 @@ export class HubRotationPoller {
    * ZERO chain requests on this path: that is the whole point, and it is the
    * measured retirement of the `Hub_rotation_poll_getBlockNumber` /
    * `Hub_rotation_poll_getLogs` pair. The dedupe identity is (block, index,
-   * name) rather than the live path's (blockHash, txHash, index) because a
-   * stored row carries no transaction hash into this listener — and it does
-   * not need one: re-dispatching the same NAME is idempotent by design
-   * (`applyHubRotationEventName` only invalidates caches), while a reorg that
-   * put a DIFFERENT rotation at the same position changes the identity and is
-   * dispatched.
+   * name, target address) rather than the live path's (blockHash, txHash,
+   * index) because a stored row carries no transaction hash into this
+   * listener. The address is essential: a reorg can replace one binding of
+   * the SAME name at the SAME log position with another address, and
+   * suppressing that replacement would leave the adapter bound to the
+   * orphaned target.
    */
   private async pollOnceFromLog(generation: number): Promise<boolean> {
     const logSource = this.logSource;
@@ -168,7 +168,12 @@ export class HubRotationPoller {
     }
 
     for (const rotation of window.rotations) {
-      const identity = `${rotation.blockNumber}:${rotation.logIndex}:${rotation.contractName}`;
+      const identity = [
+        rotation.blockNumber,
+        rotation.logIndex,
+        rotation.contractName,
+        rotation.contractAddress,
+      ].join(':');
       if (this.seenLogIds.has(identity)) continue;
       this.seenLogIds.set(identity, rotation.blockNumber);
       this.onContractName(rotation.contractName);
