@@ -1966,6 +1966,23 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
+  it('keeps ticking and records no skip when the read-context RPC fails', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    vi.mocked(chain.readRandomSamplingContext!)
+      .mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
+
+    await expect(prover.tick()).resolves.toEqual({ kind: 'already-solved' });
+    await expect(prover.tick()).resolves.toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2, epoch: 2 });
+    await prover.close();
+  });
+
   it('re-reads the chain half a period after the recording head, then skips again from the fresh read', async () => {
     // Safety re-read (review R8), block bound. Recorded at 1010 → due at 1035,
     // well before the period end (1050).
