@@ -377,7 +377,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   const assertOpen = (): void => {
     if (closed) throw new DOMException('Context Graph authority index reader is closed', 'AbortError');
   };
-  const scanFinalizedProjection = async <T>(
+  const rescanFinalizedProjection = async <T>(
     operationLabel: string,
     options: ChainReadOptions,
     project: (
@@ -480,7 +480,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   /**
    * Every finalized READ of this capability. It is answered from the index's
    * last completed projection while that is younger than `chain.indexTickMs`;
-   * otherwise `scanFinalizedProjection` above runs exactly as it always has
+   * otherwise `rescanFinalizedProjection` above runs exactly as it always has
    * (head, cursor admission, scan, stabilize) and its result is kept. The
    * projection is handed over only AFTER the stabilization fence, so a scan
    * whose anchor moved is never retained.
@@ -489,7 +489,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
    * must advance the durable cursor every pass and feeds only the servable
    * durable snapshot.
    */
-  const runFinalizedProjection = async <T>(
+  const readFinalizedProjection = async <T>(
     operationLabel: string,
     options: ChainReadOptions,
     read: (projection: ContextGraphAuthorityIndexProjection) => Readonly<{
@@ -529,7 +529,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         }
       },
       onServed: options.onContextGraphAuthorityProjectionServed,
-      refresh: () => scanFinalizedProjection(
+      refresh: () => rescanFinalizedProjection(
         operationLabel,
         options,
         async (scan, { provider, contractAddress, finalized, head }) => {
@@ -559,7 +559,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     const nameHashes = snapshotAuthorityNameHashTargetsV1(rawNameHashes);
     options.signal?.throwIfAborted();
     if (nameHashes.length === 0) return new Map();
-    return runFinalizedProjection(
+    return readFinalizedProjection(
       operationLabel,
       options,
       ({ view }) => {
@@ -580,7 +580,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     const nameHashes = snapshotAuthorityNameHashTargetsV1(rawNameHashes);
     options.signal?.throwIfAborted();
     if (nameHashes.length === 0) return new Map();
-    return runFinalizedProjection(
+    return readFinalizedProjection(
       operationLabel,
       options,
       ({ view, chainId, contractAddress }) => {
@@ -611,7 +611,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         return dependencies.index.exportSnapshot(request);
       },
       refresh(options: ChainReadOptions = {}): Promise<void> {
-        return scanFinalizedProjection('refreshContextGraphAuthorityIndex', options,
+        return rescanFinalizedProjection('refreshContextGraphAuthorityIndex', options,
           (scan) => dependencies.index.refresh(scan));
       },
     } satisfies ContextGraphAuthorityIndexSnapshots),
@@ -626,7 +626,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       options: ChainReadOptions = {},
     ): Promise<ContextGraphAuthoritySnapshot> {
       const target = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
-      return runFinalizedProjection(
+      return readFinalizedProjection(
         'getContextGraphAuthoritySnapshot',
         options,
         ({ view, chainId, contractAddress }) => ({
@@ -684,7 +684,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       const targets = snapshotAuthorityRevisionTargetsV1(contextGraphIds);
       options.signal?.throwIfAborted();
       if (targets.length === 0) return new Map();
-      return runFinalizedProjection(
+      return readFinalizedProjection(
         'readContextGraphAuthorityIndexRevisions',
         options,
         ({ view }) => {
@@ -703,7 +703,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       const targets = snapshotAuthorityRevisionTargetsV1(contextGraphIds);
       options.signal?.throwIfAborted();
       if (targets.length === 0) return new Map();
-      return runFinalizedProjection(
+      return readFinalizedProjection(
         'readContextGraphAuthorityIndexSnapshots',
         options,
         ({ view, chainId, contractAddress }) => {

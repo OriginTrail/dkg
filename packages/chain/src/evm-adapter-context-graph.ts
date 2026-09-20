@@ -33,8 +33,7 @@ import {
   type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
 import {
-  resolveEvmContextGraphAuthoritySource,
-  type EvmContextGraphAuthoritySource,
+  normalizeEvmContextGraphCurrentAuthorityState,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
@@ -1252,7 +1251,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           contextGraphId,
           { blockTag: finalized.number },
         );
-        const authoritySource: EvmContextGraphAuthoritySource = (() => {
+        const readAuthorityHistory = (() => {
           const cache = this.contextGraphAuthorityHistory;
           const cacheKey = [
             this.deploymentId,
@@ -1283,9 +1282,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
               signal: options.signal,
             });
           };
-          return Object.freeze({
-            readCurrent: readCurrentState,
-            readHistory: () => resolveContextGraphAuthorityHistory({
+          return () => resolveContextGraphAuthorityHistory({
               cache,
               cacheKey,
               readScope: provider,
@@ -1352,26 +1349,35 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                 }
                 return normalized;
               },
-            }),
-          });
+            });
         })();
-        const authority = await resolveEvmContextGraphAuthoritySource(authoritySource);
+        const [rawCurrent, history] = await Promise.all([
+          readCurrentState(),
+          readAuthorityHistory(),
+        ]);
+        const { throughBlockNumber: _number, throughBlockHash: _hash, ...generation } =
+          history.state;
+        const authority = Object.freeze(Object.assign(
+          {},
+          normalizeEvmContextGraphCurrentAuthorityState(rawCurrent),
+          generation,
+        ));
         options.signal?.throwIfAborted();
         const chainId = (await provider.getNetwork()).chainId.toString(10);
         const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
           chainId,
           governanceContract: contractAddress,
-          ...authority.state,
+          ...authority,
           contextGraphId: contextGraphId.toString(10),
-          ownershipEra: authority.state.ownershipEra.toString(10),
-          policyVersion: authority.state.policyVersion.toString(10),
-          rosterVersion: authority.state.rosterVersion.toString(10),
-          sourceBlockNumber: authority.state.sourceBlockNumber.toString(10),
+          ownershipEra: authority.ownershipEra.toString(10),
+          policyVersion: authority.policyVersion.toString(10),
+          rosterVersion: authority.rosterVersion.toString(10),
+          sourceBlockNumber: authority.sourceBlockNumber.toString(10),
         });
         // Verify the combined current-state + generation view only after both
         // reads settle. The legacy reader publishes its checkpoint here, so a
         // changed head cannot escape as one mixed snapshot.
-        await authority.stabilize();
+        await history.publish();
         return snapshot;
       },
       {
