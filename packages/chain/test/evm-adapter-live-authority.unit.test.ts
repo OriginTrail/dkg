@@ -298,12 +298,10 @@ describe('EVM adapter: one-read live context graph authority', () => {
     }
   });
 
-  it('never reclassifies a CANCELLED read, even when its error looks classifiable', async () => {
-    // Both shapes below are ones the classifiers would otherwise accept. With
-    // the caller's signal already aborted they must come back as the transport
-    // error: answering "unsupported" would send a cancelled call into the
-    // three-read fallback, and answering `null` would be a terminal verdict
-    // about a read that never completed.
+  it('returns each cancelled waiter\'s exact abort reason, regardless of the shared read outcome', async () => {
+    // Coalesced waiters detach with their own abort reason. The shared loader
+    // may settle later with a classifiable error, but that result must not
+    // replace the reason observed by a caller that already cancelled.
     const looksUnsupported = fixture();
     const bare = Object.assign(new Error('missing revert data'), { code: 'CALL_EXCEPTION', data: null, reason: null });
     let releaseBare!: (reason: unknown) => void;
@@ -311,12 +309,13 @@ describe('EVM adapter: one-read live context graph authority', () => {
       () => new Promise((_resolve, reject) => { releaseBare = reject; }),
     );
     const cancelling = new AbortController();
+    const firstAbortReason = new Error('caller stopped');
     const first = looksUnsupported.adapter.getContextGraphLiveAuthority(7n, { signal: cancelling.signal });
     const firstSettled = first.catch((error: unknown) => error);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    cancelling.abort(new Error('caller stopped'));
+    cancelling.abort(firstAbortReason);
     releaseBare(bare);
-    await expect(firstSettled).resolves.not.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+    await expect(firstSettled).resolves.toBe(firstAbortReason);
 
     const looksNonexistent = fixture();
     const revert = callException({ revert: { name: 'ERC721NonexistentToken', args: [7n] } });
@@ -325,13 +324,13 @@ describe('EVM adapter: one-read live context graph authority', () => {
       () => new Promise((_resolve, reject) => { releaseRevert = reject; }),
     );
     const cancellingToo = new AbortController();
+    const secondAbortReason = new Error('caller stopped too');
     const second = looksNonexistent.adapter.getContextGraphLiveAuthority(7n, { signal: cancellingToo.signal });
     const secondSettled = second.catch((error: unknown) => error);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    cancellingToo.abort(new Error('caller stopped'));
+    cancellingToo.abort(secondAbortReason);
     releaseRevert(revert);
-    await expect(secondSettled).resolves.toBeInstanceOf(Error);
-    await expect(secondSettled).resolves.not.toBeNull();
+    await expect(secondSettled).resolves.toBe(secondAbortReason);
 
     // An ALREADY-aborted caller never reaches the chain at all now: it is
     // never answered by a read it did not ask for, so there is nothing to

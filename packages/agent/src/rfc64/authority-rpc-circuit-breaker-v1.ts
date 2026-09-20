@@ -219,11 +219,19 @@ export class Rfc64AuthorityReadCoordinatorV1 {
         ) => {
           if (served.source === 'scan') {
             provePool();
-          } else if (
-            served.source === 'cache'
-            && this.#now() - served.ageMs > this.#exhaustedAtMs
-          ) {
-            provePool();
+          } else if (served.source === 'cache') {
+            // `ageMs` is a duration, while `#exhaustedAtMs` is an epoch on
+            // this breaker's clock. Reconstruct the cache fetch instant
+            // explicitly before comparing values on the same time base.
+            const fetchedAtMs = this.#now() - served.ageMs;
+            if (fetchedAtMs > this.#exhaustedAtMs) {
+              provePool();
+            } else {
+              // Sticky for this whole compound operation: later subreads cannot
+              // turn an answer served despite a failed refresh into proof of
+              // pool recovery. A subsequent operation may prove recovery.
+              poolEvidence.value = 'unproven';
+            }
           } else {
             // Sticky for this whole compound operation: later subreads cannot
             // turn an answer served despite a failed refresh into proof of

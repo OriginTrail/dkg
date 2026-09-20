@@ -135,6 +135,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { CoreHostedPublicCgRecordDecision } from './core-hosted-public-cg-record-decision.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -2772,20 +2773,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (numeric <= 0n) return;
 
     const numericStr = numeric.toString();
-    // Discard the hint ONLY when it's empty or literally the on-chain numeric
-    // id (no information) — NOT merely because it's all-digits: a public CG's
-    // local cleartext id can be numeric (e.g. "1" is a valid contextGraphId
-    // elsewhere in the repo), and rejecting it would wrongly key the row under
-    // the on-chain id and miss the hosted KA after restart.
-    const cleartextHint = swmGraphId && swmGraphId !== numericStr
-      ? swmGraphId
-      : undefined;
-    const resolveLocalCgId = (): string =>
-      this.resolveLocalCgIdByOnChainId(numeric) ?? cleartextHint ?? numericStr;
-    const alreadyRecorded = (localCgId: string): boolean => {
-      const row = this.subscribedContextGraphs.get(localCgId);
-      return row?.coreHosted === true && row.onChainId === numericStr;
-    };
+    const recordDecision = new CoreHostedPublicCgRecordDecision({
+      onChainId: numeric,
+      swmGraphId,
+      subscriptions: this.subscribedContextGraphs,
+      resolveMappedLocalId: (onChainId) => this.resolveLocalCgIdByOnChainId(onChainId) ?? undefined,
+    });
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
     // StorageACK sign, so checking "already recorded" only after the liveness +
@@ -2794,7 +2787,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // a live-then-policy read on its first observation, and an already-recorded
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
-    if (alreadyRecorded(resolveLocalCgId())) return;
+    if (recordDecision.isAlreadyRecorded()) return;
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
@@ -2815,30 +2808,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // row under the same id the reconciler uses.
     // Re-resolved after the await: the local mapping may have changed, and a
     // concurrent first ACK for the same CG may have recorded it meanwhile.
-    const localCgId = resolveLocalCgId();
-    if (alreadyRecorded(localCgId)) return;
-    const existing = this.subscribedContextGraphs.get(localCgId);
-
-    let next: ContextGraphSub;
-    if (existing) {
-      // Rebind through the helper so a CG re-created/rebound under the same
-      // local id drops its stale reconcile watermark + in-memory cursor before
-      // we persist the new on-chain id. A bare `onChainId` overwrite would keep
-      // the old `lastReconciledOrdinal`, making the sweep resume at the prior
-      // graph's ordinal and permanently skip the new graph's early KAs.
-      this.bindSubscriptionOnChainId(localCgId, existing, numericStr);
-      existing.coreHosted = true;
-      next = existing;
-    } else {
-      next = {
-        syncMode: 'always-on',
-        subscribed: false,
-        synced: false,
-        onChainId: numericStr,
-        coreHosted: true,
-      };
-    }
-    this.setContextGraphSubscription(localCgId, next);
+    const localCgId = recordDecision.recordIfNeeded(({ localCgId: resolvedCgId, existing }) => {
+      let next: ContextGraphSub;
+      if (existing) {
+        // Rebind through the helper so a CG re-created/rebound under the same
+        // local id drops its stale reconcile watermark + in-memory cursor before
+        // we persist the new on-chain id. A bare `onChainId` overwrite would keep
+        // the old `lastReconciledOrdinal`, making the sweep resume at the prior
+        // graph's ordinal and permanently skip the new graph's early KAs.
+        this.bindSubscriptionOnChainId(resolvedCgId, existing, numericStr);
+        existing.coreHosted = true;
+        next = existing;
+      } else {
+        next = {
+          syncMode: 'always-on',
+          subscribed: false,
+          synced: false,
+          onChainId: numericStr,
+          coreHosted: true,
+        };
+      }
+      this.setContextGraphSubscription(resolvedCgId, next);
+    });
+    if (localCgId === undefined) return;
     this.log.info(
       createOperationContext('system'),
       `Phase D: marked public cg=${numericStr} as core-hosted (will chain-reconcile to VM across restarts)`,
