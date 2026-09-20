@@ -39,6 +39,7 @@ import {
   type AsyncLiftUpdateChainProofLookup,
   type AsyncLiftChainProofResolution,
   type AsyncLiftPublisherRecoveryResult,
+  type CanonicalCreateEvidence,
   type VmPublisherControl,
   type LiftJobHex,
   type PersistedLiftJob,
@@ -943,11 +944,18 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
     if (lookup.operationKind === 'update') {
       return resolveCanonicalUpdateRecoveryEvidence(job, lookup, adapters, verdictRecovery, options);
     }
-    const recovered = await resolveCanonicalOnChainPublish(lookup, adapters, options);
+    // The generic CREATE verdict already read this exact receipt and gated its block for
+    // canonical finality. Carrying those immutable facts into this same-operation finalizer
+    // removes a second receipt+header round trip. A verdict-less LIVE interrupted lane (or an
+    // adapter that cannot project the strict receipt) keeps the established live read below.
+    const carried = verdictRecovery?.canonicalCreate;
+    const recovered = carried
+      ? recoverCanonicalCreateFromVerdict(job, lookup, verdictRecovery, carried)
+      : await resolveCanonicalOnChainPublish(lookup, adapters, options);
     if (!recovered) return null;
     const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
       recovered.receipt,
-      recovered.chain.chainId,
+      recovered.chainId,
       recovered.knowledgeAssetsContract,
     );
     if (!evidence) return null;
@@ -974,6 +982,99 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
         ual: request.kaUal,
       },
     };
+  };
+}
+
+/**
+ * Re-bind transported CREATE evidence to both the current lookup and the immutable named-KA seal.
+ * A present-but-inconsistent carrier is refused rather than silently repaired from another read:
+ * it means the verdict and finalizer disagree about which operation they are settling. Only true
+ * absence of the optional carrier selects the compatibility fallback above.
+ */
+function recoverCanonicalCreateFromVerdict(
+  job: PersistedLiftJob,
+  lookup: AsyncLiftChainProofLookup,
+  verdictRecovery: AsyncLiftPublisherRecoveryResult,
+  evidence: CanonicalCreateEvidence,
+): {
+  receipt: CanonicalFinalizationReceipt;
+  chainId: string;
+  knowledgeAssetsContract: string;
+} | null {
+  const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+    ? job.request.knowledgeAssetVmPublish
+    : undefined;
+  const sameHex = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+  if (
+    lookup.operationKind !== 'create'
+    || !request
+    || !request.sealMerkleRoot
+    || !request.seal?.authorAddress
+    || request.seal.reservedKaId === undefined
+    || !verdictRecovery.inclusion.blockHash
+    || !verdictRecovery.finalization.txHash
+    || !verdictRecovery.finalization.publisherAddress
+    || verdictRecovery.finalization.batchId === undefined
+    || verdictRecovery.finalization.startKAId === undefined
+    || verdictRecovery.finalization.endKAId === undefined
+    || !sameHex(evidence.txHash, lookup.txHash)
+    || !sameHex(verdictRecovery.inclusion.txHash, lookup.txHash)
+    || !sameHex(verdictRecovery.inclusion.blockHash, evidence.blockHash)
+    || !sameHex(verdictRecovery.finalization.txHash, lookup.txHash)
+    || verdictRecovery.inclusion.blockNumber !== evidence.blockNumber
+    || !sameHex(verdictRecovery.finalization.publisherAddress, evidence.publisherAddress)
+    || !sameHex(lookup.walletId, evidence.publisherAddress)
+    || verdictRecovery.finalization.batchId !== evidence.batchId
+    || verdictRecovery.finalization.startKAId !== evidence.startKAId
+    || verdictRecovery.finalization.endKAId !== evidence.endKAId
+    || !sameHex(request.sealMerkleRoot, evidence.merkleRoot)
+    || !sameHex(request.seal.authorAddress, evidence.authorAddress)
+    || request.seal.reservedKaId !== evidence.kaId
+    || (lookup.publishIdentityKaId !== undefined
+      && lookup.publishIdentityKaId !== evidence.kaId)
+  ) return null;
+
+  let batchId: bigint;
+  let kaId: bigint;
+  let startKAId: bigint;
+  let endKAId: bigint;
+  try {
+    batchId = BigInt(evidence.batchId);
+    kaId = BigInt(evidence.kaId);
+    startKAId = BigInt(evidence.startKAId);
+    endKAId = BigInt(evidence.endKAId);
+  } catch {
+    return null;
+  }
+  if (
+    !ethers.isHexString(evidence.txHash, 32)
+    || !ethers.isHexString(evidence.blockHash, 32)
+    || !ethers.isHexString(evidence.merkleRoot, 32)
+    || !ethers.isAddress(evidence.publisherAddress)
+    || !ethers.isAddress(evidence.authorAddress)
+    || !ethers.isAddress(evidence.knowledgeAssetsContract)
+    || !Number.isSafeInteger(evidence.blockNumber)
+    || evidence.blockNumber < 0
+    || !Number.isSafeInteger(evidence.txIndex)
+    || evidence.txIndex < 0
+  ) return null;
+  return {
+    receipt: {
+      txHash: evidence.txHash,
+      blockNumber: evidence.blockNumber,
+      blockHash: evidence.blockHash,
+      txIndex: evidence.txIndex,
+      merkleRoot: ethers.getBytes(evidence.merkleRoot),
+      publisherAddress: evidence.publisherAddress,
+      authorAddress: evidence.authorAddress,
+      batchId,
+      kaId,
+      startKAId,
+      endKAId,
+      knowledgeAssetsContract: evidence.knowledgeAssetsContract,
+    },
+    chainId: evidence.chainId,
+    knowledgeAssetsContract: evidence.knowledgeAssetsContract,
   };
 }
 
@@ -1066,7 +1167,7 @@ async function resolveCanonicalOnChainPublish(
   options?: { readonly signal?: AbortSignal },
 ): Promise<{
   receipt: CanonicalFinalizationReceipt;
-  chain: ChainAdapter;
+  chainId: string;
   knowledgeAssetsContract: string;
 } | null> {
   const chain = adapters.get(lookup.walletId);
@@ -1107,7 +1208,7 @@ async function resolveCanonicalOnChainPublish(
     }
   }
   return knowledgeAssetsContract
-    ? { receipt: resolution.receipt, chain, knowledgeAssetsContract }
+    ? { receipt: resolution.receipt, chainId: chain.chainId, knowledgeAssetsContract }
     : null;
 }
 

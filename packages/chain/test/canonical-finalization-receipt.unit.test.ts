@@ -300,6 +300,18 @@ describe('canonical finalization receipt capability', () => {
     expect(resolution.status).toBe('confirmed');
     expect(resolution.status).not.toBe('unrecognized');
     expect(resolution.status === 'confirmed' ? resolution.publish.batchId : null).toBe(legacyBatchId);
+    expect(resolution.status === 'confirmed' ? resolution.canonicalReceipt : null).toEqual({
+      txHash: TX_HASH,
+      blockNumber: 123,
+      blockHash: BLOCK_HASH,
+      txIndex: 4,
+      merkleRoot: MERKLE_ROOT,
+      publisherAddress: PUBLISHER,
+      batchId: legacyBatchId,
+      kaId: legacyBatchId,
+      startKAId: legacyBatchId,
+      endKAId: legacyBatchId,
+    });
     // And the cheaper legacy surface projects the same read to the same publish.
     expect(await chain.resolvePublishByTxHash(TX_HASH)).toMatchObject({ batchId: legacyBatchId });
   });

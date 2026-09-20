@@ -323,8 +323,18 @@ export type CanonicalFinalizationReceiptResolution =
  * absence.
  */
 export type PublishTransactionResolution =
-  /** Mined, successful, and carries a publish this adapter parsed. */
-  | { status: 'confirmed'; publish: OnChainPublishResult }
+  /**
+   * Mined, successful, and carries a publish this adapter parsed. An adapter
+   * that established the verdict from a canonical receipt may also carry that
+   * exact receipt so same-operation consumers do not have to re-prove it.
+   * Absence preserves compatibility with adapters that cannot project the
+   * stricter receipt shape; callers must then perform their existing read.
+   */
+  | {
+      status: 'confirmed';
+      publish: OnChainPublishResult;
+      canonicalReceipt?: CanonicalFinalizationReceipt;
+    }
   /** Mined with a failure receipt: proven ineffective, and permanently so. */
   | { status: 'reverted' }
   /**
