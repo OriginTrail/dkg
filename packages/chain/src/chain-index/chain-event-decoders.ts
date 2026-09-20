@@ -429,10 +429,10 @@ function decodeMerkleRootEntries(
   if (!Array.isArray(value)) return undefined;
   const entries: KnowledgeAssetMerkleRootEntry[] = [];
   for (const item of value) {
-    const merkleRoot = normalizeMerkleRoot(readMerkleRootEntryField(item, 'merkleRoot', 0));
+    const merkleRoot = normalizeMerkleRoot(readMerkleRootEntryField(item, 'merkleRoot', 1));
     if (merkleRoot === undefined) return undefined;
     const publisher = normalizeChainEventLogAddress(
-      String(readMerkleRootEntryField(item, 'publisher', 1) ?? ''),
+      String(readMerkleRootEntryField(item, 'publisher', 0) ?? ''),
     );
     entries.push(Object.freeze(
       publisher === undefined ? { merkleRoot } : { merkleRoot, publisher },

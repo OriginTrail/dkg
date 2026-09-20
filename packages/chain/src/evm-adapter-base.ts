@@ -4786,6 +4786,11 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
+    // The bulk self-heal does not know which Hub name moved. Retire the whole
+    // one-log runtime before exposing freshly resolved handles: until a runtime
+    // built around those handles attaches, every log-backed reader must use its
+    // live fallback rather than rows indexed from a retired proxy.
+    this.chainIndexOwner.rebuild();
     for (const policy of HUB_BINDING_INVALIDATORS.values()) {
       this.invalidateHubBinding(policy);
     }

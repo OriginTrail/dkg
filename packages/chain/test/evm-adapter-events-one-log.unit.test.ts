@@ -26,6 +26,7 @@ const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 const SCOPE = 'evm:31337:0xhub:0xstorage';
 const CG_STORAGE = `0x${'cd'.repeat(20)}`.toLowerCase();
+const ROTATED_CG_STORAGE = `0x${'ef'.repeat(20)}`.toLowerCase();
 
 const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
 const cgInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
@@ -104,7 +105,10 @@ function seededStore(
 }
 
 /** The adapter with a stubbed contract handle and a recorded live scan. */
-function makeAdapter(store: MemoryChainEventLogStore | undefined, coveredThrough = 100) {
+function makeAdapter(
+  store: MemoryChainEventLogStore | undefined,
+  currentContextGraphStorageAddress = CG_STORAGE,
+) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const adapter: any = new EVMChainAdapter(minimalConfig());
   adapter.initialized = true;
@@ -117,6 +121,7 @@ function makeAdapter(store: MemoryChainEventLogStore | undefined, coveredThrough
   adapter.contracts = {
     contextGraphStorage: {
       interface: cgInterface,
+      getAddress: async () => currentContextGraphStorageAddress,
       filters: {
         ContextGraphCreated: () => ({}),
         KnowledgeAssetRegisteredToContextGraph: () => ({}),
@@ -135,7 +140,6 @@ function makeAdapter(store: MemoryChainEventLogStore | undefined, coveredThrough
       contextGraphStorageAddress: CG_STORAGE,
     });
   }
-  void coveredThrough;
   return { adapter, liveScans };
 }
 
@@ -212,5 +216,22 @@ describe('listenForEvents over the one log', () => {
     const { adapter, liveScans } = makeAdapter(undefined);
     await collect(adapter, ['ContextGraphCreated'], 10, 100);
     expect(liveScans).toEqual(['cgStorage.queryFilter(ContextGraphCreated)']);
+  });
+
+  it('never serves lanes from the ContextGraphStorage the Hub rotated away from', async () => {
+    const store = seededStore(100, [creationRow(50, 7n), registrationRow(60, 7n, 900n)]);
+    const { adapter, liveScans } = makeAdapter(store, ROTATED_CG_STORAGE);
+
+    expect(await collect(adapter, ['ContextGraphCreated'], 10, 100)).toEqual([]);
+    expect(await collect(
+      adapter,
+      ['KnowledgeAssetRegisteredToContextGraph'],
+      10,
+      100,
+    )).toEqual([]);
+    expect(liveScans).toEqual([
+      'cgStorage.queryFilter(ContextGraphCreated)',
+      'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)',
+    ]);
   });
 });

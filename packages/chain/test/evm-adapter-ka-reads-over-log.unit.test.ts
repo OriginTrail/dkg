@@ -25,6 +25,7 @@ const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
 const SCOPE = 'evm:31337:0xhub';
 const CG_STORAGE = `0x${'cd'.repeat(20)}`;
+const ROTATED_CG_STORAGE = `0x${'ef'.repeat(20)}`;
 const FLOOR = 10;
 const SETTLED = 100;
 const COVERED_THROUGH = 105;
@@ -101,6 +102,7 @@ function makeAdapter(options: {
   store?: MemoryChainEventLogStore;
   attach?: boolean;
   now?: () => number;
+  currentContextGraphStorageAddress?: string;
 } = {}) {
   const adapter = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:59998',
@@ -122,7 +124,9 @@ function makeAdapter(options: {
     attachChainEventLog(binding: unknown): void;
   };
   internals.init = async () => undefined;
-  internals.requireContextGraphStorage = () => ({});
+  internals.requireContextGraphStorage = () => ({
+    getAddress: async () => options.currentContextGraphStorageAddress ?? CG_STORAGE,
+  });
   internals.readContract = async (_contract, label) => {
     calls.push(label);
     return live.get(label) ?? 0n;
@@ -134,6 +138,7 @@ function makeAdapter(options: {
   if (options.attach !== false && options.store !== undefined) {
     internals.attachChainEventLog(Object.freeze({
       subscription: {},
+      contextGraphStorageAddress: CG_STORAGE.toLowerCase(),
       knowledgeAssets: createKnowledgeAssetReadModel({
         scope: SCOPE,
         store: options.store,
@@ -189,10 +194,10 @@ describe('knowledge-asset views over the one log', () => {
     const { adapter, calls, live } = makeAdapter({
       store: seeded([registration(50, 7n, 4242n)], 45),
     });
-    live.set('cgStorage.getContextGraphKaCount', 9n);
+    live.set('cgStorage.getContextGraphKaAt', 9001n);
 
-    expect(await adapter.getContextGraphKCCount(7n)).toBe(9n);
-    expect(calls).toEqual(['cgStorage.getContextGraphKaCount']);
+    expect(await adapter.getContextGraphKCAt(7n, 0n)).toBe(9001n);
+    expect(calls).toEqual(['cgStorage.getContextGraphKaAt']);
   });
 
   it('keeps the eth_call once the tick has gone quiet', async () => {
@@ -247,9 +252,25 @@ describe('knowledge-asset views over the one log', () => {
     expect(absent.calls).toEqual(['cgStorage.kaToContextGraph']);
 
     const list = makeAdapter({ store: catchingUp });
-    list.live.set('cgStorage.getContextGraphKaCount', 3n);
-    expect(await list.adapter.getContextGraphKCCount(7n)).toBe(3n);
-    expect(list.calls).toEqual(['cgStorage.getContextGraphKaCount']);
+    list.live.set('cgStorage.getContextGraphKaAt', 9002n);
+    expect(await list.adapter.getContextGraphKCAt(7n, 0n)).toBe(9002n);
+    expect(list.calls).toEqual(['cgStorage.getContextGraphKaAt']);
+  });
+
+  it('never serves KA views from the ContextGraphStorage the Hub rotated away from', async () => {
+    const { adapter, calls, live } = makeAdapter({
+      store: populated(),
+      currentContextGraphStorageAddress: ROTATED_CG_STORAGE,
+    });
+    live.set('cgStorage.kaToContextGraph', 11n);
+    live.set('cgStorage.getContextGraphKaAt', 9003n);
+
+    expect(await adapter.getKAContextGraphId(4242n)).toBe(11n);
+    expect(await adapter.getContextGraphKCAt(7n, 0n)).toBe(9003n);
+    expect(calls).toEqual([
+      'cgStorage.kaToContextGraph',
+      'cgStorage.getContextGraphKaAt',
+    ]);
   });
 
   it('includes the UNSETTLED tail, because the call it replaces is unpinned', async () => {

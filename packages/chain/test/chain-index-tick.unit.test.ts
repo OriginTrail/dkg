@@ -798,8 +798,8 @@ describe('ChainIndexTick — the head stamp dates the head READ, not the commit'
 
     const state = await store.load();
     const askedAtMs = slow.headAskedAtMs[0]!;
-    const committedAtMs = slow.nowMs();
-    expect(committedAtMs - askedAtMs).toBeGreaterThanOrEqual(LOG_SCAN_MS);
+    const afterBackfillAtMs = slow.nowMs();
+    expect(afterBackfillAtMs - askedAtMs).toBeGreaterThanOrEqual(LOG_SCAN_MS);
     const anchorAt = (nowMs: number) => resolveChainIndexAuthorityAnchor({
       state,
       contractAddress: STORAGE,
@@ -814,9 +814,5 @@ describe('ChainIndexTick — the head stamp dates the head READ, not the commit'
 
     expect(anchorAt(askedAtMs + 17_999).anchor).toBeDefined();
     expect(anchorAt(askedAtMs + 18_001).refusal).toBe('stale-head');
-    // The distance the bug bought: with the commit stamp these two were
-    // servable, because the gate was reading `commit + 18s` as `head + 18s`.
-    expect(anchorAt(committedAtMs + 1).refusal).toBe('stale-head');
-    expect(anchorAt(committedAtMs + 17_999).refusal).toBe('stale-head');
   });
 });

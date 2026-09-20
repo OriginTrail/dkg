@@ -1144,18 +1144,33 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * graph's creation block, an ordinal past what the log holds — runs the
    * `eth_call` exactly as it did before the log existed.
    */
-  private get knowledgeAssetsFromLog() {
-    return this.chainEventLogBinding?.knowledgeAssets;
+  private async knowledgeAssetsFromLogFor(contract: Contract) {
+    const binding = this.chainEventLogBinding;
+    if (binding?.knowledgeAssets === undefined
+      || binding.contextGraphStorageAddress === undefined) return undefined;
+    let currentAddress: string;
+    try {
+      currentAddress = (await contract.getAddress()).toLowerCase();
+    } catch {
+      return undefined;
+    }
+    // A Hub self-heal may resolve the successor before the detached one-log
+    // runtime has rebuilt. Never answer the successor from the retired proxy's
+    // folded rows; an address mismatch takes the existing live eth_call below.
+    return binding.contextGraphStorageAddress === currentAddress
+      ? binding.knowledgeAssets
+      : undefined;
   }
 
   async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
-    const logged = await this.knowledgeAssetsFromLog?.readContextGraphForKa(
+    const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readContextGraphForKa(
       kaId,
       { view: 'latest' },
     );
     if (logged !== undefined) return logged.contextGraphId;
-    const cgs = this.requireContextGraphStorage();
     const cgId: bigint = await this.readContractWithOptions(
       cgs,
       'cgStorage.kaToContextGraph',
@@ -1180,7 +1195,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
-    const logged = await this.knowledgeAssetsFromLog?.readContextGraphKaList(
+    const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readContextGraphKaList(
       contextGraphId,
       { view: 'latest' },
     );
@@ -1191,7 +1208,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (logged !== undefined && index >= 0n && index < BigInt(logged.kaIds.length)) {
       return logged.kaIds[Number(index)]!;
     }
-    const cgs = this.requireContextGraphStorage();
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
     );

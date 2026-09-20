@@ -160,4 +160,36 @@ describe('DKGKnowledgeAssets one-log decoder', () => {
       { publisher: OTHER_PUBLISHER, merkleRoot: root(5) },
     ]);
   });
+
+  it('decodes unnamed MerkleRoot tuple components by their Solidity positions', () => {
+    const unnamedTupleInterface = new ethers.Interface([
+      'event KnowledgeAssetCreated(uint256 indexed id)',
+      'event KnowledgeAssetMerkleRootsUpdated(uint256 indexed id, '
+        + '(address,bytes32,uint256)[] merkleRoots)',
+    ]);
+    const event = unnamedTupleInterface.getEvent('KnowledgeAssetMerkleRootsUpdated')!;
+    const encoded = unnamedTupleInterface.encodeEventLog(event, [42n, [
+      [PUBLISHER, root(4), 100n],
+      [OTHER_PUBLISHER, root(5), 101n],
+    ]]);
+    const rows: ChainEventLogRow[] = [{
+      blockNumber: 14,
+      blockHash: hash(14),
+      logIndex: 0,
+      transactionHash: hash(0xaa),
+      address: KA_STORAGE,
+      topics: [...encoded.topics],
+      data: encoded.data,
+      settled: true,
+    }];
+
+    const decoded = new ChainEventDecoderRegistry()
+      .registerKnowledgeAssets(KA_STORAGE, unnamedTupleInterface)
+      .decodeKnowledgeAssets(rows);
+
+    expect(decoded[0]?.merkleRoots).toEqual([
+      { publisher: PUBLISHER, merkleRoot: root(4) },
+      { publisher: OTHER_PUBLISHER, merkleRoot: root(5) },
+    ]);
+  });
 });

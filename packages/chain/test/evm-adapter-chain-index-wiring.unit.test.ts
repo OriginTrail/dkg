@@ -352,6 +352,26 @@ describe('EVMChainAdapter chain index wiring', () => {
     adapter.destroy();
   });
 
+  it('retires the old binding when bulk Hub self-heal re-resolves every contract', async () => {
+    const store = new MemoryChainEventLogStore();
+    const adapter = new EVMChainAdapter(config(store));
+    stubHub(adapter);
+    stubContextGraphStorage(adapter, RETIRED_CG_STORAGE);
+    startChainIndex(adapter);
+    await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(RETIRED_CG_STORAGE);
+
+    (adapter as unknown as { invalidateAllBoundContracts(): void })
+      .invalidateAllBoundContracts();
+    expect(adapter.chainEventLog).toBeUndefined();
+
+    stubContextGraphStorage(adapter, ROTATED_CG_STORAGE);
+    startChainIndex(adapter);
+    await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(ROTATED_CG_STORAGE);
+    adapter.destroy();
+  });
+
   it('builds from the contracts it held when it STARTED, not from after the await', async () => {
     const store = new MemoryChainEventLogStore();
     const adapter = new EVMChainAdapter(config(store));

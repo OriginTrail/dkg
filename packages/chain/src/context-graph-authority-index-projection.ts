@@ -482,9 +482,9 @@ export class ContextGraphAuthorityIndexProjectionCache {
         // of the instant that data was fetched, not as of this read. Retaining
         // and reporting it under `now` would reset its age to zero and buy it a
         // further `tickMs` of service as a FRESH cache entry, so a view already
-        // `max(3T, 15s)` behind the chain could be served for `max(3T, 15s) + T`
-        // while every consumer was told it was under T old. The age this cache
-        // ages by is the age of the DATA.
+        // `min(max(3T, 15s), 5m)` behind the chain could be served for that
+        // capped bound plus T while every consumer was told it was under T old.
+        // The age this cache ages by is the age of the DATA.
         projection = Object.freeze({
           ...completed,
           fetchedAtMs: resolveProjectionFetchedAtMs(

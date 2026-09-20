@@ -33,23 +33,31 @@ export class EventsMethods extends EVMChainAdapterBase {
   private async chainEventLogRows(
     family: ChainEventLogFamily,
     addressKey: 'contextGraphStorageAddress' | 'knowledgeAssetStorageAddress',
-    contractInterface: ethers.Interface,
+    contract: ethers.Contract,
     eventName: string,
     filter: EventFilter,
   ): Promise<readonly ParsedLogLike[] | undefined> {
     const binding = this.chainEventLogBinding;
     if (binding === undefined) return undefined;
-    // The address comes from the BINDING, not from the caller's own Hub
-    // resolution: coverage is recorded per (family, address), so proving a
-    // range against one address while reading another would be comparing a
-    // range to coverage that was never about it.
+    // Coverage is recorded per (family, address), so the binding is usable only
+    // while it names the SAME contract the adapter currently resolves. A
+    // write-side Hub self-heal can replace the handle before the detached index
+    // runtime has rebuilt; in that interval the retired proxy's coverage must
+    // fail closed to the live queryFilter below.
     const address = binding[addressKey];
     if (address === undefined) return undefined;
+    let currentAddress: string;
+    try {
+      currentAddress = (await contract.getAddress()).toLowerCase();
+    } catch {
+      return undefined;
+    }
+    if (address !== currentAddress) return undefined;
     // ONE topic, not the whole family. A family is a filter of several
     // signatures fetched together, so handing a lane every row at the address
     // would feed it its siblings — a `ContextGraphDeactivated` parsed as a
     // `ContextGraphCreated` is a graph that never existed.
-    const topic0 = contractInterface.getEvent(eventName)?.topicHash.toLowerCase();
+    const topic0 = contract.interface.getEvent(eventName)?.topicHash.toLowerCase();
     if (topic0 === undefined) return undefined;
     const fromBlock = typeof filter.fromBlock === 'number' ? filter.fromBlock : undefined;
     const toBlock = typeof filter.toBlock === 'number' ? filter.toBlock : undefined;
@@ -180,7 +188,7 @@ export class EventsMethods extends EVMChainAdapterBase {
           const logged = await this.chainEventLogRows(
             'context-graph-ka',
             'contextGraphStorageAddress',
-            cgStorage.interface,
+            cgStorage,
             'KnowledgeAssetRegisteredToContextGraph',
             filter,
           );
@@ -362,7 +370,7 @@ export class EventsMethods extends EVMChainAdapterBase {
           const logged = await this.chainEventLogRows(
             'context-graph-authority',
             'contextGraphStorageAddress',
-            cgStorage.interface,
+            cgStorage,
             'ContextGraphCreated',
             filter,
           );
