@@ -332,10 +332,16 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // helpers above.
   'verifyContractSignature',
   // The node's ONE chain log, and the four helpers that build, key, rebuild and
-  // read it. None of the five is on the `ChainAdapter` interface
-  // (`chain-adapter.ts` names none of them), so the CH-8 hazard this list exists
-  // for — a mock-mode user flipping `chain.type` to `evm` and hitting "method
-  // not implemented" — cannot reach them: `chainEventLogRows` and
+  // read it. None of the five is on the `ChainAdapter` interface, so the CH-8
+  // hazard this list exists for — a mock-mode user flipping `chain.type` to
+  // `evm` and hitting "method not implemented" — cannot reach them.
+  //
+  // That claim is the entire justification for exempting them, and it is not a
+  // claim this file can check: `ChainAdapter` is a type. It is CHECKED, as a
+  // build gate, by `type-tests/one-log-internals-off-chain-adapter.ts`, which
+  // fails compilation the moment any of the five is promoted onto the
+  // interface — keep the two name lists in step. Why each is off it:
+  // `chainEventLogRows` and
   // `chainIndexContract` are TS-`private`, `startChainIndexRuntime` and
   // `rebuildChainIndexRuntimeOnRotation` are `protected`, and they appear in
   // this audit only because TS visibility is erased at runtime (same category as

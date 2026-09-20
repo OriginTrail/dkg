@@ -16,6 +16,7 @@ import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
 import {
   contextGraphAuthorityIndexProjectionFault,
+  resolveProjectionFetchedAtMs,
   contextGraphAuthorityIndexScope,
   type ContextGraphAuthorityIndexCompletedProjection,
   type ContextGraphAuthorityIndexProjection,
@@ -754,14 +755,21 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // candidate has to supply it. A fold from the log knows the answer —
         // `origin.dataFetchedAtMs`, the instant the tick asked for the head it
         // committed, up to `min(max(3T, 15s), 5m)` before this read — and that
-        // is what it must carry:
-        // stamping this read's clock would move the age towards zero, the
-        // single direction the field exists to forbid. `askedAtMs` is only the
-        // floor for a refresh that reported none (the live scan, which is
-        // fetching now), and the `min` keeps a store that somehow reports a
-        // future instant from under-reporting too. It is the same value the
-        // cache retains the fold under, so the candidate this predicate judges
-        // and the projection the cache ages cannot disagree.
+        // is what it must carry: stamping this read's clock would move the age
+        // towards zero, the single direction the field exists to forbid.
+        // `askedAtMs` is only the floor for a fold that reported no believable
+        // instant of its own.
+        //
+        // Stamped by the CACHE'S OWN constructor, not by a local expression
+        // that says the same thing. The candidate this predicate judges and the
+        // projection the cache then ages and reports must not be able to
+        // disagree, and a restatement can drift from the rule without anything
+        // noticing — this one had: the `Math.min` that stood here believed a
+        // NaN or fractional `dataFetchedAtMs` the cache rejects. The floors are
+        // deliberately different: `askedAtMs` is taken before the cache takes
+        // its own, so an absent or unbelievable instant leaves the candidate
+        // stamped at or before the published projection, which can only
+        // OVER-report age.
         //
         // Exceptions PROPAGATE. A projection that throws on the fold throws
         // again on the live scan's own projection — the conditions it throws on
@@ -772,14 +780,18 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // "exceptions never become cache misses or extra paid scans" the cache
         // documents. Admission returns faults as data until the projection
         // cache has crossed both transport-classification boundaries.
+        //
+        // The candidate is stamped by the cache's OWN resolver, not by a second
+        // copy of the rule here. The copy that used to sit at this line had
+        // already drifted: a bare `Math.min` believed a NaN or fractional
+        // `dataFetchedAtMs` that the resolver rejects, so the view a read was
+        // ADMITTED by could be stamped differently from the one the cache then
+        // aged and reported. The floors differ deliberately — `askedAtMs`
+        // precedes the cache's own stamp — and only ever over-report, which is
+        // the safe direction.
         (completed) => read({
           ...completed,
-          fetchedAtMs: Math.min(
-            askedAtMs,
-            completed.origin.kind === 'log'
-              ? completed.origin.dataFetchedAtMs
-              : askedAtMs,
-          ),
+          fetchedAtMs: resolveProjectionFetchedAtMs(askedAtMs, completed.origin),
         }).complete,
       ),
     });
