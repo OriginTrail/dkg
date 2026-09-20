@@ -3176,8 +3176,10 @@ export class EVMChainAdapterBase {
     options.signal?.throwIfAborted();
     const remembered = options.blockHash == null
       ? undefined
-      : this.receiptBlockHeadersByHash.get(options.blockHash.toLowerCase())?.timestamp;
-    if (remembered !== undefined) return remembered;
+      : this.receiptBlockHeadersByHash.get(options.blockHash.toLowerCase());
+    if (remembered?.number === blockNumber && remembered.timestamp !== undefined) {
+      return remembered.timestamp;
+    }
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most
     // likely to already have the block). It is NOT a `skipPreferred` tip read:
