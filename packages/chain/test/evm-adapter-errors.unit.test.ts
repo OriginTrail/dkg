@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isEvmBlockUnavailableError } from '../src/evm-adapter-errors.js';
+import { isEvmBlockUnavailableError } from '../src/evm-error-text.js';
 
 describe('isEvmBlockUnavailableError', () => {
   it.each([

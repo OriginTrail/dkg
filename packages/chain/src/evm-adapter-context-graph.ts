@@ -106,6 +106,7 @@ const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 type ContextGraphAuthorityMutation = 'addParticipantAgent' | 'removeParticipantAgent';
 
+/** Every authority writer invalidates projections, even when its receipt is lost. */
 function sendContextGraphAuthorityTransaction<T>(
   write: () => Promise<T>,
   dropProjections: () => void,

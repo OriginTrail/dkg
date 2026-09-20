@@ -43,6 +43,7 @@ import {
   startProverLoop,
   type RandomSamplingRepairMaterial,
 } from '../src/index.js';
+import { SOLVED_PERIOD_MAX_SKIP_MS } from '../src/solved-period-skip.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -2021,9 +2022,10 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
-  it('re-reads the chain 5 minutes after the recording tick even if the head barely moved', async () => {
-    // Safety re-read (review R8), time bound — the one that matters on a
-    // long period (Base: 30 min), where half a period is 15 min away.
+  it('detects an in-period challenge clear at the one-minute revalidation bound', async () => {
+    // An admin migration sweep or reorg can clear the challenge while the
+    // separately earned score survives. The time bound must reveal that reset
+    // promptly even on a long period whose block bound is many minutes away.
     vi.useFakeTimers({ toFake: ['performance'] });
     try {
       const state = makeSolvedState();
@@ -2031,13 +2033,15 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-      vi.advanceTimersByTime(5 * 60_000 - 1);
+      state.challengeForNode = null;
+      vi.advanceTimersByTime(SOLVED_PERIOD_MAX_SKIP_MS - 1);
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });
       expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
 
       vi.advanceTimersByTime(1);
-      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+      expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
       expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+      expect(state.createChallenge).toHaveBeenCalledTimes(1);
       await prover.close();
     } finally {
       vi.useRealTimers();

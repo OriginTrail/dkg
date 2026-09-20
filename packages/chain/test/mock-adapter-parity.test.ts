@@ -403,6 +403,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
   });
 
+  it('does not leak the shared receipt-finality decision onto either adapter prototype', () => {
+    expect(EVM_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+    expect(MOCK_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
+  });
+
   it('does not leak the authority revision operation onto the adapter prototype', () => {
     expect(EVM_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
     expect(EVM_INTERNAL_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);

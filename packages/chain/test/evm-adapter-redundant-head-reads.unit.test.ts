@@ -220,6 +220,18 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     expect(unhealthy.getBlockNumber.calls).toHaveLength(1);
   });
 
+  it('depth 1: surfaces a failed head confirmation instead of masking the block error as absence', async () => {
+    const unavailable = {
+      getBlockNumber: recorder(async () => { throw new Error('head confirmation unavailable'); }),
+      getBlock: recorder(async () => { throw new Error('header not found'); }),
+    };
+    const a = makeAdapter([unavailable]);
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT))
+      .rejects.toThrow('head confirmation unavailable');
+    expect(unavailable.getBlock.calls).toEqual([[123]]);
+    expect(unavailable.getBlockNumber.calls).toHaveLength(1);
+  });
   it('depth 1: all above-head error responses exhaust as a false verdict', async () => {
     const first = blockErrorEndpoint(121, 'unknown block');
     const second = blockErrorEndpoint(122, 'block not found');
@@ -263,6 +275,16 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     expect(deep.getBlockNumber.calls).toHaveLength(1);
     expect(deep.getBlock.calls).toEqual([[123]]);
   });
+
+  it('depth 3: a block error after the depth proof surfaces without a second head read', async () => {
+    const erroring = blockErrorEndpoint(125, 'unknown block');
+    const a = makeAdapter([erroring], { finalityConfirmations: 3 });
+
+    await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT))
+      .rejects.toThrow('unknown block');
+    expect(erroring.getBlockNumber.calls).toHaveLength(1);
+    expect(erroring.getBlock.calls).toEqual([[123]]);
+  });
 });
 
 describe('getFinalizedBlockTimestamp reuses the finality check\'s hash-bound header', () => {
@@ -288,6 +310,26 @@ describe('getFinalizedBlockTimestamp reuses the finality check\'s hash-bound hea
     expect(p.getBlock.calls).toHaveLength(1); // per tx: finality + timestamp = ONE block read
   });
 
+  it('the real receipt wait retains the header for the publish timestamp parser', async () => {
+    const p = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 });
+    const a = makeAdapter([p]);
+    const receipt = {
+      ...RECEIPT,
+      hash: `0x${'ab'.repeat(32)}`,
+      status: 1,
+      index: 0,
+      logs: [],
+    };
+    a.getTransactionReceiptWithFailover = recorder(async () => receipt);
+
+    await expect(a.waitForReceiptWithFailover(receipt.hash, 'unit publish'))
+      .resolves.toBe(receipt);
+    expect(p.getBlock.calls).toHaveLength(1);
+
+    expect(await a.getFinalizedBlockTimestamp(123, BLOCK_HASH))
+      .toBe(1_700_000_123);
+    expect(p.getBlock.calls).toHaveLength(1);
+  });
   it('an already-aborted caller rejects even when the timestamp memo has the answer', async () => {
     const p = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 });
     const a = makeAdapter([p]);
