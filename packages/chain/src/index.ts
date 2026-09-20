@@ -196,6 +196,7 @@ export {
 } from './context-graph-authority-rpc-sites.js';
 export {
   type RandomSamplingReadContext,
+  type RandomSamplingBlockContext,
   type RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 export {

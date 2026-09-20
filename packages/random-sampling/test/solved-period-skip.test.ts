@@ -145,6 +145,65 @@ describe('SolvedPeriodSkip', () => {
     expect(order).toEqual(['binding', 'live', 'head', 'context']);
   });
 
+  it('uses one binding-checked block context for both head and epoch guards', async () => {
+    const { state, chain, contextReader, skip } = fixture();
+    contextReader.readRandomSamplingBlockContext = vi.fn(async () =>
+      state.ready && state.bindingId !== undefined
+        ? {
+            bindingId: state.bindingId,
+            chronosEpoch: state.epoch,
+            headBlockNumber: BigInt(state.head),
+          }
+        : undefined);
+
+    expect((await observe(skip)).kind).toBe('live');
+    state.head = 1040;
+    expect((await readWithoutChallenge(skip)).result.kind).toBe('reused');
+    expect(chain.getBlockNumber).not.toHaveBeenCalled();
+    expect(contextReader.readRandomSamplingContext).not.toHaveBeenCalled();
+    expect(contextReader.readRandomSamplingBlockContext).toHaveBeenCalledTimes(2);
+
+    state.epoch = 4n;
+    const boundary = await readWithoutChallenge(skip);
+    expect(boundary.result.kind).toBe('live');
+    expect(boundary.read).toHaveBeenCalledOnce();
+  });
+
+  it('records a confirmed local submission without a follow-up challenge read', async () => {
+    const { state, skip } = fixture();
+    const first = await readWithoutChallenge(skip);
+    expect(first.result).toMatchObject({
+      kind: 'live',
+      observationBindingId: 'rs-a:rss-a',
+    });
+    if (first.result.kind !== 'live') throw new Error('expected live result');
+
+    await expect(skip.observeSubmittedProof({
+      observationBindingId: first.result.observationBindingId,
+      challenge: challenge({ solved: false }),
+      durationInBlocks: 100n,
+    })).resolves.toBe(true);
+
+    state.head = 1040;
+    const next = await readWithoutChallenge(skip);
+    expect(next.result.kind).toBe('reused');
+    expect(next.read).not.toHaveBeenCalled();
+  });
+
+  it('rejects a submitted-proof observation after the captured binding rotates', async () => {
+    const { state, skip } = fixture();
+    const first = await readWithoutChallenge(skip);
+    if (first.result.kind !== 'live') throw new Error('expected live result');
+    state.bindingId = 'rs-b:rss-b';
+
+    await expect(skip.observeSubmittedProof({
+      observationBindingId: first.result.observationBindingId,
+      challenge: challenge({ solved: false }),
+      durationInBlocks: 100n,
+    })).resolves.toBe(false);
+    expect((await readWithoutChallenge(skip)).result.kind).toBe('live');
+  });
+
   it('does not read the Chronos epoch for a challenge that cannot be reused', async () => {
     const { contextReader, skip } = fixture();
 

@@ -105,7 +105,10 @@ import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fenc
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
-import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type {
+  RandomSamplingBlockContext,
+  RandomSamplingReadContextReader,
+} from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
@@ -818,6 +821,29 @@ export class EVMChainAdapterBase {
    * `UnauthorizedAccess(Only Contracts in Hub)`.
    */
   protected readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
+
+  /**
+   * Immutable Chronos schedule, scoped to the exact resolved contract address.
+   * This is not a cache of the changing epoch: every use still reads a fresh
+   * canonical tip and derives the epoch from that block's timestamp. A Chronos
+   * rotation changes the key and therefore cannot reuse the old schedule.
+   */
+  protected randomSamplingChronosSchedule:
+    | Readonly<{ bindingId: string; startTime: bigint; epochLength: bigint }>
+    | undefined;
+
+  /**
+   * Positive lifecycle-admission observation only. ACK verification continues
+   * to call `shardingTableStorage.nodeExists` live for every ACK; this record is
+   * consumed solely by `resolveRandomSamplingAvailability` while the same
+   * RS/RSS pair remains current.
+   */
+  protected randomSamplingEligibilityObservation:
+    | Readonly<{ bindingId: string; identityId: bigint; checkedAtMs: number }>
+    | undefined;
+
+  /** One skipped 30 s reconcile; membership is read live again by 60 s. */
+  protected static readonly RANDOM_SAMPLING_ELIGIBILITY_MAX_REUSE_MS = 60_000;
 
   /**
    * OT-RFC-39 — per-process identity-id cache. Positive hits are memoised with
@@ -4331,6 +4357,63 @@ export class EVMChainAdapterBase {
         const context = Object.freeze({ bindingId, chronosEpoch });
         return isCurrent(context.bindingId) ? context : undefined;
       },
+      readRandomSamplingBlockContext: async (): Promise<RandomSamplingBlockContext | undefined> => {
+        const bindingId = getBindingId();
+        if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
+        try {
+          // `init()` is the observed-Hub-rotation fence for Chronos. The
+          // RS/RSS binding captured above is checked again after every await.
+          await this.init();
+          if (!isCurrent(bindingId)) return undefined;
+          if (!this.contracts.chronos) {
+            this.contracts.chronos = await this.resolveContract('Chronos');
+          }
+          const chronos = this.contracts.chronos;
+          const chronosBindingId = contractHandleTargetAddress(chronos)?.toLowerCase();
+          if (chronosBindingId === undefined) return undefined;
+
+          let schedule = this.randomSamplingChronosSchedule;
+          if (schedule?.bindingId !== chronosBindingId) {
+            const [startTimeValue, epochLengthValue] = await Promise.all([
+              this.readContract(chronos, 'chronos.startTime', 'startTime'),
+              this.readContract(chronos, 'chronos.epochLength', 'epochLength'),
+            ]);
+            const startTime = BigInt(startTimeValue as bigint | string | number);
+            const epochLength = BigInt(epochLengthValue as bigint | string | number);
+            if (startTime <= 0n || epochLength <= 0n) return undefined;
+            if (
+              !isCurrent(bindingId)
+              || contractHandleTargetAddress(this.contracts.chronos)?.toLowerCase() !== chronosBindingId
+            ) return undefined;
+            schedule = Object.freeze({ bindingId: chronosBindingId, startTime, epochLength });
+            this.randomSamplingChronosSchedule = schedule;
+          }
+
+          const block = await this.readTipProvider(
+            'randomSampling current block context',
+            (provider) => provider.getBlock('latest'),
+          );
+          if (block === null) return undefined;
+          if (
+            !isCurrent(bindingId)
+            || contractHandleTargetAddress(this.contracts.chronos)?.toLowerCase() !== chronosBindingId
+          ) return undefined;
+          const timestamp = BigInt(block.timestamp);
+          const chronosEpoch = timestamp < schedule.startTime
+            ? 1n
+            : ((timestamp - schedule.startTime) / schedule.epochLength) + 1n;
+          return Object.freeze({
+            bindingId,
+            chronosEpoch,
+            headBlockNumber: BigInt(block.number),
+          });
+        } catch {
+          // Optimization capability only. The caller falls back to the
+          // pre-existing live head + Chronos reads when this snapshot cannot
+          // be established.
+          return undefined;
+        }
+      },
       isRandomSamplingBindingCurrent: isCurrent,
     });
   }
@@ -4530,6 +4613,7 @@ export class EVMChainAdapterBase {
     this.inflightDurationProbe = undefined;
     this.inflightDurationProbeContract = undefined;
     this.inflightDurationProbeStartedAt = 0;
+    this.randomSamplingEligibilityObservation = undefined;
   }
 
   /**
@@ -4759,6 +4843,11 @@ export class EVMChainAdapterBase {
     // may have moved; flushing all of them is correct and keeps the 30s TTL as a
     // pure missed-rotation backstop.
     this.resolvedContractAddressCache.invalidateAll();
+    // A membership admission observed under any prior Hub registry state is
+    // cheap to discard and unsafe to carry across a binding change. This does
+    // not affect the per-ACK live authorization path.
+    this.randomSamplingEligibilityObservation = undefined;
+    if (name === 'Chronos') this.randomSamplingChronosSchedule = undefined;
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
       return;

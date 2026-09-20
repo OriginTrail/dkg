@@ -95,6 +95,39 @@ it('refreshes invalidated EVM bindings before returning membership', async () =>
   expect(proof).not.toHaveBeenCalled();
 });
 
+it('reuses only a positive lifecycle admission for one reconcile and invalidates it with the RS pair', async () => {
+  vi.useFakeTimers();
+  try {
+    const chain = adapter();
+    const membership = vi.spyOn(chain, 'isShardingTableMember');
+
+    await expect(chain.resolveRandomSamplingAvailability(52n))
+      .resolves.toEqual({ kind: 'available', member: true });
+    vi.advanceTimersByTime(30_000);
+    await expect(chain.resolveRandomSamplingAvailability(52n))
+      .resolves.toEqual({ kind: 'available', member: true });
+    expect(membership).toHaveBeenCalledTimes(1);
+
+    // At the 60 s bound the membership value is live again.
+    vi.advanceTimersByTime(30_000);
+    await chain.resolveRandomSamplingAvailability(52n);
+    expect(membership).toHaveBeenCalledTimes(2);
+
+    chain.invalidateBindings();
+    chain.member = false;
+    await chain.resolveRandomSamplingAvailability(52n);
+    expect(membership).toHaveBeenCalledTimes(3);
+
+    // A negative is never reused: joining the table must be visible on the
+    // very next reconciliation pass.
+    chain.member = true;
+    await chain.resolveRandomSamplingAvailability(52n);
+    expect(membership).toHaveBeenCalledTimes(4);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('exposes the mock Random Sampling pair identity and current epoch', async () => {
   const chain = new MockChainAdapter();
   const reader = chain.getRandomSamplingReadContextReader();
@@ -139,6 +172,72 @@ it('reads and revalidates a real adapter Random Sampling context as one binding'
     [],
   );
   expect(reader.isRandomSamplingBindingCurrent(context!.bindingId)).toBe(false);
+});
+
+it('derives each epoch from one fresh block while reusing only the bound immutable Chronos schedule', async () => {
+  const chain = adapter();
+  (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
+  (chain as any).contracts.randomSamplingStorage = new Contract(
+    deployedAddresses.RandomSamplingStorage!,
+    [],
+  );
+  (chain as any).contracts.chronos = new Contract(
+    '0x0000000000000000000000000000000000000005',
+    [],
+  );
+  const getCurrentEpoch = vi.spyOn(chain, 'getCurrentEpoch');
+  const readContract = vi.spyOn(chain as any, 'readContract').mockImplementation(
+    async (_contract: unknown, label: string) => {
+      if (label === 'chronos.startTime') return 100n;
+      if (label === 'chronos.epochLength') return 10n;
+      throw new Error(`unexpected read ${label}`);
+    },
+  );
+  let block = { number: 17, timestamp: 119 };
+  const readTip = vi.spyOn(chain as any, 'readTipProvider')
+    .mockImplementation(async () => block);
+  const reader = chain.getRandomSamplingReadContextReader();
+
+  await expect(reader.readRandomSamplingBlockContext!()).resolves.toEqual({
+    bindingId: `${deployedAddresses.RandomSampling}:${deployedAddresses.RandomSamplingStorage}`,
+    chronosEpoch: 2n,
+    headBlockNumber: 17n,
+  });
+  block = { number: 18, timestamp: 120 };
+  await expect(reader.readRandomSamplingBlockContext!()).resolves.toMatchObject({
+    chronosEpoch: 3n,
+    headBlockNumber: 18n,
+  });
+
+  expect(readTip).toHaveBeenCalledTimes(2);
+  expect(readContract).toHaveBeenCalledTimes(2);
+  expect(getCurrentEpoch).not.toHaveBeenCalled();
+});
+
+it('rejects a block context when the RS pair rotates during the tip read', async () => {
+  const chain = adapter();
+  (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
+  (chain as any).contracts.randomSamplingStorage = new Contract(
+    deployedAddresses.RandomSamplingStorage!,
+    [],
+  );
+  (chain as any).contracts.chronos = new Contract(
+    '0x0000000000000000000000000000000000000005',
+    [],
+  );
+  vi.spyOn(chain as any, 'readContract').mockImplementation(
+    async (_contract: unknown, label: string) => label === 'chronos.startTime' ? 100n : 10n,
+  );
+  vi.spyOn(chain as any, 'readTipProvider').mockImplementation(async () => {
+    (chain as any).contracts.randomSamplingStorage = new Contract(
+      '0x00000000000000000000000000000000000000bb',
+      [],
+    );
+    return { number: 17, timestamp: 119 };
+  });
+
+  await expect(chain.getRandomSamplingReadContextReader().readRandomSamplingBlockContext!())
+    .resolves.toBeUndefined();
 });
 
 it('fails a real adapter context read open when the pair rotates during the epoch read', async () => {

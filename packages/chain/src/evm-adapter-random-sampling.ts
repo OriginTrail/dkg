@@ -25,10 +25,30 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     try {
       await this.init();
       await this.getRandomSampling();
+      const contextReader = this.getRandomSamplingReadContextReader();
+      const bindingId = contextReader.getRandomSamplingBindingId();
+      const observed = this.randomSamplingEligibilityObservation;
+      if (
+        bindingId !== undefined
+        && observed?.identityId === identityId
+        && observed.bindingId === bindingId
+        && Date.now() - observed.checkedAtMs
+          < EVMChainAdapterBase.RANDOM_SAMPLING_ELIGIBILITY_MAX_REUSE_MS
+        && contextReader.isRandomSamplingBindingCurrent(bindingId)
+      ) {
+        return { kind: 'available', member: true };
+      }
       const member = await this.isShardingTableMember(identityId);
-      if (!this.isRandomSamplingReady()) {
+      if (
+        bindingId === undefined
+        || !contextReader.isRandomSamplingBindingCurrent(bindingId)
+      ) {
+        this.randomSamplingEligibilityObservation = undefined;
         throw new Error('RandomSampling bindings changed during eligibility lookup');
       }
+      this.randomSamplingEligibilityObservation = member
+        ? Object.freeze({ bindingId, identityId, checkedAtMs: Date.now() })
+        : undefined;
       return { kind: 'available', member };
     } catch (error) {
       if (error instanceof RandomSamplingContractsUnavailableError
