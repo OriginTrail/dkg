@@ -3272,6 +3272,21 @@ describe('computeApprovalAction — replenishing (recommended for mainnet)', () 
     const policy: ApprovalPolicy = { mode: 'replenishing' };
     const C = TYPICAL_PUBLISH_COST;
 
+    const approvalCountFor = (costs: readonly bigint[]): number => {
+      let allowance = 0n;
+      let approvals = 0;
+      for (const cost of costs) {
+        const action = computeApprovalAction(policy, cost, allowance);
+        if (action.needsApprove) {
+          approvals += 1;
+          allowance = action.targetAllowance;
+        }
+        allowance -= cost;
+        expect(allowance >= 0n).toBe(true);
+      }
+      return approvals;
+    };
+
     it('lets one outlier publish leave a standing allowance far above typical use', () => {
       const outlier = 100n * C;
       const approved = computeApprovalAction(policy, outlier, 0n);
@@ -3288,7 +3303,7 @@ describe('computeApprovalAction — replenishing (recommended for mainnet)', () 
       expect(allowance).toBe(1850n * C);
     });
 
-    it('degrades toward per-publish when an unusually cheap publish sets the ceiling', () => {
+    it('refills once when a sharp increase follows a cheap ceiling', () => {
       const cheap = C / 100n;
       const approved = computeApprovalAction(policy, cheap, 0n);
       expect(approved.targetAllowance).toBe(20n * cheap); // 0.2C — under 2C
@@ -3302,14 +3317,22 @@ describe('computeApprovalAction — replenishing (recommended for mainnet)', () 
       expect(next.targetAllowance >= effectivePublishAllowance(C)).toBe(true);
     });
 
-    it('keeps amortising while costs stay within multiple x fraction (10x) of each other', () => {
-      // Threshold is 2 × this publish's cost, so a spread up to 10× still
-      // clears the 20× ceiling set by the cheapest publish in the window.
-      const ceilingFromCheapest = 20n * (C / 10n); // 2C
-      expect(computeApprovalAction(policy, C, ceilingFromCheapest).needsApprove).toBe(false);
-      // One notch wider and it stops amortising.
-      const ceilingFromTooCheap = 20n * (C / 11n);
-      expect(computeApprovalAction(policy, C, ceilingFromTooCheap).needsApprove).toBe(true);
+    it('does not mistake a wide alternating or descending spread for per-publish behaviour', () => {
+      const cheap = C / 100n;
+      const alternating = Array.from(
+        { length: 20 },
+        (_, index) => index % 2 === 0 ? cheap : C,
+      );
+      expect(approvalCountFor(alternating)).toBe(2);
+      expect(approvalCountFor([100n * C, 10n * C, C, C / 10n, cheap])).toBe(1);
+    });
+
+    it('approaches per-publish only under repeated sharply ascending costs', () => {
+      const ascending = Array.from(
+        { length: 6 },
+        (_, index) => TRAC * (11n ** BigInt(index)),
+      );
+      expect(approvalCountFor(ascending)).toBe(ascending.length);
     });
   });
 });

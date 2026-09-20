@@ -35,6 +35,7 @@ import {
   resolveAutoUpdateSource,
   resolveUpdatePreferences,
   resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
@@ -2240,5 +2241,26 @@ describe('resolveApprovalPolicy (YAML/JSON config → runtime ApprovalPolicy)', 
       targetAllowanceMultiple: 5,
       refillBelowFraction: undefined,
     });
+  });
+
+  it('warns only when replenishing relies on the changed implicit ceiling', () => {
+    const warning = approvalPolicyMigrationWarning({ mode: 'replenishing' });
+    expect(warning).toContain('10.0.17');
+    expect(warning).toContain('20x the triggering publish cost');
+    expect(warning).toContain('legacy flat 1000 TRAC ceiling');
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      refillBelowFraction: 0.25,
+    })).toBe(warning);
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowance: '1000000000000000000000',
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowanceMultiple: 20,
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({ mode: 'per-publish' })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning(undefined)).toBeUndefined();
   });
 });

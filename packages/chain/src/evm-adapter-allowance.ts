@@ -130,19 +130,19 @@ function normalizeApprovalMultiple(value: number | undefined): bigint {
  *     matter what gets published; this does not. Operators who need a
  *     hard TRAC cap should set `targetAllowance` — it overrides the
  *     multiple precisely so that bound stays available.
- *   - **An unusually cheap publish lowers it.** A publish at `C/100`
- *     approves only `20C/100`, and the next ordinary publish sees a
- *     standing allowance under its own `2C` threshold and re-approves.
- *     A node whose costs spread wider than `multiple × fraction` (10× at
- *     the defaults) therefore drifts back toward `per-publish` gas. It
- *     self-corrects — the next ordinary publish re-establishes `20C` —
- *     and it never bricks a publish, because the floor clamp still lifts
- *     the target to `C`. It just stops amortising.
+ *   - **Repeated sharp increases cost approvals.** A publish at `C/100`
+ *     approves only `20C/100`, so an immediate ordinary publish refills.
+ *     Repeating that upward pattern — each publish roughly 10× the one
+ *     that last established the ceiling at the defaults — can approach
+ *     `per-publish` gas. A wide spread alone does not: after an expensive
+ *     publish sets a large ceiling, alternating or descending cheaper
+ *     publishes keep amortising against it. The refill always self-corrects
+ *     to the current cost and the floor clamp keeps the publish viable.
  *
  * Relative sizing is the better default for a node with a stable price
  * profile, and it removes the "1000 TRAC is wrong for my volume" problem
- * in both directions. It is not uniformly better than a flat ceiling: a
- * wide cost spread costs gas, and an outlier costs blast radius.
+ * in both directions. It is not uniformly better than a flat ceiling: an
+ * ascending price run costs gas, and an outlier costs blast radius.
  *
  * See {@link ApprovalPolicy} in `chain-adapter.ts` for the mode
  * semantics; see `evm-adapter.unit.test.ts` for the pinned-down behaviour

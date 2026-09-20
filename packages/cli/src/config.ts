@@ -40,6 +40,8 @@ import {
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
 import {
+  DEFAULT_REPLENISH_TARGET_ALLOWANCE,
+  DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
@@ -1378,6 +1380,30 @@ export function resolveApprovalPolicy(
     targetAllowanceMultiple: policy.targetAllowanceMultiple,
     refillBelowFraction: policy.refillBelowFraction,
   };
+}
+
+/**
+ * Operator-visible migration warning for the one replenishing-policy shape
+ * whose meaning changes in 10.0.17. An explicit absolute target preserves the
+ * legacy ceiling; an explicit multiple opts into the new relative ceiling.
+ */
+export function approvalPolicyMigrationWarning(
+  policy: ApprovalPolicyConfig | undefined,
+): string | undefined {
+  if (
+    policy?.mode !== 'replenishing'
+    || policy.targetAllowance !== undefined
+    || policy.targetAllowanceMultiple !== undefined
+  ) {
+    return undefined;
+  }
+  const legacyTrac = DEFAULT_REPLENISH_TARGET_ALLOWANCE / (10n ** 18n);
+  return (
+    '[warn] chain.approvalPolicy mode=replenishing has no targetAllowance or '
+    + `targetAllowanceMultiple. In 10.0.17 this uses ${DEFAULT_REPLENISH_TARGET_MULTIPLE}x `
+    + `the triggering publish cost instead of the legacy flat ${legacyTrac.toString()} TRAC `
+    + 'ceiling. Set chain.approvalPolicy.targetAllowance explicitly to retain a flat ceiling.'
+  );
 }
 
 /**
