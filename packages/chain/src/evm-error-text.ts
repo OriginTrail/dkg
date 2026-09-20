@@ -27,7 +27,11 @@ export function collectEvmErrorText(err: unknown): string {
   return parts.join(' ').toLowerCase();
 }
 
-/** Common node phrasings for a requested block that is not locally available. */
+/**
+ * Common node phrasings for a requested block that is not locally available.
+ * This is deliberately broader than the adapter's historical-state predicate:
+ * a bare `header not found` proves block unavailability here, but not pruning.
+ */
 export function isEvmBlockUnavailableError(err: unknown): boolean {
   return /\b(header not found|unknown block|block not found)\b/u
     .test(collectEvmErrorText(err));

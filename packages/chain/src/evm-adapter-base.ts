@@ -32,7 +32,7 @@ import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializ
 import { BoundedLruCache, floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { collectEvmErrorText, isEvmBlockUnavailableError } from './evm-block-unavailable-error.js';
+import { collectEvmErrorText, isEvmBlockUnavailableError } from './evm-error-text.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
