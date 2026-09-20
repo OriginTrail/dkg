@@ -2190,4 +2190,55 @@ describe('resolveApprovalPolicy (YAML/JSON config → runtime ApprovalPolicy)', 
       }),
     ).toThrow(/must be a finite number in \[0, 1\]/);
   });
+
+  it('passes a valid targetAllowanceMultiple through', () => {
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 50 }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: undefined,
+      targetAllowanceMultiple: 50,
+      refillBelowFraction: undefined,
+    });
+    // 1 is the tightest legal multiple (ceiling == this publish's cost).
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 1 })
+        ?.targetAllowanceMultiple,
+    ).toBe(1);
+  });
+
+  it('rejects an out-of-contract targetAllowanceMultiple loudly', () => {
+    // Fail fast rather than clamp: a multiple < 1 would put the ceiling under
+    // the publish floor on every call, so the adapter's floor clamp would fire
+    // every time and `replenishing` would silently behave as `per-publish` —
+    // the operator's chosen mode cancelled, visible only on the gas bill.
+    // Same convention as `finalityConfirmations` and the two sibling fields.
+    for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: bad }),
+        `expected multiple ${bad} to be rejected`,
+      ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+    }
+    expect(() =>
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: '20' as any }),
+    ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+  });
+
+  it('carries both sizing fields through when the operator set both (adapter applies precedence)', () => {
+    // Resolution does not silently drop either field — precedence (absolute
+    // `targetAllowance` wins) is `computeApprovalAction`'s job, so the config
+    // layer stays a pure translator and the operator's file round-trips.
+    expect(
+      resolveApprovalPolicy({
+        mode: 'replenishing',
+        targetAllowance: '1000000000000000000000',
+        targetAllowanceMultiple: 5,
+      }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: 10n ** 21n,
+      targetAllowanceMultiple: 5,
+      refillBelowFraction: undefined,
+    });
+  });
 });

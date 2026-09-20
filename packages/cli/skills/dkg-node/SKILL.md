@@ -887,7 +887,7 @@ Every V10 publish or update pulls TRAC from the operational signer via `token.tr
 | Mode | Per-publish gas | Blast radius (compromised KA) | When to use |
 |---|---|---|---|
 | `per-publish` (default) | One `approve` tx whenever `tokenAmount` exceeds prior allowance | One publish's cost ceiling | Conservative default. Low publish volume, or operators who trust nothing. |
-| `replenishing` | One `approve` per ~`targetAllowance / avgPublishCost` publishes | Capped at `targetAllowance` (1000 TRAC default) | **Recommended for mainnet at any volume.** Predictable gas profile + bounded exposure. |
+| `replenishing` | One `approve` per **19 publishes** of comparable cost, at any price | 20× the triggering publish's cost (or `targetAllowance`, if you set one) | **Recommended for mainnet at any volume.** Predictable gas profile + bounded exposure. |
 | `unlimited` | One `approve` ever per wallet | Operational wallet's full TRAC balance | High-volume operators on a contract they trust absolutely. Matches V9 behaviour. |
 
 Configuration (defaults shown):
@@ -901,19 +901,40 @@ chain:
   approvalPolicy:
     mode: per-publish                # 'per-publish' | 'replenishing' | 'unlimited'
     # `replenishing` mode only:
-    targetAllowance: '1000000000000000000000'   # decimal wei-TRAC string (1000 TRAC = 10^21)
-    refillBelowFraction: 0.1                     # refill when current < target × this (default 10%)
+    targetAllowanceMultiple: 20      # approve 20 x THIS publish's cost (integer >= 1, default 20)
+    refillBelowFraction: 0.1         # refill when current < target × this (default 10%)
+    # targetAllowance: '1000000000000000000000'   # optional ABSOLUTE cap, overrides the multiple
 ```
 
 `finalityConfirmations` is an operator-selected positive integer and the node's **single** definition of chain finality — for writes (when a mined publish receipt becomes terminal, and the recovery proof snapshots deciding whether a publish landed) *and* for reads (the Context Graph authority index, named-Context-Graph resolution, and the RFC-64 policy and VM precommit anchors). Standard EVM counting: `1` means the block itself, `2` waits for one successor. The default is `1`. The RPC provider's own `finalized` block tag is never substituted — it is the endpoint's consensus marker (~600 blocks / ~20 min behind head on Base Sepolia), not operator-configurable, and using it made a freshly registered Context Graph invisible to the authority index for that whole window.
 
 Choosing a value is therefore a **two-sided** trade. `1` gives no successor-block buffer: a reorganization can reverse a receipt after the node released the wallet, and can move an authority read's anchor mid-read (both are detected and fail closed, then retry — never silently accepted). A larger value buys that buffer everywhere, but also pushes the authority index, named-CG resolution and both precommit anchors that many blocks behind head, so a newly registered Context Graph stays unauthorized for roughly that many block times. Raise it when reversal resistance matters more than publish speed **and** than authority freshness.
 
+#### Sizing `replenishing`
+
+The ceiling is **relative to the publish that triggers the refill**, not a flat TRAC number. Writing `C` for what this publish costs:
+
+```
+target    = C × targetAllowanceMultiple          # default 20 × C
+threshold = max(target × refillBelowFraction, C) # default 2 × C
+```
+
+The adapter approves `20 × C`, then skips the approve until the standing allowance falls under `2 × C`. For a node whose publishes all cost roughly the same, the allowance walks `20C, 19C, … , 2C` and only the next publish re-approves: **one approve per 19 publishes** — generally `multiple × (1 - refillBelowFraction) + 1`. That ratio does not depend on the TRAC price, which is the reason for sizing relatively: a flat ceiling is simultaneously too large for a small node (blast radius) and too small for a busy one (constant re-approving), and it needs revisiting every time prices move.
+
+Raise `targetAllowanceMultiple` to approve less often at the cost of a wider standing allowance; lower it for the reverse. `1` is legal and makes `replenishing` size like `per-publish`. Anything that is not an integer `>= 1` is **rejected at startup** — a multiple below `1` would put the ceiling under the publish floor on every call, so the floor clamp would fire every time and the mode you configured would quietly behave as `per-publish`, visible only on the gas bill.
+
+**Where relative sizing is worse than a flat ceiling.** Nothing is persisted between publishes: the target and threshold are recomputed from whatever the current publish costs, and only the on-chain allowance carries over. Standing exposure is therefore set by your *most expensive recent* publish, not your typical one.
+
+- **One outlier raises the ceiling.** A publish costing 100× your usual price approves `2000 × C` and the node then coasts on that allowance across many ordinary publishes. A flat `targetAllowance` would have bounded exposure absolutely; the multiple does not.
+- **An unusually cheap publish lowers it.** A publish at `C/100` approves only `0.2 × C`, so the next ordinary publish is already under its own threshold and re-approves. A node whose publish costs spread wider than `multiple × refillBelowFraction` (10× at the defaults) drifts back toward `per-publish` gas. It self-corrects on the next ordinary publish and never bricks a publish — it just stops amortising.
+
+If you need exposure bounded by an absolute TRAC figure, set `targetAllowance`. It **overrides** `targetAllowanceMultiple`: an operator who wrote a number meant that number. That also means a config written before relative sizing existed keeps behaving exactly as it did.
+
 `targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
 
-Mode-only shorthand is accepted for compatibility (`approvalPolicy: unlimited` is normalized to `approvalPolicy: { mode: unlimited }`). Use the object form when setting `targetAllowance` or `refillBelowFraction`.
+Mode-only shorthand is accepted for compatibility (`approvalPolicy: unlimited` is normalized to `approvalPolicy: { mode: unlimited }`). Use the object form when setting any of the `replenishing` fields.
 
-The policy never approves *less* than the immediate publish needs — a too-low `targetAllowance` gets quietly raised to the publish's on-chain floor so misconfiguration can't brick a publish.
+The policy never approves *less* than the immediate publish needs — a too-low `targetAllowance` gets quietly raised to the publish's on-chain floor so misconfiguration can't brick a publish. On a zero-cost Context Graph the floor is the on-chain `1` wei-TRAC minimum, so `replenishing` approves `20` wei-TRAC of dust once and, because nothing is ever spent, never approves again.
 
 This entire surface was empirically driven by [PR #720](https://github.com/OriginTrail/dkg/pull/720)'s `TooLowAllowance(token, 0, 1)` finding on the May 2026 Base Sepolia publish-stress run; see also `packages/chain/test/evm-adapter.unit.test.ts` for the policy's invariants and edge cases.
 
