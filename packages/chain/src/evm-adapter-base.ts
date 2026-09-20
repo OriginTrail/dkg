@@ -3138,7 +3138,7 @@ export class EVMChainAdapterBase {
   ): Promise<number> {
     // A memo hit must not turn a cancelled call into an answer.
     options.signal?.throwIfAborted();
-    const rememberedTimestamp = this.receiptFinality.finalizedBlockTimestamp(
+    const rememberedTimestamp = this.receiptFinality?.finalizedBlockTimestamp(
       blockNumber,
       blockHash,
     );

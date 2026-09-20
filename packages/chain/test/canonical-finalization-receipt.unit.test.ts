@@ -20,6 +20,7 @@ function adapter(
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
     getBlockTimestamp: vi.fn(async () => 1_234_567),
+    getFinalizedBlockTimestamp: vi.fn(async () => 1_234_567),
     parseV10PublishReceipt: vi.fn(async () => null),
     // PR #2300 r1 — `resolvePublishTransaction` gates every mined verdict on receipt-block
     // finality; these rows are about receipt PROJECTION, so the gate defaults to satisfied and
@@ -166,7 +167,7 @@ describe('canonical finalization receipt capability', () => {
     });
     // The parser names the block by the receipt's HASH so the timestamp can come from the
     // header the finality check already fetched instead of a second by-number read.
-    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, { blockHash: BLOCK_HASH });
+    expect((chain as any).getFinalizedBlockTimestamp).toHaveBeenCalledWith(123, BLOCK_HASH, {});
   });
 
   it('resolves canonical V9 evidence through the production receipt parser', async () => {
@@ -224,7 +225,7 @@ describe('canonical finalization receipt capability', () => {
       },
     });
     expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
-    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, { blockHash: BLOCK_HASH });
+    expect((chain as any).getFinalizedBlockTimestamp).toHaveBeenCalledWith(123, BLOCK_HASH, {});
   });
 
   it('resolvePublishTransaction projects the SAME read, V9 fallback included [GH#2270]', async () => {
