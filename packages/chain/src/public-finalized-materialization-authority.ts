@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import type { ChainAdapter } from './chain-adapter.js';
+import type { ChainAdapter, KnowledgeAssetVersionSnapshot } from './chain-adapter.js';
 
 export type PublicFinalizedMaterializationAuthorityUnavailableReason =
   | 'capability-unavailable'
@@ -28,12 +28,9 @@ export type PublicFinalizedMaterializationAuthorityResult =
  * carry this only within the operation which obtained it from
  * `readKnowledgeAssetVersionSnapshot`; it is not a cache entry.
  */
-export interface PublicFinalizedMaterializationVersionSnapshot {
+export interface PublicFinalizedMaterializationVersionSnapshot
+  extends Omit<KnowledgeAssetVersionSnapshot, 'latestRoot'> {
   latestRoot: Uint8Array;
-  rootCount: bigint;
-  latestAuthor: string;
-  latestPublisher: string;
-  blockNumber: number;
 }
 
 export interface PublicFinalizedMaterializationAuthorityRequest {
@@ -44,6 +41,7 @@ export interface PublicFinalizedMaterializationAuthorityRequest {
   merkleRoot: Uint8Array;
   versionBlock?: number;
   versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
+  signal?: AbortSignal;
 }
 
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
@@ -69,10 +67,8 @@ export async function resolvePublicFinalizedMaterializationAuthority(
     || chain.chainId === 'none'
     || !chain.isContextGraphActiveOnChain
     || !chain.getContextGraphAccessPolicy
-    || (!request.versionSnapshot && (
-      !chain.getMerkleRootCount
-      || !chain.getLatestMerkleRoot
-    ))
+    || !chain.getMerkleRootCount
+    || !chain.getLatestMerkleRoot
     || !request.onChainContextGraphId
   ) {
     return { kind: 'unavailable', reason: 'capability-unavailable' };
@@ -108,13 +104,31 @@ export async function resolvePublicFinalizedMaterializationAuthority(
     }
 
     const suppliedSnapshot = request.versionSnapshot;
+    let reuseSuppliedSnapshot = false;
+    if (suppliedSnapshot && chain.knowledgeAssetVersionSnapshotIsCurrent) {
+      try {
+        reuseSuppliedSnapshot = await chain.knowledgeAssetVersionSnapshotIsCurrent(
+          request.kaId,
+          {
+            ...suppliedSnapshot,
+            latestRoot: ethers.hexlify(suppliedSnapshot.latestRoot),
+          },
+          { signal: request.signal },
+        );
+      } catch (error) {
+        // Abort is an operation fence, not an optimization miss. Every other
+        // validation failure preserves the unchanged live-read path below.
+        request.signal?.throwIfAborted();
+      }
+    }
+    request.signal?.throwIfAborted();
     let rootCountBefore: bigint;
     let rootCountAfter: bigint;
     let latestRoot: Uint8Array;
     let authorAddress: string | undefined;
     let authorUnavailableReason: string | undefined;
 
-    if (suppliedSnapshot) {
+    if (suppliedSnapshot && reuseSuppliedSnapshot) {
       if (
         suppliedSnapshot.rootCount <= 0n
         || suppliedSnapshot.latestRoot.length !== 32
@@ -138,8 +152,10 @@ export async function resolvePublicFinalizedMaterializationAuthority(
         authorUnavailableReason = 'invalid author in coherent version snapshot';
       }
     } else {
-      // Capability validation above guarantees the legacy read exists.
-      rootCountBefore = legacyRootCountBefore!;
+      // A missing, stale, rotating, or inconclusive lease is optimization-only.
+      // Preserve the unchanged live tuple/root materialization authority path.
+      rootCountBefore = legacyRootCountBefore
+        ?? await chain.getMerkleRootCount(request.kaId);
       latestRoot = await chain.getLatestMerkleRoot!(request.kaId);
       if (chain.getLatestMerkleRootAuthor) {
         try {
@@ -172,6 +188,7 @@ export async function resolvePublicFinalizedMaterializationAuthority(
       ...(authorUnavailableReason ? { authorUnavailableReason } : {}),
     };
   } catch (error) {
+    request.signal?.throwIfAborted();
     return {
       kind: 'unavailable',
       reason: 'chain-read-failed',

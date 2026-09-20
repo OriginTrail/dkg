@@ -800,6 +800,25 @@ export class EVMChainAdapterBase {
   /** Monotonic fence for physical Hub binding generations, including ABA. */
   protected hubBindingGeneration = 0;
 
+  /** Monotonic physical DKGKnowledgeAssets binding fence, including ABA. */
+  protected knowledgeAssetStorageBindingGeneration = 0;
+
+  protected knowledgeAssetStorageBindingAddress(
+    contract: Contract | undefined,
+  ): string | undefined {
+    return contractHandleTargetAddress(contract)?.toLowerCase();
+  }
+
+  protected knowledgeAssetStorageBindingIsCurrent(
+    contract: Contract,
+    address: string,
+    generation: number,
+  ): boolean {
+    return this.contracts.knowledgeAssetStorage === contract
+      && this.knowledgeAssetStorageBindingGeneration === generation
+      && this.knowledgeAssetStorageBindingAddress(contract) === address;
+  }
+
   /**
    * Single self-refreshing cache for the `RandomSampling` /
    * `RandomSamplingStorage` pair. RS is the highest-value Hub-resolved
@@ -4883,6 +4902,9 @@ export class EVMChainAdapterBase {
 
   protected applyHubRotationEventName(name: string): void {
     this.hubBindingGeneration += 1;
+    if (name === 'DKGKnowledgeAssets') {
+      this.knowledgeAssetStorageBindingGeneration += 1;
+    }
     // #1583 (review round-2) — flush the resolved-address memo on EVERY observed
     // Hub rotation, unconditionally and first. The memo caches the address of
     // any non-excluded name, including per-call names with no lazy binding and
@@ -4983,6 +5005,7 @@ export class EVMChainAdapterBase {
    */
   protected invalidateAllBoundContracts(): void {
     this.hubBindingGeneration += 1;
+    this.knowledgeAssetStorageBindingGeneration += 1;
     // The bulk self-heal does not know which Hub name moved. Retire the whole
     // one-log runtime before exposing freshly resolved handles: until a runtime
     // built around those handles attaches, every log-backed reader must use its
@@ -5029,6 +5052,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.knowledgeAssetStorageBindingGeneration += 1;
     this.hubRotationPoller.stop();
     // The owner disowns an in-flight build, clears the binding synchronously,
     // and stops any current runtime without making synchronous destroy wait.

@@ -2471,22 +2471,28 @@ describe('graph-scoped finalization handler', () => {
     const getLatestMerkleRootAuthor = vi.fn(async () => {
       throw new Error('coherent snapshot must replace author rereads');
     });
+    const knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
     const publicHandler = makePublicReconcileHandler(message, {
       isContextGraphActiveOnChain: active,
       getContextGraphAccessPolicy: access,
       getMerkleRootCount,
       getLatestMerkleRoot,
       getLatestMerkleRootAuthor,
+      knowledgeAssetVersionSnapshotIsCurrent,
     });
 
     await expect(reconcileGraphScoped(publicHandler, message, {
       assertionVersion: 1n,
       versionSnapshot: {
+        knowledgeAssetId: PACKED_KA_ID,
         latestRoot: message.kcMerkleRoot,
         rootCount: 1n,
         latestAuthor: AUTHOR,
         latestPublisher: PUBLISHER,
         blockNumber: 123,
+        blockHash: `0x${'44'.repeat(32)}`,
+        knowledgeAssetStorageAddress: `0x${'33'.repeat(20)}`,
+        knowledgeAssetStorageGeneration: 1,
       },
     })).resolves.toBe('promoted');
 
@@ -2495,6 +2501,7 @@ describe('graph-scoped finalization handler', () => {
     expect(getMerkleRootCount).not.toHaveBeenCalled();
     expect(getLatestMerkleRoot).not.toHaveBeenCalled();
     expect(getLatestMerkleRootAuthor).not.toHaveBeenCalled();
+    expect(knowledgeAssetVersionSnapshotIsCurrent).toHaveBeenCalledOnce();
     expect(await store.countQuads(vmGraph)).toBe(2);
   });
 

@@ -97,7 +97,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -3260,16 +3260,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           batchId: item.batchId,
           versionBlock: item.versionBlock,
           authorAddress: item.authorAddress,
-          // This exact-fetch operation already paid for one finalized,
-          // block-pinned version view. Reuse that evidence inside the same
-          // operation instead of independently rereading it per inspection.
+          // The public-authority consumer validates this lease after its last
+          // store/CG-gate await; stale evidence falls back to live reads.
           versionSnapshot: Object.freeze({
+            ...item.versionSnapshot,
             latestRoot: item.merkleRoot.slice(),
-            rootCount: item.assertionVersion,
-            latestAuthor: item.authorAddress,
-            latestPublisher: item.publisherAddress,
-            blockNumber: item.versionBlock,
           }),
+          signal,
         }, ctx);
         if (outcome === 'promoted') return 'materialized';
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
@@ -5612,6 +5609,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   clearRecentVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
     this.recentReconciledUals.deleteByPrefix(`${localCgId}\0`);
+    this.vmReconcileFinalizedSlotEvidence.deleteByPrefix(`${localCgId}\0`);
   }
 
   vmReconcileCacheKey(this: DKGAgent, localCgId: string, ual: string, merkleRoot: Uint8Array): string {
@@ -5639,24 +5637,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return finalizedBlock >= 0 ? finalizedBlock : undefined;
   }
 
-  vmReconcileFinalizedSlotPrefix(
-    this: DKGAgent,
-    localCgId: string,
-    onChainCgId: bigint,
-    ordinal: number,
-  ): string {
-    return `${localCgId}\0finalized-slot:${onChainCgId}:${ordinal}@`;
-  }
-
   vmReconcileFinalizedSlotKey(
     this: DKGAgent,
     localCgId: string,
     onChainCgId: bigint,
     ordinal: number,
-    finalizedBlock: number,
   ): string {
-    return `${this.vmReconcileFinalizedSlotPrefix(localCgId, onChainCgId, ordinal)}`
-      + finalizedBlock;
+    return `${localCgId}\0finalized-slot:${onChainCgId}:${ordinal}`;
   }
 
   async confirmAndRememberVmReconcileFinalizedSlot(
@@ -5673,17 +5660,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
       finalizedBlock === undefined
       || !this.chain.readKnowledgeAssetVersionSnapshot
     ) return;
+    let snapshot: KnowledgeAssetVersionSnapshot | null | undefined;
     try {
-      const snapshot = await this.chain.readKnowledgeAssetVersionSnapshot(kaId);
+      snapshot = await this.chain.readKnowledgeAssetVersionSnapshot(kaId);
       if (
         !snapshot
+        || snapshot.knowledgeAssetId !== kaId
         || snapshot.blockNumber !== finalizedBlock
+        || typeof snapshot.blockHash !== 'string'
+        || !ethers.isHexString(snapshot.blockHash, 32)
+        || typeof snapshot.knowledgeAssetStorageAddress !== 'string'
+        || !ethers.isAddress(snapshot.knowledgeAssetStorageAddress)
+        || !Number.isSafeInteger(snapshot.knowledgeAssetStorageGeneration)
+        || snapshot.knowledgeAssetStorageGeneration! < 0
         || snapshot.rootCount <= 0n
         || !ethers.isHexString(snapshot.latestRoot, 32)
+        || !ethers.isAddress(snapshot.latestAuthor)
         || merkleRoot.length !== 32
         || !ethers.isAddress(snapshot.latestPublisher)
         || !ethers.isAddress(publisherAddress)
         || ethers.getAddress(snapshot.latestPublisher) === ethers.ZeroAddress
+        || ethers.getAddress(snapshot.latestAuthor) === ethers.ZeroAddress
         || ethers.getAddress(publisherAddress) === ethers.ZeroAddress
         || !ethers.getBytes(snapshot.latestRoot).every(
           (byte, index) => byte === merkleRoot[index],
@@ -5695,17 +5692,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // merely withholds the same-finalized-block fast path.
       return;
     }
-    const key = this.vmReconcileFinalizedSlotKey(
-      localCgId,
-      onChainCgId,
-      ordinal,
-      finalizedBlock,
+    if (!snapshot) return;
+    this.vmReconcileFinalizedSlotEvidence.set(
+      this.vmReconcileFinalizedSlotKey(localCgId, onChainCgId, ordinal),
+      {
+        kaId,
+        snapshot: Object.freeze({ ...snapshot }),
+      },
     );
-    this.recentReconciledUals.deleteByPrefix(
-      this.vmReconcileFinalizedSlotPrefix(localCgId, onChainCgId, ordinal),
-      key,
-    );
-    this.recentReconciledUals.add(key);
   }
 
   vmReconcileCacheKeyPrefix(this: DKGAgent, cacheKey: string): string {
@@ -6644,28 +6638,48 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!storageAddr) return { status: 'skip' };
       ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
       finalizedSlotBlock = this.vmReconcileFinalizedBlockAtHead(headBlock);
-      if (
-        finalizedSlotBlock !== undefined
-        && this.recentReconciledUals.has(this.vmReconcileFinalizedSlotKey(
+      if (finalizedSlotBlock !== undefined) {
+        const finalizedSlotKey = this.vmReconcileFinalizedSlotKey(
           localCgId,
           onChainCgId,
           ordinal,
-          finalizedSlotBlock,
-        ))
-      ) {
-        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
-        return { status: 'already', blockNumber: headBlock! };
+        );
+        const evidence = this.vmReconcileFinalizedSlotEvidence.get(finalizedSlotKey);
+        if (evidence !== undefined) {
+          let current = false;
+          if (
+            evidence.kaId === kaId
+            && evidence.snapshot.blockNumber === finalizedSlotBlock
+            && typeof evidence.snapshot.knowledgeAssetStorageAddress === 'string'
+            && ethers.isAddress(storageAddr)
+            && ethers.isAddress(evidence.snapshot.knowledgeAssetStorageAddress)
+            && ethers.getAddress(storageAddr)
+              === ethers.getAddress(evidence.snapshot.knowledgeAssetStorageAddress)
+            && this.chain.knowledgeAssetVersionSnapshotIsCurrent
+          ) {
+            try {
+              current = await this.chain.knowledgeAssetVersionSnapshotIsCurrent(
+                kaId,
+                evidence.snapshot,
+              );
+            } catch {
+              // Optimization-only lease unavailable: preserve the unchanged live
+              // root/publisher/materialization path below.
+            }
+          }
+          if (options.isTargetCurrent && !options.isTargetCurrent()) {
+            return { status: 'skip' };
+          }
+          if (current) {
+            this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
+            return { status: 'already', blockNumber: headBlock! };
+          }
+          this.vmReconcileFinalizedSlotEvidence.delete(finalizedSlotKey);
+        }
       }
 
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
       cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
-
-      // Recently reconciled (live-burst guard): treat as already-done so the
-      // cursor advances without redoing chain reads + an SWM scan.
-      if (this.recentReconciledUals.has(cacheKey)) {
-        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
-        return { status: 'already', blockNumber: headBlock ?? 0 };
-      }
 
       if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({

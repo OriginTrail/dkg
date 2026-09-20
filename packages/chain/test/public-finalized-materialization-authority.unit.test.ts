@@ -6,6 +6,8 @@ import { resolvePublicFinalizedMaterializationAuthority } from '../src/public-fi
 const ROOT = new Uint8Array(32).fill(7);
 const AUTHOR = `0x${'11'.repeat(20)}`;
 const PUBLISHER = `0x${'22'.repeat(20)}`;
+const KAS_ADDRESS = `0x${'33'.repeat(20)}`;
+const BLOCK_HASH = `0x${'44'.repeat(32)}`;
 
 function authorityChain() {
   const chain = new MockChainAdapter();
@@ -14,6 +16,7 @@ function authorityChain() {
   chain.getMerkleRootCount = vi.fn(async () => 1n);
   chain.getLatestMerkleRoot = vi.fn(async () => ROOT);
   chain.getLatestMerkleRootAuthor = vi.fn(async () => AUTHOR);
+  (chain as any).knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
   return chain;
 }
 
@@ -98,6 +101,9 @@ describe('public finalized materialization authority', () => {
         latestAuthor: AUTHOR,
         latestPublisher: PUBLISHER,
         blockNumber: 321,
+        blockHash: BLOCK_HASH,
+        knowledgeAssetStorageAddress: KAS_ADDRESS,
+        knowledgeAssetStorageGeneration: 1,
       },
     })).resolves.toEqual({ kind: 'resolved', authorAddress: AUTHOR });
 
@@ -106,6 +112,7 @@ describe('public finalized materialization authority', () => {
     expect(rootCount).not.toHaveBeenCalled();
     expect(latestRoot).not.toHaveBeenCalled();
     expect(latestAuthor).not.toHaveBeenCalled();
+    expect((chain as any).knowledgeAssetVersionSnapshotIsCurrent).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -123,6 +130,9 @@ describe('public finalized materialization authority', () => {
         latestAuthor: AUTHOR,
         latestPublisher: PUBLISHER,
         blockNumber: 321,
+        blockHash: BLOCK_HASH,
+        knowledgeAssetStorageAddress: KAS_ADDRESS,
+        knowledgeAssetStorageGeneration: 1,
       }, mutation);
       await expect(resolvePublicFinalizedMaterializationAuthority({
         chain,
@@ -153,7 +163,141 @@ describe('public finalized materialization authority', () => {
         latestAuthor: AUTHOR,
         latestPublisher: PUBLISHER,
         blockNumber: 321,
+        blockHash: BLOCK_HASH,
+        knowledgeAssetStorageAddress: KAS_ADDRESS,
+        knowledgeAssetStorageGeneration: 1,
       },
     })).resolves.toEqual({ kind: 'unavailable', reason: 'inactive-context-graph' });
+  });
+
+  it('falls back to the unchanged live reads when the snapshot lease is stale', async () => {
+    const chain = authorityChain();
+    (chain as any).knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => false);
+
+    await expect(resolvePublicFinalizedMaterializationAuthority({
+      chain,
+      onChainContextGraphId: '298',
+      kaId: 42n,
+      assertionVersion: '1',
+      merkleRoot: ROOT,
+      versionBlock: 321,
+      versionSnapshot: {
+        latestRoot: ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 321,
+        blockHash: BLOCK_HASH,
+        knowledgeAssetStorageAddress: KAS_ADDRESS,
+        knowledgeAssetStorageGeneration: 1,
+      },
+    })).resolves.toEqual({ kind: 'resolved', authorAddress: AUTHOR });
+
+    expect(chain.getMerkleRootCount).toHaveBeenCalledTimes(2);
+    expect(chain.getLatestMerkleRoot).toHaveBeenCalledOnce();
+    expect(chain.getLatestMerkleRootAuthor).toHaveBeenCalledOnce();
+  });
+
+  it('treats a non-abort validator error as an optimization miss', async () => {
+    const chain = authorityChain();
+    (chain as any).knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => {
+      throw new Error('header temporarily unavailable');
+    });
+    await expect(resolvePublicFinalizedMaterializationAuthority({
+      chain,
+      onChainContextGraphId: '298',
+      kaId: 42n,
+      assertionVersion: '1',
+      merkleRoot: ROOT,
+      versionBlock: 321,
+      versionSnapshot: {
+        latestRoot: ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 321,
+        blockHash: BLOCK_HASH,
+        knowledgeAssetStorageAddress: KAS_ADDRESS,
+        knowledgeAssetStorageGeneration: 1,
+      },
+    })).resolves.toEqual({ kind: 'resolved', authorAddress: AUTHOR });
+    expect(chain.getMerkleRootCount).toHaveBeenCalledTimes(2);
+  });
+
+  it('validates the lease only after awaited live CG gates and rejects a version advanced meanwhile', async () => {
+    const chain = authorityChain();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    chain.isContextGraphActiveOnChain = vi.fn(async () => {
+      await gate;
+      return true;
+    });
+    chain.getContextGraphAccessPolicy = vi.fn(async () => {
+      await gate;
+      return 0;
+    });
+    const currentness = vi.fn(async () => false);
+    (chain as any).knowledgeAssetVersionSnapshotIsCurrent = currentness;
+    chain.getMerkleRootCount = vi.fn(async () => 2n);
+    chain.getLatestMerkleRoot = vi.fn(async () => new Uint8Array(32).fill(8));
+
+    const pending = resolvePublicFinalizedMaterializationAuthority({
+      chain,
+      onChainContextGraphId: '298',
+      kaId: 42n,
+      assertionVersion: '1',
+      merkleRoot: ROOT,
+      versionBlock: 321,
+      versionSnapshot: {
+        latestRoot: ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 321,
+        blockHash: BLOCK_HASH,
+        knowledgeAssetStorageAddress: KAS_ADDRESS,
+        knowledgeAssetStorageGeneration: 1,
+      },
+    });
+    await Promise.resolve();
+    expect(currentness).not.toHaveBeenCalled();
+    release();
+
+    await expect(pending).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'assertion-version-mismatch',
+    });
+    expect(currentness).toHaveBeenCalledOnce();
+  });
+
+  it('propagates lifecycle abort during lease validation instead of falling back', async () => {
+    const chain = authorityChain();
+    const controller = new AbortController();
+    (chain as any).knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+
+    await expect(resolvePublicFinalizedMaterializationAuthority({
+      chain,
+      onChainContextGraphId: '298',
+      kaId: 42n,
+      assertionVersion: '1',
+      merkleRoot: ROOT,
+      versionBlock: 321,
+      versionSnapshot: {
+        latestRoot: ROOT,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 321,
+        blockHash: BLOCK_HASH,
+        knowledgeAssetStorageAddress: KAS_ADDRESS,
+        knowledgeAssetStorageGeneration: 1,
+      },
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(chain.getMerkleRootCount).not.toHaveBeenCalled();
   });
 });

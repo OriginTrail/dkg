@@ -1318,6 +1318,23 @@ export interface ChainReadOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * One coherent finalized Knowledge Asset version and the immutable physical
+ * evidence that produced it. The binding fields are optional only for legacy
+ * and third-party adapters; optimizations must refuse reuse when any is absent.
+ */
+export interface KnowledgeAssetVersionSnapshot {
+  knowledgeAssetId?: bigint;
+  latestRoot: string;
+  rootCount: bigint;
+  latestAuthor: string;
+  latestPublisher: string;
+  blockNumber: number;
+  blockHash?: string;
+  knowledgeAssetStorageAddress?: string;
+  knowledgeAssetStorageGeneration?: number;
+}
+
 /** Options honored only by the shared live-authority read. */
 export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   /**
@@ -2219,13 +2236,18 @@ export interface ChainAdapter {
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,
     options?: ChainReadOptions,
-  ): Promise<{
-    latestRoot: string;
-    rootCount: bigint;
-    latestAuthor: string;
-    latestPublisher: string;
-    blockNumber: number;
-  } | null>;
+  ): Promise<KnowledgeAssetVersionSnapshot | null>;
+
+  /**
+   * Cheap lease validation for a previously-read coherent snapshot. A true
+   * result proves that the same finalized block hash and exact physical KAS
+   * binding generation are still current. Missing evidence is always false.
+   */
+  knowledgeAssetVersionSnapshotIsCurrent?(
+    kaId: bigint,
+    snapshot: KnowledgeAssetVersionSnapshot,
+    options?: ChainReadOptions,
+  ): Promise<boolean>;
 
   /**
    * Constant-cost scalar update context for a KA. Consumers that need version
