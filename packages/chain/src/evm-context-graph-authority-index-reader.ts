@@ -35,7 +35,7 @@ import {
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
-import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
+import { resolveEvmFinalityAnchorWithHeadV1 } from './evm-finality-anchor.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
   withOwnedRpcRequestContext,
@@ -410,17 +410,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // — both peers fenced each other's catalog traffic and the replica lost
         // rows while reporting itself complete. Head and anchor come from the
         // same provider, so the pair can never be spliced across endpoints.
-        const observed: { head?: Awaited<ReturnType<JsonRpcProvider['getBlock']>> } = {};
-        const finalized = await resolveEvmFinalityAnchorBlockV1({
+        const { finalized, head } = await resolveEvmFinalityAnchorWithHeadV1({
           finalityConfirmations: dependencies.finalityConfirmations(),
-          readHead: async () => {
-            observed.head = await readEvmContextGraphAuthorityIndexRpcV1(
-              `${operationLabel} chain head`,
-              () => provider.getBlock('latest'),
-              options.signal,
-            );
-            return observed.head;
-          },
+          readHead: () => readEvmContextGraphAuthorityIndexRpcV1(
+            `${operationLabel} chain head`,
+            () => provider.getBlock('latest'),
+            options.signal,
+          ),
           readBlockAt: (anchorBlockNumber) => readEvmContextGraphAuthorityIndexRpcV1(
             `${operationLabel} anchor block ${anchorBlockNumber}`,
             () => provider.getBlock(anchorBlockNumber),
@@ -428,12 +424,6 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           ),
           unavailable: contextGraphAuthorityAnchorUnavailableV1,
         });
-        const head = observed.head;
-        if (head?.hash == null) {
-          throw contextGraphAuthorityAnchorUnavailableV1(
-            'chain head was not retained after finality resolution',
-          );
-        }
         const headHash = head.hash;
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();

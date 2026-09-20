@@ -42,6 +42,7 @@ import type {
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
+import type { RandomSamplingReadContext } from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
@@ -1556,6 +1557,17 @@ export class MockChainAdapter implements ChainAdapter {
 
   async getCurrentEpoch(): Promise<bigint> {
     return this.rsEpoch;
+  }
+
+  async readRandomSamplingContext(): Promise<RandomSamplingReadContext> {
+    return Object.freeze({
+      bindingId: this.getRandomSamplingBindingId(),
+      chronosEpoch: await this.getCurrentEpoch(),
+    });
+  }
+
+  isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean {
+    return context.bindingId === this.getRandomSamplingBindingId();
   }
 
   async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {

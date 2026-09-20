@@ -332,7 +332,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     };
     const a = makeAdapter([p]);
     await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
-    expect(a.receiptBlockTimestampsByHash.size).toBe(0);
+    expect(a.receiptBlockHeadersByHash.size).toBe(1);
 
     expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH })).toBe(0); // today's best-effort
     expect(p.getBlock.calls).toHaveLength(2);
@@ -373,7 +373,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     for (let n = 1; n <= 257; n += 1) {
       await a.isReceiptBlockFinalAndCanonical({ blockNumber: n, blockHash: hashOf(n) });
     }
-    expect(a.receiptBlockTimestampsByHash.size).toBe(256);
+    expect(a.receiptBlockHeadersByHash.size).toBe(256);
     const before = served;
 
     expect(await a.getBlockTimestamp(257, { blockHash: hashOf(257) })).toBe(257); // newest: served

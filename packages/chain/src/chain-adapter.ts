@@ -2038,17 +2038,6 @@ export interface ChainAdapter {
    * check rather than only testing method presence.
    */
   isRandomSamplingReady?(): boolean;
-  /**
-   * Derived identity of the currently bound RandomSampling +
-   * RandomSamplingStorage addresses. Synchronous and zero-RPC; `undefined`
-   * means the adapter cannot vouch for the pair. Deriving this from the bound
-   * handles keeps a new assignment path from forgetting to bump a parallel
-   * generation counter.
-   */
-  getRandomSamplingBindingId?(): string | undefined;
-  /** Current Chronos epoch. Cross-tick Random Sampling caches use it as the
-   * boundary before a pending proof-period duration may take effect. */
-  getCurrentEpoch?(): Promise<bigint>;
   /** Refresh RandomSampling bindings and read membership through one typed capability. */
   resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
 

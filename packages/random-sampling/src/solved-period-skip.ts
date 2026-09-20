@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ChainAdapter, NodeChallenge } from '@origintrail-official/dkg-chain';
+import {
+  bindRandomSamplingReadContextReader,
+  type ChainAdapter,
+  type NodeChallenge,
+  type RandomSamplingReadContext,
+  type RandomSamplingReadContextReader,
+} from '@origintrail-official/dkg-chain';
 
 /** Re-read even inside a long stable proof period. */
 export const SOLVED_PERIOD_MAX_SKIP_MS = 5 * 60_000;
 
-export interface SolvedPeriodReadContext {
-  /** Derived identity of the currently bound RandomSampling contract pair. */
-  readonly bindingId: string;
-  /** Chronos epoch whose duration schedule produced the status read. */
-  readonly chronosEpoch: bigint;
-}
+export type SolvedPeriodReadContext = RandomSamplingReadContext;
 
 export interface SolvedPeriodObservation {
   readonly context?: SolvedPeriodReadContext;
@@ -78,18 +79,22 @@ export async function readCachedChallengeStaleness(
  */
 export class SolvedPeriodSkip {
   readonly #chain: ChainAdapter;
+  readonly #contextReader?: RandomSamplingReadContextReader;
   readonly #now: () => number;
   #record?: SolvedPeriodRecord;
 
   constructor(chain: ChainAdapter, now: () => number = () => performance.now()) {
     this.#chain = chain;
+    this.#contextReader = bindRandomSamplingReadContextReader(chain);
     this.#now = now;
   }
 
   /** Cheap guards checked both before and after the live head/epoch reads. */
   #stillBound(record: SolvedPeriodRecord, now: number): boolean {
-    return this.#chain.isRandomSamplingReady?.() === true
-      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
+    return this.#contextReader?.isRandomSamplingReadContextCurrent({
+      bindingId: record.bindingId,
+      chronosEpoch: record.chronosEpoch,
+    }) === true
       && now < record.rereadAtMs;
   }
 
@@ -99,19 +104,12 @@ export class SolvedPeriodSkip {
    * its answer across ticks.
    */
   async captureReadContext(): Promise<SolvedPeriodReadContext | undefined> {
-    if (
-      this.#chain.isRandomSamplingReady?.() !== true
-      || !this.#chain.getCurrentEpoch
-    ) return undefined;
-    let epoch: bigint;
+    if (!this.#contextReader) return undefined;
     try {
-      epoch = await this.#chain.getCurrentEpoch();
+      return await this.#contextReader.readRandomSamplingContext();
     } catch {
       return undefined;
     }
-    const bindingId = this.#chain.getRandomSamplingBindingId?.();
-    if (bindingId === undefined) return undefined;
-    return Object.freeze({ bindingId, chronosEpoch: epoch });
   }
 
   /** Record only when every live evidence source needed by the guards exists. */
@@ -150,7 +148,7 @@ export class SolvedPeriodSkip {
   /** Return the reusable record, or forget it on the first failed guard. */
   async reusable(): Promise<SolvedPeriodRecord | undefined> {
     const record = this.#record;
-    if (!record || !this.#chain.getBlockNumber || !this.#chain.getCurrentEpoch) {
+    if (!record || !this.#chain.getBlockNumber || !this.#contextReader) {
       this.#record = undefined;
       return undefined;
     }
@@ -159,17 +157,19 @@ export class SolvedPeriodSkip {
       return undefined;
     }
     let head: bigint;
-    let epoch: bigint;
+    let context: RandomSamplingReadContext | undefined;
     try {
       head = BigInt(await this.#chain.getBlockNumber());
-      epoch = await this.#chain.getCurrentEpoch();
+      context = await this.#contextReader.readRandomSamplingContext();
     } catch {
       this.#record = undefined;
       return undefined;
     }
     const stillReusable = (
-      this.#stillBound(record, this.#now())
-      && epoch === record.chronosEpoch
+      context !== undefined
+      && this.#stillBound(record, this.#now())
+      && context.bindingId === record.bindingId
+      && context.chronosEpoch === record.chronosEpoch
       && head >= record.periodStartBlock
       && head < record.periodEndBlock
       && head < record.rereadAtBlock

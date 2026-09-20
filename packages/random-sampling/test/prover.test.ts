@@ -23,6 +23,7 @@ import {
   type CreateChallengeResult,
   type NodeChallenge,
   type ProofPeriodStatus,
+  type RandomSamplingReadContextReader,
   type TxResult,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -67,7 +68,9 @@ interface FakeChainState {
   currentEpoch?: bigint;
 }
 
-function makeChain(state: FakeChainState): ChainAdapter {
+type TestChain = ChainAdapter & Partial<RandomSamplingReadContextReader>;
+
+function makeChain(state: FakeChainState): TestChain {
   // OT-RFC-49 WS-B proof-race snapshot: the on-chain `createChallenge` PINS the
   // current (root, leafCount) onto the Challenge struct, and `submitProof` (and
   // the prover) verify against THOSE pinned values, not a live re-read. Mirror
@@ -105,13 +108,20 @@ function makeChain(state: FakeChainState): ChainAdapter {
   if (state.randomSamplingReady !== undefined) {
     partial.isRandomSamplingReady = vi.fn(() => state.randomSamplingReady!);
   }
-  if (state.bindingId !== undefined) {
-    partial.getRandomSamplingBindingId = vi.fn(() => state.bindingId);
+  const chain = partial as TestChain;
+  if (
+    state.randomSamplingReady !== undefined
+    && state.bindingId !== undefined
+    && state.currentEpoch !== undefined
+  ) {
+    chain.readRandomSamplingContext = vi.fn(async () =>
+      state.randomSamplingReady && state.bindingId !== undefined && state.currentEpoch !== undefined
+        ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.currentEpoch })
+        : undefined);
+    chain.isRandomSamplingReadContextCurrent = vi.fn((context) =>
+      state.randomSamplingReady === true && state.bindingId === context.bindingId);
   }
-  if (state.currentEpoch !== undefined) {
-    partial.getCurrentEpoch = vi.fn(async () => state.currentEpoch!);
-  }
-  return partial as ChainAdapter;
+  return chain;
 }
 
 interface KCFixture {
@@ -1598,7 +1608,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     };
   }
 
-  function chainReads(chain: ChainAdapter): {
+  function chainReads(chain: TestChain): {
     status: number;
     challenge: number;
     head: number;
@@ -1608,7 +1618,9 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       status: vi.mocked(chain.getActiveProofPeriodStatus!).mock.calls.length,
       challenge: vi.mocked(chain.getNodeChallenge!).mock.calls.length,
       head: chain.getBlockNumber ? vi.mocked(chain.getBlockNumber).mock.calls.length : 0,
-      epoch: chain.getCurrentEpoch ? vi.mocked(chain.getCurrentEpoch).mock.calls.length : 0,
+      epoch: chain.readRandomSamplingContext
+        ? vi.mocked(chain.readRandomSamplingContext).mock.calls.length
+        : 0,
     };
   }
 
@@ -1918,13 +1930,16 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   });
 
   it.each([
-    ['lacks getRandomSamplingBindingId', undefined],
-    ['reports an undefined binding id', () => undefined],
-  ] as const)('never skips for an adapter that %s', async (_label, capability) => {
+    ['lacks the bound read-context capability', false],
+    ['reports an undefined read context', true],
+  ] as const)('never skips for an adapter that %s', async (_label, exposeCapability) => {
     const state = makeSolvedState({ bindingId: undefined });
     const chain = makeChain(state);
-    expect(chain.getRandomSamplingBindingId).toBeUndefined();
-    if (capability) chain.getRandomSamplingBindingId = capability;
+    expect(chain.readRandomSamplingContext).toBeUndefined();
+    if (exposeCapability) {
+      chain.readRandomSamplingContext = vi.fn(async () => undefined);
+      chain.isRandomSamplingReadContextCurrent = vi.fn(() => false);
+    }
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
     for (let i = 0; i < 3; i += 1) {
@@ -1937,7 +1952,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   it('never skips for an adapter that cannot report its current epoch', async () => {
     const state = makeSolvedState({ currentEpoch: undefined });
     const chain = makeChain(state);
-    expect(chain.getCurrentEpoch).toBeUndefined();
+    expect(chain.readRandomSamplingContext).toBeUndefined();
     const prover = new RandomSamplingProver({
       chain,
       store: new OxigraphStore(),

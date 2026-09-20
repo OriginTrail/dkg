@@ -2,11 +2,19 @@
 
 import {
   ChainRpcTransportError,
+  EVMChainAdapter,
   RpcEndpointsExhaustedError,
+  type ContextGraphAuthorityIndexId,
 } from '@origintrail-official/dkg-chain';
 import { ContextGraphAuthorityIndexProjectionCache } from
   '../../chain/src/context-graph-authority-index-projection.js';
-import { describe, expect, it } from 'vitest';
+import { MemoryAuthorityIndexStore } from
+  '../../chain/test/helpers/context-graph-authority-index.js';
+import {
+  createAuthorityScenario,
+  GOVERNANCE,
+} from '../../chain/test/helpers/context-graph-authority-scenario.js';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   Rfc64AuthorityReadCoordinatorV1,
@@ -311,6 +319,115 @@ describe('RFC-64 authority RPC circuit breaker', () => {
         consecutiveExhaustions: 0,
         retryAtMs: null,
       });
+    });
+
+    it('forwards real adapter projection evidence through stale fallback and recovery', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(10_000);
+      const scenario = createAuthorityScenario();
+      let providerUnavailable = false;
+      const adapter: any = new EVMChainAdapter({
+        rpcUrl: 'http://127.0.0.1:1',
+        hubAddress: GOVERNANCE,
+        privateKey: `0x${'11'.repeat(32)}`,
+        allowNoAdminSigner: true,
+        chainId: 'evm:31337',
+        localContextGraphAuthorityIndexStore: new MemoryAuthorityIndexStore(),
+        indexTickMs: T,
+      });
+      adapter.initialized = true;
+      adapter.init = async () => undefined;
+
+      const contract = {
+        interface: {
+          getEvent: (name: string) => ({ topicHash: `topic:${name}` }),
+          parseLog: (log: { parsed: unknown }) => log.parsed,
+        },
+        filters: Object.fromEntries([
+          'ContextGraphCreated',
+          'ContextGraphDeactivated',
+          'Transfer',
+          'PublishPolicyUpdated',
+          'PublishAuthorityUpdated',
+          'AgentParticipantAdded',
+          'AgentParticipantRemoved',
+        ].map((name) => [name, () => ({ name })])),
+        getAddress: async () => GOVERNANCE,
+      };
+      const provider = {
+        getBlockNumber: () => scenario.getBlockNumber(),
+        getBlock: async (tag: string | number) => {
+          if (providerUnavailable) throw exhausted();
+          const block = await scenario.getBlock(tag);
+          return {
+            ...block,
+            timestamp: Math.floor(Date.now() / 1_000) - 2,
+          };
+        },
+        getNetwork: async () => ({ chainId: 31_337n }),
+        getLogs: async (filter: { fromBlock: number; toBlock: number }) => {
+          if (providerUnavailable) throw exhausted();
+          return scenario.renderParsedLogs(filter.fromBlock, filter.toBlock);
+        },
+      };
+      adapter.contracts = {
+        contextGraphStorage: { connect: () => contract, getAddress: contract.getAddress },
+      };
+      adapter.readTipProvider = async (
+        _label: string,
+        read: (selected: typeof provider) => Promise<unknown>,
+      ) => read(provider);
+      adapter.resolveContractDeployBlock = async () => ({
+        fromBlock: 7,
+        head: 30,
+        scanProviders: [],
+      });
+
+      try {
+        const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+        const ids = ['9' as ContextGraphAuthorityIndexId];
+        await reader.readContextGraphAuthorityIndexRevisions(ids);
+
+        vi.advanceTimersByTime(T);
+        const breaker = new Rfc64AuthorityReadCoordinatorV1({
+          baseBackoffMs: 100,
+          maxBackoffMs: 800,
+          jitterRatio: 0,
+          now: Date.now,
+        });
+        await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+          .rejects.toBeInstanceOf(ChainRpcTransportError);
+
+        vi.advanceTimersByTime(100);
+        providerUnavailable = true;
+        await expect(breaker.run(undefined, (signal, evidence) =>
+          reader.readContextGraphAuthorityIndexRevisions(
+            ids,
+            evidence.chainReadOptions(signal),
+          )))
+          .resolves.toBeInstanceOf(Map);
+        expect(breaker.snapshot()).toMatchObject({
+          state: 'half-open',
+          consecutiveExhaustions: 1,
+        });
+
+        providerUnavailable = false;
+        vi.advanceTimersByTime(T);
+        await expect(breaker.run(undefined, (signal, evidence) =>
+          reader.readContextGraphAuthorityIndexRevisions(
+            ids,
+            evidence.chainReadOptions(signal),
+          )))
+          .resolves.toBeInstanceOf(Map);
+        expect(breaker.snapshot()).toEqual({
+          state: 'closed',
+          consecutiveExhaustions: 0,
+          retryAtMs: null,
+        });
+      } finally {
+        adapter.destroy();
+        vi.useRealTimers();
+      }
     });
 
   });

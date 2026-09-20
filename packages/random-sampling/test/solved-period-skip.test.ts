@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ChainAdapter, NodeChallenge } from '@origintrail-official/dkg-chain';
+import type {
+  ChainAdapter,
+  NodeChallenge,
+  RandomSamplingReadContext,
+  RandomSamplingReadContextReader,
+} from '@origintrail-official/dkg-chain';
 import { describe, expect, it, vi } from 'vitest';
 import {
   readCachedChallengeStaleness,
@@ -18,10 +23,13 @@ function fixture() {
   };
   const chain = {
     getBlockNumber: vi.fn(async () => state.head),
-    isRandomSamplingReady: vi.fn(() => state.ready),
-    getRandomSamplingBindingId: vi.fn(() => state.bindingId),
-    getCurrentEpoch: vi.fn(async () => state.epoch),
-  } as unknown as ChainAdapter;
+    readRandomSamplingContext: vi.fn(async () =>
+      state.ready && state.bindingId !== undefined
+        ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.epoch })
+        : undefined),
+    isRandomSamplingReadContextCurrent: vi.fn((context: RandomSamplingReadContext) =>
+      state.ready && state.bindingId === context.bindingId),
+  } as unknown as ChainAdapter & RandomSamplingReadContextReader;
   const skip = new SolvedPeriodSkip(chain, () => state.now);
   return { state, chain, skip };
 }
@@ -98,12 +106,12 @@ describe('SolvedPeriodSkip', () => {
     const { state, chain, skip } = fixture();
     await remember(skip);
     vi.mocked(chain.getBlockNumber!).mockClear();
-    vi.mocked(chain.getCurrentEpoch!).mockClear();
+    vi.mocked(chain.readRandomSamplingContext).mockClear();
 
     mutate(state);
     expect(await skip.reusable()).toBeUndefined();
     expect(chain.getBlockNumber).not.toHaveBeenCalled();
-    expect(chain.getCurrentEpoch).not.toHaveBeenCalled();
+    expect(chain.readRandomSamplingContext).not.toHaveBeenCalled();
   });
 
   it('refuses to record unless context, head, and a positive live duration are present', async () => {
@@ -141,7 +149,7 @@ describe('SolvedPeriodSkip', () => {
 
   it('does not capture a reusable context without every capability', async () => {
     const { chain } = fixture();
-    Reflect.deleteProperty(chain, 'getCurrentEpoch');
+    Reflect.deleteProperty(chain, 'isRandomSamplingReadContextCurrent');
     expect(await new SolvedPeriodSkip(chain).captureReadContext()).toBeUndefined();
   });
 

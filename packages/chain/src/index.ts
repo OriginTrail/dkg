@@ -179,6 +179,11 @@ export {
   type ContextGraphAuthorityRpcSite,
 } from './context-graph-authority-rpc-sites.js';
 export {
+  bindRandomSamplingReadContextReader,
+  type RandomSamplingReadContext,
+  type RandomSamplingReadContextReader,
+} from './random-sampling-read-context.js';
+export {
   activeRpcRequestContext,
   activeRpcRequestAbortSignal,
   boundedRetryFetchRequest,

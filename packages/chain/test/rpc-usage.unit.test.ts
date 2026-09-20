@@ -9,7 +9,7 @@
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { Contract } from 'ethers';
+import { AbiCoder, Contract } from 'ethers';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -776,5 +776,36 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
     expect(usage.ethCallByConsumer['unit.contract.with']).toBe(rawEthCallHits);
+  }, 30_000);
+
+  it('composes a real getContextGraph transport label with its authority call site', async () => {
+    installMeter();
+    const encoded = AbiCoder.defaultAbiCoder().encode(
+      ['address', 'address[]', 'uint256', 'bool', 'uint256', 'uint8', 'uint8', 'address', 'uint256'],
+      [HUB, [HUB], 0n, true, 0n, 1, 0, HUB, 0n],
+    );
+    const rpc = await startLoopbackRpc({ results: { eth_call: encoded } });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url }));
+    adapters.push(a);
+    a.initialized = true;
+    a.init = async () => {};
+    a.contracts = {
+      contextGraphStorage: new Contract(HUB, [
+        'function getContextGraph(uint256) view returns '
+        + '(address,address[],uint256,bool,uint256,uint8,uint8,address,uint256)',
+      ]),
+    };
+
+    await expect(withRpcUsageSite(
+      CONTEXT_GRAPH_AUTHORITY_RPC_SITES.syncAuthorize,
+      () => a.getContextGraphLiveAuthority(1n),
+    )).resolves.toMatchObject({ active: true, accessPolicy: 1 });
+
+    const usage = a.drainRpcUsage();
+    expect(usage.ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.syncAuthz': rpc.hits('eth_call'),
+    });
+    expect(rpc.hits('eth_call')).toBeGreaterThanOrEqual(1);
   }, 30_000);
 });
