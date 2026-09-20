@@ -97,7 +97,8 @@ it('refreshes invalidated EVM bindings before returning membership', async () =>
 
 it('exposes the mock Random Sampling pair identity and current epoch', async () => {
   const chain = new MockChainAdapter();
-  expect(chain.getRandomSamplingBindingId())
+  const reader = chain.getRandomSamplingReadContextReader();
+  expect(reader.getRandomSamplingBindingId())
     .toBe('mock-random-sampling:mock-random-sampling-storage');
   await expect(chain.getCurrentEpoch()).resolves.toBe(1n);
   chain.__advanceEpoch();
@@ -106,17 +107,19 @@ it('exposes the mock Random Sampling pair identity and current epoch', async () 
 
 it('makes the mock read context unavailable whenever its pair is not ready', async () => {
   const chain = new MockChainAdapter();
-  const context = await chain.readRandomSamplingContext();
+  const reader = chain.getRandomSamplingReadContextReader();
+  const context = await reader.readRandomSamplingContext();
   expect(context).toBeDefined();
   vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(false);
-  await expect(chain.readRandomSamplingContext()).resolves.toBeUndefined();
-  expect(chain.isRandomSamplingReadContextCurrent(context!)).toBe(false);
+  await expect(reader.readRandomSamplingContext()).resolves.toBeUndefined();
+  expect(reader.isRandomSamplingReadContextCurrent(context!)).toBe(false);
 });
 
 it('reads and revalidates a real adapter Random Sampling context as one binding', async () => {
   const chain = adapter();
+  const reader = chain.getRandomSamplingReadContextReader();
   const getCurrentEpoch = vi.spyOn(chain, 'getCurrentEpoch').mockResolvedValue(17n);
-  await expect(chain.readRandomSamplingContext()).resolves.toBeUndefined();
+  await expect(reader.readRandomSamplingContext()).resolves.toBeUndefined();
   expect(getCurrentEpoch).not.toHaveBeenCalled();
 
   (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
@@ -124,22 +127,23 @@ it('reads and revalidates a real adapter Random Sampling context as one binding'
     deployedAddresses.RandomSamplingStorage!,
     [],
   );
-  const context = await chain.readRandomSamplingContext();
+  const context = await reader.readRandomSamplingContext();
   expect(context).toEqual({
     bindingId: `${deployedAddresses.RandomSampling}:${deployedAddresses.RandomSamplingStorage}`,
     chronosEpoch: 17n,
   });
-  expect(chain.isRandomSamplingReadContextCurrent(context!)).toBe(true);
+  expect(reader.isRandomSamplingReadContextCurrent(context!)).toBe(true);
 
   (chain as any).contracts.randomSampling = new Contract(
     '0x00000000000000000000000000000000000000aa',
     [],
   );
-  expect(chain.isRandomSamplingReadContextCurrent(context!)).toBe(false);
+  expect(reader.isRandomSamplingReadContextCurrent(context!)).toBe(false);
 });
 
 it('fails a real adapter context read open when the pair rotates during the epoch read', async () => {
   const chain = adapter();
+  const reader = chain.getRandomSamplingReadContextReader();
   (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
   (chain as any).contracts.randomSamplingStorage = new Contract(
     deployedAddresses.RandomSamplingStorage!,
@@ -153,7 +157,7 @@ it('fails a real adapter context read open when the pair rotates during the epoc
     return 17n;
   });
 
-  await expect(chain.readRandomSamplingContext()).resolves.toBeUndefined();
+  await expect(reader.readRandomSamplingContext()).resolves.toBeUndefined();
 });
 
 // The prover keys its remembered "period already solved" read on the derived pair.
@@ -165,13 +169,14 @@ it('an invalidated pair re-bound to the same addresses keeps the same derived id
   adapters.push(chain);
   stubHubReads(chain, (name) => deployedAddresses[name]!);
   expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
-  const recorded = chain.getRandomSamplingBindingId();
+  const reader = chain.getRandomSamplingReadContextReader();
+  const recorded = reader.getRandomSamplingBindingId();
 
   chain.invalidateBindings();
   expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
 
   expect(chain.isRandomSamplingReady()).toBe(true);
-  expect(chain.getRandomSamplingBindingId()).toBe(recorded);
+  expect(reader.getRandomSamplingBindingId()).toBe(recorded);
 });
 
 it.each(['RandomSampling', 'RandomSamplingStorage'] as const)(
@@ -182,7 +187,8 @@ it.each(['RandomSampling', 'RandomSamplingStorage'] as const)(
     const addresses: Record<string, string> = { ...deployedAddresses };
     stubHubReads(chain, (name) => addresses[name]!);
     await chain.resolveRandomSamplingAvailability(52n);
-    const recorded = chain.getRandomSamplingBindingId();
+    const reader = chain.getRandomSamplingReadContextReader();
+    const recorded = reader.getRandomSamplingBindingId();
 
     // Rotation the Hub poller never saw: nothing calls invalidate().
     addresses[rotated] = '0x00000000000000000000000000000000000000aa';
@@ -191,7 +197,7 @@ it.each(['RandomSampling', 'RandomSamplingStorage'] as const)(
     expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'available', member: true });
 
     expect(chain.isRandomSamplingReady()).toBe(true);
-    expect(chain.getRandomSamplingBindingId()).not.toBe(recorded);
+    expect(reader.getRandomSamplingBindingId()).not.toBe(recorded);
   },
 );
 
@@ -200,7 +206,8 @@ it('a TTL re-resolve onto the SAME pair keeps the derived binding (the routine r
   adapters.push(chain);
   const hub = stubHubReads(chain, (name) => deployedAddresses[name]!);
   await chain.resolveRandomSamplingAvailability(52n);
-  const recorded = chain.getRandomSamplingBindingId();
+  const reader = chain.getRandomSamplingReadContextReader();
+  const recorded = reader.getRandomSamplingBindingId();
   const hubReadsBefore = hub.mock.calls.length;
 
   chain.expireBindingTtl();
@@ -208,7 +215,7 @@ it('a TTL re-resolve onto the SAME pair keeps the derived binding (the routine r
 
   // The Hub WAS re-read (fresh handles), it just resolved to the same addresses.
   expect(hub.mock.calls.length).toBeGreaterThan(hubReadsBefore + 1);
-  expect(chain.getRandomSamplingBindingId()).toBe(recorded);
+  expect(reader.getRandomSamplingBindingId()).toBe(recorded);
 });
 
 it.each(['RandomSampling', 'RandomSamplingStorage', 'ShardingTableStorage'] as const)(

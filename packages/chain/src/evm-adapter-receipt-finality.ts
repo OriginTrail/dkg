@@ -95,7 +95,7 @@ export class EvmReceiptFinalityReader {
     return resolved?.canonical === true ? resolved.header : null;
   }
 
-  timestamp(blockNumber: number, blockHash: string): number | undefined {
+  finalizedBlockTimestamp(blockNumber: number, blockHash: string): number | undefined {
     const remembered = this.#headersByHash.get(blockHash.toLowerCase());
     return remembered?.number === blockNumber ? remembered.timestamp : undefined;
   }

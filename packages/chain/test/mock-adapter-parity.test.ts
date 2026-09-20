@@ -157,6 +157,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'initContracts',          // TS-private: init() body extracted so RPC-exhaustion can be wrapped as RPC_ENDPOINTS_EXHAUSTED
   'requireV9',
   'getBlockTimestamp',
+  'getFinalizedBlockTimestamp',
   // TS-private half of the EVM sign/broadcast/receipt split. The mock has no
   // raw RPC transport or signed-transaction acceptance boundary to emulate.
   'broadcastSignedTransactionWithRetries',

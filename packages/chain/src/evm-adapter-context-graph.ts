@@ -47,6 +47,8 @@ import {
   './evm-context-graph-authority-index-reader.js';
 import { normalizeContextGraphAuthorityHash } from
   './context-graph-authority-generation.js';
+import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
+  './context-graph-authority-rpc-sites.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -750,7 +752,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         try {
           raw = await this.readContractWithOptions(
             cgs,
-            'cgStorage.getContextGraph',
+            CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
             'getContextGraph',
             [contextGraphId],
             { signal: flightSignal },
@@ -1172,7 +1174,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       try {
         const cg = await this.readContractWithOptions(
           cgs,
-          'cgStorage.getContextGraph',
+          CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
           'getContextGraph',
           [contextGraphId],
           { signal: options.signal },

@@ -3,6 +3,8 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ContextGraphLiveAuthorityUnsupportedError } from '../src/chain-adapter.js';
+import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
+  '../src/context-graph-authority-rpc-sites.js';
 import { fixture } from './context-graph-name-hash-reverse-resolution.fixtures.js';
 
 const MEMBER = '0x00000000000000000000000000000000000000a1';
@@ -39,7 +41,7 @@ describe('EVM adapter: one-read live context graph authority', () => {
 
     await adapter.getContextGraphLiveAuthority(7n, { signal });
     const [, label, method, args, options] = readContractWithOptions.mock.calls[0];
-    expect(label).toBe('cgStorage.getContextGraph');
+    expect(label).toBe(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER);
     expect(method).toBe('getContextGraph');
     expect(args).toEqual([7n]);
     // The read is shared, so it belongs to the flight: one caller abandoning

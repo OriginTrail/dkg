@@ -21,8 +21,7 @@ function fixture() {
     epoch: 3n,
     now: 0,
   };
-  const chain = {
-    getBlockNumber: vi.fn(async () => state.head),
+  const contextReader: RandomSamplingReadContextReader = {
     getRandomSamplingBindingId: vi.fn(() =>
       state.ready ? state.bindingId : undefined),
     readRandomSamplingContext: vi.fn(async () =>
@@ -31,9 +30,13 @@ function fixture() {
         : undefined),
     isRandomSamplingReadContextCurrent: vi.fn((context: RandomSamplingReadContext) =>
       state.ready && state.bindingId === context.bindingId),
-  } as unknown as ChainAdapter & RandomSamplingReadContextReader;
+  };
+  const chain = {
+    getBlockNumber: vi.fn(async () => state.head),
+    getRandomSamplingReadContextReader: vi.fn(() => contextReader),
+  } as unknown as ChainAdapter;
   const skip = new SolvedPeriodSkip(chain, () => state.now);
-  return { state, chain, skip };
+  return { state, chain, contextReader, skip };
 }
 
 function challenge(overrides: Partial<NodeChallenge> = {}): NodeChallenge {
@@ -118,13 +121,13 @@ describe('SolvedPeriodSkip', () => {
   });
 
   it('captures the binding before live reads and defers the epoch until a reusable result', async () => {
-    const { chain, skip } = fixture();
+    const { chain, contextReader, skip } = fixture();
     const order: string[] = [];
-    vi.mocked(chain.getRandomSamplingBindingId).mockImplementation(() => {
+    vi.mocked(contextReader.getRandomSamplingBindingId).mockImplementation(() => {
       order.push('binding');
       return 'rs-a:rss-a';
     });
-    vi.mocked(chain.readRandomSamplingContext).mockImplementation(async () => {
+    vi.mocked(contextReader.readRandomSamplingContext).mockImplementation(async () => {
       order.push('context');
       return { bindingId: 'rs-a:rss-a', chronosEpoch: 3n };
     });
@@ -144,11 +147,11 @@ describe('SolvedPeriodSkip', () => {
   });
 
   it('does not read the Chronos epoch for a challenge that cannot be reused', async () => {
-    const { chain, skip } = fixture();
+    const { contextReader, skip } = fixture();
 
     await observe(skip, { challenge: challenge({ solved: false }) });
 
-    expect(chain.readRandomSamplingContext).not.toHaveBeenCalled();
+    expect(contextReader.readRandomSamplingContext).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -169,20 +172,40 @@ describe('SolvedPeriodSkip', () => {
 
   it('does not record without every read-context capability', async () => {
     const { chain } = fixture();
-    Reflect.deleteProperty(chain, 'isRandomSamplingReadContextCurrent');
+    vi.mocked(chain.getRandomSamplingReadContextReader!).mockReturnValue(undefined);
     const skip = new SolvedPeriodSkip(chain);
     await observe(skip);
     expect((await readWithoutChallenge(skip)).result.kind).toBe('live');
   });
 
   it('treats a read-context failure as unavailable for that observation', async () => {
-    const { chain, skip } = fixture();
-    vi.mocked(chain.readRandomSamplingContext)
+    const { contextReader, skip } = fixture();
+    vi.mocked(contextReader.readRandomSamplingContext)
       .mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
 
     await observe(skip);
     expect((await observe(skip)).kind).toBe('live');
     expect((await readWithoutChallenge(skip)).result.kind).toBe('reused');
+  });
+
+  it('does not pair an old challenge with a newer Chronos epoch', async () => {
+    const { state, skip } = fixture();
+    const firstLive = vi.fn(async () => {
+      state.epoch = 4n;
+      return {
+        value: 'first',
+        currentChallenge: {
+          challenge: challenge({ epoch: 3n }),
+          durationInBlocks: 20n,
+        },
+      };
+    });
+
+    expect((await skip.read(firstLive)).kind).toBe('live');
+    state.head = 1021;
+    const next = await readWithoutChallenge(skip);
+    expect(next.result.kind).toBe('live');
+    expect(next.read).toHaveBeenCalledOnce();
   });
 
   it('returns the current challenge with its staleness decision', async () => {

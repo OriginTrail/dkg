@@ -174,11 +174,11 @@ export {
 } from './rpc-usage.js';
 // The bounded census of call sites that reach `cgStorage.getContextGraph`.
 export {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
   type ContextGraphAuthorityRpcSite,
 } from './context-graph-authority-rpc-sites.js';
 export {
-  bindRandomSamplingReadContextReader,
   type RandomSamplingReadContext,
   type RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';

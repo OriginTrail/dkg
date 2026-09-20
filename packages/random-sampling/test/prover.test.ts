@@ -68,7 +68,7 @@ interface FakeChainState {
   currentEpoch?: bigint;
 }
 
-type TestChain = ChainAdapter & Partial<RandomSamplingReadContextReader>;
+type TestChain = ChainAdapter;
 
 function makeChain(state: FakeChainState): TestChain {
   // OT-RFC-49 WS-B proof-race snapshot: the on-chain `createChallenge` PINS the
@@ -114,14 +114,17 @@ function makeChain(state: FakeChainState): TestChain {
     && state.bindingId !== undefined
     && state.currentEpoch !== undefined
   ) {
-    chain.getRandomSamplingBindingId = vi.fn(() =>
-      state.randomSamplingReady ? state.bindingId : undefined);
-    chain.readRandomSamplingContext = vi.fn(async () =>
-      state.randomSamplingReady && state.bindingId !== undefined && state.currentEpoch !== undefined
-        ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.currentEpoch })
-        : undefined);
-    chain.isRandomSamplingReadContextCurrent = vi.fn((context) =>
-      state.randomSamplingReady === true && state.bindingId === context.bindingId);
+    const contextReader: RandomSamplingReadContextReader = {
+      getRandomSamplingBindingId: vi.fn(() =>
+        state.randomSamplingReady ? state.bindingId : undefined),
+      readRandomSamplingContext: vi.fn(async () =>
+        state.randomSamplingReady && state.bindingId !== undefined && state.currentEpoch !== undefined
+          ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.currentEpoch })
+          : undefined),
+      isRandomSamplingReadContextCurrent: vi.fn((context) =>
+        state.randomSamplingReady === true && state.bindingId === context.bindingId),
+    };
+    chain.getRandomSamplingReadContextReader = vi.fn(() => contextReader);
   }
   return chain;
 }
@@ -1620,8 +1623,8 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       status: vi.mocked(chain.getActiveProofPeriodStatus!).mock.calls.length,
       challenge: vi.mocked(chain.getNodeChallenge!).mock.calls.length,
       head: chain.getBlockNumber ? vi.mocked(chain.getBlockNumber).mock.calls.length : 0,
-      epoch: chain.readRandomSamplingContext
-        ? vi.mocked(chain.readRandomSamplingContext).mock.calls.length
+      epoch: chain.getRandomSamplingReadContextReader?.()?.readRandomSamplingContext
+        ? vi.mocked(chain.getRandomSamplingReadContextReader().readRandomSamplingContext).mock.calls.length
         : 0,
     };
   }
@@ -1939,11 +1942,13 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   ] as const)('never skips for an adapter that %s', async (_label, exposeCapability) => {
     const state = makeSolvedState({ bindingId: undefined });
     const chain = makeChain(state);
-    expect(chain.readRandomSamplingContext).toBeUndefined();
+    expect(chain.getRandomSamplingReadContextReader).toBeUndefined();
     if (exposeCapability) {
-      chain.getRandomSamplingBindingId = vi.fn(() => undefined);
-      chain.readRandomSamplingContext = vi.fn(async () => undefined);
-      chain.isRandomSamplingReadContextCurrent = vi.fn(() => false);
+      chain.getRandomSamplingReadContextReader = vi.fn(() => ({
+        getRandomSamplingBindingId: vi.fn(() => undefined),
+        readRandomSamplingContext: vi.fn(async () => undefined),
+        isRandomSamplingReadContextCurrent: vi.fn(() => false),
+      }));
     }
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
@@ -1957,7 +1962,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   it('never skips for an adapter that cannot report its current epoch', async () => {
     const state = makeSolvedState({ currentEpoch: undefined });
     const chain = makeChain(state);
-    expect(chain.readRandomSamplingContext).toBeUndefined();
+    expect(chain.getRandomSamplingReadContextReader).toBeUndefined();
     const prover = new RandomSamplingProver({
       chain,
       store: new OxigraphStore(),
@@ -1974,7 +1979,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   it('keeps ticking and records no skip when the read-context RPC fails', async () => {
     const state = makeSolvedState();
     const chain = makeChain(state);
-    vi.mocked(chain.readRandomSamplingContext!)
+    vi.mocked(chain.getRandomSamplingReadContextReader!().readRandomSamplingContext)
       .mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
     const prover = new RandomSamplingProver({
       chain,

@@ -88,7 +88,10 @@ import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fenc
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
-import type { RandomSamplingReadContext } from './random-sampling-read-context.js';
+import type {
+  RandomSamplingReadContext,
+  RandomSamplingReadContextReader,
+} from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
@@ -108,10 +111,6 @@ import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 import { EvmReceiptFinalityReader } from './evm-adapter-receipt-finality.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
-
-interface ReceiptBlockTimestampReadOptions extends ChainReadOptions {
-  readonly blockHash?: string;
-}
 
 type ContractWriteSender = (
   contract: Contract,
@@ -3104,21 +3103,8 @@ export class EVMChainAdapterBase {
 
   protected async getBlockTimestamp(
     blockNumber: number,
-    options: ReceiptBlockTimestampReadOptions = {},
+    options: ChainReadOptions = {},
   ): Promise<number> {
-    // The receipt finality check usually fetched this very block a moment ago.
-    // Reuse its timestamp only when the caller names the block by HASH (from the
-    // receipt): the hash commits to the timestamp, so this can never serve a
-    // reorged-out header. A miss falls through to the by-number read unchanged.
-    // An already-aborted caller rejects here exactly as the read below would
-    // have: a memo hit must not turn a cancelled call into an answer.
-    options.signal?.throwIfAborted();
-    const rememberedTimestamp = options.blockHash == null
-      ? undefined
-      : this.receiptFinality.timestamp(blockNumber, options.blockHash);
-    if (rememberedTimestamp !== undefined) {
-      return rememberedTimestamp;
-    }
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most
     // likely to already have the block). It is NOT a `skipPreferred` tip read:
@@ -3142,6 +3128,21 @@ export class EVMChainAdapterBase {
       },
     );
     return block?.timestamp != null ? Number(block.timestamp) : 0;
+  }
+
+  /** Read a receipt block timestamp, reusing the hash-bound finality header. */
+  protected async getFinalizedBlockTimestamp(
+    blockNumber: number,
+    blockHash: string,
+    options: ChainReadOptions = {},
+  ): Promise<number> {
+    // A memo hit must not turn a cancelled call into an answer.
+    options.signal?.throwIfAborted();
+    const rememberedTimestamp = this.receiptFinality.finalizedBlockTimestamp(
+      blockNumber,
+      blockHash,
+    );
+    return rememberedTimestamp ?? this.getBlockTimestamp(blockNumber, options);
   }
 
   // =====================================================================
@@ -4129,9 +4130,9 @@ export class EVMChainAdapterBase {
 
     // waitForReceipt already checked this exact canonical hash and memoized
     // its header; naming the hash makes timestamp reuse explicit and reorg-safe.
-    const blockTimestamp = await this.getBlockTimestamp(
+    const blockTimestamp = await this.getFinalizedBlockTimestamp(
       receipt.blockNumber,
-      { blockHash: receipt.blockHash },
+      receipt.blockHash,
     );
 
     return {
@@ -4170,12 +4171,27 @@ export class EVMChainAdapterBase {
     return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
-  /** Synchronous identity derived from the handles that reads actually use. */
-  getRandomSamplingBindingId(): string | undefined {
-    const rsTarget = contractHandleTargetAddress(this.contracts.randomSampling);
-    const rssTarget = contractHandleTargetAddress(this.contracts.randomSamplingStorage);
-    if (rsTarget === undefined || rssTarget === undefined) return undefined;
-    return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
+  /** One cohesive optional capability for solved-period reuse. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = (): string | undefined => {
+      const rsTarget = contractHandleTargetAddress(this.contracts.randomSampling);
+      const rssTarget = contractHandleTargetAddress(this.contracts.randomSamplingStorage);
+      if (rsTarget === undefined || rssTarget === undefined) return undefined;
+      return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
+    };
+    const isCurrent = (context: RandomSamplingReadContext): boolean =>
+      this.isRandomSamplingReady() && getBindingId() === context.bindingId;
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        const bindingId = getBindingId();
+        if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
+        const chronosEpoch = await this.getCurrentEpoch();
+        const context = Object.freeze({ bindingId, chronosEpoch });
+        return isCurrent(context) ? context : undefined;
+      },
+      isRandomSamplingReadContextCurrent: isCurrent,
+    });
   }
 
   async getCurrentEpoch(): Promise<bigint> {
@@ -4187,19 +4203,6 @@ export class EVMChainAdapterBase {
       'chronos.getCurrentEpoch',
       'getCurrentEpoch',
     ));
-  }
-
-  async readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined> {
-    const bindingId = this.getRandomSamplingBindingId();
-    if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
-    const chronosEpoch = await this.getCurrentEpoch();
-    const context = Object.freeze({ bindingId, chronosEpoch });
-    return this.isRandomSamplingReadContextCurrent(context) ? context : undefined;
-  }
-
-  isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean {
-    return this.isRandomSamplingReady()
-      && this.getRandomSamplingBindingId() === context.bindingId;
   }
 
   async getBlockNumber(): Promise<number> {

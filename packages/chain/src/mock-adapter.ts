@@ -42,7 +42,10 @@ import type {
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
-import type { RandomSamplingReadContext } from './random-sampling-read-context.js';
+import type {
+  RandomSamplingReadContext,
+  RandomSamplingReadContextReader,
+} from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
@@ -1550,26 +1553,26 @@ export class MockChainAdapter implements ChainAdapter {
     return true;
   }
 
-  /** The mock's in-memory RandomSampling state is one fixed "pair" — it never rotates. */
-  getRandomSamplingBindingId(): string {
-    return 'mock-random-sampling:mock-random-sampling-storage';
+  /** The mock exposes the same cohesive solved-period capability as EVM. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = () => 'mock-random-sampling:mock-random-sampling-storage';
+    const isCurrent = (context: RandomSamplingReadContext): boolean =>
+      this.isRandomSamplingReady() && context.bindingId === getBindingId();
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        if (!this.isRandomSamplingReady()) return undefined;
+        return Object.freeze({
+          bindingId: getBindingId(),
+          chronosEpoch: await this.getCurrentEpoch(),
+        });
+      },
+      isRandomSamplingReadContextCurrent: isCurrent,
+    });
   }
 
   async getCurrentEpoch(): Promise<bigint> {
     return this.rsEpoch;
-  }
-
-  async readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined> {
-    if (!this.isRandomSamplingReady()) return undefined;
-    return Object.freeze({
-      bindingId: this.getRandomSamplingBindingId(),
-      chronosEpoch: await this.getCurrentEpoch(),
-    });
-  }
-
-  isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean {
-    return this.isRandomSamplingReady()
-      && context.bindingId === this.getRandomSamplingBindingId();
   }
 
   async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {

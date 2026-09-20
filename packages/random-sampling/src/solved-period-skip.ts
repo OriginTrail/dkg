@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  bindRandomSamplingReadContextReader,
   type ChainAdapter,
   type NodeChallenge,
   type RandomSamplingReadContext,
@@ -76,7 +75,7 @@ export class SolvedPeriodSkip {
 
   constructor(chain: ChainAdapter, now: () => number = () => performance.now()) {
     this.#chain = chain;
-    this.#contextReader = bindRandomSamplingReadContextReader(chain);
+    this.#contextReader = chain.getRandomSamplingReadContextReader?.();
     this.#now = now;
   }
 
@@ -180,6 +179,7 @@ export class SolvedPeriodSkip {
     const { context, challenge, staleness, durationInBlocks } = input;
     if (
       context === undefined
+      || challenge.epoch !== context.chronosEpoch
       || staleness.head === undefined
       || durationInBlocks === undefined
       || durationInBlocks <= 0n

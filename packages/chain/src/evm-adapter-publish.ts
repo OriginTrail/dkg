@@ -865,9 +865,10 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     // When the caller already checked receipt finality, naming this exact hash
     // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getBlockTimestamp(
+    const blockTimestamp = await this.getFinalizedBlockTimestamp(
       receipt.blockNumber,
-      { ...options, blockHash: receipt.blockHash },
+      receipt.blockHash,
+      options,
     );
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
@@ -930,9 +931,10 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     // When the caller already checked receipt finality, naming this exact hash
     // reuses that header timestamp; direct parsers safely fall through to RPC.
-    const blockTimestamp = await this.getBlockTimestamp(
+    const blockTimestamp = await this.getFinalizedBlockTimestamp(
       receipt.blockNumber,
-      { ...options, blockHash: receipt.blockHash },
+      receipt.blockHash,
+      options,
     );
 
     return {

@@ -23,8 +23,10 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
-import type { ContextGraphAuthorityRpcSite } from
-  './context-graph-authority-rpc-sites.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+  type ContextGraphAuthorityRpcSite,
+} from './context-graph-authority-rpc-sites.js';
 
 /**
  * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
@@ -348,9 +350,6 @@ export function withRpcUsageSite<T>(site: ContextGraphAuthorityRpcSite, fn: () =
   if (!normalized) return fn();
   return rpcUsageSiteContext.run(normalized, fn);
 }
-
-/** The only transport read whose shared label is split by authority call site. */
-const CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER = 'cgStorage.getContextGraph';
 
 /** Current diagnostic consumer label, if a caller established one. */
 function activeRpcUsageConsumer(): string | undefined {
