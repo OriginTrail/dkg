@@ -8,6 +8,8 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  ContextGraphAuthorityReadOptions,
+  ContextGraphLiveAuthorityReadOptions,
   CreateKCParams,
   FinalizedChainProofSnapshot,
   UpdateKCParams,
@@ -39,7 +41,9 @@ import type {
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
+  ContextGraphFinalizedCreation,
 } from './chain-adapter.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
@@ -1547,9 +1551,22 @@ export class MockChainAdapter implements ChainAdapter {
     return true;
   }
 
-  /** The mock's in-memory RandomSampling state is one fixed "pair" — it never rotates. */
-  getRandomSamplingBindingId(): string {
-    return 'mock-random-sampling:mock-random-sampling-storage';
+  /** The mock exposes the same cohesive solved-period capability as EVM. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = () => 'mock-random-sampling:mock-random-sampling-storage';
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && bindingId === getBindingId();
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        if (!this.isRandomSamplingReady()) return undefined;
+        return Object.freeze({
+          bindingId: getBindingId(),
+          chronosEpoch: await this.getCurrentEpoch(),
+        });
+      },
+      isRandomSamplingBindingCurrent: isCurrent,
+    });
   }
 
   async getCurrentEpoch(): Promise<bigint> {
@@ -1753,7 +1770,7 @@ export class MockChainAdapter implements ChainAdapter {
    */
   async getContextGraphLiveAuthority(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphLiveAuthorityReadOptions = {},
   ): Promise<ContextGraphLiveAuthority | null> {
     options.signal?.throwIfAborted();
     // Sequential and conditional on purpose: the three-read path this mirrors
@@ -1762,7 +1779,9 @@ export class MockChainAdapter implements ChainAdapter {
     // Never `null`: the mock has no "minted but burned" state, and a graph the
     // mock does not know is exactly what a stubbed liveness probe describes.
     // Same call arity as the point-read wiring this replaces: options only when
-    // a signal is present, so a spy that pinned `calledWith(id)` still matches.
+    // a signal is present. Note the agent now always supplies one on this path
+    // (the read is shared in flight, so a timed-out caller must be able to
+    // leave it), so a spy should pin the id rather than the whole call.
     const readOptions = options.signal === undefined ? undefined : { signal: options.signal };
     const live = await (readOptions === undefined
       ? this.isContextGraphActiveOnChain(contextGraphId)
@@ -1779,7 +1798,7 @@ export class MockChainAdapter implements ChainAdapter {
   /** Offline-development mirror of the finalized RFC-64 authority snapshot. */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphAuthorityReadOptions = {},
   ): Promise<ContextGraphAuthoritySnapshot> {
     options.signal?.throwIfAborted();
     const cg = this.contextGraphs.get(contextGraphId);
@@ -1812,6 +1831,21 @@ export class MockChainAdapter implements ChainAdapter {
       rosterVersion: cg.rosterVersion.toString(10),
       sourceBlockNumber: cg.authoritySourceBlockNumber.toString(10),
       sourceBlockHash: cg.authoritySourceBlockHash,
+    });
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined || typeof cg.nameHash !== 'string'
+      || cg.nameHash === ethers.ZeroHash) return undefined;
+    if (cg.accessPolicy !== 0 && cg.accessPolicy !== 1) return undefined;
+    return Object.freeze({
+      nameHash: cg.nameHash,
+      accessPolicy: cg.accessPolicy as 0 | 1,
     });
   }
 

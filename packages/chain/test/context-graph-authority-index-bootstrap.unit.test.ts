@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest';
-import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import { ContextGraphAuthorityIndex as ContextGraphAuthorityIndexBase } from
+  '../src/context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexId } from '../src/context-graph-authority-index-id.js';
 import type { ContextGraphAuthorityIndexCheckpoint, ContextGraphAuthorityIndexStore } from
   '../src/context-graph-authority-index-checkpoint.js';
@@ -23,6 +24,16 @@ const HEAD = 3_780_010;
 const OWNER = `0x${'11'.repeat(20)}`;
 const NAME = `0x${'99'.repeat(32)}`;
 const hash = (block: number) => `0x${block.toString(16).padStart(64, '0')}`;
+
+/** Bootstrap lifecycle tests select their state explicitly from the canonical view. */
+class ContextGraphAuthorityIndex extends ContextGraphAuthorityIndexBase {
+  async resolve(
+    input: Parameters<ContextGraphAuthorityIndexBase['view']>[0]
+      & { readonly contextGraphId: ContextGraphAuthorityIndexId },
+  ) {
+    return (await this.view(input)).resolve(input.contextGraphId);
+  }
+}
 
 class ScopedStore implements ContextGraphAuthorityIndexStore {
   readonly records = new Map<string, { token: number; value: unknown | null }>();

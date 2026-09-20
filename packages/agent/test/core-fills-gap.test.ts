@@ -564,14 +564,26 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(persisted?.coreHosted).toBe(true);
   });
 
-  it('ignores a numeric swmGraphId hint and falls back to the numeric id', async () => {
+  it('uses an equal numeric swmGraphId hint as the same local id', async () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => 0;
 
-    // A numeric (or equal-to-cgId) hint carries no cleartext info → numericStr.
     await internals.recordCoreHostedPublicCg('8', '8');
 
     expect(internals.subscribedContextGraphs.get('8')?.coreHosted).toBe(true);
+  });
+
+  it('keeps an all-digit cleartext hint that differs from the on-chain id', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+
+    await internals.recordCoreHostedPublicCg('5', '99');
+
+    expect(internals.subscribedContextGraphs.get('99')).toMatchObject({
+      coreHosted: true,
+      onChainId: '5',
+    });
+    expect(internals.subscribedContextGraphs.get('5')).toBeUndefined();
   });
 
   it('does NOT mark a CURATED CG (Cores host curated as opaque ciphertext, not VM)', async () => {
@@ -1005,6 +1017,212 @@ describe('Phase D - VM reconcile damping', () => {
     });
   });
 
+  it('reuses a successful version snapshot only within the same finalized block', async () => {
+    const internals = await boot();
+    const localCgId = '169';
+    const onChainCgId = 169n;
+    const kaId = 9169n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    let publisher = '0x1111111111111111111111111111111111111111';
+    const author = '0x2222222222222222222222222222222222222222';
+    const rootA = `0x${'aa'.repeat(32)}`;
+    const rootB = `0x${'bb'.repeat(32)}`;
+    let finalizedBlock = 100;
+    let latestRoot = rootA;
+    const knowledgeAssetStorageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    let blockHash = `0x${'10'.repeat(32)}`;
+    const readSnapshot = recorder(async () => ({
+      knowledgeAssetId: kaId,
+      latestRoot,
+      rootCount: latestRoot === rootA ? 1n : 2n,
+      latestAuthor: author,
+      latestPublisher: publisher,
+      blockNumber: finalizedBlock,
+      blockHash,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetStorageGeneration: 1,
+    }));
+    internals.chain.readKnowledgeAssetVersionSnapshot = readSnapshot;
+    const snapshotIsCurrent = recorder(async () => true);
+    (internals.chain as any).knowledgeAssetVersionSnapshotIsCurrent = snapshotIsCurrent;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    const getLatestMerkleRoot = recorder(async () => (
+      new Uint8Array(32).fill(latestRoot === rootA ? 0xaa : 0xbb)
+    ));
+    const getLatestMerkleRootPublisher = recorder(async () => publisher);
+    internals.chain.getLatestMerkleRoot = getLatestMerkleRoot;
+    internals.chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+
+    finalizedBlock = 101;
+    blockHash = `0x${'11'.repeat(32)}`;
+    latestRoot = rootB;
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 101))
+      .resolves.toEqual({ status: 'already', blockNumber: 101 });
+
+    expect(readSnapshot.calls).toHaveLength(2);
+    expect(snapshotIsCurrent.calls).toHaveLength(1);
+    expect(getLatestMerkleRoot.calls).toHaveLength(2);
+    expect(getLatestMerkleRootPublisher.calls).toHaveLength(2);
+    expect(reconcile.calls).toHaveLength(2);
+    expect(reconcile.calls[0]?.[0]).toMatchObject({
+      versionBlock: 100,
+      merkleRoot: new Uint8Array(32).fill(0xaa),
+      publisherAddress: publisher,
+    });
+    expect(reconcile.calls[1]?.[0]).toMatchObject({
+      versionBlock: 101,
+      merkleRoot: new Uint8Array(32).fill(0xbb),
+      publisherAddress: publisher,
+    });
+  });
+
+  it('falls back to live materialization when finalized-slot evidence loses currentness', async () => {
+    const internals = await boot();
+    const localCgId = '171';
+    const onChainCgId = 171n;
+    const kaId = 9171n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    let publisher = '0x1111111111111111111111111111111111111111';
+    const root = `0x${'aa'.repeat(32)}`;
+    const knowledgeAssetStorageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const readSnapshot = recorder(async () => ({
+      knowledgeAssetId: kaId,
+      latestRoot: root,
+      rootCount: 1n,
+      latestAuthor: '0x2222222222222222222222222222222222222222',
+      latestPublisher: publisher,
+      blockNumber: 100,
+      blockHash: `0x${'10'.repeat(32)}`,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetStorageGeneration: 1,
+    }));
+    internals.chain.readKnowledgeAssetVersionSnapshot = readSnapshot;
+    let validatorThrows = false;
+    const snapshotIsCurrent = recorder(async () => {
+      if (validatorThrows) throw new Error('header unavailable');
+      return false;
+    });
+    (internals.chain as any).knowledgeAssetVersionSnapshotIsCurrent = snapshotIsCurrent;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    const getLatestMerkleRoot = recorder(async () => new Uint8Array(32).fill(0xaa));
+    const getLatestMerkleRootPublisher = recorder(async () => publisher);
+    internals.chain.getLatestMerkleRoot = getLatestMerkleRoot;
+    internals.chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100);
+    publisher = '0x3333333333333333333333333333333333333333';
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+    validatorThrows = true;
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+
+    expect(snapshotIsCurrent.calls).toHaveLength(2);
+    expect(getLatestMerkleRoot.calls).toHaveLength(3);
+    expect(getLatestMerkleRootPublisher.calls).toHaveLength(3);
+    expect(reconcile.calls).toHaveLength(3);
+    expect(reconcile.calls[2]?.[0]).toMatchObject({ publisherAddress: publisher });
+    expect(readSnapshot.calls).toHaveLength(3);
+  });
+
+  it('does not reuse finalized-slot evidence after the ordinal resolves to a replacement KA', async () => {
+    const internals = await boot();
+    const localCgId = '172';
+    const onChainCgId = 172n;
+    const originalKaId = 9172n;
+    const replacementKaId = 9272n;
+    registerUnmatchedKC(internals.chain, originalKaId, onChainCgId);
+    let currentKaId = originalKaId;
+    internals.chain.getContextGraphKCAt = async () => currentKaId;
+    const publisher = '0x1111111111111111111111111111111111111111';
+    const root = `0x${'aa'.repeat(32)}`;
+    const knowledgeAssetStorageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    internals.chain.readKnowledgeAssetVersionSnapshot = async (kaId) => ({
+      knowledgeAssetId: kaId,
+      latestRoot: root,
+      rootCount: 1n,
+      latestAuthor: '0x2222222222222222222222222222222222222222',
+      latestPublisher: publisher,
+      blockNumber: 100,
+      blockHash: `0x${'10'.repeat(32)}`,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetStorageGeneration: 1,
+    });
+    const snapshotIsCurrent = recorder(async () => true);
+    (internals.chain as any).knowledgeAssetVersionSnapshotIsCurrent = snapshotIsCurrent;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    internals.chain.getLatestMerkleRoot = async () => new Uint8Array(32).fill(0xaa);
+    internals.chain.getLatestMerkleRootPublisher = async () => publisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100);
+    currentKaId = replacementKaId;
+    await internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100);
+
+    expect(snapshotIsCurrent.calls).toHaveLength(0);
+    expect(reconcile.calls).toHaveLength(2);
+    expect(reconcile.calls[1]?.[0]).toMatchObject({ kaId: replacementKaId });
+  });
+
+  it('withholds the finalized-block shortcut when coherent validation is stale', async () => {
+    const internals = await boot();
+    const localCgId = '170';
+    const onChainCgId = 170n;
+    const kaId = 9170n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    const publisher = '0x1111111111111111111111111111111111111111';
+    const root = `0x${'aa'.repeat(32)}`;
+    const readSnapshot = recorder(async () => ({
+      latestRoot: root,
+      rootCount: 1n,
+      latestAuthor: '0x2222222222222222222222222222222222222222',
+      latestPublisher: publisher,
+      // The provider advanced after the sweep captured head=100. This result
+      // must not authorize a shortcut for the older finalized slot.
+      blockNumber: 101,
+    }));
+    internals.chain.readKnowledgeAssetVersionSnapshot = readSnapshot;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    const getLatestMerkleRoot = recorder(async () => new Uint8Array(32).fill(0xaa));
+    const getLatestMerkleRootPublisher = recorder(async () => publisher);
+    internals.chain.getLatestMerkleRoot = getLatestMerkleRoot;
+    internals.chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+
+    expect(readSnapshot.calls).toHaveLength(2);
+    expect(getLatestMerkleRoot.calls).toHaveLength(2);
+    expect(getLatestMerkleRootPublisher.calls).toHaveLength(2);
+    expect(reconcile.calls).toHaveLength(2);
+  });
+
   it('keeps legacy sequential ids on the read-only contract/id UAL', async () => {
     const internals = await boot();
     const onChainCgId = 67n;
@@ -1025,39 +1243,6 @@ describe('Phase D - VM reconcile damping', () => {
       kaId,
       ual: buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId),
     });
-  });
-
-  it('clears exact-recovery rotation state on the direct recent-cache terminal path', async () => {
-    const internals = await boot();
-    const localCgId = '68';
-    const onChainCgId = 68n;
-    const kaId = 9068n;
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
-    const storageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
-    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId);
-    const merkleRoot = await internals.chain.getLatestMerkleRoot(kaId);
-    const target = {
-      localCgId,
-      onChainCgId: onChainCgId.toString(),
-      ordinal: 0,
-      ual,
-      merkleRoot: bytesToHex(merkleRoot),
-      kaId: kaId.toString(),
-      reason: 'no-swm' as const,
-    };
-    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
-    (internals as any).prepareVmReconcileRotationTarget(
-      target, ['12D3KooWDirectTerminalRecent'], 100,
-    );
-    ((internals as any).recentReconciledUals as { add(key: string): void }).add(
-      (internals as any).vmReconcileCacheKey(localCgId, ual, merkleRoot),
-    );
-    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(true);
-
-    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'already', blockNumber: 0 });
-
-    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
   });
 
   it.each([

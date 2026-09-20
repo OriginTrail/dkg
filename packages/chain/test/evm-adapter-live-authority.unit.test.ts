@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ContextGraphLiveAuthorityUnsupportedError } from '../src/chain-adapter.js';
+import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
+  '../src/context-graph-authority-rpc-sites.js';
 import { fixture } from './context-graph-name-hash-reverse-resolution.fixtures.js';
 
 const MEMBER = '0x00000000000000000000000000000000000000a1';
 const OTHER = '0x00000000000000000000000000000000000000b2';
 const NONEXISTENT = new ethers.Interface(['error ERC721NonexistentToken(uint256 tokenId)']);
+const AUTHORITY = { active: true, accessPolicy: 1, participantAgents: [MEMBER] };
+const TUPLE = { active: true, accessPolicy: 1n, participantAgents: [MEMBER] };
 
 function callException(overrides: Record<string, unknown>): Error {
   return Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION', ...overrides });
@@ -30,17 +34,185 @@ describe('EVM adapter: one-read live context graph authority', () => {
     expect(readContractWithOptions.mock.calls[0][2]).toBe('getContextGraph');
   });
 
-  it('forwards the id and the caller signal to the read, so cancellation is not silently dropped', async () => {
+  it('forwards the id, and runs the read on the FLIGHT\'s signal, not the caller\'s', async () => {
     const { adapter, readContractWithOptions } = fixture();
     readContractWithOptions.mockResolvedValue({ active: true, accessPolicy: 0n, participantAgents: [] });
     const { signal } = new AbortController();
 
     await adapter.getContextGraphLiveAuthority(7n, { signal });
     const [, label, method, args, options] = readContractWithOptions.mock.calls[0];
-    expect(label).toBe('cgStorage.getContextGraph');
+    expect(label).toBe(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER);
     expect(method).toBe('getContextGraph');
     expect(args).toEqual([7n]);
-    expect(options).toEqual({ signal });
+    // The read is shared, so it belongs to the flight: one caller abandoning
+    // its wait must not cancel it for the others. The caller's own signal only
+    // detaches that caller (see the abandonment case below).
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(options.signal).not.toBe(signal);
+  });
+
+  it('shares ONE read between callers of the same turn, and retains nothing after it', async () => {
+    const { adapter, readContractWithOptions } = fixture();
+    readContractWithOptions.mockResolvedValue({ active: true, accessPolicy: 1n, participantAgents: [MEMBER] });
+
+    const together = await Promise.all(
+      Array.from({ length: 20 }, () => adapter.getContextGraphLiveAuthority(7n)),
+    );
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+    for (const authority of together) {
+      expect(authority).toEqual({ active: true, accessPolicy: 1, participantAgents: [MEMBER] });
+    }
+
+    // Nothing is kept: each serial caller is a fresh live read. This is the
+    // kill-switch equivalence — remove the sharing and the counts are these.
+    readContractWithOptions.mockClear();
+    for (let i = 0; i < 5; i += 1) await adapter.getContextGraphLiveAuthority(7n);
+    expect(readContractWithOptions).toHaveBeenCalledTimes(5);
+
+    // A different id is a different flight, always.
+    readContractWithOptions.mockClear();
+    await Promise.all([
+      adapter.getContextGraphLiveAuthority(7n),
+      adapter.getContextGraphLiveAuthority(8n),
+    ]);
+    expect(readContractWithOptions).toHaveBeenCalledTimes(2);
+  });
+
+  // The two cases below drive `getContextGraphLiveAuthority` rather than the
+  // coalescer, because the properties they pin live in the ADAPTER's wiring —
+  // the `isDefinitiveError` predicate and the flight key. A coalescer test
+  // injects both, so it proves nothing about the pair that ships underneath a
+  // security gate.
+
+  it('#2666: a joiner inherits neither the initiator\'s transient failure nor its abort', async () => {
+    // What may cross callers is decided by the production predicate in
+    // `evm-adapter-base.ts`: ONLY the deterministic "this read cannot answer"
+    // fault. Both shapes below are indefinite, so they are the initiator's own.
+    for (const failure of [
+      // A transport interruption. Another read may well succeed.
+      Object.assign(new Error('socket hang up'), { code: 'SERVER_ERROR' }),
+      // An abort raised BELOW the flight (an endpoint pool torn down mid-call).
+      // The flight's own signal is still clear, so the loader rethrows it as-is
+      // and it reaches the predicate looking exactly like a verdict.
+      Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }),
+    ]) {
+      const f = fixture();
+      f.readContractWithOptions.mockRejectedValueOnce(failure).mockResolvedValue(TUPLE);
+
+      const initiator = f.adapter.getContextGraphLiveAuthority(7n);
+      const initiatorSettled = initiator.catch((error: unknown) => error);
+      const joiners = [0, 1].map(() => f.adapter.getContextGraphLiveAuthority(7n));
+
+      // Identity, not shape: the initiator owns the failure of the read it
+      // started, un-reclassified.
+      await expect(initiatorSettled).resolves.toBe(failure);
+      // And nobody else is ever answered by it. #2666 shipped the opposite.
+      for (const joiner of joiners) await expect(joiner).resolves.toEqual(AUTHORITY);
+
+      // Two reads, not four: the joiners re-read through ONE successor.
+      expect(f.readContractWithOptions).toHaveBeenCalledTimes(2);
+      // A successor FLIGHT, not a retry inside the failed one — so the re-read
+      // does not run on a controller the first read may already have poisoned.
+      expect(f.readContractWithOptions.mock.calls[1][4].signal)
+        .not.toBe(f.readContractWithOptions.mock.calls[0][4].signal);
+    }
+  });
+
+  it('shares the production predicate\'s definitive unsupported error', async () => {
+    const f = fixture();
+    const failure = new ContextGraphLiveAuthorityUnsupportedError('tuple layout');
+    f.readContractWithOptions.mockRejectedValue(failure);
+
+    const settled = await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n).catch((error: unknown) => error),
+      f.adapter.getContextGraphLiveAuthority(7n).catch((error: unknown) => error),
+    ]);
+
+    expect(settled[0]).toBe(settled[1]);
+    expect(settled[0]).toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+    expect((settled[0] as Error & { cause?: unknown }).cause).toBe(failure);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
+  it('partitions flights by the CONTRACT bound now, never by the bare numeric id', async () => {
+    const f = fixture();
+    f.readContractWithOptions.mockResolvedValue(TUPLE);
+    // ContextGraphStorage hands out ids sequentially, so id 7 exists in every
+    // deployment and names a different graph in each. The adapter reads the
+    // bound address per call — a Hub rotation rebinds the contract — so two
+    // same-turn callers can legitimately be asking two different contracts for
+    // id 7. Sharing there would answer one deployment's gate with another
+    // deployment's roster.
+    const bound = ['0x00000000000000000000000000000000000000c6',
+      '0x00000000000000000000000000000000000000d7'];
+    let nth = 0;
+    const getAddress = vi.fn(async () => bound[nth++] ?? bound[1]);
+    f.adapter.contracts.contextGraphStorage.getAddress = getAddress;
+
+    await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n),
+      f.adapter.getContextGraphLiveAuthority(7n),
+    ]);
+    // Exactly one address read per caller, so the two callers demonstrably saw
+    // the two DIFFERENT contracts above rather than the same one twice.
+    expect(getAddress).toHaveBeenCalledTimes(2);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(2);
+
+    // Control, same turn, same everything: ONE read. Without it the count above
+    // would read the same whether the key carried the lineage or the callers
+    // simply never shared anything.
+    f.readContractWithOptions.mockClear();
+    await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n),
+      f.adapter.getContextGraphLiveAuthority(7n),
+    ]);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
+  it('partitions flights by DEPLOYMENT too: one address on two chains is two graphs', async () => {
+    const f = fixture();
+    f.readContractWithOptions.mockResolvedValue(TUPLE);
+    // A reproducible deployment puts the SAME ContextGraphStorage address on
+    // several chains, so the address alone does not separate them; chainId +
+    // Hub does. Read per caller, exactly as the adapter reads it.
+    const deployments = ['evm:31337:hub=0x0000000000000000000000000000000000000001',
+      'evm:31338:hub=0x0000000000000000000000000000000000000001'];
+    let nth = 0;
+    Object.defineProperty(f.adapter, 'deploymentId', {
+      configurable: true,
+      get: () => deployments[nth++] ?? deployments[1],
+    });
+
+    await Promise.all([
+      f.adapter.getContextGraphLiveAuthority(7n),
+      f.adapter.getContextGraphLiveAuthority(7n),
+    ]);
+    expect(f.readContractWithOptions).toHaveBeenCalledTimes(2);
+    // One read of the getter per caller. If another line on this path ever
+    // starts reading it, the count above stops meaning what it names — so pin
+    // it, after the property rather than in front of it.
+    expect(nth).toBe(2);
+  });
+
+  it('gives one caller\'s abort to that caller alone; peers keep the shared read', async () => {
+    const { adapter, readContractWithOptions } = fixture();
+    let release!: (value: unknown) => void;
+    readContractWithOptions.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+
+    const leaving = new AbortController();
+    const abandoned = adapter.getContextGraphLiveAuthority(7n, { signal: leaving.signal });
+    const stays = adapter.getContextGraphLiveAuthority(7n);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+
+    leaving.abort(new Error('caller stopped'));
+    await expect(abandoned).rejects.toThrow('caller stopped');
+    // The abandoning caller did not cancel the read for the one still waiting.
+    expect(readContractWithOptions.mock.calls[0][4].signal.aborted).toBe(false);
+    release({ active: true, accessPolicy: 1n, participantAgents: [MEMBER] });
+    await expect(stays).resolves.toEqual({
+      active: true, accessPolicy: 1, participantAgents: [MEMBER],
+    });
   });
 
   it('decodes the positional tuple shape ethers may hand back', async () => {
@@ -128,27 +300,48 @@ describe('EVM adapter: one-read live context graph authority', () => {
     }
   });
 
-  it('never reclassifies a CANCELLED read, even when its error looks classifiable', async () => {
-    // Both shapes below are ones the classifiers would otherwise accept. With
-    // the caller's signal already aborted they must come back as the transport
-    // error: answering "unsupported" would send a cancelled call into the
-    // three-read fallback, and answering `null` would be a terminal verdict
-    // about a read that never completed.
-    const controller = new AbortController();
-    controller.abort(new Error('caller stopped'));
-
+  it('returns each cancelled waiter\'s exact abort reason, regardless of the shared read outcome', async () => {
+    // Coalesced waiters detach with their own abort reason. The shared loader
+    // may settle later with a classifiable error, but that result must not
+    // replace the reason observed by a caller that already cancelled.
     const looksUnsupported = fixture();
     const bare = Object.assign(new Error('missing revert data'), { code: 'CALL_EXCEPTION', data: null, reason: null });
-    looksUnsupported.readContractWithOptions.mockRejectedValue(bare);
-    const first = looksUnsupported.adapter.getContextGraphLiveAuthority(7n, { signal: controller.signal });
-    await expect(first).rejects.toBe(bare);
-    await expect(first).rejects.not.toBeInstanceOf(ContextGraphLiveAuthorityUnsupportedError);
+    let releaseBare!: (reason: unknown) => void;
+    looksUnsupported.readContractWithOptions.mockImplementation(
+      () => new Promise((_resolve, reject) => { releaseBare = reject; }),
+    );
+    const cancelling = new AbortController();
+    const firstAbortReason = new Error('caller stopped');
+    const first = looksUnsupported.adapter.getContextGraphLiveAuthority(7n, { signal: cancelling.signal });
+    const firstSettled = first.catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    cancelling.abort(firstAbortReason);
+    releaseBare(bare);
+    await expect(firstSettled).resolves.toBe(firstAbortReason);
 
     const looksNonexistent = fixture();
     const revert = callException({ revert: { name: 'ERC721NonexistentToken', args: [7n] } });
-    looksNonexistent.readContractWithOptions.mockRejectedValue(revert);
-    await expect(looksNonexistent.adapter.getContextGraphLiveAuthority(7n, { signal: controller.signal }))
-      .rejects.toBe(revert);
+    let releaseRevert!: (reason: unknown) => void;
+    looksNonexistent.readContractWithOptions.mockImplementation(
+      () => new Promise((_resolve, reject) => { releaseRevert = reject; }),
+    );
+    const cancellingToo = new AbortController();
+    const secondAbortReason = new Error('caller stopped too');
+    const second = looksNonexistent.adapter.getContextGraphLiveAuthority(7n, { signal: cancellingToo.signal });
+    const secondSettled = second.catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    cancellingToo.abort(secondAbortReason);
+    releaseRevert(revert);
+    await expect(secondSettled).resolves.toBe(secondAbortReason);
+
+    // An ALREADY-aborted caller never reaches the chain at all now: it is
+    // never answered by a read it did not ask for, so there is nothing to
+    // classify.
+    const neverRead = fixture();
+    const preAborted = AbortSignal.abort(new Error('caller stopped before asking'));
+    await expect(neverRead.adapter.getContextGraphLiveAuthority(7n, { signal: preAborted }))
+      .rejects.toThrow('caller stopped before asking');
+    expect(neverRead.readContractWithOptions).not.toHaveBeenCalled();
   });
 
   it('is id-exact on the DECODED revert too: another token proves nothing about this one', async () => {

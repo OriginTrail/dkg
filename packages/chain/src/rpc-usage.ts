@@ -12,17 +12,26 @@
  * providers with `batchMaxCount: 1` (see evm-adapter-base), so one `send()` ==
  * one HTTP JSON-RPC request == one billable unit — the count is exact.
  *
- * Two consumers, one tracker:
+ * Three consumers, one tracker:
  *  - OTel counter `dkg.chain.rpc.requests.total{rpc_method, chain_id}` — for
  *    the metrics backend once one is provisioned.
  *  - `drainWindow()` — per-window DELTA counts the daemon logs as structured
  *    `rpc_usage` lines every minute, which ride the already-deployed
  *    OTLP-logs → Alloy → Loki path so Grafana can chart RPC usage per node /
  *    per method TODAY, with exact sums (deltas, not cumulative gauges).
+ *  - `snapshotProcessRpcUsage()` — non-draining, process-lifetime cumulative
+ *    totals for authenticated diagnostic interval measurements.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
+import {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
+  type ContextGraphAuthorityRpcSite,
+} from './context-graph-authority-rpc-sites.js';
 
 /**
  * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
@@ -61,6 +70,22 @@ export function boundedRpcMethodLabel(method: string): string {
   return KNOWN_RPC_METHODS.has(method) ? method : 'other';
 }
 
+/** Fixed process-level source roles. Values never derive from operator or peer input. */
+export const RPC_USAGE_ADAPTER_ROLES = Object.freeze([
+  'main_agent',
+  'publisher_wallet',
+  'route_runtime',
+  'other',
+] as const);
+export type RpcUsageAdapterRole = typeof RPC_USAGE_ADAPTER_ROLES[number];
+const RPC_USAGE_ADAPTER_ROLE_SET: ReadonlySet<string> = new Set(RPC_USAGE_ADAPTER_ROLES);
+
+export function normalizeRpcUsageAdapterRole(value: unknown): RpcUsageAdapterRole {
+  return typeof value === 'string' && RPC_USAGE_ADAPTER_ROLE_SET.has(value)
+    ? value as RpcUsageAdapterRole
+    : 'other';
+}
+
 /** The complete bounded vocabulary for individually attributed endpoint slots. */
 export const RPC_ENDPOINT_SLOT_LABELS = Object.freeze([
   'primary',
@@ -89,6 +114,14 @@ const RPC_ENDPOINT_SLOT_LABEL_SET: ReadonlySet<string> = new Set(RPC_ENDPOINT_SL
 export type RpcUsageAttribution =
   | { readonly method: 'eth_call'; readonly consumer: string; readonly count: number }
   | {
+      readonly method:
+        | 'eth_blockNumber'
+        | 'eth_getBlockByNumber'
+        | 'eth_getBlockByHash';
+      readonly consumer: string;
+      readonly count: number;
+    }
+  | {
       readonly method: 'eth_getLogs';
       readonly consumer: string;
       readonly endpointSlot: RpcEndpointSlotLabel;
@@ -110,9 +143,14 @@ function normalizeRpcUsageAttribution(value: unknown): RpcUsageAttribution | und
   if (typeof candidate.consumer !== 'string' || typeof candidate.count !== 'number') {
     return undefined;
   }
-  if (candidate.method === 'eth_call') {
+  if (
+    candidate.method === 'eth_call'
+    || candidate.method === 'eth_blockNumber'
+    || candidate.method === 'eth_getBlockByNumber'
+    || candidate.method === 'eth_getBlockByHash'
+  ) {
     return {
-      method: 'eth_call',
+      method: candidate.method,
       consumer: candidate.consumer,
       count: candidate.count,
     };
@@ -207,9 +245,9 @@ export function mergeRpcUsageWindows(
     const w = normalizeRpcUsageWindow(input);
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
     for (const attribution of w.attributions) {
-      const key = attribution.method === 'eth_call'
-        ? `${attribution.method}\0${attribution.consumer}`
-        : `${attribution.method}\0${attribution.consumer}\0${attribution.endpointSlot}`;
+      const key = attribution.method === 'eth_getLogs'
+        ? `${attribution.method}\0${attribution.consumer}\0${attribution.endpointSlot}`
+        : `${attribution.method}\0${attribution.consumer}`;
       const current = attributions.get(key);
       attributions.set(key, {
         ...attribution,
@@ -290,6 +328,56 @@ export function rpcUsageWindowTotal(window: Pick<RpcUsageWindow, 'byMethod'>): n
 }
 
 const rpcUsageConsumerContext = new AsyncLocalStorage<string>();
+const rpcUsageSiteContext = new AsyncLocalStorage<string>();
+const rpcUsageAdapterRoleContext = new AsyncLocalStorage<RpcUsageAdapterRole>();
+
+/**
+ * Consumer attribution owned by the caller that issued one provider payload.
+ *
+ * Ethers queues `send()` calls and dispatches them later from a shared drain
+ * timer. The timer's async context belongs to whichever caller created it, so
+ * the transport must carry this context beside each queued payload instead of
+ * sampling whatever consumer happens to own the drain.
+ *
+ * Adapter role is intentionally absent: it is fixed on `RpcUsageTracker` when
+ * an adapter is constructed, so a request cannot borrow another adapter's
+ * role through async context.
+ */
+export interface RpcUsageIssuerContext {
+  readonly consumer?: string;
+  readonly site?: string;
+}
+
+/** Capture the bounded attribution context at the provider `send()` boundary. */
+export function captureRpcUsageIssuerContext(): RpcUsageIssuerContext {
+  const consumer = rpcUsageConsumerContext.getStore();
+  const site = rpcUsageSiteContext.getStore();
+  return Object.freeze({
+    ...(consumer === undefined ? {} : { consumer }),
+    ...(site === undefined ? {} : { site }),
+  });
+}
+
+/** Restore one issuer's attribution, explicitly clearing any foreign context. */
+export function withRpcUsageIssuerContext<T>(
+  context: RpcUsageIssuerContext,
+  fn: () => T,
+): T {
+  const runSite = () => context.site === undefined
+    ? rpcUsageSiteContext.exit(fn)
+    : rpcUsageSiteContext.run(context.site, fn);
+  return context.consumer === undefined
+    ? rpcUsageConsumerContext.exit(runSite)
+    : rpcUsageConsumerContext.run(context.consumer, runSite);
+}
+
+/**
+ * Longest attributed consumer key that survives the daemon's logfmt token
+ * guard (`packages/cli/src/daemon/rpc-usage-log.ts` `safeToken`) and this
+ * module's own normalizer. A composition past it degrades to the bare read
+ * label rather than to `other`, so the billing view never loses a read.
+ */
+const MAX_RPC_USAGE_CONSUMER_CHARS = 64;
 
 /**
  * Bound code-owned read labels for logfmt-safe consumer attribution. Labels are
@@ -303,8 +391,200 @@ export function normalizeRpcUsageConsumer(consumer: string | undefined): string 
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
   if (normalized.length === 0) return undefined;
-  if (normalized.length > 64) return 'other';
+  if (normalized.length > MAX_RPC_USAGE_CONSUMER_CHARS) return 'other';
   return normalized;
+}
+
+const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
+  // Explicit remainder and overflow buckets.
+  'unattributed',
+  'other',
+
+  // Fixed header reads.
+  'chainIndex.head',
+  'chainIndex.lineage',
+  'chainIndex.authorityLineage',
+  'authorityIndex.head',
+  'authorityIndex.anchor',
+  'authorityIndex.lineage',
+  'authorityIndex.stabilize',
+  'authorityProjection.validateAnchor',
+  'receiptFinality.head',
+  'receiptFinality.header',
+
+  // Event-log scans.
+  'eventLogPageScan',
+  'getMaxKaNumberForAuthor',
+  'listContextGraphsFromChain',
+  'repairContextGraphRegistry',
+  'resolveContextGraphIdByNameHash',
+  'kasV9.queryFilter(KnowledgeBatchCreated)',
+  'cgStorage.queryFilter(ContextGraphExpanded)',
+  'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)',
+  'kas.queryFilter(KnowledgeAssetCreated)',
+  'kas.queryFilter(KnowledgeAssetsMinted)',
+  'kas.queryFilter(Transfer)',
+  'cgNameRegistry.queryFilter(NameClaimed)',
+  'cgStorage.queryFilter(ContextGraphCreated)',
+  'profileStorage.queryFilter(RelayCapabilityUpdated)',
+
+  // Provider reads and fixed projection operations.
+  'transaction lookup',
+  'publish wallet native balance',
+  'allowance visibility poll',
+  'getBlock',
+  'getBlockNumber',
+  'getNetwork (chainId)',
+  'validate configured chainId',
+  'hasContractCode getCode',
+  'DKGKnowledgeAssets.getMaxKaNumberForAuthor',
+  'DKGKnowledgeAssets getCode',
+  'Hub rotation poll getBlockNumber',
+  'Hub rotation poll getLogs',
+  'Hub rotation poll initial getBlockNumber',
+  'resolveContextGraphIdByNameHash current-slot anchor',
+  'resolveContextGraphIdByNameHash validate current-slot anchor',
+  'getContextGraphAuthoritySnapshot',
+  'conviction getBlock',
+  'confirmation-depth chain-proof snapshot',
+  'publish receipt finality',
+  'resolveFinalizedContextGraphIdByNameHash',
+  'resolveFinalizedContextGraphIdsByNameHashes',
+  'resolveFinalizedContextGraphAuthoritySnapshotByNameHash',
+  'resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes',
+  'readContextGraphAuthorityIndexRevisions',
+  'readContextGraphAuthorityIndexSnapshots',
+
+  // Browser-wallet RPC labels are generated from the closed method union.
+  'browser wallet rpc eth_chainId',
+  'browser wallet rpc eth_call',
+  'browser wallet rpc eth_getTransactionReceipt',
+  'browser wallet rpc eth_getTransactionByHash',
+  'browser wallet rpc eth_blockNumber',
+  'browser wallet rpc eth_getBlockByNumber',
+
+  // Fixed contract-view labels.
+  'parametersStorage.minimumRequiredSignatures',
+  'parametersStorage.contextGraphRegistrationDeposit',
+  'shardingTableStorage.nodeExists',
+  'shardingTable.getShardingTable',
+  'identityStorage.getIdentityId',
+  'identityStorage.keyHasPurpose',
+  'contextGraphs.isAuthorizedPublisher',
+  'token.allowance',
+  'token.balanceOf',
+  'IERC1271.isValidSignature',
+  'chronos.getCurrentEpoch',
+  'cgStorage.isContextGraphActive',
+  'cgStorage.kaToContextGraph',
+  'cgStorage.getContextGraphKaCount',
+  'cgStorage.getContextGraphKaAt',
+  'cgStorage.getAccessPolicy',
+  'cgStorage.getPublishPolicy',
+  'cgStorage.getParticipantAgents',
+  'cgStorage.getNameHash',
+  'pcaNFT.agentToAccountId',
+  'pcaNFT.accounts',
+  'pcaNFT.getRemainingAllowance',
+  'pcaNFT.ownerOf',
+  'pcaNFT.getAccountInfo',
+  'pcaNFT.isAgent',
+  'pcaNFT.balanceOf',
+  'pcaNFT.tokenOfOwnerByIndex',
+  'pcaNFT.getRegisteredAgents',
+  'profileStorage.getRelayCapable',
+  'askStorage.getStakeWeightedAverageAsk',
+  'kas.getLatestMerkleRoot',
+  'kas.getKnowledgeAssetUpdateContext',
+  'kas.getMerkleRootsAtUpdateBlock',
+  'kas.getMerkleRootsBeforeUpdateBlock',
+  'kas.getTokenAmount',
+  'kas.getMerkleRoots',
+  'kas.getLatestMerkleRootPublisher',
+  'kas.getLatestMerkleRootAuthor',
+  'kas.getMerkleLeafCount',
+  'kas.getCatalogRoot',
+  'kas.getCatalogLeafCount',
+  'kasV9.getBatchPublisher',
+  'kasV9.getPublisherRangesCount',
+  'kasV9.getPublisherRange',
+  'DKGKnowledgeAssets.ownerOf',
+  'rss.getNodeChallenge',
+  'rss.getNodeEpochProofPeriodScore',
+] as const;
+
+const RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES = [
+  'RandomSampling',
+  'RandomSamplingStorage',
+  'IdentityStorage',
+  'ConvictionStakingStorage',
+  'StakingStorage',
+  'Identity',
+  'Profile',
+  'ParametersStorage',
+  'Staking',
+  'ProfileStorage',
+  'KnowledgeAssets',
+  'AskStorage',
+  'ContextGraphNameRegistry',
+  'ContextGraphs',
+  'KnowledgeAssetsLifecycle',
+  'DKGPublishingConvictionNFT',
+  'DKGStakingConvictionNFT',
+  'ShardingTableStorage',
+  'PublishingConviction',
+  'ShardingTable',
+  'Chronos',
+  'Token',
+  'StakingV10',
+] as const;
+
+const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
+  'DKGKnowledgeAssets',
+  'KnowledgeAssetsStorage',
+  'ContextGraphStorage',
+] as const;
+
+/** Update deliberately when a new code-owned consumer is added. */
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 1 as const;
+
+/** Complete closed vocabulary that the cumulative diagnostic may serialize. */
+export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(
+  [...new Set([
+    ...RPC_USAGE_SNAPSHOT_RAW_CONSUMERS,
+    ...RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES.map(
+      (name) => `Hub.getContractAddress(${name})`,
+    ),
+    ...RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES.map(
+      (name) => `Hub.getAssetStorageAddress(${name})`,
+    ),
+    CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+    ...Object.values(CONTEXT_GRAPH_AUTHORITY_RPC_SITES).map(
+      (site) => `${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:${site}`,
+    ),
+  ])]
+    .map((consumer) => normalizeRpcUsageConsumer(consumer) ?? 'other')
+    .sort(),
+);
+
+const RPC_USAGE_SNAPSHOT_CONSUMER_SET: ReadonlySet<string> =
+  new Set(RPC_USAGE_SNAPSHOT_CONSUMERS);
+
+/**
+ * Final privacy boundary for consumer labels retained by process snapshots.
+ *
+ * Existing window drains keep their diagnostic labels, but the authenticated
+ * cumulative route is long-lived and machine-readable. Even an accidentally
+ * caller-supplied label must therefore fail closed before it reaches retained
+ * storage. Only the exported, versioned code-owned vocabulary can survive;
+ * every unknown value collapses to the fixed `other` bucket.
+ */
+export function boundedRpcUsageSnapshotConsumerLabel(
+  consumer: string | undefined,
+): string | undefined {
+  const normalized = normalizeRpcUsageConsumer(consumer);
+  if (normalized === undefined) return undefined;
+  return RPC_USAGE_SNAPSHOT_CONSUMER_SET.has(normalized) ? normalized : 'other';
 }
 
 /** Run a provider read under a bounded diagnostic consumer label. */
@@ -314,9 +594,210 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
   return rpcUsageConsumerContext.run(normalized, fn);
 }
 
+/**
+ * Assign a fixed role to trackers constructed inside `fn`. The role is read
+ * once at construction, so later asynchronous work cannot drift between roles.
+ */
+export function withRpcUsageAdapterRole<T>(role: RpcUsageAdapterRole, fn: () => T): T {
+  return rpcUsageAdapterRoleContext.run(normalizeRpcUsageAdapterRole(role), fn);
+}
+
+/**
+ * Attribute a read to the CALL SITE that wanted it, beside the read label.
+ *
+ * The consumer label above is established by the transport itself
+ * (`rpc-failover-client`), INNERMOST, so it always wins over anything a caller
+ * wraps around its own code: every `getContextGraph` read is therefore billed
+ * to one undifferentiated `cgStorage.getContextGraph`, whoever asked. That is
+ * the blind spot this second dimension removes — a funnel read that ~26 call
+ * sites share cannot be budgeted while they are indistinguishable.
+ *
+ * OUTERMOST WINS, unlike the consumer label: the first site entered in a call
+ * tree is the caller we want (sync authorize, the publish probe, a VM
+ * reconcile), and the funnel entry it passes through further down must not
+ * overwrite it. So a funnel entry labels itself and is only reported when no
+ * labelled caller sits above it. Sites are code-owned constants, never derived
+ * from peer input, and an already-established site costs one ALS read.
+ */
+export function withRpcUsageSite<T>(site: ContextGraphAuthorityRpcSite, fn: () => T): T {
+  if (rpcUsageSiteContext.getStore() !== undefined) return fn();
+  const normalized = normalizeRpcUsageConsumer(site);
+  if (!normalized) return fn();
+  return rpcUsageSiteContext.run(normalized, fn);
+}
+
 /** Current diagnostic consumer label, if a caller established one. */
 function activeRpcUsageConsumer(): string | undefined {
   return rpcUsageConsumerContext.getStore();
+}
+
+/** Current call-site label, if some caller up the stack established one. */
+function activeRpcUsageSite(): string | undefined {
+  return rpcUsageSiteContext.getStore();
+}
+
+function activeRpcUsageAdapterRole(): RpcUsageAdapterRole | undefined {
+  return rpcUsageAdapterRoleContext.getStore();
+}
+
+export interface RpcUsageSnapshotCompleteness {
+  readonly complete: boolean;
+  readonly reasons: readonly string[];
+  /** Monotonic tracker-registration generation within this process epoch. */
+  readonly populationEpoch: number;
+  readonly sources: Readonly<{
+    mainAgent: RpcUsageSnapshotSourcePopulation;
+    publisherWallets: RpcUsageSnapshotSourcePopulation;
+    routeRuntimes: RpcUsageSnapshotSourcePopulation;
+    other: RpcUsageSnapshotSourcePopulation;
+  }>;
+}
+
+export interface RpcUsageSnapshotSourcePopulation {
+  readonly status: 'included';
+  /** Cumulative registrations, not a live-object count or stable identity. */
+  readonly totalRegisteredTrackers: number;
+  /** Attempts survive source retirement/replacement in the process aggregate. */
+  readonly totalsRetained: true;
+}
+
+export interface RpcUsageCumulativeSnapshot {
+  readonly schemaVersion: 1;
+  readonly consumerVocabularyVersion: typeof RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION;
+  readonly processEpoch: string;
+  readonly capturedAtUtc: string;
+  readonly capturedAtMonotonicMs: number;
+  readonly completeness: RpcUsageSnapshotCompleteness;
+  readonly cumulative: Readonly<{
+    /** Authoritative physical-attempt totals. */
+    methods: Readonly<Record<string, number>>;
+    /** Overlapping detail dimension; each method reconciles to `methods`. */
+    consumers: Readonly<Record<string, Readonly<Record<string, number>>>>;
+    /** Overlapping detail dimension; each method reconciles to `methods`. */
+    adapterRoles: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  }>;
+}
+
+export interface RpcUsageSnapshotClock {
+  readonly utcNow?: () => Date;
+  readonly monotonicNowMs?: () => number;
+}
+
+function incrementBoundedCounter(map: Map<string, number>, key: string): void {
+  const current = map.get(key) ?? 0;
+  map.set(key, current >= Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : current + 1);
+}
+
+function frozenRecord(map: ReadonlyMap<string, number>): Readonly<Record<string, number>> {
+  return Object.freeze(Object.fromEntries(map));
+}
+
+/**
+ * Process-lifetime physical-attempt accumulator. It retains only bounded,
+ * code-owned dimensions, so adapter retirement cannot make totals decrease and
+ * no per-adapter identity remains resident.
+ */
+export class RpcUsageCumulativeAccumulator {
+  static readonly MAX_CONSUMERS_PER_METHOD = 128;
+
+  private readonly methods = new Map<string, number>();
+  private readonly consumers = new Map<string, Map<string, number>>();
+  private readonly adapterRoles = new Map<string, Map<string, number>>();
+  private readonly registeredTrackers = new Map<RpcUsageAdapterRole, number>();
+
+  constructor(readonly processEpoch: string = randomUUID()) {}
+
+  registerTracker(adapterRole: RpcUsageAdapterRole): void {
+    const role = normalizeRpcUsageAdapterRole(adapterRole);
+    incrementBoundedCounter(this.registeredTrackers, role);
+  }
+
+  record(method: string, consumer: string | undefined, adapterRole: RpcUsageAdapterRole): void {
+    const methodLabel = boundedRpcMethodLabel(method);
+    incrementBoundedCounter(this.methods, methodLabel);
+
+    const byConsumer = this.consumers.get(methodLabel) ?? new Map<string, number>();
+    if (!this.consumers.has(methodLabel)) this.consumers.set(methodLabel, byConsumer);
+    const requestedConsumer = boundedRpcUsageSnapshotConsumerLabel(consumer) ?? 'unattributed';
+    const consumerLabel = byConsumer.has(requestedConsumer)
+      || byConsumer.size < RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD
+      ? requestedConsumer
+      : 'other';
+    incrementBoundedCounter(byConsumer, consumerLabel);
+
+    const byRole = this.adapterRoles.get(methodLabel) ?? new Map<string, number>();
+    if (!this.adapterRoles.has(methodLabel)) this.adapterRoles.set(methodLabel, byRole);
+    incrementBoundedCounter(byRole, normalizeRpcUsageAdapterRole(adapterRole));
+  }
+
+  snapshot(clock: RpcUsageSnapshotClock = {}): RpcUsageCumulativeSnapshot {
+    const consumers = Object.fromEntries(
+      [...this.consumers].map(([method, counts]) => [method, frozenRecord(counts)]),
+    );
+    const adapterRoles = Object.fromEntries(
+      [...this.adapterRoles].map(([method, counts]) => [method, frozenRecord(counts)]),
+    );
+    const source = (role: RpcUsageAdapterRole): RpcUsageSnapshotSourcePopulation =>
+      Object.freeze({
+        status: 'included' as const,
+        totalRegisteredTrackers: this.registeredTrackers.get(role) ?? 0,
+        totalsRetained: true as const,
+      });
+    const sources = Object.freeze({
+      mainAgent: source('main_agent'),
+      publisherWallets: source('publisher_wallet'),
+      routeRuntimes: source('route_runtime'),
+      other: source('other'),
+    });
+    const populationEpoch = Object.values(sources).reduce(
+      (sum, value) => sum + value.totalRegisteredTrackers,
+      0,
+    );
+    return Object.freeze({
+      schemaVersion: 1 as const,
+      consumerVocabularyVersion: RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
+      processEpoch: this.processEpoch,
+      capturedAtUtc: (clock.utcNow?.() ?? new Date()).toISOString(),
+      capturedAtMonotonicMs: clock.monotonicNowMs?.() ?? performance.now(),
+      completeness: Object.freeze({
+        complete: true,
+        reasons: Object.freeze([]) as readonly string[],
+        populationEpoch,
+        sources,
+      }),
+      cumulative: Object.freeze({
+        methods: frozenRecord(this.methods),
+        consumers: Object.freeze(consumers),
+        adapterRoles: Object.freeze(adapterRoles),
+      }),
+    });
+  }
+}
+
+const processRpcUsage = new RpcUsageCumulativeAccumulator();
+
+/** Non-draining process snapshot; taking it performs no chain I/O. */
+export function snapshotProcessRpcUsage(
+  clock: RpcUsageSnapshotClock = {},
+): RpcUsageCumulativeSnapshot {
+  return processRpcUsage.snapshot(clock);
+}
+
+/**
+ * `readLabel:site` for the one Context Graph authority funnel when a call site
+ * is in scope; all unrelated reads keep their bare consumer. Both halves are
+ * already normalized, so the composition only has to stay inside the logfmt
+ * token bound.
+ */
+function composeRpcUsageConsumer(
+  consumer: string,
+  site: string | undefined,
+): string {
+  if (site === undefined || consumer !== CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER) {
+    return consumer;
+  }
+  const composed = `${consumer}:${site}`;
+  return composed.length > MAX_RPC_USAGE_CONSUMER_CHARS ? consumer : composed;
 }
 
 /**
@@ -351,6 +832,10 @@ export function boundedRpcEndpointSlotLabel(
 export class RpcUsageTracker {
   private window = new Map<string, number>();
   private ethCallConsumers = new Map<string, number>();
+  private headerAttributions = new Map<
+    string,
+    { method: 'eth_blockNumber' | 'eth_getBlockByNumber' | 'eth_getBlockByHash'; consumer: string; count: number }
+  >();
   private ethGetLogsAttributions = new Map<
     string,
     { consumer: string; endpointSlot: RpcEndpointSlotLabel; count: number }
@@ -360,7 +845,13 @@ export class RpcUsageTracker {
     // Live thunk (matches RpcFailoverClient): the adapter assigns `chainId`
     // after construction, so resolve it at record time.
     private readonly chainId: () => string,
-  ) {}
+    private readonly adapterRole: RpcUsageAdapterRole =
+      activeRpcUsageAdapterRole() ?? 'main_agent',
+    private readonly cumulative: RpcUsageCumulativeAccumulator = processRpcUsage,
+  ) {
+    this.adapterRole = normalizeRpcUsageAdapterRole(this.adapterRole);
+    this.cumulative.registerTracker(this.adapterRole);
+  }
 
   /**
    * Count one raw JSON-RPC request. Called from the provider's `_send` and the
@@ -378,6 +869,7 @@ export class RpcUsageTracker {
   static readonly MAX_WINDOW_CONSUMERS = 128;
   static readonly MAX_TRACKED_ENDPOINT_SLOTS = RPC_ENDPOINT_SLOT_LABELS.length;
   static readonly MAX_WINDOW_GET_LOGS_ATTRIBUTIONS = 256;
+  static readonly MAX_WINDOW_HEADER_ATTRIBUTIONS = 128;
 
   record(method: string, endpointSlot?: number): void {
     // Authoritative window/lifetime state first, OUTSIDE any try — pure map
@@ -387,7 +879,10 @@ export class RpcUsageTracker {
     const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
     this.window.set(key, (this.window.get(key) ?? 0) + 1);
     if (raw === 'eth_call') {
-      const normalizedConsumer = activeRpcUsageConsumer();
+      const activeConsumer = activeRpcUsageConsumer();
+      const normalizedConsumer = activeConsumer === undefined
+        ? undefined
+        : composeRpcUsageConsumer(activeConsumer, activeRpcUsageSite());
       if (normalizedConsumer) {
         const consumerKey = this.ethCallConsumers.has(normalizedConsumer) ||
           this.ethCallConsumers.size < RpcUsageTracker.MAX_WINDOW_CONSUMERS
@@ -396,7 +891,31 @@ export class RpcUsageTracker {
         this.ethCallConsumers.set(consumerKey, (this.ethCallConsumers.get(consumerKey) ?? 0) + 1);
       }
     }
+    if (
+      raw === 'eth_blockNumber'
+      || raw === 'eth_getBlockByNumber'
+      || raw === 'eth_getBlockByHash'
+    ) {
+      const consumer = normalizeRpcUsageConsumer(activeRpcUsageConsumer()) ?? 'unattributed';
+      const rawKey = `${raw}\0${consumer}`;
+      const overflowKey = `${raw}\0other`;
+      const overflow = !this.headerAttributions.has(rawKey)
+        && this.headerAttributions.size >= RpcUsageTracker.MAX_WINDOW_HEADER_ATTRIBUTIONS;
+      const key = overflow ? overflowKey : rawKey;
+      const existing = this.headerAttributions.get(key);
+      if (existing) existing.count += 1;
+      else {
+        this.headerAttributions.set(key, {
+          method: raw,
+          consumer: overflow ? 'other' : consumer,
+          count: 1,
+        });
+      }
+    }
     if (raw === 'eth_getLogs') {
+      // Authority sites describe the `getContextGraph` eth_call funnel only;
+      // they must not relabel unrelated log scans that happen in the same ALS
+      // scope.
       const consumer = activeRpcUsageConsumer() ?? 'unattributed';
       const slot = boundedRpcEndpointSlotLabel(endpointSlot);
       const rawKey = `${consumer}\0${slot}`;
@@ -416,6 +935,11 @@ export class RpcUsageTracker {
         });
       }
     }
+    const activeConsumer = activeRpcUsageConsumer();
+    const cumulativeConsumer = raw === 'eth_call' && activeConsumer !== undefined
+      ? composeRpcUsageConsumer(activeConsumer, activeRpcUsageSite())
+      : activeConsumer;
+    this.cumulative.record(raw, cumulativeConsumer, this.adapterRole);
     this.lifetime += 1;
     // Best-effort applies ONLY to the OTel side effect (and the chainId
     // thunk it evaluates) — a throwing metrics backend must not break the
@@ -454,8 +978,12 @@ export class RpcUsageTracker {
           count,
         }),
       ),
+      ...[...this.headerAttributions.values()].map(
+        ({ method, consumer, count }): RpcUsageAttribution => ({ method, consumer, count }),
+      ),
     ];
     this.ethGetLogsAttributions.clear();
+    this.headerAttributions.clear();
     return {
       byMethod,
       ethCallByConsumer,
@@ -475,8 +1003,11 @@ export interface RpcUsageRecorder extends RpcUsageDrainable {
   record(method: string, endpointSlot?: number): void;
 }
 
-export function createRpcUsageRecorder(chainId: () => string): RpcUsageRecorder {
-  const tracker = new RpcUsageTracker(chainId);
+export function createRpcUsageRecorder(
+  chainId: () => string,
+  adapterRole: RpcUsageAdapterRole = activeRpcUsageAdapterRole() ?? 'other',
+): RpcUsageRecorder {
+  const tracker = new RpcUsageTracker(chainId, adapterRole);
   return Object.freeze({
     record: (method: string, endpointSlot?: number) => tracker.record(method, endpointSlot),
     drainRpcUsage: () => tracker.drainWindow(),

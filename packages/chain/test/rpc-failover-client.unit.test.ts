@@ -588,6 +588,91 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     expect(warns.some((w) => w.includes('buffered gas estimation failed'))).toBe(true); // left a breadcrumb
   });
 
+  it('a deterministic CALL_EXCEPTION from the buffered estimate is final — no duplicate estimate/nonce population', async () => {
+    // RandomSampling surfaces the expected idle outcome as this exact shape. The buffered
+    // estimate has already executed the call and received a deterministic contract answer;
+    // signing an unbuffered request would make ethers issue the same estimate plus a nonce read.
+    const noEligible = callExceptionErr(
+      'execution reverted: NoEligibleContextGraph()',
+    );
+    const primary = {};
+    const backup = {};
+    const primaryPopulate = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const backupPopulate = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const primaryEstimate = recorder(async () => { throw noEligible; });
+    const backupEstimate = recorder(async () => 21_000n);
+    const contract = {
+      connect: (rpcSigner: unknown) => ({
+        createChallenge: {
+          populateTransaction: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryPopulate
+            : backupPopulate,
+          estimateGas: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryEstimate
+            : backupEstimate,
+        },
+      }),
+    } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([primary, backup], URLS, signPopulated as SignPopulatedFn);
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = ((...args: unknown[]) => { warns.push(String(args[0])); }) as typeof console.warn;
+    try {
+      await expect(client.populateAndSign(
+        contract,
+        'createChallenge',
+        [],
+        makeSigner(),
+        'create random-sampling challenge',
+        { gasLimitBufferBps: 5_000 },
+      )).rejects.toBe(noEligible);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(primaryPopulate.calls).toHaveLength(1);
+    expect(primaryEstimate.calls).toHaveLength(1);
+    expect(backupPopulate.calls).toEqual([]); // deterministic result never fails over
+    expect(backupEstimate.calls).toEqual([]);
+    expect(signPopulated.calls).toEqual([]); // therefore no signer estimate or nonce read
+    expect(warns).toEqual([]); // not mislabeled as a degraded unbuffered send
+  });
+
+  it.each([
+    ['plain deterministic application error', new Error('estimate policy rejected')],
+    ['UNPREDICTABLE_GAS_LIMIT compatibility error', Object.assign(
+      new Error('cannot estimate gas'),
+      { code: 'UNPREDICTABLE_GAS_LIMIT' },
+    )],
+  ])('preserves the unbuffered fallback for %s', async (_label, estimateError) => {
+    // The short-circuit is intentionally code-exact. Other non-failover errors retain the
+    // compatibility behavior: signPopulated owns ethers' one unbuffered estimate+nonce attempt.
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const estimateGas = recorder(async () => { throw estimateError; });
+    const contract = {
+      connect: () => ({ doWrite: { populateTransaction, estimateGas } }),
+    } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([{}], ['https://only.example'], signPopulated as SignPopulatedFn);
+    const origWarn = console.warn;
+    console.warn = (() => undefined) as typeof console.warn;
+    try {
+      await expect(client.populateAndSign(
+        contract,
+        'doWrite',
+        [],
+        makeSigner(),
+        'V10 publish',
+        { gasLimitBufferBps: 1_000 },
+      )).resolves.toEqual({ signedTx: '0xS', txHash: '0xH' });
+    } finally {
+      console.warn = origWarn;
+    }
+    expect(estimateGas.calls).toHaveLength(1);
+    expect(signPopulated.calls).toHaveLength(1);
+  });
+
   it('a decoded revert (non-retryable) propagates AT ONCE — never signs, backup never prepared', async () => {
     const revert = callExceptionErr('execution reverted: TooLowAllowance');
     const populateTransaction = recorder(async () => { throw revert; });

@@ -41,6 +41,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   resolveRpcRequestGovernorPolicy,
+  resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
@@ -229,6 +230,8 @@ export interface NetworkConfig {
      * A value of 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /** See `ChainConfig.indexTickMs`. */
+    indexTickMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint | string | number;
     /**
@@ -375,6 +378,29 @@ export interface ChainConfig {
    * successor-block buffer. Defaults to 1.
    */
   finalityConfirmations?: number;
+  /**
+   * How long (ms) one completed finalized Context Graph authority projection
+   * answers RFC-64 authority reads before the next read refreshes it from the
+   * chain. A lower value observes on-chain authority changes sooner and costs
+   * proportionally more RPC. After a failed refresh the previous projection
+   * keeps answering until it is `min(max(3 × indexTickMs, 15s), 5m)` old,
+   * then those reads fail closed. Values above five minutes do not extend
+   * cache service past the RFC-64 accepted-authority interval. A positive
+   * integer; defaults to 6000.
+   *
+   * ALSO the cadence of the node's one chain-index tick
+   * (`evm-adapter-base.ts:startChainIndexRuntime`), which runs whether or not
+   * anything reads it: one head read, one block-hash re-read and one
+   * `eth_getLogs` every T for the whole indexed event set. Lowering it to
+   * freshen authority answers therefore also buys a proportionally faster
+   * background scanner. The same T bounds how stale the log's Hub rotation
+   * window may be — `max(3T, 15s)`, with no five-minute ceiling: the ceiling
+   * above exists because a stale authority answer is still bounded by the
+   * RFC-64 accepted-authority interval, whereas a rotation listener that
+   * promises never to miss a rotation has no such backstop — before that
+   * listener goes back to scanning the chain for itself.
+   */
+  indexTickMs?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */
   maxFeePerGasWei?: bigint | string | number;
 }
@@ -1751,6 +1777,14 @@ export function resolveChainConfig(
     : net?.finalityConfirmations;
   if (operatorHasFinalityConfirmations || finalityConfirmations !== undefined) {
     merged.finalityConfirmations = resolveFinalityConfirmations(finalityConfirmations);
+  }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasIndexTickMs = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'indexTickMs');
+  const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
+  if (operatorHasIndexTickMs || indexTickMs !== undefined) {
+    merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
   }
   const maxFeePerGasWei = parseWeiFloor(
     cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,

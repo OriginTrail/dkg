@@ -66,6 +66,7 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
+  snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
@@ -103,6 +104,7 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
+  SqliteChainEventLogStore,
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
@@ -195,6 +197,7 @@ import {
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
   decodeVmReconcileNegativeRow,
@@ -1790,6 +1793,12 @@ async function runDaemonInnerWithStartupOwnership(
     new SqliteContextGraphAuthorityHistoryStore(dashDb);
   const localContextGraphAuthorityIndexStore =
     new SqliteContextGraphAuthorityIndexStore(dashDb);
+  // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
+  // adapter builds the tick, starts it, and publishes the binding every other
+  // eligible reader consults. Per-wallet publisher adapters receive only a
+  // late-bound binding getter below — never this store — because a second store
+  // would be a second scanner, which is what this log exists to delete.
+  const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1912,6 +1921,7 @@ async function runDaemonInnerWithStartupOwnership(
     contextGraphRegistryScanCursorStore,
     localContextGraphAuthorityHistoryStore,
     localContextGraphAuthorityIndexStore,
+    chainEventLogStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2431,6 +2441,10 @@ async function runDaemonInnerWithStartupOwnership(
           store: agent.store,
           keypair: agent.wallet.keypair,
           chainBase: publisherChainBase,
+          // Late-bound: Hub rotation/rebuild clears the owner binding before a
+          // replacement exists, and every wallet must observe that gap as a
+          // live-fallback signal rather than retain the retired generation.
+          chainEventLogBindingSource: () => agent.getChainEventLogBinding(),
           ackTransportFactory: agent.createACKTransportFactory({
             sendTimeoutMs: storageAckTiming.sendTimeoutMs,
             log,
@@ -3547,6 +3561,19 @@ async function runDaemonInnerWithStartupOwnership(
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
+
+      // Auth runs first and the route also requires a loopback peer. Snapshot
+      // capture is pure in-memory accounting: it never drains counters or
+      // initiates chain reconciliation/RPC.
+      if (handleRpcUsageSnapshotRequest({
+        req,
+        res,
+        url: reqUrl,
+        // Unlike ordinary routes, local-only diagnostics are unavailable when
+        // the operator explicitly disables API authentication.
+        authenticated: authEnabled,
+        snapshot: snapshotProcessRpcUsage,
+      })) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked

@@ -106,7 +106,7 @@ import {
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -711,6 +711,7 @@ function constructConfiguredChainAdapter(
       chainId: config.chainConfig.chainId,
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
       finalityConfirmations: config.chainConfig.finalityConfirmations,
+      indexTickMs: config.chainConfig.indexTickMs,
       maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
@@ -719,6 +720,10 @@ function constructConfiguredChainAdapter(
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
       localContextGraphAuthorityIndexStore: config.localContextGraphAuthorityIndexStore,
+      // THE one log. Only this adapter is given the store, so only this
+      // adapter owns a tick; every other adapter in the process reads the
+      // binding it publishes.
+      chainEventLogStore: config.chainEventLogStore,
       contextGraphAuthorityIndexBootstrap,
     };
     const chain = config.chainConfig.adminPrivateKey
@@ -1060,10 +1065,7 @@ export class DKGAgent extends DKGAgentBase {
             { requestClass: 'background', signal },
             () => this.rfc64AuthorityReadCoordinatorV1.run(
               signal,
-              (readSignal, evidence) => {
-                evidence.markRpcAttempt();
-                return read(readSignal);
-              },
+              (readSignal, evidence) => read(evidence.chainReadOptions(readSignal)),
             ),
           )
         ),
@@ -2974,6 +2976,17 @@ export class DKGAgent extends DKGAgentBase {
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       log: options.log,
     });
+  }
+
+  /**
+   * Current read-only binding of the chain adapter that owns the node's ONE
+   * log. Publisher-wallet adapters call this late for every read; no runtime,
+   * store, or stop authority crosses this boundary.
+   */
+  public getChainEventLogBinding(): ChainEventLogBinding | undefined {
+    return (this.chain as ChainAdapter & {
+      readonly chainEventLog?: ChainEventLogBinding;
+    }).chainEventLog;
   }
 
   private createACKSendP2P(

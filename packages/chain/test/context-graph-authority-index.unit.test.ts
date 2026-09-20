@@ -2,7 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import { ContextGraphAuthorityIndex as ContextGraphAuthorityIndexBase } from
+  '../src/context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 import {
@@ -16,6 +17,16 @@ const NEXT_OWNER = `0x${'22'.repeat(20)}`;
 const AUTHORITY = `0x${'33'.repeat(20)}`;
 const NAME_9 = `0x${'99'.repeat(32)}`;
 const NAME_10 = `0x${'aa'.repeat(32)}`;
+
+/** Scanner lifecycle tests select their state explicitly from the canonical view. */
+class ContextGraphAuthorityIndex extends ContextGraphAuthorityIndexBase {
+  async resolve(
+    input: Parameters<ContextGraphAuthorityIndexBase['view']>[0]
+      & { readonly contextGraphId: ContextGraphAuthorityIndexId },
+  ) {
+    return (await this.view(input)).resolve(input.contextGraphId);
+  }
+}
 
 const blockHash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
 
@@ -139,51 +150,36 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(persisted?.cursor.throughBlockNumber).toBe(25);
   });
 
-  it('keeps raw persisted checkpoints private behind purpose-specific views', () => {
-    const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
+  it('keeps raw persisted checkpoints private behind the single projection view', () => {
+    const index = new ContextGraphAuthorityIndexBase(new MemoryAuthorityIndexStore());
 
     expect((index as any).snapshot).toBeUndefined();
-    expect(typeof index.resolve).toBe('function');
-    expect(typeof index.resolveNameHash).toBe('function');
-    expect(typeof index.revisions).toBe('function');
+    expect(typeof index.view).toBe('function');
+    expect((index as any).resolve).toBeUndefined();
+    expect((index as any).resolveNameHash).toBeUndefined();
+    expect((index as any).revisions).toBeUndefined();
   });
 
-  it('resolves unique name commitments from the shared snapshot and fails closed on ambiguity', async () => {
+  it('projects unique name commitments from the shared view and fails closed on ambiguity', async () => {
     const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
     const input = makeInput(9n, {}, async (from, to) => allEvents.filter((entry) => (
       entry.blockNumber >= from && entry.blockNumber <= to
     )));
+    const view = await index.view(input);
 
-    await expect(index.resolveNameHash({ ...input, nameHash: NAME_9 }))
-      .resolves.toBe('9');
-    await expect(index.resolveNameHash({ ...input, nameHash: `0x${'ff'.repeat(32)}` }))
-      .resolves.toBeNull();
-    await expect(index.resolveNameHash({ ...input, nameHash: 'not-a-hash' }))
-      .rejects.toThrow('name hash is invalid');
-
-    const zeroHashReads: Array<readonly [number, number]> = [];
-    await expect(index.resolveNameHash({
-      ...input,
-      nameHash: `0x${'00'.repeat(32)}`,
-      readPage: async (from, to) => {
-        zeroHashReads.push([from, to]);
-        return [
-          creation(11n, 11, 1, `0x${'00'.repeat(32)}`),
-          creation(12n, 12, 1, `0x${'00'.repeat(32)}`),
-        ];
-      },
-    })).resolves.toBeNull();
-    expect(zeroHashReads).toEqual([]);
+    expect(view.statesByNameHashes([NAME_9]).get(NAME_9)?.contextGraphId).toBe('9');
+    expect(view.statesByNameHashes([`0x${'ff'.repeat(32)}`]).size).toBe(0);
 
     const ambiguous = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
-    await expect(ambiguous.resolveNameHash({
+    const ambiguousView = await ambiguous.view({
       ...input,
-      nameHash: NAME_9,
       readPage: async (from, to) => [
         ...allEvents,
         creation(11n, 11, 2, NAME_9),
       ].filter((entry) => entry.blockNumber >= from && entry.blockNumber <= to),
-    })).rejects.toThrow('ambiguous across 2 finalized Context Graphs');
+    });
+    expect(() => ambiguousView.statesByNameHashes([NAME_9]))
+      .toThrow('ambiguous across 2 finalized Context Graphs');
   });
 
   it('shares one page walk across concurrent graph lookups and resumes after restart', async () => {

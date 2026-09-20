@@ -34,6 +34,7 @@ import {
   RpcEndpointsExhaustedError,
   withRpcRequestContext,
   type ChainAdapter,
+  type ContextGraphAuthorityReadOptions,
   type ContextGraphAuthorityIndexId,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -312,12 +313,18 @@ describe('RFC-64 rollout authority integration', () => {
       startupJitterMs: 0,
     });
     let observedSignal: AbortSignal | undefined;
+    let observedProjectionEvidence = false;
     const readRevisions = vi.fn(async (
       _contextGraphIds: readonly string[],
-      options?: { signal?: AbortSignal },
+      options: ContextGraphAuthorityReadOptions = {},
     ) => {
-      observedSignal = options?.signal;
+      observedSignal = options.signal;
       await governor.acquireActiveRequest();
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'scan',
+        ageMs: 0,
+      });
+      observedProjectionEvidence = true;
       return new Map([['9', `0x${'ab'.repeat(32)}`]]);
     });
     const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
@@ -331,12 +338,64 @@ describe('RFC-64 rollout authority integration', () => {
       // so startup needs only the owner's initial revision read.
       expect(readRevisions).toHaveBeenCalledOnce();
       expect(readRevisions).toHaveBeenCalledWith(['9'], {
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
         signal: expect.any(AbortSignal),
       });
       expect(observedSignal?.aborted).toBe(false);
+      expect(observedProjectionEvidence).toBe(true);
       expect(governor.snapshot()).toMatchObject({
         backgroundAdmitted: 1,
         foregroundAdmitted: 0,
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('keeps the shared circuit half-open when the scheduled revision read uses stale cache', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+    const readRevisions = vi.fn(async (
+      _contextGraphIds: readonly string[],
+      options: ContextGraphAuthorityReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'stale-cache',
+        ageMs: 18_000,
+      });
+      return new Map([['9', `0x${'ab'.repeat(32)}`]]);
+    });
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+
+    try {
+      runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
+      expect(readRevisions).not.toHaveBeenCalled();
+      // Isolate the scheduled revision probe: a subsequent point-authority
+      // refresh has its own production evidence-path coverage below and may
+      // legitimately prove pool recovery after this stale projection.
+      vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+        .mockResolvedValue(finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'));
+      await openSharedAuthorityCircuit(edge);
+      clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+        + 60_000;
+      // The responsibility owner used during construction is intentionally
+      // closed by the lifecycle helper. Seed the same durable binding and
+      // explicitly nudge the production refresh owner for this second pass.
+      (edge as any).contextGraphBindingState.bindAuthoritative(
+        CONTEXT_GRAPH_ID,
+        subscription,
+        '9',
+      );
+      (edge as any).rfc64PublicCatalogOwnerV1.requestAuthorityRefresh();
+      await runtime.whenIdle();
+      expect(readRevisions).toHaveBeenCalledOnce();
+      expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+        state: 'half-open',
+        consecutiveExhaustions: 1,
       });
     } finally {
       await runtime.close();
@@ -1887,7 +1946,10 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).toHaveBeenCalledOnce();
     expect(resolveSnapshots).toHaveBeenCalledWith([
       secondSnapshot.nameHash,
-    ], { signal: expect.any(AbortSignal) });
+    ], {
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(requests.get(firstContextGraphId)).toMatchObject({
       kind: 'finalized-evidence',
       evidence: {
@@ -1911,6 +1973,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readSnapshots).toHaveBeenCalledOnce();
     expect(readSnapshots).toHaveBeenCalledWith(['9'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
   });
@@ -1986,6 +2049,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).not.toHaveBeenCalled();
     expect(readSnapshots).toHaveBeenCalledWith(['79'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
   });
@@ -2016,6 +2080,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readAuthority).toHaveBeenCalledOnce();
     expect(readAuthority).toHaveBeenCalledWith(9n, {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
   });
 
@@ -2363,6 +2428,66 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('uses positive, but not negative, cold name-hash resolution as recovery evidence', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const makeEdge = async (name: string, resolved: bigint | null) => {
+      let resolutionArmed = false;
+      const resolveByNameHash = vi.fn(async () => (resolutionArmed ? resolved : null));
+      const readAuthority = vi.fn(async () => Object.freeze({
+        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+        accessPolicy: 0,
+      }));
+      const edge = await startAgent({
+        name,
+        config: {
+          chainAdapter: Object.assign(new NoChainAdapter(), {
+            resolveContextGraphIdByNameHash: resolveByNameHash,
+            getContextGraphAuthoritySnapshot: readAuthority,
+          }),
+        },
+      });
+      // Seed the locally-admitted subscription a cold-start reverse lookup
+      // operates on without marking the graph as locally created/unregistered;
+      // that local-first authority lane intentionally bypasses chain lookup.
+      (edge as unknown as {
+        subscribedContextGraphs: Map<string, { subscribed: boolean }>;
+      }).subscribedContextGraphs.set(CONTEXT_GRAPH_ID, { subscribed: true });
+      resolveByNameHash.mockClear();
+      readAuthority.mockClear();
+      await openSharedAuthorityCircuit(edge);
+      resolutionArmed = true;
+      return { edge, resolveByNameHash, readAuthority };
+    };
+
+    const positive = await makeEdge('authority-recovery-evidence-cold-name-hash', 9n);
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(positive.edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+    expect(positive.resolveByNameHash).toHaveBeenCalledOnce();
+    expect(positive.readAuthority).toHaveBeenCalled();
+    expect(positive.edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
+
+    clockOffsetMs = 0;
+    const negative = await makeEdge('authority-no-recovery-evidence-cold-name-hash', null);
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(negative.edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
+    expect(negative.resolveByNameHash).toHaveBeenCalledOnce();
+    expect(negative.readAuthority).not.toHaveBeenCalled();
+    expect(negative.edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+  });
+
   it('closes the shared circuit when an indexed authority projection reaches the pool', async () => {
     const realNow = Date.now.bind(Date);
     let clockOffsetMs = 0;
@@ -2375,9 +2500,16 @@ describe('RFC-64 rollout authority integration', () => {
       ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
       accessPolicy: 0,
     });
-    const resolveSnapshots = vi.fn(async () => new Map([
-      [expectedNameHash, indexedSnapshot],
-    ]));
+    const resolveSnapshots = vi.fn(async (
+      _nameHashes: readonly string[],
+      options: ContextGraphAuthorityReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'scan',
+        ageMs: 0,
+      });
+      return new Map([[expectedNameHash, indexedSnapshot]]);
+    });
     const pointAuthorityRead = vi.fn(async () => {
       throw new Error('an indexed projection must not reopen a point read');
     });
@@ -2411,6 +2543,59 @@ describe('RFC-64 rollout authority integration', () => {
     expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
       state: 'closed',
       consecutiveExhaustions: 0,
+    });
+  });
+
+  it('keeps the shared circuit half-open when an indexed read uses stale cache', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase();
+    const indexedSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async (
+      _nameHashes: readonly string[],
+      options: ContextGraphAuthorityReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'stale-cache',
+        ageMs: 18_000,
+      });
+      return new Map([[expectedNameHash, indexedSnapshot]]);
+    });
+    const pointAuthorityRead = vi.fn(async () => {
+      throw new Error('a stale indexed projection must not reopen a point read');
+    });
+    const edge = await startAgent({
+      name: 'authority-stale-cache-evidence-indexed',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: pointAuthorityRead,
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
     });
   });
 
@@ -2571,7 +2756,7 @@ describe('RFC-64 rollout authority integration', () => {
   async function prepareAuthorityRefreshLifecycle(
     readRevisions?: (
       contextGraphIds: readonly string[],
-      options?: { signal?: AbortSignal },
+      options?: ContextGraphAuthorityReadOptions,
     ) => Promise<ReadonlyMap<string, string>>,
     whenRevisionReadsIdle: () => Promise<void> = async () => undefined,
   ) {
@@ -3451,6 +3636,7 @@ describe('RFC-64 rollout authority integration', () => {
 
     expect(readSnapshots).toHaveBeenCalledWith(['96'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
       expect.objectContaining({ contextGraphId: withdrawnContextGraphId }),
@@ -3829,7 +4015,10 @@ describe('RFC-64 rollout authority integration', () => {
       request,
     )).rejects.toThrow('no finalized indexed authority');
     expect(resolveIds).not.toHaveBeenCalled();
-    expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
+    expect(readSnapshots).toHaveBeenCalledWith(['9'], {
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
     expect(legacyPolicy).not.toHaveBeenCalled();
   });
@@ -4240,6 +4429,9 @@ describe('RFC-64 rollout authority integration', () => {
     expect(recoveryGate).not.toHaveBeenCalled();
 
     confirmedMeta.mockResolvedValue(true);
+    recoveryGate.mockRejectedValueOnce(new Error('member recovery gate unavailable'));
+    await expect(edge.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
+      .resolves.toBeNull();
     recoveryGate.mockResolvedValue([AUTHOR]);
     await expect(edge.hasRfc64VerifiedPrivateMembershipV1(contextGraphId))
       .resolves.toBe(false);

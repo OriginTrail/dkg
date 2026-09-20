@@ -390,6 +390,10 @@ import {
 import { runBoundedOperation } from './bounded-operation.js';
 import { isRfc64UnregisteredOwnerUnresolvedErrorV1 } from './dkg-agent-rfc64-catalog.js';
 import type { Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 } from './dkg-agent-rfc64-seed-fetch.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -528,11 +532,15 @@ export class QueryMethods extends DKGAgentBase {
 
     let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
     if (opts.contextGraphId) {
-      scopedReadAuthority = await this.resolveContextGraphReadAuthority(opts.contextGraphId, {
-        callerAgentAddress: callerAgentAddressStr,
-        allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
-        signal: opts.signal,
-      });
+      const scopedContextGraphId = opts.contextGraphId;
+      scopedReadAuthority = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.query,
+        () => this.resolveContextGraphReadAuthority(scopedContextGraphId, {
+          callerAgentAddress: callerAgentAddressStr,
+          allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
+          signal: opts.signal,
+        }),
+      );
       if (scopedReadAuthority.outcome === 'unavailable') {
         throw new ContextGraphReadAuthorityUnavailableError(
           opts.contextGraphId,
@@ -720,7 +728,10 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
-    return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
+    return (await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.canRead,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, opts),
+    )).outcome === 'allowed';
   }
 
   /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
@@ -769,11 +780,14 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
-      this,
-      contextGraphId,
-      opts,
-      CHAIN_POLICY_READ_TIMEOUT_MS,
+    return withRpcUsageSite(
+      CG_AUTH_RPC_SITES.readAuthority,
+      () => QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+        this,
+        contextGraphId,
+        opts,
+        CHAIN_POLICY_READ_TIMEOUT_MS,
+      ),
     );
   }
 

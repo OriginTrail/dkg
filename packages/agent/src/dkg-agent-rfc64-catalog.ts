@@ -88,9 +88,11 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
-import type {
-  AcceptRfc64CatalogAccessSnapshotInputV1,
-  AcceptedRfc64CatalogAccessSnapshotV1,
+import {
+  resolveRfc64CatalogAuthorizationRosterV1,
+  type AcceptRfc64CatalogAccessSnapshotInputV1,
+  type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogLocalAuthorizationScopeV1,
 } from './rfc64/catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogCurrentReceiverReconcilerV1,
@@ -344,6 +346,10 @@ export {
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from './rfc64/catalog-authority-config-v1.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   /** Exact durable predecessor returned by genesis or a prior successor. */
@@ -1759,7 +1765,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
       return null;
     }
-    const gate = await this.getMemberRecoveryGate(contextGraphId).catch(() => null);
+    const gate = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.rfc64Roster,
+      () => this.getMemberRecoveryGate(contextGraphId),
+    ).catch(() => null);
     if (gate === null || gate.length === 0) return null;
     const members = new Set<EvmAddressV1>();
     for (const candidate of gate) {
@@ -1787,10 +1796,24 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async resolveRfc64CatalogLocalAgentAddressV1(
     this: DKGAgent,
     contextGraphId: string,
+    authorizationScope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
   ): Promise<EvmAddressV1 | null> {
-    const roster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+    // Transport authorization already owns an accepted-current, immutable
+    // policy/roster generation. Reuse its exact member set inside this one
+    // authorization attempt instead of performing another live chain roster
+    // read. Non-transport callers omit the scope and retain the live path.
+    const roster = await resolveRfc64CatalogAuthorizationRosterV1(
+      contextGraphId as ContextGraphIdV1,
+      authorizationScope,
+      () => this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId),
+    );
     if (roster === null) return null;
-    const rosterSet = new Set(roster);
+    const rosterSet = new Set<EvmAddressV1>();
+    for (const address of roster) {
+      if (!ethers.isAddress(address) || address === ethers.ZeroAddress) return null;
+      rosterSet.add(address.toLowerCase() as EvmAddressV1);
+    }
+    if (rosterSet.size === 0) return null;
     const configured = this.config.rfc64CatalogAccessPolicyAuthority
       ?.localAgentAddress
       ?.toLowerCase();
@@ -1841,12 +1864,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
             contextGraphId,
-            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            evidence.agentResolverReadOptions(readSignal),
           );
           readSignal.throwIfAborted();
           if (target === null) return null;
           const { expectedNameHash, expectedOnChainId } = target;
-          if (target.kind !== 'resolved-snapshot') evidence.markRpcAttempt();
           const snapshot = parseRfc64AuthoritySnapshotV1(
             target.kind === 'resolved-snapshot'
               ? target.finalizedSnapshot
@@ -1854,7 +1876,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                 this.contextGraphAuthorityReaderCapability,
               ).getContextGraphAuthoritySnapshot(
                 expectedOnChainId,
-                { signal: readSignal },
+                evidence.chainReadOptions(readSignal),
               ),
             expectedOnChainId,
           );
@@ -2083,11 +2105,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           undefined,
           async (readSignal, evidence) => {
             try {
-              evidence.markRpcAttempt();
               return await readSnapshots.call(
                 indexedReader,
                 targets,
-                { signal: readSignal },
+                evidence.chainReadOptions(readSignal),
               );
             } finally {
               await indexedReader.whenIdle();
@@ -2140,7 +2161,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
             registeredCandidates,
-            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            evidence.agentResolverReadOptions(readSignal),
           );
         } finally {
           await indexedReader.whenIdle();
@@ -2204,8 +2225,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             undefined,
             async (readSignal, evidence) => {
               try {
-                evidence.markRpcAttempt();
-                return await readSnapshots.call(indexedReader, targets, { signal: readSignal });
+                return await readSnapshots.call(
+                  indexedReader,
+                  targets,
+                  evidence.chainReadOptions(readSignal),
+                );
               } finally {
                 await indexedReader.whenIdle();
               }
@@ -3629,8 +3653,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       localPeerId: this.peerId,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority
         ?? {
-          resolveLocalAgentAddress: (contextGraphId) =>
-            this.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId),
+          resolveLocalAgentAddress: (contextGraphId, authorizationScope) =>
+            this.resolveRfc64CatalogLocalAgentAddressV1(
+              contextGraphId,
+              authorizationScope,
+            ),
           resolveRemoteAgentAddress: (peerId, contextGraphId) =>
             this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
         },

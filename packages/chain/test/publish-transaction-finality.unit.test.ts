@@ -16,13 +16,18 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
+import {
+  EvmReceiptFinalityReader,
+  type ReceiptFinalityProviderReader,
+} from '../src/evm-adapter-receipt-finality.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
+import { RpcUsageTracker } from '../src/rpc-usage.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}`;
 const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
 
 function adapter(overrides: Record<string, unknown> = {}) {
-  return Object.assign(Object.create(PublishMethods.prototype), {
+  const chain = Object.assign(Object.create(PublishMethods.prototype), {
     init: vi.fn(async () => undefined),
     finalityConfirmations: 1,
     receiptBlockHeadersByHash: new Map(),
@@ -32,7 +37,16 @@ function adapter(overrides: Record<string, unknown> = {}) {
     getBlockTimestamp: vi.fn(async () => 1_234_567),
     parseV10PublishReceipt: vi.fn(async () => null),
     ...overrides,
-  }) as PublishMethods;
+  }) as PublishMethods & {
+    finalityConfirmations: number;
+    receiptFinality: EvmReceiptFinalityReader;
+    readProviderRetryingNull: ReceiptFinalityProviderReader;
+  };
+  chain.receiptFinality = new EvmReceiptFinalityReader(
+    chain.finalityConfirmations,
+    (...args) => chain.readProviderRetryingNull(...args),
+  );
+  return chain;
 }
 
 function receipt(status: number) {
@@ -98,6 +112,36 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
 });
 
 describe('isReceiptBlockFinalAndCanonical [PR#2300 r1]', () => {
+  it('attributes receipt head and canonical header transport attempts separately', async () => {
+    const usage = new RpcUsageTracker(() => 'evm:31337');
+    const provider = {
+      getBlockNumber: async () => {
+        usage.record('eth_blockNumber');
+        return 124;
+      },
+      getBlock: async () => {
+        usage.record('eth_getBlockByNumber');
+        return { number: 123, hash: BLOCK_HASH };
+      },
+    };
+    const readProvider: ReceiptFinalityProviderReader = vi.fn(
+      async (_label, read) => read(provider as never),
+    );
+    const reader = new EvmReceiptFinalityReader(2, readProvider);
+
+    await expect(reader.read({ blockNumber: 123, blockHash: BLOCK_HASH }))
+      .resolves.toMatchObject({ number: 123, hash: BLOCK_HASH });
+    expect(usage.drainWindow().attributions).toEqual([
+      { method: 'eth_blockNumber', consumer: 'receiptFinality.head', count: 1 },
+      { method: 'eth_getBlockByNumber', consumer: 'receiptFinality.header', count: 1 },
+    ]);
+    expect(readProvider).toHaveBeenCalledWith(
+      'publish receipt finality',
+      expect.any(Function),
+      expect.objectContaining({ rpcUsageConsumer: null }),
+    );
+  });
+
   function chainOver(script: {
     latestBlockNumber: number;
     atHeight: { number: number; hash: string } | null;

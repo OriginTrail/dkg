@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type {
-  ContextGraphAuthorityIndexId,
-  ContextGraphAuthorityIndexRevisionReader,
+import {
+  RpcEndpointsExhaustedError,
+  type ChainReadOptions,
+  type ContextGraphAuthorityProjectionServedEvidence,
+  type ContextGraphAuthorityIndexId,
+  type ContextGraphAuthorityIndexRevisionReader,
 } from '@origintrail-official/dkg-chain';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -21,9 +24,12 @@ const REVISION_9 = `0x${'09'.repeat(32)}`;
 
 async function runAuthorityRead<T>(
   signal: AbortSignal,
-  read: (signal: AbortSignal) => Promise<T>,
+  read: (options: ChainReadOptions) => Promise<T>,
 ): Promise<T> {
-  return read(signal);
+  return read({
+    signal,
+    onContextGraphAuthorityProjectionServed: () => undefined,
+  });
 }
 
 function executionPlan(
@@ -85,6 +91,7 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
     loop.start();
     await loop.whenIdle();
     expect(readRevisions).toHaveBeenCalledWith(['9'], {
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
       signal: expect.any(AbortSignal),
     });
     expect(refresh.mock.calls.map(([contextGraphId]) => contextGraphId).sort())
@@ -158,10 +165,7 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
       resolveBinding: () => '9',
       runAuthorityRead: (signal, read) => coordinator.run(
         signal,
-        (readSignal, evidence) => {
-          evidence.markRpcAttempt();
-          return read(readSignal);
-        },
+        (readSignal, evidence) => read(evidence.chainReadOptions(readSignal)),
       ),
     })!;
 
@@ -178,6 +182,61 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
     releasePhysicalScan();
     await expect(second).resolves.toEqual(new Map([['second', REVISION_9]]));
     expect(calls).toBe(2);
+    await coordinator.close();
+  });
+
+  it('forwards projection evidence so stale scheduled reads cannot close the circuit', async () => {
+    let now = 0;
+    let source: ContextGraphAuthorityProjectionServedEvidence['source'] = 'stale-cache';
+    const coordinator = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 10,
+      maxBackoffMs: 10,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const reader: ContextGraphAuthorityIndexRevisionReader = {
+      readContextGraphAuthorityIndexRevisions: vi.fn(async (_ids, options) => {
+        options?.onContextGraphAuthorityProjectionServed?.({
+          source,
+          ageMs: source === 'scan' ? 0 : 20,
+        });
+        return new Map<ContextGraphAuthorityIndexId, string>([
+          ['9' as ContextGraphAuthorityIndexId, REVISION_9],
+        ]);
+      }),
+      whenIdle: vi.fn(async () => undefined),
+    };
+    const revisionSource = createRfc64CatalogAuthorityRevisionSourceV1({
+      revisionReader: reader,
+      resolveBinding: () => '9',
+      runAuthorityRead: (signal, read) => coordinator.run(
+        signal,
+        (readSignal, evidence) => read(evidence.chainReadOptions(readSignal)),
+      ),
+    })!;
+
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('authority pool exhausted', {
+        exhaustionKind: 'mixed',
+        retryAfterMs: 10,
+      });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    now = 10;
+
+    await expect(revisionSource.read(['local'], new AbortController().signal))
+      .resolves.toEqual(new Map([['local', REVISION_9]]));
+    expect(coordinator.snapshot()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+
+    source = 'scan';
+    await expect(revisionSource.read(['local'], new AbortController().signal))
+      .resolves.toEqual(new Map([['local', REVISION_9]]));
+    expect(coordinator.snapshot()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
     await coordinator.close();
   });
 });

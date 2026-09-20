@@ -133,6 +133,10 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -1318,6 +1322,29 @@ export class DKGPublisher implements Publisher {
   ): Promise<boolean> {
     if (onChainContextGraphId === undefined || onChainContextGraphId === null) return false;
     if (!this.chain || this.chain.chainId === 'none') return false;
+    const normalizedContextGraphId = contextGraphId.trim();
+    const normalizedOnChainId = String(onChainContextGraphId).trim();
+    const readFinalizedCreation = this.chain.getContextGraphFinalizedCreation;
+    if (typeof readFinalizedCreation === 'function') {
+      try {
+        const creation = await readFinalizedCreation.call(
+          this.chain,
+          BigInt(normalizedOnChainId),
+        );
+        if (creation !== undefined) {
+          const idMatches = /^\d+$/.test(normalizedContextGraphId)
+            ? normalizedContextGraphId === normalizedOnChainId
+            : creation.nameHash.toLowerCase() === ethers.keccak256(
+              ethers.toUtf8Bytes(normalizedContextGraphId),
+            ).toLowerCase();
+          return idMatches && creation.accessPolicy === 1;
+        }
+      } catch {
+        // A failed atomic proof is fail-closed. Do not splice either field
+        // with a separate latest-state read from a potentially different fork.
+        return false;
+      }
+    }
     if (typeof this.chain.getContextGraphAccessPolicy !== 'function') return false;
     if (!await this.onChainContextGraphMatchesLocalId(contextGraphId, onChainContextGraphId)) return false;
     try {
@@ -2024,7 +2051,10 @@ export class DKGPublisher implements Publisher {
     }
 
     const resolution = parseWorkspaceAgentRecipientResolution(
-      await resolveRecipients({ contextGraphId }),
+      await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publisherWrite,
+        () => resolveRecipients({ contextGraphId }),
+      ),
       contextGraphId,
     );
     if (!resolution.requiresEncryption) {

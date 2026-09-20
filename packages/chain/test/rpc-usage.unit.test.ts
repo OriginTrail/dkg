@@ -9,7 +9,11 @@
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { Contract } from 'ethers';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { AbiCoder, Contract } from 'ethers';
+import * as ts from 'typescript';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -23,16 +27,27 @@ import { MockChainAdapter } from '../src/mock-adapter.js';
 import {
   boundedRpcEndpointSlotLabel,
   boundedRpcMethodLabel,
+  boundedRpcUsageSnapshotConsumerLabel,
   mergeRpcUsageWindows,
   normalizeRpcEndpointSlotLabel,
   normalizeRpcUsageWindow,
   normalizeRpcUsageConsumer,
   RPC_ENDPOINT_SLOT_LABELS,
+  RPC_USAGE_SNAPSHOT_CONSUMERS,
+  RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
   rpcUsageWindowTotal,
+  RpcUsageCumulativeAccumulator,
   RpcUsageTracker,
   type RpcUsageDrainable,
   withRpcUsageConsumer,
+  withRpcUsageAdapterRole,
+  withRpcUsageSite,
 } from '../src/rpc-usage.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES,
+} from
+  '../src/context-graph-authority-rpc-sites.js';
 import { createRpcRequestProvider } from '../src/rpc-request-transport.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
@@ -306,6 +321,306 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(w.byMethod['other']).toBe(2);
   });
 
+  it('non-draining cumulative snapshots remain stable across repeated snapshots and drains', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-fixed');
+    const t = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
+    withRpcUsageConsumer('chainIndex.head', () => t.record('eth_getBlockByNumber'));
+    t.record('eth_call');
+
+    const clock = {
+      utcNow: () => new Date('2026-09-20T12:00:00.000Z'),
+      monotonicNowMs: () => 123,
+    };
+    const beforeDrain = cumulative.snapshot(clock);
+    const repeated = cumulative.snapshot(clock);
+    expect(repeated).toEqual(beforeDrain);
+    expect(t.drainWindow().byMethod).toEqual({ eth_getBlockByNumber: 1, eth_call: 1 });
+    expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
+    expect(t.drainWindow().byMethod).toEqual({});
+    expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
+    expect(beforeDrain).toEqual({
+      schemaVersion: 1,
+      consumerVocabularyVersion: 1,
+      processEpoch: 'epoch-fixed',
+      capturedAtUtc: '2026-09-20T12:00:00.000Z',
+      capturedAtMonotonicMs: 123,
+      completeness: {
+        complete: true,
+        reasons: [],
+        populationEpoch: 1,
+        sources: {
+          mainAgent: { status: 'included', totalRegisteredTrackers: 1, totalsRetained: true },
+          publisherWallets: { status: 'included', totalRegisteredTrackers: 0, totalsRetained: true },
+          routeRuntimes: { status: 'included', totalRegisteredTrackers: 0, totalsRetained: true },
+          other: { status: 'included', totalRegisteredTrackers: 0, totalsRetained: true },
+        },
+      },
+      cumulative: {
+        methods: { eth_getBlockByNumber: 1, eth_call: 1 },
+        consumers: {
+          eth_getBlockByNumber: { 'chainIndex.head': 1 },
+          eth_call: { unattributed: 1 },
+        },
+        adapterRoles: {
+          eth_getBlockByNumber: { main_agent: 1 },
+          eth_call: { main_agent: 1 },
+        },
+      },
+    });
+    expect(Object.isFrozen(beforeDrain)).toBe(true);
+    expect(Object.isFrozen(beforeDrain.cumulative.methods)).toBe(true);
+    expect(Object.isFrozen(beforeDrain.cumulative.consumers.eth_call)).toBe(true);
+  });
+
+  it('retains retired tracker attempts and separates bounded adapter roles exactly once', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-lifecycle');
+    const retired = new RpcUsageTracker(() => 'evm:31337', 'publisher_wallet', cumulative);
+    retired.record('eth_call');
+    retired.record('eth_getBlockByHash');
+    retired.drainWindow();
+
+    const replacement = new RpcUsageTracker(() => 'evm:31337', 'publisher_wallet', cumulative);
+    replacement.record('eth_call');
+    const route = new RpcUsageTracker(() => 'evm:31337', 'route_runtime', cumulative);
+    route.record('eth_blockNumber');
+
+    const snapshot = cumulative.snapshot();
+    expect(snapshot.completeness).toMatchObject({
+      populationEpoch: 3,
+      sources: {
+        mainAgent: { totalRegisteredTrackers: 0 },
+        publisherWallets: { totalRegisteredTrackers: 2 },
+        routeRuntimes: { totalRegisteredTrackers: 1 },
+        other: { totalRegisteredTrackers: 0 },
+      },
+    });
+    expect(Object.values(snapshot.completeness.sources)
+      .reduce((sum, source) => sum + source.totalRegisteredTrackers, 0))
+      .toBe(snapshot.completeness.populationEpoch);
+    expect(snapshot.cumulative.methods).toEqual({
+      eth_call: 2,
+      eth_getBlockByHash: 1,
+      eth_blockNumber: 1,
+    });
+    expect(snapshot.cumulative.adapterRoles).toEqual({
+      eth_call: { publisher_wallet: 2 },
+      eth_getBlockByHash: { publisher_wallet: 1 },
+      eth_blockNumber: { route_runtime: 1 },
+    });
+    for (const [method, total] of Object.entries(snapshot.cumulative.methods)) {
+      expect(Object.values(snapshot.cumulative.consumers[method] ?? {})
+        .reduce((sum, count) => sum + count, 0)).toBe(total);
+      expect(Object.values(snapshot.cumulative.adapterRoles[method] ?? {})
+        .reduce((sum, count) => sum + count, 0)).toBe(total);
+    }
+  });
+
+  it('detects process replacement and collapses every unknown consumer into one bucket', () => {
+    const first = new RpcUsageCumulativeAccumulator('epoch-a');
+    const restarted = new RpcUsageCumulativeAccumulator('epoch-b');
+    expect(first.snapshot().processEpoch).not.toBe(restarted.snapshot().processEpoch);
+
+    const t = new RpcUsageTracker(() => 'evm:31337', 'main_agent', first);
+    for (let i = 0; i < RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD + 5; i += 1) {
+      withRpcUsageConsumer(`consumer.${i}`, () => t.record('eth_getBlockByNumber'));
+      t.drainWindow();
+    }
+    const consumers = first.snapshot().cumulative.consumers.eth_getBlockByNumber;
+    expect(consumers).toEqual({
+      other: RpcUsageCumulativeAccumulator.MAX_CONSUMERS_PER_METHOD + 5,
+    });
+  });
+
+  it('captures a construction role once and never carries arbitrary role labels', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-role');
+    const publisher = withRpcUsageAdapterRole(
+      'publisher_wallet',
+      () => new RpcUsageTracker(() => 'evm:31337', undefined, cumulative),
+    );
+    publisher.record('eth_call');
+    const unknown = new RpcUsageTracker(
+      () => 'evm:31337',
+      'secret-wallet-address' as never,
+      cumulative,
+    );
+    unknown.record('eth_call');
+    expect(cumulative.snapshot().cumulative.adapterRoles.eth_call).toEqual({
+      publisher_wallet: 1,
+      other: 1,
+    });
+  });
+
+  it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
+    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(1);
+    expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(163);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
+      [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
+    );
+    for (const consumer of RPC_USAGE_SNAPSHOT_CONSUMERS) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(consumer);
+    }
+    for (const site of Object.values(CONTEXT_GRAPH_AUTHORITY_RPC_SITES)) {
+      const composed = `${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:${site}`;
+      expect(boundedRpcUsageSnapshotConsumerLabel(composed)).toBe(composed);
+    }
+    for (const [raw, normalized] of [
+      ['getNetwork (chainId)', 'getNetwork_chainId'],
+      ['Hub.getContractAddress(Identity)', 'Hub.getContractAddress_Identity'],
+      ['kas.queryFilter(KnowledgeAssetCreated)', 'kas.queryFilter_KnowledgeAssetCreated'],
+    ] as const) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(raw)).toBe(normalized);
+    }
+  });
+
+  it('retains every KA version snapshot header consumer literal', () => {
+    const source = readFileSync(fileURLToPath(
+      new URL('../src/evm-adapter-storage-reads.ts', import.meta.url),
+    ), 'utf8');
+    const start = source.indexOf('async readKnowledgeAssetVersionSnapshot(');
+    const end = source.indexOf('async getMerkleLeafCount(', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const consumers = [...source.slice(start, end).matchAll(
+      /withRpcUsageConsumer\(\s*['"]([^'"]+)['"]/g,
+    )].map((match) => match[1]!);
+    expect(consumers).toEqual(['getBlock', 'getBlock', 'getBlock', 'getBlock']);
+    for (const consumer of consumers) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(consumer);
+      expect(consumer).not.toBe('other');
+    }
+  });
+
+  it('covers every active static resolveContract Hub label from source', () => {
+    const sourceRoot = fileURLToPath(new URL('../src', import.meta.url));
+    const files: string[] = [];
+    const visitDirectory = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          if (entry.name !== 'archive') visitDirectory(join(directory, entry.name));
+        } else if (entry.name.endsWith('.ts')) {
+          files.push(join(directory, entry.name));
+        }
+      }
+    };
+    visitDirectory(sourceRoot);
+
+    const contractNames = new Set<string>();
+    for (const path of files) {
+      const source = ts.createSourceFile(
+        path,
+        readFileSync(path, 'utf8'),
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      const visitNode = (node: ts.Node): void => {
+        if (
+          ts.isCallExpression(node)
+          && ts.isPropertyAccessExpression(node.expression)
+          && node.expression.name.text === 'resolveContract'
+          && ts.isStringLiteralLike(node.arguments[0])
+        ) {
+          contractNames.add(node.arguments[0].text);
+        }
+        ts.forEachChild(node, visitNode);
+      };
+      visitNode(source);
+    }
+
+    expect([...contractNames].sort()).toEqual(expect.arrayContaining([
+      'DKGStakingConvictionNFT',
+      'ShardingTableStorage',
+      'PublishingConviction',
+      'ShardingTable',
+    ]));
+    for (const name of contractNames) {
+      const raw = `Hub.getContractAddress(${name})`;
+      const normalized = normalizeRpcUsageConsumer(raw);
+      expect(normalized).toBeDefined();
+      expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toContain(normalized);
+      expect(boundedRpcUsageSnapshotConsumerLabel(raw)).toBe(normalized);
+    }
+  });
+
+  it('maps credentials and every unknown arbitrary identifier to other before storage', () => {
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-private');
+    const tracker = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
+    const unsafeConsumers = [
+      'Bearer fixture-secret-token',
+      `wallet.0x${'ab'.repeat(20)}`,
+      'request.01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      'request.cuidclh0am13x0000w5a0k2q4g',
+      'request.4ER7u3vQ',
+      'graph.customer-private',
+      'query.select_name_from_graph',
+    ];
+    for (const consumer of unsafeConsumers) {
+      withRpcUsageConsumer(consumer, () => tracker.record('eth_call'));
+    }
+    const legitimateConsumers = [
+      'listContextGraphsFromChain',
+      'authorityProjection.validateAnchor',
+      'token.balanceOf',
+      'pcaNFT.getAccountInfo',
+      'Hub.getContractAddress(Identity)',
+      'eventLogPageScan',
+    ];
+    for (const consumer of legitimateConsumers) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(
+        normalizeRpcUsageConsumer(consumer),
+      );
+      withRpcUsageConsumer(consumer, () => tracker.record('eth_call'));
+    }
+
+    const snapshot = cumulative.snapshot();
+    expect(snapshot.cumulative.methods.eth_call).toBe(
+      unsafeConsumers.length + legitimateConsumers.length,
+    );
+    expect(snapshot.cumulative.consumers.eth_call).toEqual({
+      other: unsafeConsumers.length,
+      listContextGraphsFromChain: 1,
+      'authorityProjection.validateAnchor': 1,
+      'token.balanceOf': 1,
+      'pcaNFT.getAccountInfo': 1,
+      'Hub.getContractAddress_Identity': 1,
+      eventLogPageScan: 1,
+    });
+    const serialized = JSON.stringify(snapshot).toLowerCase();
+    for (const fragment of [
+      'fixture-secret-token',
+      '01arz3nd',
+      'cuidclh0',
+      'customer-private',
+      'select_name_from_graph',
+    ]) {
+      expect(serialized).not.toContain(fragment);
+    }
+  });
+
+  it('attributes every header request with an explicit unattributed remainder', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('chainIndex.head', () => {
+      t.record('eth_blockNumber');
+      t.record('eth_getBlockByNumber');
+    });
+    t.record('eth_getBlockByNumber');
+    t.record('eth_getBlockByHash');
+
+    const usage = t.drainWindow();
+    expect(usage.attributions).toEqual([
+      { method: 'eth_blockNumber', consumer: 'chainIndex.head', count: 1 },
+      { method: 'eth_getBlockByNumber', consumer: 'chainIndex.head', count: 1 },
+      { method: 'eth_getBlockByNumber', consumer: 'unattributed', count: 1 },
+      { method: 'eth_getBlockByHash', consumer: 'unattributed', count: 1 },
+    ]);
+    for (const method of ['eth_blockNumber', 'eth_getBlockByNumber', 'eth_getBlockByHash']) {
+      expect(usage.attributions
+        .filter((entry) => entry.method === method)
+        .reduce((sum, entry) => sum + entry.count, 0)).toBe(usage.byMethod[method]);
+    }
+  });
+
   it('attributes eth_call to the current bounded consumer without changing aggregate totals', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     withRpcUsageConsumer('pcaNFT.getAccountInfo', () => {
@@ -345,7 +660,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('keeps overlapping async consumer scopes isolated', async () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     await Promise.all([
-      withRpcUsageConsumer('cgStorage.getContextGraph', async () => {
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, async () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         t.record('eth_call');
       }),
@@ -359,9 +674,113 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const w = t.drainWindow();
     expect(w.byMethod).toEqual({ eth_call: 3 });
     expect(w.ethCallByConsumer).toEqual({
-      'cgStorage.getContextGraph': 1,
+      [CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER]: 1,
       'pcaNFT.getAccountInfo': 2,
     });
+  });
+
+  it('splits one funnel read label by the call site that wanted it', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    // The transport establishes the read label INNERMOST, exactly as
+    // rpc-failover-client does, so this is the real nesting order.
+    withRpcUsageSite('cgAuth.syncAuthz', () => {
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+    });
+    withRpcUsageSite('cgAuth.curatedProbe', () => {
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+    });
+    // No site in scope: the bare read label is preserved, unchanged.
+    withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+
+    const w = t.drainWindow();
+    expect(w.byMethod).toEqual({ eth_call: 4 });
+    expect(w.ethCallByConsumer).toEqual({
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.syncAuthz`]: 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.curatedProbe`]: 2,
+      [CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER]: 1,
+    });
+  });
+
+  it('keeps the authority site vocabulary unique, normalized and composable', () => {
+    const sites = Object.values(CONTEXT_GRAPH_AUTHORITY_RPC_SITES);
+    expect(new Set(sites).size).toBe(sites.length);
+    for (const site of sites) {
+      expect(normalizeRpcUsageConsumer(site)).toBe(site);
+      expect(`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:${site}`.length).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('does not append an authority site to unrelated eth_call consumers', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('cgAuth.syncAuthz', () => {
+      withRpcUsageConsumer('pcaNFT.getAccountInfo', () => t.record('eth_call'));
+    });
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      'pcaNFT.getAccountInfo': 1,
+    });
+  });
+
+  it('keeps the OUTERMOST call site: a funnel entry never overwrites its caller', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('cgAuth.syncAuthz', () => {
+      // The funnel entry labels itself too; the caller above must win.
+      withRpcUsageSite('cgAuth.gate', () => {
+        withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+      });
+    });
+    // Unlabelled caller: the funnel entry's own label is what gets reported.
+    withRpcUsageSite('cgAuth.gate', () => {
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+    });
+
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.syncAuthz`]: 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.gate`]: 1,
+    });
+  });
+
+  it('keeps composed consumer keys inside the logfmt token bound', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('x'.repeat(60), () => {
+      withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+    });
+    // Degrading to the bare read label keeps the read attributed; composing
+    // past 64 chars would be rewritten to `other` by the daemon formatter.
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      [CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER]: 1,
+    });
+  });
+
+  it('keeps overlapping async call sites isolated', async () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    await Promise.all([
+      withRpcUsageSite('cgAuth.vmReconcile', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+      }),
+      withRpcUsageSite('cgAuth.recipients', async () => {
+        withRpcUsageConsumer(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER, () => t.record('eth_call'));
+      }),
+    ]);
+
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.vmReconcile`]: 1,
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.recipients`]: 1,
+    });
+  });
+
+  it('does not relabel unrelated eth_getLogs inside an authority site scope', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('cgAuth.rfc64Roster', () => {
+      withRpcUsageConsumer('cg.authority.history', () => t.record('eth_getLogs', 0));
+    });
+    expect(t.drainWindow().attributions).toEqual([{
+      method: 'eth_getLogs',
+      consumer: 'cg.authority.history',
+      endpointSlot: 'primary',
+      count: 1,
+    }]);
   });
 
   it('normalizes and bounds consumer labels', () => {
@@ -506,7 +925,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('attributes ethers-internal eth_getLogs retries to the same endpoint slot', async () => {
     const rpc = await startLoopbackRpc({ throttle: ['eth_getLogs'] });
     servers.push(rpc);
-    const tracker = new RpcUsageTracker(() => 'evm:31337');
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-retry');
+    const tracker = new RpcUsageTracker(() => 'evm:31337', 'main_agent', cumulative);
     const provider = createRpcRequestProvider(rpc.url, {
       maxRetries: 1,
       providerOptions: { batchMaxCount: 1 },
@@ -516,7 +936,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
     try {
       await expect(withRpcUsageConsumer(
-        'unit.getLogs.retry',
+        'eventLogPageScan',
         () => provider.send('eth_getLogs', [{ fromBlock: '0x0', toBlock: '0x1' }]),
       )).rejects.toBeTruthy();
 
@@ -525,8 +945,75 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       expect(hits).toBe(2);
       expect(usage.byMethod.eth_getLogs).toBe(hits);
       expect(usage.attributions).toEqual([
-        { method: 'eth_getLogs', consumer: 'unit.getLogs.retry', endpointSlot: 'fallback_3', count: hits },
+        { method: 'eth_getLogs', consumer: 'eventLogPageScan', endpointSlot: 'fallback_3', count: hits },
       ]);
+      const snapshot = cumulative.snapshot();
+      expect(snapshot.cumulative.methods.eth_getLogs).toBe(hits);
+      expect(snapshot.cumulative.consumers.eth_getLogs).toEqual({
+        eventLogPageScan: hits,
+      });
+      expect(snapshot.cumulative.adapterRoles.eth_getLogs).toEqual({ main_agent: hits });
+    } finally {
+      provider.destroy();
+    }
+  }, 30_000);
+
+  it('keeps concurrent queued methods bound to their issuer consumers and publisher role', async () => {
+    const rpc = await startLoopbackRpc({
+      results: {
+        eth_getBlockByNumber: { number: '0x10', hash: `0x${'11'.repeat(32)}` },
+      },
+    });
+    servers.push(rpc);
+    const cumulative = new RpcUsageCumulativeAccumulator('epoch-issuer-context');
+    const tracker = new RpcUsageTracker(() => 'evm:31337', 'publisher_wallet', cumulative);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+      onRequest: (method, slot) => tracker.record(method, slot),
+    });
+
+    try {
+      // Complete provider startup before the paired calls. Both sends below
+      // then enqueue in one scheduling turn and share ethers' drain timer --
+      // the exact case where the timer owner's ALS used to label its peer.
+      await provider.getNetwork();
+      const header = withRpcUsageConsumer(
+        'chainIndex.lineage',
+        () => provider.send('eth_getBlockByNumber', ['latest', false]),
+      );
+      const authority = withRpcUsageSite(
+        CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query,
+        () => withRpcUsageConsumer(
+          CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+          () => provider.send('eth_call', [{ to: HUB, data: '0x' }, 'latest']),
+        ),
+      );
+
+      await expect(Promise.all([header, authority])).resolves.toHaveLength(2);
+      expect(rpc.hits('eth_getBlockByNumber')).toBe(1);
+      expect(rpc.hits('eth_call')).toBe(1);
+
+      const snapshot = cumulative.snapshot();
+      expect(snapshot.cumulative.methods).toMatchObject({
+        eth_getBlockByNumber: 1,
+        eth_call: 1,
+      });
+      expect(snapshot.cumulative.consumers.eth_getBlockByNumber).toEqual({
+        'chainIndex.lineage': 1,
+      });
+      expect(snapshot.cumulative.consumers.eth_call).toEqual({
+        'cgStorage.getContextGraph:cgAuth.query': 1,
+      });
+      expect(snapshot.cumulative.consumers.eth_chainId).toEqual({
+        unattributed: rpc.hits('eth_chainId'),
+      });
+      expect(snapshot.cumulative.adapterRoles.eth_getBlockByNumber).toEqual({
+        publisher_wallet: 1,
+      });
+      expect(snapshot.cumulative.adapterRoles.eth_call).toEqual({
+        publisher_wallet: 1,
+      });
     } finally {
       provider.destroy();
     }
@@ -671,5 +1158,36 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
     expect(usage.ethCallByConsumer['unit.contract.with']).toBe(rawEthCallHits);
+  }, 30_000);
+
+  it('composes a real getContextGraph transport label with its authority call site', async () => {
+    installMeter();
+    const encoded = AbiCoder.defaultAbiCoder().encode(
+      ['address', 'address[]', 'uint256', 'bool', 'uint256', 'uint8', 'uint8', 'address', 'uint256'],
+      [HUB, [HUB], 0n, true, 0n, 1, 0, HUB, 0n],
+    );
+    const rpc = await startLoopbackRpc({ results: { eth_call: encoded } });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url }));
+    adapters.push(a);
+    a.initialized = true;
+    a.init = async () => {};
+    a.contracts = {
+      contextGraphStorage: new Contract(HUB, [
+        'function getContextGraph(uint256) view returns '
+        + '(address,address[],uint256,bool,uint256,uint8,uint8,address,uint256)',
+      ]),
+    };
+
+    await expect(withRpcUsageSite(
+      CONTEXT_GRAPH_AUTHORITY_RPC_SITES.syncAuthorize,
+      () => a.getContextGraphLiveAuthority(1n),
+    )).resolves.toMatchObject({ active: true, accessPolicy: 1 });
+
+    const usage = a.drainRpcUsage();
+    expect(usage.ethCallByConsumer).toEqual({
+      [`${CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER}:cgAuth.syncAuthz`]: rpc.hits('eth_call'),
+    });
+    expect(rpc.hits('eth_call')).toBeGreaterThanOrEqual(1);
   }, 30_000);
 });

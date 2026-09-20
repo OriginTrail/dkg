@@ -10,6 +10,8 @@ import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chai
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
+import type { ChainEventLogStore } from './chain-index/index.js';
+import type { ChainEventLogBindingSource } from './chain-event-log-binding.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
 
 export interface EVMAdapterBaseConfig {
@@ -48,6 +50,17 @@ export interface EVMAdapterBaseConfig {
    * of 1 gives no successor-block buffer. Defaults to 1.
    */
   finalityConfirmations?: number;
+  /**
+   * `chain.indexTickMs` (T): how long one completed finalized Context Graph
+   * authority projection answers reads before the next read refreshes it, in
+   * milliseconds. After a FAILED refresh the previous projection keeps
+   * answering until it is `min(max(3T, 15s), 5m)` old, then reads fail closed.
+   * A positive integer; defaults to 6000. Values above five minutes do not
+   * extend cache service past the RFC-64 accepted-authority interval. Affects
+   * only the durable authority index, so it is inert without
+   * `localContextGraphAuthorityIndexStore`.
+   */
+  indexTickMs?: number;
   /**
    * Optional operator cap for transaction fee-per-gas fields (wei). Applied to
    * EIP-1559 maxFee/maxPriorityFee and legacy gasPrice after ethers populates a
@@ -119,6 +132,28 @@ export interface EVMAdapterBaseConfig {
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
   /** Trusted core seed plus a bounded local tail; requires a local index store. */
   contextGraphAuthorityIndexBootstrap?: ContextGraphAuthorityIndexBootstrap;
+  /**
+   * Durable backing for the node's ONE chain log. Supplying it is what makes
+   * an adapter OWN the tick: it builds the index runtime, starts the single
+   * background pass, and binds itself to the result.
+   *
+   * There must be exactly one such adapter per process — the daemon gives the
+   * store only to the agent's adapter (`lifecycle.ts`), never to the per-wallet
+   * publisher adapters (`publisher-runner.ts:createPublisherWalletChain`) —
+   * because a second one would be the second scanner this log exists to
+   * delete. An adapter without it keeps every pre-log path exactly as it was.
+   */
+  chainEventLogStore?: ChainEventLogStore;
+  /**
+   * Late-bound read-only access to the ONE log owned by another adapter in
+   * this process. Intended for publisher-wallet adapters: they borrow the
+   * owning adapter's current generation without receiving its store/runtime.
+   *
+   * This source is authoritative over `attachChainEventLog`, including while
+   * it returns `undefined` during cold start, rotation/rebuild, or shutdown.
+   * A source and `chainEventLogStore` are mutually exclusive.
+   */
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

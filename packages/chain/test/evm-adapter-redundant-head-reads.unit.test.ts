@@ -232,7 +232,6 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
     expect(unavailable.getBlock.calls).toEqual([[123]]);
     expect(unavailable.getBlockNumber.calls).toHaveLength(1);
   });
-
   it('depth 1: all above-head error responses exhaust as a false verdict', async () => {
     const first = blockErrorEndpoint(121, 'unknown block');
     const second = blockErrorEndpoint(122, 'block not found');
@@ -288,7 +287,7 @@ describe('isReceiptBlockFinalAndCanonical: one block read decides at depth 1', (
   });
 });
 
-describe('getBlockTimestamp reuses the finality check\'s header — by HASH only', () => {
+describe('getFinalizedBlockTimestamp reuses the finality check\'s hash-bound header', () => {
   function endpoint(atHeight: { number: number; hash: string; timestamp: number } | null) {
     return {
       getBlockNumber: recorder(async () => 500),
@@ -303,7 +302,10 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     expect(p.getBlock.calls).toHaveLength(1);
 
     // Hash casing differs between RPC payloads and receipts; the key is case-insensitive.
-    expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH.toUpperCase().replace('0X', '0x') }))
+    expect(await a.getFinalizedBlockTimestamp(
+      123,
+      BLOCK_HASH.toUpperCase().replace('0X', '0x'),
+    ))
       .toBe(1_700_000_123);
     expect(p.getBlock.calls).toHaveLength(1); // per tx: finality + timestamp = ONE block read
   });
@@ -324,11 +326,10 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
       .resolves.toBe(receipt);
     expect(p.getBlock.calls).toHaveLength(1);
 
-    expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH }))
+    expect(await a.getFinalizedBlockTimestamp(123, BLOCK_HASH))
       .toBe(1_700_000_123);
     expect(p.getBlock.calls).toHaveLength(1);
   });
-
   it('an already-aborted caller rejects even when the timestamp memo has the answer', async () => {
     const p = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 });
     const a = makeAdapter([p]);
@@ -337,8 +338,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     const reason = new Error('cancelled before timestamp lookup');
     controller.abort(reason);
 
-    await expect(a.getBlockTimestamp(123, {
-      blockHash: BLOCK_HASH,
+    await expect(a.getFinalizedBlockTimestamp(123, BLOCK_HASH, {
       signal: controller.signal,
     })).rejects.toBe(reason);
     expect(p.getBlock.calls).toHaveLength(1);
@@ -364,7 +364,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     await a.isReceiptBlockFinalAndCanonical(RECEIPT);
     expect(p.getBlock.calls).toHaveLength(1);
 
-    expect(await a.getBlockTimestamp(999, { blockHash: BLOCK_HASH })).toBe(1_700_000_999);
+    expect(await a.getFinalizedBlockTimestamp(999, BLOCK_HASH)).toBe(1_700_000_999);
     expect(p.getBlock.calls).toHaveLength(2);
     expect(p.getBlock.calls[1]?.[0]).toBe(999);
   });
@@ -378,23 +378,22 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(false);
     expect(p.getBlock.calls).toHaveLength(1);
 
-    await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH });
+    await a.getFinalizedBlockTimestamp(123, BLOCK_HASH);
     expect(p.getBlock.calls).toHaveLength(2);
 
-    expect(await a.getBlockTimestamp(123, { blockHash: OTHER_HASH })).toBe(42);
+    expect(await a.getFinalizedBlockTimestamp(123, OTHER_HASH)).toBe(42);
     expect(p.getBlock.calls).toHaveLength(2);
   });
 
-  it('a header that carried no timestamp is not remembered — the timestamp read goes to the wire', async () => {
+  it('stores a timestamp-less header but does not reuse it for a timestamp read', async () => {
     const p = {
       getBlockNumber: recorder(async () => 500),
       getBlock: recorder(async (_tag: number | string) => ({ number: 123, hash: BLOCK_HASH })),
     };
     const a = makeAdapter([p]);
     await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
-    expect(a.receiptBlockHeadersByHash.size).toBe(1);
 
-    expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH })).toBe(0); // today's best-effort
+    expect(await a.getFinalizedBlockTimestamp(123, BLOCK_HASH)).toBe(0); // today's best-effort
     expect(p.getBlock.calls).toHaveLength(2);
   });
 
@@ -403,7 +402,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     const healthy = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 77 });
     const a = makeAdapter([lagging, healthy]);
 
-    expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH })).toBe(77);
+    expect(await a.getFinalizedBlockTimestamp(123, BLOCK_HASH)).toBe(77);
     expect(lagging.getBlock.calls).toHaveLength(1);
     expect(healthy.getBlock.calls).toHaveLength(1);
   });
@@ -415,7 +414,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     a.invalidatePublishPreflightCache();
     a.ensureConfiguredStaticChainIdValidated = async () => 31337n;
 
-    await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH });
+    await a.getFinalizedBlockTimestamp(123, BLOCK_HASH);
     expect(p.getBlock.calls).toHaveLength(2);
   });
 
@@ -433,12 +432,11 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     for (let n = 1; n <= 257; n += 1) {
       await a.isReceiptBlockFinalAndCanonical({ blockNumber: n, blockHash: hashOf(n) });
     }
-    expect(a.receiptBlockHeadersByHash.size).toBe(256);
     const before = served;
 
-    expect(await a.getBlockTimestamp(257, { blockHash: hashOf(257) })).toBe(257); // newest: served
+    expect(await a.getFinalizedBlockTimestamp(257, hashOf(257))).toBe(257); // newest: served
     expect(served).toBe(before);
-    expect(await a.getBlockTimestamp(1, { blockHash: hashOf(1) })).toBe(1); // evicted: re-read
+    expect(await a.getFinalizedBlockTimestamp(1, hashOf(1))).toBe(1); // evicted: re-read
     expect(served).toBe(before + 1);
   });
 });

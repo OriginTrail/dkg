@@ -399,6 +399,10 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import { localContextGraphIdMatchesCommittedNameHash } from './context-graph-binding-state.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 
@@ -661,7 +665,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<ContextGraphAgentGateAuthority> {
-    return resolveContextGraphAgentGateAuthorityDecision({
+    return withRpcUsageSite(CG_AUTH_RPC_SITES.gate, () => resolveContextGraphAgentGateAuthorityDecision({
       contextGraphId,
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
@@ -672,7 +676,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
       ),
-    });
+    }));
   }
 
   /** Compatibility projection for admission callers that only need fail-closed gate values. */
@@ -708,9 +712,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
-      contextGraphId,
-      { signal: options.signal },
+    const registeredAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recoveryGate,
+      () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        { signal: options.signal },
+      ),
     );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
     if (registeredAuthority.kind !== 'unregistered') return null;
@@ -847,9 +854,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * {@link CHAIN_POLICY_READ_TIMEOUT_MS}, so callers fail closed instead of
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
+   *
+   * `start` receives the bounded signal so the deadline reaches the read
+   * itself: a hung RPC is cancelled rather than merely abandoned, and a
+   * timed-out caller leaves any flight it was sharing.
    */
   private async raceChainPolicyRead<T>(
-    start: () => Promise<T>,
+    start: (signal: AbortSignal) => Promise<T>,
     label: string,
     signal?: AbortSignal,
   ): Promise<T | typeof TIMEOUT_SENTINEL> {
@@ -933,7 +944,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<0 | 1 | null> {
-    const state = await this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options);
+    const state = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.livePolicy,
+      () => this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options),
+    );
     return state.kind === 'available' ? state.accessPolicy : null;
   }
 
@@ -1094,10 +1108,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // resolver collapses unknown↔not-public ONLY for this boolean predicate;
       // the publish-inline probe consumes the tri-state directly so it can
       // REFUSE (rather than choose plaintext) on a genuine UNKNOWN.
-      return (await this.resolveOnChainAccessPolicyState(
-        contextGraphId,
-        opCtx,
-        options,
+      return (await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publicProbe,
+        () => this.resolveOnChainAccessPolicyState(contextGraphId, opCtx, options),
       )) === 0;
     } catch (err) {
       // Fail closed (curated/encrypted) on any lookup failure, but not
@@ -1376,7 +1389,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(input.contextGraphId);
+    const registeredAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recipients,
+      () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId),
+    );
     if (registeredAuthority.kind === 'unregistered') {
       return resolveWorkspaceAgentRecipients(this.store, input);
     }
@@ -2337,7 +2353,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       );
     }
 
-    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(pkg.contextGraphId);
+    const agentGateAddresses = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.senderKeyAccept,
+      () => this.getContextGraphAgentGateAddresses(pkg.contextGraphId),
+    );
     if (!agentGateAddresses) {
       // A cold private member can receive Sender Key setup after the finalized
       // chain binding but before its accepted RFC-64 roster or legacy `_meta`
@@ -2791,7 +2810,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
   ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
-    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId);
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.signer,
+      () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
+    );
     if (authority.kind === 'ungated') {
       return this.getWorkspaceGossipSigningAgent();
     }

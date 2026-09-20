@@ -864,6 +864,8 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       getConnectedCorePeers: vi.fn(() => ['peer-a']),
       log,
     }));
+    const currentChainEventLogBinding = { scope: 'evm:100:hub=test:test' };
+    const getChainEventLogBinding = vi.fn(() => currentChainEventLogBinding);
     const fakeAgent = {
       peerId: 'self-peer',
       multiaddrs: [],
@@ -899,6 +901,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       createContextGraph: vi.fn(),
       listContextGraphs: vi.fn(async () => []),
       createACKTransportFactory,
+      getChainEventLogBinding,
       drainRpcUsage: vi.fn(() => ({
         calls: 0,
         errors: 0,
@@ -939,6 +942,8 @@ describe('runDaemonInner StorageACK timing wiring', () => {
 
     const startupArg = mocks.startPublisherRuntimeWithOutcome.mock.calls[0]?.[0] as any;
     expect(startupArg.chainBase).toMatchObject({ receiptTimeoutMs: 1_200_000 });
+    expect(startupArg.chainEventLogBindingSource()).toBe(currentChainEventLogBinding);
+    expect(getChainEventLogBinding).toHaveBeenCalledTimes(1);
     const agentCreateArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
     expect(agentCreateArg.chainConfig.rpcRequestAdmission).toBe(
       startupArg.chainBase.rpcRequestAdmission,

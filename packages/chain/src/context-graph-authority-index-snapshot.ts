@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ChainReadOptions } from './chain-adapter.js';
+import type { ContextGraphAuthorityReadOptions } from './chain-adapter.js';
 import {
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
@@ -77,7 +77,7 @@ export interface ContextGraphAuthorityIndexSnapshots {
   exportSnapshot(
     request: ContextGraphAuthorityIndexSnapshotRequest,
   ): Promise<ContextGraphAuthorityIndexSnapshot | null>;
-  refresh(options?: ChainReadOptions): Promise<void>;
+  refresh(options?: ContextGraphAuthorityReadOptions): Promise<void>;
 }
 
 export function isContextGraphAuthorityIndexSnapshotRequest(
