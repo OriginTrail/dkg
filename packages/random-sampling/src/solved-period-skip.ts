@@ -11,8 +11,6 @@ import {
 /** Re-read even inside a long stable proof period. */
 export const SOLVED_PERIOD_MAX_SKIP_MS = 5 * 60_000;
 
-export type SolvedPeriodReadContext = RandomSamplingReadContext;
-
 export interface SolvedPeriodRecord {
   readonly challengePeriodEpoch: bigint;
   readonly periodStartBlock: bigint;
@@ -65,9 +63,10 @@ export type SolvedPeriodReadResult<T> =
  * bound applies independently, so the premise is always revalidated.
  *
  * The collaborator owns the full read sequence. Callers provide only the live
- * status/challenge read: this class checks reuse, captures the binding and
- * epoch before that callback, reads the head afterwards, and records the
- * observation. A caller cannot accidentally omit or reorder one guard.
+ * status/challenge read: this class checks reuse, captures the cheap binding
+ * identity before that callback, reads the head afterwards, and pays for the
+ * Chronos epoch only when the challenge is solved and non-stale. A caller
+ * cannot accidentally omit or reorder one guard.
  */
 export class SolvedPeriodSkip {
   readonly #chain: ChainAdapter;
@@ -90,9 +89,9 @@ export class SolvedPeriodSkip {
     const reusable = await this.#reusable();
     if (reusable !== undefined) return Object.freeze({ kind: 'reused', record: reusable });
 
-    // Capture BEFORE the status/challenge callback so an in-flight rotation
-    // cannot attribute the old read to the new pair or Chronos epoch.
-    const context = await this.#captureReadContext();
+    // Capture the free binding identity BEFORE the status/challenge callback.
+    // The paid Chronos epoch is deferred until there is a reusable observation.
+    const bindingId = this.#captureBindingId();
     const live = await readLive();
     const current = live.currentChallenge;
     if (current === undefined) {
@@ -105,6 +104,7 @@ export class SolvedPeriodSkip {
       current.durationInBlocks,
     );
     if (current.challenge.solved && !staleness.stale) {
+      const context = await this.#captureReadContext(bindingId);
       this.#observe({
         context,
         challenge: current.challenge,
@@ -133,10 +133,19 @@ export class SolvedPeriodSkip {
       && now < record.rereadAtMs;
   }
 
-  async #captureReadContext(): Promise<SolvedPeriodReadContext | undefined> {
-    if (!this.#contextReader) return undefined;
+  #captureBindingId(): string | undefined {
     try {
-      return await this.#contextReader.readRandomSamplingContext();
+      return this.#contextReader?.getRandomSamplingBindingId();
+    } catch {
+      return undefined;
+    }
+  }
+
+  async #captureReadContext(bindingId: string | undefined): Promise<RandomSamplingReadContext | undefined> {
+    if (!this.#contextReader || bindingId === undefined) return undefined;
+    try {
+      const context = await this.#contextReader.readRandomSamplingContext();
+      return context?.bindingId === bindingId ? context : undefined;
     } catch {
       return undefined;
     }
@@ -163,7 +172,7 @@ export class SolvedPeriodSkip {
 
   /** Record only when every live evidence source needed by the guards exists. */
   #observe(input: Readonly<{
-    context?: SolvedPeriodReadContext;
+    context?: RandomSamplingReadContext;
     challenge: NodeChallenge;
     staleness: CachedChallengeStaleness;
     durationInBlocks?: bigint;

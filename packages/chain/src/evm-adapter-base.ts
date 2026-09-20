@@ -310,7 +310,6 @@ import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 
-/** Memory bound for the by-hash receipt block headers; entries never go stale. */
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
  * failing over to the next eligible backend — generous enough for a slow

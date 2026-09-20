@@ -653,6 +653,17 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(h.reads.refreshes).toBe(1);
   });
 
+  it('publishes and reuses a head whose chain timestamp is in the future', async () => {
+    const h = makeHarness();
+    h.chain.headLagSeconds = -60;
+    const published = await h.read();
+
+    h.clock.nowMs += T - 1;
+    expect(await h.read()).toBe(published);
+    expect(h.reads.refreshes).toBe(1);
+    expect(h.served.map(({ source }) => source)).toEqual(['scan', 'cache']);
+  });
+
   it('never retains a projection whose head carries no chain time', async () => {
     const h = makeHarness();
     h.chain.withoutTimestamp = true;

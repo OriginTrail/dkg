@@ -2034,6 +2034,8 @@ export interface ChainAdapter {
   isRandomSamplingReady?(): boolean;
   /** Refresh RandomSampling bindings and read membership through one typed capability. */
   resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
+  /** Cheap synchronous identity of the RandomSampling/Storage pair used by reads. */
+  getRandomSamplingBindingId?(): string | undefined;
   /** Read one pair-and-epoch context for solved-period reuse, or fail open. */
   readRandomSamplingContext?(): Promise<RandomSamplingReadContext | undefined>;
   /** Cheap synchronous guard for a previously sampled Random Sampling binding. */

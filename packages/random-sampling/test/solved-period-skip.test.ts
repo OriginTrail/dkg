@@ -23,6 +23,8 @@ function fixture() {
   };
   const chain = {
     getBlockNumber: vi.fn(async () => state.head),
+    getRandomSamplingBindingId: vi.fn(() =>
+      state.ready ? state.bindingId : undefined),
     readRandomSamplingContext: vi.fn(async () =>
       state.ready && state.bindingId !== undefined
         ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.epoch })
@@ -115,9 +117,13 @@ describe('SolvedPeriodSkip', () => {
     expect((await readWithoutChallenge(skip)).result.kind).toBe('live');
   });
 
-  it('owns capture -> live read -> head ordering', async () => {
+  it('captures the binding before live reads and defers the epoch until a reusable result', async () => {
     const { chain, skip } = fixture();
     const order: string[] = [];
+    vi.mocked(chain.getRandomSamplingBindingId).mockImplementation(() => {
+      order.push('binding');
+      return 'rs-a:rss-a';
+    });
     vi.mocked(chain.readRandomSamplingContext).mockImplementation(async () => {
       order.push('context');
       return { bindingId: 'rs-a:rss-a', chronosEpoch: 3n };
@@ -134,7 +140,15 @@ describe('SolvedPeriodSkip', () => {
         currentChallenge: { challenge: challenge(), durationInBlocks: 100n },
       };
     });
-    expect(order).toEqual(['context', 'live', 'head']);
+    expect(order).toEqual(['binding', 'live', 'head', 'context']);
+  });
+
+  it('does not read the Chronos epoch for a challenge that cannot be reused', async () => {
+    const { chain, skip } = fixture();
+
+    await observe(skip, { challenge: challenge({ solved: false }) });
+
+    expect(chain.readRandomSamplingContext).not.toHaveBeenCalled();
   });
 
   it.each([

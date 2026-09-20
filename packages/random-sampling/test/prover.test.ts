@@ -114,6 +114,8 @@ function makeChain(state: FakeChainState): TestChain {
     && state.bindingId !== undefined
     && state.currentEpoch !== undefined
   ) {
+    chain.getRandomSamplingBindingId = vi.fn(() =>
+      state.randomSamplingReady ? state.bindingId : undefined);
     chain.readRandomSamplingContext = vi.fn(async () =>
       state.randomSamplingReady && state.bindingId !== undefined && state.currentEpoch !== undefined
         ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.currentEpoch })
@@ -1678,7 +1680,9 @@ describe('RandomSamplingProver — solved-period read skip', () => {
 
     state.blockNumber = 1049;
     expect(await prover.tick()).toEqual({ kind: 'cg-not-found', kaId: 7n });
-    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 4, epoch: 4 });
+    // The live reread found an unsolved challenge, so it deliberately skipped
+    // the final Chronos epoch RPC.
+    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 4, epoch: 3 });
     await prover.close();
   });
 
@@ -1937,6 +1941,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const chain = makeChain(state);
     expect(chain.readRandomSamplingContext).toBeUndefined();
     if (exposeCapability) {
+      chain.getRandomSamplingBindingId = vi.fn(() => undefined);
       chain.readRandomSamplingContext = vi.fn(async () => undefined);
       chain.isRandomSamplingReadContextCurrent = vi.fn(() => false);
     }
@@ -2100,7 +2105,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
 
     expect((await prover.tick()).kind).toBe('submitted');
-    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 0, epoch: 1 });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 0, epoch: 0 });
 
     state.challengeForNode = { ...challenge, solved: true };
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });

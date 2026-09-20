@@ -14,6 +14,7 @@ export interface RandomSamplingReadContext {
  * binding guard; consumers either receive the whole capability or none of it.
  */
 export interface RandomSamplingReadContextReader {
+  getRandomSamplingBindingId(): string | undefined;
   readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined>;
   isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean;
 }
@@ -22,13 +23,16 @@ export interface RandomSamplingReadContextReader {
 export function bindRandomSamplingReadContextReader(
   adapter: ChainAdapter,
 ): RandomSamplingReadContextReader | undefined {
+  const getBindingId = adapter.getRandomSamplingBindingId;
   const readContext = adapter.readRandomSamplingContext;
   const isCurrent = adapter.isRandomSamplingReadContextCurrent;
   if (
-    typeof readContext !== 'function'
+    typeof getBindingId !== 'function'
+    || typeof readContext !== 'function'
     || typeof isCurrent !== 'function'
   ) return undefined;
   return Object.freeze({
+    getRandomSamplingBindingId: () => getBindingId.call(adapter),
     readRandomSamplingContext: () => readContext.call(adapter),
     isRandomSamplingReadContextCurrent: (context: RandomSamplingReadContext) =>
       isCurrent.call(adapter, context),

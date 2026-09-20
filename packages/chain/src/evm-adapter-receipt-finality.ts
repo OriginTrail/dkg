@@ -100,14 +100,6 @@ export class EvmReceiptFinalityReader {
     return remembered?.number === blockNumber ? remembered.timestamp : undefined;
   }
 
-  rememberedHeader(blockHash: string): ReceiptBlockHeader | undefined {
-    return this.#headersByHash.get(blockHash.toLowerCase());
-  }
-
-  get retainedHeaderCount(): number {
-    return this.#headersByHash.size;
-  }
-
   clear(): void {
     this.#headersByHash.clear();
   }
