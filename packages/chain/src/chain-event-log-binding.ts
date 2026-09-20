@@ -62,12 +62,16 @@ export interface ChainEventLogBinding {
   readonly knowledgeAssets?: KnowledgeAssetReadModel;
   /**
    * Hub rotations out of the log, or `undefined` when the log cannot prove it
-   * covers the window the listener asked for.
+   * covers the window the listener asked for — or cannot prove it is still
+   * RUNNING. A tick that stopped committing leaves coverage frozen, and frozen
+   * coverage is indistinguishable from a chain that produced no blocks, so the
+   * window is refused once the log's own head read is older than a multiple of
+   * the tick interval.
    *
    * `undefined` is the listener's cue to do exactly what it did before the log
    * existed — one `eth_getBlockNumber` and one `eth_getLogs` against the Hub —
-   * so a cold or lagging log degrades to the old cost and never to a missed
-   * rotation. `lastScannedBlock === undefined` asks for a BASELINE: the window
+   * so a cold, lagging or stalled log degrades to the old cost and never to a
+   * missed rotation. `lastScannedBlock === undefined` asks for a BASELINE: the window
    * comes back with no rotations, because a listener that has never scanned
    * must not replay the history the backfill has since walked into the log.
    */

@@ -91,6 +91,8 @@ export interface EvmChainIndexRuntimeOptions {
   readonly readTipProvider: EvmChainIndexReadProvider;
   readonly onResult?: (result: ChainIndexTickResult) => void;
   readonly onError?: (error: unknown) => void;
+  /** Injected wall clock; late-bound so a faked `Date` is honoured. */
+  readonly now?: () => number;
 }
 
 export interface EvmChainIndexRuntime {
@@ -212,6 +214,34 @@ function chainIndexInitialBindings(
 }
 
 /**
+ * How stale the log's own head may be before the Hub window stops being an
+ * answer at all.
+ *
+ * `readHubRotationWindow` is the one reader that cannot be allowed to degrade
+ * quietly: its "nothing new" window is indistinguishable from a tick that has
+ * stopped committing, and the listener treats any window as handled and skips
+ * its live scan. The rotation invalidation it drives is what flushes the
+ * resolved-address memo, whose 30s TTL exists precisely as the missed-rotation
+ * backstop — so a frozen log must send the listener back to the chain instead
+ * of holding that invalidation for as long as the tick stays quiet.
+ *
+ * `max(3T, floor)` is the shape the sibling projection cache already uses
+ * (`context-graph-authority-index-projection.ts:16-21`): three missed passes
+ * for an operator-sized T, never shorter than one slow failover pass.
+ *
+ * FETCH time, not chain time. An idle devnet legitimately produces no blocks
+ * for an hour, and refusing the window there would put the live scan back for
+ * good — which is the cost this whole change exists to remove. What this guard
+ * is about is whether the TICK is still running, and the tick's tip-sensitive
+ * transport is what keeps the head it commits canonical.
+ */
+const CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS = 15_000;
+
+function chainIndexHubWindowMaxAgeMs(intervalMs: number): number {
+  return Math.max(3 * intervalMs, CHAIN_INDEX_HUB_WINDOW_STALE_FLOOR_MS);
+}
+
+/**
  * Construct — and only construct — the one log for this process.
  *
  * `start()` is separate from construction and never awaited by the caller: a
@@ -225,6 +255,7 @@ export function createEvmChainIndexRuntime(
 ): EvmChainIndexRuntime {
   const registry = chainIndexRegistry(options);
   const readTip = options.readTipProvider;
+  const now = options.now ?? (() => Date.now());
 
   const tick = new ChainIndexTick(
     {
@@ -285,6 +316,7 @@ export function createEvmChainIndexRuntime(
       backfillPageBlocks: options.backfillPageBlocks,
       maxCatchUpBlocks: options.maxCatchUpBlocks,
       initialBindings: chainIndexInitialBindings(options),
+      ...(options.now === undefined ? {} : { now: options.now }),
     },
   );
 
@@ -321,6 +353,13 @@ export function createEvmChainIndexRuntime(
   ): Promise<ChainEventLogHubRotationWindow | undefined> {
     const state = await options.store.load(options.scope);
     if (state === undefined) return undefined;
+    // AGE FIRST, before any branch can answer. A tick that stopped committing
+    // — a lagging endpoint returns before the commit, and the runner then backs
+    // off to 16×T — leaves coverage frozen, and frozen coverage is exactly what
+    // the "nothing new walked" window below is made of. Undefined here is the
+    // listener's cue to do what it did before the log existed.
+    const ageMs = now() - state.cursor.head.fetchedAtMs;
+    if (ageMs > chainIndexHubWindowMaxAgeMs(options.intervalMs)) return undefined;
     const coverage = findChainEventLogCoverage(state.coverage, 'hub', hubAddress);
     if (coverage === undefined) return undefined;
     const through = coverage.coveredThroughBlock;

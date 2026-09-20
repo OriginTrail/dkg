@@ -78,6 +78,8 @@ interface Harness {
   readonly blocks: ReturnType<typeof vi.fn>;
   readonly labels: string[];
   readonly runtime: ReturnType<typeof createEvmChainIndexRuntime>;
+  /** Wall clock the runtime reads, so a quiet tick can be aged on demand. */
+  advanceMs(ms: number): void;
 }
 
 function harness(options?: {
@@ -87,6 +89,7 @@ function harness(options?: {
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
+  let nowMs = 1_700_000_000_000;
   const store = new MemoryChainEventLogStore();
   const labels: string[] = [];
   // Honours the ADDRESS array, not only the range. A fake that ignored it
@@ -143,8 +146,17 @@ function harness(options?: {
       labels.push(label);
       return read(provider as never);
     },
+    now: () => nowMs,
   });
-  return { store, heads, getLogs, blocks, labels, runtime };
+  return {
+    store,
+    heads,
+    getLogs,
+    blocks,
+    labels,
+    runtime,
+    advanceMs: (ms: number) => { nowMs += ms; },
+  };
 }
 
 describe('createEvmChainIndexRuntime', () => {
@@ -275,6 +287,29 @@ describe('createEvmChainIndexRuntime', () => {
     // below that has blocks in between nobody looked at, and a rotation there
     // would be skipped forever if the window were served anyway.
     await expect(h.runtime.binding.readHubRotationWindow!(10, 50)).resolves.toBeUndefined();
+  });
+
+  it('refuses a window the tick has gone quiet under, however servable it looks', async () => {
+    const h = harness({ logs: [rotationLog('ContextGraphStorage', 998, 0)] });
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    // Same call, same coverage, and it IS servable — this is the one below,
+    // asserted here before the clock moves so the refusal cannot be vacuous.
+    await expect(h.runtime.binding.readHubRotationWindow!(1_000, 50))
+      .resolves.toBeDefined();
+
+    // A tick that stopped committing looks exactly like a chain that stopped
+    // producing: coverage frozen, "nothing new walked". The listener treats any
+    // window as handled and skips its live scan, so an hour-old log would hold
+    // Hub-binding invalidation for as long as the tick stayed quiet — against
+    // the 30s memo TTL that is meant to be the backstop.
+    h.advanceMs(3 * 6_000 + 1);
+
+    await expect(h.runtime.binding.readHubRotationWindow!(1_000, 50))
+      .resolves.toBeUndefined();
+    // And the baseline is refused too: a listener with no cursor must not take
+    // one from a log that cannot say how old its own answer is.
+    await expect(h.runtime.binding.readHubRotationWindow!(undefined, 50))
+      .resolves.toBeUndefined();
   });
 
   it('reports an empty window rather than re-dispatching a block it already served', async () => {
