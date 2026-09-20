@@ -1386,7 +1386,7 @@ export class EVMChainAdapterBase {
             options,
           ),
           // The index reader consumes only the deploy block: no head probe on a cache hit.
-          resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+          resolveContractDeployBlockNumber: (address, operationLabel, contractLabel) =>
             this.resolveContractDeployBlockNumber(
               address,
               operationLabel,
