@@ -246,6 +246,21 @@ describe('createEvmChainIndexRuntime', () => {
       .resolves.toBeUndefined();
   });
 
+  it('refuses Hub baseline and empty windows while a fork suspicion is held', async () => {
+    const h = harness();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    const state = (await h.store.load())!;
+    h.store.seed({
+      ...state,
+      suspectedForkBlockNumber: state.cursor.settledBlockNumber,
+    });
+
+    await expect(h.runtime.binding.readHubRotationWindow!(undefined, 50))
+      .resolves.toBeUndefined();
+    await expect(h.runtime.binding.readHubRotationWindow!(1_000, 50))
+      .resolves.toBeUndefined();
+  });
+
   it('answers a BASELINE with no rotations, so history is never replayed', async () => {
     const h = harness({ logs: [rotationLog('ContextGraphStorage', 996, 0)] });
     await h.runtime.tick.runOnce(new AbortController().signal);

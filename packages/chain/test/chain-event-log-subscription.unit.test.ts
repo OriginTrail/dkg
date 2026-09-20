@@ -117,6 +117,16 @@ describe('chain event log subscription', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('refuses retained coverage while a fork suspicion is held', async () => {
+    const store = seeded(10, 90, 85);
+    const state = (await store.load(SCOPE))!;
+    store.seed({ ...state, suspectedForkBlockNumber: 85 });
+
+    await expect(
+      subscription(store).servableRange('context-graph-ka', CG_STORAGE, 50, 90),
+    ).resolves.toBeUndefined();
+  });
+
   it('caps the finalized view at the settled cursor', async () => {
     const store = seeded(10, 90, 85);
     await expect(

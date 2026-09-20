@@ -375,6 +375,12 @@ export function createEvmChainIndexRuntime(
   ): Promise<ChainEventLogHubRotationWindow | undefined> {
     const state = await options.store.load(options.scope);
     if (state === undefined) return undefined;
+    // The suspicion pass deliberately keeps coverage while it waits for a
+    // second hash read. It also refreshes fetchedAtMs, so the age guard below
+    // cannot distinguish those retained, possibly wrong-fork rows from a good
+    // pass. Refuse before the baseline and empty-window shortcuts can suppress
+    // the listener's live scan without consulting `servableRange`.
+    if (state.suspectedForkBlockNumber !== undefined) return undefined;
     // AGE FIRST, before any branch can answer. A tick that stopped committing
     // — a lagging endpoint returns before the commit, and the runner then backs
     // off to 16×T — leaves coverage frozen, and frozen coverage is exactly what

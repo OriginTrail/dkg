@@ -115,6 +115,12 @@ export function createChainEventLogSubscription(
       if (!Number.isSafeInteger(requestedThroughBlockNumber)) return undefined;
       const state = await store.load(scope);
       if (state === undefined) return undefined;
+      // A first settled-hash mismatch retains rows and coverage until a second
+      // pass confirms or withdraws it. None of those rows is a safe answer in
+      // the meantime: a lane that consumes them advances its durable cursor,
+      // so a later tombstone would leave replacement-chain events behind that
+      // cursor forever. Refuse the log and let the caller use its live scan.
+      if (state.suspectedForkBlockNumber !== undefined) return undefined;
       const coverage = findChainEventLogCoverage(state.coverage, family, normalized);
       if (coverage === undefined) return undefined;
 
