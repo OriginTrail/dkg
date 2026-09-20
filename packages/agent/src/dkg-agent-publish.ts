@@ -3940,18 +3940,13 @@ export class PublishMethods extends DKGAgentBase {
       // fails closed.
       let policyState: 0 | 1 | 'unregistered' | 'unknown';
       try {
-        if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
-          const policy = await withRpcUsageSite(
-            CG_AUTH_RPC_SITES.curatedProbe,
-            () => this.readLiveOnChainAccessPolicy(cgId.trim(), ctx),
-          );
-          policyState = policy === 0 || policy === 1 ? policy : 'unknown';
-        } else {
-          policyState = await withRpcUsageSite(
-            CG_AUTH_RPC_SITES.curatedProbe,
-            () => this.resolveOnChainAccessPolicyState(cgId, ctx),
-          );
-        }
+        policyState = await withRpcUsageSite(CG_AUTH_RPC_SITES.curatedProbe, async () => {
+          if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
+            const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
+            return policy === 0 || policy === 1 ? policy : 'unknown';
+          }
+          return this.resolveOnChainAccessPolicyState(cgId, ctx);
+        });
       } catch (err) {
         this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
         return null;

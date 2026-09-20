@@ -34,6 +34,8 @@ import {
   withRpcUsageConsumer,
   withRpcUsageSite,
 } from '../src/rpc-usage.js';
+import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES } from
+  '../src/context-graph-authority-rpc-sites.js';
 import { createRpcRequestProvider } from '../src/rpc-request-transport.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
@@ -388,6 +390,25 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     });
   });
 
+  it('keeps the authority site vocabulary unique, normalized and composable', () => {
+    const sites = Object.values(CONTEXT_GRAPH_AUTHORITY_RPC_SITES);
+    expect(new Set(sites).size).toBe(sites.length);
+    for (const site of sites) {
+      expect(normalizeRpcUsageConsumer(site)).toBe(site);
+      expect(`cgStorage.getContextGraph:${site}`.length).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('does not append an authority site to unrelated eth_call consumers', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageSite('cgAuth.syncAuthz', () => {
+      withRpcUsageConsumer('pcaNFT.getAccountInfo', () => t.record('eth_call'));
+    });
+    expect(t.drainWindow().ethCallByConsumer).toEqual({
+      'pcaNFT.getAccountInfo': 1,
+    });
+  });
+
   it('keeps the OUTERMOST call site: a funnel entry never overwrites its caller', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     withRpcUsageSite('cgAuth.syncAuthz', () => {
@@ -435,14 +456,14 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     });
   });
 
-  it('attributes eth_getLogs to the call site as well', () => {
+  it('does not relabel unrelated eth_getLogs inside an authority site scope', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     withRpcUsageSite('cgAuth.rfc64Roster', () => {
       withRpcUsageConsumer('cg.authority.history', () => t.record('eth_getLogs', 0));
     });
     expect(t.drainWindow().attributions).toEqual([{
       method: 'eth_getLogs',
-      consumer: 'cg.authority.history:cgAuth.rfc64Roster',
+      consumer: 'cg.authority.history',
       endpointSlot: 'primary',
       count: 1,
     }]);

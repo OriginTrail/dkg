@@ -8,6 +8,7 @@ import {
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
 import { ContextGraphAuthorityIndexRetryableError } from
   '../src/context-graph-authority-index-errors.js';
+import { RpcEndpointsExhaustedError } from '../src/chain-rpc-transport-error.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
@@ -448,6 +449,21 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(h.reads.refreshes).toBe(3);
   });
 
+  it('never masks a deterministic refresh fault with stale authority or backoff', async () => {
+    const h = makeHarness();
+    await h.read();
+    h.clock.nowMs += T;
+    const fault = new Error('authority response violated its deterministic shape');
+    h.failRefresh(fault);
+
+    await expect(h.read()).rejects.toBe(fault);
+    await expect(h.read()).rejects.toBe(fault);
+    expect(h.served.map(({ source }) => source)).toEqual(['scan']);
+    // A deterministic fault is retried and reported on every read; it never
+    // arms the one-tick transport-outage backoff.
+    expect(h.reads.refreshes).toBe(3);
+  });
+
   it('publishes a lower stabilized head after the retained newer head expires', async () => {
     const h = makeHarness();
     const newer = await h.read();
@@ -471,7 +487,7 @@ describe('finalized Context Graph authority projection cache', () => {
   it('pays one failed refresh per tick during an outage, not one per read', async () => {
     const h = makeHarness();
     const cached = await h.read();
-    h.failRefresh(new Error('provider pool is down'));
+    h.failRefresh(new RpcEndpointsExhaustedError('provider pool is down'));
 
     h.clock.nowMs = START_MS + T;
     expect(await h.read()).toBe(cached);
@@ -722,7 +738,7 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(lagging.head.number).toBe(24);
 
     h.chain.head = 25;
-    h.failRefresh(new Error('provider pool is down'));
+    h.failRefresh(new RpcEndpointsExhaustedError('provider pool is down'));
     h.clock.nowMs += 1;
     expect(await h.read()).toBe(newer);
   });

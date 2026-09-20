@@ -349,6 +349,9 @@ export function withRpcUsageSite<T>(site: ContextGraphAuthorityRpcSite, fn: () =
   return rpcUsageSiteContext.run(normalized, fn);
 }
 
+/** The only transport read whose shared label is split by authority call site. */
+const CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER = 'cgStorage.getContextGraph';
+
 /** Current diagnostic consumer label, if a caller established one. */
 function activeRpcUsageConsumer(): string | undefined {
   return rpcUsageConsumerContext.getStore();
@@ -360,15 +363,18 @@ function activeRpcUsageSite(): string | undefined {
 }
 
 /**
- * `readLabel:site` when a call site is in scope, the bare read label
- * otherwise. Both halves are already normalized, so the composition only has
- * to stay inside the logfmt token bound.
+ * `readLabel:site` for the one Context Graph authority funnel when a call site
+ * is in scope; all unrelated reads keep their bare consumer. Both halves are
+ * already normalized, so the composition only has to stay inside the logfmt
+ * token bound.
  */
 function composeRpcUsageConsumer(
   consumer: string,
   site: string | undefined,
 ): string {
-  if (site === undefined) return consumer;
+  if (site === undefined || consumer !== CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER) {
+    return consumer;
+  }
   const composed = `${consumer}:${site}`;
   return composed.length > MAX_RPC_USAGE_CONSUMER_CHARS ? consumer : composed;
 }
@@ -454,10 +460,10 @@ export class RpcUsageTracker {
       }
     }
     if (raw === 'eth_getLogs') {
-      const consumer = composeRpcUsageConsumer(
-        activeRpcUsageConsumer() ?? 'unattributed',
-        activeRpcUsageSite(),
-      );
+      // Authority sites describe the `getContextGraph` eth_call funnel only;
+      // they must not relabel unrelated log scans that happen in the same ALS
+      // scope.
+      const consumer = activeRpcUsageConsumer() ?? 'unattributed';
       const slot = boundedRpcEndpointSlotLabel(endpointSlot);
       const rawKey = `${consumer}\0${slot}`;
       const overflowKey = 'other\0other';

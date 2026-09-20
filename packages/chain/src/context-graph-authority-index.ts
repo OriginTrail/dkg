@@ -28,8 +28,9 @@ import {
 } from './context-graph-authority-index-projection.js';
 import { ContextGraphAuthorityIndexBootstrapCoordinator } from
   './context-graph-authority-index-bootstrap.js';
-import { ContextGraphAuthorityIndexActivity, waitForAuthorityIndexOperation } from
+import { ContextGraphAuthorityIndexActivity } from
   './context-graph-authority-index-activity.js';
+import { waitForSignal } from './wait-for-signal.js';
 import {
   authorityIndexSnapshotWithinSizeLimit,
   ContextGraphAuthorityIndexSnapshotExportError,
@@ -267,7 +268,7 @@ export class ContextGraphAuthorityIndex {
       } }, lifecycleSignal);
       return this.#activity.track(scan);
     });
-    return waitForAuthorityIndexOperation(pending, input.signal);
+    return waitForSignal(pending, input.signal);
   }
 
   async #scan(

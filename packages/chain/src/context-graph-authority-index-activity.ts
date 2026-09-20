@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { waitForSignal } from './wait-for-signal.js';
+
 /** Shared ownership of scans and their independently cancellable physical work. */
 export class ContextGraphAuthorityIndexActivity {
   readonly #pending = new Set<Promise<unknown>>();
@@ -16,7 +18,7 @@ export class ContextGraphAuthorityIndexActivity {
     signal.throwIfAborted();
     // The waiter may time out before an uncooperative transport/store settles.
     // Keep physical ownership so close()/whenIdle() still drain that operation.
-    return waitForAuthorityIndexOperation(this.track(operation()), signal);
+    return waitForSignal(this.track(operation()), signal);
   }
 
   async whenIdle(): Promise<void> {
@@ -26,20 +28,4 @@ export class ContextGraphAuthorityIndexActivity {
       if (revision === this.#revision && this.#pending.size === 0) return;
     }
   }
-}
-
-/** Cancellation ends this waiter without abandoning the tracked physical work. */
-export function waitForAuthorityIndexOperation<T>(
-  pending: Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  if (signal === undefined) return pending;
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-    signal.addEventListener('abort', onAbort, { once: true });
-    void pending.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
 }

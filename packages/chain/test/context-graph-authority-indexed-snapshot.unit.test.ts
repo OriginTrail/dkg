@@ -10,6 +10,7 @@ import { ContextGraphAuthorityIndexRetryableError } from
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { activeRpcRequestAbortSignal } from '../src/rpc-request-transport.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { RpcEndpointsExhaustedError } from '../src/chain-rpc-transport-error.js';
 import {
   createAbortableTipReader,
   MemoryAuthorityIndexStore,
@@ -1692,6 +1693,29 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
 
     expect(after.policyVersion).not.toBe(before.policyVersion);
     expect(harness.evidence.headReads).toEqual([30, 35]);
+  });
+
+  it('serves a warm adapter projection as stale-cache only after a real refresh outage', async () => {
+    const harness = makeTimedAdapter();
+    const served: string[] = [];
+    const options = {
+      onContextGraphAuthorityProjectionServed: ({ source }: { source: string }) => {
+        served.push(source);
+      },
+    };
+    const warm = await harness.adapter.getContextGraphAuthoritySnapshot(9n, options);
+    const reads = rpcReads(harness);
+    (harness.adapter as any).readTipProvider = async () => {
+      throw new RpcEndpointsExhaustedError('authority provider pool exhausted');
+    };
+
+    vi.setSystemTime(START_MS + T);
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n, options))
+      .resolves.toEqual(warm);
+    expect(served).toEqual(['scan', 'stale-cache']);
+    // The failing adapter refresh never reaches a provider read in this
+    // fixture, so only the warm scan contributes evidence counters.
+    expect(rpcReads(harness)).toBe(reads);
   });
 
   it('honours an operator-configured chain.indexTickMs', async () => {

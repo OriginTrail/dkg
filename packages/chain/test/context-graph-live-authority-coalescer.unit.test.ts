@@ -83,6 +83,19 @@ function coalescer(
 }
 
 describe('ContextGraphLiveAuthorityCoalescer', () => {
+  it('never abandons the first caller when an injected defer dispatches synchronously', async () => {
+    let calls = 0;
+    const flight = new ContextGraphLiveAuthorityCoalescer<Authority>({
+      defer: (dispatch) => dispatch(),
+    });
+
+    await expect(flight.run(KEY, async () => {
+      calls += 1;
+      return { id: 'live' };
+    })).resolves.toEqual({ id: 'live' });
+    expect(calls).toBe(1);
+  });
+
   it('#2666: a joiner never inherits the initiator\'s failed read; they share ONE re-read', async () => {
     const scheduler = manualScheduler();
     const flight = coalescer(scheduler);

@@ -376,6 +376,38 @@ describe('agent-bound chain reads keep their arity, signal and receiver', () => 
     expect(live.mock.contexts[0]).toBe(chain);
   });
 
+  it('aborts the single-read flight when the bounded deadline expires', async () => {
+    const { agent: bound, chain } = await boundAgent('BinderLiveDeadline');
+    let forwarded: AbortSignal | undefined;
+    vi.spyOn(chain, 'getContextGraphLiveAuthority')
+      .mockImplementation(async (_id, options) => {
+        forwarded = options?.signal;
+        return new Promise<ContextGraphLiveAuthority>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+            once: true,
+          });
+        });
+      });
+
+    vi.useFakeTimers();
+    try {
+      const resolving = bound.resolveRegisteredContextGraphAuthority('cg');
+      // Dispatch the coalescer's same-turn batch, then expire the caller-owned
+      // policy-read budget. The bounded caller must leave the shared flight.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(forwarded).toBeInstanceOf(AbortSignal);
+      expect(forwarded?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(forwarded?.aborted).toBe(true);
+      await expect(resolving).resolves.toMatchObject({
+        kind: 'unavailable',
+        reason: 'chain-access-policy-timeout',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('hands it to both point reads on the fallback leg too', async () => {
     const { agent: bound, chain } = await boundAgent('BinderPointReads');
     vi.spyOn(chain, 'getContextGraphLiveAuthority')

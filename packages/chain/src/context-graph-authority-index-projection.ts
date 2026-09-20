@@ -9,10 +9,10 @@ import type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 import { normalizeContextGraphAuthorityHash as normalizeHash } from
   './context-graph-authority-generation.js';
-import { waitForAuthorityIndexOperation } from
-  './context-graph-authority-index-activity.js';
+import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { isContextGraphAuthorityIndexRetryableError } from
   './context-graph-authority-index-errors.js';
+import { waitForSignal } from './wait-for-signal.js';
 
 /** Default `chain.indexTickMs`: how long one completed projection answers reads. */
 export const DEFAULT_CONTEXT_GRAPH_AUTHORITY_INDEX_TICK_MS = 6_000;
@@ -245,12 +245,14 @@ export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
  * failed, they inherit none of that: each simply runs its own read, which is
  * exactly what it would have done before this cache existed.
  *
- * FAIL CLOSED. A failed refresh may be papered over by the previous projection
- * only while that projection is at most `min(max(3T, 15s), 5m)` old by fetch
- * time AND its head is within the chain-time tolerance. Past either bound the
- * refresh's OWN error is rethrown untouched, so typed transport failures
- * (`RPC_ENDPOINTS_EXHAUSTED`) keep reaching the RFC-64 circuit breaker. A
- * failure is never turned into an absent, public or zero answer.
+ * FAIL CLOSED. Only a typed chain-transport availability failure may be
+ * papered over by the previous projection, and only while that projection is
+ * at most `min(max(3T, 15s), 5m)` old by fetch time AND its head is within the
+ * chain-time tolerance. Deterministic refresh faults propagate immediately
+ * and do not arm backoff. Past either age bound the refresh's OWN transport
+ * error is rethrown untouched, so typed failures keep reaching the RFC-64
+ * circuit breaker. A failure is never turned into an absent, public or zero
+ * answer.
  */
 export class ContextGraphAuthorityIndexProjectionCache {
   readonly tickMs: number;
@@ -318,7 +320,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
       if (refreshing === undefined) break;
       // `refreshing` never rejects: the initiator's abort, timeout or failure
       // is its own. This waiter only learns that the refresh settled.
-      await waitForAuthorityIndexOperation(refreshing, input.signal);
+      await waitForSignal(refreshing, input.signal);
       const published = this.#serve(input, 'backing-off');
       if (published.hit) return published.value;
     }
@@ -358,6 +360,10 @@ export class ContextGraphAuthorityIndexProjectionCache {
         if (generation === this.#generation(input.scope)) this.drop(input.scope);
         throw error;
       }
+      // Only the chain transport boundary proves an availability outage. A
+      // plain/deterministic fault must never be hidden behind stale authority
+      // or arm a one-tick backoff that would keep hiding it from later reads.
+      if (!isChainRpcTransportError(error)) throw error;
       if (generation === this.#generation(input.scope)) {
         this.#failedAtMs.set(input.scope, this.#now());
       }

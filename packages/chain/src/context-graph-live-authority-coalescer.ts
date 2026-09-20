@@ -5,7 +5,7 @@ import {
   withOwnedRpcRequestContext,
   type RpcRequestClass,
 } from './rpc-request-transport.js';
-import { waitForSignal } from './keyed-ttl-single-flight-cache.js';
+import { waitForSignal } from './wait-for-signal.js';
 
 /**
  * In-flight de-duplication for the one-read Context Graph live authority.
@@ -89,7 +89,9 @@ interface ContextGraphLiveAuthorityPartition<V> {
 export interface ContextGraphLiveAuthorityCoalescerOptions {
   /**
    * How dispatch is deferred so same-turn callers batch into one read. A
-   * macrotask by default; tests inject a deterministic scheduler.
+   * macrotask by default; tests inject a deterministic scheduler. A synchronous
+   * implementation is supported (without same-turn batching) and never loses
+   * the initiating waiter.
    */
   readonly defer?: (dispatch: () => void) => void;
   /**
@@ -178,7 +180,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       const pending = partition.pending.get(key);
       const initiated = pending === undefined;
       const flight = pending ?? this.#open(partition, key, load, requestClass);
-      flight.waiters += 1;
+      if (!initiated) flight.waiters += 1;
       let outcome: ContextGraphLiveAuthorityFlightOutcome<V>;
       try {
         // The flight's promise never rejects, so this can only reject for THIS
@@ -220,7 +222,9 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
     const flight: ContextGraphLiveAuthorityFlight<V> = {
       controller,
       outcome,
-      waiters: 0,
+      // Enrol the initiating caller before `defer` is invoked: an injected
+      // synchronous scheduler may dispatch immediately from this method.
+      waiters: 1,
       dispatched: false,
       settled: false,
     };
