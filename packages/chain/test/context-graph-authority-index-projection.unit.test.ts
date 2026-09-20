@@ -2,9 +2,6 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS as ROOT_MAX_TARGETS,
-} from '../src/index.js';
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
 import { ContextGraphAuthorityIndexRetryableError } from
   '../src/context-graph-authority-index-errors.js';
@@ -176,10 +173,6 @@ describe('authority projection scope', () => {
 });
 
 describe('chain.indexTickMs', () => {
-  it('keeps the legacy target-limit symbol available from the package root', () => {
-    expect(ROOT_MAX_TARGETS).toBe(4_096);
-  });
-
   it('defaults to 6s and rejects everything that is not a positive integer', () => {
     expect(resolveContextGraphAuthorityIndexTickMs(undefined)).toBe(6_000);
     expect(resolveContextGraphAuthorityIndexTickMs(250)).toBe(250);

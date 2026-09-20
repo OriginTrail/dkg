@@ -596,15 +596,23 @@ function isHistoricalStateUnavailable(err: unknown): boolean {
   );
 }
 
+function contractHandleTargetAddress(contract: Contract | undefined): string | undefined {
+  const target = (contract as any)?.target;
+  if (typeof target !== 'string') return undefined;
+  try {
+    return ethers.getAddress(target);
+  } catch {
+    return undefined;
+  }
+}
+
 async function contractAddress(contract: Contract): Promise<string> {
   const getAddress = (contract as any).getAddress;
   if (typeof getAddress === 'function') {
     return ethers.getAddress(await getAddress.call(contract));
   }
-  const target = (contract as any).target;
-  if (typeof target === 'string') {
-    return ethers.getAddress(target);
-  }
+  const target = contractHandleTargetAddress(contract);
+  if (target !== undefined) return target;
   throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
 }
 
@@ -3617,13 +3625,12 @@ export class EVMChainAdapterBase {
     operationLabel: string,
     contractLabel: string,
   ): Promise<number> {
-    const cached = this.#cachedContractDeployBlock(address);
+    const cached = this.cachedContractDeployBlocks.get(address.toLowerCase());
     if (cached !== undefined) return cached;
     return (await this.resolveContractDeployBlock(
       address,
       operationLabel,
       contractLabel,
-      { cacheMissKnown: true },
     )).fromBlock;
   }
 
@@ -3631,7 +3638,6 @@ export class EVMChainAdapterBase {
     address: string,
     operationLabel: string,
     contractLabel: string,
-    cache: Readonly<{ cacheMissKnown?: boolean }> = {},
   ): Promise<{
     fromBlock: number;
     head: number;
@@ -3681,12 +3687,8 @@ export class EVMChainAdapterBase {
     // 2. Deploy block (immutable): cache hit, else binary-search a backend that
     //    serves historical getCode — each search uses ITS OWN head (self-
     //    consistent); fail over across backends, freshest-first.
-    const cacheKey = this.#contractDeployBlockCacheKey(address);
-    // The block-only path already performed this immutable-cache lookup. Its
-    // explicit miss marker prevents a second lookup before the cold scan.
-    const cached = cache.cacheMissKnown === true
-      ? undefined
-      : this.#cachedContractDeployBlock(address);
+    const cacheKey = address.toLowerCase();
+    const cached = this.cachedContractDeployBlocks.get(cacheKey);
     if (cached !== undefined) return { fromBlock: cached, head, scanProviders: reachable };
     let throttle: unknown; // a transient rate-limit/throttle seen during the search
     const throttledProviders = new Set<JsonRpcProvider>();
@@ -3754,14 +3756,6 @@ export class EVMChainAdapterBase {
     const scanProviders = reachable.filter((r) => !throttledProviders.has(r.provider));
     if (scanProviders.length === 0) throw throttle;
     return { fromBlock: 0, head, scanProviders, degradedFromGenesis: true };
-  }
-
-  #contractDeployBlockCacheKey(address: string): string {
-    return address.toLowerCase();
-  }
-
-  #cachedContractDeployBlock(address: string): number | undefined {
-    return this.cachedContractDeployBlocks.get(this.#contractDeployBlockCacheKey(address));
   }
 
   /**
@@ -4265,11 +4259,9 @@ export class EVMChainAdapterBase {
 
   /** Synchronous identity derived from the handles that reads actually use. */
   getRandomSamplingBindingId(): string | undefined {
-    const rsTarget = (this.contracts.randomSampling as { target?: unknown } | undefined)?.target;
-    const rssTarget = (
-      this.contracts.randomSamplingStorage as { target?: unknown } | undefined
-    )?.target;
-    if (typeof rsTarget !== 'string' || typeof rssTarget !== 'string') return undefined;
+    const rsTarget = contractHandleTargetAddress(this.contracts.randomSampling);
+    const rssTarget = contractHandleTargetAddress(this.contracts.randomSamplingStorage);
+    if (rsTarget === undefined || rssTarget === undefined) return undefined;
     return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
   }
 

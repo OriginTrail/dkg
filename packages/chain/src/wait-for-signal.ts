@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
+/** Canonical AbortError shape for shared chain work and its waiters. */
+export function abortError(message: string): Error {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
 /** Waiter-local cancellation for a generic shared operation. */
 function waiterAbortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
-    : Object.assign(new Error('Shared request waiter aborted'), { name: 'AbortError' });
+    : abortError('Shared request waiter aborted');
 }
 
 export async function waitForSignal<T>(

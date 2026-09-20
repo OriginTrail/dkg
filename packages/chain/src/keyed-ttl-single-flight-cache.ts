@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { waitForSignal } from './wait-for-signal.js';
+import { abortError, waitForSignal } from './wait-for-signal.js';
 
 export interface TtlValueCacheOptions<V> {
   ttlMs: number | ((value: CacheValue<V>) => number);
@@ -184,12 +184,6 @@ export interface AbortableKeyedFlightResult<V> {
   /** True only for the caller that opened this physical flight. */
   readonly initiated: boolean;
   readonly value: V;
-}
-
-function abortError(message: string): Error {
-  const error = new Error(message);
-  error.name = 'AbortError';
-  return error;
 }
 
 /**

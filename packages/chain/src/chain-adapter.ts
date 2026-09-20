@@ -572,13 +572,6 @@ export interface ContextGraphAuthoritySnapshot {
 }
 
 /**
- * @deprecated Finalized authority readers no longer chunk logical target sets;
- * they project an unbounded target set from one contract-wide finalized view.
- * Retained only so existing package-root imports keep compiling.
- */
-export const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS = 4_096;
-
-/**
  * Logical finalized-authority capability. Callers provide the complete target
  * set for one operation; the chain implementation owns validation, projection,
  * and the single finalized anchor.

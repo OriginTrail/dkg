@@ -1853,7 +1853,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           readSignal.throwIfAborted();
           if (target === null) return null;
           const { expectedNameHash, expectedOnChainId } = target;
-          if (target.kind !== 'resolved-snapshot') evidence.markRpcAttempt();
           const snapshot = parseRfc64AuthoritySnapshotV1(
             target.kind === 'resolved-snapshot'
               ? target.finalizedSnapshot

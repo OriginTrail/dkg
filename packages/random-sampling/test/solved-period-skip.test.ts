@@ -8,9 +8,9 @@ import type {
 } from '@origintrail-official/dkg-chain';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  readCachedChallengeStaleness,
   SOLVED_PERIOD_MAX_SKIP_MS,
   SolvedPeriodSkip,
+  type SolvedPeriodReadResult,
 } from '../src/solved-period-skip.js';
 
 function fixture() {
@@ -34,49 +34,68 @@ function fixture() {
   return { state, chain, skip };
 }
 
-async function remember(skip: SolvedPeriodSkip): Promise<void> {
-  const context = await skip.captureReadContext();
-  expect(context).toBeDefined();
-  expect(skip.observe({
-    context,
-    challenge: {
-      epoch: 3n,
-      activeProofPeriodStartBlock: 1000n,
-    } as NodeChallenge,
-    staleness: { stale: false, head: 1010n },
-    durationInBlocks: 100n,
-  })).toBe(true);
+function challenge(overrides: Partial<NodeChallenge> = {}): NodeChallenge {
+  return {
+    epoch: 3n,
+    activeProofPeriodStartBlock: 1000n,
+    proofingPeriodDurationInBlocks: 100n,
+    solved: true,
+    ...overrides,
+  } as NodeChallenge;
+}
+
+async function observe(
+  skip: SolvedPeriodSkip,
+  options: Readonly<{
+    value?: string;
+    challenge?: NodeChallenge;
+    durationInBlocks?: bigint;
+    includeDuration?: boolean;
+  }> = {},
+): Promise<SolvedPeriodReadResult<string>> {
+  const liveChallenge = options.challenge ?? challenge();
+  return skip.read(async () => ({
+    value: options.value ?? 'live',
+    currentChallenge: {
+      challenge: liveChallenge,
+      ...(options.includeDuration === false
+        ? {}
+        : { durationInBlocks: options.durationInBlocks ?? 100n }),
+    },
+  }));
+}
+
+async function readWithoutChallenge(skip: SolvedPeriodSkip) {
+  const read = vi.fn(async () => ({ value: 'live' }));
+  const result = await skip.read(read);
+  return { read, result };
 }
 
 describe('SolvedPeriodSkip', () => {
   it('reuses only inside the head, half-period, time, pair, and epoch guards', async () => {
     const { state, skip } = fixture();
-    await remember(skip);
+    expect((await observe(skip)).kind).toBe('live');
     state.head = 1059;
-    expect(await skip.reusable()).toMatchObject({ periodStartBlock: 1000n });
+    const reused = await readWithoutChallenge(skip);
+    expect(reused.result).toMatchObject({ kind: 'reused', record: { periodStartBlock: 1000n } });
+    expect(reused.read).not.toHaveBeenCalled();
 
     state.head = 1060;
-    expect(await skip.reusable()).toBeUndefined();
+    const live = await readWithoutChallenge(skip);
+    expect(live.result.kind).toBe('live');
+    expect(live.read).toHaveBeenCalledOnce();
   });
 
   it('caps a late observation at the last open-period block', async () => {
     const { state, skip } = fixture();
     state.head = 1075;
-    const context = await skip.captureReadContext();
-    expect(skip.observe({
-      context,
-      challenge: {
-        epoch: 3n,
-        activeProofPeriodStartBlock: 1000n,
-      } as NodeChallenge,
-      staleness: { stale: false, head: 1075n },
-      durationInBlocks: 100n,
-    })).toBe(true);
+    await observe(skip);
 
     state.head = 1098;
-    expect(await skip.reusable()).toMatchObject({ rereadAtBlock: 1099n });
+    expect((await readWithoutChallenge(skip)).result)
+      .toMatchObject({ kind: 'reused', record: { rereadAtBlock: 1099n } });
     state.head = 1099;
-    expect(await skip.reusable()).toBeUndefined();
+    expect((await readWithoutChallenge(skip)).result.kind).toBe('live');
   });
 
   it.each([
@@ -90,89 +109,80 @@ describe('SolvedPeriodSkip', () => {
     }],
   ] as const)('forgets the record on %s', async (_label, mutate) => {
     const { state, skip } = fixture();
-    await remember(skip);
+    await observe(skip);
     mutate(state);
-    expect(await skip.reusable()).toBeUndefined();
-    expect(await skip.reusable()).toBeUndefined();
+    expect((await readWithoutChallenge(skip)).result.kind).toBe('live');
+    expect((await readWithoutChallenge(skip)).result.kind).toBe('live');
+  });
+
+  it('owns capture -> live read -> head ordering', async () => {
+    const { chain, skip } = fixture();
+    const order: string[] = [];
+    vi.mocked(chain.readRandomSamplingContext).mockImplementation(async () => {
+      order.push('context');
+      return { bindingId: 'rs-a:rss-a', chronosEpoch: 3n };
+    });
+    vi.mocked(chain.getBlockNumber!).mockImplementation(async () => {
+      order.push('head');
+      return 1010;
+    });
+
+    await skip.read(async () => {
+      order.push('live');
+      return {
+        value: 'live',
+        currentChallenge: { challenge: challenge(), durationInBlocks: 100n },
+      };
+    });
+    expect(order).toEqual(['context', 'live', 'head']);
   });
 
   it.each([
-    ['binding rotation', (state: ReturnType<typeof fixture>['state']) => { state.bindingId = 'rs-b:rss-b'; }],
-    ['binding clear', (state: ReturnType<typeof fixture>['state']) => { state.ready = false; }],
-    ['wall-clock bound', (state: ReturnType<typeof fixture>['state']) => {
-      state.now = SOLVED_PERIOD_MAX_SKIP_MS;
-    }],
-  ] as const)('rejects %s before spending head or epoch RPCs', async (_label, mutate) => {
-    const { state, chain, skip } = fixture();
-    await remember(skip);
-    vi.mocked(chain.getBlockNumber!).mockClear();
-    vi.mocked(chain.readRandomSamplingContext).mockClear();
-
-    mutate(state);
-    expect(await skip.reusable()).toBeUndefined();
-    expect(chain.getBlockNumber).not.toHaveBeenCalled();
-    expect(chain.readRandomSamplingContext).not.toHaveBeenCalled();
+    ['missing context', (f: ReturnType<typeof fixture>) => { f.state.ready = false; }, {}],
+    ['missing head', (f: ReturnType<typeof fixture>) => {
+      vi.mocked(f.chain.getBlockNumber!).mockRejectedValue(new Error('head unavailable'));
+    }, {}],
+    ['missing live duration', () => undefined, { includeDuration: false }],
+    ['zero live duration', () => undefined, { durationInBlocks: 0n }],
+  ] as const)('does not record with %s', async (_label, arrange, options) => {
+    const f = fixture();
+    arrange(f);
+    await observe(f.skip, options);
+    const next = await readWithoutChallenge(f.skip);
+    expect(next.result.kind).toBe('live');
+    expect(next.read).toHaveBeenCalledOnce();
   });
 
-  it('refuses to record unless context, head, and a positive live duration are present', async () => {
-    const { skip } = fixture();
-    const context = await skip.captureReadContext();
-    const challenge = {
-      epoch: 3n,
-      activeProofPeriodStartBlock: 1000n,
-    } as NodeChallenge;
-
-    expect(skip.observe({
-      context: undefined,
-      challenge,
-      staleness: { stale: false, head: 1010n },
-      durationInBlocks: 100n,
-    })).toBe(false);
-    expect(skip.observe({
-      context,
-      challenge,
-      staleness: { stale: false },
-      durationInBlocks: 100n,
-    })).toBe(false);
-    expect(skip.observe({
-      context,
-      challenge,
-      staleness: { stale: false, head: 1010n },
-    })).toBe(false);
-    expect(skip.observe({
-      context,
-      challenge,
-      staleness: { stale: false, head: 1010n },
-      durationInBlocks: 0n,
-    })).toBe(false);
-  });
-
-  it('does not capture a reusable context without every capability', async () => {
+  it('does not record without every read-context capability', async () => {
     const { chain } = fixture();
     Reflect.deleteProperty(chain, 'isRandomSamplingReadContextCurrent');
-    expect(await new SolvedPeriodSkip(chain).captureReadContext()).toBeUndefined();
+    const skip = new SolvedPeriodSkip(chain);
+    await observe(skip);
+    expect((await readWithoutChallenge(skip)).result.kind).toBe('live');
   });
 
-  it('treats a read-context failure as unavailable context', async () => {
+  it('treats a read-context failure as unavailable for that observation', async () => {
     const { chain, skip } = fixture();
     vi.mocked(chain.readRandomSamplingContext)
       .mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
 
-    await expect(skip.captureReadContext()).resolves.toBeUndefined();
-    await expect(skip.captureReadContext()).resolves.toMatchObject({ chronosEpoch: 3n });
+    await observe(skip);
+    expect((await observe(skip)).kind).toBe('live');
+    expect((await readWithoutChallenge(skip)).result.kind).toBe('reused');
   });
 
   it('returns the head with the cached-challenge staleness decision', async () => {
-    const { chain, state } = fixture();
-    const challenge = {
-      activeProofPeriodStartBlock: 1000n,
+    const { chain, state, skip } = fixture();
+    const unsolved = challenge({
       proofingPeriodDurationInBlocks: 20n,
-    } as NodeChallenge;
+      solved: false,
+    });
     state.head = 1019;
-    expect(await readCachedChallengeStaleness(chain, challenge, 20n))
-      .toEqual({ stale: false, head: 1019n });
+    expect(await observe(skip, { challenge: unsolved, durationInBlocks: 20n }))
+      .toMatchObject({ kind: 'live', challengeStaleness: { stale: false, head: 1019n } });
     state.head = 1020;
-    expect(await readCachedChallengeStaleness(chain, challenge, 20n))
-      .toEqual({ stale: true, head: 1020n });
+    expect(await observe(skip, { challenge: unsolved, durationInBlocks: 20n }))
+      .toMatchObject({ kind: 'live', challengeStaleness: { stale: true, head: 1020n } });
+    expect(chain.getBlockNumber).toHaveBeenCalledTimes(2);
   });
 });

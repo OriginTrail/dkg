@@ -4254,10 +4254,9 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.cause).toBeDefined(); // original error preserved
   });
 
-  it('reads the publish receipt block timestamp BY HASH so the finality check\'s header is reused', async () => {
-    // The receipt wait already fetched this block for its canonicality check. Naming the block
-    // by the receipt's hash lets `getBlockTimestamp` answer from that header (hash-keyed, so
-    // never stale) instead of issuing a second eth_getBlockByNumber per publish.
+  it('names the publish receipt block timestamp read by the receipt block hash', async () => {
+    // The parser must pass the canonical receipt block hash through to the
+    // timestamp reader; the separate redundant-head-read suite pins cache reuse.
     const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     const kasInterface = new ethers.Interface(['event KnowledgeAssetCreated(uint256 id, address author)']);
     const created = kasInterface.encodeEventLog('KnowledgeAssetCreated', [55n, ethers.ZeroAddress]);

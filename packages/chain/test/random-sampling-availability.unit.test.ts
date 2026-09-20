@@ -104,6 +104,58 @@ it('exposes the mock Random Sampling pair identity and current epoch', async () 
   await expect(chain.getCurrentEpoch()).resolves.toBe(2n);
 });
 
+it('makes the mock read context unavailable whenever its pair is not ready', async () => {
+  const chain = new MockChainAdapter();
+  const context = await chain.readRandomSamplingContext();
+  expect(context).toBeDefined();
+  vi.spyOn(chain, 'isRandomSamplingReady').mockReturnValue(false);
+  await expect(chain.readRandomSamplingContext()).resolves.toBeUndefined();
+  expect(chain.isRandomSamplingReadContextCurrent(context!)).toBe(false);
+});
+
+it('reads and revalidates a real adapter Random Sampling context as one binding', async () => {
+  const chain = adapter();
+  const getCurrentEpoch = vi.spyOn(chain, 'getCurrentEpoch').mockResolvedValue(17n);
+  await expect(chain.readRandomSamplingContext()).resolves.toBeUndefined();
+  expect(getCurrentEpoch).not.toHaveBeenCalled();
+
+  (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
+  (chain as any).contracts.randomSamplingStorage = new Contract(
+    deployedAddresses.RandomSamplingStorage!,
+    [],
+  );
+  const context = await chain.readRandomSamplingContext();
+  expect(context).toEqual({
+    bindingId: `${deployedAddresses.RandomSampling}:${deployedAddresses.RandomSamplingStorage}`,
+    chronosEpoch: 17n,
+  });
+  expect(chain.isRandomSamplingReadContextCurrent(context!)).toBe(true);
+
+  (chain as any).contracts.randomSampling = new Contract(
+    '0x00000000000000000000000000000000000000aa',
+    [],
+  );
+  expect(chain.isRandomSamplingReadContextCurrent(context!)).toBe(false);
+});
+
+it('fails a real adapter context read open when the pair rotates during the epoch read', async () => {
+  const chain = adapter();
+  (chain as any).contracts.randomSampling = new Contract(deployedAddresses.RandomSampling!, []);
+  (chain as any).contracts.randomSamplingStorage = new Contract(
+    deployedAddresses.RandomSamplingStorage!,
+    [],
+  );
+  vi.spyOn(chain, 'getCurrentEpoch').mockImplementation(async () => {
+    (chain as any).contracts.randomSamplingStorage = new Contract(
+      '0x00000000000000000000000000000000000000bb',
+      [],
+    );
+    return 17n;
+  });
+
+  await expect(chain.readRandomSamplingContext()).resolves.toBeUndefined();
+});
+
 // The prover keys its remembered "period already solved" read on the derived pair.
 // `isRandomSamplingReady()` cannot carry the rotation signal on its own: the
 // 30 s eligibility reconcile below re-binds the pair, so by the prover's next

@@ -350,7 +350,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
         fetchedAtMs,
       });
       if (generation === state.generation) {
-        this.#publish(input.scope, state, projection);
+        this.#publish(state, projection);
       }
       input.onServed?.(Object.freeze({
         source: 'scan',
@@ -392,13 +392,13 @@ export class ContextGraphAuthorityIndexProjectionCache {
   }
 
   #publish(
-    scope: string,
     state: ContextGraphAuthorityProjectionScopeState,
     projection: ContextGraphAuthorityIndexProjection,
   ): void {
-    // Keyed by what was actually scanned. A refresh that resolved another
-    // contract than the one this read was keyed by answers its caller only.
-    if (projection.scope !== scope) return;
+    // Derive the publication key from what was actually scanned. A refresh
+    // that resolved another contract than the initiating read answers its
+    // caller only; it cannot publish through that read's state cell.
+    if (this.#scopes.get(projection.scope) !== state) return;
     // No chain time, no cache: the S2 guard could never be evaluated.
     if (!Number.isSafeInteger(projection.head.timestampSeconds)
       || projection.head.timestampSeconds < 0) return;

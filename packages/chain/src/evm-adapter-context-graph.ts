@@ -104,6 +104,14 @@ const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 type ContextGraphAuthorityMutation = 'addParticipantAgent' | 'removeParticipantAgent';
 
+function sendContextGraphAuthorityTransaction<T>(
+  write: () => Promise<T>,
+  dropProjections: () => void,
+): Promise<T> {
+  // Also on failure: a submission whose receipt was lost may still have landed.
+  return write().finally(dropProjections);
+}
+
 function normalizePageBudget(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) >= 1
     ? Math.floor(value ?? 0)
@@ -891,35 +899,21 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     };
   }
 
-  private sendContextGraphAuthorityTransaction(
-    contextGraphs: Contract,
-    method: ContextGraphAuthorityMutation,
-    contextGraphId: bigint,
-    agent: string,
-    label: string,
-  ) {
-    return this.sendContractTransaction(
-      contextGraphs,
-      method,
-      [contextGraphId, ethers.getAddress(agent)],
-      this.signer,
-      label,
-    // Also on failure: a submission whose receipt was lost may still have landed.
-    ).finally(() => this.contextGraphAuthorityIndex?.dropProjections());
-  }
-
   async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
     await this.init();
     const contextGraphs = this.contracts.contextGraphs;
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContextGraphAuthorityTransaction(
-      contextGraphs,
-      'addParticipantAgent',
-      contextGraphId,
-      agent,
-      'add context graph participant agent',
+    const receipt = await sendContextGraphAuthorityTransaction(
+      () => this.sendContractTransaction(
+        contextGraphs,
+        'addParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        [contextGraphId, ethers.getAddress(agent)],
+        this.signer,
+        'add context graph participant agent',
+      ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
     );
     return {
       hash: receipt.hash,
@@ -935,12 +929,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContextGraphAuthorityTransaction(
-      contextGraphs,
-      'removeParticipantAgent',
-      contextGraphId,
-      agent,
-      'remove context graph participant agent',
+    const receipt = await sendContextGraphAuthorityTransaction(
+      () => this.sendContractTransaction(
+        contextGraphs,
+        'removeParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        [contextGraphId, ethers.getAddress(agent)],
+        this.signer,
+        'remove context graph participant agent',
+      ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
     );
     return {
       hash: receipt.hash,

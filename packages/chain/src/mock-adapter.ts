@@ -1559,7 +1559,8 @@ export class MockChainAdapter implements ChainAdapter {
     return this.rsEpoch;
   }
 
-  async readRandomSamplingContext(): Promise<RandomSamplingReadContext> {
+  async readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined> {
+    if (!this.isRandomSamplingReady()) return undefined;
     return Object.freeze({
       bindingId: this.getRandomSamplingBindingId(),
       chronosEpoch: await this.getCurrentEpoch(),
@@ -1567,7 +1568,8 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   isRandomSamplingReadContextCurrent(context: RandomSamplingReadContext): boolean {
-    return context.bindingId === this.getRandomSamplingBindingId();
+    return this.isRandomSamplingReady()
+      && context.bindingId === this.getRandomSamplingBindingId();
   }
 
   async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
