@@ -154,7 +154,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       // here consumes. The arithmetic — the part that must stay singular — is
       // still `confirmedStateBlockAtHead`, the same function the resolver uses.
       const head = await withRpcUsageConsumer(
-        'kaVersionSnapshot.anchor',
+        'getBlock',
         () => provider.getBlock('latest'),
       );
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
@@ -166,7 +166,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       const block = blockNumber === head.number
         ? head
         : await withRpcUsageConsumer(
-            'kaVersionSnapshot.anchor',
+            'getBlock',
             () => provider.getBlock(blockNumber),
           );
       if (block === null
@@ -276,7 +276,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       }
       options.signal?.throwIfAborted();
       const head = await withRpcUsageConsumer(
-        'kaVersionSnapshot.currentness',
+        'getBlock',
         () => provider.getBlock('latest'),
       );
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
@@ -288,7 +288,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       const block = blockNumber === head.number
         ? head
         : await withRpcUsageConsumer(
-            'kaVersionSnapshot.currentness',
+            'getBlock',
             () => provider.getBlock(blockNumber),
           );
       if (block === null

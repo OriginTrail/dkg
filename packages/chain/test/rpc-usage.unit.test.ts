@@ -473,6 +473,25 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     }
   });
 
+  it('retains every KA version snapshot header consumer literal', () => {
+    const source = readFileSync(fileURLToPath(
+      new URL('../src/evm-adapter-storage-reads.ts', import.meta.url),
+    ), 'utf8');
+    const start = source.indexOf('async readKnowledgeAssetVersionSnapshot(');
+    const end = source.indexOf('async getMerkleLeafCount(', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const consumers = [...source.slice(start, end).matchAll(
+      /withRpcUsageConsumer\(\s*['"]([^'"]+)['"]/g,
+    )].map((match) => match[1]!);
+    expect(consumers).toEqual(['getBlock', 'getBlock', 'getBlock', 'getBlock']);
+    for (const consumer of consumers) {
+      expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(consumer);
+      expect(consumer).not.toBe('other');
+    }
+  });
+
   it('covers every active static resolveContract Hub label from source', () => {
     const sourceRoot = fileURLToPath(new URL('../src', import.meta.url));
     const files: string[] = [];
