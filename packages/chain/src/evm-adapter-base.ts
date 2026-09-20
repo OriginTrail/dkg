@@ -134,14 +134,6 @@ function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
   return createRpcReadDescriptor(label, consumer);
 }
 
-type ReceiptFinalityReadResult = {
-  header: ReceiptBlockHeader;
-  canonical: boolean;
-};
-
-/** Symbol-keyed so mixin-compatible tests can reuse it without widening the public API. */
-const readFinalCanonicalReceiptBlock = Symbol('readFinalCanonicalReceiptBlock');
-
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
  *
@@ -1681,11 +1673,11 @@ export class EVMChainAdapterBase {
     return contract.connect(runner) as Contract;
   }
 
-  /** One receipt-finality implementation shared by polling and public checks. */
-  async [readFinalCanonicalReceiptBlock](
+  /** One finality decision shared by polling and public checks; also memoizes the observed header. */
+  async #isReceiptBlockFinalAndCanonical(
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number },
-  ): Promise<ReceiptBlockHeader | null> {
+  ): Promise<boolean> {
     const resolved = await this.readProviderRetryingNull(
       'publish receipt finality',
       async (provider) => {
@@ -1720,14 +1712,11 @@ export class EVMChainAdapterBase {
           ...(atHeight.timestamp == null ? {} : { timestamp: Number(atHeight.timestamp) }),
         });
         this.receiptBlockHeadersByHash.set(header.hash, header);
-        return {
-          header,
-          canonical: header.hash === receipt.blockHash.toLowerCase(),
-        } satisfies ReceiptFinalityReadResult;
+        return header.hash === receipt.blockHash.toLowerCase();
       },
       { signal: options.signal, deadlineMs: options.deadlineMs },
     );
-    return resolved?.canonical === true ? resolved.header : null;
+    return resolved === true;
   }
 
   protected async waitForReceiptWithFailover(
@@ -1739,9 +1728,8 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
-      isReceiptEligible: async (receipt, { deadlineMs }) => (
-        await this[readFinalCanonicalReceiptBlock](receipt, { deadlineMs })
-      ) !== null,
+      isReceiptEligible: (receipt, { deadlineMs }) =>
+        this.#isReceiptBlockFinalAndCanonical(receipt, { deadlineMs }),
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
@@ -1764,7 +1752,7 @@ export class EVMChainAdapterBase {
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return (await this[readFinalCanonicalReceiptBlock](receipt, options)) !== null;
+    return this.#isReceiptBlockFinalAndCanonical(receipt, options);
   }
 
   protected async signPopulatedTransaction(
@@ -4197,10 +4185,8 @@ export class EVMChainAdapterBase {
 
   /** Synchronous identity derived from the handles that reads actually use. */
   getRandomSamplingBindingId(): string | undefined {
-    const rsTarget = (this.contracts.randomSampling as { target?: unknown } | undefined)?.target;
-    const rssTarget = (
-      this.contracts.randomSamplingStorage as { target?: unknown } | undefined
-    )?.target;
+    const rsTarget = this.contracts.randomSampling?.target;
+    const rssTarget = this.contracts.randomSamplingStorage?.target;
     if (typeof rsTarget !== 'string' || typeof rssTarget !== 'string') return undefined;
     return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
   }
