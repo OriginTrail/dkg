@@ -3505,9 +3505,7 @@ export class EVMChainAdapterBase {
     operationLabel: string,
     contractLabel: string,
   ): Promise<number> {
-    const cached = this.cachedContractDeployBlocks.get(
-      this.#contractDeployBlockCacheKey(address),
-    );
+    const cached = this.#cachedDeployBlock(address);
     if (cached !== undefined) return cached;
     return (await this.resolveContractDeployBlock(address, operationLabel, contractLabel)).fromBlock;
   }
@@ -3566,7 +3564,7 @@ export class EVMChainAdapterBase {
     //    serves historical getCode — each search uses ITS OWN head (self-
     //    consistent); fail over across backends, freshest-first.
     const cacheKey = this.#contractDeployBlockCacheKey(address);
-    const cached = this.cachedContractDeployBlocks.get(cacheKey);
+    const cached = this.#cachedDeployBlock(address);
     if (cached !== undefined) return { fromBlock: cached, head, scanProviders: reachable };
     let throttle: unknown; // a transient rate-limit/throttle seen during the search
     const throttledProviders = new Set<JsonRpcProvider>();
@@ -3638,6 +3636,10 @@ export class EVMChainAdapterBase {
 
   #contractDeployBlockCacheKey(address: string): string {
     return address.toLowerCase();
+  }
+
+  #cachedDeployBlock(address: string): number | undefined {
+    return this.cachedContractDeployBlocks.get(this.#contractDeployBlockCacheKey(address));
   }
 
   /**

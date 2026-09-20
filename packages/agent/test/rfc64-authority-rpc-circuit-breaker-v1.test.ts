@@ -12,6 +12,8 @@ import {
   Rfc64AuthorityReadCoordinatorV1,
   isRfc64AuthorityRpcCircuitOpenErrorV1,
 } from '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
+  '../src/rfc64/catalog-authority-config-v1.js';
 
 function exhausted(retryAfterMs?: number): ChainRpcTransportError {
   return new RpcEndpointsExhaustedError(
@@ -28,6 +30,11 @@ function deterministicFailure(): Error {
 }
 
 describe('RFC-64 authority RPC circuit breaker', () => {
+  it('keeps projection stale-if-error reuse inside the RFC-64 refresh interval', () => {
+    expect(new ContextGraphAuthorityIndexProjectionCache({ tickMs: 180_000 }).staleMs)
+      .toBeLessThanOrEqual(RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs);
+  });
+
   it('shares one open circuit across queued graph refreshes', async () => {
     let now = 1_000;
     let calls = 0;

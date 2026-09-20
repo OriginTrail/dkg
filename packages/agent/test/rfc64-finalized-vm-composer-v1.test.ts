@@ -281,10 +281,7 @@ describe('RFC-64 finalized VM placement composition', () => {
       () => composeFinalizedVmSetV1(requestFor(aboveCatalogBound)),
       'finalized-vm-composition-placement',
     );
-  // This boundary case intentionally mints and verifies 1,025 cryptographic
-  // capabilities. Coverage shards share CPU with many files, so give that
-  // proof workload room without weakening the production bound.
-  }, 180_000);
+  }, 60_000);
 
   it('binds the cleartext catalog lane to the exact same-anchor numeric Context Graph', async () => {
     const placement = await createPlacement(KA_2, ROOT_2);
