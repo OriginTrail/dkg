@@ -99,8 +99,9 @@ registry changes are required.**
 ### Fixed
 
 - Random Sampling period reuse is fenced across generations and adapter
-  teardown; publisher event-horizon leases are revalidated before side effects
-  and cursor persistence.
+  teardown; publisher event-horizon leases are revalidated after each
+  dispatched event and again before cursor persistence, so retirement stops
+  the next event and prevents cursor advancement.
 - Knowledge Asset snapshot reuse is fenced by canonical binding, and publisher
   receipt fixtures use valid canonical contracts.
 - Authority scan progress no longer disappears on daemon restart, and stale or
