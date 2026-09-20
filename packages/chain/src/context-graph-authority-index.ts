@@ -23,7 +23,6 @@ import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 import {
   ContextGraphAuthorityIndexProjectionCache,
   ContextGraphAuthorityIndexView,
-  type ContextGraphAuthorityIndexProjection,
   type ContextGraphAuthorityIndexProjectionOptions,
   type ContextGraphAuthorityIndexProjectionReadInput,
 } from './context-graph-authority-index-projection.js';
