@@ -94,6 +94,34 @@ export const CONTEXT_GRAPH_AUTHORITY_RPC_SITES = Object.freeze({
   swmGateOracle: 'cgAuth.swmGateOracle',
   /** Scoped `agent.query()` — G3, and the harness's polling path. */
   query: 'cgAuth.query',
+  /** Receiver-side SWM apply agent-gate authorization — G3. */
+  workspaceApply: 'cgAuth.workspaceApply',
+  /** Host-mode envelope agent-gate authorization — G3. */
+  hostEnvelope: 'cgAuth.hostEnvelope',
+  /** Registered authority consulted by the read-authority resolver — G3. */
+  readRegistered: 'cgAuth.readRegistered',
+  /** Local agent gate consulted by the read-authority resolver — G3. */
+  readLocalGate: 'cgAuth.readLocalGate',
+  /** Inbound remote-query public-policy admission — G3. */
+  remoteQuery: 'cgAuth.remoteQuery',
+  /** Pending join metadata recovery read-authority gate — G3. */
+  joinResume: 'cgAuth.joinResume',
+  /** Shared-memory activation read-authority gate — G3. */
+  sharedMemoryRead: 'cgAuth.swmRead',
+  /** Random-sampling numeric-slot to local-CG binding resolution. */
+  samplingBinding: 'cgAuth.samplingBinding',
+  /** Join-policy active-member capacity census. */
+  joinPolicyRoster: 'cgAuth.joinPolicyRoster',
+  /** Join admission active-member capacity census. */
+  joinAdmissionRoster: 'cgAuth.joinAdmission',
+  /** Registered participant-add mutation preflight. */
+  memberAdd: 'cgAuth.memberAdd',
+  /** Registered participant-remove mutation preflight. */
+  memberRemove: 'cgAuth.memberRemove',
+  /** Query-catalog route read-authority gate — G3. */
+  queryCatalog: 'cgAuth.queryCatalog',
+  /** Memory-search route read-authority gate — G3. */
+  memorySearch: 'cgAuth.memorySearch',
 } as const);
 
 export type ContextGraphAuthorityRpcSite =
