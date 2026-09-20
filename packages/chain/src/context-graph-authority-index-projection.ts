@@ -282,15 +282,28 @@ function isContextGraphAuthorityIndexProjectionFault(
 }
 
 /**
- * The stamp a completed refresh is retained and reported under.
+ * Stamp a completed refresh, producing the projection it is judged, retained,
+ * reported and aged by. THE ONLY WAY a `fetchedAtMs` is ever produced.
  *
- * `refreshStartedAtMs` is taken before any RPC, so a scan is never younger
- * than it. A refresh that folded stored rows may prove its data is OLDER, and
- * only older is ever believed: a reported instant at or after the refresh
- * started would move age towards zero, which is the one direction this field
- * exists to forbid.
+ * `floorAtMs` is taken before any RPC — `#refresh`'s own pre-refresh instant,
+ * or, for the log fast path's synthetic candidate, the instant that read was
+ * asked. A scan is therefore never younger than it. A refresh that folded
+ * stored rows may prove its data is OLDER, and only older is ever believed: a
+ * reported instant at or after the floor would move age towards zero, which is
+ * the one direction `dataFetchedAtMs` exists to forbid. A value that is not a
+ * safe integer proves nothing at all and falls back with it.
+ *
+ * EXPORTED so the log fast path in `evm-context-graph-authority-index-reader`
+ * can build the candidate it runs the caller's projection against through this
+ * function instead of restating the rule. The two must not be able to disagree:
+ * the candidate a read is ADMITTED by and the projection the cache then ages
+ * and reports are the same view, and a second copy of the expression could
+ * drift from this one silently (it already had: `Math.min` believed a NaN or
+ * fractional `dataFetchedAtMs` that this resolver rejects). The floors differ —
+ * the reader's `askedAtMs` precedes the cache's stamp — and only ever in the
+ * over-reporting direction, which is the safe one.
  */
-function resolveProjectionFetchedAtMs(
+export function resolveProjectionFetchedAtMs(
   refreshStartedAtMs: number,
   origin: ContextGraphAuthorityIndexProjectionOrigin,
 ): number {
