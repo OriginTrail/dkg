@@ -85,6 +85,24 @@ export interface KnowledgeAssetReadModelOptions {
   readonly contextGraphStorageAddress: string;
   /** Physical `DKGKnowledgeAssets` address, when the node has one bound. */
   readonly knowledgeAssetStorageAddress?: string;
+  /**
+   * How old the tick's own head read may be before NOTHING here answers.
+   *
+   * Coverage alone cannot tell a chain that produced no events from a tick
+   * that stopped committing: both leave the stored range exactly where it was,
+   * and every gate in this file is a statement about that range. Each method
+   * here stands in for an UNPINNED `eth_call`, which is never stale, so the
+   * staleness this model may add has to be bounded by something — and the only
+   * thing that can bound it is when the log last heard from the chain.
+   *
+   * `max(3T, 15s)`, supplied by the composition root, exactly as the Hub
+   * window and the authority anchor bound themselves. Omitted (tests, and
+   * callers that build a model for rows alone) means unbounded, which is why
+   * the runtime never omits it.
+   */
+  readonly maxHeadAgeMs?: number;
+  /** Injected wall clock; late-bound so a faked `Date` is honoured. */
+  readonly now?: () => number;
 }
 
 export interface KnowledgeAssetReadModel {
@@ -170,7 +188,8 @@ export function createKnowledgeAssetReadModel(
     && knowledgeAssetStorageAddress === undefined) {
     throw new Error('Knowledge asset read model DKGKnowledgeAssets address is invalid');
   }
-  const { scope, store, registry } = options;
+  const { scope, store, registry, maxHeadAgeMs } = options;
+  const now = options.now ?? (() => Date.now());
 
   /**
    * The block range this family can be folded over, or `undefined` when the
@@ -189,6 +208,18 @@ export function createKnowledgeAssetReadModel(
   ): Promise<ResolvedWindow | undefined> {
     const state = await store.load(scope);
     if (state === undefined) return undefined;
+    // BEFORE coverage, because coverage is what goes quiet. A tick that stopped
+    // committing leaves every range below exactly where it was, and a frozen
+    // range is indistinguishable from a chain on which nothing happened — so a
+    // stalled log would go on answering `kaToContextGraph` and an ordinal from
+    // whenever it stopped, with no way for the caller to tell.
+    if (maxHeadAgeMs !== undefined) {
+      const ageMs = now() - state.cursor.head.fetchedAtMs;
+      if (!(ageMs >= 0) || ageMs > maxHeadAgeMs) return undefined;
+    }
+    // A settled-hash mismatch the tick has seen but not yet confirmed or
+    // withdrawn: the rows may belong to a chain this node is no longer on.
+    if (state.suspectedForkBlockNumber !== undefined) return undefined;
     const coverage = findChainEventLogCoverage(state.coverage, family, address);
     if (coverage === undefined) return undefined;
 

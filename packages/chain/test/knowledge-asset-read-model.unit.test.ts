@@ -225,15 +225,68 @@ function seeded(options: SeedOptions = {}): MemoryChainEventLogStore {
   return store;
 }
 
-function model(store: MemoryChainEventLogStore) {
+function model(
+  store: MemoryChainEventLogStore,
+  liveness: { maxHeadAgeMs?: number; now?: () => number } = {},
+) {
   return createKnowledgeAssetReadModel({
     scope: SCOPE,
     store,
     registry: registry(),
     contextGraphStorageAddress: CG_STORAGE,
     knowledgeAssetStorageAddress: KA_STORAGE,
+    ...liveness,
   });
 }
+
+/** The head the fixture commits, in the same units the gate measures. */
+const SEEDED_FETCHED_AT_MS = 1_700_000_000_000;
+
+describe('knowledge asset read model — the tick is still running', () => {
+  it('refuses EVERY read once the tick head read is older than the bound', async () => {
+    // Nothing about coverage changed: a chain on which nothing happened and a
+    // tick that stopped committing leave exactly the same stored range, and
+    // these reads stand in for calls that are never stale.
+    const store = seeded({ rows: [registration(50, 7n, 4242n), creation(40, 7n)] });
+    const stalled = model(store, {
+      maxHeadAgeMs: 18_000,
+      now: () => SEEDED_FETCHED_AT_MS + 18_001,
+    });
+
+    expect(await stalled.readContextGraphForKa(4242n)).toBeUndefined();
+    expect(await stalled.readContextGraphKaList(7n)).toBeUndefined();
+    expect(await stalled.readLatestMerkleRoot(4242n)).toBeUndefined();
+    expect(await stalled.readMaxKaNumberForAuthor(author(0x11))).toBeUndefined();
+  });
+
+  it('answers while the tick is inside the bound', async () => {
+    const store = seeded({ rows: [registration(50, 7n, 4242n)] });
+    const live = model(store, {
+      maxHeadAgeMs: 18_000,
+      now: () => SEEDED_FETCHED_AT_MS + 17_999,
+    });
+
+    expect(await live.readContextGraphForKa(4242n)).toMatchObject({ kind: 'bound' });
+  });
+
+  it('refuses a wall clock that stepped backwards, which proves no age at all', async () => {
+    const store = seeded({ rows: [registration(50, 7n, 4242n)] });
+    const skewed = model(store, {
+      maxHeadAgeMs: 18_000,
+      now: () => SEEDED_FETCHED_AT_MS - 1,
+    });
+
+    expect(await skewed.readContextGraphForKa(4242n)).toBeUndefined();
+  });
+
+  it('refuses while a settled-hash mismatch is held but not yet confirmed', async () => {
+    const store = seeded({ rows: [registration(50, 7n, 4242n)] });
+    const held = await store.load(SCOPE);
+    store.seed({ ...held!, suspectedForkBlockNumber: 99 }, [registration(50, 7n, 4242n)]);
+
+    expect(await model(store).readContextGraphForKa(4242n)).toBeUndefined();
+  });
+});
 
 describe('knowledge asset read model — kaToContextGraph', () => {
   it('serves a positive binding from a settled row', async () => {

@@ -513,6 +513,11 @@ export function createEvmChainIndexRuntime(
           registry,
           contextGraphStorageAddress,
           knowledgeAssetStorageAddress: options.knowledgeAssetStorage.address,
+          // ONE liveness bound for the whole log: the same `max(3T, 15s)` the
+          // Hub window and the authority anchor use. Every reader of a frozen
+          // tick must degrade to the chain, not to the last thing it heard.
+          maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
+          now,
         }),
       }),
   });

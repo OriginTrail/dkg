@@ -1113,8 +1113,38 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     });
   }
 
+  /**
+   * The three `ContextGraphStorage` views below read the ONE log first.
+   *
+   * `latest`, not `finalized`, and that is the whole reason they are safe to
+   * move: each one stands in for an UNPINNED `eth_call`, which is answered at
+   * the chain's current head and has exactly the tip-reorg exposure the
+   * `latest` view has — no more, and, bounded by the tick's own liveness gate,
+   * no staler than one interval. Reading them at the settled cursor instead
+   * would be a DIFFERENT answer, fifty blocks behind the call it replaces, and
+   * a KA registered inside that window would read as not registered.
+   *
+   * Every refusal — a cold log, a stalled tick, a held fork suspicion, a
+   * backfill that has not reached the graph's creation block, an ordinal past
+   * what the log holds — returns `undefined` and the `eth_call` below runs
+   * exactly as it did before the log existed.
+   */
+  private get knowledgeAssetsFromLog() {
+    return this.chainEventLogBinding?.knowledgeAssets;
+  }
+
   async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
+    const logged = await this.knowledgeAssetsFromLog?.readContextGraphForKa(
+      kaId,
+      { view: 'latest' },
+    );
+    // A `bound` answer rests on a write-once mapping; an `unbound` one rests on
+    // COMPLETE contract-wide coverage, which the read model refuses to claim
+    // without. Both are decided there, so there is no third case here.
+    if (logged !== undefined) {
+      return logged.kind === 'bound' ? logged.contextGraphId : 0n;
+    }
     const cgs = this.requireContextGraphStorage();
     const cgId: bigint = await this.readContractWithOptions(
       cgs,
@@ -1128,6 +1158,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
+    // The list is proven back to the graph's own creation block, so its LENGTH
+    // is the count: there is nowhere below it for a registration to hide, and
+    // a list folded from the middle is refused rather than truncated.
+    const logged = await this.knowledgeAssetsFromLog?.readContextGraphKaList(
+      contextGraphId,
+      { view: 'latest' },
+    );
+    if (logged !== undefined) return BigInt(logged.kaIds.length);
     const cgs = this.requireContextGraphStorage();
     const count: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaCount', 'getContextGraphKaCount', contextGraphId,
@@ -1137,6 +1175,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
+    const logged = await this.knowledgeAssetsFromLog?.readContextGraphKaList(
+      contextGraphId,
+      { view: 'latest' },
+    );
+    // Position IS the ordinal — the on-chain list only ever appends. An index
+    // the log does not hold is NOT an out-of-range answer to invent: the chain
+    // reverts on one, and callers read that revert, so the call below must be
+    // the thing that produces it.
+    if (logged !== undefined && index >= 0n && index < BigInt(logged.kaIds.length)) {
+      return logged.kaIds[Number(index)]!;
+    }
     const cgs = this.requireContextGraphStorage();
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
