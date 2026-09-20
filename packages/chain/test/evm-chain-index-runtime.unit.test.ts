@@ -21,10 +21,10 @@ const CG_STORAGE_ADDRESS = '0x00000000000000000000000000000000000000b2';
 const HUB_EVENTS = [
   'event NewContract(string contractName, address newContractAddress)',
   'event ContractChanged(string contractName, address newContractAddress)',
-  'event ContractRemoved(string contractName)',
+  'event ContractRemoved(string contractName, address contractAddress)',
   'event NewAssetStorage(string contractName, address newContractAddress)',
   'event AssetStorageChanged(string contractName, address newContractAddress)',
-  'event AssetStorageRemoved(string contractName)',
+  'event AssetStorageRemoved(string contractName, address contractAddress)',
 ];
 
 /** The seven signatures `CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES` names, plus the KA one. */
@@ -54,11 +54,13 @@ function rotationLog(
   // The Hub keeps contracts and asset storages in two registries with two event
   // sets (`Hub.sol:189-222`); the indexed storages live in the second one, so
   // that is what a rotation of THEM looks like.
-  eventName: 'ContractChanged' | 'AssetStorageChanged' = 'ContractChanged',
+  eventName: 'ContractChanged' | 'AssetStorageChanged' | 'ContractRemoved' | 'AssetStorageRemoved'
+    = 'ContractChanged',
+  contractAddress = '0x00000000000000000000000000000000000000c1',
 ): ethers.Log {
   const encoded = hubInterface.encodeEventLog(hubInterface.getEvent(eventName)!, [
     contractName,
-    '0x00000000000000000000000000000000000000c1',
+    contractAddress,
   ]);
   return {
     blockNumber,
@@ -307,6 +309,28 @@ describe('createEvmChainIndexRuntime', () => {
     expect(
       h.getLogs.mock.calls.length + h.heads.mock.calls.length + h.blocks.mock.calls.length,
     ).toBe(before);
+  });
+
+  it('surfaces a pure Hub removal to the adapter listener from the one-log window', async () => {
+    const h = harness({
+      headNumber: 1_000,
+      logs: [rotationLog(
+        'ContextGraphStorage',
+        998,
+        0,
+        'AssetStorageRemoved',
+        CG_STORAGE_ADDRESS,
+      )],
+    });
+    await h.runtime.tick.runOnce(new AbortController().signal);
+
+    const window = await h.runtime.binding.readHubRotationWindow!(997, 2);
+
+    expect(window!.rotations).toEqual([{
+      blockNumber: 998,
+      logIndex: 0,
+      contractName: 'ContextGraphStorage',
+    }]);
   });
 
   it('refuses a window whose bottom is BELOW what the log walked', async () => {

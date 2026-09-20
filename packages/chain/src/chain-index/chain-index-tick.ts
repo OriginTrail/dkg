@@ -792,6 +792,9 @@ export class ChainIndexTick {
     }));
     for (const succession of successions) {
       if (!registered.includes(succession.retiredAddress)) continue;
+      // A pure removal has no successor to inherit this address's families.
+      // Its retirement boundary still caps the old address above.
+      if (succession.kind === 'removed') continue;
       // A name rebound onto an address the registry already knows needs no
       // second entry; a duplicate would only make the commit's two rows for it
       // order-dependent.

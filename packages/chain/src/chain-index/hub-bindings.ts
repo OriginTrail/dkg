@@ -120,18 +120,27 @@ export function reduceHubBindings(
   });
 }
 
-/** One name's move off an address the tick indexes, and onto another. */
-export interface HubBindingSuccession {
-  /** The address the name points at NOW. Lowercased. */
-  readonly address: string;
-  /** An address the same name used to point at, and no longer does. */
-  readonly retiredAddress: string;
-  /** The block the Hub rebound the name. The whole point of this record. */
-  readonly fromBlock: number;
-}
+/** One name's move off an address the tick indexes, with or without a successor. */
+export type HubBindingSuccession =
+  | Readonly<{
+    readonly kind: 'rebound';
+    /** The address the name points at NOW. Lowercased. */
+    readonly address: string;
+    /** An address the same name used to point at, and no longer does. */
+    readonly retiredAddress: string;
+    /** The block the Hub rebound the name. The whole point of this record. */
+    readonly fromBlock: number;
+  }>
+  | Readonly<{
+    readonly kind: 'removed';
+    /** An address the Hub removed without binding the name to a successor. */
+    readonly retiredAddress: string;
+    /** The removal block. Coverage ends at the preceding block. */
+    readonly fromBlock: number;
+  }>;
 
 /**
- * Every address a still-bound name has MOVED OFF, and the block it moved.
+ * Every address a name has MOVED OFF or REMOVED, and the boundary block.
  *
  * This is what stops the one log answering out of a retired proxy. A rebind
  * does not stop the old contract from existing or from emitting: it stops it
@@ -167,14 +176,23 @@ export function hubBindingSuccessions(
   for (const binding of bindings) {
     if (currentAddresses.has(binding.address)) continue;
     const open = current.get(bindingKeyOf(binding.kind, binding.name));
-    if (open === undefined || open.address === binding.address) continue;
+    if (open?.address === binding.address) continue;
+    const fromBlock = open?.fromBlock ?? binding.toBlock;
+    if (fromBlock === undefined) continue;
     const held = successions.get(binding.address);
-    if (held !== undefined && held.fromBlock <= open.fromBlock) continue;
-    successions.set(binding.address, Object.freeze({
-      address: open.address,
-      retiredAddress: binding.address,
-      fromBlock: open.fromBlock,
-    }));
+    if (held !== undefined && held.fromBlock <= fromBlock) continue;
+    successions.set(binding.address, Object.freeze(open === undefined
+      ? {
+          kind: 'removed' as const,
+          retiredAddress: binding.address,
+          fromBlock,
+        }
+      : {
+          kind: 'rebound' as const,
+          address: open.address,
+          retiredAddress: binding.address,
+          fromBlock,
+        }));
   }
   return Object.freeze([...successions.values()]);
 }

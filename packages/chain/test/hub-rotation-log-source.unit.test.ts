@@ -24,8 +24,10 @@ function hubContract(): Contract {
     interface: new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]),
   } as unknown as Contract;
 }

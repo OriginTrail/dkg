@@ -105,7 +105,7 @@ function creationLog(
 function hubLog(
   blockNumber: number,
   logIndex: number,
-  eventName: 'NewContract' | 'ContractChanged',
+  eventName: 'NewContract' | 'ContractChanged' | 'ContractRemoved',
   contractName: string,
   address: string,
 ): ChainEventLogFetchedRow {
@@ -367,6 +367,36 @@ describe('ChainIndexTick — one log', () => {
 
     expect(authorityCoverage((await store.load())!.coverage, STORAGE)!.coveredThroughBlock)
       .toBe(97);
+  });
+
+  it('STOPS coverage at a pure Hub removal and keeps it frozen without a successor', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    rig.logs = (request) => (
+      request.addresses.includes(HUB.toLowerCase())
+        ? [hubLog(98, 0, 'ContractRemoved', 'ContextGraphStorage', STORAGE)]
+        : []
+    );
+    const index = tick(store, rig.ports, { initialBindings: BOUND_STORAGE });
+
+    await index.runOnce(new AbortController().signal);
+
+    let coverage = (await store.load())!.coverage;
+    expect(authorityCoverage(coverage, STORAGE)!.coveredThroughBlock).toBe(97);
+    expect(coverage.filter((entry) => entry.family === 'context-graph-authority'))
+      .toHaveLength(1);
+
+    // The removal row is now below the settled cursor. The in-memory binding
+    // boundary must continue refusing post-removal coverage without inventing
+    // a successor address.
+    rig.logs = () => [];
+    rig.head = { number: 140, hash: hash(0x8c), timestampSeconds: 1_700_000_120 };
+    await index.runOnce(new AbortController().signal);
+
+    coverage = (await store.load())!.coverage;
+    expect(authorityCoverage(coverage, STORAGE)!.coveredThroughBlock).toBe(97);
+    expect(coverage.filter((entry) => entry.family === 'context-graph-authority'))
+      .toHaveLength(1);
   });
 
   it('treats the Hub emitting NewContract then ContractChanged as one rotation', async () => {

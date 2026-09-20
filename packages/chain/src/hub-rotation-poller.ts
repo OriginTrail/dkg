@@ -265,8 +265,10 @@ export class HubRotationPoller {
     return [
       'ContractChanged',
       'NewContract',
+      'ContractRemoved',
       'AssetStorageChanged',
       'NewAssetStorage',
+      'AssetStorageRemoved',
     ].map((eventName) => {
       const event = hub.interface.getEvent(eventName);
       if (!event?.topicHash) {
