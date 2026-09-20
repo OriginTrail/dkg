@@ -93,7 +93,6 @@ export class SolvedPeriodSkip {
       && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
       && now < record.rereadAtMs;
   }
-
   /**
    * Sample the pair/epoch BEFORE the status and challenge reads. If either can
    * not be vouched for, callers still perform the normal read but do not retain

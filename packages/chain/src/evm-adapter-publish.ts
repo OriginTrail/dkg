@@ -1012,13 +1012,10 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     let currentEpoch = 0n;
     const needsGrowthSizing = params.newByteSize > currentByteSize;
-    if (needsGrowthSizing && !this.contracts.chronos) {
-      throw new Error(
-        'Chronos contract binding required for byte-size growth update tokenAmount sizing',
-      );
-    }
-    if (this.contracts.chronos) {
+    if (needsGrowthSizing) {
       try {
+        // Growth sizing is the only path that needs the epoch. The shared
+        // helper owns lazy Chronos resolution when init has not bound it yet.
         currentEpoch = await this.getCurrentEpoch();
       } catch (err) {
         throw new Error(

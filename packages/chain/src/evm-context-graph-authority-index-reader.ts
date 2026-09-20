@@ -263,7 +263,7 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
     read: (provider: JsonRpcProvider) => Promise<T>,
     options?: ReadOpts,
   ) => Promise<T>;
-  readonly resolveContractDeployBlock: (
+  readonly resolveContractDeployBlockNumber: (
     address: string,
     operationLabel: string,
     contractLabel: string,
@@ -431,7 +431,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         const contract = base.connect(provider) as Contract;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         ownScope = contextGraphAuthorityIndexScope(dependencies.deploymentId, contractAddress);
-        const deploymentBlockNumber = await dependencies.resolveContractDeployBlock(
+        const deploymentBlockNumber = await dependencies.resolveContractDeployBlockNumber(
           contractAddress,
           operationLabel,
           'ContextGraphStorage',

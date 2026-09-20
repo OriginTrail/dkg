@@ -73,6 +73,11 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
   'getContextGraphNameHashResolver',
+  // Shared protected receipt-finality decision behind the public adapter gate
+  // and receipt polling. It remains an ordinary method so PublishMethods
+  // fixtures can exercise the inherited implementation without private-field
+  // brand checks; MockChainAdapter mirrors only the public gate.
+  'readFinalCanonicalReceiptBlock',
   // Shared protected transport dispatcher behind the two public browser-wallet
   // RPC capabilities. MockChainAdapter mirrors those public methods directly;
   // it has no provider pool or failover plumbing to dispatch through.
@@ -400,6 +405,12 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
     expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
+  });
+
+  it('classifies the shared receipt-finality decision as adapter-internal', () => {
+    expect(EVM_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(true);
+    expect(EVM_INTERNAL_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(true);
+    expect(MOCK_METHODS.has('readFinalCanonicalReceiptBlock')).toBe(false);
   });
 
   it('does not leak the authority revision operation onto the adapter prototype', () => {

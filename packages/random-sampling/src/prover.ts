@@ -495,6 +495,13 @@ export class RandomSamplingProver {
     const existingIsCurrent =
       existing !== null
       && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
+    const staleness = existingIsCurrent
+      ? await readCachedChallengeStaleness(
+        this.chain,
+        existing,
+        status.proofingPeriodDurationInBlocks,
+      )
+      : { stale: false };
 
     // Codex review on PR #357 flagged: short-circuiting on `existingIsCurrent && solved`
     // strands the node when the read-only `getActiveProofPeriodStatus` view is
@@ -511,11 +518,6 @@ export class RandomSamplingProver {
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
     if (existingIsCurrent && existing.solved) {
-      const staleness = await readCachedChallengeStaleness(
-        this.chain,
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      );
       if (!staleness.stale) {
         // Remember the period so later ticks skip these reads — only when
         // everything the skip window is built from was actually read this
@@ -561,11 +563,7 @@ export class RandomSamplingProver {
     // after the 2026-05-01 RS-contract Hub rotation.
     const unsolvedStale = existingIsCurrent
       && !existing.solved
-      && (await readCachedChallengeStaleness(
-        this.chain,
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      )).stale;
+      && staleness.stale;
     if (unsolvedStale) {
       this.log.info('rs.tick.forcing-rotation', {
         cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),

@@ -29,9 +29,10 @@ import type {
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
-import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
+import { BoundedLruCache, floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, isEvmBlockUnavailableError } from './evm-error-text.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -82,7 +83,7 @@ import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-r
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -97,7 +98,6 @@ import {
 } from
   './evm-context-graph-authority-index-reader.js';
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
-import { EvmReceiptFinalityReader } from './evm-adapter-receipt-finality.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -105,6 +105,11 @@ interface ReceiptBlockTimestampReadOptions extends ChainReadOptions {
   readonly blockHash?: string;
 }
 
+interface ReceiptBlockHeader {
+  readonly number: number;
+  readonly hash: string;
+  readonly timestamp?: number;
+}
 type ContractWriteSender = (
   contract: Contract,
   method: string,
@@ -303,6 +308,7 @@ const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 
 /** Memory bound for the by-hash receipt block headers; entries never go stale. */
+const RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES = 256;
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
  * failing over to the next eligible backend — generous enough for a slow
@@ -637,7 +643,6 @@ export class EVMChainAdapterBase {
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
   protected readonly finalityConfirmations: number;
-  protected readonly receiptFinality: EvmReceiptFinalityReader;
 
   protected readonly maxFeePerGasWei?: bigint;
 
@@ -920,6 +925,13 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
+  /**
+   * Headers the receipt finality read already fetched, keyed by lowercase block
+   * hash. The stored height is checked before reuse so a mismatched identity
+   * pair cannot return a plausible timestamp for the wrong requested block.
+   */
+  protected readonly receiptBlockHeadersByHash =
+    new BoundedLruCache<string, ReceiptBlockHeader>(RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES);
   /** Lazily constructed by the base-owned internal accessor below. */
   protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
 
@@ -1024,7 +1036,7 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
-    this.receiptFinality.clear();
+    this.receiptBlockHeadersByHash.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
@@ -1257,10 +1269,6 @@ export class EVMChainAdapterBase {
         stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
       },
     );
-    this.receiptFinality = new EvmReceiptFinalityReader(
-      this.finalityConfirmations,
-      (label, read, options) => this.readProviderRetryingNull(label, read, options),
-    );
     this.hubRotationPoller = new HubRotationPoller({
       readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
       intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
@@ -1376,7 +1384,7 @@ export class EVMChainAdapterBase {
             options,
           ),
           // The index reader consumes only the deploy block: no head probe on a cache hit.
-          resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+          resolveContractDeployBlockNumber: (address, operationLabel, contractLabel) =>
             this.resolveContractDeployBlockNumber(
               address,
               operationLabel,
@@ -1672,6 +1680,52 @@ export class EVMChainAdapterBase {
     return contract.connect(runner) as Contract;
   }
 
+  /** One finality decision shared by polling and public checks; also memoizes the observed header. */
+  protected async readFinalCanonicalReceiptBlock(
+    receipt: { txHash?: string; blockNumber: number; blockHash: string },
+    options: ChainReadOptions & { deadlineMs?: number },
+  ): Promise<boolean> {
+    const resolved = await this.readProviderRetryingNull(
+      'publish receipt finality',
+      async (provider) => {
+        const requiredBlockNumber = requiredHeadBlockForReceipt(
+          receipt.blockNumber,
+          this.finalityConfirmations,
+        );
+        let providerHead: number | undefined;
+        if (requiredBlockNumber > receipt.blockNumber) {
+          providerHead = await provider.getBlockNumber();
+          if (providerHead < requiredBlockNumber) return null;
+        }
+        let atHeight;
+        try {
+          atHeight = await provider.getBlock(receipt.blockNumber);
+        } catch (error) {
+          if (isEvmBlockUnavailableError(error)) {
+            // Some clients report an above-head block as an error rather than
+            // null. Confirm that narrow condition before treating it as the
+            // nullable failover signal: the same bare message from an endpoint
+            // already at this height indicates a sync/restart fault and must
+            // surface instead of turning into a ten-minute receipt poll.
+            providerHead ??= await provider.getBlockNumber();
+            if (providerHead < receipt.blockNumber) return null;
+          }
+          throw error;
+        }
+        if (!atHeight?.hash) return null;
+        const header = Object.freeze({
+          number: atHeight.number,
+          hash: atHeight.hash.toLowerCase(),
+          ...(atHeight.timestamp == null ? {} : { timestamp: Number(atHeight.timestamp) }),
+        });
+        this.receiptBlockHeadersByHash.set(header.hash, header);
+        return header.hash === receipt.blockHash.toLowerCase();
+      },
+      { signal: options.signal, deadlineMs: options.deadlineMs },
+    );
+    return resolved === true;
+  }
+
   protected async waitForReceiptWithFailover(
     txHash: string,
     label: string,
@@ -1681,9 +1735,8 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
-      isReceiptEligible: async (receipt, { deadlineMs }) => (
-        await this.receiptFinality.read(receipt, { deadlineMs })
-      ) !== null,
+      isReceiptEligible: (receipt, { deadlineMs }) =>
+        this.readFinalCanonicalReceiptBlock(receipt, { deadlineMs }),
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
@@ -1706,7 +1759,7 @@ export class EVMChainAdapterBase {
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return (await this.receiptFinality.read(receipt, options)) !== null;
+    return this.readFinalCanonicalReceiptBlock(receipt, options);
   }
 
   protected async signPopulatedTransaction(
@@ -3080,11 +3133,11 @@ export class EVMChainAdapterBase {
     // An already-aborted caller rejects here exactly as the read below would
     // have: a memo hit must not turn a cancelled call into an answer.
     options.signal?.throwIfAborted();
-    const rememberedTimestamp = options.blockHash == null
+    const remembered = options.blockHash == null
       ? undefined
-      : this.receiptFinality.timestamp(blockNumber, options.blockHash);
-    if (rememberedTimestamp !== undefined) {
-      return rememberedTimestamp;
+      : this.receiptBlockHeadersByHash.get(options.blockHash.toLowerCase());
+    if (remembered?.number === blockNumber && remembered.timestamp !== undefined) {
+      return remembered.timestamp;
     }
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most
@@ -3505,7 +3558,9 @@ export class EVMChainAdapterBase {
     operationLabel: string,
     contractLabel: string,
   ): Promise<number> {
-    const cached = this.#cachedDeployBlock(address);
+    const cached = this.cachedContractDeployBlocks.get(
+      this.#contractDeployBlockCacheKey(address),
+    );
     if (cached !== undefined) return cached;
     return (await this.resolveContractDeployBlock(address, operationLabel, contractLabel)).fromBlock;
   }
@@ -3564,7 +3619,7 @@ export class EVMChainAdapterBase {
     //    serves historical getCode — each search uses ITS OWN head (self-
     //    consistent); fail over across backends, freshest-first.
     const cacheKey = this.#contractDeployBlockCacheKey(address);
-    const cached = this.#cachedDeployBlock(address);
+    const cached = this.cachedContractDeployBlocks.get(cacheKey);
     if (cached !== undefined) return { fromBlock: cached, head, scanProviders: reachable };
     let throttle: unknown; // a transient rate-limit/throttle seen during the search
     const throttledProviders = new Set<JsonRpcProvider>();
@@ -3636,10 +3691,6 @@ export class EVMChainAdapterBase {
 
   #contractDeployBlockCacheKey(address: string): string {
     return address.toLowerCase();
-  }
-
-  #cachedDeployBlock(address: string): number | undefined {
-    return this.cachedContractDeployBlocks.get(this.#contractDeployBlockCacheKey(address));
   }
 
   /**
