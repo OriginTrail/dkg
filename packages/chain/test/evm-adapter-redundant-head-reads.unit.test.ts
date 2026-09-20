@@ -309,6 +309,22 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     expect(p.getBlock.calls).toHaveLength(2);
   });
 
+  it('a mismatched block number and hash cannot hit the remembered header', async () => {
+    const p = {
+      getBlockNumber: recorder(async () => 500),
+      getBlock: recorder(async (tag: number | string) => tag === 999
+        ? { number: 999, hash: OTHER_HASH, timestamp: 1_700_000_999 }
+        : { number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 }),
+    };
+    const a = makeAdapter([p]);
+    await a.isReceiptBlockFinalAndCanonical(RECEIPT);
+    expect(p.getBlock.calls).toHaveLength(1);
+
+    expect(await a.getBlockTimestamp(999, { blockHash: BLOCK_HASH })).toBe(1_700_000_999);
+    expect(p.getBlock.calls).toHaveLength(2);
+    expect(p.getBlock.calls[1]?.[0]).toBe(999);
+  });
+
   it('a DIFFERENT hash at the same height is a miss: the reorged-in header is never served', async () => {
     // The chain now holds OTHER_HASH at height 123 (the receipt's block was reorged out). The
     // finality check answers false and remembers the header under ITS OWN hash, so a lookup by
@@ -332,7 +348,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     };
     const a = makeAdapter([p]);
     await expect(a.isReceiptBlockFinalAndCanonical(RECEIPT)).resolves.toBe(true);
-    expect(a.receiptBlockTimestampsByHash.size).toBe(0);
+    expect(a.receiptBlockHeadersByHash.size).toBe(1);
 
     expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH })).toBe(0); // today's best-effort
     expect(p.getBlock.calls).toHaveLength(2);
@@ -373,7 +389,7 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     for (let n = 1; n <= 257; n += 1) {
       await a.isReceiptBlockFinalAndCanonical({ blockNumber: n, blockHash: hashOf(n) });
     }
-    expect(a.receiptBlockTimestampsByHash.size).toBe(256);
+    expect(a.receiptBlockHeadersByHash.size).toBe(256);
     const before = served;
 
     expect(await a.getBlockTimestamp(257, { blockHash: hashOf(257) })).toBe(257); // newest: served
