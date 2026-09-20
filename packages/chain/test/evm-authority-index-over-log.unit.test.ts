@@ -100,7 +100,7 @@ function seedLog(
   options: SeedOptions = {},
 ): MemoryChainEventLogStore {
   const head = options.head ?? HEAD;
-  store.seed({
+  store.seed(SCOPE, {
     cursor: {
       revision: 1,
       lineage: hash(0x01),
@@ -488,7 +488,7 @@ describe('Context Graph authority index over the one log', () => {
     const resetDuringFence: ChainEventLogAuthoritySource = {
       ...original,
       async anchorHolds(anchor) {
-        store.seed({
+        store.seed(SCOPE, {
           cursor: {
             revision: 2,
             lineage: hash(0x02),
@@ -534,7 +534,7 @@ describe('Context Graph authority index over the one log', () => {
     // proves this is a different chain instance. The authority checkpoint from
     // the first read is intentionally left in place to exercise the stale
     // durable-prefix mutation the point-row validation closes.
-    store.seed({
+    store.seed(SCOPE, {
       cursor: {
         revision: 2,
         lineage: hash(0x02),

@@ -21,6 +21,7 @@ import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
 const SCOPE = 'evm:31337:0xhub:0xstorage';
+const OTHER_SCOPE = 'evm:31337:0xother-hub:0xstorage';
 const CG_STORAGE = `0x${'cd'.repeat(20)}`.toLowerCase();
 const KA_STORAGE = `0x${'ab'.repeat(20)}`.toLowerCase();
 
@@ -82,7 +83,7 @@ function seeded(
   rows: readonly ChainEventLogRow[] = [],
 ): MemoryChainEventLogStore {
   const store = new MemoryChainEventLogStore();
-  store.seed({
+  store.seed(SCOPE, {
     cursor: {
       revision: 1,
       lineage: hash(1),
@@ -147,10 +148,42 @@ describe('chain event log subscription', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('keeps the in-memory store state and rows isolated by scope', async () => {
+    const store = seeded(10, 90, 85, [registrationRow(50, 7n, 100n)]);
+    const state = (await store.load(SCOPE))!;
+    store.seed(OTHER_SCOPE, state, [registrationRow(50, 8n, 200n)]);
+
+    expect(await store.load('unknown-scope')).toBeUndefined();
+    const primary = subscription(store);
+    const secondary = createChainEventLogSubscription({
+      scope: OTHER_SCOPE,
+      store,
+      registry: registry(),
+    });
+    const primaryRange = await primary.servableRange(
+      'context-graph-ka', CG_STORAGE, 10, 90,
+    );
+    const secondaryRange = await secondary.servableRange(
+      'context-graph-ka', CG_STORAGE, 10, 90,
+    );
+    expect((await primary.readKaRegistrations(primaryRange!)).map((event) => event.kaId))
+      .toEqual([100n]);
+    expect((await secondary.readKaRegistrations(secondaryRange!)).map((event) => event.kaId))
+      .toEqual([200n]);
+
+    expect(await store.tombstone(SCOPE, 1)).toBe(2);
+    expect(await store.load(SCOPE)).toBeUndefined();
+    expect(await store.load(OTHER_SCOPE)).toBeDefined();
+    expect(await store.readEvents(OTHER_SCOPE, {
+      fromBlockNumber: 0,
+      throughBlockNumber: 90,
+    })).toHaveLength(1);
+  });
+
   it('refuses retained coverage while a fork suspicion is held', async () => {
     const store = seeded(10, 90, 85);
     const state = (await store.load(SCOPE))!;
-    store.seed({ ...state, suspectedForkBlockNumber: 85 });
+    store.seed(SCOPE, { ...state, suspectedForkBlockNumber: 85 });
 
     await expect(
       subscription(store).servableRange('context-graph-ka', CG_STORAGE, 50, 90),

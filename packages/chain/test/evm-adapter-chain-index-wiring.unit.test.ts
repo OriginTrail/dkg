@@ -228,7 +228,7 @@ describe('EVMChainAdapter chain index wiring', () => {
         settled: true,
       };
     };
-    store.seed({
+    store.seed(oneLogScope(adapter), {
       cursor: {
         revision: 1,
         lineage: hash(1),

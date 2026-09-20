@@ -10,6 +10,7 @@ import {
 } from '../src/chain-event-log-store.js';
 
 const SCOPE = 'evm:31337:0xhub:0xstorage';
+const OTHER_SCOPE = 'evm:31337:0xother-hub:0xstorage';
 const ADDRESS = `0x${'cd'.repeat(20)}`;
 const OTHER_ADDRESS = `0x${'ef'.repeat(20)}`;
 const TOPIC = `0x${'01'.repeat(32)}`;
@@ -203,6 +204,38 @@ describe('SqliteChainEventLogStore', () => {
     expect(await store.blockHashAt(SCOPE, 10)).toBe(hash(10));
     expect(await store.blockHashAt(SCOPE, 11)).toBe(hash(11));
     expect(await store.blockHashAt(SCOPE, 9)).toBeUndefined();
+  });
+
+  it('isolates state, rows, hashes, CAS and tombstones between scopes', async () => {
+    const { store } = createStore();
+    const rowA = row(11, 0, false, '0xaaaa');
+    const rowB = { ...row(11, 0, false, '0xbbbb'), blockHash: hash(0xbb) };
+
+    expect(await store.commit(SCOPE, undefined, commit(10, 12, [rowA]))).toBe(1);
+    expect(await store.commit(OTHER_SCOPE, undefined, commit(10, 12, [rowB]))).toBe(1);
+
+    expect((await store.load(SCOPE))?.cursor.revision).toBe(1);
+    expect((await store.load(OTHER_SCOPE))?.cursor.revision).toBe(1);
+    expect((await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 20 }))[0])
+      .toMatchObject({ data: '0xaaaa', blockHash: hash(11) });
+    expect((await store.readEvents(OTHER_SCOPE, {
+      fromBlockNumber: 0,
+      throughBlockNumber: 20,
+    }))[0]).toMatchObject({ data: '0xbbbb', blockHash: hash(0xbb) });
+    expect(await store.blockHashAt(SCOPE, 11)).toBe(hash(11));
+    expect(await store.blockHashAt(OTHER_SCOPE, 11)).toBe(hash(0xbb));
+
+    expect(await store.commit(SCOPE, 1, commit(10, 13, [rowA]))).toBe(2);
+    expect((await store.load(OTHER_SCOPE))?.cursor.revision).toBe(1);
+    expect(await store.commit(OTHER_SCOPE, 1, commit(10, 13, [rowB]))).toBe(2);
+
+    expect(await store.tombstone(SCOPE, 2)).toBe(3);
+    expect(await store.load(SCOPE)).toBeUndefined();
+    expect(await store.load(OTHER_SCOPE)).toBeDefined();
+    expect(await store.readEvents(SCOPE, { fromBlockNumber: 0, throughBlockNumber: 20 }))
+      .toEqual([]);
+    expect(await store.readEvents(OTHER_SCOPE, { fromBlockNumber: 0, throughBlockNumber: 20 }))
+      .toHaveLength(1);
   });
 
   it('never serves the zero settled-hash sentinel as a block hash', async () => {

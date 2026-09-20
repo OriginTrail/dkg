@@ -45,7 +45,7 @@ function creationRow(blockNumber: number, contextGraphId: bigint) {
 
 function seeded(coverage: { from: number; through: number }): MemoryChainEventLogStore {
   const store = new MemoryChainEventLogStore();
-  store.seed({
+  store.seed(SCOPE, {
     cursor: {
       revision: 1,
       lineage: hash(0x01),
@@ -93,7 +93,7 @@ describe('chain index authority page source', () => {
 
   it('point-reads only the requested indexed id at or below the held anchor', async () => {
     const store = seeded({ from: 10, through: 100 });
-    store.seed((await store.load(SCOPE))!, [
+    store.seed(SCOPE, (await store.load(SCOPE))!, [
       creationRow(100, 7n),
       creationRow(100, 8n),
       creationRow(101, 7n),

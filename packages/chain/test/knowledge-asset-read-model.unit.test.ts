@@ -103,7 +103,7 @@ function seeded(options: SeedOptions = {}): MemoryChainEventLogStore {
   const store = new MemoryChainEventLogStore();
   const settledBlockNumber = options.settledBlockNumber ?? 100;
   const headBlockNumber = options.headBlockNumber ?? settledBlockNumber + 5;
-  store.seed({
+  store.seed(SCOPE, {
     cursor: {
       revision: 1,
       lineage: hash(0x01),
@@ -196,7 +196,9 @@ describe('knowledge asset read model — the tick is still running', () => {
   it('refuses while a settled-hash mismatch is held but not yet confirmed', async () => {
     const store = seeded({ rows: [registration(50, 7n, 4242n)] });
     const held = await store.load(SCOPE);
-    store.seed({ ...held!, suspectedForkBlockNumber: 99 }, [registration(50, 7n, 4242n)]);
+    store.seed(SCOPE, { ...held!, suspectedForkBlockNumber: 99 }, [
+      registration(50, 7n, 4242n),
+    ]);
 
     expect(await model(store).readContextGraphForKa(4242n)).toBeUndefined();
   });
