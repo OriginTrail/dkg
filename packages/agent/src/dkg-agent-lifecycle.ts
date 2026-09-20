@@ -2466,7 +2466,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // error, so private/curated/unregistered CGs remain denied.
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig, {
       isContextGraphPublic: (contextGraphId: string) =>
-        this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        withRpcUsageSite(
+          CG_AUTH_RPC_SITES.remoteQuery,
+          () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        ),
     });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
@@ -8876,9 +8879,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
 
-    const authority = await this.resolveContextGraphReadAuthority(contextGraphId, {
-      allowSubscriptionFallback: false,
-    }).catch(() => ({ outcome: 'unavailable' as const }));
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.joinResume,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, {
+        allowSubscriptionFallback: false,
+      }),
+    ).catch(() => ({ outcome: 'unavailable' as const }));
     if (authority.outcome !== 'allowed') {
       this.log.warn(
         ctx,
@@ -11024,10 +11030,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     return opts.readAuthority !== undefined
       ? opts.readAuthority.outcome === 'allowed'
-      : this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: opts.callerAgentAddress,
-          allowSubscriptionFallback: false,
-        });
+      : withRpcUsageSite(
+          CG_AUTH_RPC_SITES.sharedMemoryRead,
+          () => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: opts.callerAgentAddress,
+            allowSubscriptionFallback: false,
+          }),
+        );
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,
