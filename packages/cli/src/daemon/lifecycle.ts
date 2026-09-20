@@ -1793,10 +1793,9 @@ async function runDaemonInnerWithStartupOwnership(
     new SqliteContextGraphAuthorityIndexStore(dashDb);
   // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
   // adapter builds the tick, starts it, and publishes the binding every other
-  // reader consults. The per-wallet publisher adapters
-  // (`createPublisherWalletChain`) are deliberately given nothing here — a
-  // second store would be a second scanner, which is what this log exists to
-  // delete.
+  // eligible reader consults. Per-wallet publisher adapters receive only a
+  // late-bound binding getter below — never this store — because a second store
+  // would be a second scanner, which is what this log exists to delete.
   const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
@@ -2440,6 +2439,10 @@ async function runDaemonInnerWithStartupOwnership(
           store: agent.store,
           keypair: agent.wallet.keypair,
           chainBase: publisherChainBase,
+          // Late-bound: Hub rotation/rebuild clears the owner binding before a
+          // replacement exists, and every wallet must observe that gap as a
+          // live-fallback signal rather than retain the retired generation.
+          chainEventLogBindingSource: () => agent.getChainEventLogBinding(),
           ackTransportFactory: agent.createACKTransportFactory({
             sendTimeoutMs: storageAckTiming.sendTimeoutMs,
             log,

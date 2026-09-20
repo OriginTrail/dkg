@@ -17,6 +17,8 @@ import { describe, expect, it } from 'vitest';
 import { ChainEventDecoderRegistry } from '../src/chain-index/chain-event-decoders.js';
 import { createChainEventLogSubscription } from
   '../src/chain-index/chain-event-log-subscription.js';
+import type { ChainEventLogSubscription } from
+  '../src/chain-index/chain-event-log-subscription.js';
 import type { ChainEventLogRow } from '../src/chain-index/chain-event-log.js';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
@@ -108,6 +110,7 @@ function seededStore(
 function makeAdapter(
   store: MemoryChainEventLogStore | undefined,
   currentContextGraphStorageAddress = CG_STORAGE,
+  subscriptionOverride?: ChainEventLogSubscription,
 ) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const adapter: any = new EVMChainAdapter(minimalConfig());
@@ -130,7 +133,7 @@ function makeAdapter(
   };
   if (store !== undefined) {
     adapter.attachChainEventLog({
-      subscription: createChainEventLogSubscription({
+      subscription: subscriptionOverride ?? createChainEventLogSubscription({
         scope: SCOPE,
         store,
         registry: new ChainEventDecoderRegistry()
@@ -233,5 +236,40 @@ describe('listenForEvents over the one log', () => {
       'cgStorage.queryFilter(ContextGraphCreated)',
       'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)',
     ]);
+  });
+
+  it('discards rows when the binding generation changes while their read is in flight', async () => {
+    const store = seededStore(100, [creationRow(50, 7n)]);
+    const base = createChainEventLogSubscription({
+      scope: SCOPE,
+      store,
+      registry: new ChainEventDecoderRegistry()
+        .registerContextGraphAuthority(CG_STORAGE, cgInterface)
+        .registerContextGraphKnowledgeAssets(CG_STORAGE, cgInterface),
+    });
+    let release = (): void => {};
+    let markStarted = (): void => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const delayed: ChainEventLogSubscription = {
+      ...base,
+      async readRows(range, view) {
+        markStarted();
+        await new Promise<void>((resolve) => { release = resolve; });
+        return base.readRows(range, view);
+      },
+    };
+    const { adapter, liveScans } = makeAdapter(store, CG_STORAGE, delayed);
+
+    const collecting = collect(adapter, ['ContextGraphCreated'], 10, 100);
+    await started;
+    adapter.attachChainEventLog({
+      subscription: base,
+      contextGraphStorageAddress: CG_STORAGE,
+    });
+    release();
+
+    expect(await collecting).toEqual([]);
+    expect(liveScans).toEqual(['cgStorage.queryFilter(ContextGraphCreated)']);
+    adapter.destroy();
   });
 });

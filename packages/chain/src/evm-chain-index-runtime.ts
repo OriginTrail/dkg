@@ -17,12 +17,10 @@
  * (`publisher-runner.ts:createPublisherWalletChain`) get none, so they cannot
  * become a second TICK.
  *
- * They are not yet READERS of it either, and nothing in this file makes them
- * one: the binding is handed to the owning adapter alone
- * (`evm-adapter-base.ts:attachChainEventLog`), so every per-wallet adapter
- * keeps its full live scanner set, its own Hub rotation poll included. Threading
- * the binding down to them is the step that would make
- * `Hub_rotation_poll_getLogs` read zero on every wallet rather than on one.
+ * Per-wallet adapters may BORROW the owning adapter's current binding through a
+ * late-bound source. That grants read access only: they still receive no store,
+ * cannot build or stop the runtime, reject a different chain/Hub scope, and
+ * return to their live scanner whenever the owner has no current generation.
  */
 
 import { ethers, type JsonRpcProvider } from 'ethers';
@@ -110,7 +108,7 @@ export interface EvmChainIndexRuntimeOptions {
 }
 
 export interface EvmChainIndexRuntime {
-  /** What every adapter in this process reads instead of the chain. */
+  /** What eligible adapters in this process may borrow instead of the chain. */
   readonly binding: ChainEventLogBinding;
   readonly tick: ChainIndexTick;
   start(): void;
@@ -534,6 +532,7 @@ export function createEvmChainIndexRuntime(
     -readonly [Key in keyof ChainEventLogBinding]: ChainEventLogBinding[Key];
   };
   const binding: MutableChainEventLogBinding = {
+    scope: options.scope,
     subscription,
     readHubRotationWindow,
   };

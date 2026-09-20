@@ -14,7 +14,10 @@ import { ethers } from 'ethers';
 import { describe, expect, it } from 'vitest';
 
 import { ChainEventDecoderRegistry } from '../src/chain-index/chain-event-decoders.js';
-import { createKnowledgeAssetReadModel } from
+import {
+  createKnowledgeAssetReadModel,
+  type KnowledgeAssetReadModel,
+} from
   '../src/chain-index/knowledge-asset-read-model.js';
 import type { ChainEventLogRow } from '../src/chain-index/chain-event-log.js';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
@@ -103,6 +106,7 @@ function makeAdapter(options: {
   attach?: boolean;
   now?: () => number;
   currentContextGraphStorageAddress?: string;
+  knowledgeAssets?: KnowledgeAssetReadModel;
 } = {}) {
   const adapter = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:59998',
@@ -139,7 +143,7 @@ function makeAdapter(options: {
     internals.attachChainEventLog(Object.freeze({
       subscription: {},
       contextGraphStorageAddress: CG_STORAGE.toLowerCase(),
-      knowledgeAssets: createKnowledgeAssetReadModel({
+      knowledgeAssets: options.knowledgeAssets ?? createKnowledgeAssetReadModel({
         scope: SCOPE,
         store: options.store,
         registry: new ChainEventDecoderRegistry()
@@ -151,7 +155,18 @@ function makeAdapter(options: {
       }),
     }));
   }
-  return { adapter, calls, live };
+  return {
+    adapter,
+    calls,
+    live,
+    replaceKnowledgeAssets(knowledgeAssets: KnowledgeAssetReadModel) {
+      internals.attachChainEventLog(Object.freeze({
+        subscription: {},
+        contextGraphStorageAddress: CG_STORAGE.toLowerCase(),
+        knowledgeAssets,
+      }));
+    },
+  };
 }
 
 describe('knowledge-asset views over the one log', () => {
@@ -271,6 +286,74 @@ describe('knowledge-asset views over the one log', () => {
       'cgStorage.kaToContextGraph',
       'cgStorage.getContextGraphKaAt',
     ]);
+  });
+
+  it('discards a kaToContextGraph answer completed by a retired binding', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const mayFinish = new Promise<void>((resolve) => { release = resolve; });
+    const oldReadModel: KnowledgeAssetReadModel = {
+      async readContextGraphForKa() {
+        started();
+        await mayFinish;
+        return { kind: 'bound', contextGraphId: 7n, asOfBlockNumber: SETTLED };
+      },
+      async readContextGraphKaList() { return undefined; },
+    };
+    const currentReadModel: KnowledgeAssetReadModel = {
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+    };
+    const { adapter, calls, live, replaceKnowledgeAssets } = makeAdapter({
+      store: populated(),
+      knowledgeAssets: oldReadModel,
+    });
+    live.set('cgStorage.kaToContextGraph', 11n);
+
+    const pending = adapter.getKAContextGraphId(4242n);
+    await didStart;
+    replaceKnowledgeAssets(currentReadModel);
+    release();
+
+    expect(await pending).toBe(11n);
+    expect(calls).toEqual(['cgStorage.kaToContextGraph']);
+  });
+
+  it('discards a context-graph ordinal completed by a retired binding', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const mayFinish = new Promise<void>((resolve) => { release = resolve; });
+    const oldReadModel: KnowledgeAssetReadModel = {
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() {
+        started();
+        await mayFinish;
+        return {
+          contextGraphId: 7n,
+          kaIds: [4242n],
+          throughBlockNumber: COVERED_THROUGH,
+        };
+      },
+    };
+    const currentReadModel: KnowledgeAssetReadModel = {
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+    };
+    const { adapter, calls, live, replaceKnowledgeAssets } = makeAdapter({
+      store: populated(),
+      knowledgeAssets: oldReadModel,
+    });
+    live.set('cgStorage.getContextGraphKaAt', 9003n);
+
+    const pending = adapter.getContextGraphKCAt(7n, 0n);
+    await didStart;
+    replaceKnowledgeAssets(currentReadModel);
+    release();
+
+    expect(await pending).toBe(9003n);
+    expect(calls).toEqual(['cgStorage.getContextGraphKaAt']);
   });
 
   it('includes the UNSETTLED tail, because the call it replaces is unpinned', async () => {

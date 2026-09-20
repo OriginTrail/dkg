@@ -9,6 +9,7 @@ import {
   mergeRpcUsageWindows,
   type CanonicalFinalizationReceipt,
   type ChainAdapter,
+  type ChainEventLogBindingSource,
   type OnChainPublishResult,
   type RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
@@ -81,9 +82,15 @@ export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 export function createPublisherWalletChain(
   chainBase: RuntimeEvmChainConfig | undefined,
   privateKey: string,
+  chainEventLogBindingSource?: ChainEventLogBindingSource,
 ): ChainAdapter {
   return chainBase
-    ? new EVMChainAdapter({ ...chainBase, privateKey, allowNoAdminSigner: true })
+    ? new EVMChainAdapter({
+        ...chainBase,
+        privateKey,
+        allowNoAdminSigner: true,
+        chainEventLogBindingSource,
+      })
     : new NoChainAdapter();
 }
 
@@ -239,6 +246,8 @@ export async function startPublisherRuntimeIfEnabled(args: {
   store: TripleStore;
   keypair: Ed25519Keypair;
   chainBase?: RuntimeEvmChainConfig;
+  /** Borrow the agent adapter's current one-log generation; never ownership. */
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
   log: (message: string) => void;
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
@@ -255,6 +264,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       store: args.store,
       keypair: args.keypair,
       chainBase: args.chainBase,
+      chainEventLogBindingSource: args.chainEventLogBindingSource,
       // The daemon boundary: config resolves into the runner's own option shape ONCE, here.
       runnerOptions: {
         pollIntervalMs: args.config.publisher.pollIntervalMs,
@@ -377,6 +387,7 @@ interface PublisherRuntimeBaseArgs {
   keypair: Ed25519Keypair;
   store: TripleStore;
   chainBase?: RuntimeEvmChainConfig;
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
   /** Already resolved at the calling boundary; passed through intact to `new AsyncLiftRunner`. */
   runnerOptions?: PublisherRunnerSchedulingOptions;
   maxRetries?: number;
@@ -547,6 +558,8 @@ export async function createPublisherRuntimeFromAgent(args: {
   store: TripleStore;
   keypair: Ed25519Keypair;
   chainBase?: RuntimeEvmChainConfig;
+  /** Late-bound because the owning adapter may rebuild after Hub rotation. */
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
   /** Resolved by the caller's boundary (daemon config or test); passed through intact. */
   runnerOptions?: PublisherRunnerSchedulingOptions;
   maxRetries?: number;
@@ -564,6 +577,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     keypair: args.keypair,
     store: args.store,
     chainBase: args.chainBase,
+    chainEventLogBindingSource: args.chainEventLogBindingSource,
     runnerOptions: args.runnerOptions,
     maxRetries: args.maxRetries,
     retryTuning: args.retryTuning,
@@ -617,7 +631,11 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   const wallets: ConfiguredPublisherWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
-    const chain = createPublisherWalletChain(args.chainBase, wallet.privateKey);
+    const chain = createPublisherWalletChain(
+      args.chainBase,
+      wallet.privateKey,
+      args.chainEventLogBindingSource,
+    );
     const identityId = await chain.getIdentityId();
     wallets.push({
       address: wallet.address,
@@ -741,9 +759,19 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     // daemon's admission instance and the lane that would do the work cannot disagree.
     canSettleHeldJob,
     stop: async () => {
-      await runner.stop();
-      if (args.closeStoreOnStop) {
-        await args.store.close();
+      try {
+        await runner.stop();
+      } finally {
+        // Wallet adapters borrow the agent's binding but own their own Hub
+        // pollers and providers. Stopping one releases only those local
+        // resources; it cannot stop the borrowed runtime or close its store.
+        for (const wallet of wallets) {
+          const destroy = (wallet.chain as { destroy?: () => void }).destroy;
+          if (typeof destroy === 'function') destroy.call(wallet.chain);
+        }
+        if (args.closeStoreOnStop) {
+          await args.store.close();
+        }
       }
     },
   };

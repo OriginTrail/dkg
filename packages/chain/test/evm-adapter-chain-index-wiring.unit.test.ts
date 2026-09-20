@@ -14,6 +14,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import type {
+  ChainEventLogBinding,
+  ChainEventLogHubRotationWindow,
+} from '../src/chain-event-log-binding.js';
 import { createContextGraphAuthorityIndexCheckpoint } from
   '../src/context-graph-authority-index-checkpoint.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
@@ -76,6 +80,19 @@ function chainIndexOwner(adapter: EVMChainAdapter): Readonly<{
   return (adapter as unknown as {
     chainIndexOwner: Readonly<{ starting?: Promise<void>; runtime?: unknown }>;
   }).chainIndexOwner;
+}
+
+function oneLogScope(adapter: EVMChainAdapter): string {
+  return [adapter.deploymentId, HUB_ADDRESS.toLowerCase()].join(':');
+}
+
+async function waitForHubPollerIdle(adapter: EVMChainAdapter): Promise<void> {
+  await vi.waitUntil(
+    () => (adapter as unknown as {
+      hubRotationPoller: { inFlight: Promise<void> | null };
+    }).hubRotationPoller.inFlight === null,
+    { timeout: 2_000 },
+  );
 }
 
 /** `ContextGraphStorage` as `initContracts` would have resolved it. */
@@ -256,6 +273,176 @@ describe('EVMChainAdapter chain index wiring', () => {
     adapter.destroy();
   });
 
+  it('borrows only the current exact-scope binding and never retains a static fallback', () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    const matching = Object.freeze({
+      scope: oneLogScope(borrower),
+      subscription: {} as ChainEventLogBinding['subscription'],
+    });
+
+    // Cold start: absence means live behavior. A static attachment must not
+    // become a hidden fallback that reappears during a later rebuild gap.
+    borrower.attachChainEventLog(matching);
+    expect(borrower.chainEventLog).toBeUndefined();
+    expect(chainIndexOwner(borrower).binding).toBeUndefined();
+
+    current = Object.freeze({ ...matching, scope: 'evm:1:hub=foreign:foreign' });
+    expect(borrower.chainEventLog).toBeUndefined();
+
+    current = matching;
+    expect(borrower.chainEventLog).toBe(matching);
+
+    current = undefined;
+    expect(borrower.chainEventLog).toBeUndefined();
+    borrower.destroy();
+  });
+
+  it('refuses an adapter configured to both own and borrow the one-log runtime', () => {
+    expect(() => new EVMChainAdapter({
+      ...config(new MemoryChainEventLogStore()),
+      chainEventLogBindingSource: () => undefined,
+    })).toThrow(/cannot own and borrow/i);
+  });
+
+  it('lets multiple borrowers share one scanner and fall back live after owner shutdown', async () => {
+    const store = new MemoryChainEventLogStore();
+    const owner = new EVMChainAdapter({ ...config(store), indexTickMs: 60_000 });
+    const ownerBoundary = stubInitBoundary(owner);
+    await ownerBoundary.internals.init();
+    await vi.waitUntil(() => owner.chainEventLog !== undefined, { timeout: 2_000 });
+    await vi.waitUntil(async () => await store.load() !== undefined, { timeout: 2_000 });
+
+    const source = () => owner.chainEventLog;
+    const borrowerA = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: source,
+    });
+    const borrowerB = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: source,
+    });
+    const boundaryA = stubInitBoundary(borrowerA);
+    const boundaryB = stubInitBoundary(borrowerB);
+    await boundaryA.internals.init();
+    await boundaryB.internals.init();
+    await waitForHubPollerIdle(borrowerA);
+    await waitForHubPollerIdle(borrowerB);
+
+    boundaryA.rpcLabels.length = 0;
+    boundaryB.rpcLabels.length = 0;
+    await boundaryA.internals.hubRotationPoller.pollOnce();
+    await boundaryB.internals.hubRotationPoller.pollOnce();
+
+    expect(chainIndexOwner(owner).runtime).toBeDefined();
+    expect(chainIndexOwner(borrowerA).runtime).toBeUndefined();
+    expect(chainIndexOwner(borrowerB).runtime).toBeUndefined();
+    expect(boundaryA.rpcLabels.filter((label) => label.startsWith('Hub rotation poll'))).toEqual([]);
+    expect(boundaryB.rpcLabels.filter((label) => label.startsWith('Hub rotation poll'))).toEqual([]);
+
+    const ownedBinding = owner.chainEventLog;
+    borrowerA.destroy();
+    expect(owner.chainEventLog).toBe(ownedBinding);
+
+    owner.destroy();
+    expect(borrowerB.chainEventLog).toBeUndefined();
+    boundaryB.rpcLabels.length = 0;
+    await boundaryB.internals.hubRotationPoller.pollOnce();
+    expect(boundaryB.rpcLabels).toEqual(expect.arrayContaining([
+      'Hub rotation poll getBlockNumber',
+      'Hub rotation poll getLogs',
+    ]));
+    borrowerB.destroy();
+  });
+
+  it('rejects an old borrowed generation completion but applies rotations from the current one', async () => {
+    let current: ChainEventLogBinding | undefined;
+    const borrower = new EVMChainAdapter({
+      ...config(),
+      chainEventLogBindingSource: () => current,
+    });
+    const boundary = stubInitBoundary(borrower);
+    const rotations: string[] = [];
+    const internals = borrower as unknown as {
+      initialized: boolean;
+      applyHubRotationEventName(name: string): void;
+    };
+    const applyRotation = internals.applyHubRotationEventName.bind(borrower);
+    internals.applyHubRotationEventName = (name) => {
+      rotations.push(name);
+      applyRotation(name);
+    };
+
+    let readWindow: NonNullable<ChainEventLogBinding['readHubRotationWindow']> =
+      async () => ({
+      fromBlockNumber: 11,
+      throughBlockNumber: 10,
+      rotations: [],
+      });
+    const bindingA: ChainEventLogBinding = {
+      scope: oneLogScope(borrower),
+      subscription: {} as ChainEventLogBinding['subscription'],
+      readHubRotationWindow: (...args) => readWindow(...args),
+    };
+    current = bindingA;
+    await boundary.internals.init();
+    await waitForHubPollerIdle(borrower);
+
+    let releaseOld = (_window: ChainEventLogHubRotationWindow): void => {};
+    let markStarted = (): void => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    readWindow = () => new Promise((resolve) => {
+      releaseOld = resolve;
+      markStarted();
+    });
+    boundary.rpcLabels.length = 0;
+    const oldPoll = boundary.internals.hubRotationPoller.pollOnce();
+    await started;
+
+    const bindingB: ChainEventLogBinding = {
+      scope: oneLogScope(borrower),
+      subscription: {} as ChainEventLogBinding['subscription'],
+      readHubRotationWindow: async () => ({
+        fromBlockNumber: 101,
+        throughBlockNumber: 101,
+        rotations: [{
+          blockNumber: 101,
+          logIndex: 0,
+          contractName: 'ContextGraphStorage',
+        }],
+      }),
+    };
+    current = bindingB;
+    internals.initialized = true;
+    releaseOld({
+      fromBlockNumber: 11,
+      throughBlockNumber: 11,
+      rotations: [{
+        blockNumber: 11,
+        logIndex: 0,
+        contractName: 'DKGKnowledgeAssets',
+      }],
+    });
+    await oldPoll;
+
+    expect(rotations).toEqual([]);
+    expect(internals.initialized).toBe(true);
+    expect(boundary.rpcLabels).toEqual(expect.arrayContaining([
+      'Hub rotation poll getBlockNumber',
+      'Hub rotation poll getLogs',
+    ]));
+
+    boundary.rpcLabels.length = 0;
+    await boundary.internals.hubRotationPoller.pollOnce();
+    expect(rotations).toEqual(['ContextGraphStorage']);
+    expect(internals.initialized).toBe(false);
+    expect(boundary.rpcLabels.filter((label) => label.startsWith('Hub rotation poll'))).toEqual([]);
+    borrower.destroy();
+  });
+
   it('attaches the binding for the one adapter that owns the store', async () => {
     const store = new MemoryChainEventLogStore();
     const adapter = new EVMChainAdapter(config(store));
@@ -348,6 +535,42 @@ describe('EVMChainAdapter chain index wiring', () => {
     // The one that matters. A binding still naming the retired proxy is a log
     // that answers "covered, and nothing happened" for every event the new
     // contract emits, and the lanes advance past them for good.
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(ROTATED_CG_STORAGE);
+    adapter.destroy();
+  });
+
+  it('does not let an old-generation build restore a binding after rebuild', async () => {
+    const store = new MemoryChainEventLogStore();
+    const adapter = new EVMChainAdapter(config(store));
+    stubHub(adapter);
+    stubContextGraphStorage(adapter, RETIRED_CG_STORAGE);
+    const internals = adapter as unknown as {
+      resolveContractDeployBlockNumber: () => Promise<number>;
+    };
+    let release = (): void => {};
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    internals.resolveContractDeployBlockNumber = async () => {
+      await blocked;
+      return 1;
+    };
+
+    startChainIndex(adapter);
+    const oldStarting = chainIndexOwner(adapter).starting;
+    expect(oldStarting).toBeDefined();
+    dispatchHubRotation(adapter, 'ContextGraphStorage');
+    expect(adapter.chainEventLog).toBeUndefined();
+
+    release();
+    await oldStarting;
+    // The detached old build completed, but its generation was retired before
+    // completion. It must stop itself without becoming current again.
+    expect(adapter.chainEventLog).toBeUndefined();
+    expect(chainIndexOwner(adapter).runtime).toBeUndefined();
+
+    internals.resolveContractDeployBlockNumber = async () => 1;
+    stubContextGraphStorage(adapter, ROTATED_CG_STORAGE);
+    startChainIndex(adapter);
+    await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
     expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(ROTATED_CG_STORAGE);
     adapter.destroy();
   });

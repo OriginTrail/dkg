@@ -301,6 +301,7 @@ export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
  */
 export type {
   ChainEventLogBinding,
+  ChainEventLogBindingSource,
   ChainEventLogHubRotation,
   ChainEventLogHubRotationWindow,
 } from './chain-event-log-binding.js';

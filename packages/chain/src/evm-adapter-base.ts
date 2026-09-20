@@ -82,7 +82,10 @@ import {
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
-import type { ChainEventLogBinding } from './chain-event-log-binding.js';
+import type {
+  ChainEventLogBinding,
+  ChainEventLogBindingSource,
+} from './chain-event-log-binding.js';
 import {
   createEvmChainIndexRuntime,
   type EvmChainIndexContract,
@@ -871,9 +874,36 @@ export class EVMChainAdapterBase {
    * pre-log behaviour and never a degraded one.
    */
   private readonly chainIndexOwner: EvmChainIndexRuntimeOwner;
+  private readonly chainEventLogBindingSource: ChainEventLogBindingSource | undefined;
+
+  /** Durable identity of the one-log runtime this adapter is allowed to read. */
+  private get chainEventLogScope(): string {
+    return [this.deploymentId, this.hubAddress.toLowerCase()].join(':');
+  }
 
   protected get chainEventLogBinding(): ChainEventLogBinding | undefined {
-    return this.chainIndexOwner.binding;
+    const source = this.chainEventLogBindingSource;
+    if (source === undefined) return this.chainIndexOwner.binding;
+
+    // The borrowed source is authoritative, including an empty interval while
+    // its owner rebuilds or stops. Falling through to a static attachment here
+    // would resurrect precisely the retired generation the late binding avoids.
+    let binding: ChainEventLogBinding | undefined;
+    try {
+      binding = source();
+    } catch {
+      return undefined;
+    }
+    // Scope pins chain + Hub. Contract readers additionally compare the
+    // binding's per-contract addresses with their own current handles before
+    // accepting rows. Old/static bindings without a runtime scope are never
+    // borrowable, but remain valid through the explicit attachment API below.
+    return binding?.scope === this.chainEventLogScope ? binding : undefined;
+  }
+
+  /** Object identity is the generation token for a late-bound binding. */
+  protected chainEventLogBindingIsCurrent(binding: ChainEventLogBinding): boolean {
+    return this.chainEventLogBinding === binding;
   }
 
   /**
@@ -883,12 +913,16 @@ export class EVMChainAdapterBase {
    * back the moment coverage cannot carry the range they were asked for.
    */
   attachChainEventLog(binding: ChainEventLogBinding | undefined): void {
+    // A borrowing adapter must not retain a second, hidden static generation.
+    // Its source returning undefined is a lifecycle signal, not permission to
+    // fall back to an older attachment.
+    if (this.chainEventLogBindingSource !== undefined) return;
     this.chainIndexOwner.attach(binding);
   }
 
   /** The binding the process hands DOWN to every adapter that has no store. */
   get chainEventLog(): ChainEventLogBinding | undefined {
-    return this.chainIndexOwner.binding;
+    return this.chainEventLogBinding;
   }
 
   /**
@@ -1217,6 +1251,11 @@ export class EVMChainAdapterBase {
   }
 
   constructor(config: EVMAdapterConfig) {
+    if (config.chainEventLogStore !== undefined
+      && config.chainEventLogBindingSource !== undefined) {
+      throw new TypeError('An EVM adapter cannot own and borrow the one-log runtime at the same time');
+    }
+    this.chainEventLogBindingSource = config.chainEventLogBindingSource;
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.signerTxSerializer = new SignerTxSerializer({
@@ -1377,15 +1416,20 @@ export class EVMChainAdapterBase {
       // binding is attached after `initContracts` resolves the Hub, which is
       // strictly after this constructor runs, so anything decided once at
       // construction would pin this listener to the scan forever.
-      logSource: (lastScannedBlock, reorgBufferBlocks) => {
-        const readWindow = this.chainEventLogBinding?.readHubRotationWindow;
-        return readWindow === undefined
-          ? Promise.resolve(undefined)
-          : readWindow.call(
-            this.chainEventLogBinding,
-            lastScannedBlock,
-            reorgBufferBlocks,
-          );
+      logSource: async (lastScannedBlock, reorgBufferBlocks) => {
+        const binding = this.chainEventLogBinding;
+        const readWindow = binding?.readHubRotationWindow;
+        if (binding === undefined || readWindow === undefined) return undefined;
+        const window = await readWindow.call(
+          binding,
+          lastScannedBlock,
+          reorgBufferBlocks,
+        );
+        // A rotation/rebuild may complete while the old generation is reading.
+        // Treat its answer as unavailable so the poller performs the live scan;
+        // otherwise that old empty window could advance the wallet past a Hub
+        // rotation the new binding must deliver.
+        return this.chainEventLogBindingIsCurrent(binding) ? window : undefined;
       },
     });
     const providerContext = formatProviderContext(config);
@@ -4631,7 +4675,7 @@ export class EVMChainAdapterBase {
         // identities. That makes the `hub.address` suffix redundant for
         // identity; it stays because this is a DURABLE key, and shortening it
         // would strand every existing node's cursor and re-walk history.
-        scope: [this.deploymentId, hub.address].join(':'),
+        scope: this.chainEventLogScope,
         store,
         intervalMs: resolveContextGraphAuthorityIndexTickMs(this.indexTickMs),
         // The depth the Context Graph registry scan already treats as

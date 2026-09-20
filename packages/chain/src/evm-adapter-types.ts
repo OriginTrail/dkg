@@ -11,6 +11,7 @@ import type { ContextGraphAuthorityHistoryStore } from './context-graph-authorit
 import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
 import type { ChainEventLogStore } from './chain-index/index.js';
+import type { ChainEventLogBindingSource } from './chain-event-log-binding.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
 
 export interface EVMAdapterBaseConfig {
@@ -143,6 +144,16 @@ export interface EVMAdapterBaseConfig {
    * delete. An adapter without it keeps every pre-log path exactly as it was.
    */
   chainEventLogStore?: ChainEventLogStore;
+  /**
+   * Late-bound read-only access to the ONE log owned by another adapter in
+   * this process. Intended for publisher-wallet adapters: they borrow the
+   * owning adapter's current generation without receiving its store/runtime.
+   *
+   * This source is authoritative over `attachChainEventLog`, including while
+   * it returns `undefined` during cold start, rotation/rebuild, or shutdown.
+   * A source and `chainEventLogStore` are mutually exclusive.
+   */
+  chainEventLogBindingSource?: ChainEventLogBindingSource;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

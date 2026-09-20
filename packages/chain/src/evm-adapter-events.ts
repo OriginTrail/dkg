@@ -71,6 +71,7 @@ export class EventsMethods extends EVMChainAdapterBase {
     );
     if (range === undefined || range.throughBlockNumber < toBlock) return undefined;
     const rows = await binding.subscription.readRows(range);
+    if (!this.chainEventLogBindingIsCurrent(binding)) return undefined;
     return rows.filter((row) => row.topics[0]?.toLowerCase() === topic0);
   }
   // =====================================================================

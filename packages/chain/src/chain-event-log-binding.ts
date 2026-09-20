@@ -83,6 +83,16 @@ export interface ChainEventLogAuthoritySource {
 }
 
 export interface ChainEventLogBinding {
+  /**
+   * Durable scope of the ONE runtime that produced this binding.
+   *
+   * Runtime-produced bindings always carry it. It remains optional only for
+   * backwards-compatible direct/static attachments in tests and SDK hosts.
+   * A borrowed binding source is accepted only when this exactly matches the
+   * reader adapter's chain + Hub scope; absence therefore fails closed to the
+   * reader's live path.
+   */
+  readonly scope?: string;
   readonly subscription: ChainEventLogSubscription;
   /**
    * Absent when the Hub binds no `ContextGraphStorage`, so a reader with no
@@ -119,3 +129,13 @@ export interface ChainEventLogBinding {
     reorgBufferBlocks: number,
   ): Promise<ChainEventLogHubRotationWindow | undefined>;
 }
+
+/**
+ * Late-bound view of another adapter's current one-log binding.
+ *
+ * The returned object must stay stable for one owner generation. Returning
+ * `undefined` during cold start, rebuild or shutdown is meaningful: borrowers
+ * immediately use their existing live chain fallback and must not consult a
+ * previously attached value.
+ */
+export type ChainEventLogBindingSource = () => ChainEventLogBinding | undefined;
