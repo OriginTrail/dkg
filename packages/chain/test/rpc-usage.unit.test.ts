@@ -786,6 +786,10 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('normalizes and bounds consumer labels', () => {
     expect(normalizeRpcUsageConsumer(' Hub.getContractAddress(Token) ')).toBe('Hub.getContractAddress_Token');
     expect(normalizeRpcUsageConsumer('bad label/with=spaces')).toBe('bad_label_with_spaces');
+    expect(normalizeRpcUsageConsumer('___bad___label___')).toBe('bad_label');
+    expect(normalizeRpcUsageConsumer('_'.repeat(100_000))).toBeUndefined();
+    expect(normalizeRpcUsageConsumer(`a${'_'.repeat(100_000)}b`)).toBe('a_b');
+    expect(normalizeRpcUsageConsumer(`${'x'.repeat(64)}_`)).toBe('x'.repeat(64));
     expect(normalizeRpcUsageConsumer('')).toBeUndefined();
     expect(normalizeRpcUsageConsumer('x'.repeat(65))).toBe('other');
   });
