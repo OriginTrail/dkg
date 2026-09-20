@@ -590,7 +590,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphIdByNameHash?(
     nameHash: string,
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<bigint | null>;
   /**
    * Resolve many unique name commitments from one finalized index projection.
@@ -598,7 +598,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphIdsByNameHashes?(
     nameHashes: readonly string[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<string, bigint>>;
   /**
    * Resolve a name commitment and its complete authority state atomically at
@@ -607,7 +607,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
     nameHash: string,
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ContextGraphAuthoritySnapshot | null>;
   /**
    * Resolve many name commitments and their complete authority state from one
@@ -616,11 +616,11 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
     nameHashes: readonly string[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
   readContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
   /**
    * Read complete authority snapshots for many graphs at one finalized anchor.
@@ -629,7 +629,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   readContextGraphAuthorityIndexSnapshots?(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<
     ContextGraphAuthorityIndexId,
     ContextGraphAuthoritySnapshot
@@ -1301,6 +1301,10 @@ export interface PreBroadcastSignal {
 
 export interface ChainReadOptions {
   signal?: AbortSignal;
+}
+
+/** Options honored only by the shared live-authority read. */
+export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   /**
    * Explicit transport priority for this read. Only
    * `getContextGraphLiveAuthority` consults it today, to partition its shared
@@ -1309,6 +1313,10 @@ export interface ChainReadOptions {
    * unshared read would have used anyway.
    */
   requestClass?: RpcRequestClass;
+}
+
+/** Options honored only by finalized Context Graph authority projections. */
+export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
   /**
    * Finalized Context Graph authority reads only: told how the read was
    * answered — by a scan that exercised the RPC pool, by the projection cache
@@ -1553,7 +1561,7 @@ export interface ChainAdapter {
      */
     getContextGraphAuthoritySnapshot?(
       contextGraphId: bigint,
-      options?: ChainReadOptions,
+      options?: ContextGraphAuthorityReadOptions,
     ): Promise<ContextGraphAuthoritySnapshot>;
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
@@ -2373,7 +2381,7 @@ export interface ChainAdapter {
    */
   getContextGraphLiveAuthority?(
     contextGraphId: bigint,
-    options?: ChainReadOptions,
+    options?: ContextGraphLiveAuthorityReadOptions,
   ): Promise<ContextGraphLiveAuthority | null>;
 
   /**

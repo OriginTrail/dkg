@@ -2428,6 +2428,66 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('uses positive, but not negative, cold name-hash resolution as recovery evidence', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const makeEdge = async (name: string, resolved: bigint | null) => {
+      let resolutionArmed = false;
+      const resolveByNameHash = vi.fn(async () => (resolutionArmed ? resolved : null));
+      const readAuthority = vi.fn(async () => Object.freeze({
+        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+        accessPolicy: 0,
+      }));
+      const edge = await startAgent({
+        name,
+        config: {
+          chainAdapter: Object.assign(new NoChainAdapter(), {
+            resolveContextGraphIdByNameHash: resolveByNameHash,
+            getContextGraphAuthoritySnapshot: readAuthority,
+          }),
+        },
+      });
+      // Seed the locally-admitted subscription a cold-start reverse lookup
+      // operates on without marking the graph as locally created/unregistered;
+      // that local-first authority lane intentionally bypasses chain lookup.
+      (edge as unknown as {
+        subscribedContextGraphs: Map<string, { subscribed: boolean }>;
+      }).subscribedContextGraphs.set(CONTEXT_GRAPH_ID, { subscribed: true });
+      resolveByNameHash.mockClear();
+      readAuthority.mockClear();
+      await openSharedAuthorityCircuit(edge);
+      resolutionArmed = true;
+      return { edge, resolveByNameHash, readAuthority };
+    };
+
+    const positive = await makeEdge('authority-recovery-evidence-cold-name-hash', 9n);
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(positive.edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+    expect(positive.resolveByNameHash).toHaveBeenCalledOnce();
+    expect(positive.readAuthority).toHaveBeenCalled();
+    expect(positive.edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
+
+    clockOffsetMs = 0;
+    const negative = await makeEdge('authority-no-recovery-evidence-cold-name-hash', null);
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(negative.edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
+    expect(negative.resolveByNameHash).toHaveBeenCalledOnce();
+    expect(negative.readAuthority).not.toHaveBeenCalled();
+    expect(negative.edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+  });
+
   it('closes the shared circuit when an indexed authority projection reaches the pool', async () => {
     const realNow = Date.now.bind(Date);
     let clockOffsetMs = 0;

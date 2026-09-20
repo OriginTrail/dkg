@@ -50,6 +50,19 @@ export function collectEvmErrorText(err: unknown): string {
   return parts.join(' ').toLowerCase();
 }
 
+/** Client-independent text boundary for a requested block the endpoint cannot serve. */
+export function evmErrorTextIndicatesUnavailableBlock(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes('header not found')
+    || normalized.includes('unknown block')
+    || normalized.includes('block not found');
+}
+
+/** Flatten provider wrappers before applying the shared block-unavailable classifier. */
+export function isEvmBlockUnavailableError(error: unknown): boolean {
+  return evmErrorTextIndicatesUnavailableBlock(collectEvmErrorText(error));
+}
+
 /**
  * Read the top-level error class name exposed by Error / DOMException shapes.
  * Unlike status and code extraction, this deliberately does not traverse

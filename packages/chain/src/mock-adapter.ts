@@ -8,6 +8,8 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  ContextGraphAuthorityReadOptions,
+  ContextGraphLiveAuthorityReadOptions,
   CreateKCParams,
   FinalizedChainProofSnapshot,
   UpdateKCParams,
@@ -1753,7 +1755,7 @@ export class MockChainAdapter implements ChainAdapter {
    */
   async getContextGraphLiveAuthority(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphLiveAuthorityReadOptions = {},
   ): Promise<ContextGraphLiveAuthority | null> {
     options.signal?.throwIfAborted();
     // Sequential and conditional on purpose: the three-read path this mirrors
@@ -1781,7 +1783,7 @@ export class MockChainAdapter implements ChainAdapter {
   /** Offline-development mirror of the finalized RFC-64 authority snapshot. */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphAuthorityReadOptions = {},
   ): Promise<ContextGraphAuthoritySnapshot> {
     options.signal?.throwIfAborted();
     const cg = this.contextGraphs.get(contextGraphId);

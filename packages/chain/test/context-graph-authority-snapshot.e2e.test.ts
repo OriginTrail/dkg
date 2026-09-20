@@ -48,9 +48,13 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
       ...makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP),
       localContextGraphAuthorityIndexStore: store,
       // Every step below mutates authority through a raw contract handle and
-      // asserts the very next read. The 1ms tick minimizes the normal fresh
-      // window; raw writes below also drop projections explicitly because a
-      // failed refresh may otherwise serve stale-if-error for at least 15s.
+      // asserts the very next read, so bypassing the adapter's write-triggered
+      // invalidation is intentional here: use a 1ms tick and explicitly drop
+      // the projection after each raw write. Production-shape cache evidence
+      // (including the shipped 6s default, T-boundary refresh, stale-if-error
+      // arithmetic and old/new projection equivalence) lives in
+      // context-graph-authority-index-projection.unit.test.ts and
+      // context-graph-authority-indexed-snapshot.unit.test.ts.
       indexTickMs: 1,
     });
     const dropProjections = () => (

@@ -24,7 +24,7 @@ import {
   type ContextGraphLiveAuthority,
 } from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
@@ -722,7 +722,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    */
   async getContextGraphLiveAuthority(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphLiveAuthorityReadOptions = {},
   ): Promise<ContextGraphLiveAuthority | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
@@ -1240,7 +1240,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphAuthorityReadOptions = {},
   ): Promise<ContextGraphAuthoritySnapshot> {
     await this.init();
     options.signal?.throwIfAborted();

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
+import { RpcUsageTracker, withRpcUsageConsumer } from '../../chain/dist/rpc-usage.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TypedEventBus,
@@ -325,6 +326,30 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
 
       expect(verdict.accepted).toBe(true);
       expect(oracleCalls).toBe(1);
+    });
+
+    it('attributes the production host-admission oracle instead of the shared read label', async () => {
+      const allowed = ethers.Wallet.createRandom();
+      const recipientKey = recipientKeyFor(allowed.address);
+      const tracker = new RpcUsageTracker(() => '31337');
+      const oracle = async () => withRpcUsageConsumer(
+        'cgStorage.getContextGraph',
+        () => {
+          tracker.record('eth_call');
+          return [allowed.address];
+        },
+      );
+      const raw = workspaceMessage('Attributed Host Admission', 'op-host-auth-attributed');
+      const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+      const wire = await signWorkspaceMessage(allowed, encrypted);
+
+      const verdict = await makeHandlerWithChainOracle(oracle)
+        .verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, HOST_PEER_ID);
+
+      expect(verdict.accepted).toBe(true);
+      expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+        'cgStorage.getContextGraph:cgAuth.hostAdmit': 1,
+      });
     });
 
     it('prefers the local store when allowlist triples are present (chain oracle not consulted)', async () => {

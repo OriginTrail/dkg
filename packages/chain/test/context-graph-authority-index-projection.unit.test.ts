@@ -2,6 +2,9 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS as ROOT_MAX_TARGETS,
+} from '../src/index.js';
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
 import { ContextGraphAuthorityIndexRetryableError } from
   '../src/context-graph-authority-index-errors.js';
@@ -22,7 +25,8 @@ import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-ind
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
 const AUTHORITY = `0x${'33'.repeat(20)}`;
-const NAME_9 = `0x${'99'.repeat(32)}`;
+const NAME_9 = `0x${'ab'.repeat(32)}`;
+const ZERO_HASH = `0x${'00'.repeat(32)}`;
 const SCOPE = 'evm:31337:0xhub:0xstorage';
 const T = 6_000;
 const START_MS = 1_800_000_000_000;
@@ -171,6 +175,10 @@ describe('authority projection scope', () => {
 });
 
 describe('chain.indexTickMs', () => {
+  it('keeps the legacy target-limit symbol available from the package root', () => {
+    expect(ROOT_MAX_TARGETS).toBe(4_096);
+  });
+
   it('defaults to 6s and rejects everything that is not a positive integer', () => {
     expect(resolveContextGraphAuthorityIndexTickMs(undefined)).toBe(6_000);
     expect(resolveContextGraphAuthorityIndexTickMs(250)).toBe(250);
@@ -200,6 +208,17 @@ describe('chain.indexTickMs', () => {
 });
 
 describe('finalized Context Graph authority projection cache', () => {
+  it('keeps name-hash normalization and zero-hash opt-out inside the view', async () => {
+    const h = makeHarness();
+    const { view } = await h.read();
+
+    expect([...view.statesByNameHashes([`0x${'AB'.repeat(32)}`, ZERO_HASH])])
+      .toEqual([[NAME_9, view.resolve(id(9n))]]);
+    expect(view.statesByNameHashes([ZERO_HASH]).size).toBe(0);
+    expect(() => view.statesByNameHashes(['not-a-hash']))
+      .toThrow('Context Graph authority index name hash is invalid');
+  });
+
   it('answers inside T from the last completed projection with zero reads', async () => {
     const h = makeHarness();
     const first = await h.read();
@@ -247,6 +266,31 @@ describe('finalized Context Graph authority projection cache', () => {
 
     expect(project).toHaveBeenCalledTimes(1);
     expect(h.reads.refreshes).toBe(2);
+  });
+
+  it('caches a legitimate undefined projection result without rescanning', async () => {
+    const h = makeHarness();
+    const readUndefined = () => h.index.projection({
+      scope: h.scope,
+      project: () => ({ complete: true, value: undefined }),
+      refresh: h.refresh,
+    });
+
+    await expect(readUndefined()).resolves.toBeUndefined();
+    await expect(readUndefined()).resolves.toBeUndefined();
+    expect(h.reads.refreshes).toBe(1);
+  });
+
+  it('propagates a cached projector fault without buying another scan', async () => {
+    const h = makeHarness();
+    await h.read();
+
+    await expect(h.index.projection({
+      scope: h.scope,
+      project: () => { throw new Error('projector failed'); },
+      refresh: h.refresh,
+    })).rejects.toThrow('projector failed');
+    expect(h.reads.refreshes).toBe(1);
   });
 
   it('runs exactly one refresh for N concurrent callers of an expired projection', async () => {
@@ -496,6 +540,81 @@ describe('finalized Context Graph authority projection cache', () => {
     h.index.clear();
     await h.read();
     expect(h.reads.refreshes).toBe(2);
+  });
+
+  it('does not invalidate an in-flight refresh for an unrelated scope', async () => {
+    const h = makeHarness();
+    const cache = new ContextGraphAuthorityIndexProjectionCache({
+      tickMs: T,
+      now: () => h.clock.nowMs,
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let refreshes = 0;
+    const input = {
+      scope: 'scope-b',
+      project: (projection: { scope: string }) => ({ complete: true, value: projection.scope }),
+      refresh: async () => {
+        refreshes += 1;
+        await gate;
+        return { ...await h.refresh(), scope: 'scope-b' };
+      },
+    };
+    const pending = cache.read(input);
+    await turns();
+
+    cache.drop('scope-a');
+    release();
+    await expect(pending).resolves.toBe('scope-b');
+    await expect(cache.read(input)).resolves.toBe('scope-b');
+    expect(refreshes).toBe(1);
+  });
+
+  it('drops one scope generation and releases its in-flight slot immediately', async () => {
+    const h = makeHarness();
+    const cache = new ContextGraphAuthorityIndexProjectionCache({
+      tickMs: T,
+      now: () => h.clock.nowMs,
+    });
+    const oldProjection = await h.refresh();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let refreshes = 0;
+    const project = (projection: { head: { number: number } }) => ({
+      complete: true,
+      value: projection.head.number,
+    });
+    const first = cache.read({
+      scope: h.scope,
+      project,
+      refresh: async () => {
+        refreshes += 1;
+        await gate;
+        return oldProjection;
+      },
+    });
+    await turns();
+    cache.drop(h.scope);
+    h.chain.head = 26;
+    await expect(cache.read({
+      scope: h.scope,
+      project,
+      refresh: async () => {
+        refreshes += 1;
+        return h.refresh();
+      },
+    })).resolves.toBe(26);
+    release();
+    await expect(first).resolves.toBe(25);
+    await expect(cache.read({
+      scope: h.scope,
+      project,
+      refresh: async () => {
+        refreshes += 1;
+        return h.refresh();
+      },
+    })).resolves.toBe(26);
+    expect(refreshes).toBe(2);
   });
 
   it('does not let a refresh that started before a clear publish after it', async () => {

@@ -38,7 +38,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { BoundedLruCache, floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isEvmBlockUnavailableError, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -108,6 +108,10 @@ import {
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
+
+interface ReceiptBlockTimestampReadOptions extends ChainReadOptions {
+  readonly blockHash?: string;
+}
 
 type ContractWriteSender = (
   contract: Contract,
@@ -1753,8 +1757,7 @@ export class EVMChainAdapterBase {
         try {
           atHeight = await provider.getBlock(receipt.blockNumber);
         } catch (error) {
-          const message = collectEvmErrorText(error);
-          if (/\b(header not found|unknown block|block not found)\b/.test(message)) {
+          if (isEvmBlockUnavailableError(error)) {
             // Some clients report an above-head block as an error rather than
             // null. Confirm that narrow condition before treating it as the
             // nullable failover signal: the same bare message from an endpoint
@@ -3142,7 +3145,7 @@ export class EVMChainAdapterBase {
 
   protected async getBlockTimestamp(
     blockNumber: number,
-    options: ChainReadOptions & { blockHash?: string } = {},
+    options: ReceiptBlockTimestampReadOptions = {},
   ): Promise<number> {
     // The receipt finality check usually fetched this very block a moment ago.
     // Reuse its timestamp only when the caller names the block by HASH (from the

@@ -2,7 +2,7 @@
 
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
-  ChainReadOptions,
+  ContextGraphAuthorityReadOptions,
   ContextGraphAuthoritySnapshot,
   ContextGraphAuthorityIndexRevisionReader,
 } from './chain-adapter.js';
@@ -358,7 +358,7 @@ export interface EvmContextGraphAuthorityIndexReaderV1
   readonly snapshots: ContextGraphAuthorityIndexSnapshots;
   readContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ContextGraphAuthoritySnapshot>;
 }
 
@@ -379,7 +379,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
   const rescanFinalizedProjection = async <T>(
     operationLabel: string,
-    options: ChainReadOptions,
+    options: ContextGraphAuthorityReadOptions,
     project: (
       scan: ContextGraphAuthorityIndexScanInput,
       context: Readonly<{
@@ -498,7 +498,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
    */
   const readFinalizedProjection = async <T>(
     operationLabel: string,
-    options: ChainReadOptions,
+    options: ContextGraphAuthorityReadOptions,
     read: (projection: ContextGraphAuthorityIndexProjection) => Readonly<{
       complete: boolean;
       value: T;
@@ -543,7 +543,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
 
   const resolveFinalizedIdsByNameHashes = async (
     rawNameHashes: readonly string[],
-    options: ChainReadOptions,
+    options: ContextGraphAuthorityReadOptions,
     operationLabel = 'resolveFinalizedContextGraphIdsByNameHashes',
   ): Promise<ReadonlyMap<string, bigint>> => {
     const nameHashes = snapshotAuthorityNameHashTargetsV1(rawNameHashes);
@@ -564,7 +564,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
 
   const resolveFinalizedSnapshotsByNameHashes = async (
     rawNameHashes: readonly string[],
-    options: ChainReadOptions,
+    options: ContextGraphAuthorityReadOptions,
     operationLabel = 'resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes',
   ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>> => {
     const nameHashes = snapshotAuthorityNameHashTargetsV1(rawNameHashes);
@@ -600,7 +600,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         if (closed || request?.scope !== ownScope) return null;
         return dependencies.index.exportSnapshot(request);
       },
-      refresh(options: ChainReadOptions = {}): Promise<void> {
+      refresh(options: ContextGraphAuthorityReadOptions = {}): Promise<void> {
         return rescanFinalizedProjection('refreshContextGraphAuthorityIndex', options,
           (scan) => dependencies.index.refresh(scan));
       },
@@ -611,27 +611,32 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         dependencies.index.whenIdle(),
       ]);
     },
-    readContextGraphAuthoritySnapshot(
+    async readContextGraphAuthoritySnapshot(
       contextGraphId: bigint,
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ): Promise<ContextGraphAuthoritySnapshot> {
       const target = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
-      return readFinalizedProjection(
+      const snapshot = await readFinalizedProjection<ContextGraphAuthoritySnapshot | undefined>(
         'getContextGraphAuthoritySnapshot',
         options,
-        ({ view, chainId, contractAddress }) => ({
-          complete: true,
-          value: authoritySnapshotV1(
-            view.resolve(target),
-            chainId,
-            contractAddress,
-          ),
-        }),
+        ({ view, chainId, contractAddress }) => {
+          const complete = view.has(target);
+          return {
+            complete,
+            value: complete
+              ? authoritySnapshotV1(view.resolve(target), chainId, contractAddress)
+              : undefined,
+          };
+        },
       );
+      if (snapshot === undefined) {
+        throw new Error(`Context Graph ${target} has no finalized creation event`);
+      }
+      return snapshot;
     },
     async resolveFinalizedContextGraphIdByNameHash(
       nameHash: string,
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ): Promise<bigint | null> {
       const normalized = snapshotAuthorityNameHashTargetsV1([nameHash]);
       if (normalized.length === 0) return null;
@@ -644,13 +649,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     },
     resolveFinalizedContextGraphIdsByNameHashes(
       nameHashes: readonly string[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ): Promise<ReadonlyMap<string, bigint>> {
       return resolveFinalizedIdsByNameHashes(nameHashes, options);
     },
     async resolveFinalizedContextGraphAuthoritySnapshotByNameHash(
       nameHash: string,
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ): Promise<ContextGraphAuthoritySnapshot | null> {
       const nameHashes = snapshotAuthorityNameHashTargetsV1([nameHash]);
       if (nameHashes.length === 0) return null;
@@ -663,13 +668,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     },
     resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
       nameHashes: readonly string[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>> {
       return resolveFinalizedSnapshotsByNameHashes(nameHashes, options);
     },
     async readContextGraphAuthorityIndexRevisions(
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>> {
       const targets = snapshotAuthorityRevisionTargetsV1(contextGraphIds);
       options.signal?.throwIfAborted();
@@ -685,7 +690,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     },
     async readContextGraphAuthorityIndexSnapshots(
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-      options: ChainReadOptions = {},
+      options: ContextGraphAuthorityReadOptions = {},
     ): Promise<ReadonlyMap<
       ContextGraphAuthorityIndexId,
       ContextGraphAuthoritySnapshot
