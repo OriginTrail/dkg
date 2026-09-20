@@ -308,6 +308,27 @@ describe('getBlockTimestamp reuses the finality check\'s header — by HASH only
     expect(p.getBlock.calls).toHaveLength(1); // per tx: finality + timestamp = ONE block read
   });
 
+  it('the real receipt wait retains the header for the publish timestamp parser', async () => {
+    const p = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 });
+    const a = makeAdapter([p]);
+    const receipt = {
+      ...RECEIPT,
+      hash: `0x${'ab'.repeat(32)}`,
+      status: 1,
+      index: 0,
+      logs: [],
+    };
+    a.getTransactionReceiptWithFailover = recorder(async () => receipt);
+
+    await expect(a.waitForReceiptWithFailover(receipt.hash, 'unit publish'))
+      .resolves.toBe(receipt);
+    expect(p.getBlock.calls).toHaveLength(1);
+
+    expect(await a.getBlockTimestamp(123, { blockHash: BLOCK_HASH }))
+      .toBe(1_700_000_123);
+    expect(p.getBlock.calls).toHaveLength(1);
+  });
+
   it('an already-aborted caller rejects even when the timestamp memo has the answer', async () => {
     const p = endpoint({ number: 123, hash: BLOCK_HASH, timestamp: 1_700_000_123 });
     const a = makeAdapter([p]);
