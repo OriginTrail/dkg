@@ -388,6 +388,16 @@ export function createEvmChainIndexRuntime(
 
   const runner = new ChainIndexRunner(tick, {
     intervalMs: options.intervalMs,
+    // The BINDING freshness contract, not either bound on its own. Both are
+    // derived from the same T and the stricter one is what actually refuses:
+    // they coincide at the default tick and diverge once T is large enough for
+    // the anchor's 5-minute ceiling to bite. Taking the minimum means the idle
+    // period can never widen past whichever guard would have rejected first
+    // and sent the reader to the chain.
+    idleHeadAgeBudgetMs: Math.min(
+      chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
+      chainIndexHubWindowMaxAgeMs(options.intervalMs),
+    ),
     onResult: options.onResult,
     onError: options.onError,
   });
