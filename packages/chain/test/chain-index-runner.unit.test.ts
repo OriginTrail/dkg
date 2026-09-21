@@ -267,28 +267,31 @@ describe('ChainIndexRunner', () => {
       }
     });
 
-    it('reserves the duration high-water plus one interval for a slower following pass', async () => {
+    it('reserves a recent duration high-water, then recovers after three fast passes', async () => {
       // Default production shape: T=6s, budget=18s. Three 1s passes establish
       // a 1s high-water mark. The next pass then grows to 7s: high-water + T.
       // The widened delay must keep the still-visible prior head at exactly
-      // 1+10+7=18s, rather than the old 1+11+7=19s stale-head window. Once the
-      // 7s pass is observed, its monotonic reserve disables further widening.
+      // 1+10+7=18s, rather than the old 1+11+7=19s stale-head window. The 7s
+      // pass remains reserved until three subsequent 1s successes displace it,
+      // after which a stable fast scope can widen again.
       const harness = rig({
         intervalMs: 6_000,
         idleHeadAgeBudgetMs: 18_000,
-        runOnceDurationsMs: [1_000, 1_000, 1_000, 7_000, 1_000, 1_000],
+        runOnceDurationsMs: [1_000, 1_000, 1_000, 7_000, 1_000, 1_000, 1_000],
       });
       harness.runner.start();
 
-      for (let pass = 0; pass < 6; pass += 1) await harness.fire();
+      for (let pass = 0; pass < 7; pass += 1) await harness.fire();
 
-      expect(harness.delays).toEqual([0, 6_000, 6_000, 10_000, 6_000, 6_000, 6_000]);
+      expect(harness.delays).toEqual([
+        0, 6_000, 6_000, 10_000, 6_000, 6_000, 6_000, 10_000,
+      ]);
       expect(1_000 + harness.delays[3]! + 7_000).toBe(18_000);
       await harness.runner.stop();
     });
 
     it('adds no idle delay when a successful pass already spent its allowance', async () => {
-      // A 13s pass plus its monotonic reserve leaves less than the ordinary
+      // A 13s pass plus its recent-duration reserve leaves less than the ordinary
       // T=6s schedule. Idle backoff must never make this case worse.
       const harness = rig({
         intervalMs: 6_000,
@@ -427,6 +430,43 @@ describe('ChainIndexRunner', () => {
 
       expect(harness.delays).toEqual([0, 1_000, 1_000, 6_000, 1_000, 1_000]);
       expect(onError).toHaveBeenCalledTimes(1);
+      await harness.runner.stop();
+    });
+
+    it('does not reserve the duration of a long failing pass', async () => {
+      const onError = vi.fn();
+      const harness = rig({
+        intervalMs: 6_000,
+        idleHeadAgeBudgetMs: 18_000,
+        failAtPasses: [0],
+        runOnceDurationsMs: [30_000, 1_000, 1_000, 1_000],
+        onError,
+      });
+      harness.runner.start();
+
+      for (let pass = 0; pass < 4; pass += 1) await harness.fire();
+
+      // The 30s failure owns one ordinary failure period but contributes no
+      // successful-duration sample. Three fast successes may still widen.
+      expect(harness.delays).toEqual([0, 6_000, 6_000, 6_000, 10_000]);
+      expect(onError).toHaveBeenCalledTimes(1);
+      await harness.runner.stop();
+    });
+
+    it('starts a new duration evidence window after stop and restart', async () => {
+      const harness = rig({
+        intervalMs: 6_000,
+        idleHeadAgeBudgetMs: 18_000,
+        runOnceDurationsMs: [7_000, 1_000, 1_000, 1_000],
+      });
+      harness.runner.start();
+      await harness.fire();
+      await harness.runner.stop();
+
+      harness.runner.start();
+      for (let pass = 0; pass < 3; pass += 1) await harness.fire();
+
+      expect(harness.delays).toEqual([0, 6_000, 0, 6_000, 6_000, 10_000]);
       await harness.runner.stop();
     });
   });

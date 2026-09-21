@@ -280,6 +280,7 @@ export class ChainIndexTick {
       }
       return this.#result(verification.outcome, {
         head: observedHead,
+        pendingWork: false,
         blockRequests,
         logRequests: 0,
       });
@@ -295,7 +296,12 @@ export class ChainIndexTick {
     // above holding rows that no later pass re-fetches — while coverage, which
     // never shrinks, went on claiming them.
     if (observedHead.number < Math.max(cursor.settledBlockNumber, cursor.head.number)) {
-      return this.#result('endpoint-lagging', { head: observedHead, blockRequests, logRequests: 0 });
+      return this.#result('endpoint-lagging', {
+        head: observedHead,
+        pendingWork: false,
+        blockRequests,
+        logRequests: 0,
+      });
     }
 
     const topicSetVersion = chainEventLogTopicSetVersion(registry.topicSet());
@@ -390,7 +396,7 @@ export class ChainIndexTick {
     }
     const incomplete = state.coverage.find((entry) => !chainEventLogCoverageIsComplete(entry));
     if (incomplete === undefined) {
-      return this.#result('idle', { blockRequests: 0, logRequests: 0 });
+      return this.#result('idle', { pendingWork: false, blockRequests: 0, logRequests: 0 });
     }
     // Clamped at the settled cursor so a page can never reach into the tail.
     // History is settled history; if a coverage row ever started above the
@@ -505,7 +511,12 @@ export class ChainIndexTick {
       // No lineage, no scope. Without it a redeployed chain with deterministic
       // addresses is indistinguishable from the old one, and `node-ui.db`
       // outlives a chain reset (`chain-reset-wipe.ts:56-58`).
-      return this.#result('endpoint-lagging', { head, blockRequests, logRequests: 0 });
+      return this.#result('endpoint-lagging', {
+        head,
+        pendingWork: false,
+        blockRequests,
+        logRequests: 0,
+      });
     }
 
     const fetchThrough = this.#catchUpThrough(liveFrom - 1, head.number);
@@ -892,11 +903,9 @@ export class ChainIndexTick {
 
   #result(
     outcome: ChainIndexTickOutcome,
-    detail: Omit<ChainIndexTickResult, 'outcome' | 'pendingWork'> & {
-      readonly pendingWork?: boolean;
-    },
+    detail: Omit<ChainIndexTickResult, 'outcome'>,
   ): ChainIndexTickResult {
-    return Object.freeze({ outcome, pendingWork: false, ...detail });
+    return Object.freeze({ outcome, ...detail });
   }
 }
 
