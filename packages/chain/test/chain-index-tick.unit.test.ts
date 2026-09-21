@@ -10,7 +10,10 @@ import {
   type ChainIndexLogRequest,
   type ChainIndexTickPorts,
 } from '../src/chain-index/chain-index-tick.js';
-import type { ChainEventLogCoverage } from '../src/chain-index/chain-event-log.js';
+import {
+  chainEventLogCoverageIsComplete,
+  type ChainEventLogCoverage,
+} from '../src/chain-index/chain-event-log.js';
 import { resolveChainIndexAuthorityAnchor } from '../src/chain-index/chain-index-anchor.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
@@ -282,18 +285,27 @@ describe('ChainIndexTick — one log', () => {
 
   it('coverage reports what was looked at, not the head, while catching up', async () => {
     const store = new MemoryChainEventLogStore();
-    const rig = harness({
-      head: { number: 10_000, hash: hash(0x27), timestampSeconds: 1_700_000_000 },
+    const rig = harness();
+    const index = tick(store, rig.ports, {
+      maxCatchUpBlocks: 50,
+      backfillPageBlocks: 10_000,
     });
-    const index = tick(store, rig.ports, { maxCatchUpBlocks: 50, resumeFromBlockNumber: 100 });
-
     await index.runOnce(new AbortController().signal);
+    for (let pass = 0; pass < 8; pass += 1) {
+      if ((await index.backfillOnce(new AbortController().signal)).outcome === 'idle') break;
+    }
+    expect((await store.load(SCOPE))!.coverage.every(chainEventLogCoverageIsComplete)).toBe(true);
+    rig.head = { number: 10_000, hash: hash(0x27), timestampSeconds: 1_700_000_000 };
+
+    const result = await index.runOnce(new AbortController().signal);
 
     const coverage = (await store.load(SCOPE))!.coverage
       .find((entry) => entry.family === 'context-graph-authority')!;
-    // Resumed at 101, so the cursor sat at 100 and one bounded pass climbed 50.
-    expect(coverage.coveredThroughBlock).toBe(150);
+    // The cursor sat at 95 and one bounded pass climbed only 50 blocks.
+    expect(coverage.coveredThroughBlock).toBe(145);
     expect(coverage.coveredThroughBlock).toBeLessThan(10_000);
+    expect(result.fetchedRows).toBe(0);
+    expect(result.pendingWork).toBe(true);
   });
 
   it('restarts coverage at the fetched range when the subscribed topic set changes', async () => {
@@ -671,7 +683,21 @@ describe('ChainIndexTick — one log', () => {
     rig.requests.length = 0;
     const result = await index.backfillOnce(new AbortController().signal);
     expect(result.outcome).toBe('idle');
+    expect(result.pendingWork).toBe(false);
     expect(rig.requests).toHaveLength(0);
+  });
+
+  it('marks an empty incomplete backfill page as pending work', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const index = tick(store, rig.ports, { backfillPageBlocks: 10 });
+    await index.runOnce(new AbortController().signal);
+
+    const result = await index.backfillOnce(new AbortController().signal);
+
+    expect(result.outcome).toBe('advanced');
+    expect(result.fetchedRows).toBe(0);
+    expect(result.pendingWork).toBe(true);
   });
 });
 

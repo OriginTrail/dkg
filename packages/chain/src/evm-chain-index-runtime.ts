@@ -50,6 +50,7 @@ import {
   type ChainIndexAuthorityAnchor,
   type ChainIndexLogRequest,
   type ChainIndexObservedHead,
+  type ChainIndexRunnerOptions,
   type ChainIndexTickResult,
   type HubBinding,
 } from './chain-index/index.js';
@@ -107,6 +108,11 @@ export interface EvmChainIndexRuntimeOptions {
   readonly onError?: (error: unknown) => void;
   /** Injected wall clock; late-bound so a faked `Date` is honoured. */
   readonly now?: () => number;
+  /** Scheduler-only hooks for deterministic composition-level tests. */
+  readonly runnerHooks?: Pick<
+    ChainIndexRunnerOptions,
+    'setTimer' | 'clearTimer' | 'now'
+  >;
   /** Owner-only reader over the already-existing authority index/log. */
   readonly readContextGraphFinalizedCreation?: ChainEventLogAuthoritySource[
     'readContextGraphFinalizedCreation'
@@ -388,8 +394,15 @@ export function createEvmChainIndexRuntime(
 
   const runner = new ChainIndexRunner(tick, {
     intervalMs: options.intervalMs,
+    // The authority anchor is provably the binding reader bound: it is the Hub
+    // window's `max(3T, 15s)` with an additional 5-minute ceiling, so it can
+    // never be wider and becomes strictly narrower for large T. Passing it
+    // directly makes that ordering explicit instead of presenting a `min`
+    // whose Hub operand can never win.
+    idleHeadAgeBudgetMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
     onResult: options.onResult,
     onError: options.onError,
+    ...options.runnerHooks,
   });
 
   const subscription = createChainEventLogSubscription({

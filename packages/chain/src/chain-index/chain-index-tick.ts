@@ -140,6 +140,12 @@ export interface ChainIndexTickResult {
   readonly head?: ChainIndexObservedHead;
   readonly settledBlockNumber?: number;
   readonly fetchedRows?: number;
+  /**
+   * This bounded pass left one or more index lanes unconverged.
+   * An empty page with this flag is not an idle scope: slowing it down would
+   * delay convergence and prolong the readers' live-chain fallback.
+   */
+  readonly pendingWork?: boolean;
   /** Physical `eth_getLogs` calls this tick issued. The one-log budget check. */
   readonly logRequests: number;
   readonly blockRequests: number;
@@ -311,6 +317,7 @@ export class ChainIndexTick {
       return this.#result(revision === undefined ? 'cas-lost' : 'idle', {
         head: observedHead,
         settledBlockNumber: cursor.settledBlockNumber,
+        pendingWork: state.coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
         blockRequests,
         logRequests: 0,
       });
@@ -335,6 +342,11 @@ export class ChainIndexTick {
       head: { ...observedHead, fetchedAtMs: headFetchedAtMs },
       topicSetVersion,
     };
+    const coverage = this.#extendCoverage(
+      state.coverage,
+      fetch,
+      topicSetVersion !== cursor.topicSetVersion,
+    );
     const revision = await store.commit(scope, cursor.revision, {
       cursor: nextCursor,
       rows: this.#flagRows(fetch.rows, settled.number),
@@ -345,11 +357,7 @@ export class ChainIndexTick {
       // the head while a catch-up is still climbing is exactly how an unindexed
       // range becomes an "indexed and absent" answer — and so is claiming a
       // rebound contract's blocks for the proxy it was rebound off.
-      coverage: this.#extendCoverage(
-        state.coverage,
-        fetch,
-        topicSetVersion !== cursor.topicSetVersion,
-      ),
+      coverage,
       clearsForkSuspicion: verification.verified,
     });
 
@@ -357,6 +365,8 @@ export class ChainIndexTick {
       head: observedHead,
       settledBlockNumber: settled.number,
       fetchedRows: fetch.rows.length,
+      pendingWork: fetchThrough < observedHead.number
+        || coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
       blockRequests,
       logRequests: fetch.logRequests,
     });
@@ -376,7 +386,7 @@ export class ChainIndexTick {
     const { scope, store } = this.#options;
     const state = await store.load(scope);
     if (state === undefined) {
-      return this.#result('idle', { blockRequests: 0, logRequests: 0 });
+      return this.#result('idle', { pendingWork: true, blockRequests: 0, logRequests: 0 });
     }
     const incomplete = state.coverage.find((entry) => !chainEventLogCoverageIsComplete(entry));
     if (incomplete === undefined) {
@@ -395,7 +405,7 @@ export class ChainIndexTick {
       throughBlock - this.#options.backfillPageBlocks + 1,
     );
     if (throughBlock < fromBlock) {
-      return this.#result('idle', { blockRequests: 0, logRequests: 0 });
+      return this.#result('idle', { pendingWork: true, blockRequests: 0, logRequests: 0 });
     }
 
     const fetch = await this.#fetchRange(fromBlock, throughBlock, signal, [incomplete.address]);
@@ -406,18 +416,23 @@ export class ChainIndexTick {
     // never looks at the tail, and the commit that used to drop the whole tail
     // anyway left the log with no unfinalized rows at all for most of every
     // interval while coverage went on claiming them.
+    const nextCoverage = extendChainEventLogCoverage(incomplete, {
+      ...incomplete,
+      coveredFromBlock: fromBlock,
+      coveredThroughBlock: incomplete.coveredThroughBlock,
+    });
     const revision = await store.commit(scope, state.cursor.revision, {
       cursor: { ...state.cursor },
       rows: this.#flagRows(fetch.rows, throughBlock),
-      coverage: [extendChainEventLogCoverage(incomplete, {
-        ...incomplete,
-        coveredFromBlock: fromBlock,
-        coveredThroughBlock: incomplete.coveredThroughBlock,
-      })],
+      coverage: [nextCoverage],
     });
     return this.#result(revision === undefined ? 'cas-lost' : 'advanced', {
       settledBlockNumber: state.cursor.settledBlockNumber,
       fetchedRows: fetch.rows.length,
+      pendingWork: !chainEventLogCoverageIsComplete(nextCoverage)
+        || state.coverage.some((entry) => (
+          entry !== incomplete && !chainEventLogCoverageIsComplete(entry)
+        )),
       blockRequests: 0,
       logRequests: fetch.logRequests,
     });
@@ -506,6 +521,7 @@ export class ChainIndexTick {
     blockRequests += settled.blockRequests;
 
     const topicSetVersion = chainEventLogTopicSetVersion(registry.topicSet());
+    const coverage = this.#extendCoverage([], fetch, true);
     const revision = await store.commit(scope, undefined, {
       cursor: {
         lineage,
@@ -517,12 +533,14 @@ export class ChainIndexTick {
       },
       rows: this.#flagRows(fetch.rows, settled.number),
       replacedRange: { fromBlockNumber: liveFrom, throughBlockNumber: fetchThrough },
-      coverage: this.#extendCoverage([], fetch, true),
+      coverage,
     });
     return this.#result(revision === undefined ? 'cas-lost' : 'advanced', {
       head,
       settledBlockNumber: settled.number,
       fetchedRows: fetch.rows.length,
+      pendingWork: fetchThrough < head.number
+        || coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
       blockRequests,
       logRequests: fetch.logRequests,
     });
@@ -871,7 +889,7 @@ export class ChainIndexTick {
     outcome: ChainIndexTickOutcome,
     detail: Omit<ChainIndexTickResult, 'outcome'>,
   ): ChainIndexTickResult {
-    return Object.freeze({ outcome, ...detail });
+    return Object.freeze({ outcome, pendingWork: false, ...detail });
   }
 }
 

@@ -92,6 +92,10 @@ interface Harness {
   readonly labels: string[];
   readonly usageConsumers: string[];
   readonly runtime: ReturnType<typeof createEvmChainIndexRuntime>;
+  /** Every delay requested by the real runtime-owned runner. */
+  readonly runnerDelays: number[];
+  /** Fire the currently scheduled runner timer and settle its pass. */
+  fireRunner(): Promise<void>;
   /** Wall clock the runtime reads, so a quiet tick can be aged on demand. */
   advanceMs(ms: number): void;
 }
@@ -112,6 +116,8 @@ function harness(options?: {
    */
   chainTimeLeadSeconds?: number;
   resumeFromBlockNumber?: number;
+  /** Deploy both indexed contracts here; defaults to their real fixture floors. */
+  deploymentBlockNumber?: number;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -119,6 +125,9 @@ function harness(options?: {
   const store = new MemoryChainEventLogStore();
   const labels: string[] = [];
   const usageConsumers: string[] = [];
+  const runnerDelays: number[] = [];
+  let runnerTimer: (() => void) | undefined;
+  let runnerDelayMs = 0;
   // Honours the ADDRESS array, not only the range. A fake that ignored it
   // would hand the Hub's own rotation back to the re-request the tick issues
   // for the newly bound address, and the duplicate would read as a decoder bug.
@@ -162,12 +171,12 @@ function harness(options?: {
     hub: {
       address: HUB_ADDRESS,
       contractInterface: hubInterface,
-      deploymentBlockNumber: 1,
+      deploymentBlockNumber: options?.deploymentBlockNumber ?? 1,
     },
     contextGraphStorage: {
       address: CG_STORAGE_ADDRESS,
       contractInterface: cgInterface,
-      deploymentBlockNumber: 2,
+      deploymentBlockNumber: options?.deploymentBlockNumber ?? 2,
       // Exactly what the adapter passes: the registry this address was
       // resolved through. It seeds the tick's bindings, which is what makes a
       // rotation of this name a MOVE off this address.
@@ -181,6 +190,16 @@ function harness(options?: {
       return read(provider as never);
     },
     now: () => nowMs,
+    runnerHooks: {
+      now: () => nowMs,
+      setTimer: (fn, ms) => {
+        runnerDelays.push(ms);
+        runnerTimer = fn;
+        runnerDelayMs = ms;
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      },
+      clearTimer: () => { runnerTimer = undefined; },
+    },
   });
   return {
     store,
@@ -190,11 +209,40 @@ function harness(options?: {
     labels,
     usageConsumers,
     runtime,
+    runnerDelays,
+    fireRunner: async () => {
+      const timer = runnerTimer;
+      const scheduledBeforePass = runnerDelays.length;
+      runnerTimer = undefined;
+      nowMs += runnerDelayMs;
+      runnerDelayMs = 0;
+      timer?.();
+      for (let drain = 0; drain < 50 && runnerDelays.length === scheduledBeforePass; drain += 1) {
+        await Promise.resolve();
+      }
+    },
     advanceMs: (ms: number) => { nowMs += ms; },
   };
 }
 
 describe('createEvmChainIndexRuntime', () => {
+  it('wires the production idle budget to the anchor ceiling at large T', async () => {
+    // T=150s: Hub liveness accepts 450s, while the authority anchor caps at
+    // 300s. Two thirds of the binding 300s bound is a 200s idle delay. A
+    // deleted budget would stay at 150s; min->max would widen to 300s.
+    const h = harness({
+      intervalMs: 150_000,
+      deploymentBlockNumber: 1_000,
+      chainTimeLeadSeconds: 3_600,
+    });
+    h.runtime.start();
+
+    for (let pass = 0; pass < 3; pass += 1) await h.fireRunner();
+
+    expect(h.runnerDelays).toEqual([0, 150_000, 150_000, 200_000]);
+    await h.runtime.stop();
+  });
+
   it('threads the existing authority cursor into the first one-log range', async () => {
     const h = harness({ headNumber: 5_000, resumeFromBlockNumber: 4_000 });
 
