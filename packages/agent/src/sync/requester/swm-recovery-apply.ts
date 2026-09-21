@@ -380,7 +380,16 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
       const storedHead = await ports.snapshotMaterializer.readStoredHead(descriptor);
       if (storedHead.version !== null) {
         try {
-          if (BigInt(storedHead.version) > BigInt(descriptor.assertionVersion)) {
+          // A genuinely newer live share has a different operation identity
+          // and must win this race. The same operation id cannot legitimately
+          // certify two assertion versions, though: that shape is a corrupt
+          // head row which the canonical metadata replacement must heal. In
+          // particular, do not let a drifted higher version turn the race
+          // guard into an id-equal fast path that preserves bad metadata.
+          if (
+            BigInt(storedHead.version) > BigInt(descriptor.assertionVersion)
+            && storedHead.shareOperationId !== descriptor.shareOperationId
+          ) {
             return {
               insertedGraphQuads: 0,
               withholdRows: descriptor.metadataQuads.filter(
