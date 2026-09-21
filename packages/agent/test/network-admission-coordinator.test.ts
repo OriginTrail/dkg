@@ -123,6 +123,7 @@ function buildCoordinator(input: {
     deletePeerFromPeerStore,
     cleanupRejectedPeerState,
     ...(input.probeTimeoutMs !== undefined ? { probeTimeoutMs: input.probeTimeoutMs } : {}),
+    ...(input.now !== undefined ? { now: input.now } : {}),
   });
 
   return {
@@ -203,17 +204,10 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
   });
 
-  it('preflight respects active probe backoff and admits the peer after it expires', async () => {
+  it('preflight bypasses automatic backoff once, then applies its own retry cooldown', async () => {
     let now = 1_000;
-    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
-      const request = JSON.parse(new TextDecoder().decode(data));
-      const response = await signNetworkIdentityResponse({
-        request,
-        identity,
-        responderPeerId: REMOTE_PEER_ID,
-        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
-      });
-      return new TextEncoder().encode(JSON.stringify(response));
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new Error('peer still booting');
     });
     const fixture = buildCoordinator({
       identity,
@@ -227,9 +221,37 @@ describe('NetworkAdmissionCoordinator', () => {
       [REMOTE_PEER_ID, REMOTE_PEER_ID_CID],
       createOperationContext('publish'),
     )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
-    expect(sendIdentityProbe).not.toHaveBeenCalled();
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
 
-    now += 100;
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 1_000;
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('preflight admits a healthy peer despite an active automatic backoff', async () => {
+    const now = 1_000;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe, now: () => now });
+    fixture.admission.rememberRetryableProbeFailure(REMOTE_PEER_ID, 'connection/open race', 'transient');
+
     await expect(fixture.coordinator.preflightPeerAdmission(
       [REMOTE_PEER_ID],
       createOperationContext('publish'),
@@ -239,19 +261,18 @@ describe('NetworkAdmissionCoordinator', () => {
   });
 
   it('preflight bounds concurrent identity admission attempts', async () => {
-    const fixture = buildCoordinator({
-      identity,
-      sendIdentityProbe: async () => new Uint8Array(),
-    });
     let active = 0;
     let maxActive = 0;
     const releases: Array<() => void> = [];
-    vi.spyOn(fixture.coordinator, 'ensureAdmitted').mockImplementation(async () => {
-      active += 1;
-      maxActive = Math.max(maxActive, active);
-      await new Promise<void>((resolve) => releases.push(resolve));
-      active -= 1;
-      return true;
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active -= 1;
+        return new Uint8Array();
+      },
     });
 
     const preflight = fixture.coordinator.preflightPeerAdmission(
@@ -266,7 +287,7 @@ describe('NetworkAdmissionCoordinator', () => {
     releases[2]();
     releases[3]();
 
-    await expect(preflight).resolves.toEqual({ checked: 4, admitted: 4, unresolved: 0 });
+    await expect(preflight).resolves.toEqual({ checked: 4, admitted: 0, unresolved: 4 });
     expect(maxActive).toBe(2);
   });
 

@@ -130,6 +130,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
+  selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
@@ -2898,24 +2899,22 @@ export class DKGAgent extends DKGAgentBase {
 
   /**
    * Resolve admission only for connected peers already known to be eligible
-   * for an ACK round. This deliberately excludes arbitrary connected peers:
-   * a configured ACK allowlist wins, otherwise identify-derived core/V2
-   * evidence is required. The coordinator owns filtering, retry backoff and a
-   * bounded probe fan-out; signed same-network proof remains mandatory.
+   * for an ACK round. The publisher selector is the single source of truth: a
+   * configured ACK allowlist wins, otherwise every connected peer remains in
+   * the candidate universe because identify-derived core tiers may be partial.
+   * The coordinator owns admission, per-peer retry cooldown and bounded probe
+   * fan-out; signed same-network proof remains mandatory.
    */
   private async getACKCandidatePeersAfterAdmission(
     protocol: string | undefined,
     ctx: OperationContext,
   ): Promise<string[]> {
     const connected = this.connectedPeerIds();
-    const connectedSet = new Set(connected);
-    const configuredAllowlist = (this.config.ackCandidatePeerIds ?? [])
-      .map((peerId) => peerId.trim())
-      .filter((peerId) => peerId.length > 0);
-    const eligible = configuredAllowlist.length > 0
-      ? configuredAllowlist.filter((peerId) => connectedSet.has(peerId))
-      : [...new Set([...this.knownCorePeerIds, ...this.knownCorePeerIdsV2])]
-        .filter((peerId) => connectedSet.has(peerId));
+    const eligible = selectACKCandidateUniverse({
+      connectedPeers: connected,
+      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
+      selfPeerId: this.peerId,
+    });
 
     const result = await this.networkAdmissionCoordinator.preflightPeerAdmission(
       eligible,
@@ -3020,12 +3019,17 @@ export class DKGAgent extends DKGAgentBase {
       sendP2P: this.createACKSendP2P(timeoutMs),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
         protocol,
-        createOperationContext(protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
-          ? 'update'
-          : 'publish'),
+        this.ackOperationContext(protocol),
       ),
       log: options.log,
     });
+  }
+
+  private ackOperationContext(protocol?: string): OperationContext {
+    const operation = protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
+      ? 'update'
+      : 'publish';
+    return createOperationContext(operation);
   }
 
   /**

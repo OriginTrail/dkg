@@ -12,6 +12,7 @@ import {
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -37,6 +38,7 @@ export interface NetworkAdmissionCoordinatorOptions {
     warn(ctx: OperationContext, message: string): void;
   };
   probeTimeoutMs?: number;
+  now?: () => number;
 }
 
 export interface NetworkAdmissionAttemptOptions {
@@ -66,6 +68,8 @@ const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
 const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
+
+const MAX_PREFLIGHT_COOLDOWNS = 10_000;
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -170,7 +174,10 @@ export class NetworkAdmissionCoordinator {
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
+  private readonly now: () => number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
+  /** ACK-preflight-specific suppression; distinct from automatic admission backoff. */
+  private readonly preflightRetryAfter = new Map<CanonicalPeerId, number>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
@@ -185,6 +192,7 @@ export class NetworkAdmissionCoordinator {
     this.cleanupRejectedPeerState = options.cleanupRejectedPeerState;
     this.log = options.log;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 3_000;
+    this.now = options.now ?? Date.now;
   }
 
   get enabled(): boolean {
@@ -259,10 +267,10 @@ export class NetworkAdmissionCoordinator {
   /**
    * Resolve admission for a bounded, caller-selected peer set.
    *
-   * The coordinator remains the sole owner of the accepted/rejected and
-   * retry-backoff gates. In particular this path uses the automatic policy:
-   * an active transient backoff is respected, so repeated publishes cannot
-   * turn into repeated identity probes of a peer that is still booting.
+   * The coordinator remains the sole owner of accepted/rejected state. An ACK
+   * round may bypass the automatic admission backoff once so a healthy peer
+   * cannot be frozen out of a quorum, but a separate per-peer cooldown prevents
+   * repeated publishes from re-probing the same failing peer each round.
    */
   async preflightPeerAdmission(
     peerIds: Iterable<string>,
@@ -271,7 +279,18 @@ export class NetworkAdmissionCoordinator {
   ): Promise<NetworkAdmissionPreflightResult> {
     if (!this.enabled) return { checked: 0, admitted: 0, unresolved: 0 };
 
-    const canonicalPeerIds: string[] = [];
+    const preflightNow = this.now();
+    for (const [peerId, retryAfter] of this.preflightRetryAfter) {
+      if (
+        retryAfter <= preflightNow
+        || this.isAcceptedPeer(peerId)
+        || this.isRejectedPeer(peerId)
+      ) {
+        this.preflightRetryAfter.delete(peerId);
+      }
+    }
+
+    const canonicalPeerIds: CanonicalPeerId[] = [];
     for (const peerId of peerIds) {
       try {
         canonicalPeerIds.push(canonicalAdmissionPeerId(peerId));
@@ -284,29 +303,41 @@ export class NetworkAdmissionCoordinator {
       .filter((peerId) => !this.isAcceptedPeer(peerId) && !this.isRejectedPeer(peerId));
     if (pending.length === 0) return { checked: 0, admitted: 0, unresolved: 0 };
 
-    const requestedConcurrency = options.maxConcurrency ?? 4;
-    const maxConcurrency = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0
-      ? requestedConcurrency
-      : 1;
-    let cursor = 0;
-    let admitted = 0;
-    let unresolved = 0;
-    const worker = async () => {
-      while (cursor < pending.length) {
-        const peerId = pending[cursor++];
+    const results = await mapWithConcurrencySettled(
+      pending,
+      options.maxConcurrency ?? 4,
+      async (peerId) => {
+        const now = this.now();
+        const retryAfter = this.preflightRetryAfter.get(peerId);
+        if (retryAfter !== undefined && retryAfter > now) return false;
+        this.preflightRetryAfter.delete(peerId);
         try {
-          if (await this.ensureAdmitted(peerId, ctx)) admitted += 1;
-          else unresolved += 1;
-        } catch {
-          // A retryable probe/backoff keeps the peer excluded for this round.
-          // Definitive proof rejection is handled fail-closed by ensureAdmitted.
-          unresolved += 1;
+          const admitted = await this.ensureAdmittedWithPolicy(
+            peerId,
+            ctx,
+            EXPLICIT_CONNECT_ADMISSION_POLICY,
+            {},
+          );
+          this.preflightRetryAfter.delete(peerId);
+          return admitted;
+        } catch (error) {
+          const backoff = this.admission.getRetryableProbeBackoff(peerId);
+          if (this.preflightRetryAfter.size >= MAX_PREFLIGHT_COOLDOWNS) {
+            const oldest = this.preflightRetryAfter.keys().next();
+            if (!oldest.done) this.preflightRetryAfter.delete(oldest.value);
+          }
+          this.preflightRetryAfter.set(
+            peerId,
+            this.now() + Math.max(1_000, backoff?.retryAfterMs ?? 15_000),
+          );
+          throw error;
         }
-      }
-    };
-    await Promise.all(
-      Array.from({ length: Math.min(maxConcurrency, pending.length) }, () => worker()),
+      },
     );
+    const admitted = results.filter(
+      (result) => result.status === 'fulfilled' && result.value,
+    ).length;
+    const unresolved = pending.length - admitted;
     return { checked: pending.length, admitted, unresolved };
   }
 
