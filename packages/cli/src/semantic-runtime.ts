@@ -14,6 +14,7 @@ import type { LlmConfig } from '@origintrail-official/dkg-node-ui';
 import { ethers } from 'ethers';
 import {
   ComponentWorkerClient,
+  TypeScriptProgramHost,
   defaultExecutionCapability,
   RuntimeAdapterRegistry,
   RuntimeEffectBroker,
@@ -21,6 +22,7 @@ import {
   RUNTIME_DATABASE_FILENAME,
   WasmStrategyAdmissionClient,
   admittedPlanAuthority,
+  hashCanonicalPlan,
   encodeCapabilityMetadata,
   startSemanticRuntimeHost,
   type AdmittedPlanSummary,
@@ -33,6 +35,7 @@ import {
 } from '@origintrail-official/dkg-semantic-runtime';
 
 import { SemanticProgramConfiguration } from './semantic-runtime-configuration.js';
+import { canonicalProgramInputs } from './semantic-runtime-bound-invocation.js';
 import { createAssetCreationAdapter } from './semantic-runtime-asset-adapter.js';
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
 import { assertSparqlReadOutput, createSparqlReadAdapter } from './semantic-runtime-sparql-adapter.js';
@@ -137,6 +140,7 @@ export interface ConfiguredSemanticRuntimeService {
   host: SemanticRuntimeHost;
   store: SemanticRuntimeStore;
   configuration: SemanticProgramConfiguration;
+  typescript?: TypeScriptProgramHost;
   inFlight: Map<string, {
     requestIdentity: string;
     promise: Promise<SemanticInvocationResult>;
@@ -186,14 +190,19 @@ export async function startConfiguredSemanticRuntime(
     `Semantic runtime ready (watchdog=${config.watchdogMs ?? 100}ms, `
       + 'Wasm execution + durable effect journal enabled)',
   );
+  const typescript = new TypeScriptProgramHost();
+  const inFlight: ConfiguredSemanticRuntimeService['inFlight'] = new Map();
   return {
     host,
     store,
     configuration,
-    inFlight: new Map(),
+    typescript,
+    inFlight,
     async stop() {
       try {
+        await typescript.stop();
         await host.stop();
+        await Promise.allSettled([...inFlight.values()].map(invocation => invocation.promise));
       } finally {
         store.close();
       }
@@ -268,7 +277,7 @@ export async function loadStoredSemanticProgram(
     );
   }
   const [definition] = definitions.values();
-  if (definition.language !== 'sexpr-v1') {
+  if (!['sexpr-v1', 'typescript-v1'].includes(definition.language)) {
     throw new SemanticProgramError(
       'UNSUPPORTED_PROGRAM_LANGUAGE',
       `Unsupported program language: ${definition.language}`,
@@ -471,6 +480,8 @@ export async function invokeBoundSemanticProgram(
   invocationId: string,
   config: SemanticRuntimeConfig,
   authenticatedCaller: string | undefined,
+  inputs?: unknown[],
+  composition?: TypeScriptComposition,
 ): Promise<SemanticInvocationResult> {
   const denied = () => new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'This operation is not authorized for the caller', 403);
   validateProgramBindings(config.programBindings ?? []);
@@ -483,6 +494,7 @@ export async function invokeBoundSemanticProgram(
   const binding = structuredClone(selected);
   const digest = programBindingDigest(binding);
   const assertAuthorized = async () => {
+    await composition?.assertParent();
     const checkGrant = () => {
       const current = config.programBindings?.find((item) =>
         item.contextGraphId === contextGraphId && item.operationIri === operationIri);
@@ -497,6 +509,13 @@ export async function invokeBoundSemanticProgram(
     checkGrant();
   };
   await assertAuthorized();
+  if (binding.typescript) {
+    return invokeTypeScriptProgram(agent, runtime, binding, digest, invocationId, config, authenticatedCaller,
+      inputs ?? [], assertAuthorized, composition);
+  }
+  if (inputs !== undefined && (!Array.isArray(inputs) || inputs.length !== 0)) {
+    throw new SemanticProgramError('PROGRAM_INPUTS_UNSUPPORTED', 'S-expression Programs do not accept runtime arguments', 400);
+  }
   const result = await invokeStoredSemanticProgram(
     agent, runtime, contextGraphId, binding.program.programIri, invocationId,
     binding.program.programLayer, binding.executionLayer ?? 'wm', config, undefined,
@@ -563,6 +582,13 @@ export async function validateBoundSemanticProgram(
     }
   };
   await check();
+  if (binding.typescript) {
+    const program = await validateTypeScriptProgram(agent, runtime, binding, check);
+    return { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
+      executingNode: `did:dkg:agent:${executor.agentAddress}`,
+      selectedPolicy: { iri: `urn:dkg:program-binding:${programBindingDigest(binding)}`, version: '1', hash: programBindingDigest(binding) },
+      requiredTools: [], previousExecutions: [], executable: true };
+  }
   if (binding.sparqlRead?.layer === 'swm' && !await agent.canUseSharedMemoryForContextGraph(binding.contextGraphId, { callerAgentAddress: executor.agentAddress })) {
     throw new SemanticProgramError('PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE', 'The data graph is unavailable for shared-memory reads', 503);
   }
@@ -607,6 +633,138 @@ export async function validateBoundSemanticProgram(
   } finally { await worker.stop(); }
   await check();
   return resolved.public;
+}
+
+interface TypeScriptComposition {
+  ancestors: string[];
+  budget: { calls: number; maximum: number; deadline: number; cancelled: boolean };
+  assertParent(): Promise<void>;
+}
+
+async function validateTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSemanticRuntimeService,
+  binding: SemanticProgramBinding, check: () => Promise<void>): Promise<StoredSemanticProgram> {
+  await check();
+  const program = await loadStoredSemanticProgram(agent, binding.program.contextGraphId, binding.program.programIri,
+    binding.program.programLayer, binding.executorAgentAddress);
+  if (program.language !== 'typescript-v1' || sourceHashOf(program) !== binding.program.sourceHash
+    || program.authorAgentAddress.toLowerCase() !== binding.program.authorAgentAddress.toLowerCase()
+    || program.requiredTools.length || !sameSet(new Set(program.permittedPrograms), new Set(binding.typescript!.children.map(child => child.programIri)))) {
+    throw new SemanticProgramError('PROGRAM_BINDING_MISMATCH', 'TypeScript source, author or declared child Programs differ from approval', 403);
+  }
+  if (!runtime.typescript) throw new SemanticProgramError('TYPESCRIPT_RUNTIME_UNAVAILABLE', 'TypeScript execution is unavailable', 409);
+  try { await runtime.typescript.compile(program.source); }
+  catch (error) { throw new SemanticProgramError('PROGRAM_COMPILATION_FAILED', safeMessage(error), 422); }
+  await check();
+  return program;
+}
+
+async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSemanticRuntimeService,
+  binding: SemanticProgramBinding, digest: string, invocationId: string, config: SemanticRuntimeConfig,
+  caller: string, inputs: unknown[], authorized: () => Promise<void>, parent?: TypeScriptComposition): Promise<SemanticInvocationResult> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(invocationId))
+    throw new SemanticProgramError('INVALID_INVOCATION_ID', 'invocationId must be a UUID', 400);
+  invocationId = invocationId.toLowerCase();
+  const grant = binding.typescript!, graph = binding.contextGraphId;
+  const operationKey = `${graph}\0${binding.operationIri}`;
+  if (parent && (parent.ancestors.length >= 8 || parent.ancestors.includes(operationKey)))
+    throw new SemanticProgramError('PROGRAM_COMPOSITION_LIMIT', 'Program composition is cyclic or exceeds eight levels', 403);
+  let inputJson: string;
+  try { inputJson = canonicalProgramInputs(inputs); }
+  catch { throw new SemanticProgramError('INVALID_PROGRAM_INPUTS', 'inputs must be a JSON array of at most 64 KiB and depth 20', 400); }
+  const budget = parent?.budget ?? { calls: 0, maximum: grant.maxCalls, deadline: Date.now() + grant.timeoutMs, cancelled: false };
+  const check = async () => {
+    if (budget.cancelled || Date.now() > budget.deadline) throw new SemanticProgramError('PROGRAM_EXECUTION_CANCELLED', 'Execution is cancelled or expired', 409);
+    await authorized();
+    const visited = new Set<string>();
+    const checkChildren = (selected: SemanticProgramBinding, ancestors: string[]) => {
+      for (const pin of selected.typescript?.children ?? []) {
+        const key = `${pin.contextGraphId}\0${pin.operationIri}`;
+        if (ancestors.includes(key) || ancestors.length >= 8) throw new SemanticProgramError('PROGRAM_COMPOSITION_LIMIT', 'Program grants are cyclic or too deep', 403);
+        const child = config.programBindings?.find(item => item.contextGraphId === pin.contextGraphId && item.operationIri === pin.operationIri);
+        if (!child?.enabled || programBindingDigest(child) !== pin.bindingDigest
+          || !child.allowedCallerAgentAddresses.some(address => address.toLowerCase() === caller.toLowerCase()))
+          throw new SemanticProgramError('PROGRAM_CHILD_FORBIDDEN', 'A child grant changed or does not authorize the original caller', 403);
+        if (!visited.has(key)) { visited.add(key); checkChildren(child, [...ancestors, key]); }
+      }
+    };
+    checkChildren(binding, [operationKey]);
+  };
+  const identity = hashParts(['typescript-v1', digest, caller.toLowerCase(), inputJson, ...(parent?.ancestors ?? [])]);
+  const key = `${graph}\0${invocationId}`;
+  const existing = runtime.inFlight.get(key);
+  if (existing) {
+    if (existing.requestIdentity !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
+    await check();
+    return existing.promise;
+  }
+  const work = async (): Promise<SemanticInvocationResult> => {
+    await check();
+    const program = await validateTypeScriptProgram(agent, runtime, binding, check);
+    const executor = agent.listLocalAgents().find(item => item.agentAddress.toLowerCase() === binding.executorAgentAddress.toLowerCase());
+    if (!executor || !agent.getCustodialAgentPrivateKey(executor.agentAddress)) throw new SemanticProgramError('TARGET_EXECUTOR_NOT_LOCAL', 'Executor is unavailable', 409);
+    const executionIri = `urn:sr:execution:${invocationId}`, name = `semantic-execution-${invocationId}`;
+    const layer = binding.executionLayer ?? 'wm';
+    const previous = runtime.store.execution(executionIri);
+    const history = await agent.assertion.history(graph, name, { agentAddress: executor.agentAddress });
+    if (previous) {
+      if (previous.graphRevision !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
+      if (previous.status !== 'completed') {
+        // JavaScript continuations are not durable. Never replay partially run
+        // workflows and accidentally repeat an external effect after a crash.
+        if (previous.status === 'active') runtime.store.setExecutionStatus(executionIri, 'failed');
+        throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted or failed TypeScript execution requires a new invocation ID', 409);
+      }
+      if (!history || !historyIsAtLayer(history, layer)) throw new SemanticProgramError('EXECUTION_PERSISTENCE_INCONSISTENT', 'Completed receipt is missing', 500);
+      const outputs = await loadExecutionOutputs(agent, graph, executionIri, layer, executor.agentAddress);
+      await check();
+      return { invocationId, executionIri, executionLayer: layer, ...(layer === 'vm' ? { executionUal: history.publishedUal } : {}), outputs, persisted: true };
+    }
+    const artifact = await runtime.typescript!.compile(program.source);
+    const manifest = new TextEncoder().encode(artifact.manifest), planId = hashCanonicalPlan(manifest);
+    runtime.store.registerStrategyArtifact({ artifactHash: planId, strategyId: program.programIri, version: program.version,
+      canonicalPlan: manifest, sourceRef: program.programIri, reviewState: 'approved', createdAt: Date.now() });
+    runtime.store.createExecution({ executionId: executionIri, planId, partitionId: hashParts([graph]),
+      status: 'active', graphRevision: identity, policyEpoch: 1n, rootProcessId: executionIri, leaseEpoch: 0n });
+    const childExecutions: string[] = [], startedAt = new Date();
+    try {
+      const output = await runtime.typescript!.execute(artifact, inputJson,
+        { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => {
+          await check();
+          if (++budget.calls > budget.maximum) throw new SemanticProgramError('PROGRAM_CALL_BUDGET_EXCEEDED', 'Program tree exceeds its call budget', 403);
+          const pin = grant.children.find(child => child.programIri === effect.program);
+          if (!pin) throw new SemanticProgramError('PROGRAM_CHILD_FORBIDDEN', 'Child Program is not approved', 403);
+          // Deterministic effect-specific IDs link persisted child executions to
+          // this parent. Only the host chooses them and the original caller.
+          const hex = hashParts([invocationId, String(effect.id)]);
+          const childId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+          const result = await invokeBoundSemanticProgram(agent, runtime, pin.contextGraphId, pin.operationIri, childId,
+            config, caller, effect.args, { ancestors: [...(parent?.ancestors ?? []), operationKey], budget, assertParent: check });
+          await check();
+          childExecutions.push(result.executionIri);
+          const values = (result.outputs ?? []).map(value => { try { return JSON.parse(value); } catch { return value; } });
+          return values.length === 1 ? values[0] : values;
+        });
+      await check();
+      const quads = buildExecutionQuads({ bound: { binding, digest, assertAuthorized: check }, executionIri, invocationId,
+        programIri: program.programIri, operatorIri: `did:dkg:agent:${executor.agentAddress}`, callerIri: `did:dkg:agent:${caller}`,
+        policy: { iri: `urn:dkg:program-binding:${digest}`, version: '1', hash: digest }, programHash: artifact.hash,
+        tools: [], events: [], agents: [], outputs: [{ role: 'result', processId: new Uint8Array(), value: output }],
+        childExecutions, startedAt, finishedAt: new Date() });
+      quads.push(literalQuad(executionIri, `${SR}inputHash`, createHash('sha256').update(inputJson).digest('hex')));
+      const persistence = await persistExecutionKnowledgeAsset(agent, graph, name, executor.agentAddress, quads, history, layer);
+      await check();
+      runtime.store.setExecutionStatus(executionIri, 'completed');
+      return { invocationId, executionIri, executionLayer: layer, ...(persistence.ual ? { executionUal: persistence.ual } : {}), outputs: [output], persisted: true };
+    } catch (error) {
+      runtime.store.setExecutionStatus(executionIri, 'failed');
+      if (error instanceof SemanticProgramError) throw error;
+      throw new SemanticProgramError('TYPESCRIPT_EXECUTION_FAILED', safeMessage(error), 422);
+    }
+  };
+  const promise = work();
+  runtime.inFlight.set(key, { requestIdentity: identity, promise });
+  try { return await promise; }
+  finally { runtime.inFlight.delete(key); if (!parent) budget.cancelled = true; }
 }
 
 interface LocalInvocationScope {
@@ -724,6 +882,9 @@ async function resolveInternal(
     programLayer,
     readPrincipal,
   );
+  if (program.language === 'typescript-v1') {
+    throw new SemanticProgramError('PROGRAM_BINDING_REQUIRED', 'TypeScript Programs require a TypeScript operation approval', 403);
+  }
   if (bound && (sourceHashOf(program) !== bound.binding.program.sourceHash
     || program.authorAgentAddress.toLowerCase() !== bound.binding.program.authorAgentAddress.toLowerCase()
     || program.permittedPrograms.length !== 0)) {

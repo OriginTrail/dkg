@@ -2,6 +2,8 @@
 
 Web dashboard for DKG V10 nodes. Provides a browser-based UI for monitoring node health, exploring the knowledge graph, running SPARQL queries, and chatting with integrated agents.
 
+The Context Graph action bar includes **Program** for creating TypeScript Graph Computer Programs. Existing TypeScript Program assets offer **Edit TypeScript Program**. The editor supports source editing, saving a new Knowledge Asset version, explicit execution approval, JSON arguments and invocation results. See the [Graph Computer editor workflow](../graph-computer/README.md#edit-typescript-programs-in-the-node-ui) for wallet, permission and retry behavior.
+
 ## Features
 
 - **Dashboard** - real-time node metrics (peers, KAs published, queries served, uptime)

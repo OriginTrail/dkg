@@ -9,13 +9,14 @@ import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from 
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
 
-export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
+export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh, onNewProgram }: {
   active: LayerView;
   counts: { wm: number; swm: number; vm: number; total: number };
   onSwitch: (v: LayerView) => void;
   onShare: () => void;
   onImport: () => void;
   onRefresh: () => void;
+  onNewProgram?: () => void;
 }) {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
@@ -133,6 +134,9 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
       </div>
       <div className="v10-layer-switcher-spacer" />
       <div className="v10-layer-switcher-actions">
+        {onNewProgram && <button className="v10-layer-action-btn" onClick={onNewProgram} aria-label="New TypeScript Program">
+          <span className="v10-layer-action-icon">⌘</span><span className="v10-layer-action-label">Program</span>
+        </button>}
         <button className="v10-layer-action-btn" onClick={onShare} aria-label="Share Context Graph">
           <span className="v10-layer-action-icon">⤴</span>
           <span className="v10-layer-action-label">Share</span>
@@ -954,4 +958,3 @@ export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void
     </div>
   );
 }
-

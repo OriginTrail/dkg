@@ -72,7 +72,7 @@ describe('signed bound operation inbox', () => {
     expect(f.sender.resolveLocalAgentAddress).not.toHaveBeenCalled();
     const request = JSON.parse(new TextDecoder().decode(f.sender.invokeSkill.mock.calls[0][2]));
     expect(request.authorization).toEqual(proof);
-    expect(invokeBoundSemanticProgram).toHaveBeenLastCalledWith(f.target, {}, graph, operation, id, { enabled: true }, caller);
+    expect(invokeBoundSemanticProgram).toHaveBeenLastCalledWith(f.target, {}, graph, operation, id, { enabled: true }, caller, undefined);
     expect(invokeBoundSemanticProgram).toHaveBeenCalledTimes(2); // each retry reaches current permission checks
     expect(f.sender.invokeSkill.mock.calls[0][3].messageId).not.toBe(f.sender.invokeSkill.mock.calls[1][3].messageId);
   });
@@ -105,7 +105,7 @@ describe('signed bound operation inbox', () => {
     await f.invoke();
     expect(f.sender.invokeSkill.mock.calls[1][3].messageId).not.toBe(firstDeliveryId);
     expect(firstDeliveryId).not.toBe(id);
-    expect(invokeBoundSemanticProgram).toHaveBeenCalledWith(f.target, {}, graph, operation, id, { enabled: true }, caller);
+    expect(invokeBoundSemanticProgram).toHaveBeenCalledWith(f.target, {}, graph, operation, id, { enabled: true }, caller, undefined);
     expect(f.target.isPrivateContextGraph).not.toHaveBeenCalled();
     expect(f.target.query).not.toHaveBeenCalled();
   });

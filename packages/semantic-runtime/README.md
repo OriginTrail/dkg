@@ -4,6 +4,16 @@ This package contains the default-off TypeScript host and shared Rust semantic
 kernel for DKG V10. Program S-expressions remain RDF data; every invocation
 loads and admits one immutable Program plan into the same kernel.
 
+Stored `typescript-v1` Programs use `TypeScriptProgramHost`: the daemon compiles
+their source at approval with ComponentizeJS, then runs each invocation in a
+separate Wasm process. Their only effect API is `invoke_program`, routed through
+pinned child operation grants with the original caller's permissions. The SDK
+provides guest `pipe`, `map` and `reduce` helpers. See the
+[TypeScript Program guide](../graph-computer/README.md#write-a-typescript-program)
+for upload, approval and invocation examples, resource limits, and retry semantics.
+This path shares the execution journal and RDF receipts with the S-expression
+runtime, but does not checkpoint JavaScript continuations.
+
 The execution boundary is a versioned WebAssembly component with typed,
 asynchronous WIT. The official Rust WASI 0.3 build flow uses a
 `wasm32-wasip2` carrier component plus async component-model bindings rather

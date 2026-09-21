@@ -1,5 +1,7 @@
+import { canonicalProgramInputs } from '../../semantic-runtime-bound-invocation.js';
 import {
   forkStoredSemanticProgram,
+  loadStoredSemanticProgram,
   invokeBoundSemanticProgram,
   isSemanticMemoryLayer,
   resolveStoredSemanticProgram,
@@ -14,9 +16,10 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
   if (await handleSemanticRuntimeConfigurationRoutes(ctx)) return;
   const { req, res, path, url, agent, config, semanticRuntimeHost } = ctx;
   const isResolve = req.method === 'GET' && path === '/api/semantic-runtime/resolve';
+  const isSource = req.method === 'GET' && path === '/api/programs/source';
   const isInvoke = req.method === 'POST' && path === '/api/programs/execute';
   const isFork = req.method === 'POST' && path === '/api/semantic-runtime/programs/fork';
-  if (!isResolve && !isInvoke && !isFork) return;
+  if (!isResolve && !isSource && !isInvoke && !isFork) return;
 
   if (!semanticRuntimeHost) {
     return jsonResponse(res, 409, {
@@ -25,7 +28,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
     });
   }
   const callerAgentAddress = ctx.actor.effectiveAgentAddress;
-  if (isResolve) {
+  if (isResolve || isSource) {
     const contextGraphId = url.searchParams.get('contextGraphId');
     const programIri = url.searchParams.get('programIri');
     const programLayer = url.searchParams.get('programLayer');
@@ -35,6 +38,11 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       });
     }
     try {
+      if (isSource) {
+        if (!ctx.actor.authenticatedAgentAddress) throw new SemanticProgramError('PROGRAM_SOURCE_ACCESS_DENIED', 'Reading Program source requires an authenticated agent', 403);
+        return jsonResponse(res, 200, await loadStoredSemanticProgram(agent, canonicalProgramGraphId(contextGraphId),
+          programIri, programLayer, ctx.actor.authenticatedAgentAddress));
+      }
       return jsonResponse(res, 200, await resolveStoredSemanticProgram(
         agent,
         contextGraphId,
@@ -87,10 +95,14 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
   // even if a route has been removed or a binding has never been installed.
   if (Object.hasOwn(body, 'operationIri')) {
     if (typeof body.operationIri !== 'string' || typeof body.contextGraphId !== 'string' || typeof body.invocationId !== 'string'
-      || Object.keys(body).some((key) => !['contextGraphId', 'operationIri', 'invocationId', 'authorization'].includes(key))) {
+      || Object.keys(body).some((key) => !['contextGraphId', 'operationIri', 'invocationId', 'authorization', 'inputs'].includes(key))) {
       return jsonResponse(res, 400, { error: 'Bound invocation requires contextGraphId, operationIri and invocationId, with optional client-signed authorization' });
     }
     try {
+      if (Object.hasOwn(body, 'inputs')) {
+        try { canonicalProgramInputs(body.inputs); }
+        catch { throw new SemanticProgramError('INVALID_PROGRAM_INPUTS', 'inputs must be a bounded JSON array', 400); }
+      }
       const graph = canonicalProgramGraphId(body.contextGraphId);
       const route = config.semanticRuntime?.programRoutes?.find((entry) => entry.contextGraphId === graph && entry.operationIri === body.operationIri);
       if (!config.semanticRuntime) throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Semantic runtime is unavailable', 409);
@@ -98,8 +110,8 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
         throw new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'Forwarded authorization requires an exact outbound route', 403);
       }
       const result = route
-        ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, ctx.actor.authenticatedAgentAddress, body.authorization)
-        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, ctx.actor.authenticatedAgentAddress);
+        ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, ctx.actor.authenticatedAgentAddress, body.authorization, body.inputs)
+        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, ctx.actor.authenticatedAgentAddress, body.inputs);
       return jsonResponse(res, 200, result);
     } catch (error) {
       if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message });

@@ -56,7 +56,7 @@ export function registerSemanticRuntimeInboxSkill(
   agent.registerSkill(SEMANTIC_RUNTIME_INBOX_SKILL_IRI, async (request, senderPeerId) => {
     try {
       const invocation = decodeInvocation(request);
-      const expectedScope = invocation.version === 3
+      const expectedScope = isBoundInvocation(invocation)
         ? boundSemanticInvocationScope(invocation, agent.peerId)
         : semanticInvocationScope(invocation, agent.peerId);
       try {
@@ -90,7 +90,7 @@ export function registerSemanticRuntimeInboxSkill(
         );
       }
       const callerAgentAddress = checksumAddress(invocation.authorization.agentAddress);
-      if (invocation.version === 3) {
+      if (isBoundInvocation(invocation)) {
         if (config?.enabled !== true) {
           throw new SemanticProgramError('SEMANTIC_RUNTIME_DISABLED', 'Semantic runtime is not enabled', 409);
         }
@@ -98,7 +98,7 @@ export function registerSemanticRuntimeInboxSkill(
         // checks the signer and the tenant executor's graph access independently.
         const result = await invokeBoundSemanticProgram(
           agent, runtime, invocation.contextGraphId, invocation.operationIri,
-          invocation.invocationId, config, callerAgentAddress,
+          invocation.invocationId, config, callerAgentAddress, invocation.inputs,
         );
         return { success: true, outputData: encodeJson(result), ...(result.executionUal ? { resultUal: result.executionUal } : {}) };
       }
@@ -167,6 +167,7 @@ export async function invokeBoundSemanticProgramOnPeer(
   invocationId: string,
   authenticatedCaller: string | undefined,
   clientAuthorization?: unknown,
+  inputs?: unknown[],
 ): Promise<SemanticInvocationResult> {
   validateProgramRoutes(config.programRoutes ?? []);
   const route = config.programRoutes?.find((item) =>
@@ -175,7 +176,7 @@ export async function invokeBoundSemanticProgramOnPeer(
     throw new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'No authorized local caller or configured operation route', 403);
   }
   const caller = checksumAddress(authenticatedCaller);
-  const unsigned = { version: 3 as const, kind: 'bound-operation' as const, contextGraphId, operationIri, invocationId: invocationId.toLowerCase() };
+  const unsigned = { version: inputs === undefined ? 3 as const : 4 as const, kind: 'bound-operation' as const, contextGraphId, operationIri, invocationId: invocationId.toLowerCase(), ...(inputs !== undefined ? { inputs } : {}) };
   try {
     assertBoundSemanticInvocation(unsigned);
   } catch {
@@ -415,7 +416,7 @@ function localCustodialAgent(agent: DKGAgent, authorAgentAddress: string): strin
 
 function decodeInvocation(request: SkillRequest): SemanticInboxInvocationV2 | BoundSemanticInboxInvocationV3 {
   const decoded = decodeJson(request.inputData);
-  if (decoded && typeof decoded === 'object' && (decoded as { version?: unknown }).version === 3) {
+  if (decoded && typeof decoded === 'object' && [3, 4].includes((decoded as { version?: number }).version ?? 0)) {
     try {
       assertBoundSemanticInvocation(decoded);
       const value = decoded as BoundSemanticInboxInvocationV3;
@@ -447,6 +448,10 @@ function decodeInvocation(request: SkillRequest): SemanticInboxInvocationV2 | Bo
     );
   }
   return value as SemanticInboxInvocationV2;
+}
+
+function isBoundInvocation(value: SemanticInboxInvocationV2 | BoundSemanticInboxInvocationV3): value is BoundSemanticInboxInvocationV3 {
+  return value.version === 3 || value.version === 4;
 }
 
 function decodeResult(

@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createRequestActor } from '../src/daemon/routes/context.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
+import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleSemanticRuntimeRoutes } from '../src/daemon/routes/semantic-runtime.js';
 import { registerSemanticRuntimeInboxSkill } from '../src/semantic-runtime-inbox.js';
 import { startConfiguredSemanticRuntime, type ConfiguredSemanticRuntimeService } from '../src/semantic-runtime.js';
@@ -21,6 +22,8 @@ import { authenticateHttpRequest } from '../src/auth.js';
 import { signAgentHttpHeaders } from '../src/agent-http-signing.js';
 import { boundSemanticInvocationScope } from '../src/semantic-runtime-bound-invocation.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { GraphComputer } from '../../graph-computer/src/index.js';
+import { examples as sdkExamples } from '../../graph-computer/examples/programs.mjs';
 
 const ownerWallet = new ethers.Wallet('0x' + '02'.padStart(64, '0'));
 const owner = ownerWallet.address;
@@ -66,7 +69,7 @@ function node(agent: any, configured: SemanticRuntimeConfig = {}): Node {
     } };
   return n;
 }
-async function request(n: Node, identity: Identity, method: string, path: string, body?: unknown, signing?: { wallet: ethers.Wallet; operator?: boolean }) {
+async function request(n: Node, identity: Identity, method: string, path: string, body?: unknown, signing?: { wallet: ethers.Wallet; operator?: boolean; headers?: Record<string, string> }) {
   let auth = identity === 'anonymous' || identity === 'disabled-anonymous'
     ? requestAuthentication({ kind: 'anonymous', mode: identity === 'anonymous' ? 'public' : 'disabled' })
     : identity === 'operator' ? requestAuthentication({ kind: 'nodeOperator' })
@@ -77,8 +80,8 @@ async function request(n: Node, identity: Identity, method: string, path: string
   res.writeHead = (status: number) => { res.statusCode = status; return res; };
   res.end = (data: string) => { res.body = JSON.parse(data); res.writableEnded = true; };
   if (signing) {
-    const bytes = Buffer.from(JSON.stringify(body ?? {}));
-    const headers = signAgentHttpHeaders({ agentAddress: signing.wallet.address, method, path, targetPeerId: n.agent.peerId,
+    const bytes = Buffer.from(body === undefined && signing.headers ? '' : JSON.stringify(body ?? {}));
+    const headers = signing.headers ?? signAgentHttpHeaders({ agentAddress: signing.wallet.address, method, path, targetPeerId: n.agent.peerId,
       body: bytes, contentType: 'application/json', timestamp: String(Date.now()), nonce: randomUUID().replaceAll('-', '') }, signing.wallet.signingKey);
     req = Object.assign(Readable.from([bytes]), { method, url: path, headers, rawHeaders: [] });
     const result = await authenticateHttpRequest({ req, res, authEnabled: true, validTokens: new Set(), resolveAgentByToken: () => undefined,
@@ -86,7 +89,8 @@ async function request(n: Node, identity: Identity, method: string, path: string
     if (!result.allowed) return { status: res.statusCode as number, body: res.body as any };
     auth = result;
   }
-  const handler = url.pathname === '/api/query' ? handleQueryRoutes : handleSemanticRuntimeRoutes;
+  const handler = url.pathname === '/api/query' ? handleQueryRoutes
+    : url.pathname === '/api/knowledge-assets' ? handleKnowledgeAssetsRoutes : handleSemanticRuntimeRoutes;
   await handler({ req, res, path: url.pathname, url, agent: n.agent, config: n.config,
     actor: createRequestActor(auth, () => owner), authentication: auth, requestAgentAddress: owner,
     tracker: { start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn() },
@@ -116,13 +120,15 @@ async function fixture() {
     probeContextGraphWritePreflight: vi.fn(async () => ({ storeAvailable: true, exists: true, hasLocalContent: true, callerAuthorized: true })),
     query: vi.fn(async (query: string, opts: any) => DKGAgent.prototype.query.call(agent, query, opts)),
     assertion: {
-      history: vi.fn(async (_cg: string, name: string) => sealed.has(name) ? { wmCurrentAssertion: 'aa'.repeat(32), memoryLayer: 'WM' } : null),
+      history: vi.fn(async (_cg: string, name: string) => sealed.has(name)
+        ? { wmCurrentAssertion: 'aa'.repeat(32), memoryLayer: 'WM' }
+        : content.has(name) ? { wmCurrentAssertion: null, memoryLayer: 'WM' } : null),
       create: vi.fn(async (_cg: string, name: string) => { content.set(name, []); return 'urn:example:asset:' + name; }),
       write: vi.fn(async (cg: string, name: string, quads: Quad[], lane: { agentAddress: string }) => {
         const at = `did:dkg:context-graph:${cg}/_working_memory/${lane.agentAddress}/${content.size + 10}`;
         const entries = quads.map((q) => ({ ...q, graph: at })); content.get(name)!.push(...entries); await store.insert(entries);
       }),
-      finalize: vi.fn(async (_cg: string, name: string) => { sealed.add(name); }),
+      finalize: vi.fn(async (_cg: string, name: string) => { sealed.add(name); return { merkleRoot: new Uint8Array(32).fill(170), authorAddress: owner }; }),
       query: vi.fn(async (_cg: string, name: string) => content.get(name) ?? []),
     },
   };
@@ -158,6 +164,161 @@ async function fixture() {
 }
 
 describe('durable Program management API', () => {
+  it('uploads, approves and remotely invokes TypeScript composition with signed inputs and live child grants', async () => {
+    const f = await fixture();
+    const callerWallet = new ethers.Wallet(callerKey);
+    f.senderAgent.getCustodialAgentPrivateKey = vi.fn(() => { throw new Error('The caller key is client-held'); });
+    f.agent.listContextGraphs = vi.fn(async ({ callerAgentAddress }: any) => callerAgentAddress === owner ? [{ id: graph }, { id: sourceGraph }] : []);
+    const fetchFor = (n: Node, wallet: ethers.Wallet, operator = false): typeof fetch => async (url, init) => {
+      const u = new URL(String(url));
+      const result = await request(n, wallet.address === owner ? 'owner' : 'caller', init!.method!, u.pathname + u.search,
+        init!.body ? JSON.parse(String(init!.body)) : undefined,
+        { wallet, operator, headers: Object.fromEntries(new Headers(init!.headers).entries()) });
+      return new Response(JSON.stringify(result.body), { status: result.status });
+    };
+    const manager = new GraphComputer({ nodeUrl: 'http://target', peerId: f.agent.peerId, signer: ownerWallet,
+      fetch: fetchFor(f.target, ownerWallet), retries: 0 });
+    const client = new GraphComputer({ nodeUrl: 'http://client', peerId: f.senderAgent.peerId, signer: callerWallet,
+      executorPeerId: f.agent.peerId, fetch: fetchFor(f.client, callerWallet, true), retries: 0 });
+    expect((await f.activate()).status).toBe(201);
+    const child = await manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
+      source: 'export function run(value: number, factor: number) { return value * factor; }' });
+    const loaded = await manager.programs.getSource(child);
+    expect(loaded.source).toBe('export function run(value: number, factor: number) { return value * factor; }');
+    expect(loaded.sourceHash).toBe(child.sourceHash);
+    const deniedSource = await request(f.target, 'caller', 'GET', '/api/programs/source?' + new URLSearchParams({
+      contextGraphId: sourceGraph, programIri: child.programIri, programLayer: 'wm', callerAgentAddress: owner,
+    }), undefined, { wallet: callerWallet });
+    expect([403, 404]).toContain(deniedSource.status);
+    expect(deniedSource.body.source).toBeUndefined();
+    const childOperation = { graphId: graph, operationIri: 'urn:test:scale-operation' };
+    const childApproval = await manager.programs.approve({ ...childOperation, program: child, allowedCallers: [caller], typescript: { children: [] } });
+    const parent = await manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
+      permittedPrograms: [programIri, child.programIri],
+      source: `import { invoke_program, pipe, map, reduce } from '@origintrail-official/dkg-graph-computer/program';
+        export async function run(factor: number) {
+          const data: any = await invoke_program('${programIri}', []);
+          const total = await pipe(data.result.bindings, map(async (row: any) => invoke_program('${child.programIri}', [Number(JSON.parse(row.value)), factor])),
+            reduce((sum: any, n: any) => sum + n, 0));
+          if (factor < 0) throw new Error('failure after child effects');
+          return total;
+        }` });
+    const parentOperation = { graphId: graph, operationIri: 'urn:test:typescript-pipeline' };
+    await manager.programs.approve({ ...parentOperation, program: parent, allowedCallers: [caller, member],
+      typescript: { children: [{ graphId: graph, operationIri: operation }, childOperation] } });
+    await client.routes.create({ ...parentOperation, targetPeerId: f.agent.peerId });
+    const prepared = client.programs.prepareInvocation({ ...parentOperation, inputs: [3] });
+    const result = await client.programs.invoke(prepared);
+    expect(result.outputs).toEqual([126]);
+    const deniedChild = await request(f.target, 'member', 'POST', '/api/programs/execute', {
+      contextGraphId: graph, operationIri: parentOperation.operationIri, invocationId: randomUUID(), inputs: [3],
+    });
+    expect(deniedChild.status).toBe(403);
+    expect(deniedChild.body.code).toBe('PROGRAM_CHILD_FORBIDDEN');
+    const writes = f.agent.assertion.create.mock.calls.length;
+    expect(await client.programs.invoke(prepared)).toEqual(result);
+    expect(f.agent.assertion.create.mock.calls.length).toBe(writes);
+    await expect(client.programs.invoke({ ...prepared, inputs: [4] })).rejects.toMatchObject({ status: 409 });
+    const oldRuntime = f.target.runtime!;
+    await oldRuntime.stop(); runtimes.delete(oldRuntime); f.target.runtime = null; await f.target.boot();
+    expect(await client.programs.invoke(prepared)).toEqual(result);
+    const failed = client.programs.prepareInvocation({ ...parentOperation, inputs: [-1] });
+    await expect(client.programs.invoke(failed)).rejects.toMatchObject({ status: 422 });
+    const afterFailure = f.agent.assertion.create.mock.calls.length;
+    await expect(client.programs.invoke(failed)).rejects.toMatchObject({ status: 409 });
+    expect(f.agent.assertion.create.mock.calls.length).toBe(afterFailure);
+    const receipt = await f.store.query(`SELECT ?child WHERE { GRAPH ?g { <${result.executionIri}> <http://www.w3.org/ns/prov#wasInformedBy> ?child } }`);
+    expect(JSON.stringify(receipt).match(/urn:sr:execution:/g)?.length).toBe(2);
+    const originalTransport = f.senderAgent.invokeSkill.getMockImplementation();
+    f.senderAgent.invokeSkill.mockImplementationOnce((peer: string, skill: string, bytes: Uint8Array, opts: any) => {
+      const changed = JSON.parse(new TextDecoder().decode(bytes)); changed.inputs[0] = 999;
+      return originalTransport(peer, skill, new TextEncoder().encode(JSON.stringify(changed)), opts);
+    });
+    await expect(client.programs.invoke({ ...parentOperation, inputs: [3] })).rejects.toMatchObject({ status: 403 });
+    const denied = await request(f.target, 'caller', 'POST', '/api/query', {
+      contextGraphId: graph, view: 'working-memory', sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+    }, { wallet: callerWallet });
+    expect(denied.status === 403 || denied.body.result?.bindings?.length === 0).toBe(true);
+    await manager.programs.revoke({ ...childOperation, expectedRevision: childApproval.revision });
+    await expect(client.programs.invoke(prepared)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('requires TypeScript child declarations to match the approval', async () => {
+    const f = await fixture();
+    expect((await f.activate()).status).toBe(201);
+    await f.upload('export function run() { return 1; }', []);
+    // Replace only the fixture language; upload and approval source loading stay real.
+    const g = `did:dkg:context-graph:${sourceGraph}/_shared_memory/${author}/1`;
+    await f.store.delete([{ subject: programIri, predicate: SR + 'language', object: '"sexpr-v1"', graph: g }]);
+    await f.store.insert([{ subject: programIri, predicate: SR + 'language', object: '"typescript-v1"', graph: g }]);
+    const input = bindingInput();
+    const { sparqlRead: _, ...rest } = input;
+    const response = await request(f.target, 'owner', 'POST', '/api/programs/bindings', {
+      binding: { ...rest, operationIri: 'urn:test:bad-child-declaration', typescript: { children: [{ contextGraphId: graph, operationIri: operation }] } },
+    });
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('PROGRAM_BINDING_MISMATCH');
+  });
+
+  it.each(['read-devices', 'read-and-record', 'read-device-subset'])('runs SDK %s upload, approval, remote invocation and revocation through real handlers and WASM', async (scenarioName) => {
+    const f = await fixture();
+    const callerWallet = new ethers.Wallet(callerKey);
+    f.senderAgent.getCustodialAgentPrivateKey = vi.fn(() => { throw new Error('Caller key must remain outside the client node'); });
+    f.agent.listContextGraphs = vi.fn(async ({ callerAgentAddress }: any) => callerAgentAddress === owner
+      ? [{ id: graph }, { id: sourceGraph }] : []);
+    const seed = (id: string, line: string, temperature: string) => [
+      { subject: id, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:example:Device' },
+      { subject: id, predicate: 'urn:example:temperatureC', object: JSON.stringify(temperature) },
+      { subject: id, predicate: 'urn:example:line', object: line },
+    ];
+    await f.store.insert([
+      ...seed('urn:example:device:001', 'urn:example:line:A', '21.5'),
+      ...seed('urn:example:device:002', 'urn:example:line:B', '26.2'),
+    ].map(q => ({ ...q, graph: `did:dkg:context-graph:${graph}/_working_memory/${owner}/2` })));
+    await f.store.insert(seed('urn:example:device:foreign', 'urn:example:line:A', '99').map(q => ({
+      ...q, graph: `did:dkg:context-graph:other-data/_working_memory/${owner}/2`,
+    })));
+    const fetchFor = (n: Node, wallet: ethers.Wallet, operator = false): typeof fetch => async (url, init) => {
+      const u = new URL(String(url));
+      const response = await request(n, wallet.address === owner ? 'owner' : 'caller', init!.method!, u.pathname + u.search,
+        init!.body ? JSON.parse(init!.body as string) : undefined,
+        { wallet, operator, headers: Object.fromEntries(new Headers(init!.headers).entries()) });
+      return new Response(JSON.stringify(response.body), { status: response.status, headers: { 'content-type': 'application/json' } });
+    };
+    const ownerClient = new GraphComputer({ nodeUrl: 'http://executor.test', peerId: f.agent.peerId,
+      signer: ownerWallet, fetch: fetchFor(f.target, ownerWallet), retries: 0 });
+    const callerClient = new GraphComputer({ nodeUrl: 'http://client.test', peerId: f.senderAgent.peerId,
+      executorPeerId: f.agent.peerId, signer: callerWallet, fetch: fetchFor(f.client, callerWallet, true), retries: 0 });
+    const scenario = sdkExamples(graph).find((item: any) => item.name === scenarioName)!;
+    const program = await ownerClient.programs.upload({ graphId: sourceGraph, source: scenario.source, requiredTools: scenario.requiredTools });
+    const sdkOperation = { graphId: graph, operationIri: `urn:example:operation:${scenarioName}` };
+    const approved = await ownerClient.programs.approve({ ...sdkOperation, program, allowedCallers: [caller],
+      sparqlRead: scenario.sparqlRead, ...(scenario.assetCreation ? { assetCreation: scenario.assetCreation } : {}) });
+    expect(approved.resolution?.executable).toBe(true);
+    await callerClient.routes.create({ ...sdkOperation, targetPeerId: f.agent.peerId });
+    const prepared = callerClient.programs.prepareInvocation(sdkOperation);
+    const result = await callerClient.programs.invoke(prepared);
+    expect(result.persisted).toBe(true);
+    const readOutput = result.outputs.find((value: any) => value?.kind === 'sparql-read') as any;
+    expect(readOutput.result.bindings.map((row: any) => row.device).sort()).toEqual(scenarioName === 'read-devices'
+      ? ['urn:example:device:001', 'urn:example:device:002'] : ['urn:example:device:001']);
+    expect(result.outputs.some((value: any) => value?.kind === 'asset-created')).toBe(scenarioName === 'read-and-record');
+    if (scenarioName === 'read-and-record') {
+      const rows = await f.store.query('SELECT ?status WHERE { GRAPH ?g { <urn:example:assessment:001> <urn:example:status> ?status } }');
+      expect(JSON.stringify(rows)).toContain('checked');
+    }
+    const beforeRetry = f.agent.assertion.create.mock.calls.length;
+    expect(await callerClient.programs.invoke(prepared)).toEqual(result);
+    expect(f.agent.assertion.create.mock.calls.length).toBe(beforeRetry);
+    const denied = await request(f.target, 'caller', 'POST', '/api/query', {
+      contextGraphId: graph, view: 'working-memory', sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+    }, { wallet: callerWallet });
+    expect(denied.status === 403 || (denied.status === 200 && denied.body.result?.bindings?.length === 0)).toBe(true);
+    const current = await ownerClient.programs.getApproval(sdkOperation);
+    await ownerClient.programs.revoke({ ...sdkOperation, expectedRevision: current.revision });
+    await expect(callerClient.programs.invoke(prepared)).rejects.toMatchObject({ status: 403, invocationId: prepared.invocationId });
+  });
+
   it('uses client-held signing-key identities through real WASM, preserves roles, isolates private data and revokes retries', async () => {
     const f = await fixture();
     const callerWallet = new ethers.Wallet(callerKey);

@@ -1,0 +1,26 @@
+{
+  "name": "@origintrail-official/dkg-graph-computer",
+  "version": "10.0.17",
+  "description": "Agent-signed TypeScript client for DKG Graph Computer Programs",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    "./program": { "types": "./dist/program.d.ts", "import": "./dist/program.js" },
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./package.json": "./package.json"
+  },
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "prepack": "pnpm run build",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": { "ethers": "^6" },
+  "devDependencies": { "@types/node": "^22", "typescript": "^5.7", "vitest": "^4.0.18" },
+  "files": ["dist", "README.md"],
+  "publishConfig": { "access": "public" },
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/OriginTrail/dkg.git", "directory": "packages/graph-computer" }
+}

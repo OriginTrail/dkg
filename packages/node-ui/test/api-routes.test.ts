@@ -540,6 +540,21 @@ describe('serveStatic path traversal prevention', () => {
     expect(body).toContain('<html>');
   });
 
+  it('serves editor fonts and license files instead of the SPA fallback', async () => {
+    setup();
+    mkdirSync(join(staticDir, 'monaco'));
+    const font = Buffer.from([0, 1, 0, 0, 255]);
+    writeFileSync(join(staticDir, 'monaco', 'codicon-test.ttf'), font);
+    writeFileSync(join(staticDir, 'monaco', 'LICENSE.txt'), 'Editor license');
+    harness.setArgs([fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined] as any);
+    const response = await fetch(`${baseUrl}/ui/monaco/codicon-test.ttf`);
+    expect(response.headers.get('content-type')).toBe('font/ttf');
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(font);
+    const license = await fetch(`${baseUrl}/ui/monaco/LICENSE.txt`);
+    expect(license.headers.get('content-type')).toContain('text/plain');
+    expect(await license.text()).toBe('Editor license');
+  });
+
   it('allows filenames starting with .. that are not traversals', () => {
     const base = '/srv/static';
     const file = resolve(base, '..page.html');

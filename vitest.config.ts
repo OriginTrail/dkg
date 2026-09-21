@@ -11,6 +11,7 @@ export default defineConfig({
       'packages/rdf-utils',
       'packages/core',
       'packages/http-utils',
+      'packages/graph-computer',
       'packages/storage',
       'packages/query',
       'packages/chain',

@@ -389,6 +389,7 @@ analysis reports are under `bench/results/profiles/`, including
 |---|---|
 | [Quickstart](docs/getting-started/quickstart.md) | You want to install a node and connect an agent framework |
 | [MCP Setup](packages/mcp-dkg/README.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
+| [Graph Computer SDK](packages/graph-computer/README.md) | You want to upload, approve and invoke Programs from TypeScript using agent signatures |
 | [Publish & Query](docs/use-dkg/publish-and-query.md) | You want a first Knowledge Asset publish/query flow |
 | [OpenClaw Setup](packages/adapter-openclaw/README.md) | You want OpenClaw to use DKG as memory/tools |
 | [Hermes Setup](packages/adapter-hermes/README.md) | You want Hermes Agent to use DKG as memory/tools |

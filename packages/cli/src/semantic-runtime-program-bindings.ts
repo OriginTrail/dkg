@@ -13,7 +13,7 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
   const seen = new Set<string>();
   for (const binding of value) {
     if (!record(binding)
-      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'executionLayer', 'authorizationRevision'])
+      || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'typescript', 'executionLayer', 'authorizationRevision'])
       || typeof binding.enabled !== 'boolean'
       || !address(binding.executorAgentAddress)
       || !Array.isArray(binding.allowedCallerAgentAddresses)
@@ -45,7 +45,25 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
     }
     if (binding.sparqlRead !== undefined) validateSparqlReadGrant(binding.sparqlRead);
     if (binding.sparqlRead && binding.assetCreation && (binding.sparqlRead as { toolIri: string }).toolIri === binding.assetCreation.toolIri) throw new Error('DUPLICATE_PROGRAM_TOOL');
-    if (!binding.query && !binding.assetCreation && !binding.sparqlRead) throw new Error('EMPTY_PROGRAM_BINDING');
+    if (binding.typescript !== undefined) {
+      const grant = binding.typescript;
+      if (!record(grant) || !keys(grant, ['children', 'maxCalls', 'maxConcurrency', 'timeoutMs'])
+        || !Array.isArray(grant.children) || grant.children.length > 32
+        || !Number.isSafeInteger(grant.maxCalls) || Number(grant.maxCalls) < 1 || Number(grant.maxCalls) > 256
+        || !Number.isSafeInteger(grant.maxConcurrency) || Number(grant.maxConcurrency) < 1 || Number(grant.maxConcurrency) > 8
+        || !Number.isSafeInteger(grant.timeoutMs) || Number(grant.timeoutMs) < 100 || Number(grant.timeoutMs) > 120000
+        || binding.query || binding.sparqlRead || binding.assetCreation) throw new Error('INVALID_TYPESCRIPT_GRANT');
+      const children = new Set<string>();
+      for (const child of grant.children) {
+        if (!record(child) || !keys(child, ['contextGraphId', 'operationIri', 'programIri', 'bindingDigest'])
+          || typeof child.contextGraphId !== 'string' || !validateContextGraphId(child.contextGraphId).valid
+          || typeof child.operationIri !== 'string' || typeof child.programIri !== 'string'
+          || typeof child.bindingDigest !== 'string' || !/^[a-f0-9]{64}$/.test(child.bindingDigest)
+          || children.has(child.programIri)) throw new Error('INVALID_TYPESCRIPT_CHILD');
+        sparqlIri(child.operationIri); sparqlIri(child.programIri); children.add(child.programIri);
+      }
+    }
+    if (!binding.query && !binding.assetCreation && !binding.sparqlRead && !binding.typescript) throw new Error('EMPTY_PROGRAM_BINDING');
     if (binding.executionLayer !== undefined && !['wm', 'swm', 'vm'].includes(String(binding.executionLayer))) throw new Error('INVALID_EXECUTION_LAYER');
     const key = `${binding.contextGraphId}\0${binding.operationIri}`;
     if (seen.has(key)) throw new Error('DUPLICATE_PROGRAM_BINDING');

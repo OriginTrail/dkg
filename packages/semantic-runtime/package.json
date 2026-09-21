@@ -27,11 +27,13 @@
     "clean": "rm -rf dist generated tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/jco": "1.32.1",
+    "esbuild": "0.28.2",
     "better-sqlite3": "12.11.1",
     "cborg": "6.1.1"
   },
   "devDependencies": {
-    "@bytecodealliance/jco": "1.32.1",
     "@types/better-sqlite3": "^7",
     "@types/node": "^22",
     "@vitest/coverage-v8": "^4.0.18",
@@ -40,6 +42,7 @@
   "files": [
     "dist",
     "generated",
+    "typescript-runtime",
     "artifact-lock.json",
     "schema",
     "smoke",

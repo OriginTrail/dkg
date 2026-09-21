@@ -1,0 +1,29 @@
+.program-editor-backdrop { position: fixed; inset: 0; z-index: 1000; background: #0009; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.program-editor-dialog { width: min(1260px, 100%); max-height: 94vh; display: flex; flex-direction: column; background: var(--bg-panel, #101820); color: var(--text-primary, #e2e8f0); border: 1px solid var(--border-default, #334155); border-radius: 12px; box-shadow: 0 24px 80px #0007; overflow: hidden; }
+.program-editor-dialog header { display: flex; justify-content: space-between; align-items: flex-start; padding: 18px 24px; border-bottom: 1px solid var(--border-default, #334155); }
+.program-editor-dialog h2, .program-editor-dialog h3 { margin: 0 0 10px; }
+.program-editor-dialog h4 { margin: 16px 0 6px; }
+.program-editor-dialog p { margin: 6px 0 12px; }
+.program-editor-body { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(310px, 1fr); overflow: auto; }
+.program-editor-code, .program-editor-controls { padding: 20px 24px; min-width: 0; }
+.program-editor-controls { border-left: 1px solid var(--border-default, #334155); }
+.program-editor-dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; margin-bottom: 12px; }
+.program-editor-dialog label input, .program-editor-dialog label textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border-default, #475569); border-radius: 5px; padding: 8px 10px; color: inherit; background: var(--bg-surface, #17212d); font: inherit; }
+.program-editor-dialog label textarea { resize: vertical; font-family: monospace; }
+.program-editor-dialog button { background: var(--bg-elevated, #233348); border: 1px solid var(--border-default, #475569); color: inherit; padding: 7px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+.program-editor-dialog button:disabled { opacity: .45; cursor: not-allowed; }
+.program-editor-dialog button:focus-visible, .program-editor-dialog input:focus-visible, .program-editor-dialog textarea:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+.program-editor-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.program-source-editor { height: 380px; border: 1px solid var(--border-default, #334155); border-radius: 5px; overflow: hidden; }
+.program-editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; font-size: 12px; }
+.program-editor-help { font-size: 12px; color: var(--text-secondary, #94a3b8); line-height: 1.6; }
+.program-editor-child { border: 1px solid var(--border-default, #334155); border-radius: 6px; padding: 10px; margin: 10px 0; }
+.program-editor-limits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+.program-editor-reference { overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; }
+.program-wallet-address { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.program-wallet-address code { overflow-wrap: anywhere; min-width: 0; }
+.program-editor-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 240px; overflow: auto; background: var(--bg-surface, #17212d); padding: 10px; border-radius: 5px; }
+.program-editor-dialog details { margin-bottom: 22px; font-size: 12px; }
+.program-editor-dialog footer { border-top: 1px solid var(--border-default, #334155); padding: 8px 24px; font-size: 13px; }
+.program-editor-dialog [role="alert"] { color: var(--text-danger, #f87171); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 820px) { .program-editor-backdrop { padding: 8px; } .program-editor-body { grid-template-columns: 1fr; } .program-editor-controls { border-left: 0; border-top: 1px solid var(--border-default, #334155); } }

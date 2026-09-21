@@ -73,6 +73,15 @@ export interface SemanticProgramBinding {
   sparqlRead?: SemanticSparqlReadGrant;
   /** Explicit tenant-approved creation tool; never inferred from read permission. */
   assetCreation?: { toolIri: string };
+  /** TypeScript orchestration can invoke only these pinned local operation grants. */
+  typescript?: SemanticTypeScriptGrant;
   /** Output assets inherit this execution layer; defaults to wm for compatibility. */
   executionLayer?: 'wm' | 'swm' | 'vm';
+}
+
+export interface SemanticTypeScriptGrant {
+  children: Array<{ contextGraphId: string; operationIri: string; programIri: string; bindingDigest: string }>;
+  maxCalls: number;
+  maxConcurrency: number;
+  timeoutMs: number;
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, Suspense } from 'react';
+import React, { lazy, useEffect, useMemo, useState, Suspense } from 'react';
 import { api } from '../../../api-wrapper.js';
 import { forkSemanticProgram, invokeSemanticProgram, resolveSemanticProgram, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type SemanticMemoryLayer, type SemanticProgramResolution, type PromoteOutcome, type PublishResult } from '../../../api.js';
 import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
@@ -16,6 +16,7 @@ import { GraphSurface, RdfGraph } from './graph.js';
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
 const SR_PROGRAM = 'https://origintrail.io/semantic-runtime/v1#Program';
+const ProgramEditor = lazy(() => import('../../../components/Programs/ProgramEditor.js'));
 
 function SemanticProgramPanel({
   contextGraphId,
@@ -554,6 +555,10 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   onOpenAgent?: (uri: string) => void;
 }) {
   const [pane, setPane] = useState<KAPane>('content');
+  const [showProgramEditor, setShowProgramEditor] = useState(false);
+  const isTypeScriptProgram = entity.properties.get('https://origintrail.io/semantic-runtime/v1#language')
+    ?.some(value => decodeRdfStringLiteral(value) === 'typescript-v1');
+  useEffect(() => { setShowProgramEditor(false); }, [entity.uri]);
   const theme = useLayoutStore(s => s.theme);
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
@@ -729,7 +734,16 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
               )}
 
               {entity.types.includes(SR_PROGRAM) && (
-                <SemanticProgramPanel
+                isTypeScriptProgram ? <div className="v10-ka-section">
+                  <div className="v10-ka-section-title">TypeScript Program</div>
+                  <button className="v10-ka-back" onClick={() => setShowProgramEditor(true)}>Edit TypeScript Program</button>
+                  {showProgramEditor && <Suspense fallback={<p>Loading Program editor…</p>}>
+                    <ProgramEditor contextGraphId={contextGraphId}
+                      existing={{ programIri: entity.uri, programLayer: entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm' }}
+                      onClose={() => setShowProgramEditor(false)} onSaved={onRefresh}
+                      onExecution={(iri, layer) => { setShowProgramEditor(false); onNavigate(iri, undefined, layer); }} />
+                  </Suspense>}
+                </div> : <SemanticProgramPanel
                   contextGraphId={contextGraphId}
                   programIri={entity.uri}
                   programLayer={entity.trustLevel === 'verified'

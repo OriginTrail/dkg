@@ -20,15 +20,18 @@ function providerKey(detail: Eip6963ProviderDetail): string {
 export function WalletConnectControl({
   className = '',
   testId = 'wallet-connect',
+  purpose = 'transaction',
 }: {
   className?: string;
   testId?: string;
+  purpose?: 'transaction' | 'message';
 }) {
   const discovered = useWalletStore((s) => s.discovered);
   const unsupported = useWalletStore((s) => s.unsupported);
   const address = useWalletStore((s) => s.address);
   const initWallet = useWalletStore((s) => s.initWallet);
   const connect = useWalletStore((s) => s.connect);
+  const disconnect = useWalletStore((s) => s.disconnect);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +48,7 @@ export function WalletConnectControl({
   if (address) {
     return (
       <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
-        <WalletPill />
+        {purpose === 'message' ? <div className="program-wallet-address"><code>{address}</code> <button type="button" onClick={disconnect}>Disconnect</button></div> : <WalletPill />}
         <p className="v10-wallet-note">
           One active wallet in v1. Disconnect to switch accounts or providers.
         </p>
@@ -89,9 +92,9 @@ export function WalletConnectControl({
         {discovered.length !== 1 && <ChevronDown size={14} aria-hidden="true" />}
       </button>
       <p className="v10-wallet-note">
-        Hardware wallet recommended. If your provider uses a device, verify the amount and contract on
+        {purpose === 'message' ? 'Connect your agent wallet to sign Program requests. These signatures do not send blockchain transactions.' : <>Hardware wallet recommended. If your provider uses a device, verify the amount and contract on
         the device. Hot publishing wallets can publish without prompts; their spend is bounded by the
-        per-epoch allowance, not the committed TRAC.
+        per-epoch allowance, not the committed TRAC.</>}
       </p>
       <p className="v10-wallet-note">
         Provider names are self-reported and display-only.

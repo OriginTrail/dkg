@@ -7,7 +7,7 @@ import type { SemanticProgramBinding, SemanticQueryOutputSchema } from '@origint
 import { ethers } from 'ethers';
 
 import { loadStoredSemanticProgram, SemanticProgramError, validateBoundSemanticProgram } from '../../semantic-runtime.js';
-import { validateProgramBindings, validateProgramRoutes } from '../../semantic-runtime-program-bindings.js';
+import { programBindingDigest, validateProgramBindings, validateProgramRoutes } from '../../semantic-runtime-program-bindings.js';
 import { findSavedQuery } from '../../semantic-runtime-query-adapter.js';
 import { createSemanticQueryPin, queryOutputSchemaSha256 } from '../../semantic-runtime-query-pins.js';
 import { readContextGraphQueryCatalogBindings } from '../query-catalog-service.js';
@@ -47,7 +47,7 @@ async function assertManager(ctx: RequestContext, kind: 'binding' | 'route', gra
 }
 
 async function prepareBinding(ctx: RequestContext, raw: Record<string, unknown>): Promise<SemanticProgramBinding> {
-  closed(raw, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'executionLayer']);
+  closed(raw, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'typescript', 'executionLayer']);
   if (raw.enabled !== undefined && raw.enabled !== true) badRequest('Use DELETE to revoke a binding');
   if (!record(raw.program) || !Array.isArray(raw.allowedCallerAgentAddresses)) badRequest('program and allowedCallerAgentAddresses are required');
   closed(raw.program, ['contextGraphId', 'programIri', 'programLayer', 'sourceHash', 'authorAgentAddress']);
@@ -97,6 +97,23 @@ async function prepareBinding(ctx: RequestContext, raw: Record<string, unknown>)
     if (!record(raw.sparqlRead)) badRequest('sparqlRead must be an object');
     const outputSchemaSha256 = queryOutputSchemaSha256(raw.sparqlRead.outputSchema as SemanticQueryOutputSchema);
     binding.sparqlRead = { ...raw.sparqlRead, outputSchemaSha256: pin(raw.sparqlRead.outputSchemaSha256, outputSchemaSha256, 'outputSchemaSha256') } as SemanticProgramBinding['sparqlRead'];
+  }
+  if (raw.typescript !== undefined) {
+    if (!record(raw.typescript) || !Array.isArray(raw.typescript.children) || raw.typescript.children.length > 32) badRequest('typescript.children must contain at most 32 operations');
+    closed(raw.typescript, ['children', 'maxCalls', 'maxConcurrency', 'timeoutMs']);
+    const children = await Promise.all(raw.typescript.children.map(async (child: unknown) => {
+      if (!record(child)) badRequest('Invalid child operation');
+      closed(child, ['contextGraphId', 'operationIri', 'programIri', 'bindingDigest']);
+      const childGraph = canonicalProgramGraphId(child.contextGraphId), operation = operationIri(child.operationIri);
+      await assertManager(ctx, 'binding', childGraph);
+      const selected = ctx.config.semanticRuntime?.programBindings?.find(item => item.contextGraphId === childGraph && item.operationIri === operation);
+      if (!selected?.enabled) throw new SemanticProgramError('PROGRAM_CHILD_UNAVAILABLE', 'Each child must have an enabled local approval', 409);
+      return { contextGraphId: childGraph, operationIri: operation,
+        programIri: pin(child.programIri, selected.program.programIri, 'child programIri'),
+        bindingDigest: pin(child.bindingDigest, programBindingDigest(selected), 'child bindingDigest') };
+    }));
+    binding.typescript = { children, maxCalls: (raw.typescript.maxCalls ?? 64) as number,
+      maxConcurrency: (raw.typescript.maxConcurrency ?? 4) as number, timeoutMs: (raw.typescript.timeoutMs ?? 30000) as number };
   }
   validateProgramBindings([binding]);
   return binding;
