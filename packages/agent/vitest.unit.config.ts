@@ -151,6 +151,7 @@ export default defineConfig({
       "test/rootless-durable-bounded-progress.test.ts",
       "test/rootless-durable-skips-legacy-partition.test.ts",
       "test/rootless-lifecycle-graph.test.ts",
+      "test/swm-recovery-apply.test.ts",
       "test/swm-recovery.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
       "test/dkg-agent-snapshot-store-injection.test.ts",

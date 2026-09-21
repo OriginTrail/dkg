@@ -907,13 +907,17 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
   });
 
-  it('a graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
+  it('a verified graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
     // Graph-backed descriptors (publicSnapshotGraph, no publicSnapshotRef)
-    // never enter the per-KA loop — the round's bulk insert is their ONLY head
-    // writer. A blanket head-row filter instead of decision-driven suppression
-    // would leave them permanently headless (the #2050 G7 invisibility class).
+    // receive their bytes from the aggregate data phase. Once those bytes are
+    // verified and materialized under the per-KA boundary, the round's bulk
+    // insert remains their head writer. A blanket head-row filter instead of
+    // decision-driven suppression would leave them permanently headless (the
+    // #2050 G7 invisibility class).
     const store = new OxigraphStore();
     stores.push(store);
+    const publicSnapshotGraph =
+      `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`;
     const graphBacked = {
       ...v1,
       meta: [
@@ -921,12 +925,21 @@ describe('operation identity preservation (GH#2273)', () => {
         {
           subject: v1.operationSubject,
           predicate: `${DKG}publicSnapshotGraph`,
-          object: `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`,
+          object: publicSnapshotGraph,
           graph: WS_META,
         },
       ],
     };
-    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: graphBacked as typeof v1 }).run();
+    const graphData = v1.payload.map((quad) => ({ ...quad, graph: publicSnapshotGraph }));
+    await makeSwmSyncHarness({
+      ctx,
+      contextGraphId: CG,
+      store,
+      served: graphBacked as typeof v1,
+      fetchPage: async ({ phase }, fallback) => phase === 'data'
+        ? { ...fallback, quads: graphData, nextOffset: graphData.length }
+        : fallback,
+    }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
   });

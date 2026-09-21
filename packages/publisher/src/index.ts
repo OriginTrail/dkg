@@ -136,6 +136,12 @@ export {
   type CASCondition,
 } from './dkg-publisher.js';
 export {
+  tryReplaceGraphWithDurableRootCompanionAtomically,
+  type DurableRootMaterializationIdentity,
+  type DurableRootAtomicCompanion,
+  type DurableRootAtomicCompanionResolver,
+} from './durable-root-atomic-companion.js';
+export {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,

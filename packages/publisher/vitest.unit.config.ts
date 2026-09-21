@@ -81,6 +81,7 @@ export default defineConfig({
       'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',
       'test/knowledge-asset-swm-staging.test.ts',
+      'test/durable-root-atomic-companion.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

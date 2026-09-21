@@ -3,11 +3,14 @@ import {
   deleteByPatternWithoutCount,
   GraphManager,
   invalidateSwmMaterializationWitness,
-  tryReplaceGraphAtomically,
 } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetAgentAddressesEqual, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
+import {
+  tryReplaceGraphWithDurableRootCompanionAtomically,
+  type DurableRootAtomicCompanionResolver,
+} from './durable-root-atomic-companion.js';
 import {
   decodeGossipEnvelope,
   decodeEncryptedWorkspacePayload,
@@ -332,6 +335,7 @@ export class SharedMemoryHandler {
     contextGraphId: string,
     subGraphName: string | null,
   ) => boolean | Promise<boolean>;
+  private readonly resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
@@ -470,6 +474,7 @@ export class SharedMemoryHandler {
         contextGraphId: string,
         subGraphName: string | null,
       ) => boolean | Promise<boolean>;
+      resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
@@ -530,6 +535,8 @@ export class SharedMemoryHandler {
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
     this.publicAccessPolicyOnChainOracle = options?.publicAccessPolicyOnChainOracle;
     this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
+    this.resolveDurableRootAtomicCompanion =
+      options?.resolveDurableRootAtomicCompanion;
     this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
@@ -998,10 +1005,10 @@ export class SharedMemoryHandler {
     // switch after the lock.
     type SwmWriteDecision =
       | { readonly applied: true }
-      | { readonly applied: false; readonly kind: 'validation' | 'cas' | 'corrupt-head'; readonly reason?: string };
+      | { readonly applied: false; readonly kind: 'validation' | 'cas' | 'corrupt-head' | 'authority'; readonly reason?: string };
     const swmWriteApplied: SwmWriteDecision = { applied: true };
     const rejectWithinLocks = (
-      kind: 'validation' | 'cas' | 'corrupt-head',
+      kind: 'validation' | 'cas' | 'corrupt-head' | 'authority',
       reason?: string,
     ): SwmWriteDecision => ({ applied: false, kind, ...(reason === undefined ? {} : { reason }) });
     let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
@@ -1477,6 +1484,14 @@ export class SharedMemoryHandler {
           this.log.warn(ctx, `SWM validation rejected: ${reason}`);
           return rejectWithinLocks('validation', reason);
         }
+        const resolveRootCompanion = () => subGraphName === undefined
+          ? this.resolveDurableRootAtomicCompanion?.(Object.freeze({
+              contextGraphId,
+              kaUal: contentScope.ual,
+              assertionVersion: contentScope.assertionVersion,
+              shareOperationId,
+            }))
+          : undefined;
         const persistLocallyTrustedControls = async (): Promise<void> => {
           const merkleRoot = computeFlatKCRootV10(
             normalized.map((quad) => ({ ...quad, graph: '' })),
@@ -1542,9 +1557,37 @@ export class SharedMemoryHandler {
               currentHead.access.accessPolicy === graphAccessPolicy &&
               currentHead.access.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
             if (sameAssertion) {
-              // Exact replay: acknowledge idempotently without churning the
-              // graph or immutable operation snapshot. Refresh the local-only
-              // controls too, so a retry completes a prior head/sidecar tear.
+              if (
+                this.legacyApplyAllowedOracle !== undefined
+                && !await this.legacyApplyAllowedOracle(contextGraphId, subGraphName ?? null)
+              ) {
+                return rejectWithinLocks(
+                  'authority',
+                  `legacy SWM apply is not authoritative for ${subGraphName === undefined ? 'root scope' : `subgraph "${subGraphName}"`} of context graph "${contextGraphId}"`,
+                );
+              }
+              // A pre-upgrade or torn exact replay may have the graph/head but
+              // no late-boundary witness. Replacing the same verified bytes
+              // with the companion closes that gap atomically; without a
+              // companion the replay remains the old no-churn path.
+              const companion = resolveRootCompanion();
+              if (companion !== undefined) {
+                const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
+                  this.store,
+                  swmGraph,
+                  normalized,
+                  companion,
+                  { source: 'publisher.swm.graphScopedReplay.atomicRootCompanion' },
+                );
+                if (!replaced) {
+                  throw Object.assign(
+                    new Error('Root SWM replay requires atomic graph/subject replacement support'),
+                    { code: 'SWM_ATOMIC_GRAPH_AND_SUBJECT_REPLACE_UNSUPPORTED' },
+                  );
+                }
+              }
+              // Refresh local-only controls so a retry completes a prior
+              // head/sidecar tear.
               await persistLocallyTrustedControls();
               return swmWriteApplied;
             }
@@ -1576,10 +1619,26 @@ export class SharedMemoryHandler {
           }
         }
 
-        const replacedAtomically = await tryReplaceGraphAtomically(
+        // Authority may change while envelope verification, policy reads, or
+        // the per-KA lock are pending. Re-check at the final pre-mutation
+        // boundary so the catalog receiver remains the sole root materializer.
+        if (
+          this.legacyApplyAllowedOracle !== undefined
+          && !await this.legacyApplyAllowedOracle(contextGraphId, subGraphName ?? null)
+        ) {
+          const scope = subGraphName === undefined ? 'root scope' : `subgraph "${subGraphName}"`;
+          return rejectWithinLocks(
+            'authority',
+            `legacy SWM apply is not authoritative for ${scope} of context graph "${contextGraphId}"`,
+          );
+        }
+
+        const rootCompanion = resolveRootCompanion();
+        const replacedAtomically = await tryReplaceGraphWithDurableRootCompanionAtomically(
           this.store,
           swmGraph,
           normalized,
+          rootCompanion,
           { source: 'publisher.swm.graphScopedReplace' },
         );
         if (!replacedAtomically) {
@@ -1697,6 +1756,13 @@ export class SharedMemoryHandler {
       // drop of a share that will apply once the head heals).
       const rejectionKind = decision.kind;
       switch (rejectionKind) {
+        case 'authority':
+          return rejectedSharedMemoryOutcome(
+            verifiedFields,
+            decision.reason ?? 'legacy SWM apply is no longer authoritative',
+            false,
+            true,
+          );
         case 'corrupt-head':
           return rejectedSharedMemoryOutcome(
             verifiedFields,
