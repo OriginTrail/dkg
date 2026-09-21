@@ -30,6 +30,8 @@ import { legacySwmBoundaryFixtureQuadsV1 } from
   './_helpers/legacy-swm-boundary-fixture.js';
 
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/legacy-boundary';
+const SECOND_CONTEXT_GRAPH_ID =
+  '0x1111111111111111111111111111111111111111/legacy-boundary-two';
 const META_GRAPH = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID);
 const SUBGRAPH_META_GRAPH = contextGraphSharedMemoryMetaUri(
   CONTEXT_GRAPH_ID,
@@ -47,6 +49,10 @@ const ROOT_SCOPE = Object.freeze({
   authorAddress: '0x1111111111111111111111111111111111111111',
   era: '0',
   bucketCount: '1',
+}) as AuthorCatalogScopeV1;
+const SECOND_ROOT_SCOPE = Object.freeze({
+  ...ROOT_SCOPE,
+  contextGraphId: SECOND_CONTEXT_GRAPH_ID,
 }) as AuthorCatalogScopeV1;
 
 describe('RFC-64 10.0.16 legacy SWM boundary', () => {
@@ -281,6 +287,44 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       .resolves.toEqual(new Set([swmGraph]));
   });
 
+  it('fences receiver retirement per context graph and releases it synchronously', async () => {
+    const root = await secureTempRoot(roots);
+    const store = new OxigraphStore();
+    const owner = {};
+    await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
+
+    const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(
+      owner,
+      ROOT_SCOPE,
+    );
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'same-cg-during-receiver-lease',
+      '1',
+    )).toThrow('retirement is in progress');
+
+    const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      SECOND_CONTEXT_GRAPH_ID,
+      UAL_TWO,
+      'other-cg-during-receiver-lease',
+      '1',
+    );
+    unrelatedPreparation.settle(false);
+
+    lease.release();
+    const immediateSameGraphPreparation = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL_ONE,
+      'same-cg-after-receiver-release',
+      '1',
+    );
+    immediateSameGraphPreparation.settle(false);
+  });
+
   it('clears the preparation fence before an acquisition failure is observed', async () => {
     const root = await secureTempRoot(roots);
     const store = new OxigraphStore();
@@ -299,7 +343,19 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     await initializeRfc64LegacySwmBoundaryV1(owner, root, store);
     failBoundaryRead = true;
 
-    await expect(acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, ROOT_SCOPE))
+    const failedAcquisition = acquireRfc64LegacySwmBoundaryReceiverLeaseV1(
+      owner,
+      ROOT_SCOPE,
+    );
+    const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      SECOND_ROOT_SCOPE.contextGraphId,
+      UAL_TWO,
+      'other-cg-during-acquire-failure',
+      '1',
+    );
+    unrelatedPreparation.settle(false);
+    await expect(failedAcquisition)
       .rejects.toThrow('simulated boundary evidence read failure');
     const immediatePreparation = prepareRfc64LateLegacySwmBoundaryV1(
       owner,
@@ -359,6 +415,14 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       'same-ual-generation-three',
       '3',
     )).toThrow('retirement is in progress');
+    const unrelatedPreparation = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      SECOND_CONTEXT_GRAPH_ID,
+      UAL_TWO,
+      'other-cg-during-explicit-retirement',
+      '1',
+    );
+    unrelatedPreparation.settle(false);
     await store.replaceGraphAndSubject!(
       swmGraph,
       [swmQuad('2')],

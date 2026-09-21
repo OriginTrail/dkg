@@ -532,6 +532,97 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       )).resolves.toMatchObject({ type: 'boolean', value: true });
     });
 
+    it('does not backfill a graph-locator root when ordinary catalog authority denies it', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      await store.insert(graphLocatorMeta);
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-denied';
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: markerGraph,
+        subject: markerSubject,
+        quads: [{
+          subject: markerSubject,
+          predicate: 'urn:test:entry',
+          object: '"graph-locator-denied"',
+          graph: markerGraph,
+        }],
+      }));
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        preloadSnapshot: false,
+        ordinaryRootSnapshotApplyAllowed: () => false,
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(0);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
+    it('does not backfill a stale graph-locator root when the stored head outranks it', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([...v2.meta]);
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-stale';
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: markerGraph,
+        subject: markerSubject,
+        quads: [{
+          subject: markerSubject,
+          predicate: 'urn:test:entry',
+          object: '"graph-locator-stale"',
+          graph: markerGraph,
+        }],
+      }));
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        preloadSnapshot: false,
+        ordinaryRootSnapshotApplyAllowed: () => true,
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(0);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({
+        version: '2',
+        needsRepair: false,
+        shareOperationId: 'op-v2',
+      });
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
     it('atomically materializes an absent graph-locator root instead of bulk-inserting it', async () => {
       const store = new OxigraphStore();
       const sourceGraph = workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId);
