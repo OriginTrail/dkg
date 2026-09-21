@@ -847,17 +847,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         }
       }
       // Root graph-locator bytes belong to complete, digest-bound KA graphs,
-      // not the aggregate entity-union lane. Keeping them in `validWsQuads`
-      // would let a missing root fall through to `storeInsert` without the KA
-      // lock or its durable boundary companion.
+      // not the aggregate entity-union lane. Current responders transport them
+      // in the canonical assertion graph; older peers may explicitly transport
+      // the legacy locator graph. Keeping either source in `validWsQuads` would
+      // let a missing root fall through to `storeInsert` without the KA lock or
+      // its durable boundary companion.
       const graphBackedRootSourceGraphs = new Set(
         graphBackedDescriptors
           .filter(({ subGraphName }) => subGraphName === undefined)
-          .map(({ snapshotSource }) => snapshotSource.locator.kind === 'graph'
-            ? snapshotSource.locator.graph
-            : ''),
+          .flatMap((descriptor) => descriptor.snapshotSource.locator.kind === 'graph'
+            ? [descriptor.assertionGraph, descriptor.snapshotSource.locator.graph]
+            : []),
       );
-      graphBackedRootSourceGraphs.delete('');
       if (graphBackedRootSourceGraphs.size > 0) {
         validWsQuads = validWsQuads.filter(
           (quad) => !graphBackedRootSourceGraphs.has(quad.graph),
@@ -954,7 +955,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
               if (exactGraph === null) {
                 const asset = await materializeGraphScopedSwmRecoveryAsset({
                   descriptor,
-                  fetchedDataQuads: processed.verifiedData,
+                  // V2 graph-scoped operations intentionally have no
+                  // `rootEntity` rows, so the legacy entity verifier excludes
+                  // their per-KA graph from `processed.verifiedData`. The
+                  // descriptor has already authenticated the exact assertion
+                  // graph, and the materializer re-verifies count + digest;
+                  // pass the raw transport rows solely to that fail-closed path.
+                  fetchedDataQuads,
                   publicSnapshotStore,
                 });
                 exactGraph = [...asset.quads];

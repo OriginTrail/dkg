@@ -391,6 +391,37 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
     });
 
+    it('atomically materializes an absent store-locator root with its durable companion', async () => {
+      const store = new OxigraphStore();
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:store-locator-absent';
+      const settle = vi.fn();
+      const h = realHarness(store, v1, v1.meta, {
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"store-locator-absent"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      expect(settle).toHaveBeenCalledWith(true);
+      await expect(store.hasGraph(v1.assertionGraph)).resolves.toBe(true);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
     it('defers an in-flight ordinary root snapshot when catalog authority takes ownership', async () => {
       const store = new OxigraphStore();
       let checks = 0;
