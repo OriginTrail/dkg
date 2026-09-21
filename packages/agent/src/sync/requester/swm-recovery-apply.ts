@@ -398,12 +398,19 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
             };
           }
         } catch {
-          return {
-            insertedGraphQuads: 0,
-            withholdRows: descriptor.metadataQuads.filter(
-              (quad) => quad.subject === descriptor.headSubject,
-            ),
-          };
+          // A replace carries different content, so an unparseable local
+          // version leaves its ordering unknowable and must fail closed.
+          // Preserve-equivalent already proved the assertion bytes identical;
+          // it may continue solely to replace the corrupt head metadata with
+          // the descriptor's canonical rows.
+          if (asset.kind === 'replace') {
+            return {
+              insertedGraphQuads: 0,
+              withholdRows: descriptor.metadataQuads.filter(
+                (quad) => quad.subject === descriptor.headSubject,
+              ),
+            };
+          }
         }
       }
 
