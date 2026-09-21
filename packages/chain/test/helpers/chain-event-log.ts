@@ -30,8 +30,8 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
   commits = 0;
   tombstones = 0;
 
-  async load(scope?: string): Promise<ChainEventLogState | undefined> {
-    const held = this.#heldScope(scope);
+  async load(scope: string): Promise<ChainEventLogState | undefined> {
+    const held = this.#scopes.get(scope);
     return held?.tombstoned === true ? undefined : held?.state;
   }
 
@@ -40,11 +40,20 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
     expectedRevision: number | undefined,
     commit: ChainEventLogCommit,
   ): Promise<number | undefined> {
-    const held = this.#scope(scope);
+    let held = this.#scopes.get(scope);
     if (expectedRevision === undefined) {
-      if (held.state !== undefined && !held.tombstoned) return undefined;
-    } else if (held.state?.cursor.revision !== expectedRevision || held.tombstoned) {
+      if (held?.state !== undefined && !held.tombstoned) return undefined;
+    } else if (held?.state?.cursor.revision !== expectedRevision || held.tombstoned) {
       return undefined;
+    }
+    if (held === undefined) {
+      held = {
+        revision: 0,
+        state: undefined,
+        rows: [],
+        tombstoned: false,
+      };
+      this.#scopes.set(scope, held);
     }
     const replaced = commit.replacedRange !== undefined
       && commit.replacedRange.throughBlockNumber >= commit.replacedRange.fromBlockNumber
@@ -133,8 +142,8 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
   }
 
   /** Test-only window onto what the log holds. */
-  rows(scope?: string): readonly ChainEventLogRow[] {
-    return [...(this.#heldScope(scope)?.rows ?? [])];
+  rows(scope: string): readonly ChainEventLogRow[] {
+    return [...(this.#scopes.get(scope)?.rows ?? [])];
   }
 
   seed(
@@ -150,23 +159,4 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
     });
   }
 
-  #scope(scope: string): MemoryChainEventLogScope {
-    const existing = this.#scopes.get(scope);
-    if (existing !== undefined) return existing;
-    const created = {
-      revision: 0,
-      state: undefined,
-      rows: [] as ChainEventLogRow[],
-      tombstoned: false,
-    };
-    this.#scopes.set(scope, created);
-    return created;
-  }
-
-  #heldScope(scope: string | undefined): MemoryChainEventLogScope | undefined {
-    if (scope !== undefined) return this.#scopes.get(scope);
-    if (this.#scopes.size === 0) return undefined;
-    if (this.#scopes.size === 1) return this.#scopes.values().next().value;
-    throw new Error('MemoryChainEventLogStore requires an explicit scope when more than one exists');
-  }
 }

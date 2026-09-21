@@ -182,7 +182,7 @@ describe('ChainIndexTick — one log', () => {
     const index = tick(store, rig.ports);
 
     await index.runOnce(new AbortController().signal);
-    const firstSettled = (await store.load())!.cursor.settledBlockNumber;
+    const firstSettled = (await store.load(SCOPE))!.cursor.settledBlockNumber;
     rig.head = { number: 140, hash: hash(0x8c), timestampSeconds: 1_700_000_120 };
     rig.requests.length = 0;
     await index.runOnce(new AbortController().signal);
@@ -196,14 +196,14 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness({ logs: () => [orphan] });
     const index = tick(store, rig.ports);
     await index.runOnce(new AbortController().signal);
-    expect(store.rows().some((row) => row.blockNumber === 99 && !row.settled)).toBe(true);
+    expect(store.rows(SCOPE).some((row) => row.blockNumber === 99 && !row.settled)).toBe(true);
 
     // The next pass simply does not return it; nothing rolls anything back.
     rig.logs = () => [];
     rig.head = { number: 101, hash: hash(0x11), timestampSeconds: 1_700_000_010 };
     await index.runOnce(new AbortController().signal);
 
-    expect(store.rows().some((row) => row.blockNumber === 99)).toBe(false);
+    expect(store.rows(SCOPE).some((row) => row.blockNumber === 99)).toBe(false);
   });
 
   it('S4: a lagging endpoint is retryable and never tombstones the scope', async () => {
@@ -211,7 +211,7 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports);
     await index.runOnce(new AbortController().signal);
-    const settled = (await store.load())!.cursor.settledBlockNumber;
+    const settled = (await store.load(SCOPE))!.cursor.settledBlockNumber;
 
     // An endpoint whose head is BELOW the cursor knows nothing about the chain.
     rig.head = { number: settled - 10, hash: hash(0x01), timestampSeconds: 1_700_000_000 };
@@ -219,7 +219,7 @@ describe('ChainIndexTick — one log', () => {
 
     expect(result.outcome).toBe('endpoint-lagging');
     expect(store.tombstones).toBe(0);
-    expect((await store.load())?.cursor.settledBlockNumber).toBe(settled);
+    expect((await store.load(SCOPE))?.cursor.settledBlockNumber).toBe(settled);
   });
 
   it('S4: one mismatched settled hash is suspected, a second confirms the tombstone', async () => {
@@ -227,7 +227,7 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports);
     await index.runOnce(new AbortController().signal);
-    const settled = (await store.load())!.cursor.settledBlockNumber;
+    const settled = (await store.load(SCOPE))!.cursor.settledBlockNumber;
 
     rig.blockHashes.set(settled, hash(0xfe));
     rig.head = { number: 120, hash: hash(0x78), timestampSeconds: 1_700_000_100 };
@@ -238,7 +238,7 @@ describe('ChainIndexTick — one log', () => {
     const second = await index.runOnce(new AbortController().signal);
     expect(second.outcome).toBe('tombstoned');
     expect(store.tombstones).toBe(1);
-    expect(await store.load()).toBeUndefined();
+    expect(await store.load(SCOPE)).toBeUndefined();
   });
 
   it('keeps the verified settled boundary when the next boundary hash is unavailable', async () => {
@@ -246,14 +246,14 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports);
     await index.runOnce(new AbortController().signal);
-    const verified = (await store.load())!.cursor;
+    const verified = (await store.load(SCOPE))!.cursor;
 
     rig.head = { number: 151, hash: hash(0x97), timestampSeconds: 1_700_000_100 };
     const nextBoundary = rig.head.number - 5;
     rig.blockHashes.set(nextBoundary, null);
     await index.runOnce(new AbortController().signal);
 
-    const retained = (await store.load())!.cursor;
+    const retained = (await store.load(SCOPE))!.cursor;
     expect(retained.settledBlockNumber).toBe(verified.settledBlockNumber);
     expect(retained.settledBlockHash).toBe(verified.settledBlockHash);
     expect(await store.blockHashAt(SCOPE, retained.settledBlockNumber))
@@ -273,11 +273,11 @@ describe('ChainIndexTick — one log', () => {
 
     await index.runOnce(new AbortController().signal);
 
-    const cursor = (await store.load())!.cursor;
+    const cursor = (await store.load(SCOPE))!.cursor;
     expect(cursor.settledBlockNumber).toBe(94);
     expect(await store.blockHashAt(SCOPE, cursor.settledBlockNumber)).toBeUndefined();
-    expect(store.rows()).toHaveLength(1);
-    expect(store.rows()[0]?.settled).toBe(false);
+    expect(store.rows(SCOPE)).toHaveLength(1);
+    expect(store.rows(SCOPE)[0]?.settled).toBe(false);
   });
 
   it('coverage reports what was looked at, not the head, while catching up', async () => {
@@ -289,7 +289,7 @@ describe('ChainIndexTick — one log', () => {
 
     await index.runOnce(new AbortController().signal);
 
-    const coverage = (await store.load())!.coverage
+    const coverage = (await store.load(SCOPE))!.coverage
       .find((entry) => entry.family === 'context-graph-authority')!;
     // Resumed at 101, so the cursor sat at 100 and one bounded pass climbed 50.
     expect(coverage.coveredThroughBlock).toBe(150);
@@ -304,7 +304,7 @@ describe('ChainIndexTick — one log', () => {
 
     await index.runOnce(new AbortController().signal);
     await index.backfillOnce(new AbortController().signal);
-    const before = authorityCoverage((await store.load())!.coverage, STORAGE)!;
+    const before = authorityCoverage((await store.load(SCOPE))!.coverage, STORAGE)!;
 
     // Widen the same address from authority events to include KA registration.
     // Blocks walked under the old filter prove nothing about the added topic.
@@ -315,7 +315,7 @@ describe('ChainIndexTick — one log', () => {
     await index.runOnce(new AbortController().signal);
 
     const fetchedFrom = rig.requests[0]!.fromBlock;
-    const after = authorityCoverage((await store.load())!.coverage, STORAGE)!;
+    const after = authorityCoverage((await store.load(SCOPE))!.coverage, STORAGE)!;
     expect(after.coveredFromBlock).toBe(fetchedFrom);
     expect(after.coveredFromBlock).toBeGreaterThan(before.coveredFromBlock);
   });
@@ -368,7 +368,7 @@ describe('ChainIndexTick — one log', () => {
 
     await index.runOnce(new AbortController().signal);
 
-    const coverage = (await store.load())!.coverage;
+    const coverage = (await store.load(SCOPE))!.coverage;
     const retired = authorityCoverage(coverage, STORAGE)!;
     // The pass read through the head at 100 and its request array still carried
     // the old address — but 98 is where the Hub stopped meaning it, and 98
@@ -404,7 +404,7 @@ describe('ChainIndexTick — one log', () => {
     rig.head = { number: 140, hash: hash(0x8c), timestampSeconds: 1_700_000_120 };
     await index.runOnce(new AbortController().signal);
 
-    expect(authorityCoverage((await store.load())!.coverage, STORAGE)!.coveredThroughBlock)
+    expect(authorityCoverage((await store.load(SCOPE))!.coverage, STORAGE)!.coveredThroughBlock)
       .toBe(97);
   });
 
@@ -420,7 +420,7 @@ describe('ChainIndexTick — one log', () => {
 
     await index.runOnce(new AbortController().signal);
 
-    let coverage = (await store.load())!.coverage;
+    let coverage = (await store.load(SCOPE))!.coverage;
     expect(authorityCoverage(coverage, STORAGE)!.coveredThroughBlock).toBe(97);
     expect(coverage.filter((entry) => entry.family === 'context-graph-authority'))
       .toHaveLength(1);
@@ -432,7 +432,7 @@ describe('ChainIndexTick — one log', () => {
     rig.head = { number: 140, hash: hash(0x8c), timestampSeconds: 1_700_000_120 };
     await index.runOnce(new AbortController().signal);
 
-    coverage = (await store.load())!.coverage;
+    coverage = (await store.load(SCOPE))!.coverage;
     expect(authorityCoverage(coverage, STORAGE)!.coveredThroughBlock).toBe(97);
     expect(coverage.filter((entry) => entry.family === 'context-graph-authority'))
       .toHaveLength(1);
@@ -462,12 +462,12 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports, { backfillPageBlocks: 20 });
     await index.runOnce(new AbortController().signal);
-    const before = (await store.load())!.coverage
+    const before = (await store.load(SCOPE))!.coverage
       .find((entry) => entry.family === 'context-graph-authority')!;
 
     rig.requests.length = 0;
     await index.backfillOnce(new AbortController().signal);
-    const after = (await store.load())!.coverage
+    const after = (await store.load(SCOPE))!.coverage
       .find((entry) => entry.family === 'context-graph-authority')!;
 
     expect(rig.requests).toHaveLength(1);
@@ -487,13 +487,13 @@ describe('ChainIndexTick — one log', () => {
     store: MemoryChainEventLogStore,
     blockNumbersThatHeldRows: readonly number[],
   ): Promise<void> {
-    const state = await store.load();
+    const state = await store.load(SCOPE);
     if (state === undefined) return;
     for (const coverage of state.coverage) {
       for (const blockNumber of blockNumbersThatHeldRows) {
         if (blockNumber < coverage.coveredFromBlock) continue;
         if (blockNumber > coverage.coveredThroughBlock) continue;
-        expect(store.rows().some((row) => row.blockNumber === blockNumber)).toBe(true);
+        expect(store.rows(SCOPE).some((row) => row.blockNumber === blockNumber)).toBe(true);
       }
     }
   }
@@ -509,7 +509,7 @@ describe('ChainIndexTick — one log', () => {
     });
     const index = tick(store, rig.ports, { backfillPageBlocks: 20 });
     await index.runOnce(new AbortController().signal);
-    expect(store.rows().some((row) => row.blockNumber === 100)).toBe(true);
+    expect(store.rows(SCOPE).some((row) => row.blockNumber === 100)).toBe(true);
 
     // Every shape a pass can take, back to back: a backfill page, a head
     // refresh, and an endpoint that fell behind.
@@ -538,7 +538,7 @@ describe('ChainIndexTick — one log', () => {
 
     await index.runOnce(new AbortController().signal);
 
-    const stored = store.rows().find((row) => row.blockNumber === 100)!;
+    const stored = store.rows(SCOPE).find((row) => row.blockNumber === 100)!;
     expect(stored.topics).toEqual(shouty.topics.map((topic) => topic.toLowerCase()));
   });
 
@@ -556,7 +556,7 @@ describe('ChainIndexTick — one log', () => {
 
     expect(result.outcome).toBe('endpoint-lagging');
     expect(result.logRequests).toBe(0);
-    expect(store.rows().some((row) => row.blockNumber === 100)).toBe(true);
+    expect(store.rows(SCOPE).some((row) => row.blockNumber === 100)).toBe(true);
   });
 
   it('a backfill page leaves the tail alone', async () => {
@@ -564,18 +564,18 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness({ logs: () => [creationLog(100, 0, 4n)] });
     const index = tick(store, rig.ports, { backfillPageBlocks: 20 });
     await index.runOnce(new AbortController().signal);
-    const before = (await store.load())!.coverage
+    const before = (await store.load(SCOPE))!.coverage
       .find((entry) => entry.family === 'context-graph-authority')!;
 
     rig.logs = () => [];
     await index.backfillOnce(new AbortController().signal);
 
-    const after = (await store.load())!.coverage
+    const after = (await store.load(SCOPE))!.coverage
       .find((entry) => entry.family === 'context-graph-authority')!;
     // History moved down and the unfinalized tail is untouched: the backfill
     // walks DOWN and has no business replacing blocks it never looked at.
     expect(after.coveredFromBlock).toBe(before.coveredFromBlock - 20);
-    expect(store.rows().some((row) => row.blockNumber === 100 && !row.settled)).toBe(true);
+    expect(store.rows(SCOPE).some((row) => row.blockNumber === 100 && !row.settled)).toBe(true);
   });
 
   it('S4: a fork suspicion survives an interleaved backfill', async () => {
@@ -583,7 +583,7 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports, { backfillPageBlocks: 20 });
     await index.runOnce(new AbortController().signal);
-    const settled = (await store.load())!.cursor.settledBlockNumber;
+    const settled = (await store.load(SCOPE))!.cursor.settledBlockNumber;
 
     rig.blockHashes.set(settled, hash(0xfe));
     rig.head = { number: 120, hash: hash(0x78), timestampSeconds: 1_700_000_100 };
@@ -593,7 +593,7 @@ describe('ChainIndexTick — one log', () => {
     // erase the suspicion, the second confirmation never arrives and the scope
     // can never be tombstoned at all.
     await index.backfillOnce(new AbortController().signal);
-    expect((await store.load())!.suspectedForkBlockNumber).toBe(settled);
+    expect((await store.load(SCOPE))!.suspectedForkBlockNumber).toBe(settled);
 
     const second = await index.runOnce(new AbortController().signal);
     expect(second.outcome).toBe('tombstoned');
@@ -605,7 +605,7 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports);
     await index.runOnce(new AbortController().signal);
-    const settled = (await store.load())!.cursor.settledBlockNumber;
+    const settled = (await store.load(SCOPE))!.cursor.settledBlockNumber;
 
     rig.blockHashes.set(settled, hash(0xfe));
     rig.head = { number: 120, hash: hash(0x78), timestampSeconds: 1_700_000_100 };
@@ -615,7 +615,7 @@ describe('ChainIndexTick — one log', () => {
     rig.blockHashes.delete(settled);
     rig.head = { number: 130, hash: hash(0x82), timestampSeconds: 1_700_000_160 };
     expect((await index.runOnce(new AbortController().signal)).outcome).toBe('advanced');
-    expect((await store.load())!.suspectedForkBlockNumber).toBeUndefined();
+    expect((await store.load(SCOPE))!.suspectedForkBlockNumber).toBeUndefined();
   });
 
   it('S5: verifies the lineage on the path that reads no settled hash', async () => {
@@ -623,7 +623,7 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports, { deploymentBlockNumber: 10 });
     await index.runOnce(new AbortController().signal);
-    const settled = (await store.load())!.cursor.settledBlockNumber;
+    const settled = (await store.load(SCOPE))!.cursor.settledBlockNumber;
 
     // A redeployed devnet under a `node-ui.db` that outlived it: the new chain
     // is SHORTER than this cursor, so it cannot answer for the settled block at
@@ -634,7 +634,7 @@ describe('ChainIndexTick — one log', () => {
 
     expect((await index.runOnce(new AbortController().signal)).outcome).toBe('fork-suspected');
     expect((await index.runOnce(new AbortController().signal)).outcome).toBe('tombstoned');
-    expect(await store.load()).toBeUndefined();
+    expect(await store.load(SCOPE)).toBeUndefined();
   });
 
   it('S5: a lagging endpoint on the SAME chain is still only lagging', async () => {
@@ -642,7 +642,7 @@ describe('ChainIndexTick — one log', () => {
     const rig = harness();
     const index = tick(store, rig.ports, { deploymentBlockNumber: 10 });
     await index.runOnce(new AbortController().signal);
-    const settled = (await store.load())!.cursor.settledBlockNumber;
+    const settled = (await store.load(SCOPE))!.cursor.settledBlockNumber;
 
     // Same shape as the reset above, except the deployment block still hashes
     // the way this scope was pinned to it.
@@ -652,7 +652,7 @@ describe('ChainIndexTick — one log', () => {
     expect((await index.runOnce(new AbortController().signal)).outcome).toBe('endpoint-lagging');
     expect((await index.runOnce(new AbortController().signal)).outcome).toBe('endpoint-lagging');
     expect(store.tombstones).toBe(0);
-    expect(await store.load()).toBeDefined();
+    expect(await store.load(SCOPE)).toBeDefined();
   });
 
   it('stops the backfill exactly at the family floor', async () => {
@@ -665,7 +665,7 @@ describe('ChainIndexTick — one log', () => {
     for (let pass = 0; pass < 8; pass += 1) {
       if ((await index.backfillOnce(new AbortController().signal)).outcome === 'idle') break;
     }
-    const coverage = (await store.load())!.coverage;
+    const coverage = (await store.load(SCOPE))!.coverage;
     expect(coverage.map((entry) => entry.coveredFromBlock)).toEqual(coverage.map(() => 10));
 
     rig.requests.length = 0;
@@ -735,7 +735,7 @@ describe('ChainIndexTick — the head stamp dates the head READ, not the commit'
 
     await index.runOnce(new AbortController().signal);
 
-    const committed = (await store.load())!.cursor.head.fetchedAtMs;
+    const committed = (await store.load(SCOPE))!.cursor.head.fetchedAtMs;
     // The lineage read, the log scan and the boundary read all landed between
     // the two, so this is not a distinction without a difference.
     expect(slow.nowMs()).toBeGreaterThan(START_MS + LOG_SCAN_MS);
@@ -755,7 +755,7 @@ describe('ChainIndexTick — the head stamp dates the head READ, not the commit'
     expect(result.outcome).toBe('advanced');
     const askedAtMs = slow.headAskedAtMs[1]!;
     expect(slow.nowMs() - askedAtMs).toBeGreaterThan(LOG_SCAN_MS);
-    expect((await store.load())!.cursor.head.fetchedAtMs).toBe(askedAtMs);
+    expect((await store.load(SCOPE))!.cursor.head.fetchedAtMs).toBe(askedAtMs);
   });
 
   it('idle: a pass that fetches nothing still dates its head from the ask', async () => {
@@ -777,7 +777,7 @@ describe('ChainIndexTick — the head stamp dates the head READ, not the commit'
     const askedAtMs = slow.headAskedAtMs[1]!;
     // An idle pass still verifies the chain identity before it commits.
     expect(slow.nowMs()).toBeGreaterThan(askedAtMs);
-    expect((await store.load())!.cursor.head.fetchedAtMs).toBe(askedAtMs);
+    expect((await store.load(SCOPE))!.cursor.head.fetchedAtMs).toBe(askedAtMs);
   });
 
   it('the anchor gate bounds the DATA, so a slow pass spends its own duration', async () => {
@@ -796,7 +796,7 @@ describe('ChainIndexTick — the head stamp dates the head READ, not the commit'
       if ((await index.backfillOnce(new AbortController().signal)).outcome === 'idle') break;
     }
 
-    const state = await store.load();
+    const state = await store.load(SCOPE);
     const askedAtMs = slow.headAskedAtMs[0]!;
     const afterBackfillAtMs = slow.nowMs();
     expect(afterBackfillAtMs - askedAtMs).toBeGreaterThanOrEqual(LOG_SCAN_MS);
