@@ -173,6 +173,82 @@ describe('RFC-64 SWM author inventory producer', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
   });
 
+  it('rejects exact-merge rows outside the scoped author and network', async () => {
+    const inventory = await createInventory();
+    const foreignRow = Object.freeze({
+      ...ROW_A,
+      kaUal: `did:dkg:otp:20430/${otherWallet.address.toLowerCase()}/7`,
+    }) as SwmAuthorInventoryRowV1;
+
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(
+      inventory,
+      exactMergeInput([foreignRow]),
+    )).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('rejects an exact-merge signer and retry bound that are not scope-bound', async () => {
+    const inventory = await createInventory();
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(inventory, {
+      ...exactMergeInput([ROW_A]),
+      signer: {
+        issuer: otherWallet.address.toLowerCase() as EvmAddressV1,
+        signDigest: (digest) => otherWallet.signMessage(digest),
+      },
+    })).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(inventory, {
+      ...exactMergeInput([ROW_A]),
+      maxCasAttempts: 0,
+    })).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+  });
+
+  it('wraps a merged row-set uniqueness violation as producer input', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    const duplicateShareOperation = Object.freeze({
+      ...ROW_B,
+      shareOperationId: ROW_A.shareOperationId,
+    }) as SwmAuthorInventoryRowV1;
+
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(
+      inventory,
+      exactMergeInput([duplicateShareOperation]),
+    )).rejects.toMatchObject({ code: 'swm-inventory-producer-input' });
+  });
+
+  it('distinguishes terminal CAS conflicts from unrelated persistence errors', async () => {
+    const terminalConflict = {
+      readSwmAuthorInventorySnapshotV1: () => null,
+      compareAndSwapMergeSwmAuthorInventoryV1: () => {
+        throw new InventoryV1CandidateError(
+          'swm-inventory-cas-conflict',
+          'injected terminal conflict',
+        );
+      },
+    } satisfies Pick<
+      Rfc64SwmAuthorInventoryOperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapMergeSwmAuthorInventoryV1'
+    >;
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(terminalConflict, {
+      ...exactMergeInput([ROW_A]),
+      maxCasAttempts: 1,
+    })).rejects.toMatchObject({ code: 'swm-inventory-producer-conflict' });
+
+    const persistenceFailure = {
+      ...terminalConflict,
+      compareAndSwapMergeSwmAuthorInventoryV1: () => {
+        throw new Error('injected persistence failure');
+      },
+    } satisfies Pick<
+      Rfc64SwmAuthorInventoryOperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapMergeSwmAuthorInventoryV1'
+    >;
+    await expect(mergeRfc64SwmAuthorInventoryRowsV1(
+      persistenceFailure,
+      exactMergeInput([ROW_A]),
+    )).rejects.toThrow('injected persistence failure');
+  });
+
   it('rejects a signed exact snapshot that is not the requested merge', async () => {
     const source = await createInventory();
     const signed = await mergeRfc64SwmAuthorInventoryRowsV1(
