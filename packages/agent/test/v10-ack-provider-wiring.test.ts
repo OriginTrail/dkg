@@ -427,6 +427,10 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const accepted = new Set(['already-admitted']);
     const preflightPeerAdmission = vi.fn(async (peerIds: Iterable<string>) => {
       const peers = [...peerIds];
+      // Admission is genuinely asynchronous in production. Yield before the
+      // side effect so this test fails if the pool is frozen without awaiting
+      // preflight completion.
+      await Promise.resolve();
       accepted.add('new-v2-core');
       accepted.add('unclassified-core');
       return { checked: peers.length, admitted: 2, unresolved: 1 };
@@ -477,7 +481,8 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       expect(pool).not.toContain('rejected-peer');
     }
     expect(preflightPeerAdmission).toHaveBeenCalledTimes(3);
-    for (const [peerIds, _ctx, options] of preflightPeerAdmission.mock.calls) {
+    const expectedOperationNames = ['publish', 'update', 'publish'];
+    for (const [index, [peerIds, ctx, options]] of preflightPeerAdmission.mock.calls.entries()) {
       expect([...peerIds]).toEqual([
         'already-admitted',
         'new-v2-core',
@@ -485,6 +490,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
         'retryable-probe-failure',
         'unclassified-core',
       ]);
+      expect(ctx).toMatchObject({ operationName: expectedOperationNames[index] });
       expect(options).toEqual({ maxConcurrency: 4 });
     }
   });

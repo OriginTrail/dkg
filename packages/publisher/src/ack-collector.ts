@@ -45,6 +45,11 @@ export interface ACKVerifyResult {
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  /**
+   * Resolve the candidate pool before an ACK round freezes it. Implementers
+   * may return a synchronous pool for backward compatibility or await network
+   * admission; consumers must always await the result.
+   */
   getConnectedCorePeers: (protocol?: string) => string[] | Promise<string[]>;
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry

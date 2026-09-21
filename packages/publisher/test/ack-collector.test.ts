@@ -7,6 +7,7 @@ import {
   computePublishACKDigest,
   PROTOCOL_STORAGE_ACK,
   PROTOCOL_STORAGE_ACK_V2,
+  PROTOCOL_STORAGE_UPDATE_ACK,
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10, computePrivateRootV10 } from '../src/merkle.js';
 import { ethers } from 'ethers';
@@ -113,7 +114,7 @@ describe('ACKCollector', () => {
     }
   });
 
-  it('surfaces an async ACK candidate-provider failure as a typed quorum error', async () => {
+  it('surfaces async publish and update candidate-provider failures as typed quorum errors', async () => {
     const candidateFailure = new Error('admission preflight unavailable');
     const deps: ACKCollectorDeps = {
       gossipPublish: async () => {},
@@ -156,6 +157,36 @@ describe('ACKCollector', () => {
     });
     expect(caught!.message).toContain('ACK candidate discovery failed');
     expect(caught!.message).toContain(PROTOCOL_STORAGE_ACK);
+
+    let updateCaught: QuorumUnmetError | undefined;
+    try {
+      await collector.collectUpdate({
+        kaId: 1n,
+        contextGraphId: testCGId,
+        preUpdateMerkleRootCount: 1n,
+        newMerkleRoot: merkleRoot,
+        newByteSize: 100n,
+        newTokenAmount: 1n,
+        mintAmount: 0n,
+        burnTokenIds: [],
+        newMerkleLeafCount: merkleLeafCount,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        publisherPeerId: 'publisher-0',
+      });
+    } catch (err) {
+      updateCaught = err as QuorumUnmetError;
+    }
+
+    expect(updateCaught).toBeInstanceOf(QuorumUnmetError);
+    expect(updateCaught).toMatchObject({
+      collected: 0,
+      required: 3,
+      dialled: 0,
+      cause: candidateFailure,
+    });
+    expect(updateCaught!.message).toContain('ACK candidate discovery failed');
+    expect(updateCaught!.message).toContain(PROTOCOL_STORAGE_UPDATE_ACK);
   });
 
   it('does not put lifecycle assetUal on the PublishIntent wire', async () => {
