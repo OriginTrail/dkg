@@ -53,7 +53,7 @@ const HEAD_TIMESTAMP_SECONDS = 1_700_000_000;
 const NOW_MS = HEAD_TIMESTAMP_SECONDS * 1_000;
 const TICK_MS = 6_000;
 
-const hash = (seed: number): string => `0x${seed.toString(16).padStart(2, '0').repeat(32)}`;
+const hash = (seed: number): string => `0x${seed.toString(16).padStart(64, '0')}`;
 const storageInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
 
 function creationRow(
@@ -280,7 +280,7 @@ function makeReader(options: {
         }),
   });
   reader.snapshots.open();
-  return { reader, calls, authorityLogs, attempts, usage };
+  return { reader, index, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -838,6 +838,158 @@ describe('Context Graph authority index over the one log', () => {
     expect(evidence.every((e) => e.ageMs < 6_000)).toBe(true);
     expect(calls.getLogs).toBe(0);
     expect(calls.getBlock).toBe(0);
+  });
+
+  describe('retained log-fold anchor validation', () => {
+    const retainedHead = DEPLOY_BLOCK + 600;
+
+    it('accepts a checksummed live binding against the lowercase log source without an RPC',
+      async () => {
+        const store = seededStore({ head: retainedHead });
+        const original = logSource(store);
+        const anchorHolds = vi.fn(original.anchorHolds.bind(original));
+        const source = { ...original, anchorHolds };
+        const { reader, calls } = makeReader({
+          store,
+          source,
+          // Production receives this address from an ABI-decoded Hub call;
+          // ethers preserves its checksum case on Contract.getAddress(). The
+          // one-log source is deliberately lowercase.
+          contractAddress: ethers.getAddress(STORAGE),
+        });
+
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+        // First call stabilizes the fold, second validates the retained fold.
+        expect(anchorHolds).toHaveBeenCalledTimes(2);
+        expect(calls.getBlock).toBe(0);
+        expect(calls.getLogs).toBe(0);
+      });
+
+    it('falls back to the provider when the local revision moved', async () => {
+      const store = seededStore({ head: retainedHead });
+      const original = logSource(store);
+      let current: ChainEventLogAuthoritySource | undefined = original;
+      const { reader, calls } = makeReader({
+        store,
+        sourceProvider: () => current,
+      });
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+      const moved = vi.fn(async () => false);
+      current = { ...original, anchorHolds: moved };
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+      expect(moved).toHaveBeenCalledTimes(1);
+      expect(calls.getBlock).toBe(1);
+      expect(calls.getLogs).toBe(0);
+    });
+
+    it('falls back to the provider when the current source belongs to another contract',
+      async () => {
+        const store = seededStore({ head: retainedHead });
+        const original = logSource(store);
+        let current: ChainEventLogAuthoritySource | undefined = original;
+        const { reader, calls } = makeReader({
+          store,
+          sourceProvider: () => current,
+        });
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+        const rotatedAnchorHolds = vi.fn(async () => true);
+        current = {
+          ...original,
+          contractAddress: ROTATED_STORAGE,
+          anchorHolds: rotatedAnchorHolds,
+        };
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+        expect(rotatedAnchorHolds).not.toHaveBeenCalled();
+        expect(calls.getBlock).toBe(1);
+        expect(calls.getLogs).toBe(0);
+      });
+
+    it('falls back for a retained pre-anchor log origin', async () => {
+      const store = seededStore({ head: retainedHead });
+      const source = logSource(store);
+      const { reader, index, calls } = makeReader({ store, source });
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+      // Projection caches are process-local, but the origin field stays
+      // optional for older/direct hosts. Wrap the real cache so the public
+      // reader exercises that compatibility shape through its actual
+      // validateAnchor callback.
+      const project = index.projection.bind(index);
+      vi.spyOn(index, 'projection').mockImplementation(async (input) => project({
+        ...input,
+        validateAnchor: async (cached) => input.validateAnchor!({
+          ...cached,
+          origin: Object.freeze({
+            kind: 'log' as const,
+            dataFetchedAtMs: cached.origin.kind === 'log'
+              ? cached.origin.dataFetchedAtMs
+              : cached.fetchedAtMs,
+          }),
+        }),
+      }));
+
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+      expect(calls.getBlock).toBe(1);
+      expect(calls.getLogs).toBe(0);
+    });
+
+    it('falls back when the optional local anchor proof rejects', async () => {
+      const store = seededStore({ head: retainedHead });
+      const original = logSource(store);
+      let current: ChainEventLogAuthoritySource | undefined = original;
+      const { reader, calls } = makeReader({
+        store,
+        sourceProvider: () => current,
+      });
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+      const rejected = vi.fn(async () => { throw new Error('local index unavailable'); });
+      current = { ...original, anchorHolds: rejected };
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+      expect(rejected).toHaveBeenCalledTimes(1);
+      expect(calls.getBlock).toBe(1);
+      expect(calls.getLogs).toBe(0);
+    });
+
+    it('honours caller abort after the local proof await without provider fallback', async () => {
+      const store = seededStore({ head: retainedHead });
+      const original = logSource(store);
+      let current: ChainEventLogAuthoritySource | undefined = original;
+      const { reader, calls } = makeReader({
+        store,
+        sourceProvider: () => current,
+      });
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+      let release!: (value: boolean) => void;
+      let markStarted!: () => void;
+      const held = new Promise<boolean>((resolve) => { release = resolve; });
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
+      current = {
+        ...original,
+        anchorHolds: () => {
+          markStarted();
+          return held;
+        },
+      };
+      const controller = new AbortController();
+      const reading = reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH, {
+        signal: controller.signal,
+      });
+      await started;
+      controller.abort(new DOMException('test abort', 'AbortError'));
+      release(true);
+
+      await expect(reading).rejects.toMatchObject({ name: 'AbortError' });
+      expect(calls.getBlock).toBe(0);
+    });
   });
 
   it('refuses the fold when the tick committed underneath it', async () => {

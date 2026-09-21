@@ -187,11 +187,14 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
  * 8.7% of a private cell, and the single largest consumer of
  * `eth_getBlockByNumber`. But a fold that came from the event log already
  * carries the anchor it was admitted under, and when the tick has not committed
- * since, the log's own CAS token settles the question for free. That is the
- * same fence `stabilize()` already prefers, and the reason is written out in
- * `chainIndexAuthorityAnchorHolds`: every way the rows beneath a fold can
- * change is a COMMIT, so an unmoved revision is a STRONGER statement than the
- * one block hash the read it replaces re-proves.
+ * since, the log's own CAS token proves that the LOCAL indexed generation has
+ * not moved. That costs no RPC.
+ *
+ * This is deliberately the same bounded-consistency contract as every direct
+ * answer from the one-log fast path: it does NOT independently ask the chain
+ * whether the anchor is still canonical between ticks. The tick's fetch-time
+ * and chain-time freshness limits bound that window. A caller that requires a
+ * fresh external-canonicality proof must continue to use the provider path.
  *
  * IT MAY ONLY EVER ANSWER YES. Two reasons, and both matter:
  *
@@ -204,8 +207,9 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
  *    fork and DROPS the whole scope's projection. Answering `false` on a
  *    commit would turn a routine tick into a full rescan.
  *
- * So every case this cannot prove falls through to the block read, unchanged.
- * A scan-origin projection has no anchor and always does.
+ * So every case this cannot prove, including a local-store read error, falls
+ * through to the block read unchanged. A scan-origin projection has no anchor
+ * and always does.
  */
 export async function contextGraphAuthorityProjectionAnchorProvenByLogV1(
   cached: ContextGraphAuthorityIndexProjection,
@@ -218,8 +222,18 @@ export async function contextGraphAuthorityProjectionAnchorProvenByLogV1(
   // runtime rebuild may have replaced the source since, and a retired
   // generation's token must not vouch for rows it no longer owns — even when it
   // happens to have kept the same physical address.
-  if (currentSource.contractAddress !== currentContractAddress) return false;
-  return currentSource.anchorHolds(anchor);
+  const cachedContractAddress = cached.contractAddress.toLowerCase();
+  const sourceContractAddress = currentSource.contractAddress.toLowerCase();
+  const boundContractAddress = currentContractAddress.toLowerCase();
+  if (cachedContractAddress !== boundContractAddress
+    || sourceContractAddress !== boundContractAddress) return false;
+  try {
+    return await currentSource.anchorHolds(anchor);
+  } catch {
+    // This is an optional local proof. A store failure must not replace the
+    // provider-backed validation that existed before the optimization.
+    return false;
+  }
 }
 
 /**
@@ -670,9 +684,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                 // reports the fold by its own age instead of by this read's
                 // clock.
                 // The anchor rides along so a LATER revalidation of this
-                // retained fold can ask the log whether anything moved, rather
-                // than spending a block read to re-prove a hash the log's own
-                // CAS token already speaks for. See `validateAnchor` below.
+                // retained fold can ask whether the local one-log generation
+                // moved. This inherits the log's tick/freshness-bounded view of
+                // chain canonicality; it is not a fresh chain observation.
                 origin: Object.freeze({
                   kind: 'log' as const,
                   dataFetchedAtMs: anchor.fetchedAtMs,
@@ -802,12 +816,15 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       signal: options.signal,
       project: read,
       validateAnchor: async (cached) => {
-        if (await contextGraphAuthorityProjectionAnchorProvenByLogV1(
+        const provenByLog = await contextGraphAuthorityProjectionAnchorProvenByLogV1(
           cached,
           dependencies.chainEventLogAuthority?.(),
           await dependencies.requireContextGraphStorage().getAddress(),
-        )) return true;
+        );
+        // `anchorHolds` has no caller signal of its own. Re-check after that
+        // await before either serving the cache or beginning provider fallback.
         options.signal?.throwIfAborted();
+        if (provenByLog) return true;
         return dependencies.readTipProvider(
           `${operationLabel} cached projection anchor`,
           async (provider) => {

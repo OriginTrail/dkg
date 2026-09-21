@@ -6,10 +6,10 @@
  * `authorityProjection.validateAnchor` was the largest single consumer of
  * `eth_getBlockByNumber` on a measured six-node run — 982 requests, 8.7% of a
  * private cell — spent re-proving a block hash for a projection the event log
- * already had an opinion about. This file pins the one thing that makes taking
- * that read away safe: the fence may answer YES, and it may decline, but it may
- * never answer NO, because the cache reads `false` as proof of a fork and drops
- * the whole scope.
+ * already had an opinion about. This file pins the local proof's deliberately
+ * narrow contract: it may answer YES inside the one-log tick/freshness window,
+ * or decline to the provider-backed proof. It is not an independent observation
+ * of external chain canonicality between ticks.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -86,6 +86,19 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
     expect(anchorHolds).toHaveBeenCalledWith(ANCHOR);
   });
 
+  it('normalizes cached, source and live contract-address casing', async () => {
+    const anchorHolds = vi.fn(async () => true);
+    const checksummed = '0xCdCDCdCdcdcdcdCdcDcDCdcDcDCdCdcdCdcDCDcD';
+
+    await expect(contextGraphAuthorityProjectionAnchorProvenByLogV1(
+      { ...projection(LOG_ORIGIN), contractAddress: checksummed },
+      source(anchorHolds, STORAGE),
+      checksummed,
+    )).resolves.toBe(true);
+
+    expect(anchorHolds).toHaveBeenCalledWith(ANCHOR);
+  });
+
   it('declines rather than denies when the tick has committed since the fold', async () => {
     // A moved revision proves a COMMIT, not a fork. The log names a hash for
     // only its head and its settled boundary, so it cannot speak for the
@@ -131,6 +144,26 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
     )).resolves.toBe(false);
 
     expect(anchorHolds).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cached projection from another contract', async () => {
+    const anchorHolds = vi.fn(async () => true);
+
+    await expect(contextGraphAuthorityProjectionAnchorProvenByLogV1(
+      { ...projection(LOG_ORIGIN), contractAddress: ROTATED },
+      source(anchorHolds),
+      STORAGE,
+    )).resolves.toBe(false);
+
+    expect(anchorHolds).not.toHaveBeenCalled();
+  });
+
+  it('declines when the optional local proof rejects', async () => {
+    await expect(contextGraphAuthorityProjectionAnchorProvenByLogV1(
+      projection(LOG_ORIGIN),
+      source(async () => { throw new Error('local index unavailable'); }),
+      STORAGE,
+    )).resolves.toBe(false);
   });
 
   it('declines when the runtime holds no log source', async () => {
