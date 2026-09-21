@@ -251,7 +251,11 @@ describe('ChainIndexRunner', () => {
         harness.runner.start();
         for (let pass = 0; pass < 6; pass += 1) await harness.fire();
 
-        expect(Math.max(...harness.delays)).toBeLessThanOrEqual(budgetMs);
+        // Pin the headroom itself, not merely `delay <= budget`: spending the
+        // whole budget leaves nothing for either adjacent pass and makes the
+        // readers reject before the replacement head commits.
+        const spendableMs = Math.floor((2 * budgetMs) / 3);
+        expect(Math.max(...harness.delays)).toBeLessThanOrEqual(spendableMs);
         await harness.runner.stop();
       }
     });
