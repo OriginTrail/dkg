@@ -24,6 +24,12 @@ const REMOTE_PRIVATE_KEY_SEED = Buffer
   .from('vHxcSg3ecwP9UfJWdmlnWQeJe83jD2yKtOJlWuLpIrTRh3QiB5sL6iRhAidCZ3bHQLaE0RwBfHBNEmV7ylcjqg==', 'base64')
   .slice(0, 32);
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+const PREFLIGHT_PEER_IDS = [
+  REMOTE_PEER_ID,
+  '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw',
+  '12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge',
+  '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ',
+] as const;
 const identity = {
   networkId: 'network-a',
   genesisId: 'base-testnet',
@@ -195,6 +201,73 @@ describe('NetworkAdmissionCoordinator', () => {
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('preflight respects active probe backoff and admits the peer after it expires', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: { transientBaseMs: 100, transientMaxMs: 100 },
+    });
+    fixture.admission.rememberRetryableProbeFailure(REMOTE_PEER_ID, 'peer still booting', 'transient');
+
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID, REMOTE_PEER_ID_CID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
+    expect(sendIdentityProbe).not.toHaveBeenCalled();
+
+    now += 100;
+    await expect(fixture.coordinator.preflightPeerAdmission(
+      [REMOTE_PEER_ID],
+      createOperationContext('publish'),
+    )).resolves.toEqual({ checked: 1, admitted: 1, unresolved: 0 });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+  });
+
+  it('preflight bounds concurrent identity admission attempts', async () => {
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe: async () => new Uint8Array(),
+    });
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    vi.spyOn(fixture.coordinator, 'ensureAdmitted').mockImplementation(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return true;
+    });
+
+    const preflight = fixture.coordinator.preflightPeerAdmission(
+      PREFLIGHT_PEER_IDS,
+      createOperationContext('publish'),
+      { maxConcurrency: 2 },
+    );
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[0]();
+    releases[1]();
+    await vi.waitFor(() => expect(releases).toHaveLength(4));
+    releases[2]();
+    releases[3]();
+
+    await expect(preflight).resolves.toEqual({ checked: 4, admitted: 4, unresolved: 0 });
+    expect(maxActive).toBe(2);
   });
 
   it('lets an explicit connect bypass cached retry backoff without bypassing admission', async () => {

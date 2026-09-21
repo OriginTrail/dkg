@@ -44,6 +44,17 @@ export interface NetworkAdmissionAttemptOptions {
   timeoutMs?: number;
 }
 
+export interface NetworkAdmissionPreflightOptions {
+  /** Bound parallel identity streams so publish cannot fan out without limit. */
+  maxConcurrency?: number;
+}
+
+export interface NetworkAdmissionPreflightResult {
+  checked: number;
+  admitted: number;
+  unresolved: number;
+}
+
 interface NetworkAdmissionAttemptPolicy {
   probeRetrySuppression: 'respect' | 'bypass';
 }
@@ -243,6 +254,60 @@ export class NetworkAdmissionCoordinator {
       EXPLICIT_CONNECT_ADMISSION_POLICY,
       options,
     );
+  }
+
+  /**
+   * Resolve admission for a bounded, caller-selected peer set.
+   *
+   * The coordinator remains the sole owner of the accepted/rejected and
+   * retry-backoff gates. In particular this path uses the automatic policy:
+   * an active transient backoff is respected, so repeated publishes cannot
+   * turn into repeated identity probes of a peer that is still booting.
+   */
+  async preflightPeerAdmission(
+    peerIds: Iterable<string>,
+    ctx: OperationContext,
+    options: NetworkAdmissionPreflightOptions = {},
+  ): Promise<NetworkAdmissionPreflightResult> {
+    if (!this.enabled) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const canonicalPeerIds: string[] = [];
+    for (const peerId of peerIds) {
+      try {
+        canonicalPeerIds.push(canonicalAdmissionPeerId(peerId));
+      } catch {
+        // Invalid peer IDs are already rejected by the coordinator boundary.
+      }
+    }
+    const pending = [...new Set(canonicalPeerIds)]
+      .filter((peerId) => peerId !== this.selfPeerId)
+      .filter((peerId) => !this.isAcceptedPeer(peerId) && !this.isRejectedPeer(peerId));
+    if (pending.length === 0) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const requestedConcurrency = options.maxConcurrency ?? 4;
+    const maxConcurrency = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0
+      ? requestedConcurrency
+      : 1;
+    let cursor = 0;
+    let admitted = 0;
+    let unresolved = 0;
+    const worker = async () => {
+      while (cursor < pending.length) {
+        const peerId = pending[cursor++];
+        try {
+          if (await this.ensureAdmitted(peerId, ctx)) admitted += 1;
+          else unresolved += 1;
+        } catch {
+          // A retryable probe/backoff keeps the peer excluded for this round.
+          // Definitive proof rejection is handled fail-closed by ensureAdmitted.
+          unresolved += 1;
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(maxConcurrency, pending.length) }, () => worker()),
+    );
+    return { checked: pending.length, admitted, unresolved };
   }
 
   private async ensureAdmittedWithPolicy(
