@@ -3801,6 +3801,7 @@ async function readFreshSwmDataRowsPageFromPlan(
       : `VALUES ?root { ${graphValues(entry.roots)} }
         GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
         FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))`;
+    // sparql-scan-allow: R3 -- the retained session plan pre-counts each exact admitted graph, bounds skip to that graph rowCount, and LIMIT is the remaining response page
     const result = await store.query(`
       SELECT DISTINCT ?s ?p ?o WHERE {
         ${selection}
