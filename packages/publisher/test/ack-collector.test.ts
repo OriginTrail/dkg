@@ -79,7 +79,7 @@ describe('ACKCollector', () => {
           nodeIdentityId: idx + 1,
         });
       },
-      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
+      getConnectedCorePeers: async () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
       log: () => {},
     };
 
@@ -111,6 +111,51 @@ describe('ACKCollector', () => {
       expect(ack.signatureVS.length).toBe(32);
       expect(ack.nodeIdentityId).toBeGreaterThan(0n);
     }
+  });
+
+  it('surfaces an async ACK candidate-provider failure as a typed quorum error', async () => {
+    const candidateFailure = new Error('admission preflight unavailable');
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async () => {
+        throw new Error('sendP2P should not be called');
+      },
+      getConnectedCorePeers: async () => {
+        throw candidateFailure;
+      },
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    let caught: QuorumUnmetError | undefined;
+    try {
+      await collector.collect({
+        merkleRoot,
+        contextGraphId: testCGId,
+        contextGraphIdStr: testCGIdStr,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 100n,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:a'],
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    } catch (err) {
+      caught = err as QuorumUnmetError;
+    }
+
+    expect(caught).toBeInstanceOf(QuorumUnmetError);
+    expect(caught).toMatchObject({
+      collected: 0,
+      required: 3,
+      dialled: 0,
+      cause: candidateFailure,
+    });
+    expect(caught!.message).toContain('ACK candidate discovery failed');
+    expect(caught!.message).toContain(PROTOCOL_STORAGE_ACK);
   });
 
   it('does not put lifecycle assetUal on the PublishIntent wire', async () => {

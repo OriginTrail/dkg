@@ -3089,7 +3089,7 @@ export class DKGAgent extends DKGAgentBase {
       sendP2P: this.createACKSendP2P(),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
         protocol,
-        createOperationContext('publish'),
+        this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
@@ -3259,7 +3259,7 @@ export class DKGAgent extends DKGAgentBase {
       sendP2P: this.createACKSendP2P(),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
         protocol,
-        createOperationContext('update'),
+        this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
