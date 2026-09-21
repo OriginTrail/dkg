@@ -909,11 +909,14 @@ describe('operation identity preservation (GH#2273)', () => {
 
   it('a verified graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
     // Graph-backed descriptors (publicSnapshotGraph, no publicSnapshotRef)
-    // receive their bytes from the aggregate data phase. Once those bytes are
-    // verified and materialized under the per-KA boundary, the round's bulk
-    // insert remains their head writer. A blanket head-row filter instead of
-    // decision-driven suppression would leave them permanently headless (the
-    // #2050 G7 invisibility class).
+    // receive their bytes from the aggregate data phase under the canonical
+    // per-KA assertion graph. V2 metadata deliberately carries no rootEntity,
+    // so the legacy entity verifier excludes those bytes from its aggregate
+    // output; the raw transport must still reach the descriptor-bound digest
+    // verifier and must not fall through to the aggregate insert. Once the KA
+    // is materialized under its lock, the round's bulk insert remains its head
+    // writer. A blanket head-row filter instead of decision-driven suppression
+    // would leave it permanently headless (the #2050 G7 invisibility class).
     const store = new OxigraphStore();
     stores.push(store);
     const publicSnapshotGraph =
@@ -930,12 +933,13 @@ describe('operation identity preservation (GH#2273)', () => {
         },
       ],
     };
-    const graphData = v1.payload.map((quad) => ({ ...quad, graph: publicSnapshotGraph }));
+    const graphData = v1.payload.map((quad) => ({ ...quad, graph: v1.assertionGraph }));
     await makeSwmSyncHarness({
       ctx,
       contextGraphId: CG,
       store,
       served: graphBacked as typeof v1,
+      verifiedDataOverride: [],
       fetchPage: async ({ phase }, fallback) => phase === 'data'
         ? { ...fallback, quads: graphData, nextOffset: graphData.length }
         : fallback,
