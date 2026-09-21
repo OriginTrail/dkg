@@ -3757,17 +3757,18 @@ describe('RFC-64 rollout authority integration', () => {
       await vi.advanceTimersByTimeAsync(100);
       expect(readSnapshots).toHaveBeenCalledOnce();
 
-      await vi.advanceTimersByTimeAsync(10_000);
+      const release = edge.beginRfc64ScheduledCatalogResponsibilityBatchV1();
       expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId))
         .toBe(true);
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+
+      release();
       await vi.advanceTimersByTimeAsync(100);
       expect(readSnapshots).toHaveBeenCalledTimes(2);
 
       finalized = true;
-      await vi.advanceTimersByTimeAsync(20_000);
-      expect(readSnapshots).toHaveBeenCalledTimes(2);
-
-      await vi.advanceTimersByTimeAsync(10_100);
+      await vi.advanceTimersByTimeAsync(30_100);
       await edge.whenRfc64CatalogResponsibilitiesIdleV1();
       expect(readSnapshots).toHaveBeenCalledTimes(3);
       expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
