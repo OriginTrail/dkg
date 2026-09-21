@@ -18,8 +18,12 @@ import { HubRotationPoller } from '../src/hub-rotation-poller.js';
 import type { ChainEventLogHubRotationWindow } from '../src/chain-event-log-binding.js';
 
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
-const FIRST_FORK_HASH = `0x${'11'.repeat(32)}`;
-const SECOND_FORK_HASH = `0x${'22'.repeat(32)}`;
+const FIRST_FORK_HASH = `0x${'ab'.repeat(32)}`;
+const SECOND_FORK_HASH = `0x${'cd'.repeat(32)}`;
+
+function hashForBlock(blockNumber: number): string {
+  return `0x${blockNumber.toString(16).padStart(64, '0')}`;
+}
 
 function hubContract(): Contract {
   return {
@@ -39,7 +43,7 @@ function window(
   throughBlockNumber: number,
   rotations: ReadonlyArray<{
     blockNumber: number;
-    blockHash?: string;
+    blockHash: string;
     logIndex: number;
     contractName: string;
   }>,
@@ -47,10 +51,7 @@ function window(
   return Object.freeze({
     fromBlockNumber,
     throughBlockNumber,
-    rotations: Object.freeze(rotations.map((rotation) => Object.freeze({
-      ...rotation,
-      blockHash: rotation.blockHash ?? `0x${rotation.blockNumber.toString(16).padStart(64, '0')}`,
-    }))),
+    rotations: Object.freeze(rotations.map((rotation) => Object.freeze(rotation))),
   });
 }
 
@@ -89,6 +90,7 @@ describe('HubRotationPoller over the one log', () => {
       window(951, 1_050, [
         {
           blockNumber: 1_010,
+          blockHash: hashForBlock(1_010),
           logIndex: 0,
           contractName: 'ContextGraphStorage',
         },
@@ -110,6 +112,7 @@ describe('HubRotationPoller over the one log', () => {
       window(1_001, 1_000, [
         {
           blockNumber: 500,
+          blockHash: hashForBlock(500),
           logIndex: 0,
           contractName: 'ShouldNeverBeReplayed',
         },
@@ -130,6 +133,7 @@ describe('HubRotationPoller over the one log', () => {
   it('dispatches a contract name only once across overlapping windows', async () => {
     const rotation = {
       blockNumber: 1_010,
+      blockHash: hashForBlock(1_010),
       logIndex: 0,
       contractName: 'ContextGraphStorage',
     };
@@ -156,7 +160,9 @@ describe('HubRotationPoller over the one log', () => {
       getBlockNumber: vi.fn(async () => 1_060),
       getLogs: vi.fn(async () => [{
         blockNumber: 1_010,
-        blockHash: FIRST_FORK_HASH,
+        // The live transport may preserve a different hex-letter case than
+        // the normalized stored row; both still identify one canonical log.
+        blockHash: `0x${FIRST_FORK_HASH.slice(2).toUpperCase()}`,
         transactionHash: `0x${'33'.repeat(32)}`,
         index: 0,
         topics: encoded.topics,

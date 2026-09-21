@@ -33,7 +33,7 @@ import type {
  */
 export interface ChainEventLogHubRotation {
   readonly blockNumber: number;
-  /** Canonical fork identity of the stored row. */
+  /** Block hash of the stored row; distinguishes a fork replacement at the same position. */
   readonly blockHash: string;
   readonly logIndex: number;
   readonly contractName: string;
