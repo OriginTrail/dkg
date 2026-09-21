@@ -1298,17 +1298,26 @@ export class Rfc64PublicCatalogServiceV1 {
    * Scoped still means queued: this graph's own receiver tasks share the
    * receiver's slots and FIFO queue with every other graph.
    */
-  async whenReceiverIdleForContextGraph(contextGraphId: string): Promise<void> {
+  async whenReceiverIdleForContextGraph(
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     for (;;) {
-      await this.#receiver.whenIdleForContextGraph(contextGraphId);
+      signal?.throwIfAborted();
+      await this.#receiver.whenIdleForContextGraph(contextGraphId, signal);
+      signal?.throwIfAborted();
       // A settled pull may just have admitted this graph's verified task, so
       // every wait here goes back through the receiver before returning.
-      if (!(await this.#awaitAnnouncedCurrentHeadPulls(contextGraphId))) return;
+      if (!(await this.#awaitAnnouncedCurrentHeadPulls(contextGraphId, signal))) return;
     }
   }
 
   /** Park on this graph's unsatisfied outstanding pulls; false when there are none. */
-  async #awaitAnnouncedCurrentHeadPulls(contextGraphId: string): Promise<boolean> {
+  async #awaitAnnouncedCurrentHeadPulls(
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    signal?.throwIfAborted();
     if (this.#closed) return false;
     const outstanding = this.#outstandingAnnouncedCurrentHeadTargets(contextGraphId);
     if (outstanding.length === 0) return false;
@@ -1324,15 +1333,38 @@ export class Rfc64PublicCatalogServiceV1 {
     try {
       let unsatisfied = false;
       for (const target of outstanding) {
+        signal?.throwIfAborted();
         if (!(await this.#isAnnouncedHeadApplied(target.announcement))) {
           unsatisfied = true;
           break;
         }
       }
+      signal?.throwIfAborted();
       if (!unsatisfied) return false;
       if (!watch.dirty && !this.#closed) {
-        await new Promise<void>((resolve) => { watch.wake = resolve; });
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          };
+          const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            reject(signal?.reason ?? new DOMException(
+              'RFC-64 announced-head idle wait aborted',
+              'AbortError',
+            ));
+          };
+          watch.wake = finish;
+          signal?.addEventListener('abort', onAbort, { once: true });
+          if (signal?.aborted) onAbort();
+        });
       }
+      signal?.throwIfAborted();
       return true;
     } finally {
       watches.delete(watch);

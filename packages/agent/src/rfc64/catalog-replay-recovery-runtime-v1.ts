@@ -62,6 +62,8 @@ export type Rfc64CatalogReplayPeerResultV1<Target> = Readonly<{
 export type Rfc64CatalogReplayRecoveryCommandV1 = Readonly<{
   readonly contextGraphId: string;
   readonly policyDigest: string;
+  /** Lifecycle owner for peer transport, receiver drain, and parity handoff. */
+  readonly signal?: AbortSignal;
 } & (
   | {
       readonly kind: 'full-connected-peers';
@@ -78,6 +80,7 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
   requestPeer(
     contextGraphId: string,
     peerId: string,
+    signal?: AbortSignal,
   ): Promise<Rfc64CatalogReplayPeerResultV1<Target>>;
   /**
    * Resolve once THIS context graph's admitted announcements have drained.
@@ -85,7 +88,10 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
    * signature, and wiring one in would let any other graph's work hold this
    * graph's pass (and its replay-active flag) open again.
    */
-  whenReceiverIdleForContextGraph(contextGraphId: string): Promise<void>;
+  whenReceiverIdleForContextGraph(
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
 }
@@ -387,13 +393,18 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let replayFailed = true;
     let requiresFullReplay = false;
     try {
+      input.signal?.throwIfAborted();
       const manifests: Target[][] = [];
       for (;;) {
         const replayDemands = progress.peerWorklist.drain();
         await Promise.all(replayDemands.map(async ({ peerId }) => {
           for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
-              const completion = await this.#ports.requestPeer(input.contextGraphId, peerId);
+              input.signal?.throwIfAborted();
+              const completion = input.signal === undefined
+                ? await this.#ports.requestPeer(input.contextGraphId, peerId)
+                : await this.#ports.requestPeer(input.contextGraphId, peerId, input.signal);
+              input.signal?.throwIfAborted();
               if (completion.status === 'local-unavailable') {
                 // A local fault is not provider evidence: it may neither
                 // attribute a failure to this peer nor clear the attribution an
@@ -407,7 +418,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 requested += 1;
               }
               return;
-            } catch {
+            } catch (error) {
+              if (input.signal?.aborted) throw input.signal.reason ?? error;
               if (attempt === 1) {
                 if (!this.#retainPeerFailure(progress, peerId)) requiresFullReplay = true;
                 failed += 1;
@@ -423,7 +435,16 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // withholding this graph's catalog parity for as long as that lasts.
         // The announcements admitted above still take their turn behind other
         // graphs' tasks for the receiver's shared slots.
-        await this.#ports.whenReceiverIdleForContextGraph(input.contextGraphId);
+        input.signal?.throwIfAborted();
+        if (input.signal === undefined) {
+          await this.#ports.whenReceiverIdleForContextGraph(input.contextGraphId);
+        } else {
+          await this.#ports.whenReceiverIdleForContextGraph(
+            input.contextGraphId,
+            input.signal,
+          );
+        }
+        input.signal?.throwIfAborted();
         if (progress.peerWorklist.exhausted) {
           requiresFullReplay = true;
           failed += 1;
@@ -436,9 +457,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           promisedByIdentity.set(this.#ports.targetIdentity(target), target);
         }
         const promised = [...promisedByIdentity.values()];
+        input.signal?.throwIfAborted();
         const parityFailed = promised.length
           > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
           || await this.#ports.parityFailed(input.contextGraphId, promised);
+        input.signal?.throwIfAborted();
         // A reconnect generation arriving during the durable parity read owns
         // another pass. The worklist budget keeps that fence finite.
         if (progress.peerWorklist.exhausted) {
@@ -471,7 +494,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       //   agrees".
       replayFailed = requiresFullReplay || requested === 0;
       return Object.freeze({ requested, failed });
-    } catch {
+    } catch (error) {
+      if (input.signal?.aborted) throw input.signal.reason ?? error;
       requiresFullReplay = true;
       failed += 1;
       return Object.freeze({ requested, failed });

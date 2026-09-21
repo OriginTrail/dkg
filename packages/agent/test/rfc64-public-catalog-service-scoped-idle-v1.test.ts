@@ -312,6 +312,25 @@ async function wedgeAccelerationPass(f: FixtureV1): Promise<void> {
 }
 
 describe('RFC-64 public catalog service: per-context-graph idle barrier', () => {
+  it('releases a scoped idle waiter immediately when its lifecycle owner aborts', async () => {
+    const wedge = gate();
+    const f = await fixture({
+      contextGraphIds: [WEDGED_CG],
+      reconcile: (applied) => applyOnceOpened(applied, wedge.opened),
+    });
+    await wedgeAccelerationPass(f);
+
+    const owner = new AbortController();
+    const idle = f.requester.whenReceiverIdleForContextGraph(WEDGED_CG, owner.signal);
+    const reason = new DOMException('background dispatcher closing', 'AbortError');
+    owner.abort(reason);
+
+    await expect(idle).rejects.toBe(reason);
+    // Cancellation releases only this waiter; it does not pretend the graph's
+    // still-running receiver and acceleration work has converged.
+    expect(f.requester.stats().receiver.inFlight).toBe(1);
+  }, 60_000);
+
   it('does not hold an idle context graph while another graph wedges the acceleration pass', async () => {
     const wedge = gate();
     const f = await fixture({

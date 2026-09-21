@@ -560,6 +560,11 @@ const RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_DELAYS_MS_V1 = Object.freeze([
   120_000,
   240_000,
 ]);
+const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
+  250,
+  1_000,
+  4_000,
+]);
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
@@ -1358,7 +1363,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
     if (runtime !== undefined) return runtime;
     runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
-      requestPeer: async (contextGraphId, remotePeerId) => {
+      requestPeer: async (contextGraphId, remotePeerId, signal) => {
         const service = this.rfc64PublicCatalogServiceV1;
         const networkId = (
           this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -1376,6 +1381,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             remotePeerId,
             networkId,
             contextGraphId: contextGraphId as ContextGraphIdV1,
+            ...(signal === undefined ? {} : { signal }),
           });
           return Object.freeze({
             status: 'completed' as const,
@@ -1389,9 +1395,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           throw error;
         }
       },
-      whenReceiverIdleForContextGraph: async (contextGraphId) => {
+      whenReceiverIdleForContextGraph: async (contextGraphId, signal) => {
         await this.rfc64PublicCatalogServiceV1
-          ?.whenReceiverIdleForContextGraph(contextGraphId);
+          ?.whenReceiverIdleForContextGraph(contextGraphId, signal);
       },
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
       parityFailed: async (contextGraphId, promised) => {
@@ -3398,7 +3404,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
       }
-      await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
+      this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+        contextGraphId,
+        acceptedAuthority.policyDigest,
+      );
       return authority;
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
@@ -3451,6 +3460,43 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       throw error;
     }
+  }
+
+  /**
+   * Release the authority single-flight before catalog promotion or replay can
+   * wait on receiver admission. The keyed dispatcher owns cancellation,
+   * coalescing, error reporting, and shutdown drain for the detached work.
+   */
+  private scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    policyDigest: Digest32V1,
+  ): void {
+    const workKey = `authority-catalog-recovery\0${contextGraphId}\0${policyDigest}`;
+    this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(workKey, async (signal) => {
+      for (
+        let attempt = 0;
+        attempt <= RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1.length;
+        attempt += 1
+      ) {
+        try {
+          await this.promoteRfc64OwnerSignedSwmInventoriesV1(contextGraphId, signal);
+          signal.throwIfAborted();
+          await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+            contextGraphId,
+            signal,
+          );
+          return;
+        } catch (error) {
+          if (signal.aborted) throw signal.reason ?? error;
+          const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
+            attempt
+          ];
+          if (retryDelayMs === undefined) throw error;
+          await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
+        }
+      }
+    });
   }
 
   /**
@@ -4422,20 +4468,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
     this: DKGAgent,
     contextGraphId: string,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
       kind: 'connected-peers',
-    });
+    }, signal);
   }
 
   /** Continue only already-owned recovery demand without reseeding peers. */
   async continueRfc64CatalogHeadReplayRecoveryV1(
     this: DKGAgent,
     contextGraphId: string,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
       kind: 'pending-recovery',
-    });
+    }, signal);
   }
 
   private async requestRfc64CatalogHeadReplayV1(
@@ -4449,7 +4497,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           replayDemand: Rfc64CatalogReplayPeerDemandV1;
         }
     >,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
+    signal?.throwIfAborted();
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -4477,17 +4527,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       case 'connected-peers':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'full-connected-peers',
           connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
         });
       case 'pending-recovery':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'pending-recovery',
         });
       case 'connection-demand':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'connection-demand',
           demand: request.replayDemand,
         });

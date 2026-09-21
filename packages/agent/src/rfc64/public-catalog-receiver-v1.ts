@@ -821,13 +821,44 @@ export class Rfc64PublicCatalogReceiverV1 {
    * unqueued: this graph's own tasks still take their turn in the shared FIFO
    * queue and slot pool, so other graphs' work ahead of them delays this too.
    */
-  whenIdleForContextGraph(contextGraphId: string): Promise<void> {
-    return this.#whenIdle(() => this.#tasks.isIdleForContextGraph(contextGraphId));
+  whenIdleForContextGraph(
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.#whenIdle(
+      () => this.#tasks.isIdleForContextGraph(contextGraphId),
+      signal,
+    );
   }
 
-  #whenIdle(isIdle: () => boolean): Promise<void> {
+  #whenIdle(isIdle: () => boolean, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (isIdle()) return Promise.resolve();
-    return new Promise<void>((resolve) => this.#idleWaiters.push({ isIdle, resolve }));
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let waiter!: ReceiverIdleWaiterV1;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        const index = this.#idleWaiters.indexOf(waiter);
+        if (index >= 0) this.#idleWaiters.splice(index, 1);
+        signal?.removeEventListener('abort', onAbort);
+        reject(signal?.reason ?? new DOMException(
+          'RFC-64 receiver idle wait aborted',
+          'AbortError',
+        ));
+      };
+      waiter = { isIdle, resolve: finish };
+      this.#idleWaiters.push(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
   }
 
   /** Fence queued, deferred, and active work for one no-longer-selected CG. */

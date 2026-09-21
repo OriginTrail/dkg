@@ -1,5 +1,6 @@
 import type {
   Digest32V1,
+  EvmAddressV1,
   SwmAuthorInventoryRowV1,
   SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
@@ -57,7 +58,27 @@ export interface CompareAndSwapSwmAuthorInventoryInputV1 {
   readonly expectedCurrentHeadDigest: Digest32V1 | null;
 }
 
+/**
+ * Exact signed successor produced by merging a non-empty canonical row set into
+ * the current inventory. Persistence verifies the merge again under the CAS
+ * transaction before replacing the SQL row set.
+ */
+export interface CompareAndSwapMergeSwmAuthorInventoryInputV1 {
+  readonly snapshot: SwmAuthorInventorySnapshotV1;
+  readonly mergeRows: readonly SwmAuthorInventoryRowV1[];
+  readonly issuerSignature?: VerifiedControlEnvelopeIssuerSignatureV1;
+  /** `null` initializes version 0; otherwise the exact current head must match. */
+  readonly expectedCurrentHeadDigest: Digest32V1 | null;
+}
+
 export interface SwmAuthorInventoryCasResultV1 {
   readonly status: 'applied' | 'existing';
   readonly snapshot: SwmAuthorInventorySnapshotV1;
+}
+
+/** Exact retirement of one obsolete authority-generation inventory. */
+export interface DeleteSwmAuthorInventoryInputV1 {
+  readonly inventoryScopeDigest: Digest32V1;
+  readonly authorAddress: EvmAddressV1;
+  readonly expectedCurrentHeadDigest: Digest32V1;
 }
