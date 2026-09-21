@@ -156,4 +156,22 @@ describe('NetworkAdmissionProbeRetryState', () => {
     state.recordFailure(PEER_A, 'after clear', 'transient');
     expect(state.getActiveSuppression(PEER_A)).toMatchObject({ failures: 1 });
   });
+
+  it('owns one ACK-preflight bypass claim per active suppression window', () => {
+    let now = 1_000;
+    const state = buildRetryState({ now: () => now });
+
+    state.recordFailure(PEER_A, 'first', 'transient');
+    expect(state.claimPreflightProbe(PEER_A)).toBe(true);
+    expect(state.claimPreflightProbe(PEER_A)).toBe(false);
+
+    now += 100;
+    expect(state.claimPreflightProbe(PEER_A)).toBe(true);
+    state.recordFailure(PEER_A, 'second', 'transient');
+    state.markPreflightProbeAttempted(PEER_A);
+    expect(state.claimPreflightProbe(PEER_A)).toBe(false);
+
+    now += 200;
+    expect(state.claimPreflightProbe(PEER_A)).toBe(true);
+  });
 });

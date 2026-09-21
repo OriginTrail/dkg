@@ -123,7 +123,6 @@ function buildCoordinator(input: {
     deletePeerFromPeerStore,
     cleanupRejectedPeerState,
     ...(input.probeTimeoutMs !== undefined ? { probeTimeoutMs: input.probeTimeoutMs } : {}),
-    ...(input.now !== undefined ? { now: input.now } : {}),
   });
 
   return {
@@ -204,7 +203,7 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
   });
 
-  it('preflight bypasses automatic backoff once, then applies its own retry cooldown', async () => {
+  it('preflight bypasses automatic backoff once, then reuses its retry window', async () => {
     let now = 1_000;
     const sendIdentityProbe = vi.fn(async () => {
       throw new Error('peer still booting');
@@ -229,7 +228,7 @@ describe('NetworkAdmissionCoordinator', () => {
     )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
     expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
 
-    now += 1_000;
+    now += 100;
     await expect(fixture.coordinator.preflightPeerAdmission(
       [REMOTE_PEER_ID],
       createOperationContext('publish'),
@@ -290,6 +289,31 @@ describe('NetworkAdmissionCoordinator', () => {
     await expect(preflight).resolves.toEqual({ checked: 4, admitted: 0, unresolved: 4 });
     expect(maxActive).toBe(2);
   });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    'keeps invalid preflight concurrency %s bounded to one probe',
+    async (maxConcurrency) => {
+      let active = 0;
+      let maxActive = 0;
+      const fixture = buildCoordinator({
+        identity,
+        sendIdentityProbe: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          active -= 1;
+          return new Uint8Array();
+        },
+      });
+
+      await expect(fixture.coordinator.preflightPeerAdmission(
+        PREFLIGHT_PEER_IDS,
+        createOperationContext('publish'),
+        { maxConcurrency },
+      )).resolves.toEqual({ checked: 4, admitted: 0, unresolved: 4 });
+      expect(maxActive).toBe(1);
+    },
+  );
 
   it('lets an explicit connect bypass cached retry backoff without bypassing admission', async () => {
     const now = 1_000;

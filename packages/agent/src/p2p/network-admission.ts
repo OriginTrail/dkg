@@ -104,6 +104,18 @@ export class NetworkAdmissionService {
     this.probeRetry.recordFailure(canonicalPeerId, reason, kind);
   }
 
+  /** Claim the one ACK-preflight bypass owned by the active retry window. */
+  claimRetryablePreflightProbe(peerId: string): boolean {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    return this.probeRetry.claimPreflightProbe(canonicalPeerId);
+  }
+
+  /** Keep a failure created by ACK preflight suppressed for the rest of its window. */
+  markRetryablePreflightProbeAttempted(peerId: string): void {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    this.probeRetry.markPreflightProbeAttempted(canonicalPeerId);
+  }
+
   isAcceptedPeer(peerId: string): boolean {
     if (!this.enabled) return true;
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);

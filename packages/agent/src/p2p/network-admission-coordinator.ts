@@ -38,7 +38,6 @@ export interface NetworkAdmissionCoordinatorOptions {
     warn(ctx: OperationContext, message: string): void;
   };
   probeTimeoutMs?: number;
-  now?: () => number;
 }
 
 export interface NetworkAdmissionAttemptOptions {
@@ -69,7 +68,7 @@ const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
 
-const MAX_PREFLIGHT_COOLDOWNS = 10_000;
+const DEFAULT_PREFLIGHT_CONCURRENCY = 4;
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -174,10 +173,7 @@ export class NetworkAdmissionCoordinator {
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
-  private readonly now: () => number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
-  /** ACK-preflight-specific suppression; distinct from automatic admission backoff. */
-  private readonly preflightRetryAfter = new Map<CanonicalPeerId, number>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
@@ -192,7 +188,6 @@ export class NetworkAdmissionCoordinator {
     this.cleanupRejectedPeerState = options.cleanupRejectedPeerState;
     this.log = options.log;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 3_000;
-    this.now = options.now ?? Date.now;
   }
 
   get enabled(): boolean {
@@ -268,9 +263,9 @@ export class NetworkAdmissionCoordinator {
    * Resolve admission for a bounded, caller-selected peer set.
    *
    * The coordinator remains the sole owner of accepted/rejected state. An ACK
-   * round may bypass the automatic admission backoff once so a healthy peer
-   * cannot be frozen out of a quorum, but a separate per-peer cooldown prevents
-   * repeated publishes from re-probing the same failing peer each round.
+   * round may bypass the active retry window once so a healthy peer cannot be
+   * frozen out of a quorum. The admission service owns that per-window claim,
+   * keeping automatic and preflight retry decisions on one bounded state map.
    */
   async preflightPeerAdmission(
     peerIds: Iterable<string>,
@@ -278,17 +273,6 @@ export class NetworkAdmissionCoordinator {
     options: NetworkAdmissionPreflightOptions = {},
   ): Promise<NetworkAdmissionPreflightResult> {
     if (!this.enabled) return { checked: 0, admitted: 0, unresolved: 0 };
-
-    const preflightNow = this.now();
-    for (const [peerId, retryAfter] of this.preflightRetryAfter) {
-      if (
-        retryAfter <= preflightNow
-        || this.isAcceptedPeer(peerId)
-        || this.isRejectedPeer(peerId)
-      ) {
-        this.preflightRetryAfter.delete(peerId);
-      }
-    }
 
     const canonicalPeerIds: CanonicalPeerId[] = [];
     for (const peerId of peerIds) {
@@ -303,33 +287,24 @@ export class NetworkAdmissionCoordinator {
       .filter((peerId) => !this.isAcceptedPeer(peerId) && !this.isRejectedPeer(peerId));
     if (pending.length === 0) return { checked: 0, admitted: 0, unresolved: 0 };
 
+    const requestedConcurrency = options.maxConcurrency ?? DEFAULT_PREFLIGHT_CONCURRENCY;
+    const maxConcurrency = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0
+      ? Math.min(requestedConcurrency, DEFAULT_PREFLIGHT_CONCURRENCY)
+      : 1;
     const results = await mapWithConcurrencySettled(
       pending,
-      options.maxConcurrency ?? 4,
+      maxConcurrency,
       async (peerId) => {
-        const now = this.now();
-        const retryAfter = this.preflightRetryAfter.get(peerId);
-        if (retryAfter !== undefined && retryAfter > now) return false;
-        this.preflightRetryAfter.delete(peerId);
+        if (!this.admission.claimRetryablePreflightProbe(peerId)) return false;
         try {
-          const admitted = await this.ensureAdmittedWithPolicy(
+          return await this.ensureAdmittedWithPolicy(
             peerId,
             ctx,
             EXPLICIT_CONNECT_ADMISSION_POLICY,
             {},
           );
-          this.preflightRetryAfter.delete(peerId);
-          return admitted;
         } catch (error) {
-          const backoff = this.admission.getRetryableProbeBackoff(peerId);
-          if (this.preflightRetryAfter.size >= MAX_PREFLIGHT_COOLDOWNS) {
-            const oldest = this.preflightRetryAfter.keys().next();
-            if (!oldest.done) this.preflightRetryAfter.delete(oldest.value);
-          }
-          this.preflightRetryAfter.set(
-            peerId,
-            this.now() + Math.max(1_000, backoff?.retryAfterMs ?? 15_000),
-          );
+          this.admission.markRetryablePreflightProbeAttempted(peerId);
           throw error;
         }
       },

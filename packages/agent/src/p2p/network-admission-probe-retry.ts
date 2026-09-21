@@ -25,6 +25,8 @@ interface PeerProbeRetryState {
     kind: NetworkAdmissionProbeBackoffKind;
     reason: string;
     untilMs: number;
+    /** ACK preflight may bypass this suppression at most once. */
+    preflightBypassConsumed: boolean;
   };
 }
 
@@ -100,8 +102,28 @@ export class NetworkAdmissionProbeRetryState {
         kind,
         reason,
         untilMs: this.now() + delayMs,
+        preflightBypassConsumed: false,
       },
     });
+  }
+
+  /**
+   * Claim the single ACK-preflight bypass for the active suppression window.
+   * A peer without active suppression is immediately eligible.
+   */
+  claimPreflightProbe(peerId: CanonicalPeerId): boolean {
+    const entry = this.peers.get(peerId);
+    if (!entry?.suppression || !this.getActiveSuppression(peerId)) return true;
+    if (entry.suppression.preflightBypassConsumed) return false;
+    entry.suppression.preflightBypassConsumed = true;
+    return true;
+  }
+
+  /** Mark a newly-created failure window as already used by ACK preflight. */
+  markPreflightProbeAttempted(peerId: CanonicalPeerId): void {
+    const entry = this.peers.get(peerId);
+    if (!entry?.suppression || !this.getActiveSuppression(peerId)) return;
+    entry.suppression.preflightBypassConsumed = true;
   }
 
   clear(peerId: CanonicalPeerId): void {
