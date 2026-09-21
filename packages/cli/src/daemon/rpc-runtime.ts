@@ -56,7 +56,7 @@ export function createDaemonRpcRuntime(
   if (!chain?.rpcUrl) return undefined;
   const projected = projectRuntimeEvmChainConfig(chain);
   const governor = new ProcessRpcRequestGovernor(chain.rpcRequestBudget);
-  const usage = createRpcUsageRecorder(() => chain.chainId ?? 'unknown');
+  const usage = createRpcUsageRecorder(() => chain.chainId ?? 'unknown', 'route_runtime');
   const onRequest = (method: string, endpointSlot?: number) => {
     usage.record(method, endpointSlot);
   };

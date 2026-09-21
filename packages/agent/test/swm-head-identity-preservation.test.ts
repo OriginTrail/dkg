@@ -907,13 +907,20 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
   });
 
-  it('a graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
+  it('a verified graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
     // Graph-backed descriptors (publicSnapshotGraph, no publicSnapshotRef)
-    // never enter the per-KA loop — the round's bulk insert is their ONLY head
+    // receive their bytes from the aggregate data phase under the canonical
+    // per-KA assertion graph. V2 metadata deliberately carries no rootEntity,
+    // so the legacy entity verifier excludes those bytes from its aggregate
+    // output; the raw transport must still reach the descriptor-bound digest
+    // verifier and must not fall through to the aggregate insert. Once the KA
+    // is materialized under its lock, the round's bulk insert remains its head
     // writer. A blanket head-row filter instead of decision-driven suppression
-    // would leave them permanently headless (the #2050 G7 invisibility class).
+    // would leave it permanently headless (the #2050 G7 invisibility class).
     const store = new OxigraphStore();
     stores.push(store);
+    const publicSnapshotGraph =
+      `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`;
     const graphBacked = {
       ...v1,
       meta: [
@@ -921,12 +928,22 @@ describe('operation identity preservation (GH#2273)', () => {
         {
           subject: v1.operationSubject,
           predicate: `${DKG}publicSnapshotGraph`,
-          object: `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`,
+          object: publicSnapshotGraph,
           graph: WS_META,
         },
       ],
     };
-    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: graphBacked as typeof v1 }).run();
+    const graphData = v1.payload.map((quad) => ({ ...quad, graph: v1.assertionGraph }));
+    await makeSwmSyncHarness({
+      ctx,
+      contextGraphId: CG,
+      store,
+      served: graphBacked as typeof v1,
+      verifiedDataOverride: [],
+      fetchPage: async ({ phase }, fallback) => phase === 'data'
+        ? { ...fallback, quads: graphData, nextOffset: graphData.length }
+        : fallback,
+    }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
   });

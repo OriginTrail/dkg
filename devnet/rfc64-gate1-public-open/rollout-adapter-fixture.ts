@@ -292,6 +292,20 @@ export class Gate1VmChainAdapter extends MockChainAdapter {
       publishPolicy: 1,
       nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
     });
+    const finalizedSnapshot = await chain.getContextGraphAuthoritySnapshot(
+      registered.contextGraphId,
+    );
+    Object.assign(chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: async (
+          nameHashes: readonly string[],
+        ) => nameHashes.includes(finalizedSnapshot.nameHash)
+          ? new Map([[finalizedSnapshot.nameHash, finalizedSnapshot]])
+          : new Map(),
+        readContextGraphAuthorityIndexRevisions: async () => new Map(),
+        whenIdle: async () => undefined,
+      },
+    });
     chain.__registerKC({
       kaId: BigInt(GATE1_KA_ID),
       contextGraphId: registered.contextGraphId,

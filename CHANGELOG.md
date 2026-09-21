@@ -4,7 +4,7 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-## [10.0.17] - 2026-09-13
+## [10.0.17] - 2026-09-20
 
 An RPC-bounded RFC-64 operational-hardening release. RFC-64 remains active by
 default for persistent nodes and keeps its 10.0.16 responsibility model, while
@@ -54,6 +54,18 @@ registry changes are required.**
   exposing private identifiers.
 ### Changed
 
+- RFC-64 roster authorization shares one finalized roster snapshot only within
+  a single authorization operation. Independent authorization decisions and
+  the three security gates retain live, fail-closed chain reads.
+- Finalized Knowledge Asset version evidence, Context Graph creation pairs,
+  Random Sampling period context, canonical creation receipts, and publisher
+  event horizons are reused only inside their bounded canonical bindings,
+  generations, or leases. They are not promoted into a long-lived node-wide
+  cache.
+- Publisher wallets can borrow the process one-log binding, and deterministic
+  gas-estimation reverts stop retrying equivalent providers.
+- Cumulative RPC diagnostics attribute bounded, privacy-safe consumers while
+  redacting sensitive dynamic labels and preserving issuer context.
 - Authority history pages combine six authority-bearing event signatures into
   one `eth_getLogs` filter. The logical single-CG cold case falls from `6P`
   requests to `P` pages (83.3%), while multiple CGs amortize across the same
@@ -86,6 +98,12 @@ registry changes are required.**
 
 ### Fixed
 
+- Random Sampling period reuse is fenced across generations and adapter
+  teardown; publisher event-horizon leases are revalidated immediately before
+  and after each dispatched event and again before cursor persistence, so
+  retirement prevents stale dispatch and cursor advancement.
+- Knowledge Asset snapshot reuse is fenced by canonical binding, and publisher
+  receipt fixtures use valid canonical contracts.
 - Authority scan progress no longer disappears on daemon restart, and stale or
   corrupt checkpoints fail closed without erasing a valid concurrent winner.
 - Authority-index admission, cache invalidation, compare-and-swap, and
@@ -116,6 +134,11 @@ registry changes are required.**
 
 ### RPC-volume expectations
 
+- The final four-cell Blackbox campaign observed 9,134 to 11,442 raw workload
+  RPC calls across the six-node 50-SWM/50-VM workload, with 100% publication
+  and synchronization in every cell. These are workload measurements rather
+  than a provider-credit guarantee; topology, idle cadence, failover, and
+  provider billing can change the total.
 - At the measured canary registry history of approximately 27,000 logical
   pages, missing-watermark startup falls from a full replay to the current tail
   plus at most 30 repair pages (approximately 99.89% fewer startup logical
@@ -284,7 +307,7 @@ A selected-public convergence and publisher-recovery release. An Edge node can o
 | Selected VM recovery uses bounded footprint-aware batches | Multiple small assets can share one recovery request, while byte, quad and heap estimates keep large transfers bounded | No action; the scheduler derives safe batches from authoritative or conservative size evidence |
 | Persisted user subscriptions rehydrate on daemon startup | An operator-selected graph resumes automatically after restart instead of remaining a dormant database row | Set `DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED=false` only as an emergency kill-switch |
 | Dashboard SQLite schema 32 → 33 | Selected-VM cursors are fenced by deployment identity; v32 optimization cursors are discarded so a redeploy cannot reuse another chain deployment's numeric IDs or watermark | No action; the graph data is retained and selected VM reconciliation safely resumes from chain inventory |
-| `chain.finalityConfirmations` controls mined-receipt finality | The receipt block counts as confirmation 1. The default of `1` releases a publisher wallet as soon as the receipt block is canonical, with no successor-block reorganization buffer. Larger values wait for more blocks and reduce throughput | Keep the default only when lower latency is worth the reorganization risk. Set a larger positive integer when reversal resistance is more important than publish speed |
+| `chain.finalityConfirmations` is the node's SINGLE finality depth | It no longer governs only mined-receipt finality. The same depth now anchors the Context Graph authority index, named-Context-Graph resolution and both RFC-64 precommits, replacing the RPC `finalized` block tag on those paths. The receipt block still counts as confirmation 1, and the default of `1` still releases a publisher wallet as soon as the receipt block is canonical, with no successor-block reorganization buffer | Re-read your setting before upgrading: raising it now ALSO delays how quickly a newly registered Context Graph becomes authoritative on this node, by roughly that many block times. Keep the default unless reversal resistance matters more than both publish speed and authority freshness |
 | `AsyncLiftPublisherConfig.chainRecoveryResolver` is replaced by `chainProofResolver` | **Node operators are not affected** — the node wires this itself. This affects code that constructs `TripleStoreAsyncLiftPublisher` directly from `@origintrail-official/dkg-publisher`. The callback now receives a lookup and returns `recovered`, `reverted`, `not-found`, `pending`, or `inconclusive`. The old key is rejected instead of ignored | If you embed the publisher package directly, rename the field and adapt the callback to the verdict contract. If you run a node, no action |
 | Jobs already stuck at upgrade time may need one manual clear | Recovery needs to know whether a held job was creating or updating an asset. Jobs recorded before this upgrade do not carry that marker, so the node reports them as needing operator action instead of guessing. Jobs enqueued after the upgrade record the marker automatically | Run `dkg publisher jobs --status failed`. After verifying a legacy held job on chain, clear that exact job with `POST /api/publisher/clear-job {"jobId":"<id>"}`. Bulk clear deliberately skips held jobs |
 

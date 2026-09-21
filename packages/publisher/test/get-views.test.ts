@@ -17,11 +17,30 @@ describe('resolveViewGraphs', () => {
       expect(() => resolveViewGraphs('working-memory', CG)).toThrow('agentAddress is required');
     });
 
-    it('returns a prefix for all agent assertions when no assertionName given', () => {
+    it('returns prefixes for BOTH working-memory graph families when no assertionName given', () => {
+      // WM lives in two families and an unscoped read has to span both:
+      // the uniform per-KA `…/_working_memory/{addr}/{number}` AND the
+      // name-keyed `…/assertion/{addr}/{name}`. The second is not dead
+      // legacy — `DKGPublisher.wmGraphUri` (this package) still falls back to
+      // `contextGraphAssertionUri` whenever `resolveKaGraphIdentity` returns
+      // null, and the by-name branch of this same view reads that shape. This
+      // test previously pinned the `_working_memory`-only prefix, which made
+      // the prefix branch strictly narrower than the by-name branch.
       const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT });
       expect(res.graphs).toHaveLength(0);
-      expect(res.graphPrefixes).toHaveLength(1);
-      expect(res.graphPrefixes[0]).toBe(`did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`);
+      expect(res.graphPrefixes).toEqual([
+        `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
+        `did:dkg:context-graph:${CG}/assertion/${AGENT}/`,
+      ]);
+    });
+
+    it('keeps every working-memory prefix keyed to the requested agent', () => {
+      // Spanning a second family must not widen across agents: both families
+      // embed the same address.
+      const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT });
+      for (const prefix of res.graphPrefixes) {
+        expect(prefix).toContain(AGENT);
+      }
     });
 
     it('includes the agent address in the graph URI prefix', () => {

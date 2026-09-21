@@ -13,7 +13,7 @@
  * unit coverage has no other home once the loops leave the base, plus the
  * `resolveCapMs` policy matrix:
  *
- *   - resolveCapMs → the three policies × {single,multi} cap matrix (exhaustive).
+ *   - resolveCapMs → the named policies × {single,multi} cap matrix (exhaustive).
  *   - read / readContract → the matrix APPLIED (multi caps + fails over, single
  *     uncapped) + the view BAD_DATA classifier (non-retryable, surfaces directly)
  *     + a custom-classifier override. (The detailed control-flow + observability
@@ -33,7 +33,11 @@
  * over REAL providers in multi-rpc-{read,write}-failover.test.ts.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { resolveCapMs, type SignPopulatedFn } from '../src/rpc-failover-client.js';
+import {
+  createRpcReadDescriptor,
+  resolveCapMs,
+  type SignPopulatedFn,
+} from '../src/rpc-failover-client.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
@@ -48,6 +52,7 @@ import {
   isRetryableRpcError,
 } from '../src/evm-adapter-rpc.js';
 import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
+import { ContextGraphAuthorityIndexBootstrapUnavailableError } from '../src/context-graph-authority-index-snapshot.js';
 import { recorder, retryable429, NEVER_SIGN, makeClient } from './rpc-failover-test-helpers.js';
 
 const callExceptionErr = (msg = 'execution reverted: TooLowAllowance') => {
@@ -74,6 +79,12 @@ const URLS = ['https://primary.example', 'https://backup.example'];
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
 describe('RPC retry disposition', () => {
+  it('keeps core bootstrap failures retry-later even when causes mention network timeouts and 503', () => {
+    const error = new ContextGraphAuthorityIndexBootstrapUnavailableError(new Error('network timeout 503'));
+    expect(classifyRpcRetryDisposition(error)).toBe('retry-later');
+    expect(isRetryableRpcError(error)).toBe(true);
+    expect(isRpcEndpointFailoverEligible(error)).toBe(false);
+  });
   it('keeps local saturation caller-retryable but excludes it from endpoint failover', () => {
     const queueFull = new RpcRequestGovernorQueueFullError(1);
     expect(classifyRpcRetryDisposition(queueFull)).toBe('retry-later');
@@ -84,7 +95,7 @@ describe('RPC retry disposition', () => {
   });
 });
 
-// ── resolveCapMs — the named timeout-policy matrix (exhaustive 3×2) ──────────
+// ── resolveCapMs — the named timeout-policy matrix ───────────────────────────
 describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => {
   it('pointRead: multi-RPC caps at RPC_READ_STALL_TIMEOUT_MS, single-RPC is uncapped (#894)', () => {
     expect(resolveCapMs('pointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
@@ -97,6 +108,11 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
     expect(resolveCapMs('wideLogScan', 1)).toBeUndefined();
   });
 
+  it('durablePagedLogScan: aggregate provider attempts are uncapped', () => {
+    expect(resolveCapMs('durablePagedLogScan', 1)).toBeUndefined();
+    expect(resolveCapMs('durablePagedLogScan', 2)).toBeUndefined();
+  });
+
   it('watchdog policies cap single-RPC attempts with the matching point/log deadline', () => {
     expect(resolveCapMs('watchdogPointRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('watchdogPointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
@@ -107,6 +123,33 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
   it('failOpenFundingRead: caps EVERY attempt incl. single-RPC at RPC_READ_STALL_TIMEOUT_MS', () => {
     expect(resolveCapMs('failOpenFundingRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('failOpenFundingRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
+  });
+});
+
+describe('RpcReadDescriptor — explicit read attribution ownership', () => {
+  it('freezes the human label and consumer owner together', () => {
+    const descriptor = createRpcReadDescriptor('human read label', 'stable.consumer');
+
+    expect(descriptor).toEqual({ label: 'human read label', consumer: 'stable.consumer' });
+    expect(Object.isFrozen(descriptor)).toBe(true);
+  });
+
+  it('supports a deliberate unattributed read', () => {
+    const descriptor = createRpcReadDescriptor('health probe', null);
+    const provider = { read: recorder(async () => 'OK') };
+    const client = makeClient([provider], ['https://health.example']);
+
+    return expect(client.read(descriptor, (p: any) => p.read())).resolves.toBe('OK');
+  });
+
+  it('rejects a compatibility option that conflicts with the descriptor owner', () => {
+    const descriptor = createRpcReadDescriptor('human read label', 'stable.consumer');
+    const provider = { read: recorder(async () => 'OK') };
+    const client = makeClient([provider], ['https://health.example']);
+
+    expect(() => client.read(descriptor, (p: any) => p.read(), {
+      rpcUsageConsumer: 'different.consumer',
+    })).toThrow(/consumer conflict/);
   });
 });
 
@@ -543,6 +586,91 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     const [, populated] = signPopulated.calls[0] as [unknown, any];
     expect(populated.gasLimit).toBeUndefined(); // no buffer (fell back to ethers' own estimate at sign time)
     expect(warns.some((w) => w.includes('buffered gas estimation failed'))).toBe(true); // left a breadcrumb
+  });
+
+  it('a deterministic CALL_EXCEPTION from the buffered estimate is final — no duplicate estimate/nonce population', async () => {
+    // RandomSampling surfaces the expected idle outcome as this exact shape. The buffered
+    // estimate has already executed the call and received a deterministic contract answer;
+    // signing an unbuffered request would make ethers issue the same estimate plus a nonce read.
+    const noEligible = callExceptionErr(
+      'execution reverted: NoEligibleContextGraph()',
+    );
+    const primary = {};
+    const backup = {};
+    const primaryPopulate = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const backupPopulate = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const primaryEstimate = recorder(async () => { throw noEligible; });
+    const backupEstimate = recorder(async () => 21_000n);
+    const contract = {
+      connect: (rpcSigner: unknown) => ({
+        createChallenge: {
+          populateTransaction: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryPopulate
+            : backupPopulate,
+          estimateGas: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryEstimate
+            : backupEstimate,
+        },
+      }),
+    } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([primary, backup], URLS, signPopulated as SignPopulatedFn);
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = ((...args: unknown[]) => { warns.push(String(args[0])); }) as typeof console.warn;
+    try {
+      await expect(client.populateAndSign(
+        contract,
+        'createChallenge',
+        [],
+        makeSigner(),
+        'create random-sampling challenge',
+        { gasLimitBufferBps: 5_000 },
+      )).rejects.toBe(noEligible);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(primaryPopulate.calls).toHaveLength(1);
+    expect(primaryEstimate.calls).toHaveLength(1);
+    expect(backupPopulate.calls).toEqual([]); // deterministic result never fails over
+    expect(backupEstimate.calls).toEqual([]);
+    expect(signPopulated.calls).toEqual([]); // therefore no signer estimate or nonce read
+    expect(warns).toEqual([]); // not mislabeled as a degraded unbuffered send
+  });
+
+  it.each([
+    ['plain deterministic application error', new Error('estimate policy rejected')],
+    ['UNPREDICTABLE_GAS_LIMIT compatibility error', Object.assign(
+      new Error('cannot estimate gas'),
+      { code: 'UNPREDICTABLE_GAS_LIMIT' },
+    )],
+  ])('preserves the unbuffered fallback for %s', async (_label, estimateError) => {
+    // The short-circuit is intentionally code-exact. Other non-failover errors retain the
+    // compatibility behavior: signPopulated owns ethers' one unbuffered estimate+nonce attempt.
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const estimateGas = recorder(async () => { throw estimateError; });
+    const contract = {
+      connect: () => ({ doWrite: { populateTransaction, estimateGas } }),
+    } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([{}], ['https://only.example'], signPopulated as SignPopulatedFn);
+    const origWarn = console.warn;
+    console.warn = (() => undefined) as typeof console.warn;
+    try {
+      await expect(client.populateAndSign(
+        contract,
+        'doWrite',
+        [],
+        makeSigner(),
+        'V10 publish',
+        { gasLimitBufferBps: 1_000 },
+      )).resolves.toEqual({ signedTx: '0xS', txHash: '0xH' });
+    } finally {
+      console.warn = origWarn;
+    }
+    expect(estimateGas.calls).toHaveLength(1);
+    expect(signPopulated.calls).toHaveLength(1);
   });
 
   it('a decoded revert (non-retryable) propagates AT ONCE — never signs, backup never prepared', async () => {

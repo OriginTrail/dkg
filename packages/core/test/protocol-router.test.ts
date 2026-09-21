@@ -1529,6 +1529,58 @@ describe('ProtocolRouter', () => {
       expect(resolveCalls).toBe(0);
     });
 
+    it('caps the response read at SendOptions.maxReadBytes without widening the router-wide limit', async () => {
+      const makeRouter = () => makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            newStream: async () => makeStubStream(new Uint8Array([1, 2, 3, 4, 5])) as any,
+          },
+        ],
+        dialBehavior: async () => {
+          throw new Error('dialProtocol must not be called when fast path hits');
+        },
+      });
+
+      // Default: the router-wide limit (10 MiB) admits the 5-byte response.
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1])))
+        .resolves.toEqual(new Uint8Array([1, 2, 3, 4, 5]));
+      // A per-call cap tightens the read for this send only.
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 4 }))
+        .rejects.toThrow('Read limit exceeded (4 bytes)');
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 5 }))
+        .resolves.toEqual(new Uint8Array([1, 2, 3, 4, 5]));
+      // A per-call cap can never exceed the router-wide limit.
+      const tight = new ProtocolRouter(
+        {
+          libp2p: {
+            getConnections: () => [{
+              status: 'open',
+              remotePeer: {
+                equals: (other: unknown) => String(other) === FAKE_PEER_ID,
+                toString: () => FAKE_PEER_ID,
+              },
+              newStream: async () => makeStubStream(new Uint8Array([1, 2, 3, 4, 5])),
+            }],
+            dialProtocol: async () => {
+              throw new Error('dialProtocol must not be called when fast path hits');
+            },
+            handle: () => undefined,
+            unhandle: () => undefined,
+            peerStore: { get: async () => { throw new Error('NotFound'); } },
+          },
+        } as unknown as DKGNode,
+        { maxReadBytes: 3 },
+      );
+      await expect(tight.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 1024 }))
+        .rejects.toThrow('Read limit exceeded (3 bytes)');
+      // Malformed caps are rejected before any I/O.
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 0 }))
+        .rejects.toThrow(RangeError);
+      await expect(makeRouter().send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { maxReadBytes: 2.5 }))
+        .rejects.toThrow(/positive integer/u);
+    });
+
     it('falls through to dialProtocol when no connections exist (cold peer)', async () => {
       let dialCalls = 0;
       let resolveCalls = 0;

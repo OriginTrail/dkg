@@ -44,17 +44,11 @@ describe('private SWM recovery budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000);
     const budget = createPrivateSwmRecoveryWindow(50)!;
     expect(Object.isFrozen(budget)).toBe(true);
-    const longRound = budget.admitRound(2_000, {
-      sharing: 'exclusive', owner: 'long-round',
-    });
-    const shortRound = budget.admitRound(1_020, {
-      sharing: 'exclusive', owner: 'short-round',
-    });
+    const longRound = budget.admitRound(2_000);
+    const shortRound = budget.admitRound(1_020);
     expect(longRound.capTimeout(Infinity)).toBe(50);
     expect(shortRound.capTimeout(Infinity)).toBe(20);
-    expect(createPrivateSwmRecoveryWindow(0).admitRound(2_000, {
-      sharing: 'exclusive', owner: 'initial-round',
-    }).capTimeout(Infinity)).toBe(1_000);
+    expect(createPrivateSwmRecoveryWindow(0).admitRound(2_000).capTimeout(Infinity)).toBe(1_000);
     now = 160;
     expect(longRound.capTimeout(Infinity)).toBe(0);
     expect(createPrivateSwmRecoveryWindow(0)).toMatchObject({ kind: 'initial-round-only' });
@@ -72,16 +66,13 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     const createRoundDeadline = vi.fn(() => 1_030);
     let calls = 0;
     await recoverContextGraphSwmWithProgressRetries({
-      owner: 'driver-owned-admission',
       createRoundDeadline,
       window: createPrivateSwmRecoveryWindow(budgetMs),
       recover: async (round, admission, deadline) => {
         calls++;
         expect(round).toBe(1);
         expect(deadline).toBe(1_030);
-        expect(admission.scope).toEqual({
-          sharing: 'exclusive', owner: 'driver-owned-admission:round-1',
-        });
+        expect(admission.fetchSharingIdentity).toBeUndefined();
         expect(admission.admitTimeout(1_000)).toBe(30);
         wallClock = 1_010;
         elapsed = 100;
@@ -107,7 +98,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     const allowances: number[] = [];
     const onRetry = vi.fn();
     const result = await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       recover: async (_round, admission, deadline) => {
@@ -130,7 +120,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
     const recover = vi.fn(async () => recoveryResult(1, 20));
     await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       recover,
@@ -143,7 +132,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '0');
     const recover = vi.fn(async () => recoveryResult(1, 20));
     await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()), recover });
     expect(recover).toHaveBeenCalledTimes(1);
@@ -160,7 +148,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     let calls = 0;
 
     const result = await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       recover: async () => outcomes[calls++]!,
@@ -177,7 +164,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
   it('stops after one transient retry when snapshot progress is flat', async () => {
     let calls = 0;
     const result = await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       recover: async () => {
@@ -201,7 +187,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
     let calls = 0;
 
     const result = await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       recover: async () => outcomes[calls++]!,
@@ -218,7 +203,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
   it('extends the default cap while declared snapshots keep making progress', async () => {
     let calls = 0;
     const result = await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       recover: async () => {
@@ -234,7 +218,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
   it('keeps snapshot-aware progress retries under an absolute ceiling', async () => {
     let calls = 0;
     const result = await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       recover: async () => {
@@ -250,7 +233,6 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
   it('honours the hard recovery-round cap while progress continues', async () => {
     let calls = 0;
     const result = await recoverContextGraphSwmWithProgressRetries({
-      owner: 'budget-test',
       createRoundDeadline: () => Date.now() + 1_000,
       window: createPrivateSwmRecoveryWindow(resolvePrivateSwmRecoveryBudgetMs()),
       maxRounds: 3,

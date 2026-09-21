@@ -10,11 +10,14 @@ export interface ManagedReadRecoveryTokenV1 {
   readonly storeGeneration: number;
 }
 
-export interface ManagedReadRecoveryCoordinatorOptionsV1 {
-  readonly enabled: boolean;
-  readonly now: () => number;
-  readonly readRecoveryState: () => ManagedReadRecoveryStateV1 | null;
+export interface ManagedReadRecoveryCapabilityV1 {
+  readonly readState: () => ManagedReadRecoveryStateV1;
   readonly recover: (operation: 'query' | 'construct') => void;
+}
+
+export interface ManagedReadRecoveryCoordinatorOptionsV1 {
+  readonly now: () => number;
+  readonly capability?: ManagedReadRecoveryCapabilityV1;
 }
 
 /**
@@ -36,7 +39,7 @@ export class ManagedReadRecoveryCoordinatorV1 {
   }
 
   begin(state: ManagedReadRecoveryStateV1 | null): ManagedReadRecoveryTokenV1 | null {
-    if (!this.#options.enabled || state === null || state.recovering) return null;
+    if (this.#options.capability === undefined || state === null || state.recovering) return null;
     return Object.freeze({
       lifecycleGeneration: this.#lifecycleGeneration,
       storeGeneration: state.generation,
@@ -49,6 +52,14 @@ export class ManagedReadRecoveryCoordinatorV1 {
     token: ManagedReadRecoveryTokenV1 | null,
   ): void {
     if (token === null || token.lifecycleGeneration !== this.#lifecycleGeneration) return;
+    const current = this.#readState();
+    if (
+      current === null
+      || current.recovering
+      || current.generation !== token.storeGeneration
+    ) {
+      return;
+    }
     const pending = this.#pending;
     if (pending?.storeGeneration === token.storeGeneration && pending.deadline <= deadline) {
       return;
@@ -56,14 +67,18 @@ export class ManagedReadRecoveryCoordinatorV1 {
     clearTimeout(pending?.timer);
     const timer = setTimeout(() => {
       if (this.#pending?.timer === timer) this.#pending = undefined;
-      const current = this.#options.readRecoveryState();
+      const current = this.#readState();
       if (
         token.lifecycleGeneration === this.#lifecycleGeneration
         && current !== null
         && !current.recovering
         && current.generation === token.storeGeneration
       ) {
-        this.#options.recover(operation);
+        try {
+          this.#options.capability?.recover(operation);
+        } catch {
+          // Recovery notification must never escape a retained timer callback.
+        }
       }
     }, Math.max(0, deadline - this.#options.now()));
     timer.unref?.();
@@ -74,5 +89,19 @@ export class ManagedReadRecoveryCoordinatorV1 {
     this.#lifecycleGeneration += 1;
     clearTimeout(this.#pending?.timer);
     this.#pending = undefined;
+  }
+
+  #readState(): ManagedReadRecoveryStateV1 | null {
+    try {
+      const state = this.#options.capability?.readState();
+      if (
+        typeof state?.recovering === 'boolean'
+        && Number.isSafeInteger(state.generation)
+        && state.generation >= 0
+      ) return state;
+    } catch {
+      // A broken runtime capability must not replace the endpoint's result.
+    }
+    return null;
   }
 }

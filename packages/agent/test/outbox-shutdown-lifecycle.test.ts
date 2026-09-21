@@ -2,6 +2,7 @@ import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
 import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-random-sampling';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
@@ -26,6 +27,7 @@ import { Rfc64BackgroundWorkDispatcherV1 } from
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.chain = new MockChainAdapter();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();

@@ -8,7 +8,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
-import { activatePersistedContextGraphSubscription } from
+import {
+  activatePersistedContextGraphSubscription,
+  recoverDeferredContextGraphSubscriptionAuthorities,
+} from
   '../src/context-graph-subscription-authority-recovery.js';
 
 const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
@@ -146,6 +149,86 @@ describe('Context Graph subscription authority retry', () => {
     expect(topics.every((topic) => gossip.subscribed.has(topic))).toBe(true);
     expect((agent as unknown as { gossipRegistered: Set<string> })
       .gossipRegistered.has(contextGraphId)).toBe(true);
+  });
+
+  it('discovers slow loadAll-only candidates concurrently and commits in stable order', async () => {
+    const rows = Array.from({ length: 6 }, (_, index) => ({
+      id: `deferred-${index}`,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }));
+    const loadAll = vi.fn(async () => rows.map((row) => ({ ...row })));
+    const dormancyById = new Map(rows.map((row) => (
+      [row.id, 'authorityUnavailable' as const]
+    )));
+    const status = {
+      rehydrationEnabled: true,
+      persistedTotal: rows.length,
+      systemExcluded: 0,
+      hostedActivated: 0,
+      hostedActivatedIds: [],
+      activated: 0,
+      activationCap: 0,
+      capDisabled: true,
+      completedAt: 1,
+      updatedAt: 1,
+    };
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+    let activeDiscoveries = 0;
+    let maxActiveDiscoveries = 0;
+    const discoveryOrder: string[] = [];
+    const activationOrder: string[] = [];
+    const resolveAuthority = vi.fn(async (contextGraphId: string) => {
+      discoveryOrder.push(contextGraphId);
+      activeDiscoveries += 1;
+      maxActiveDiscoveries = Math.max(maxActiveDiscoveries, activeDiscoveries);
+      await discoveryGate;
+      activeDiscoveries -= 1;
+      return {
+        outcome: 'allowed' as const,
+        source: 'registered-chain' as const,
+        reason: 'open-context-graph' as const,
+        metadataBootstrap: 'eligible' as const,
+      };
+    });
+
+    const recovery = recoverDeferredContextGraphSubscriptionAuthorities(
+      new AbortController().signal,
+      {
+        store: {
+          loadAll,
+          save: async () => undefined,
+          delete: async () => undefined,
+        },
+        dormancyById,
+        persistRevisions: new Map(),
+        subscriptions: new Map(),
+        getStatus: () => status,
+        isCurrent: () => true,
+        touchStatus: () => undefined,
+        clearStatus: vi.fn(),
+        resolveAuthority,
+        activate: async (row) => {
+          activationOrder.push(row.id);
+          await Promise.resolve();
+        },
+        warn: vi.fn(),
+        activated: () => { status.activated += 1; },
+      },
+    );
+    await vi.waitFor(() => expect(resolveAuthority).toHaveBeenCalledTimes(4));
+    expect(maxActiveDiscoveries).toBe(4);
+    releaseDiscovery();
+    await recovery;
+
+    expect(resolveAuthority).toHaveBeenCalledTimes(6);
+    expect(discoveryOrder).toEqual(rows.map((row) => row.id));
+    expect(activationOrder).toEqual(rows.map((row) => row.id));
+    expect(loadAll).toHaveBeenCalledTimes(2);
   });
 
   it('retries a cold persisted binding after startup and restores the subscription', async () => {

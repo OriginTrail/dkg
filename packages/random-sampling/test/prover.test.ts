@@ -23,6 +23,7 @@ import {
   type CreateChallengeResult,
   type NodeChallenge,
   type ProofPeriodStatus,
+  type RandomSamplingReadContextReader,
   type TxResult,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -42,6 +43,7 @@ import {
   startProverLoop,
   type RandomSamplingRepairMaterial,
 } from '../src/index.js';
+import { SOLVED_PERIOD_MAX_SKIP_MS } from '../src/solved-period-skip.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -58,9 +60,18 @@ interface FakeChainState {
    *  check inside the prover engages. Tests that omit this fall back
    *  to "stale check always false" (the production-safe default). */
   blockNumber?: number;
+  /** When set, exposes `chain.isRandomSamplingReady` (read live, so a test
+   *  can flip it to simulate a Hub rotation clearing the RS bindings). */
+  randomSamplingReady?: boolean;
+  /** When set, exposes the derived identity of the live RS/RSS pair. */
+  bindingId?: string;
+  /** When set, exposes the current Chronos epoch. */
+  currentEpoch?: bigint;
 }
 
-function makeChain(state: FakeChainState): ChainAdapter {
+type TestChain = ChainAdapter;
+
+function makeChain(state: FakeChainState): TestChain {
   // OT-RFC-49 WS-B proof-race snapshot: the on-chain `createChallenge` PINS the
   // current (root, leafCount) onto the Challenge struct, and `submitProof` (and
   // the prover) verify against THOSE pinned values, not a live re-read. Mirror
@@ -95,7 +106,28 @@ function makeChain(state: FakeChainState): ChainAdapter {
   if (state.blockNumber !== undefined) {
     partial.getBlockNumber = vi.fn(async () => state.blockNumber!);
   }
-  return partial as ChainAdapter;
+  if (state.randomSamplingReady !== undefined) {
+    partial.isRandomSamplingReady = vi.fn(() => state.randomSamplingReady!);
+  }
+  const chain = partial as TestChain;
+  if (
+    state.randomSamplingReady !== undefined
+    && state.bindingId !== undefined
+    && state.currentEpoch !== undefined
+  ) {
+    const contextReader: RandomSamplingReadContextReader = {
+      getRandomSamplingBindingId: vi.fn(() =>
+        state.randomSamplingReady ? state.bindingId : undefined),
+      readRandomSamplingContext: vi.fn(async () =>
+        state.randomSamplingReady && state.bindingId !== undefined && state.currentEpoch !== undefined
+          ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.currentEpoch })
+          : undefined),
+      isRandomSamplingBindingCurrent: vi.fn((bindingId) =>
+        state.randomSamplingReady === true && state.bindingId === bindingId),
+    };
+    chain.getRandomSamplingReadContextReader = vi.fn(() => contextReader);
+  }
+  return chain;
 }
 
 interface KCFixture {
@@ -388,11 +420,97 @@ describe('RandomSamplingProver — mid-period update (content pinning)', () => {
       { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"MUTATED"', graph: dataGraph },
     ]);
 
+    // A chain-rejected root mismatch also enters the bounded corruption
+    // cooldown, so the next three ticks give sync a chance to repair the KA
+    // without re-extracting it.
+    for (let tick = 0; tick < 3; tick += 1) {
+      await expect(prover.tick()).resolves.toEqual({
+        kind: 'kc-not-synced',
+        kaId: fixture.kaId,
+        cgId: fixture.cgId,
+      });
+    }
+
     await expect(prover.tick()).resolves.toMatchObject({
       kind: 'data-corrupted',
       reason: 'root-mismatch',
     });
     expect(submitProof).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+});
+
+describe('RandomSamplingProver — data-corruption retry cooldown', () => {
+  let store: OxigraphStore;
+  beforeEach(() => {
+    store = new OxigraphStore();
+  });
+
+  it('suppresses repeated full extracts after a leaf-count mismatch, then retries', async () => {
+    const fixture: KCFixture = {
+      cgId: 11n,
+      kaId: 7n,
+      ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1', 'urn:e:2', 'urn:e:3'],
+      publicTriples: [
+        { subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' },
+        { subject: 'urn:e:2', predicate: 'urn:p:k', object: '"b"' },
+        { subject: 'urn:e:3', predicate: 'urn:p:k', object: '"c"' },
+      ],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+    const challenge = makeChallenge({
+      knowledgeAssetId: fixture.kaId,
+      challengeRoot: root,
+      // Deliberately disagree with the locally extracted leaf count so the
+      // builder returns the same deterministic mismatch seen in the issue.
+      challengeLeafCount: BigInt(leafCount + 1),
+      activeProofPeriodStartBlock: 1000n,
+      solved: false,
+    });
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: challenge,
+      createChallenge: async () => ({
+        challenge,
+        contextGraphId: fixture.cgId,
+        hash: '0xchallenge',
+        blockNumber: 1000,
+        success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: vi.fn(async () => ({ hash: '0xunused', blockNumber: 1001, success: true })),
+    });
+    const querySpy = vi.spyOn(store, 'query');
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'data-corrupted',
+      kaId: fixture.kaId,
+      cgId: fixture.cgId,
+      reason: 'leaf-count-mismatch',
+    });
+    const firstExtractQueries = querySpy.mock.calls.length;
+    expect(firstExtractQueries).toBeGreaterThan(0);
+
+    for (let tick = 0; tick < 3; tick += 1) {
+      await expect(prover.tick()).resolves.toEqual({
+        kind: 'kc-not-synced',
+        kaId: fixture.kaId,
+        cgId: fixture.cgId,
+      });
+    }
+    expect(querySpy.mock.calls.length).toBe(firstExtractQueries);
+
+    // The cooldown is finite: the next tick attempts extraction again and
+    // surfaces the mismatch instead of suppressing it forever.
+    await expect(prover.tick()).resolves.toMatchObject({
+      kind: 'data-corrupted',
+      reason: 'leaf-count-mismatch',
+    });
+    expect(querySpy.mock.calls.length).toBeGreaterThan(firstExtractQueries);
     await prover.close();
   });
 });
@@ -1452,5 +1570,571 @@ describe('RandomSamplingProver — concurrency', () => {
     expect(createChallengeCalls).toBe(1);
     expect(submitProof).toHaveBeenCalledTimes(1);
     await prover.close();
+  });
+});
+
+describe('RandomSamplingProver — solved-period read skip', () => {
+  // Once a chain read shows this identity's challenge SOLVED for the active
+  // period, nothing this node can do changes that slot until the head leaves
+  // the period — yet every tick re-read status + challenge (3 eth_call + 1
+  // eth_blockNumber; ~370 requests per core per devnet cell). These tests pin
+  // both halves: the reads ARE skipped inside the period, and every doubt
+  // (rollover, chain reset, Hub rotation, missing capability, head failure,
+  // a read the record could not be fully built from, the safety re-read,
+  // restart) falls back to the full chain read.
+  const PERIOD_START = 1000n;
+  const LIVE_DURATION = 50n;
+  // Default recording head. The half-period bound would land after the period;
+  // the late-observation cap therefore forces a safety read at block 1049.
+  const RECORD_HEAD = 1030;
+
+  function makeSolvedState(overrides: Partial<FakeChainState> = {}): FakeChainState {
+    return {
+      status: {
+        activeProofPeriodStartBlock: PERIOD_START,
+        isValid: true,
+        proofingPeriodDurationInBlocks: LIVE_DURATION,
+      },
+      challengeForNode: makeChallenge({
+        epoch: 3n,
+        activeProofPeriodStartBlock: PERIOD_START,
+        proofingPeriodDurationInBlocks: LIVE_DURATION,
+        solved: true,
+      }),
+      createChallenge: vi.fn(async () => { throw new NoEligibleContextGraphError(); }),
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 0,
+      cgIdForKc: 0n,
+      submitProof: vi.fn() as never,
+      blockNumber: RECORD_HEAD,
+      randomSamplingReady: true,
+      bindingId: 'rs-a:rss-a',
+      currentEpoch: 3n,
+      ...overrides,
+    };
+  }
+
+  function chainReads(chain: TestChain): {
+    status: number;
+    challenge: number;
+    head: number;
+    epoch: number;
+  } {
+    return {
+      status: vi.mocked(chain.getActiveProofPeriodStatus!).mock.calls.length,
+      challenge: vi.mocked(chain.getNodeChallenge!).mock.calls.length,
+      head: chain.getBlockNumber ? vi.mocked(chain.getBlockNumber).mock.calls.length : 0,
+      epoch: chain.getRandomSamplingReadContextReader?.()?.readRandomSamplingContext
+        ? vi.mocked(chain.getRandomSamplingReadContextReader().readRandomSamplingContext).mock.calls.length
+        : 0,
+    };
+  }
+
+  it('skips status + challenge reads until the in-period safety bound', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const info = vi.fn();
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+      log: { info, warn: vi.fn(), error: vi.fn() },
+    });
+
+    // Tick 1 learns "solved" from the chain — the full pre-existing read.
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 1, epoch: 1 });
+
+    // Ticks inside the safe window spend one head plus one Chronos read each,
+    // with no status or challenge read.
+    for (const head of [1031, 1040]) {
+      state.blockNumber = head;
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    }
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 3, epoch: 3 });
+
+    // A late observation is always revalidated on the last open-period block.
+    state.blockNumber = 1049;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 5, epoch: 5 });
+    expect(info.mock.calls).toEqual(
+      Array.from({ length: 4 }, () => [
+        'rs.tick.already-solved',
+        { epoch: '3', periodStart: '1000' },
+      ]),
+    );
+    expect(state.createChallenge).not.toHaveBeenCalled();
+    await prover.close();
+  });
+
+  it('re-reads a late solved observation before rollover and detects a solved flag clear', async () => {
+    const state = makeSolvedState({ blockNumber: 1040 });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.challengeForNode = { ...state.challengeForNode!, solved: false };
+    state.blockNumber = 1048;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 2, epoch: 2 });
+
+    state.blockNumber = 1049;
+    expect(await prover.tick()).toEqual({ kind: 'cg-not-found', kaId: 7n });
+    // The live reread found an unsolved challenge, so it deliberately skipped
+    // the final Chronos epoch RPC.
+    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 4, epoch: 3 });
+    await prover.close();
+  });
+
+  it('reads the chain again on the first tick whose head reaches the period end', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    // head == start + duration is the first block of the NEXT period.
+    state.blockNumber = 1050;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+
+    // The record was dropped, not merely bypassed: a later in-range head
+    // (lagging RPC backend) must not resurrect the skip.
+    state.blockNumber = 1049;
+    state.challengeForNode = null;
+    await prover.tick();
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('ends the skip at the LIVE duration when it is shorter than the challenge-baked one', async () => {
+    // Codex PR #369: the chain rolls the period with the live duration. A
+    // skip window built from the (longer) baked duration would sleep through
+    // the rollover.
+    const state = makeSolvedState({
+      challengeForNode: makeChallenge({
+        activeProofPeriodStartBlock: PERIOD_START,
+        proofingPeriodDurationInBlocks: 10_000n,
+        solved: true,
+      }),
+    });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.blockNumber = 1060;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('re-reads at an epoch boundary before a shorter duration can move the period end', async () => {
+    const state = makeSolvedState({
+      blockNumber: 1001,
+      status: {
+        activeProofPeriodStartBlock: PERIOD_START,
+        isValid: true,
+        proofingPeriodDurationInBlocks: 200n,
+      },
+      challengeForNode: makeChallenge({
+        epoch: 3n,
+        activeProofPeriodStartBlock: PERIOD_START,
+        proofingPeriodDurationInBlocks: 200n,
+        solved: true,
+      }),
+    });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    // Governance duration changes take effect at an epoch boundary. The old
+    // record said end=1200; the new schedule says end=1020. The epoch guard
+    // must force a full read before the old bound can suppress this period.
+    state.currentEpoch = 4n;
+    state.status = {
+      ...state.status,
+      proofingPeriodDurationInBlocks: 20n,
+    };
+    state.blockNumber = 1021;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('does not record on a tick whose status carries no LIVE duration (probe timeout / legacy adapter)', async () => {
+    // The adapter returns `proofingPeriodDurationInBlocks: undefined` when its
+    // duration probe times out. Building the skip window from the
+    // challenge-baked fallback would pin that guess for the whole period.
+    const state = makeSolvedState({
+      status: { activeProofPeriodStartBlock: PERIOD_START, isValid: true },
+    });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+
+    // The probe answers on tick 3: that tick records, tick 4 skips.
+    state.status = { ...state.status, proofingPeriodDurationInBlocks: LIVE_DURATION };
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('does not record on a tick that could not read the head', async () => {
+    // Without the recording head there is no anchor for the half-period
+    // safety re-read; guessing one (e.g. the period start, which would put
+    // head 1010 inside a [1000, 1025) window) is not a chain read.
+    const state = makeSolvedState({ blockNumber: 1010 });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    vi.mocked(chain.getBlockNumber!).mockRejectedValueOnce(new Error('rpc down'));
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
+  it('reads the chain again when the head is BELOW the remembered period (chain reset)', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    // Devnet redeployed under a live process: fresh chain, empty slot.
+    state.blockNumber = 12;
+    state.status = { activeProofPeriodStartBlock: 0n, isValid: true, proofingPeriodDurationInBlocks: LIVE_DURATION };
+    state.challengeForNode = null;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('reads the chain again once a Hub rotation clears the RandomSampling bindings', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.blockNumber = 1035;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    // `invalidateRandomSamplingPair()` drops the handles; the rotated
+    // RandomSamplingStorage has no challenge for this node yet. (Generation
+    // deliberately left alone: a cleared binding is reason enough to read.)
+    state.randomSamplingReady = false;
+    state.challengeForNode = null;
+    state.blockNumber = 1040;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('honours a Hub rotation that lands while the skip tick is reading the head', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    vi.mocked(chain.getBlockNumber!).mockImplementationOnce(async () => {
+      state.randomSamplingReady = false;
+      state.challengeForNode = null;
+      return 1040;
+    });
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
+  it('reads the chain again after a Hub rotation that ANOTHER caller already re-bound (lost-signal regression)', async () => {
+    // The adapter's handles are re-bound by any `getRandomSampling()` caller,
+    // and the agent's 30 s eligibility reconcile is one. So by this prover's
+    // next tick a rotation looks like: ready === true again, head still inside
+    // the remembered period — only the pair identity says "different contract".
+    // Skipping here parks the node until the OLD period end while the rotated
+    // RandomSamplingStorage holds an empty slot it could be proving against.
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    // Hub poller observes the rotation: invalidateRandomSamplingPair().
+    state.randomSamplingReady = false;
+    state.bindingId = 'rs-b:rss-b';
+    state.challengeForNode = null;
+    // Eligibility reconcile → resolveRandomSamplingAvailability() re-binds.
+    state.randomSamplingReady = true;
+
+    state.blockNumber = 1040;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(state.createChallenge).toHaveBeenCalledTimes(1);
+    await prover.close();
+  });
+
+  it('honours a rotation that lands while the SKIP check itself is reading the head', async () => {
+    // `solvedPeriodStillOpen` awaits the head. The pair identity must be sampled
+    // AFTER that await: sampled before it, a rotation landing during the head
+    // read is compared against the pre-rotation binding and the tick skips
+    // against a pair that is already gone.
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    const readHead = vi.mocked(chain.getBlockNumber!).getMockImplementation()!;
+    vi.mocked(chain.getBlockNumber!).mockImplementationOnce(async (...args) => {
+      // Rotation + re-bind by another caller, all while this read is in flight:
+      // ready stays true, only the derived pair identity moves.
+      state.bindingId = 'rs-b:rss-b';
+      state.challengeForNode = null;
+      return readHead(...args);
+    });
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
+  it('honours a rotation that lands while the RECORDING tick is reading status + challenge', async () => {
+    // Those reads went to the old pair; the binding id the record carries must
+    // be the one from before them, so the very next tick sees the mismatch.
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    vi.mocked(chain.getActiveProofPeriodStatus!).mockImplementationOnce(async () => {
+      state.bindingId = 'rs-b:rss-b';
+      return state.status;
+    });
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.challengeForNode = null;
+    expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
+  it.each([
+    ['lacks the bound read-context capability', false],
+    ['reports an undefined read context', true],
+  ] as const)('never skips for an adapter that %s', async (_label, exposeCapability) => {
+    const state = makeSolvedState({ bindingId: undefined });
+    const chain = makeChain(state);
+    expect(chain.getRandomSamplingReadContextReader).toBeUndefined();
+    if (exposeCapability) {
+      chain.getRandomSamplingReadContextReader = vi.fn(() => ({
+        getRandomSamplingBindingId: vi.fn(() => undefined),
+        readRandomSamplingContext: vi.fn(async () => undefined),
+        isRandomSamplingBindingCurrent: vi.fn(() => false),
+      }));
+    }
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    }
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('never skips for an adapter that cannot report its current epoch', async () => {
+    const state = makeSolvedState({ currentEpoch: undefined });
+    const chain = makeChain(state);
+    expect(chain.getRandomSamplingReadContextReader).toBeUndefined();
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    }
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('keeps ticking and records no skip when the read-context RPC fails', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    vi.mocked(chain.getRandomSamplingReadContextReader!().readRandomSamplingContext)
+      .mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
+    const prover = new RandomSamplingProver({
+      chain,
+      store: new OxigraphStore(),
+      identityId: IDENTITY_ID,
+    });
+
+    await expect(prover.tick()).resolves.toEqual({ kind: 'already-solved' });
+    await expect(prover.tick()).resolves.toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2, epoch: 2 });
+    await prover.close();
+  });
+
+  it('re-reads the chain half a period after the recording head, then skips again from the fresh read', async () => {
+    // Safety re-read (review R8), block bound. Recorded at 1010 → due at 1035,
+    // well before the period end (1050).
+    const state = makeSolvedState({ blockNumber: 1010 });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    state.blockNumber = 1034;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    state.blockNumber = 1035;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+
+    // Still solved on chain -> re-recorded from head 1035 and skipped again
+    // until the in-period late-observation cap.
+    state.blockNumber = 1048;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+
+    state.blockNumber = 1049;
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('detects an in-period challenge clear at the one-minute revalidation bound', async () => {
+    // An admin migration sweep or reorg can clear the challenge while the
+    // separately earned score survives. The time bound must reveal that reset
+    // promptly even on a long period whose block bound is many minutes away.
+    vi.useFakeTimers({ toFake: ['performance'] });
+    try {
+      const state = makeSolvedState();
+      const chain = makeChain(state);
+      const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+      state.challengeForNode = null;
+      vi.advanceTimersByTime(SOLVED_PERIOD_MAX_SKIP_MS - 1);
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+      expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+      vi.advanceTimersByTime(1);
+      expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
+      expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+      expect(state.createChallenge).toHaveBeenCalledTimes(1);
+      await prover.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never skips for an adapter that cannot vouch for its RandomSampling bindings', async () => {
+    const state = makeSolvedState({ randomSamplingReady: undefined });
+    const chain = makeChain(state);
+    expect(chain.isRandomSamplingReady).toBeUndefined();
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    }
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('never skips for an adapter without getBlockNumber', async () => {
+    const state = makeSolvedState({ blockNumber: undefined });
+    const chain = makeChain(state);
+    expect(chain.getBlockNumber).toBeUndefined();
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    for (let i = 0; i < 3; i += 1) {
+      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    }
+    expect(chainReads(chain)).toMatchObject({ status: 3, challenge: 3 });
+    await prover.close();
+  });
+
+  it('reads the chain again when the head read fails', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    vi.mocked(chain.getBlockNumber!).mockRejectedValueOnce(new Error('rpc down'));
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await prover.close();
+  });
+
+  it('reuses a binding-checked confirmed submission without re-reading its challenge', async () => {
+    const store = new OxigraphStore();
+    const fixture: KCFixture = {
+      cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    const { root, leafCount } = await seedKC(store, fixture);
+    const challenge = makeChallenge({
+      knowledgeAssetId: fixture.kaId,
+      epoch: 3n,
+      activeProofPeriodStartBlock: PERIOD_START,
+      proofingPeriodDurationInBlocks: LIVE_DURATION,
+    });
+    const state = makeSolvedState({
+      challengeForNode: null,
+      createChallenge: vi.fn(async () => ({
+        challenge, contextGraphId: fixture.cgId, hash: '0xc', blockNumber: 1001, success: true,
+      })),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      submitProof: vi.fn(async () => ({ hash: '0xs', blockNumber: 1002, success: true })) as never,
+    });
+    const chain = makeChain(state);
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+
+    expect((await prover.tick()).kind).toBe('submitted');
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 1, epoch: 1 });
+
+    state.challengeForNode = { ...challenge, solved: true };
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+
+    expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
+    await prover.close();
+  });
+
+  it('a restart mid-period (fresh prover, empty memory) reads the chain exactly as before', async () => {
+    const state = makeSolvedState();
+    const chain = makeChain(state);
+    const first = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+    expect(await first.tick()).toEqual({ kind: 'already-solved' });
+    await first.close();
+
+    const restarted = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
+    expect(await restarted.tick()).toEqual({ kind: 'already-solved' });
+    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    await restarted.close();
   });
 });

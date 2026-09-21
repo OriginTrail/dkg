@@ -1,4 +1,9 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexConfig,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
@@ -67,6 +72,7 @@ export * from './rfc64/swm-author-inventory-producer-v1.js';
 export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
+export * from './rfc64/unregistered-authority-transport-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
 export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';
@@ -84,6 +90,7 @@ export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
 export type {
+  Rfc64AgentAuthorityResolverReadOptionsV1,
   Rfc64AuthorityReadCoordinatorSnapshotV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 export * from './rfc64/policy-cell-v1.js';
@@ -180,6 +187,7 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,
@@ -211,6 +219,10 @@ export type {
 export type {
   Rfc64PublicCatalogBootstrapStatusV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+export type {
+  PersistVerifiedRfc64UnregisteredAuthoritySeedInputV1,
+  ReadRfc64UnregisteredAuthoritySeedInputV1,
+} from './dkg-agent-rfc64-seed-store.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';

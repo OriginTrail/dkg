@@ -21,7 +21,11 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { UNRESTRICTED_SYNC_WORK, createSyncWorkAdmission } from '../src/sync/work-admission.js';
+import {
+  UNRESTRICTED_SYNC_WORK,
+  createSyncFetchSharingIdentity,
+  createSyncWorkAdmission,
+} from '../src/sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -427,16 +431,35 @@ describe('DKGAgent sync fetch coalescing', () => {
   });
 
   it.each([
-    { name: 'different custom keys', secondKey: 'lane-b', expectedSends: 2 },
-    { name: 'separate policies with the same custom key', secondKey: 'lane-a', expectedSends: 1 },
-  ])('preserves request ownership for $name', async ({ secondKey, expectedSends }) => {
+    {
+      name: 'independently minted sharing identities',
+      identities: [createSyncFetchSharingIdentity(), createSyncFetchSharingIdentity()],
+      expectedSends: 2,
+    },
+    {
+      name: 'one deliberately shared identity',
+      identities: (() => {
+        const identity = createSyncFetchSharingIdentity();
+        return [identity, identity];
+      })(),
+      expectedSends: 1,
+    },
+  ])('preserves request ownership for $name', async ({ identities, expectedSends }) => {
     const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
     let sends = 0;
     const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
     try {
-      const first = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: 'lane-a' }) });
+      const first = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000, {
+          fetchSharingIdentity: identities[0],
+        }),
+      });
       await flushMicrotasks();
-      const second = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: secondKey }) });
+      const second = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000, {
+          fetchSharingIdentity: identities[1],
+        }),
+      });
       let secondSettled = false;
       void second.then(() => { secondSettled = true; });
       await flushMicrotasks();
@@ -626,6 +649,66 @@ describe('DKGAgent sync fetch coalescing', () => {
       await abortObserved.promise;
       expect(sendSignal?.aborted).toBe(true);
     } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('evicts an aborted shared lane before starting its replacement fetch', async () => {
+    const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
+    const identity = createSyncFetchSharingIdentity();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
+    const stop = new AbortController();
+    const node = (agent as any).node;
+    const originalStopSignal = Object.getOwnPropertyDescriptor(node, 'stopSignal');
+    Object.defineProperty(node, 'stopSignal', {
+      configurable: true,
+      get: () => stop.signal,
+    });
+    const workAdmission = () => createSyncWorkAdmission(() => 1_000, {
+      fetchSharingIdentity: identity,
+    });
+
+    try {
+      const first = fetchPages(agent, { workAdmission: workAdmission() });
+      const firstOutcome = first.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
+      await flushMicrotasks();
+      expect(sends).toBe(1);
+
+      // Node shutdown synchronously aborts the shared fetch controller while
+      // this deliberately non-cooperative transport keeps its promise pending.
+      // The stale entry therefore remains visible long enough for the next
+      // caller to prove that it is evicted instead of joined.
+      stop.abort(new Error('node stopping'));
+      const replacement = fetchPages(agent, { workAdmission: workAdmission() });
+      const replacementOutcome = replacement.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
+      await flushMicrotasks();
+      // The new fetch observes the already-aborted node signal before transport.
+      // If it had joined the stale entry, it would remain blocked on response 0.
+      expect(await replacementOutcome).toMatchObject({
+        status: 'rejected',
+        reason: { name: 'AbortError', message: 'node stopping' },
+      });
+      expect(sends).toBe(1);
+
+      responses[0]!.resolve(new Uint8Array());
+      expect(await firstOutcome).toMatchObject({
+        status: 'rejected',
+        reason: { name: 'AbortError', message: 'node stopping' },
+      });
+    } finally {
+      if (originalStopSignal) {
+        Object.defineProperty(node, 'stopSignal', originalStopSignal);
+      } else {
+        delete node.stopSignal;
+      }
+      for (const response of responses) response.resolve(new Uint8Array());
       await agent.stop().catch(() => {});
     }
   });
