@@ -859,9 +859,14 @@ describe('Context Graph authority index over the one log', () => {
         });
 
         expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+        const networkCallsAfterFold = calls.getNetwork;
+        expect(networkCallsAfterFold).toBe(1);
         expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
 
-        // First call stabilizes the fold, second validates the retained fold.
+        // First call stabilizes the fold. The unchanged network-read counter
+        // proves the second call served that retained projection rather than
+        // silently re-folding the log (which resolves chain id again).
+        expect(calls.getNetwork).toBe(networkCallsAfterFold);
         expect(anchorHolds).toHaveBeenCalledTimes(2);
         expect(calls.getBlock).toBe(0);
         expect(calls.getLogs).toBe(0);

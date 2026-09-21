@@ -196,14 +196,16 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
  * and chain-time freshness limits bound that window. A caller that requires a
  * fresh external-canonicality proof must continue to use the provider path.
  *
- * IT MAY ONLY EVER ANSWER YES. Two reasons, and both matter:
+ * IT MAY ONLY EVER ANSWER YES. Its return type makes that invariant explicit:
+ * `true` is local proof and `undefined` means the local log cannot prove the
+ * anchor, so the caller must continue to the provider. Two reasons matter:
  *
  *  - A moved revision does not prove a reorg. It proves the tick committed,
  *    which is the ordinary case once per `chain.indexTickMs`. The log stores a
  *    hash for exactly two blocks — its observed head and its settled boundary
  *    (`ChainEventLogCursor`) — so it cannot speak for the mid-window block a
  *    retained fold is usually anchored at, and silence is not a mismatch.
- *  - `false` is not "unproven" to the caller: the cache reads it as proof of a
+ *  - `false` is not "unproven" to the cache: it reads it as proof of a
  *    fork and DROPS the whole scope's projection. Answering `false` on a
  *    commit would turn a routine tick into a full rescan.
  *
@@ -215,9 +217,9 @@ export async function contextGraphAuthorityProjectionAnchorProvenByLogV1(
   cached: ContextGraphAuthorityIndexProjection,
   currentSource: ChainEventLogAuthoritySource | undefined,
   currentContractAddress: string,
-): Promise<boolean> {
+): Promise<true | undefined> {
   const anchor = cached.origin.kind === 'log' ? cached.origin.anchor : undefined;
-  if (anchor === undefined || currentSource === undefined) return false;
+  if (anchor === undefined || currentSource === undefined) return undefined;
   // The LATE-BOUND owner, not the one that produced the fold. A Hub rotation or
   // runtime rebuild may have replaced the source since, and a retired
   // generation's token must not vouch for rows it no longer owns — even when it
@@ -226,13 +228,13 @@ export async function contextGraphAuthorityProjectionAnchorProvenByLogV1(
   const sourceContractAddress = currentSource.contractAddress.toLowerCase();
   const boundContractAddress = currentContractAddress.toLowerCase();
   if (cachedContractAddress !== boundContractAddress
-    || sourceContractAddress !== boundContractAddress) return false;
+    || sourceContractAddress !== boundContractAddress) return undefined;
   try {
-    return await currentSource.anchorHolds(anchor);
+    return await currentSource.anchorHolds(anchor) ? true : undefined;
   } catch {
     // This is an optional local proof. A store failure must not replace the
     // provider-backed validation that existed before the optimization.
-    return false;
+    return undefined;
   }
 }
 
@@ -824,7 +826,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // `anchorHolds` has no caller signal of its own. Re-check after that
         // await before either serving the cache or beginning provider fallback.
         options.signal?.throwIfAborted();
-        if (provenByLog) return true;
+        if (provenByLog === true) return true;
         return dependencies.readTipProvider(
           `${operationLabel} cached projection anchor`,
           async (provider) => {

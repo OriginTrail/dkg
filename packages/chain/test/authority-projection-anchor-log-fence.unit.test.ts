@@ -106,7 +106,7 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
     // to go and read that block rather than drop the scope.
     await expect(contextGraphAuthorityProjectionAnchorProvenByLogV1(
       projection(LOG_ORIGIN), source(async () => false), STORAGE,
-    )).resolves.toBe(false);
+    )).resolves.toBeUndefined();
   });
 
   it('declines a scan-origin projection, which carries no anchor at all', async () => {
@@ -114,7 +114,7 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
 
     await expect(contextGraphAuthorityProjectionAnchorProvenByLogV1(
       projection(Object.freeze({ kind: 'scan' as const })), source(anchorHolds), STORAGE,
-    )).resolves.toBe(false);
+    )).resolves.toBeUndefined();
 
     expect(anchorHolds).not.toHaveBeenCalled();
   });
@@ -128,7 +128,7 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
       projection(Object.freeze({ kind: 'log' as const, dataFetchedAtMs: 1 })),
       source(anchorHolds),
       STORAGE,
-    )).resolves.toBe(false);
+    )).resolves.toBeUndefined();
 
     expect(anchorHolds).not.toHaveBeenCalled();
   });
@@ -141,7 +141,7 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
 
     await expect(contextGraphAuthorityProjectionAnchorProvenByLogV1(
       projection(LOG_ORIGIN), source(anchorHolds, ROTATED), STORAGE,
-    )).resolves.toBe(false);
+    )).resolves.toBeUndefined();
 
     expect(anchorHolds).not.toHaveBeenCalled();
   });
@@ -153,7 +153,7 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
       { ...projection(LOG_ORIGIN), contractAddress: ROTATED },
       source(anchorHolds),
       STORAGE,
-    )).resolves.toBe(false);
+    )).resolves.toBeUndefined();
 
     expect(anchorHolds).not.toHaveBeenCalled();
   });
@@ -163,13 +163,13 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
       projection(LOG_ORIGIN),
       source(async () => { throw new Error('local index unavailable'); }),
       STORAGE,
-    )).resolves.toBe(false);
+    )).resolves.toBeUndefined();
   });
 
   it('declines when the runtime holds no log source', async () => {
     await expect(contextGraphAuthorityProjectionAnchorProvenByLogV1(
       projection(LOG_ORIGIN), undefined, STORAGE,
-    )).resolves.toBe(false);
+    )).resolves.toBeUndefined();
   });
 
   it('hands the fold its OWN anchor, never a freshly resolved one', async () => {
