@@ -10,6 +10,7 @@ import type { ContextGraphAuthorityIndexId } from
 import { normalizeContextGraphAuthorityHash as normalizeHash } from
   './context-graph-authority-generation.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
+import type { ChainIndexAuthorityAnchor } from './chain-index/chain-index-anchor.js';
 import {
   ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
@@ -232,7 +233,20 @@ export class ContextGraphAuthorityIndexView {
 /** Where a completed projection obtained the chain data it contains. */
 export type ContextGraphAuthorityIndexProjectionOrigin =
   | Readonly<{ kind: 'scan' }>
-  | Readonly<{ kind: 'log'; dataFetchedAtMs: number }>;
+  | Readonly<{
+    kind: 'log';
+    dataFetchedAtMs: number;
+    /**
+     * The anchor this fold was admitted under, kept so a later revalidation
+     * can ask the LOG whether anything moved instead of asking the chain.
+     *
+     * Type-only import: this module keeps no runtime dependency on the index.
+     * Optional because a fold recorded before this field existed, or by a
+     * caller that has no log source, must still be servable — every consumer
+     * treats its absence as "cannot prove it locally", never as a mismatch.
+     */
+    anchor?: ChainIndexAuthorityAnchor;
+  }>;
 
 /** What one completed refresh hands over: scanned AND past its final fence. */
 export interface ContextGraphAuthorityIndexCompletedProjection {
