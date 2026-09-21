@@ -575,6 +575,10 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       options?.source === 'agent.rfc64.legacySwmBoundary.readHeads'
     ));
     expect(captureQueryCalls).toHaveLength(1);
+    // The fail-closed head cap (legacy-swm-boundary-v1.ts: bindings.length >
+    // RFC64_LEGACY_SWM_HEAD_LIMIT_V1) is only reachable while the query fetches
+    // one row MORE than the limit, so pin that exact relationship.
+    expect(captureQueryCalls[0]![0]).toContain('LIMIT 100001');
   });
 
   it.each([

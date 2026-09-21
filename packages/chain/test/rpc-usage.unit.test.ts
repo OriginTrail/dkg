@@ -313,6 +313,37 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(normalized.attributions).toEqual([
       { method: 'eth_call', consumer: 'token.balanceOf', count: 1 },
     ]);
+
+    // A tracker-drained window carries both representations built from the
+    // SAME counters, so it can only ever show them agreeing. Precedence is
+    // only observable when they disagree — hand-build that case. Reverting
+    // normalizeRpcUsageWindow to the legacy branch yields
+    // { 'stale.legacy': 9 } here and drops the eth_getLogs attribution.
+    const contradictory = normalizeRpcUsageWindow({
+      byMethod: { eth_call: 3, eth_getLogs: 1 },
+      ethCallByConsumer: { 'stale.legacy': 9 },
+      ethGetLogsByConsumerAndEndpointSlot: { 'stale.legacy': { primary: 9 } },
+      attributions: [
+        { method: 'eth_call', consumer: 'token.balanceOf', count: 3 },
+        {
+          method: 'eth_getLogs',
+          consumer: 'cg.authority.history',
+          endpointSlot: 'fallback_1',
+          count: 1,
+        },
+      ],
+      lifetimeTotal: 4,
+    });
+    expect(contradictory.ethCallByConsumer).toEqual({ 'token.balanceOf': 3 });
+    expect(contradictory.attributions).toEqual([
+      { method: 'eth_call', consumer: 'token.balanceOf', count: 3 },
+      {
+        method: 'eth_getLogs',
+        consumer: 'cg.authority.history',
+        endpointSlot: 'fallback_1',
+        count: 1,
+      },
+    ]);
   });
 
   it('returns a concrete empty RPC usage window from the mock adapter', () => {

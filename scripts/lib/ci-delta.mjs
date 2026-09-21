@@ -308,9 +308,24 @@ function isBlazegraphArm64Path(filePath) {
 const NODE_LANES = NODE_EVM_LANES.filter((lane) => lane !== 'bura_blazegraph_arm64');
 const MAX_REPORTED_FILES = 200;
 
+// Source of truth for WHAT this protects: EVM_TEST_SCOPES.chain.files in
+// scripts/ci/evm-test-scopes.mjs — packages/chain/test/evm-adapter.test.ts plus
+// ../node-ui/integration/identity-wallet-actions-v10.test.ts. That module
+// cannot be imported here: ci-delta.mjs runs from the trusted-controller sparse
+// checkout, whose file list is pinned to CONTROLLER_POLICY_FILES in
+// scripts/ci/trusted-controller-pins.mjs and enforced by sparseCheckoutPaths(),
+// so a fifth entry hard-fails every workflow that runs the planner. The
+// manifest names the test files the chain scope RUNS; the patterns below name
+// the SOURCE changes that must trigger it. Drift between the two copies is
+// guarded from the test side in scripts/lib/__tests__/ci-delta.test.mjs.
+const IDENTITY_WALLET_EVM_PATTERNS = [
+  /^packages\/node-ui\/src\/ui\/web3\/(?:identityWalletActions|browserWalletTransaction)\.[cm]?[jt]sx?/,
+  /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
+  /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
+];
+
 function isIdentityWalletEvmPath(filePath) {
-  return /^packages\/node-ui\/(?:src\/ui\/(?:web3\/(?:identityWalletActions|browserWalletTransaction)\.[cm]?[jt]sx?|pages\/identity-wallets\/)|integration\/identity-wallet-actions-v10\.test\.ts$)/
-    .test(filePath);
+  return IDENTITY_WALLET_EVM_PATTERNS.some((pattern) => pattern.test(filePath));
 }
 
 function emptyLanes() {
