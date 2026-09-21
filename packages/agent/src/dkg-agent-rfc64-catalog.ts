@@ -529,6 +529,7 @@ const rfc64ResponsibilityAuthorityBatchRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1>();
 interface Rfc64ScheduledResponsibilityStateV1 {
   readonly targets: Map<string, number>;
+  readonly finalizedAbsenceRetryRevisions: Map<string, number>;
   activityRevision: number;
   producerHolds: number;
 }
@@ -1147,7 +1148,12 @@ function rfc64ScheduledResponsibilityStateForV1(
 ): Rfc64ScheduledResponsibilityStateV1 {
   let state = rfc64ScheduledResponsibilityStatesV1.get(agent);
   if (state === undefined) {
-    state = { targets: new Map(), activityRevision: 0, producerHolds: 0 };
+    state = {
+      targets: new Map(),
+      finalizedAbsenceRetryRevisions: new Map(),
+      activityRevision: 0,
+      producerHolds: 0,
+    };
     rfc64ScheduledResponsibilityStatesV1.set(agent, state);
   }
   return state;
@@ -2614,6 +2620,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // and deactivate the registry/receiver synchronously instead of waiting
       // behind that batch's physical RPC or retry delay.
       targets.delete(contextGraphId);
+      state.finalizedAbsenceRetryRevisions.delete(contextGraphId);
       state.activityRevision += 1;
       if (isCurrentRfc64CatalogResponsibilityRevisionV1(
         this,
@@ -2793,6 +2800,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       throw error;
     }
 
+    const finalizedAbsenceRetries: Array<readonly [string, number]> = [];
     for (let targetIndex = 0; targetIndex < authorityTargets.length; targetIndex += 1) {
       const [contextGraphId, revision] = authorityTargets[targetIndex]!;
       if (ownerSignal.aborted) {
@@ -2805,15 +2813,46 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         revision,
       )) continue;
       try {
-        await this.reconcileRfc64CatalogResponsibilityCoreV1(
+        const authorityRequest = requests.get(contextGraphId)!;
+        const responsibility = await this.reconcileRfc64CatalogResponsibilityCoreV1(
           contextGraphId,
           ownerSignal,
           {
             deferRegisteredAuthority: true,
             revision,
-            authorityRequest: requests.get(contextGraphId)!,
+            authorityRequest,
           },
         );
+        const subscription = this.subscribedContextGraphs.get(contextGraphId);
+        if (
+          authorityRequest.kind === 'finalized-absence'
+          && !responsibility.active
+          && subscription?.subscribed === true
+          && subscription.onChainId !== undefined
+          && subscription.onChainHash !== undefined
+          && state.finalizedAbsenceRetryRevisions.get(contextGraphId) !== revision
+          && isCurrentRfc64CatalogResponsibilityRevisionV1(
+            this,
+            contextGraphId,
+            revision,
+          )
+        ) {
+          // A current-chain discovery can bind the numeric slot before the
+          // finalized authority index has projected its creation event. The
+          // first selection pass must stay fail-closed, but treating that
+          // snapshot absence as terminal strands a fresh Edge subscription
+          // until restart because no later lifecycle transition re-runs it.
+          // Retry once per lifecycle revision: a durable id+name binding is
+          // evidence of the discovery/finality race, while an indefinitely
+          // absent index row must still let the dispatcher become idle.
+          state.finalizedAbsenceRetryRevisions.set(contextGraphId, revision);
+          finalizedAbsenceRetries.push([contextGraphId, revision]);
+        } else if (
+          authorityRequest.kind !== 'finalized-absence'
+          || responsibility.active
+        ) {
+          state.finalizedAbsenceRetryRevisions.delete(contextGraphId);
+        }
       } catch (error) {
         if (ownerSignal.aborted) {
           pending.clear();
@@ -2869,6 +2908,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         );
       }
     }
+    if (finalizedAbsenceRetries.length === 0) return;
+    try {
+      await waitForRfc64ScheduledResponsibilityDelayV1(
+        ownerSignal,
+        RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1,
+      );
+      ownerSignal.throwIfAborted();
+    } catch (retryError) {
+      if (ownerSignal.aborted) pending.clear();
+      throw retryError;
+    }
+    for (const [contextGraphId, revision] of finalizedAbsenceRetries) {
+      if (
+        isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)
+        && !pending.has(contextGraphId)
+      ) {
+        pending.set(contextGraphId, revision);
+      }
+    }
+    this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+      RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+      (signal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(signal),
+    );
   }
 
   /** Test/operator fence for asynchronous access-policy responsibility reads. */
