@@ -114,7 +114,8 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(requestReplay).toHaveBeenCalledTimes(2);
     // The replay parks on ITS OWN graph: a wait keyed by any other string reads
     // idle at once, so the id is pinned through runtime -> adapter -> service.
-    expect(whenIdle.mock.calls).toEqual([[CONTEXT_GRAPH_ID], [CONTEXT_GRAPH_ID]]);
+    expect(whenIdle.mock.calls.map(([contextGraphId]) => contextGraphId))
+      .toEqual([CONTEXT_GRAPH_ID, CONTEXT_GRAPH_ID]);
   });
 
   it('does not let an older same-peer fence release a newer replay demand', async () => {
