@@ -458,6 +458,50 @@ export class ContextGraphAuthorityIndexProjectionCache {
     }
   }
 
+  /**
+   * Serve ONLY what this cache already holds. Never scans, never refreshes.
+   *
+   * {@link read} below exists to answer at any cost: a miss waits for an
+   * in-flight refresh and then performs one itself, which is a live head read,
+   * a paged `eth_getLogs` scan back to the deployment block and a stabilization
+   * fence. That is the correct behaviour for a caller that NEEDS the answer.
+   *
+   * It is the wrong behaviour for a caller that merely PREFERS a local one. A
+   * bounded-freshness reader is trying to avoid a single `eth_call`; escalating
+   * its miss into a full rescan would cost orders of magnitude more than the
+   * read it was trying to skip, and would do so exactly when the index is cold
+   * — at startup, after a Hub rotation, on first contact with a graph — which
+   * is when the most callers arrive at once.
+   *
+   * So a miss here is simply a miss. The caller falls back to whatever it would
+   * have done anyway, and the index catches up on its own tick.
+   *
+   * Every admission rule {@link read} applies still applies: the service
+   * window, the completeness predicate, and the anchor validation for a
+   * projection carrying an unsettled tail. This only removes the escalation.
+   */
+  async peek<T>(
+    input: Omit<ContextGraphAuthorityIndexProjectionReadInput<T>, 'refresh'>,
+  ): Promise<Readonly<{ hit: true; value: T } | { hit: false }>> {
+    input.signal?.throwIfAborted();
+    // `refresh` is structurally required by the shared input and is never
+    // reachable from here — `#serve` only ever reads retained state. It is
+    // supplied as a thrower rather than a no-op so that a future edit which
+    // does reach it fails loudly instead of silently returning nothing.
+    const served = await this.#serve(
+      {
+        ...input,
+        refresh: () => {
+          throw new Error('peek must never refresh a Context Graph authority projection');
+        },
+      } as ContextGraphAuthorityIndexProjectionReadInput<T>,
+      'backing-off',
+    );
+    return served.hit
+      ? Object.freeze({ hit: true as const, value: served.value })
+      : Object.freeze({ hit: false as const });
+  }
+
   async read<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
     input.signal?.throwIfAborted();
     const cached = await this.#serve(input, 'backing-off');

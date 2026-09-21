@@ -684,6 +684,17 @@ export class EVMChainAdapterBase {
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
   protected readonly finalityConfirmations: number;
+  /**
+   * `chain.boundedAuthorityReads` — may the node's own event index answer a
+   * Context Graph authority read that asked for `freshness: 'bounded'`?
+   *
+   * OFF by default, and deliberately an operator switch rather than a code
+   * path: it is the one control that can be thrown without a deploy when the
+   * index is suspected of serving a roster the chain disagrees with. It can
+   * only ever REMOVE the index from the answer — no gate is disabled by it, and
+   * every read it declines falls through to the live chain read.
+   */
+  protected readonly contextGraphBoundedAuthorityReadsEnabled: boolean;
   protected readonly receiptFinality: EvmReceiptFinalityReader;
 
   protected readonly maxFeePerGasWei?: bigint;
@@ -1327,6 +1338,10 @@ export class EVMChainAdapterBase {
       stallAfterMs: resolveTxSerializerStallAfterMs(this.receiptTimeoutMs),
     });
     this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
+    // Strict `=== true`: an operator who has not stated an opinion, or who
+    // supplied a truthy-but-not-boolean value from a config file, gets the
+    // live read.
+    this.contextGraphBoundedAuthorityReadsEnabled = config.boundedAuthorityReads === true;
     this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])

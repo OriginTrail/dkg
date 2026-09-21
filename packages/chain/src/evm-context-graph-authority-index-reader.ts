@@ -6,6 +6,7 @@ import type {
   ContextGraphAuthoritySnapshot,
   ContextGraphFinalizedCreation,
   ContextGraphAuthorityIndexRevisionReader,
+  ContextGraphLiveAuthority,
 } from './chain-adapter.js';
 import {
   ContextGraphAuthorityIndex,
@@ -520,6 +521,17 @@ class EvmContextGraphAuthorityIndexRevisionReadLifecycleV1 {
 export interface EvmContextGraphAuthorityIndexReaderV1
   extends ContextGraphAuthorityIndexRevisionReader {
   readonly snapshots: ContextGraphAuthorityIndexSnapshots;
+  /**
+   * Liveness, access policy and roster from the index's retained projection,
+   * or `undefined` when it cannot answer without going to the chain.
+   *
+   * Never escalates to a scan, and never reports `null`: absence here means
+   * "not folded yet", which is not the adapter's "proved nonexistent".
+   */
+  peekContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options?: ContextGraphAuthorityReadOptions,
+  ): Promise<ContextGraphLiveAuthority | undefined>;
   readContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
     options?: ContextGraphAuthorityReadOptions,
@@ -789,6 +801,66 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
    * must advance the durable cursor every pass and feeds only the servable
    * durable snapshot.
    */
+  /**
+   * The same retained-projection read, minus the escalation.
+   *
+   * {@link readFinalizedProjection} answers at any cost: a miss ends in
+   * `rescanFinalizedProjection`, which is a live head read plus a paged
+   * `eth_getLogs` walk back to the deployment block. That is right for a caller
+   * that needs the answer.
+   *
+   * A bounded-freshness caller is trying to avoid ONE `eth_call`. Escalating
+   * its miss into a full rescan would cost orders of magnitude more than the
+   * read it was avoiding, and would do it precisely when the index is cold — at
+   * startup, after a Hub rotation, on first contact with a graph — which is
+   * when the most callers arrive together. So a miss is reported as a miss and
+   * the caller does what it would have done anyway.
+   *
+   * Anchor validation is deliberately kept: a retained projection carrying an
+   * unsettled tail is admitted here by exactly the rule the escalating path
+   * uses, so relaxing freshness never relaxes reorg safety.
+   */
+  const peekFinalizedProjection = async <T>(
+    operationLabel: string,
+    options: ContextGraphAuthorityReadOptions,
+    read: (projection: ContextGraphAuthorityIndexProjection) => Readonly<{
+      complete: boolean;
+      value: T;
+    }>,
+  ): Promise<Readonly<{ hit: true; value: T } | { hit: false }>> => {
+    assertOpen();
+    options.signal?.throwIfAborted();
+    await dependencies.initialize();
+    assertOpen();
+    options.signal?.throwIfAborted();
+    const scope = contextGraphAuthorityIndexScope(
+      dependencies.deploymentId,
+      await dependencies.requireContextGraphStorage().getAddress(),
+    );
+    return dependencies.index.peekProjection({
+      scope,
+      signal: options.signal,
+      project: read,
+      validateAnchor: async (cached) => dependencies.readTipProvider(
+        `${operationLabel} cached projection anchor`,
+        async (provider) => {
+          const anchor = await withRpcUsageConsumer(
+            'authorityProjection.validateAnchor',
+            () => readEvmContextGraphAuthorityIndexRpcV1(
+              `${operationLabel} cached projection anchor block`,
+              () => provider.getBlock(cached.finalized.number),
+              options.signal,
+            ),
+          );
+          if (anchor?.hash == null) return undefined;
+          return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();
+        },
+        { signal: options.signal },
+      ),
+      onServed: options.onContextGraphAuthorityProjectionServed,
+    });
+  };
+
   const readFinalizedProjection = async <T>(
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
@@ -1000,6 +1072,38 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         lifecycle.whenIdle(),
         dependencies.index.whenIdle(),
       ]);
+    },
+    async peekContextGraphLiveAuthority(
+      contextGraphId: bigint,
+      options: ContextGraphAuthorityReadOptions = {},
+    ): Promise<ContextGraphLiveAuthority | undefined> {
+      const target = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
+      const peeked = await peekFinalizedProjection<ContextGraphLiveAuthority | undefined>(
+        'peekContextGraphLiveAuthority',
+        options,
+        ({ view }) => {
+          // ONE fold position answers all three fields, or none of them does.
+          // Composing liveness from the fold with a roster from anywhere else
+          // is how a policy and the membership it governs come to disagree.
+          const complete = view.has(target);
+          if (!complete) return { complete, value: undefined };
+          const state = view.resolve(target);
+          return {
+            complete,
+            value: Object.freeze({
+              active: state.active,
+              accessPolicy: state.accessPolicy,
+              participantAgents: Object.freeze([...state.participantAgents]),
+            }),
+          };
+        },
+      );
+      // ABSENCE IS `undefined`, NEVER `null`. `null` is the adapter's proof
+      // that the chain does not have this id — terminal, never retried. The
+      // index not having folded a creation event yet proves nothing of the
+      // sort: the graph may have been created one block ago. Returning `null`
+      // here would turn "not indexed yet" into "does not exist".
+      return peeked.hit ? peeked.value : undefined;
     },
     async readContextGraphAuthoritySnapshot(
       contextGraphId: bigint,
