@@ -739,6 +739,26 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<ContextGraphLiveAuthority | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    // BEFORE THE COALESCER, AND THAT IS THE WHOLE POINT.
+    //
+    // `flightKey` below carries no freshness component, so a bounded answer
+    // placed inside `run()` would be handed to every caller sharing that key —
+    // including a live one that asked precisely because its decision cannot
+    // tolerate a stale roster. The coalescer's contract, stated in its own
+    // header and in the docstring above, is that it only ever carries reads
+    // with zero staleness; that is what lets the security gates use it.
+    //
+    // So a bounded read is answered here or not at all. A miss simply falls
+    // through to the live read below, unchanged.
+    if (this.contextGraphBoundedAuthorityReadsEnabled
+      && options.freshness === 'bounded') {
+      const peeked = await this.contextGraphAuthorityIndexReader
+        ?.peekContextGraphLiveAuthority(contextGraphId, { signal: options.signal });
+      // `undefined` is "the index cannot answer", never "no such graph": the
+      // caller falls back to the chain rather than inheriting a conclusion the
+      // index never reached.
+      if (peeked !== undefined) return peeked;
+    }
     // Full lineage, never the bare numeric id: ContextGraphStorage hands out
     // sequential ids, so another deployment reuses them freely.
     const flightKey = [
