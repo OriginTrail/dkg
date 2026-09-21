@@ -2747,16 +2747,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     revision: number,
     authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1,
     responsibility: Rfc64CatalogResponsibilitySelectionV1,
-  ): boolean {
+  ): void {
     const state = rfc64ScheduledResponsibilityStateForV1(this);
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
     const eligible = authorityRequest.kind === 'finalized-absence'
       && !responsibility.active
+      && !this.config.rfc64CatalogExecutionPlan.killSwitchActive
       && isRfc64ActiveRegisteredSubscriptionV1(subscription)
       && isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision);
     if (!eligible) {
       this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, revision);
-      return false;
+      return;
     }
 
     const previous = state.finalizedAbsenceRetries.get(contextGraphId);
@@ -2766,7 +2767,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       revision,
       attempt,
     );
-    if (retry === null) return false;
+    if (retry === null) return;
     state.finalizedAbsenceRetries.set(contextGraphId, retry);
     const scheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
       retry.key,
@@ -2809,7 +2810,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (!scheduled) {
       this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, retry.revision);
     }
-    return scheduled;
   }
 
   /** One immutable scheduled selection set owns one finalized authority batch. */
