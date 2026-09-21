@@ -1,5 +1,6 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer } from '@origintrail-official/dkg-graph-computer';
+import { createUuid } from '@origintrail-official/dkg-graph-computer';
 import { programClient } from './client.js';
 import { WalletConnectControl } from '../Wallet/WalletConnectControl.js';
 import { useWalletStore } from '../../stores/wallet.js';
@@ -121,7 +122,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     if (childIris.some(iri => !iri) || childIris.length !== children.length) throw new Error('Each child needs a distinct Program IRI.');
     const fingerprint = JSON.stringify([source, version, childIris]);
     if (saveAttempt.current?.fingerprint !== fingerprint) {
-      const id = crypto.randomUUID();
+      const id = createUuid();
       saveAttempt.current = { fingerprint, programIri: `urn:dkg:program:${id}`, name: `program-${id}` };
     }
     const attempt = saveAttempt.current!;

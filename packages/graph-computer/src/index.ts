@@ -1,6 +1,7 @@
 import { getAddress } from 'ethers';
 import { GraphComputerError } from './errors.js';
 import { canonicalInputs } from './inputs.js';
+import { createUuid } from './uuid.js';
 import { sha256, signInvocation } from './signing.js';
 import { assertPeer, integer, isRecord, Transport } from './transport.js';
 import type {
@@ -9,6 +10,7 @@ import type {
 } from './types.js';
 
 export { GraphComputerError } from './errors.js';
+export { createUuid } from './uuid.js';
 export type * from './types.js';
 
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
@@ -49,7 +51,7 @@ class Programs {
     const language = input.language ?? 'sexpr-v1';
     if (!['sexpr-v1', 'typescript-v1'].includes(language)) throw new TypeError('Unsupported Program language');
     if (input.permittedPrograms !== undefined && !Array.isArray(input.permittedPrograms)) throw new TypeError('permittedPrograms must be an array');
-    const id = crypto.randomUUID();
+    const id = createUuid();
     const programIri = iri(input.programIri ?? `urn:dkg:program:${id}`);
     const name = input.name ?? `program-${id}`;
     const version = input.version ?? '1.0.0';
@@ -111,7 +113,7 @@ class Programs {
     }
     const value: PreparedInvocation = {
       graphId: graph(input.graphId), operationIri: iri(input.operationIri),
-      invocationId: input.invocationId ?? crypto.randomUUID(),
+      invocationId: input.invocationId ?? createUuid(),
       executorPeerId: input.executorPeerId ?? this.transport.options.executorPeerId,
       ...(input.inputs !== undefined ? { inputs: JSON.parse(canonicalInputs(input.inputs)) } : {}),
     };

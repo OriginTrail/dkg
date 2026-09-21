@@ -4,7 +4,7 @@ import { Wallet, verifyMessage } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentHttpSigningMessage } from '../../cli/src/agent-http-signing.js';
 import { verifyAgentDelegation } from '../../agent/src/auth/agent-delegation.js';
-import { GraphComputer, GraphComputerError, type GraphComputerOptions } from '../src/index.js';
+import { createUuid, GraphComputer, GraphComputerError, type GraphComputerOptions } from '../src/index.js';
 import { sha256 } from '../src/signing.js';
 import { boundSemanticInvocationScope } from '../../cli/src/semantic-runtime-bound-invocation.js';
 
@@ -45,6 +45,14 @@ function verifyHttp(url: URL, init: RequestInit) {
 }
 
 describe('Program client', () => {
+  it('creates Program and invocation IDs without the secure-context-only native UUID API', () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => { throw new Error('Unavailable on HTTP'); });
+    const id = createUuid();
+    const prepared = client(vi.fn()).programs.prepareInvocation(operation);
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(prepared.invocationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(prepared.invocationId).not.toBe(id);
+  });
   it('calls the default browser fetch with the global receiver', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async function (this: unknown, _url, init) {
       expect(this).toBe(globalThis);

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createUuid } from '@origintrail-official/dkg-graph-computer';
 import type * as Monaco from 'monaco-editor/editor/editor.api';
 import type * as TypeScript from 'monaco-editor/languages/features/typescript/register';
 import { scriptUrl, styleUrl, editorWorkerUrl, typescriptWorkerUrl } from 'virtual:dkg-monaco-assets';
@@ -47,7 +48,7 @@ export default function TypeScriptEditor({ value, onChange, disabled }: {
     let cleanup: (() => void) | undefined;
     void loadRuntime().then(({ monaco }) => {
       if (disposed) return;
-      const model = monaco.editor.createModel(latest.current.value, 'typescript', monaco.Uri.parse(`file:///program-${crypto.randomUUID()}.ts`));
+      const model = monaco.editor.createModel(latest.current.value, 'typescript', monaco.Uri.parse(`file:///program-${createUuid()}.ts`));
       const instance = monaco.editor.create(container.current!, { model, automaticLayout: true,
         readOnly: latest.current.disabled, theme: useLayoutStore.getState().theme === 'dark' ? 'vs-dark' : 'vs',
         minimap: { enabled: false }, wordWrap: 'on', fontSize: 13, tabSize: 2, scrollBeyondLastLine: false,
