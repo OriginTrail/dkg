@@ -18,6 +18,12 @@ import { HubRotationPoller } from '../src/hub-rotation-poller.js';
 import type { ChainEventLogHubRotationWindow } from '../src/chain-event-log-binding.js';
 
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
+const FIRST_FORK_HASH = `0x${'ab'.repeat(32)}`;
+const SECOND_FORK_HASH = `0x${'cd'.repeat(32)}`;
+
+function hashForBlock(blockNumber: number): string {
+  return `0x${blockNumber.toString(16).padStart(64, '0')}`;
+}
 
 function hubContract(): Contract {
   return {
@@ -35,9 +41,18 @@ function hubContract(): Contract {
 function window(
   fromBlockNumber: number,
   throughBlockNumber: number,
-  rotations: ReadonlyArray<{ blockNumber: number; logIndex: number; contractName: string }>,
+  rotations: ReadonlyArray<{
+    blockNumber: number;
+    blockHash: string;
+    logIndex: number;
+    contractName: string;
+  }>,
 ): ChainEventLogHubRotationWindow {
-  return Object.freeze({ fromBlockNumber, throughBlockNumber, rotations: Object.freeze(rotations) });
+  return Object.freeze({
+    fromBlockNumber,
+    throughBlockNumber,
+    rotations: Object.freeze(rotations.map((rotation) => Object.freeze(rotation))),
+  });
 }
 
 interface Harness {
@@ -77,7 +92,12 @@ describe('HubRotationPoller over the one log', () => {
     const h = harness([
       window(1_001, 1_000, []),
       window(951, 1_050, [
-        { blockNumber: 1_010, logIndex: 0, contractName: 'ContextGraphStorage' },
+        {
+          blockNumber: 1_010,
+          blockHash: hashForBlock(1_010),
+          logIndex: 0,
+          contractName: 'ContextGraphStorage',
+        },
       ]),
     ]);
     h.poller.start(hubContract(), HUB_ADDRESS);
@@ -94,7 +114,12 @@ describe('HubRotationPoller over the one log', () => {
   it('takes its BASELINE from the log and dispatches nothing for it', async () => {
     const h = harness([
       window(1_001, 1_000, [
-        { blockNumber: 500, logIndex: 0, contractName: 'ShouldNeverBeReplayed' },
+        {
+          blockNumber: 500,
+          blockHash: hashForBlock(500),
+          logIndex: 0,
+          contractName: 'ShouldNeverBeReplayed',
+        },
       ]),
       window(951, 1_000, []),
     ]);
@@ -110,7 +135,12 @@ describe('HubRotationPoller over the one log', () => {
   });
 
   it('dispatches a contract name only once across overlapping windows', async () => {
-    const rotation = { blockNumber: 1_010, logIndex: 0, contractName: 'ContextGraphStorage' };
+    const rotation = {
+      blockNumber: 1_010,
+      blockHash: hashForBlock(1_010),
+      logIndex: 0,
+      contractName: 'ContextGraphStorage',
+    };
     const h = harness([
       window(1_001, 1_000, []),
       window(951, 1_050, [rotation]),
@@ -125,15 +155,62 @@ describe('HubRotationPoller over the one log', () => {
     h.poller.stop();
   });
 
+  it('deduplicates one canonical row when the source falls back from the log to RPC', async () => {
+    const encoded = hubContract().interface.encodeEventLog(
+      hubContract().interface.getEvent('ContractChanged')!,
+      ['ContextGraphStorage', '0x00000000000000000000000000000000000000b1'],
+    );
+    const provider = {
+      getBlockNumber: vi.fn(async () => 1_060),
+      getLogs: vi.fn(async () => [{
+        blockNumber: 1_010,
+        // The live transport may preserve a different hex-letter case than
+        // the normalized stored row; both still identify one canonical log.
+        blockHash: `0x${FIRST_FORK_HASH.slice(2).toUpperCase()}`,
+        transactionHash: `0x${'33'.repeat(32)}`,
+        index: 0,
+        topics: encoded.topics,
+        data: encoded.data,
+      }]),
+    };
+    const h = harness([
+      window(1_001, 1_000, []),
+      window(951, 1_050, [{
+        blockNumber: 1_010,
+        blockHash: FIRST_FORK_HASH,
+        logIndex: 0,
+        contractName: 'ContextGraphStorage',
+      }]),
+      undefined,
+    ], provider);
+    h.poller.start(hubContract(), HUB_ADDRESS);
+    await h.poller.pollOnce();
+    await h.poller.pollOnce();
+
+    expect(h.names).toEqual(['ContextGraphStorage']);
+    expect(provider.getLogs).toHaveBeenCalledTimes(1);
+    h.poller.stop();
+  });
+
   it('dispatches a DIFFERENT rotation that replaced the same position', async () => {
     const h = harness([
       window(1_001, 1_000, []),
       window(951, 1_050, [
-        { blockNumber: 1_010, logIndex: 0, contractName: 'ContextGraphStorage' },
+        {
+          blockNumber: 1_010,
+          blockHash: FIRST_FORK_HASH,
+          logIndex: 0,
+          contractName: 'ContextGraphStorage',
+        },
       ]),
       // A reorg put another rotation at the same (block, index).
       window(1_001, 1_060, [
-        { blockNumber: 1_010, logIndex: 0, contractName: 'ParametersStorage' },
+        {
+          blockNumber: 1_010,
+          blockHash: SECOND_FORK_HASH,
+          logIndex: 0,
+          contractName: 'ParametersStorage',
+        },
       ]),
     ]);
     h.poller.start(hubContract(), HUB_ADDRESS);
@@ -141,6 +218,34 @@ describe('HubRotationPoller over the one log', () => {
     await h.poller.pollOnce();
 
     expect(h.names).toEqual(['ContextGraphStorage', 'ParametersStorage']);
+    h.poller.stop();
+  });
+
+  it('dispatches a same-name rotation again when only the canonical fork changes', async () => {
+    const h = harness([
+      window(1_001, 1_000, []),
+      // Models ContractChanged(name, address) on the first fork.
+      window(951, 1_050, [{
+        blockNumber: 1_010,
+        blockHash: FIRST_FORK_HASH,
+        logIndex: 0,
+        contractName: 'ContextGraphStorage',
+      }]),
+      // The canonical fork can replace it with ContractRemoved(name, address)
+      // at the same position. Name and address are identical; the block hash
+      // is the faithful row identity that must make this a new dispatch.
+      window(1_001, 1_060, [{
+        blockNumber: 1_010,
+        blockHash: SECOND_FORK_HASH,
+        logIndex: 0,
+        contractName: 'ContextGraphStorage',
+      }]),
+    ]);
+    h.poller.start(hubContract(), HUB_ADDRESS);
+    await h.poller.pollOnce();
+    await h.poller.pollOnce();
+
+    expect(h.names).toEqual(['ContextGraphStorage', 'ContextGraphStorage']);
     h.poller.stop();
   });
 

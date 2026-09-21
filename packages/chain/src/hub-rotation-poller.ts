@@ -42,7 +42,6 @@ interface HubRotationBinding {
 
 type HubRotationLogWithIdentity = ethers.Log & {
   blockHash?: unknown;
-  transactionHash?: unknown;
   index?: unknown;
   logIndex?: unknown;
 };
@@ -138,13 +137,11 @@ export class HubRotationPoller {
    *
    * ZERO chain requests on this path: that is the whole point, and it is the
    * measured retirement of the `Hub_rotation_poll_getBlockNumber` /
-   * `Hub_rotation_poll_getLogs` pair. The dedupe identity is (block, index,
-   * name) rather than the live path's (blockHash, txHash, index) because a
-   * stored row carries no transaction hash into this listener — and it does
-   * not need one: re-dispatching the same NAME is idempotent by design
-   * (`applyHubRotationEventName` only invalidates caches), while a reorg that
-   * put a DIFFERENT rotation at the same position changes the identity and is
-   * dispatched.
+   * `Hub_rotation_poll_getLogs` pair. The stored row's (blockHash, logIndex)
+   * identity is the same one used by the live fallback: it remains stable
+   * across overlapping reads of one fork and changes for every reorg
+   * replacement, including a binding replaced by a removal of the same name
+   * and address.
    */
   private async pollOnceFromLog(generation: number): Promise<boolean> {
     const logSource = this.logSource;
@@ -172,7 +169,7 @@ export class HubRotationPoller {
     }
 
     for (const rotation of window.rotations) {
-      const identity = `${rotation.blockNumber}:${rotation.logIndex}:${rotation.contractName}`;
+      const identity = this.canonicalLogIdentity(rotation.blockHash, rotation.logIndex);
       if (this.seenLogIds.has(identity)) continue;
       this.seenLogIds.set(identity, rotation.blockNumber);
       this.onContractName(rotation.contractName);
@@ -285,14 +282,13 @@ export class HubRotationPoller {
   private logIdentity(log: ethers.Log): string {
     const maybe = log as HubRotationLogWithIdentity;
     const blockHash = typeof maybe.blockHash === 'string' ? maybe.blockHash : undefined;
-    const transactionHash = typeof maybe.transactionHash === 'string' ? maybe.transactionHash : undefined;
     const index = typeof maybe.index === 'number'
       ? maybe.index
       : typeof maybe.logIndex === 'number'
         ? maybe.logIndex
         : undefined;
-    if (blockHash && transactionHash && index != null) {
-      return `${blockHash}:${transactionHash}:${index}`;
+    if (blockHash && index != null) {
+      return this.canonicalLogIdentity(blockHash, index);
     }
     return [
       log.blockNumber,
@@ -300,6 +296,10 @@ export class HubRotationPoller {
       log.topics.join(','),
       log.data,
     ].join(':');
+  }
+
+  private canonicalLogIdentity(blockHash: string, logIndex: number): string {
+    return `${blockHash.toLowerCase()}:${logIndex}`;
   }
 
   private rememberLog(identity: string, log: ethers.Log): void {

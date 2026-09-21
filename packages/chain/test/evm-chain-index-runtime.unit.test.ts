@@ -504,6 +504,7 @@ describe('createEvmChainIndexRuntime', () => {
 
     expect(window!.rotations).toEqual([{
       blockNumber: 998,
+      blockHash: hexWord(998),
       logIndex: 0,
       contractName: 'ContextGraphStorage',
     }]);

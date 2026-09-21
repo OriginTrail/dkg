@@ -599,6 +599,7 @@ describe('EVMChainAdapter chain index wiring', () => {
         throughBlockNumber: 101,
         rotations: [{
           blockNumber: 101,
+          blockHash: hash(101),
           logIndex: 0,
           contractName: 'ContextGraphStorage',
         }],
@@ -611,6 +612,7 @@ describe('EVMChainAdapter chain index wiring', () => {
       throughBlockNumber: 11,
       rotations: [{
         blockNumber: 11,
+        blockHash: hash(11),
         logIndex: 0,
         contractName: 'DKGKnowledgeAssets',
       }],

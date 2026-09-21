@@ -478,6 +478,7 @@ export function createEvmChainIndexRuntime(
       throughBlockNumber: range.throughBlockNumber,
       rotations: Object.freeze(rotations.map((rotation) => Object.freeze({
         blockNumber: rotation.blockNumber,
+        blockHash: rotation.blockHash,
         logIndex: rotation.logIndex,
         contractName: rotation.contractName,
       }))),
