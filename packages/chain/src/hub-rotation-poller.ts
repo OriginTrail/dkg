@@ -149,10 +149,14 @@ export class HubRotationPoller {
   private async pollOnceFromLog(generation: number): Promise<boolean> {
     const logSource = this.logSource;
     if (logSource === undefined) return false;
-    const window: ChainEventLogHubRotationWindow | undefined = await logSource(
-      this.lastScannedBlock,
-      this.reorgBufferBlocks,
-    );
+    let window: ChainEventLogHubRotationWindow | undefined;
+    try {
+      window = await logSource(this.lastScannedBlock, this.reorgBufferBlocks);
+    } catch {
+      // A broken optional log path is the same refusal as a cold or lagging
+      // log: preserve Hub invalidation by paying for the live scan below.
+      return false;
+    }
     if (window === undefined) return false;
     if (!this.started || generation !== this.generation) return true;
 

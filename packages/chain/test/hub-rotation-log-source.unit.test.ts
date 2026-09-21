@@ -48,12 +48,16 @@ interface Harness {
 }
 
 function harness(
-  answers: ReadonlyArray<ChainEventLogHubRotationWindow | undefined>,
+  answers: ReadonlyArray<ChainEventLogHubRotationWindow | Error | undefined>,
   liveProvider?: Record<string, unknown>,
 ): Harness {
   const names: string[] = [];
   let call = 0;
-  const logSource = vi.fn(async () => answers[Math.min(call++, answers.length - 1)]);
+  const logSource = vi.fn(async () => {
+    const answer = answers[Math.min(call++, answers.length - 1)];
+    if (answer instanceof Error) throw answer;
+    return answer;
+  });
   const readProvider = vi.fn(async (
     _label: string,
     fn: (provider: unknown) => Promise<unknown>,
@@ -162,6 +166,35 @@ describe('HubRotationPoller over the one log', () => {
 
     // A cold or lagging log degrades to exactly the pre-log cost, never to a
     // missed rotation.
+    expect(h.names).toEqual(['ParametersStorage']);
+    expect(provider.getBlockNumber).toHaveBeenCalled();
+    expect(provider.getLogs).toHaveBeenCalled();
+    h.poller.stop();
+  });
+
+  it('falls back to the live scan when the log source rejects', async () => {
+    const encoded = hubContract().interface.encodeEventLog(
+      hubContract().interface.getEvent('ContractChanged')!,
+      ['ParametersStorage', '0x00000000000000000000000000000000000000c1'],
+    );
+    const provider = {
+      getBlockNumber: vi.fn(async () => 2_000),
+      getLogs: vi.fn(async () => [{
+        blockNumber: 1_990,
+        blockHash: `0x${'aa'.repeat(32)}`,
+        transactionHash: `0x${'bb'.repeat(32)}`,
+        index: 0,
+        topics: encoded.topics,
+        data: encoded.data,
+      }]),
+    };
+    const h = harness([
+      window(1_001, 1_000, []),
+      new Error('stored Hub window unavailable'),
+    ], provider);
+    h.poller.start(hubContract(), HUB_ADDRESS);
+    await h.poller.pollOnce();
+
     expect(h.names).toEqual(['ParametersStorage']);
     expect(provider.getBlockNumber).toHaveBeenCalled();
     expect(provider.getLogs).toHaveBeenCalled();
