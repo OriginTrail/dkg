@@ -227,11 +227,12 @@ function harness(options?: {
 
 describe('createEvmChainIndexRuntime', () => {
   it('wires the production idle budget to the anchor ceiling at large T', async () => {
-    // T=150s: Hub liveness accepts 450s, while the authority anchor caps at
-    // 300s. Two thirds of the binding 300s bound is a 200s idle delay. A
-    // deleted budget would stay at 150s; min->max would widen to 300s.
+    // T=120s: Hub liveness accepts 360s, while the authority anchor caps at
+    // 300s. After reserving T for latency growth, the binding bound permits a
+    // 180s idle delay. A deleted budget stays at 120s; using the Hub bound
+    // instead widens to 240s.
     const h = harness({
-      intervalMs: 150_000,
+      intervalMs: 120_000,
       deploymentBlockNumber: 1_000,
       chainTimeLeadSeconds: 3_600,
     });
@@ -239,7 +240,7 @@ describe('createEvmChainIndexRuntime', () => {
 
     for (let pass = 0; pass < 3; pass += 1) await h.fireRunner();
 
-    expect(h.runnerDelays).toEqual([0, 150_000, 150_000, 200_000]);
+    expect(h.runnerDelays).toEqual([0, 120_000, 120_000, 180_000]);
     await h.runtime.stop();
   });
 

@@ -17,6 +17,7 @@ import type { ChainIndexTick, ChainIndexTickResult } from '../src/chain-index/ch
 
 const ADVANCED: ChainIndexTickResult = Object.freeze({
   outcome: 'advanced',
+  pendingWork: false,
   logRequests: 1,
   blockRequests: 2,
 });
@@ -25,6 +26,7 @@ const ADVANCED: ChainIndexTickResult = Object.freeze({
 const PRODUCTIVE: ChainIndexTickResult = Object.freeze({
   outcome: 'advanced',
   fetchedRows: 1,
+  pendingWork: false,
   logRequests: 1,
   blockRequests: 2,
 });
@@ -43,6 +45,8 @@ interface RigOptions {
   readonly onError?: (error: unknown) => void;
   /** Throw from every `runOnce`, to drive the backoff. */
   readonly failing?: boolean;
+  /** Zero-based `runOnce` calls that throw after consuming their duration. */
+  readonly failAtPasses?: readonly number[];
   /** The readers' freshness contract; omitted keeps the flat period. */
   readonly idleHeadAgeBudgetMs?: number;
   /** Consumed in order by successive `runOnce` calls; then {@link ADVANCED}. */
@@ -78,10 +82,13 @@ function rig(options: RigOptions = {}): Rig {
   const tick = {
     runOnce: async () => {
       calls.push('tick');
-      nowMs += options.runOnceDurationsMs?.[passes] ?? 0;
-      if (options.failing === true) throw new Error('endpoint down');
-      const scripted = options.results?.[passes];
+      const pass = passes;
       passes += 1;
+      nowMs += options.runOnceDurationsMs?.[pass] ?? 0;
+      if (options.failing === true || options.failAtPasses?.includes(pass) === true) {
+        throw new Error('endpoint down');
+      }
+      const scripted = options.results?.[pass];
       return scripted ?? ADVANCED;
     },
     backfillOnce: async () => {
@@ -214,7 +221,7 @@ describe('ChainIndexRunner', () => {
     });
 
     it('widens the period only after consecutive quiet passes', async () => {
-      // 9,000 ms of budget, two thirds spendable, 1,000 ms period => 6x.
+      // 9,000 ms of budget, one third reserved, 1,000 ms period => 6x.
       const harness = rig({ idleHeadAgeBudgetMs: 9_000 });
       harness.runner.start();
 
@@ -260,26 +267,29 @@ describe('ChainIndexRunner', () => {
       }
     });
 
-    it('subtracts completed pass time before spending the freshness budget', async () => {
-      // Default production shape: T=6s, budget=18s, 12s spendable. The head is
-      // stamped before each 4s pass, so only 8s remain for the idle timer. Two
-      // adjacent passes then age the previous head by 4+8+4=16s, below 18s.
+    it('reserves the duration high-water plus one interval for a slower following pass', async () => {
+      // Default production shape: T=6s, budget=18s. Three 1s passes establish
+      // a 1s high-water mark. The next pass then grows to 7s: high-water + T.
+      // The widened delay must keep the still-visible prior head at exactly
+      // 1+10+7=18s, rather than the old 1+11+7=19s stale-head window. Once the
+      // 7s pass is observed, its monotonic reserve disables further widening.
       const harness = rig({
         intervalMs: 6_000,
         idleHeadAgeBudgetMs: 18_000,
-        runOnceDurationsMs: [4_000, 4_000, 4_000, 4_000],
+        runOnceDurationsMs: [1_000, 1_000, 1_000, 7_000, 1_000, 1_000],
       });
       harness.runner.start();
 
-      for (let pass = 0; pass < 4; pass += 1) await harness.fire();
+      for (let pass = 0; pass < 6; pass += 1) await harness.fire();
 
-      expect(harness.delays).toEqual([0, 6_000, 6_000, 8_000, 8_000]);
+      expect(harness.delays).toEqual([0, 6_000, 6_000, 10_000, 6_000, 6_000, 6_000]);
+      expect(1_000 + harness.delays[3]! + 7_000).toBe(18_000);
       await harness.runner.stop();
     });
 
     it('adds no idle delay when a successful pass already spent its allowance', async () => {
-      // A 13s pass has consumed more than the 12s spendable share. Keep the
-      // ordinary T=6s schedule; idle backoff must never make this case worse.
+      // A 13s pass plus its monotonic reserve leaves less than the ordinary
+      // T=6s schedule. Idle backoff must never make this case worse.
       const harness = rig({
         intervalMs: 6_000,
         idleHeadAgeBudgetMs: 18_000,
@@ -294,8 +304,8 @@ describe('ChainIndexRunner', () => {
     });
 
     it('does not widen at all when one period already spends the budget', async () => {
-      // 6,000 ms of budget leaves 4,000 spendable, which is less than one
-      // 5,000 ms period: the only honest multiplier is 1.
+      // 6,000 ms of budget leaves less than one 5,000 ms period after holding
+      // the next-pass reserve: the only honest multiplier is 1.
       const harness = rig({ intervalMs: 5_000, idleHeadAgeBudgetMs: 6_000 });
       harness.runner.start();
 
@@ -310,7 +320,9 @@ describe('ChainIndexRunner', () => {
       // converged. Slowing down while it is trying to converge is the one
       // thing the backoff must not do.
       for (const outcome of ['cas-lost', 'endpoint-lagging', 'fork-suspected', 'tombstoned'] as const) {
-        const stalled: ChainIndexTickResult = { outcome, logRequests: 1, blockRequests: 1 };
+        const stalled: ChainIndexTickResult = {
+          outcome, pendingWork: false, logRequests: 1, blockRequests: 1,
+        };
         const harness = rig({
           idleHeadAgeBudgetMs: 9_000,
           results: [stalled, stalled, stalled, stalled, stalled],
@@ -326,7 +338,7 @@ describe('ChainIndexRunner', () => {
 
     it('counts an unmoved head as quiet as well as an empty advance', async () => {
       const unmoved: ChainIndexTickResult = {
-        outcome: 'idle', logRequests: 1, blockRequests: 1,
+        outcome: 'idle', pendingWork: false, logRequests: 1, blockRequests: 1,
       };
       const harness = rig({
         idleHeadAgeBudgetMs: 9_000,
@@ -397,6 +409,24 @@ describe('ChainIndexRunner', () => {
       for (let pass = 0; pass < 4; pass += 1) await harness.fire();
 
       expect(harness.delays).toEqual([0, 1_000, 2_000, 4_000, 8_000]);
+      await harness.runner.stop();
+    });
+
+    it('resets quiet history when a pass throws', async () => {
+      const onError = vi.fn();
+      const harness = rig({
+        idleHeadAgeBudgetMs: 9_000,
+        failAtPasses: [3],
+        onError,
+      });
+      harness.runner.start();
+
+      // The third quiet pass widens. The fourth pass throws; its failure delay
+      // owns that period and the next successful quiet pass starts from zero.
+      for (let pass = 0; pass < 5; pass += 1) await harness.fire();
+
+      expect(harness.delays).toEqual([0, 1_000, 1_000, 6_000, 1_000, 1_000]);
+      expect(onError).toHaveBeenCalledTimes(1);
       await harness.runner.stop();
     });
   });

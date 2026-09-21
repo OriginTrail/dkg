@@ -145,7 +145,7 @@ export interface ChainIndexTickResult {
    * An empty page with this flag is not an idle scope: slowing it down would
    * delay convergence and prolong the readers' live-chain fallback.
    */
-  readonly pendingWork?: boolean;
+  readonly pendingWork: boolean;
   /** Physical `eth_getLogs` calls this tick issued. The one-log budget check. */
   readonly logRequests: number;
   readonly blockRequests: number;
@@ -317,7 +317,7 @@ export class ChainIndexTick {
       return this.#result(revision === undefined ? 'cas-lost' : 'idle', {
         head: observedHead,
         settledBlockNumber: cursor.settledBlockNumber,
-        pendingWork: state.coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
+        pendingWork: this.#hasIncompleteCoverage(state.coverage),
         blockRequests,
         logRequests: 0,
       });
@@ -366,7 +366,7 @@ export class ChainIndexTick {
       settledBlockNumber: settled.number,
       fetchedRows: fetch.rows.length,
       pendingWork: fetchThrough < observedHead.number
-        || coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
+        || this.#hasIncompleteCoverage(coverage),
       blockRequests,
       logRequests: fetch.logRequests,
     });
@@ -426,16 +426,21 @@ export class ChainIndexTick {
       rows: this.#flagRows(fetch.rows, throughBlock),
       coverage: [nextCoverage],
     });
+    const resultingCoverage = state.coverage.map((entry) => (
+      entry === incomplete ? nextCoverage : entry
+    ));
     return this.#result(revision === undefined ? 'cas-lost' : 'advanced', {
       settledBlockNumber: state.cursor.settledBlockNumber,
       fetchedRows: fetch.rows.length,
-      pendingWork: !chainEventLogCoverageIsComplete(nextCoverage)
-        || state.coverage.some((entry) => (
-          entry !== incomplete && !chainEventLogCoverageIsComplete(entry)
-        )),
+      pendingWork: this.#hasIncompleteCoverage(resultingCoverage),
       blockRequests: 0,
       logRequests: fetch.logRequests,
     });
+  }
+
+  /** One definition of whether any durable history lane still owes work. */
+  #hasIncompleteCoverage(coverage: readonly ChainEventLogCoverage[]): boolean {
+    return coverage.some((entry) => !chainEventLogCoverageIsComplete(entry));
   }
 
   /** Highest block one pass may fetch through, so catch-up stays bounded. */
@@ -540,7 +545,7 @@ export class ChainIndexTick {
       settledBlockNumber: settled.number,
       fetchedRows: fetch.rows.length,
       pendingWork: fetchThrough < head.number
-        || coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
+        || this.#hasIncompleteCoverage(coverage),
       blockRequests,
       logRequests: fetch.logRequests,
     });
@@ -887,7 +892,9 @@ export class ChainIndexTick {
 
   #result(
     outcome: ChainIndexTickOutcome,
-    detail: Omit<ChainIndexTickResult, 'outcome'>,
+    detail: Omit<ChainIndexTickResult, 'outcome' | 'pendingWork'> & {
+      readonly pendingWork?: boolean;
+    },
   ): ChainIndexTickResult {
     return Object.freeze({ outcome, pendingWork: false, ...detail });
   }
