@@ -14,7 +14,6 @@ interface MemoryChainEventLogScope {
   revision: number;
   state: ChainEventLogState | undefined;
   rows: ChainEventLogRow[];
-  tombstoned: boolean;
 }
 
 /**
@@ -31,8 +30,7 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
   tombstones = 0;
 
   async load(scope: string): Promise<ChainEventLogState | undefined> {
-    const held = this.#scopes.get(scope);
-    return held?.tombstoned === true ? undefined : held?.state;
+    return this.#scopes.get(scope)?.state;
   }
 
   async commit(
@@ -42,8 +40,8 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
   ): Promise<number | undefined> {
     let held = this.#scopes.get(scope);
     if (expectedRevision === undefined) {
-      if (held?.state !== undefined && !held.tombstoned) return undefined;
-    } else if (held?.state?.cursor.revision !== expectedRevision || held.tombstoned) {
+      if (held?.state !== undefined) return undefined;
+    } else if (held?.state?.cursor.revision !== expectedRevision) {
       return undefined;
     }
     if (held === undefined) {
@@ -51,7 +49,6 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
         revision: 0,
         state: undefined,
         rows: [],
-        tombstoned: false,
       };
       this.#scopes.set(scope, held);
     }
@@ -68,7 +65,6 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
       }
     }
     this.commits += 1;
-    held.tombstoned = false;
     held.revision += 1;
     // Mirrors the SQLite DELETE exactly: the tail goes ONLY inside the range
     // this commit re-fetched, so coverage can never outlive its rows.
@@ -102,7 +98,6 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
     if (held?.state?.cursor.revision !== expectedRevision) return undefined;
     this.tombstones += 1;
     held.revision += 1;
-    held.tombstoned = true;
     held.rows = [];
     held.state = undefined;
     return held.revision;
@@ -155,7 +150,6 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
       state,
       revision: state.cursor.revision,
       rows: [...rows],
-      tombstoned: false,
     });
   }
 

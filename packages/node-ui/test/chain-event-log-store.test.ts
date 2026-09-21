@@ -210,17 +210,20 @@ describe('SqliteChainEventLogStore', () => {
     const { store } = createStore();
     const rowA = row(11, 0, false, '0xaaaa');
     const rowB = { ...row(11, 0, false, '0xbbbb'), blockHash: hash(0xbb) };
-    const otherScopeCommit = commit(10, 12, [rowB]);
+    const otherScopeCommit = (headBlockNumber: number): SqliteChainEventLogCommit => {
+      const value = commit(10, headBlockNumber, [rowB]);
+      return {
+        ...value,
+        coverage: [{
+          ...value.coverage[0]!,
+          address: OTHER_ADDRESS,
+          coveredFromBlock: 2,
+        }],
+      };
+    };
 
     expect(await store.commit(SCOPE, undefined, commit(10, 12, [rowA]))).toBe(1);
-    expect(await store.commit(OTHER_SCOPE, undefined, {
-      ...otherScopeCommit,
-      coverage: [{
-        ...otherScopeCommit.coverage[0]!,
-        address: OTHER_ADDRESS,
-        coveredFromBlock: 2,
-      }],
-    })).toBe(1);
+    expect(await store.commit(OTHER_SCOPE, undefined, otherScopeCommit(12))).toBe(1);
 
     expect((await store.load(SCOPE))?.cursor.revision).toBe(1);
     expect((await store.load(SCOPE))?.coverage).toEqual([{
@@ -249,15 +252,7 @@ describe('SqliteChainEventLogStore', () => {
 
     expect(await store.commit(SCOPE, 1, commit(10, 13, [rowA]))).toBe(2);
     expect((await store.load(OTHER_SCOPE))?.cursor.revision).toBe(1);
-    const nextOtherScopeCommit = commit(10, 13, [rowB]);
-    expect(await store.commit(OTHER_SCOPE, 1, {
-      ...nextOtherScopeCommit,
-      coverage: [{
-        ...nextOtherScopeCommit.coverage[0]!,
-        address: OTHER_ADDRESS,
-        coveredFromBlock: 2,
-      }],
-    })).toBe(2);
+    expect(await store.commit(OTHER_SCOPE, 1, otherScopeCommit(13))).toBe(2);
 
     expect(await store.tombstone(SCOPE, 2)).toBe(3);
     expect(await store.load(SCOPE)).toBeUndefined();
