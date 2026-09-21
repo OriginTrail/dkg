@@ -165,6 +165,7 @@ export {
 } from './ack-transport.js';
 export {
   selectACKCandidatePeers,
+  selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
   type ACKCandidatePeerDiagnostic,

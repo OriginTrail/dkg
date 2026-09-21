@@ -8,7 +8,10 @@ import {
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2,
+  PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -127,6 +130,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
+  selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
@@ -2881,31 +2885,7 @@ export class DKGAgent extends DKGAgentBase {
     await store.insert(quads);
   }
 
-  /**
-   * Resolve network admission for every currently connected peer before an
-   * ACK round freezes its candidate set.
-   *
-   * `getACKCandidatePeers()` is synchronous, so it can only filter on
-   * admission evidence that already exists. A peer can nevertheless be
-   * connected and advertise the V2 StorageACK protocol while its identity
-   * probe is still retrying after a transient connection/open race. In a
-   * mixed-version network that omission is decisive: the collector may
-   * snapshot only two V2-capable peers for a three-signature quorum, then
-   * correctly fail as every legacy peer reports `PROTOCOL_UNSUPPORTED`.
-   *
-   * The explicit preflight bypasses only transient probe-backoff suppression;
-   * the signed network-identity proof is still mandatory. Failed probes are
-   * non-fatal here: those peers stay excluded by the existing admission
-   * filter, and the collector still fails closed when the verified pool cannot
-   * meet quorum. This never promotes an unverified peer and never changes the
-   * on-chain `requiredACKs` gate.
-   */
-  private async preflightConnectedACKPeerAdmission(
-    ctx: OperationContext,
-  ): Promise<void> {
-    const coordinator = this.networkAdmissionCoordinator;
-    if (!coordinator.enabled) return;
-
+  private connectedPeerIds(): string[] {
     const connectedPeerIds = new Set<string>();
     for (const peer of this.node.libp2p.getPeers()) {
       connectedPeerIds.add(peer.toString());
@@ -2914,30 +2894,41 @@ export class DKGAgent extends DKGAgentBase {
       connectedPeerIds.add(connection.remotePeer.toString());
     }
     connectedPeerIds.delete(this.peerId);
+    return [...connectedPeerIds];
+  }
 
-    const pending = [...connectedPeerIds].filter(
-      (peerId) => !coordinator.isAcceptedPeer(peerId) && !coordinator.isRejectedPeer(peerId),
-    );
-    if (pending.length === 0) return;
+  /**
+   * Resolve admission only for connected peers already known to be eligible
+   * for an ACK round. The publisher selector is the single source of truth: a
+   * configured ACK allowlist wins, otherwise every connected peer remains in
+   * the candidate universe because identify-derived core tiers may be partial.
+   * The coordinator owns admission, per-peer retry cooldown and bounded probe
+   * fan-out; signed same-network proof remains mandatory.
+   */
+  private async getACKCandidatePeersAfterAdmission(
+    protocol: string | undefined,
+    ctx: OperationContext,
+  ): Promise<string[]> {
+    const connected = this.connectedPeerIds();
+    const eligible = selectACKCandidateUniverse({
+      connectedPeers: connected,
+      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
+      selfPeerId: this.peerId,
+    });
 
-    const results = await Promise.allSettled(
-      // An operator-requested publish is an explicit, security-critical use
-      // of the peer. Bypass only the transient probe backoff, exactly as an
-      // explicit connect does; the signed network-identity proof itself is
-      // still mandatory and unchanged.
-      pending.map((peerId) => coordinator.ensureExplicitConnectAdmitted(peerId, ctx)),
-    );
-    let newlyAdmitted = 0;
-    let unresolved = 0;
-    for (const result of results) {
-      if (result.status === 'fulfilled' && result.value) newlyAdmitted += 1;
-      else unresolved += 1;
-    }
-    this.log.info(
+    const result = await this.networkAdmissionCoordinator.preflightPeerAdmission(
+      eligible,
       ctx,
-      `[ACKCollector] Admission preflight checked ${pending.length} connected peer(s): ` +
-      `${newlyAdmitted} newly admitted, ${unresolved} still excluded`,
+      { maxConcurrency: 4 },
     );
+    if (result.checked > 0) {
+      this.log.info(
+        ctx,
+        `[ACKCollector] Admission preflight checked ${result.checked} ACK-eligible peer(s): ` +
+        `${result.admitted} newly admitted, ${result.unresolved} still excluded`,
+      );
+    }
+    return this.getACKCandidatePeers(protocol);
   }
 
   /**
@@ -2984,16 +2975,10 @@ export class DKGAgent extends DKGAgentBase {
    * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
-    const connectedPeerIds = new Set<string>();
-    for (const peer of this.node.libp2p.getPeers()) {
-      connectedPeerIds.add(peer.toString());
-    }
-    for (const connection of this.node.libp2p.getConnections()) {
-      connectedPeerIds.add(connection.remotePeer.toString());
-    }
+    const connectedPeerIds = this.connectedPeerIds();
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = selectACKCandidatePeersWithDiagnostics({
-      connectedPeers: [...connectedPeerIds],
+      connectedPeers: connectedPeerIds,
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
@@ -3032,9 +3017,19 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(timeoutMs),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+        protocol,
+        this.ackOperationContext(protocol),
+      ),
       log: options.log,
     });
+  }
+
+  private ackOperationContext(protocol?: string): OperationContext {
+    const operation = protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
+      ? 'update'
+      : 'publish';
+    return createOperationContext(operation);
   }
 
   /**
@@ -3092,7 +3087,10 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+        protocol,
+        this.ackOperationContext(protocol),
+      ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -3203,8 +3201,6 @@ export class DKGAgent extends DKGAgentBase {
       }
 
       const result = await this.withStorageACKCollectionSlot(async () => {
-        const ctx = createOperationContext('publish');
-        await this.preflightConnectedACKPeerAdmission(ctx);
         return collector.collect({
           merkleRoot: params.merkleRoot,
           contextGraphId: cgIdBigInt,
@@ -3261,7 +3257,10 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+        protocol,
+        this.ackOperationContext(protocol),
+      ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -3374,8 +3373,6 @@ export class DKGAgent extends DKGAgentBase {
       }
 
       const result = await this.withStorageACKCollectionSlot(async () => {
-        const ctx = createOperationContext('update');
-        await this.preflightConnectedACKPeerAdmission(ctx);
         return collector.collectUpdate({
           kaId: params.kaId,
           contextGraphId: cgIdBigInt,
