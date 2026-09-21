@@ -6,6 +6,8 @@ export interface NetworkAdmissionProbeBackoffOptions {
   transientBaseMs: number;
   transientMaxMs: number;
   unreadableResponseMs: number;
+  /** Short ACK-preflight retry lease, independent of automatic backoff. */
+  preflightRetryMs: number;
 }
 
 export type NetworkAdmissionProbeBackoffKind = 'transient' | 'unreadable-response';
@@ -25,8 +27,8 @@ interface PeerProbeRetryState {
     kind: NetworkAdmissionProbeBackoffKind;
     reason: string;
     untilMs: number;
-    /** ACK preflight may bypass this suppression at most once. */
-    preflightBypassConsumed: boolean;
+    /** Do not let concurrent ACK rounds repeat the same bypass probe. */
+    preflightRetryAfterMs?: number;
   };
 }
 
@@ -56,6 +58,7 @@ export class NetworkAdmissionProbeRetryState {
       transientBaseMs: options.backoff?.transientBaseMs ?? 15_000,
       transientMaxMs: options.backoff?.transientMaxMs ?? 120_000,
       unreadableResponseMs: options.backoff?.unreadableResponseMs ?? 60_000,
+      preflightRetryMs: options.backoff?.preflightRetryMs ?? 3_000,
     };
     this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
     if (!Number.isInteger(this.maxEntries) || this.maxEntries <= 0) {
@@ -102,28 +105,29 @@ export class NetworkAdmissionProbeRetryState {
         kind,
         reason,
         untilMs: this.now() + delayMs,
-        preflightBypassConsumed: false,
       },
     });
   }
 
   /**
-   * Claim the single ACK-preflight bypass for the active suppression window.
-   * A peer without active suppression is immediately eligible.
+   * Claim a short ACK-preflight retry lease within the active automatic
+   * suppression window. This prevents concurrent probe storms without making
+   * ACK recovery wait for the much longer 15-120s automatic backoff.
    */
   claimPreflightProbe(peerId: CanonicalPeerId): boolean {
     const entry = this.peers.get(peerId);
     if (!entry?.suppression || !this.getActiveSuppression(peerId)) return true;
-    if (entry.suppression.preflightBypassConsumed) return false;
-    entry.suppression.preflightBypassConsumed = true;
+    const now = this.now();
+    if ((entry.suppression.preflightRetryAfterMs ?? 0) > now) return false;
+    entry.suppression.preflightRetryAfterMs = now + this.backoff.preflightRetryMs;
     return true;
   }
 
-  /** Mark a newly-created failure window as already used by ACK preflight. */
+  /** Start the short retry lease on a failure window created by ACK preflight. */
   markPreflightProbeAttempted(peerId: CanonicalPeerId): void {
     const entry = this.peers.get(peerId);
     if (!entry?.suppression || !this.getActiveSuppression(peerId)) return;
-    entry.suppression.preflightBypassConsumed = true;
+    entry.suppression.preflightRetryAfterMs = this.now() + this.backoff.preflightRetryMs;
   }
 
   clear(peerId: CanonicalPeerId): void {

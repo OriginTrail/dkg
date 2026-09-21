@@ -203,16 +203,30 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
   });
 
-  it('preflight bypasses automatic backoff once, then reuses its retry window', async () => {
+  it('preflight retries after a short lease and admits before automatic backoff expires', async () => {
     let now = 1_000;
-    const sendIdentityProbe = vi.fn(async () => {
-      throw new Error('peer still booting');
+    let attempt = 0;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('peer still booting');
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
     });
     const fixture = buildCoordinator({
       identity,
       sendIdentityProbe,
       now: () => now,
-      probeBackoff: { transientBaseMs: 100, transientMaxMs: 100 },
+      probeBackoff: {
+        transientBaseMs: 10_000,
+        transientMaxMs: 10_000,
+        preflightRetryMs: 100,
+      },
     });
     fixture.admission.rememberRetryableProbeFailure(REMOTE_PEER_ID, 'peer still booting', 'transient');
 
@@ -232,8 +246,9 @@ describe('NetworkAdmissionCoordinator', () => {
     await expect(fixture.coordinator.preflightPeerAdmission(
       [REMOTE_PEER_ID],
       createOperationContext('publish'),
-    )).resolves.toEqual({ checked: 1, admitted: 0, unresolved: 1 });
+    )).resolves.toEqual({ checked: 1, admitted: 1, unresolved: 0 });
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
   });
 
   it('preflight admits a healthy peer despite an active automatic backoff', async () => {

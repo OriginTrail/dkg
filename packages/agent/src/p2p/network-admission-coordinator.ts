@@ -263,9 +263,10 @@ export class NetworkAdmissionCoordinator {
    * Resolve admission for a bounded, caller-selected peer set.
    *
    * The coordinator remains the sole owner of accepted/rejected state. An ACK
-   * round may bypass the active retry window once so a healthy peer cannot be
-   * frozen out of a quorum. The admission service owns that per-window claim,
-   * keeping automatic and preflight retry decisions on one bounded state map.
+   * round may briefly bypass the active retry window so a healthy peer cannot
+   * be frozen out of a quorum. The admission service owns a short preflight
+   * lease inside its bounded retry state, preventing concurrent probe storms
+   * without inheriting the longer automatic backoff.
    */
   async preflightPeerAdmission(
     peerIds: Iterable<string>,

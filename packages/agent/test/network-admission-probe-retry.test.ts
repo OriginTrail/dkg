@@ -12,6 +12,7 @@ function buildRetryState(input: {
   transientBaseMs?: number;
   transientMaxMs?: number;
   unreadableResponseMs?: number;
+  preflightRetryMs?: number;
 }) {
   return new NetworkAdmissionProbeRetryState({
     now: input.now,
@@ -20,6 +21,7 @@ function buildRetryState(input: {
       transientBaseMs: input.transientBaseMs ?? 100,
       transientMaxMs: input.transientMaxMs ?? 1_000,
       unreadableResponseMs: input.unreadableResponseMs ?? 250,
+      preflightRetryMs: input.preflightRetryMs ?? 100,
     },
   });
 }
@@ -157,9 +159,14 @@ describe('NetworkAdmissionProbeRetryState', () => {
     expect(state.getActiveSuppression(PEER_A)).toMatchObject({ failures: 1 });
   });
 
-  it('owns one ACK-preflight bypass claim per active suppression window', () => {
+  it('owns a short ACK-preflight lease inside the longer automatic suppression window', () => {
     let now = 1_000;
-    const state = buildRetryState({ now: () => now });
+    const state = buildRetryState({
+      now: () => now,
+      transientBaseMs: 1_000,
+      transientMaxMs: 1_000,
+      preflightRetryMs: 100,
+    });
 
     state.recordFailure(PEER_A, 'first', 'transient');
     expect(state.claimPreflightProbe(PEER_A)).toBe(true);
@@ -171,7 +178,8 @@ describe('NetworkAdmissionProbeRetryState', () => {
     state.markPreflightProbeAttempted(PEER_A);
     expect(state.claimPreflightProbe(PEER_A)).toBe(false);
 
-    now += 200;
+    now += 100;
     expect(state.claimPreflightProbe(PEER_A)).toBe(true);
+    expect(state.getActiveSuppression(PEER_A)).toMatchObject({ retryAfterMs: 900 });
   });
 });
