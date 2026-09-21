@@ -17,6 +17,7 @@ import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
 const HUB_ADDRESS = '0x00000000000000000000000000000000000000a1';
 const CG_STORAGE_ADDRESS = '0x00000000000000000000000000000000000000b2';
+const RUNTIME_SCOPE = 'evm:31337:hub=0xa1:0xa1';
 
 const HUB_EVENTS = [
   'event NewContract(string contractName, address newContractAddress)',
@@ -149,7 +150,7 @@ function harness(options?: {
     getLogs,
   };
   const runtime = createEvmChainIndexRuntime({
-    scope: 'evm:31337:hub=0xa1:0xa1',
+    scope: RUNTIME_SCOPE,
     store,
     intervalMs: options?.intervalMs ?? 6_000,
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
@@ -201,7 +202,7 @@ describe('createEvmChainIndexRuntime', () => {
 
     expect(h.getLogs).toHaveBeenCalled();
     expect(h.getLogs.mock.calls[0]![0].fromBlock).toBe(4_001);
-    const authority = (await h.store.load())?.coverage.find(
+    const authority = (await h.store.load(RUNTIME_SCOPE))?.coverage.find(
       (entry) => entry.family === 'context-graph-authority',
     );
     expect(authority?.coveredFromBlock).toBe(4_001);
@@ -257,7 +258,7 @@ describe('createEvmChainIndexRuntime', () => {
     });
     await h.runtime.tick.runOnce(new AbortController().signal);
 
-    const coverage = (await h.store.load('scope'))!.coverage.find((entry) => (
+    const coverage = (await h.store.load(RUNTIME_SCOPE))!.coverage.find((entry) => (
       entry.family === 'context-graph-authority'
       && entry.address === CG_STORAGE_ADDRESS.toLowerCase()
     ))!;
@@ -302,8 +303,8 @@ describe('createEvmChainIndexRuntime', () => {
   it('lends each exact-family lease without another chain request', async () => {
     const h = harness();
     await h.runtime.tick.runOnce(new AbortController().signal);
-    const state = (await h.store.load())!;
-    h.store.seed({
+    const state = (await h.store.load(RUNTIME_SCOPE))!;
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       coverage: state.coverage.map((entry) => entry.family === 'context-graph-ka'
         ? { ...entry, coveredThroughBlock: 997 }
@@ -328,7 +329,7 @@ describe('createEvmChainIndexRuntime', () => {
 
     // Corrupt/forward coverage must never turn this into a head oracle: the
     // runtime lends at most the head whose lineage it actually observed.
-    h.store.seed({
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       coverage: state.coverage.map((entry) => ({
         ...entry,
@@ -362,8 +363,8 @@ describe('createEvmChainIndexRuntime', () => {
   it('refuses coverage committed by a different decoder topic generation', async () => {
     const h = harness();
     await h.runtime.tick.runOnce(new AbortController().signal);
-    const state = (await h.store.load())!;
-    h.store.seed({
+    const state = (await h.store.load(RUNTIME_SCOPE))!;
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       cursor: { ...state.cursor, topicSetVersion: 'retired-topics' },
     });
@@ -375,8 +376,8 @@ describe('createEvmChainIndexRuntime', () => {
   it('refuses an event-scan lease without exact-address coverage for its family', async () => {
     const h = harness();
     await h.runtime.tick.runOnce(new AbortController().signal);
-    const state = (await h.store.load())!;
-    h.store.seed({
+    const state = (await h.store.load(RUNTIME_SCOPE))!;
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       coverage: state.coverage.map((entry) => entry.family === 'context-graph-ka'
         ? { ...entry, address: '0x00000000000000000000000000000000000000c3' }
@@ -385,7 +386,7 @@ describe('createEvmChainIndexRuntime', () => {
     await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_KA_SCAN_IDENTITY))
       .resolves.toBeUndefined();
 
-    h.store.seed({
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       coverage: state.coverage.filter((entry) => entry.family !== 'context-graph-ka'),
     });
@@ -403,8 +404,8 @@ describe('createEvmChainIndexRuntime', () => {
     expect(lease).toBeDefined();
     await expect(lease!.holds()).resolves.toBe(true);
 
-    const state = (await h.store.load())!;
-    h.store.seed({
+    const state = (await h.store.load(RUNTIME_SCOPE))!;
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       cursor: { ...state.cursor, revision: state.cursor.revision + 1 },
     });
@@ -424,8 +425,8 @@ describe('createEvmChainIndexRuntime', () => {
       .resolves.toBeUndefined();
 
     h.advanceMs(1);
-    const state = (await h.store.load())!;
-    h.store.seed({
+    const state = (await h.store.load(RUNTIME_SCOPE))!;
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       suspectedForkBlockNumber: state.cursor.settledBlockNumber,
     });
@@ -442,8 +443,8 @@ describe('createEvmChainIndexRuntime', () => {
   it('refuses Hub baseline and empty windows while a fork suspicion is held', async () => {
     const h = harness();
     await h.runtime.tick.runOnce(new AbortController().signal);
-    const state = (await h.store.load())!;
-    h.store.seed({
+    const state = (await h.store.load(RUNTIME_SCOPE))!;
+    h.store.seed(RUNTIME_SCOPE, {
       ...state,
       suspectedForkBlockNumber: state.cursor.settledBlockNumber,
     });

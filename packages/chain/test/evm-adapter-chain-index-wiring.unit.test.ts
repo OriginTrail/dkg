@@ -208,7 +208,10 @@ describe('EVMChainAdapter chain index wiring', () => {
 
     await internals.init();
     await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
-    await vi.waitUntil(async () => await store.load() !== undefined, { timeout: 2_000 });
+    await vi.waitUntil(
+      async () => await store.load(oneLogScope(adapter)) !== undefined,
+      { timeout: 2_000 },
+    );
 
     const now = Date.now();
     const contextGraphInterface = new ethers.Interface(loadAbi('ContextGraphStorage'));
@@ -228,7 +231,7 @@ describe('EVMChainAdapter chain index wiring', () => {
         settled: true,
       };
     };
-    store.seed({
+    store.seed(oneLogScope(adapter), {
       cursor: {
         revision: 1,
         lineage: hash(1),
@@ -503,7 +506,10 @@ describe('EVMChainAdapter chain index wiring', () => {
     const ownerBoundary = stubInitBoundary(owner);
     await ownerBoundary.internals.init();
     await vi.waitUntil(() => owner.chainEventLog !== undefined, { timeout: 2_000 });
-    await vi.waitUntil(async () => await store.load() !== undefined, { timeout: 2_000 });
+    await vi.waitUntil(
+      async () => await store.load(oneLogScope(owner)) !== undefined,
+      { timeout: 2_000 },
+    );
 
     const source = () => owner.chainEventLog;
     const borrowerA = new EVMChainAdapter({
@@ -669,9 +675,12 @@ describe('EVMChainAdapter chain index wiring', () => {
 
     startChainIndex(adapter);
     await chainIndexOwner(adapter).starting;
-    await vi.waitUntil(async () => await store.load() !== undefined, { timeout: 2_000 });
+    await vi.waitUntil(
+      async () => await store.load(oneLogScope(adapter)) !== undefined,
+      { timeout: 2_000 },
+    );
 
-    const authorityCoverage = (await store.load())?.coverage.find(
+    const authorityCoverage = (await store.load(oneLogScope(adapter)))?.coverage.find(
       (entry) => entry.family === 'context-graph-authority',
     );
     // The fixture head is 500: a cold start would begin at 450 (50-block

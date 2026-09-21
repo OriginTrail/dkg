@@ -80,7 +80,7 @@ function seededStore(
   rows: readonly ChainEventLogRow[],
 ): MemoryChainEventLogStore {
   const store = new MemoryChainEventLogStore();
-  store.seed({
+  store.seed(SCOPE, {
     cursor: {
       revision: 1,
       lineage: hash(1),

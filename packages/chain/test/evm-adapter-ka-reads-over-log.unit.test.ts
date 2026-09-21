@@ -68,7 +68,7 @@ function seeded(
   coveredThroughBlock = COVERED_THROUGH,
 ) {
   const store = new MemoryChainEventLogStore();
-  store.seed({
+  store.seed(SCOPE, {
     cursor: {
       revision: 1,
       lineage: hash(0x01),
