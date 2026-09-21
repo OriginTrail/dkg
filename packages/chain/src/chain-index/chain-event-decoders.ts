@@ -111,6 +111,7 @@ export interface HubRotationEvent {
   readonly contractAddress: string;
   readonly assetStorage: boolean;
   readonly blockNumber: number;
+  readonly blockHash: string;
   readonly logIndex: number;
 }
 
@@ -496,6 +497,7 @@ function decodeHubRotationLog(
     contractAddress,
     assetStorage: name.startsWith('AssetStorage') || name === 'NewAssetStorage',
     blockNumber: row.blockNumber,
+    blockHash: row.blockHash,
     logIndex: row.logIndex,
   });
 }

@@ -18,8 +18,8 @@ import { HubRotationPoller } from '../src/hub-rotation-poller.js';
 import type { ChainEventLogHubRotationWindow } from '../src/chain-event-log-binding.js';
 
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
-const FIRST_TARGET = '0x00000000000000000000000000000000000000b1';
-const SECOND_TARGET = '0x00000000000000000000000000000000000000c1';
+const FIRST_FORK_HASH = `0x${'11'.repeat(32)}`;
+const SECOND_FORK_HASH = `0x${'22'.repeat(32)}`;
 
 function hubContract(): Contract {
   return {
@@ -39,12 +39,19 @@ function window(
   throughBlockNumber: number,
   rotations: ReadonlyArray<{
     blockNumber: number;
+    blockHash?: string;
     logIndex: number;
     contractName: string;
-    contractAddress: string;
   }>,
 ): ChainEventLogHubRotationWindow {
-  return Object.freeze({ fromBlockNumber, throughBlockNumber, rotations: Object.freeze(rotations) });
+  return Object.freeze({
+    fromBlockNumber,
+    throughBlockNumber,
+    rotations: Object.freeze(rotations.map((rotation) => Object.freeze({
+      ...rotation,
+      blockHash: rotation.blockHash ?? `0x${rotation.blockNumber.toString(16).padStart(64, '0')}`,
+    }))),
+  });
 }
 
 interface Harness {
@@ -84,7 +91,6 @@ describe('HubRotationPoller over the one log', () => {
           blockNumber: 1_010,
           logIndex: 0,
           contractName: 'ContextGraphStorage',
-          contractAddress: FIRST_TARGET,
         },
       ]),
     ]);
@@ -106,7 +112,6 @@ describe('HubRotationPoller over the one log', () => {
           blockNumber: 500,
           logIndex: 0,
           contractName: 'ShouldNeverBeReplayed',
-          contractAddress: FIRST_TARGET,
         },
       ]),
       window(951, 1_000, []),
@@ -127,7 +132,6 @@ describe('HubRotationPoller over the one log', () => {
       blockNumber: 1_010,
       logIndex: 0,
       contractName: 'ContextGraphStorage',
-      contractAddress: FIRST_TARGET,
     };
     const h = harness([
       window(1_001, 1_000, []),
@@ -143,24 +147,59 @@ describe('HubRotationPoller over the one log', () => {
     h.poller.stop();
   });
 
+  it('deduplicates one canonical row when the source falls back from the log to RPC', async () => {
+    const encoded = hubContract().interface.encodeEventLog(
+      hubContract().interface.getEvent('ContractChanged')!,
+      ['ContextGraphStorage', '0x00000000000000000000000000000000000000b1'],
+    );
+    const provider = {
+      getBlockNumber: vi.fn(async () => 1_060),
+      getLogs: vi.fn(async () => [{
+        blockNumber: 1_010,
+        blockHash: FIRST_FORK_HASH,
+        transactionHash: `0x${'33'.repeat(32)}`,
+        index: 0,
+        topics: encoded.topics,
+        data: encoded.data,
+      }]),
+    };
+    const h = harness([
+      window(1_001, 1_000, []),
+      window(951, 1_050, [{
+        blockNumber: 1_010,
+        blockHash: FIRST_FORK_HASH,
+        logIndex: 0,
+        contractName: 'ContextGraphStorage',
+      }]),
+      undefined,
+    ], provider);
+    h.poller.start(hubContract(), HUB_ADDRESS);
+    await h.poller.pollOnce();
+    await h.poller.pollOnce();
+
+    expect(h.names).toEqual(['ContextGraphStorage']);
+    expect(provider.getLogs).toHaveBeenCalledTimes(1);
+    h.poller.stop();
+  });
+
   it('dispatches a DIFFERENT rotation that replaced the same position', async () => {
     const h = harness([
       window(1_001, 1_000, []),
       window(951, 1_050, [
         {
           blockNumber: 1_010,
+          blockHash: FIRST_FORK_HASH,
           logIndex: 0,
           contractName: 'ContextGraphStorage',
-          contractAddress: FIRST_TARGET,
         },
       ]),
       // A reorg put another rotation at the same (block, index).
       window(1_001, 1_060, [
         {
           blockNumber: 1_010,
+          blockHash: SECOND_FORK_HASH,
           logIndex: 0,
           contractName: 'ParametersStorage',
-          contractAddress: SECOND_TARGET,
         },
       ]),
     ]);
@@ -172,20 +211,24 @@ describe('HubRotationPoller over the one log', () => {
     h.poller.stop();
   });
 
-  it('dispatches the same name again when a reorg replaces its target address', async () => {
+  it('dispatches a same-name rotation again when only the canonical fork changes', async () => {
     const h = harness([
       window(1_001, 1_000, []),
+      // Models ContractChanged(name, address) on the first fork.
       window(951, 1_050, [{
         blockNumber: 1_010,
+        blockHash: FIRST_FORK_HASH,
         logIndex: 0,
         contractName: 'ContextGraphStorage',
-        contractAddress: FIRST_TARGET,
       }]),
+      // The canonical fork can replace it with ContractRemoved(name, address)
+      // at the same position. Name and address are identical; the block hash
+      // is the faithful row identity that must make this a new dispatch.
       window(1_001, 1_060, [{
         blockNumber: 1_010,
+        blockHash: SECOND_FORK_HASH,
         logIndex: 0,
         contractName: 'ContextGraphStorage',
-        contractAddress: SECOND_TARGET,
       }]),
     ]);
     h.poller.start(hubContract(), HUB_ADDRESS);

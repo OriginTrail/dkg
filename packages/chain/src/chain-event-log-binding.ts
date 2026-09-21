@@ -33,10 +33,10 @@ import type {
  */
 export interface ChainEventLogHubRotation {
   readonly blockNumber: number;
+  /** Canonical fork identity of the stored row. */
+  readonly blockHash: string;
   readonly logIndex: number;
   readonly contractName: string;
-  /** Lowercased target (or removed) address carried by the Hub event. */
-  readonly contractAddress: string;
 }
 
 /**
