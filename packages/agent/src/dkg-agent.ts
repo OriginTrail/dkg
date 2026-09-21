@@ -2882,6 +2882,65 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   /**
+   * Resolve network admission for every currently connected peer before an
+   * ACK round freezes its candidate set.
+   *
+   * `getACKCandidatePeers()` is synchronous, so it can only filter on
+   * admission evidence that already exists. A peer can nevertheless be
+   * connected and advertise the V2 StorageACK protocol while its identity
+   * probe is still retrying after a transient connection/open race. In a
+   * mixed-version network that omission is decisive: the collector may
+   * snapshot only two V2-capable peers for a three-signature quorum, then
+   * correctly fail as every legacy peer reports `PROTOCOL_UNSUPPORTED`.
+   *
+   * The explicit preflight bypasses only transient probe-backoff suppression;
+   * the signed network-identity proof is still mandatory. Failed probes are
+   * non-fatal here: those peers stay excluded by the existing admission
+   * filter, and the collector still fails closed when the verified pool cannot
+   * meet quorum. This never promotes an unverified peer and never changes the
+   * on-chain `requiredACKs` gate.
+   */
+  private async preflightConnectedACKPeerAdmission(
+    ctx: OperationContext,
+  ): Promise<void> {
+    const coordinator = this.networkAdmissionCoordinator;
+    if (!coordinator.enabled) return;
+
+    const connectedPeerIds = new Set<string>();
+    for (const peer of this.node.libp2p.getPeers()) {
+      connectedPeerIds.add(peer.toString());
+    }
+    for (const connection of this.node.libp2p.getConnections()) {
+      connectedPeerIds.add(connection.remotePeer.toString());
+    }
+    connectedPeerIds.delete(this.peerId);
+
+    const pending = [...connectedPeerIds].filter(
+      (peerId) => !coordinator.isAcceptedPeer(peerId) && !coordinator.isRejectedPeer(peerId),
+    );
+    if (pending.length === 0) return;
+
+    const results = await Promise.allSettled(
+      // An operator-requested publish is an explicit, security-critical use
+      // of the peer. Bypass only the transient probe backoff, exactly as an
+      // explicit connect does; the signed network-identity proof itself is
+      // still mandatory and unchanged.
+      pending.map((peerId) => coordinator.ensureExplicitConnectAdmitted(peerId, ctx)),
+    );
+    let newlyAdmitted = 0;
+    let unresolved = 0;
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value) newlyAdmitted += 1;
+      else unresolved += 1;
+    }
+    this.log.info(
+      ctx,
+      `[ACKCollector] Admission preflight checked ${pending.length} connected peer(s): ` +
+      `${newlyAdmitted} newly admitted, ${unresolved} still excluded`,
+    );
+  }
+
+  /**
    * Candidate peer pool for ACK collection (#1093 / #1482).
    *
    * `knownCorePeerIds` is populated from identify-time protocol lists in
@@ -3143,35 +3202,39 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(() => collector.collect({
-        merkleRoot: params.merkleRoot,
-        contextGraphId: cgIdBigInt,
-        contextGraphIdStr: params.contextGraphId,
-        publisherPeerId: this.peerId,
-        publicByteSize: params.publicByteSize,
-        isPrivate: params.ackMode.kind !== 'public',
-        kaCount: params.kaCount,
-        rootEntities: params.rootEntities,
-        chainId: chainIdBig,
-        kav10Address,
-        requiredACKs,
-        stagingQuads: params.stagingQuads,
-        epochs: params.epochs,
-        tokenAmount: params.tokenAmount,
-        swmGraphId: params.swmGraphId,
-        subGraphName: params.subGraphName,
-        merkleLeafCount: params.merkleLeafCount,
-        assetUal: params.assetUal,
-        contentScopeVersion: params.contentScopeVersion,
-        kaUal: params.kaUal,
-        assertionVersion: params.assertionVersion,
-        publicTripleCount: params.publicTripleCount,
-        privateMerkleRoot: params.privateMerkleRoot,
-        privateTripleCount: params.privateTripleCount,
-        accessPolicy: params.accessPolicy,
-        allowedPeers: params.allowedPeers,
-        ackMode: params.ackMode,
-      }));
+      const result = await this.withStorageACKCollectionSlot(async () => {
+        const ctx = createOperationContext('publish');
+        await this.preflightConnectedACKPeerAdmission(ctx);
+        return collector.collect({
+          merkleRoot: params.merkleRoot,
+          contextGraphId: cgIdBigInt,
+          contextGraphIdStr: params.contextGraphId,
+          publisherPeerId: this.peerId,
+          publicByteSize: params.publicByteSize,
+          isPrivate: params.ackMode.kind !== 'public',
+          kaCount: params.kaCount,
+          rootEntities: params.rootEntities,
+          chainId: chainIdBig,
+          kav10Address,
+          requiredACKs,
+          stagingQuads: params.stagingQuads,
+          epochs: params.epochs,
+          tokenAmount: params.tokenAmount,
+          swmGraphId: params.swmGraphId,
+          subGraphName: params.subGraphName,
+          merkleLeafCount: params.merkleLeafCount,
+          assetUal: params.assetUal,
+          contentScopeVersion: params.contentScopeVersion,
+          kaUal: params.kaUal,
+          assertionVersion: params.assertionVersion,
+          publicTripleCount: params.publicTripleCount,
+          privateMerkleRoot: params.privateMerkleRoot,
+          privateTripleCount: params.privateTripleCount,
+          accessPolicy: params.accessPolicy,
+          allowedPeers: params.allowedPeers,
+          ackMode: params.ackMode,
+        });
+      });
       return result.acks;
     };
   }
@@ -3310,35 +3373,39 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(() => collector.collectUpdate({
-        kaId: params.kaId,
-        contextGraphId: cgIdBigInt,
-        preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
-        newMerkleRoot: params.newMerkleRoot,
-        newByteSize: params.newByteSize,
-        newTokenAmount: params.newTokenAmount,
-        mintAmount: params.mintAmount,
-        burnTokenIds: params.burnTokenIds,
-        newMerkleLeafCount: params.newMerkleLeafCount,
-        newCatalogRoot: params.newCatalogRoot,
-        newCatalogLeafCount: params.newCatalogLeafCount,
-        chainId: chainIdBig,
-        kav10Address,
-        publisherPeerId: this.peerId,
-        requiredACKs,
-        swmGraphId: params.swmGraphId,
-        subGraphName: params.subGraphName,
-        stagingQuads: params.stagingQuads,
-        // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
-        // curated update so cores rebuild/verify/persist the inline catalog.
-        isEncryptedPayload: params.isEncryptedPayload,
-        contentScopeVersion: params.contentScopeVersion,
-        kaUal: params.kaUal,
-        assertionVersion: params.assertionVersion,
-        publicTripleCount: params.publicTripleCount,
-        privateMerkleRoot: params.privateMerkleRoot,
-        privateTripleCount: params.privateTripleCount,
-      }));
+      const result = await this.withStorageACKCollectionSlot(async () => {
+        const ctx = createOperationContext('update');
+        await this.preflightConnectedACKPeerAdmission(ctx);
+        return collector.collectUpdate({
+          kaId: params.kaId,
+          contextGraphId: cgIdBigInt,
+          preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
+          newMerkleRoot: params.newMerkleRoot,
+          newByteSize: params.newByteSize,
+          newTokenAmount: params.newTokenAmount,
+          mintAmount: params.mintAmount,
+          burnTokenIds: params.burnTokenIds,
+          newMerkleLeafCount: params.newMerkleLeafCount,
+          newCatalogRoot: params.newCatalogRoot,
+          newCatalogLeafCount: params.newCatalogLeafCount,
+          chainId: chainIdBig,
+          kav10Address,
+          publisherPeerId: this.peerId,
+          requiredACKs,
+          swmGraphId: params.swmGraphId,
+          subGraphName: params.subGraphName,
+          stagingQuads: params.stagingQuads,
+          // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
+          // curated update so cores rebuild/verify/persist the inline catalog.
+          isEncryptedPayload: params.isEncryptedPayload,
+          contentScopeVersion: params.contentScopeVersion,
+          kaUal: params.kaUal,
+          assertionVersion: params.assertionVersion,
+          publicTripleCount: params.publicTripleCount,
+          privateMerkleRoot: params.privateMerkleRoot,
+          privateTripleCount: params.privateTripleCount,
+        });
+      });
       return result.acks;
     };
   }

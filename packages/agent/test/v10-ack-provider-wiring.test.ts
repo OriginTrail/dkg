@@ -172,7 +172,18 @@ interface ProviderInternals {
       identityId: bigint,
     ) => Promise<VerifyACKIdentityResult>;
   };
-  node: { libp2p: { getPeers(): unknown[] } };
+  node: {
+    libp2p: {
+      getPeers(): Array<{ toString(): string }>;
+      getConnections?(): Array<{ remotePeer: { toString(): string } }>;
+    };
+  };
+  networkAdmissionCoordinator: {
+    enabled: boolean;
+    isAcceptedPeer(peerId: string): boolean;
+    isRejectedPeer(peerId: string): boolean;
+    ensureExplicitConnectAdmitted(peerId: string, ctx: unknown): Promise<boolean>;
+  };
 }
 
 async function bootProviderAgent(options: Record<string, unknown> = {}): Promise<{ agent: DKGAgent; internals: ProviderInternals }> {
@@ -395,6 +406,62 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await expect(first).resolves.toEqual([]);
     await vi.waitFor(() => expect(entered).toBe(2));
     await expect(second).resolves.toEqual([]);
+  });
+
+  it('preflights unresolved connected peers before freezing the ACK candidate pool', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    const accepted = new Set(['already-admitted']);
+    const ensureExplicitConnectAdmitted = vi.fn(async (peerId: string) => {
+      if (peerId === 'retryable-probe-failure') {
+        throw new Error('synthetic transient identity-probe failure');
+      }
+      accepted.add(peerId);
+      return true;
+    });
+    internals.networkAdmissionCoordinator = {
+      enabled: true,
+      isAcceptedPeer: (peerId) => accepted.has(peerId),
+      isRejectedPeer: (peerId) => peerId === 'rejected-peer',
+      ensureExplicitConnectAdmitted,
+    };
+    internals.node = {
+      libp2p: {
+        getPeers: () => [
+          'already-admitted',
+          'new-v2-core',
+          'rejected-peer',
+          'retryable-probe-failure',
+        ].map((id) => ({ toString: () => id })),
+        getConnections: () => [{
+          remotePeer: { toString: () => 'new-v2-core' },
+        }],
+      },
+    };
+    let collectSawAdmittedPeer = false;
+    publishCollectHook = async () => {
+      collectSawAdmittedPeer = accepted.has('new-v2-core');
+      return { acks: [] };
+    };
+    const provider = internals.createV10ACKProvider('test-cg') as V10ACKProviderObject;
+
+    await expect(provider({
+      merkleRoot: new Uint8Array(32).fill(0x11),
+      contextGraphId: '42',
+      kaCount: 1,
+      rootEntities: [],
+      publicByteSize: 10n,
+      merkleLeafCount: 1,
+      ackMode: { kind: 'public' },
+    })).resolves.toEqual([]);
+
+    expect(ensureExplicitConnectAdmitted).toHaveBeenCalledTimes(2);
+    expect(ensureExplicitConnectAdmitted).toHaveBeenCalledWith('new-v2-core', expect.any(Object));
+    expect(ensureExplicitConnectAdmitted).toHaveBeenCalledWith('retryable-probe-failure', expect.any(Object));
+    expect(ensureExplicitConnectAdmitted).not.toHaveBeenCalledWith('already-admitted', expect.anything());
+    expect(ensureExplicitConnectAdmitted).not.toHaveBeenCalledWith('rejected-peer', expect.anything());
+    expect(collectSawAdmittedPeer).toBe(true);
   });
 
   it('shares a configurable FIFO StorageACK limit across publish and update and releases rejected slots', async () => {
