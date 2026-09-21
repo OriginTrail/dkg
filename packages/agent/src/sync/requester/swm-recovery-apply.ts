@@ -12,6 +12,8 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import type { DurableRootAtomicCompanionResolver } from
+  '@origintrail-official/dkg-publisher';
 import {
   canonicalizeGraphScopedSwmHeadRows,
   type GraphScopedSwmRecoveryDescriptor,
@@ -291,6 +293,8 @@ export interface VerifiedSwmRecoveryApplyPorts {
     assets: readonly GraphScopedSwmRecoveryDescriptor[],
   ) => Promise<void>;
   readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
+  /** Durable negative-completeness boundary for recovered root SWM assets. */
+  readonly resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
   readonly ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
 }
 
@@ -357,43 +361,145 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
   asset: VerifiedSwmRecoveryGraphApply;
   ports: Pick<
     VerifiedSwmRecoveryApplyPorts,
-    'store' | 'replaceMetaForGraphAssets' | 'snapshotMaterializer'
+    | 'store'
+    | 'replaceMetaForGraphAssets'
+    | 'snapshotMaterializer'
+    | 'resolveRootAtomicCompanion'
   >;
 }>): Promise<VerifiedSwmRecoveryGraphAssetApplyResult> {
   const { asset, ports } = params;
-  if (asset.kind === 'replace') {
-    await ports.store.replaceGraph(
-      asset.descriptor.assertionGraph,
-      [...asset.replacementQuads],
-    );
-    await invalidateSwmMaterializationWitness(
-      ports.store,
-      asset.descriptor.assertionGraph,
-      { source: 'agent.swmRecovery.witnessInvalidate' },
-    ).catch(() => {});
-  }
+  const { descriptor } = asset;
+  return ports.snapshotMaterializer.withKaWriteLock(
+    params.contextGraphId,
+    descriptor.subGraphName,
+    descriptor.kaUal,
+    async () => {
+      // The recovery-level CG lock elects one provider, but live gossip uses
+      // this canonical per-KA lock. Re-read ordering only after acquiring it;
+      // otherwise a queued recovery can overwrite a newer live generation.
+      const storedHead = await ports.snapshotMaterializer.readStoredHead(descriptor);
+      if (storedHead.version !== null) {
+        try {
+          if (BigInt(storedHead.version) > BigInt(descriptor.assertionVersion)) {
+            return {
+              insertedGraphQuads: 0,
+              withholdRows: descriptor.metadataQuads.filter(
+                (quad) => quad.subject === descriptor.headSubject,
+              ),
+            };
+          }
+        } catch {
+          return {
+            insertedGraphQuads: 0,
+            withholdRows: descriptor.metadataQuads.filter(
+              (quad) => quad.subject === descriptor.headSubject,
+            ),
+          };
+        }
+      }
 
-  if (asset.kind === 'preserve-equivalent') {
-    const preservation = await ports.snapshotMaterializer
-      .preserveStoredIdentityForSkippedAsset(
-        params.contextGraphId,
-        asset.descriptor,
-      );
-    if (preservation.outcome === 'preserved') {
+      if (asset.kind === 'replace') {
+        const companion = descriptor.subGraphName === undefined
+          ? ports.resolveRootAtomicCompanion?.(Object.freeze({
+              contextGraphId: params.contextGraphId,
+              kaUal: descriptor.kaUal,
+              assertionVersion: descriptor.assertionVersion,
+              shareOperationId: descriptor.shareOperationId,
+            }))
+          : undefined;
+        if (companion === undefined) {
+          await ports.store.replaceGraph(
+            descriptor.assertionGraph,
+            [...asset.replacementQuads],
+          );
+          await invalidateSwmMaterializationWitness(
+            ports.store,
+            descriptor.assertionGraph,
+            { source: 'agent.swmRecovery.witnessInvalidate' },
+          ).catch(() => {});
+        } else {
+          await ports.snapshotMaterializer.replaceGraphWithAtomicCompanion(
+            descriptor.assertionGraph,
+            [...asset.replacementQuads],
+            companion,
+          );
+        }
+      }
+
+      if (asset.kind === 'preserve-equivalent') {
+        if (
+          descriptor.subGraphName === undefined
+          && ports.resolveRootAtomicCompanion !== undefined
+        ) {
+          const exactStoredGraph = await ports.snapshotMaterializer
+            .readExactMaterializedGraph(descriptor);
+          if (exactStoredGraph === null) {
+            throw new Error(
+              `stored root recovery asset ${descriptor.kaUal} changed before boundary commit`,
+            );
+          }
+          const companion = ports.resolveRootAtomicCompanion(Object.freeze({
+            contextGraphId: params.contextGraphId,
+            kaUal: descriptor.kaUal,
+            assertionVersion: descriptor.assertionVersion,
+            shareOperationId: descriptor.shareOperationId,
+          }));
+          if (companion !== undefined) {
+            await ports.snapshotMaterializer.replaceGraphWithAtomicCompanion(
+              descriptor.assertionGraph,
+              exactStoredGraph,
+              companion,
+            );
+          }
+        }
+
+        // This is the locked form of preserveStoredIdentityForSkippedAsset.
+        // Calling that convenience method here would reacquire the same key
+        // and deadlock; its component capabilities explicitly require the
+        // caller to hold this lock.
+        let sameVersion = false;
+        if (
+          !storedHead.needsRepair
+          && storedHead.version !== null
+          && storedHead.shareOperationId !== null
+        ) {
+          try {
+            sameVersion = BigInt(storedHead.version) === BigInt(descriptor.assertionVersion);
+          } catch {
+            sameVersion = false;
+          }
+        }
+        if (
+          sameVersion
+          && storedHead.shareOperationId !== descriptor.shareOperationId
+        ) {
+          const selected = await ports.snapshotMaterializer.selectRepairIdentity(
+            params.contextGraphId,
+            descriptor,
+          );
+          if (selected !== null) {
+            await ports.snapshotMaterializer.repairHeadPreservingIdentity(
+              params.contextGraphId,
+              descriptor,
+              selected.winnerShareOperationId,
+            );
+            return {
+              insertedGraphQuads: descriptor.publicQuadsCount,
+              withholdRows: selected.withholdRows,
+            };
+          }
+        }
+      }
+
+      await ports.replaceMetaForGraphAssets([descriptor]);
       return {
-        insertedGraphQuads: asset.descriptor.publicQuadsCount,
-        withholdRows: preservation.withholdRows,
+        insertedGraphQuads: asset.kind === 'replace'
+          ? asset.replacementQuads.length
+          : descriptor.publicQuadsCount,
+        withholdRows: [],
       };
-    }
-  }
-
-  await ports.replaceMetaForGraphAssets([asset.descriptor]);
-  return {
-    insertedGraphQuads: asset.kind === 'replace'
-      ? asset.replacementQuads.length
-      : asset.descriptor.publicQuadsCount,
-    withholdRows: [],
-  };
+    },
+  );
 }
 
 /**

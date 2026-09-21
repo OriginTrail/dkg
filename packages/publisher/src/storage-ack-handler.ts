@@ -3,7 +3,6 @@ import {
   deleteByPatternWithoutCount,
   GraphManager,
   loadSelectedSharedMemoryQuads,
-  tryReplaceGraphAtomically,
   type SharedMemoryReadSelection,
   type TripleStore,
   type Quad,
@@ -11,6 +10,10 @@ import {
   type StorePressureSnapshot,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
+import {
+  tryReplaceGraphWithDurableRootCompanionAtomically,
+  type DurableRootAtomicCompanionResolver,
+} from './durable-root-atomic-companion.js';
 import type {
   EventBus,
   PublishIntentMsg,
@@ -395,6 +398,8 @@ export interface StorageACKHandlerConfig {
   kav10Address: string;
   /** Shared publisher/agent lock domain for graph-scoped SWM KA writes. */
   workspaceWriteLocks?: Map<string, Promise<void>>;
+  /** Atomic negative-completeness witness for root graph-scoped ACK writes. */
+  resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -896,11 +901,20 @@ export class StorageACKHandler {
     });
 
     const persist = async () => this.runStoreOpOrDecline(cgId, async () => {
-      if (replaceGraph) {
-        const replaced = await tryReplaceGraphAtomically(
+      const companion = graphPublish.subGraphName === undefined
+        ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
+            contextGraphId: swmGraphId,
+            kaUal: graphPublish.scope.ual,
+            assertionVersion: graphPublish.scope.assertionVersion,
+            shareOperationId: operationId,
+          }))
+        : undefined;
+      if (replaceGraph || companion !== undefined) {
+        const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
           this.store,
           swmGraphUri,
           normalized,
+          companion,
           ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
         );
         if (!replaced) {

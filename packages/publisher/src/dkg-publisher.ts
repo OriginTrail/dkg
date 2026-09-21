@@ -97,6 +97,8 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { DurableRootAtomicCompanionResolver } from
+  './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
 import {
   parseWorkspaceAgentRecipientResolution,
@@ -528,6 +530,8 @@ export interface DKGPublisherConfig {
   resolveDurableRootPromotionAtomicCompanion?: (
     input: Readonly<DurableRootPromotionIdentity>,
   ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
+  /** Atomic late-boundary companion for root SWM staging/update writes. */
+  resolveDurableRootMaterializationAtomicCompanion?: DurableRootAtomicCompanionResolver;
   /**
    * RFC ka-metadata-trim Phase 3 (P3.3) — `metadata.provenanceEvents` config.
    * Default `true`. When `false` ("lite mode"), the lifecycle writers skip the
@@ -1173,6 +1177,8 @@ export class DKGPublisher implements Publisher {
   private readonly resolveDurableRootPromotionAtomicCompanion?: (
     input: Readonly<DurableRootPromotionIdentity>,
   ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
+  private readonly resolveDurableRootMaterializationAtomicCompanion?:
+    DurableRootAtomicCompanionResolver;
   /** Authors whose allocator floor has been reconciled against the chain this process. */
   private readonly reconciledKaAuthors = new Set<string>();
   /** RFC ka-metadata-trim P3.3 — gate for the lifecycle PROV event rows (default true). */
@@ -1184,6 +1190,8 @@ export class DKGPublisher implements Publisher {
     this.kaAllocator = config.kaAllocator;
     this.resolveDurableRootPromotionAtomicCompanion =
       config.resolveDurableRootPromotionAtomicCompanion;
+    this.resolveDurableRootMaterializationAtomicCompanion =
+      config.resolveDurableRootMaterializationAtomicCompanion;
     this.provenanceEvents = config.provenanceEvents !== false;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
@@ -1279,6 +1287,12 @@ export class DKGPublisher implements Publisher {
       store: this.store,
       writeLocks: this.writeLocks,
       graphManager: this.graphManager,
+      ...(this.resolveDurableRootMaterializationAtomicCompanion === undefined
+        ? {}
+        : {
+            resolveDurableRootAtomicCompanion:
+              this.resolveDurableRootMaterializationAtomicCompanion,
+          }),
       ...(this.publicSnapshotStore === undefined
         ? {}
         : { publicSnapshotStore: this.publicSnapshotStore }),
