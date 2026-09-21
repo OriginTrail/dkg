@@ -29,6 +29,15 @@ const PRODUCTIVE: ChainIndexTickResult = Object.freeze({
   blockRequests: 2,
 });
 
+/** An empty bounded page that left more of its lane to walk. */
+const PENDING: ChainIndexTickResult = Object.freeze({
+  outcome: 'advanced',
+  fetchedRows: 0,
+  pendingWork: true,
+  logRequests: 1,
+  blockRequests: 2,
+});
+
 interface RigOptions {
   readonly backfillEveryTicks?: number;
   readonly onError?: (error: unknown) => void;
@@ -40,6 +49,10 @@ interface RigOptions {
   readonly results?: readonly ChainIndexTickResult[];
   /** What `backfillOnce` returns; defaults to {@link ADVANCED}. */
   readonly backfillResult?: ChainIndexTickResult;
+  /** Monotonic milliseconds consumed by successive `runOnce` calls. */
+  readonly runOnceDurationsMs?: readonly number[];
+  /** Monotonic milliseconds consumed by every `backfillOnce` call. */
+  readonly backfillDurationMs?: number;
   /** Overrides the 1,000 ms default period. */
   readonly intervalMs?: number;
 }
@@ -58,11 +71,14 @@ function rig(options: RigOptions = {}): Rig {
   const calls: string[] = [];
   const delays: number[] = [];
   let pending: (() => void) | undefined;
+  let pendingDelayMs = 0;
+  let nowMs = 0;
 
   let passes = 0;
   const tick = {
     runOnce: async () => {
       calls.push('tick');
+      nowMs += options.runOnceDurationsMs?.[passes] ?? 0;
       if (options.failing === true) throw new Error('endpoint down');
       const scripted = options.results?.[passes];
       passes += 1;
@@ -70,6 +86,7 @@ function rig(options: RigOptions = {}): Rig {
     },
     backfillOnce: async () => {
       calls.push('backfill');
+      nowMs += options.backfillDurationMs ?? 0;
       return options.backfillResult ?? ADVANCED;
     },
   } as unknown as ChainIndexTick;
@@ -83,9 +100,11 @@ function rig(options: RigOptions = {}): Rig {
       ? {}
       : { idleHeadAgeBudgetMs: options.idleHeadAgeBudgetMs }),
     ...(options.onError === undefined ? {} : { onError: options.onError }),
+    now: () => nowMs,
     setTimer: (fn, ms) => {
       delays.push(ms);
       pending = fn;
+      pendingDelayMs = ms;
       return 0 as unknown as ReturnType<typeof setTimeout>;
     },
     clearTimer: () => { pending = undefined; },
@@ -98,6 +117,8 @@ function rig(options: RigOptions = {}): Rig {
     fire: async () => {
       const fn = pending;
       pending = undefined;
+      nowMs += pendingDelayMs;
+      pendingDelayMs = 0;
       fn?.();
       // Drain the pass and its `finally` reschedule. Four is comfortably more
       // than the chain of awaits one pass goes through.
@@ -235,6 +256,39 @@ describe('ChainIndexRunner', () => {
       }
     });
 
+    it('subtracts completed pass time before spending the freshness budget', async () => {
+      // Default production shape: T=6s, budget=18s, 12s spendable. The head is
+      // stamped before each 4s pass, so only 8s remain for the idle timer. Two
+      // adjacent passes then age the previous head by 4+8+4=16s, below 18s.
+      const harness = rig({
+        intervalMs: 6_000,
+        idleHeadAgeBudgetMs: 18_000,
+        runOnceDurationsMs: [4_000, 4_000, 4_000, 4_000],
+      });
+      harness.runner.start();
+
+      for (let pass = 0; pass < 4; pass += 1) await harness.fire();
+
+      expect(harness.delays).toEqual([0, 6_000, 6_000, 8_000, 8_000]);
+      await harness.runner.stop();
+    });
+
+    it('adds no idle delay when a successful pass already spent its allowance', async () => {
+      // A 13s pass has consumed more than the 12s spendable share. Keep the
+      // ordinary T=6s schedule; idle backoff must never make this case worse.
+      const harness = rig({
+        intervalMs: 6_000,
+        idleHeadAgeBudgetMs: 18_000,
+        runOnceDurationsMs: [13_000, 13_000, 13_000],
+      });
+      harness.runner.start();
+
+      for (let pass = 0; pass < 3; pass += 1) await harness.fire();
+
+      expect(harness.delays).toEqual([0, 6_000, 6_000, 6_000]);
+      await harness.runner.stop();
+    });
+
     it('does not widen at all when one period already spends the budget', async () => {
       // 6,000 ms of budget leaves 4,000 spendable, which is less than one
       // 5,000 ms period: the only honest multiplier is 1.
@@ -294,6 +348,35 @@ describe('ChainIndexRunner', () => {
       for (let pass = 0; pass < 4; pass += 1) await harness.fire();
 
       expect(harness.delays).toEqual([0, 1_000, 1_000, 1_000, 1_000]);
+      await harness.runner.stop();
+    });
+
+    it('holds the full period for empty bounded work that has not converged', async () => {
+      // An empty forward or backfill page still moved a coverage cursor. It is
+      // progress, not evidence that the scope has nothing left to learn.
+      const harness = rig({
+        idleHeadAgeBudgetMs: 9_000,
+        backfillEveryTicks: 1,
+        backfillResult: PENDING,
+      });
+      harness.runner.start();
+
+      for (let pass = 0; pass < 4; pass += 1) await harness.fire();
+
+      expect(harness.delays).toEqual([0, 1_000, 1_000, 1_000, 1_000]);
+      await harness.runner.stop();
+    });
+
+    it('resets quiet history when an empty forward page has more work', async () => {
+      const harness = rig({
+        idleHeadAgeBudgetMs: 9_000,
+        results: [ADVANCED, ADVANCED, PENDING, ADVANCED, ADVANCED, ADVANCED],
+      });
+      harness.runner.start();
+
+      for (let pass = 0; pass < 6; pass += 1) await harness.fire();
+
+      expect(harness.delays).toEqual([0, 1_000, 1_000, 1_000, 1_000, 1_000, 6_000]);
       await harness.runner.stop();
     });
 

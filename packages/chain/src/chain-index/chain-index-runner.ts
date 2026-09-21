@@ -22,8 +22,9 @@ const IDLE_TICKS_BEFORE_BACKOFF = 3;
  * The widened period is what decides how old `cursor.head` can be when a
  * reader arrives, and a head past the budget is REFUSED — the reader falls
  * back to the live chain read this loop exists to replace. Backing off past
- * the budget would therefore RAISE physical demand, so the ceiling keeps a
- * third of it in hand for the pass's own duration and for wall-clock skew.
+ * the budget would therefore RAISE physical demand. The completed pass is
+ * debited explicitly, and the ceiling keeps a final third in hand for the
+ * following pass and scheduler skew.
  */
 const IDLE_BACKOFF_BUDGET_NUMERATOR = 2;
 const IDLE_BACKOFF_BUDGET_DENOMINATOR = 3;
@@ -61,6 +62,8 @@ export interface ChainIndexRunnerOptions {
   readonly onError?: (error: unknown) => void;
   readonly setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   readonly clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
+  /** Monotonic elapsed-time source; injectable with the scheduler in tests. */
+  readonly now?: () => number;
 }
 
 /**
@@ -90,6 +93,7 @@ export class ChainIndexRunner {
   readonly #options: ChainIndexRunnerOptions;
   readonly #setTimer: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   readonly #clearTimer: (handle: ReturnType<typeof setTimeout>) => void;
+  readonly #now: () => number;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #abort: AbortController | undefined;
   #inFlight: Promise<void> | undefined;
@@ -107,6 +111,7 @@ export class ChainIndexRunner {
     this.#options = options;
     this.#setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.#clearTimer = options.clearTimer ?? ((handle) => { clearTimeout(handle); });
+    this.#now = options.now ?? (() => performance.now());
   }
 
   get started(): boolean {
@@ -148,27 +153,38 @@ export class ChainIndexRunner {
    */
   static #isQuiet(result: ChainIndexTickResult): boolean {
     if (result.outcome !== 'advanced' && result.outcome !== 'idle') return false;
+    if (result.pendingWork === true) return false;
     return (result.fetchedRows ?? 0) === 0;
   }
 
   /**
-   * How many periods a quiet scope may wait, bounded by the readers' contract.
+   * How long a quiet scope may wait, bounded by the readers' contract.
    *
    * Derived rather than configured: the one thing that must never happen is a
    * period so wide that `cursor.head` ages past what the projection cache and
    * the anchor resolver accept, because their refusal is a fall back to the
    * live read — which costs MORE than the pass this was trying to skip.
+   *
+   * `fetchedAtMs` is stamped before the pass's RPC work, while this delay starts
+   * after that work. The completed pass has therefore already spent part of
+   * the budget. Subtracting its whole runner-observed duration is conservative
+   * (the runner starts slightly before the head stamp) and leaves the final
+   * third for the following pass plus scheduler skew.
    */
-  #idleBackoffMultiplier(): number {
+  #idleBackoffDelayMs(successfulPassElapsedMs: number): number {
+    const baselineMs = this.#options.intervalMs;
     const budgetMs = this.#options.idleHeadAgeBudgetMs;
     if (budgetMs === undefined
       || !Number.isSafeInteger(budgetMs)
-      || budgetMs < 1) return 1;
-    if (this.#consecutiveQuietTicks < IDLE_TICKS_BEFORE_BACKOFF) return 1;
+      || budgetMs < 1) return baselineMs;
+    if (this.#consecutiveQuietTicks < IDLE_TICKS_BEFORE_BACKOFF) return baselineMs;
     const spendableMs = Math.floor(
       (budgetMs * IDLE_BACKOFF_BUDGET_NUMERATOR) / IDLE_BACKOFF_BUDGET_DENOMINATOR,
     );
-    return Math.max(1, Math.floor(spendableMs / this.#options.intervalMs));
+    const elapsedMs = Number.isFinite(successfulPassElapsedMs)
+      ? Math.max(0, successfulPassElapsedMs)
+      : 0;
+    return Math.max(baselineMs, Math.floor(spendableMs - elapsedMs));
   }
 
   #schedule(delayMs: number): void {
@@ -184,6 +200,8 @@ export class ChainIndexRunner {
   async #pass(): Promise<void> {
     const abort = this.#abort;
     if (abort === undefined) return;
+    const passStartedAtMs = this.#now();
+    let successfulPassElapsedMs = 0;
     try {
       const result = await this.tick.runOnce(abort.signal);
       this.#options.onResult?.(result);
@@ -205,10 +223,14 @@ export class ChainIndexRunner {
         this.#ticksSinceBackfill = 0;
         const backfill = await this.tick.backfillOnce(abort.signal);
         this.#options.onResult?.(backfill);
-        // A backfill still producing rows means the scope has not converged,
-        // whatever the head passes look like. Hold the full rate until it has.
+        // A backfill still producing rows OR carrying explicit pending work
+        // means the scope has not converged, whatever the head passes look
+        // like. Hold the full rate until it has.
         if (!ChainIndexRunner.#isQuiet(backfill)) this.#consecutiveQuietTicks = 0;
       }
+      // Captured only after every successful head/backfill callback. A failure
+      // has its own independent backoff and must not borrow an idle allowance.
+      successfulPassElapsedMs = Math.max(0, this.#now() - passStartedAtMs);
     } catch (error) {
       if (abort.signal.aborted) return;
       this.#consecutiveFailures += 1;
@@ -227,8 +249,9 @@ export class ChainIndexRunner {
       // A quiet scope waits longer too, but only ever within the freshness
       // budget its readers hold it to. `max` because a failing scope must keep
       // the wider of the two: idleness never shortens a failure's backoff.
-      const multiplier = Math.max(failureMultiplier, this.#idleBackoffMultiplier());
-      this.#schedule(this.#options.intervalMs * multiplier);
+      const failureDelayMs = this.#options.intervalMs * failureMultiplier;
+      const idleDelayMs = this.#idleBackoffDelayMs(successfulPassElapsedMs);
+      this.#schedule(Math.max(failureDelayMs, idleDelayMs));
     }
   }
 }
