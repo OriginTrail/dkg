@@ -173,6 +173,11 @@ describe('walletOwnerActionSubmitter create guards', () => {
 
     await expect(submitter.create({ tokens: '5', primaryNode: '42' }))
       .resolves.toMatchObject({ accountId: '9' });
+    expect(h.writeContract.mock.calls.at(-1)![0]).toMatchObject({
+      account: OWNER,
+      address: NFT,
+      functionName: 'createAccount',
+    });
   });
 
   it('fails closed when neither injected nor shared PCA bootstrap state exists', async () => {
@@ -224,11 +229,13 @@ describe('walletOwnerActionSubmitter create guards', () => {
     });
     expect(h.writeContract).toHaveBeenCalledTimes(2);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
+      account: OWNER,
       address: TOKEN,
       functionName: 'approve',
       args: [NFT, amount],
     });
     expect(h.writeContract.mock.calls[1]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'createAccount',
       args: [amount, 42n],
@@ -342,6 +349,7 @@ describe('walletOwnerActionSubmitter action shapes', () => {
     expect(h.readContract).not.toHaveBeenCalled();
     expect(h.writeContract).toHaveBeenCalledTimes(1);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'registerAgent',
       args: [7n, OTHER],
@@ -367,6 +375,7 @@ describe('walletOwnerActionSubmitter action shapes', () => {
     expect(h.readContract).not.toHaveBeenCalled();
     expect(h.writeContract).toHaveBeenCalledTimes(1);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'deregisterAgent',
       args: [7n, OTHER],
@@ -390,6 +399,7 @@ describe('walletOwnerActionSubmitter action shapes', () => {
     expect(h.writeContract).toHaveBeenCalledTimes(2);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({ functionName: 'approve' });
     expect(h.writeContract.mock.calls[1]![0]).toMatchObject({
+      account: OWNER,
       address: NFT,
       functionName: 'topUp',
       args: [7n, amount],

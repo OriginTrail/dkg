@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { WalletConnectControl } from '../src/ui/components/Wallet/WalletConnectControl.js';
 import { PcaWalletConnectControl } from '../src/ui/components/Pca/PcaWalletConnectControl.js';
+import { WalletConnectControl as PcaSurfaceWalletConnectControl } from '../src/ui/components/Pca/index.js';
 import { useWalletStore } from '../src/ui/stores/wallet.js';
 
 describe('feature-owned wallet connection guidance', () => {
@@ -18,7 +19,11 @@ describe('feature-owned wallet connection guidance', () => {
   });
 
   it('renders PCA publishing guidance only through the PCA wrapper', () => {
-    const html = renderToStaticMarkup(React.createElement(PcaWalletConnectControl));
+    // Render through the PCA barrel, not the leaf module: the barrel alias is the
+    // one line that routes every PCA surface to the PCA copy, so a revert of it
+    // must fail this test.
+    expect(PcaSurfaceWalletConnectControl).toBe(PcaWalletConnectControl);
+    const html = renderToStaticMarkup(React.createElement(PcaSurfaceWalletConnectControl));
     expect(html).toContain('Hot publishing wallets');
     expect(html).toContain('per-epoch allowance');
   });
