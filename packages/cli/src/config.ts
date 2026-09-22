@@ -5,13 +5,19 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import {
-  resolveChainAuthorityTimeoutMs,
-  type DKGAgentConfig,
-  type SyncAdmissionConfig,
-  type SyncContextGraphPriorityConfig,
-  type SyncResponderSnapshotLimitsConfig,
+import type {
+  DKGAgentConfig,
+  SyncAdmissionConfig,
+  SyncContextGraphPriorityConfig,
+  SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
+// The config loader must stay off the agent package ROOT at runtime: that entry
+// loads the whole agent runtime (libp2p, sync lanes, the process-wide
+// `sync-global` backpressure registration) into every config-only command, and
+// a CLI test that also loads agent sources directly then registers that
+// singleton twice. The light subpath carries only the budget resolver, like the
+// RFC-64 activation config below.
+import { resolveChainAuthorityTimeoutMs } from '@origintrail-official/dkg-agent/chain-authority-read-budgets';
 import {
   resolveRfc64CatalogActivationsV1,
   type Rfc64CatalogNormalizedActivationStateV1,
