@@ -1067,67 +1067,82 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader !== undefined) {
       try {
-        const finalizedBinding = await runBoundedOperation(async (ownerSignal) => (
+        const finalizedBinding = await runBoundedOperation(async (ownerSignal) => {
           // Registration discovery reads the same finalized authority index as
           // the catalog refresh pass and the VM reconcile lane, so it shares
           // the one circuit instead of staying the last ungoverned lane into
           // the pool: its exhaustion now trips the circuit for every other
           // reader, and a real provider read here proves recovery for them too.
           //
-          // It takes the circuit WITHOUT the serializer. This boundary backs
-          // query, crypto and Context Graph operations, it fails closed, and
-          // its budget here is `CHAIN_POLICY_READ_TIMEOUT_MS` whenever the
-          // graph has a local binding candidate — queued behind a cold
-          // whole-contract scan it would spend that budget waiting and deny a
-          // policy decision on a node whose pool is healthy. FIFO admission
-          // exists to stop bulk per-graph passes from stampeding an exhausted
-          // pool; one caller-driven read is not that.
-          this.rfc64AuthorityReadCoordinatorV1.runUnqueued(ownerSignal, async (readSignal, evidence) => {
-            try {
-              const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
-                [contextGraphId],
-                evidence.agentResolverReadOptions(readSignal),
-              );
-              // An older reader object without any finalized name capability is
-              // an explicitly legacy adapter and may use the compatibility path.
-              if (resolution.kind === 'legacy-current') return null;
-              const target = resolution.targets.get(contextGraphId);
-              if (target === undefined) {
-                return options.allowAcceptedRfc64FinalizedAbsence === true
-                  ? { kind: 'unregistered' } as const
-                  : {
-                      kind: 'unavailable' as const,
-                      reason: 'finalized-name-absence-unaccepted' as const,
-                      detail: 'finalized name absence has no accepted owner-signed unregistered authority',
-                    };
-              }
-              if (
-                target.expectedOnChainId <= 0n
-                || target.expectedOnChainId >= (1n << 256n)
-              ) {
-                throw new Error('finalized Context Graph id is outside uint256');
-              }
-              if (target.kind === 'resolved-snapshot') {
-                const snapshot = target.finalizedSnapshot;
-                if (
-                  snapshot.active !== true
-                  || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
-                  || this.contextGraphWireId(snapshot.nameHash)
-                    !== this.contextGraphWireId(target.expectedNameHash)
-                ) {
-                  throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
+          // It takes the FOREGROUND lane, not the bulk serializer. This
+          // boundary backs query, crypto and Context Graph operations, it
+          // fails closed, and its budget here is `CHAIN_POLICY_READ_TIMEOUT_MS`
+          // whenever the graph has a local binding candidate — queued behind a
+          // cold whole-contract scan it would spend that budget waiting and
+          // deny a policy decision on a node whose pool is healthy.
+          //
+          // It is not one caller-driven read, though: unscoped-query admission
+          // fans this boundary out once per candidate graph, up to
+          // `SCALAR_REGISTRATION_PREPARATION_CONCURRENCY` (32) scalar
+          // preparations at a time. The foreground lane's own permit is what
+          // bounds that fan-out to a single probe against an exhausted pool;
+          // the siblings are then refused at the re-evaluated admission gate.
+          try {
+            return await this.rfc64AuthorityReadCoordinatorV1.runForeground(
+              ownerSignal,
+              async (readSignal, evidence) => {
+                const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
+                  [contextGraphId],
+                  evidence.agentResolverReadOptions(readSignal),
+                );
+                // An older reader object without any finalized name capability
+                // is an explicitly legacy adapter and may use the
+                // compatibility path.
+                if (resolution.kind === 'legacy-current') return null;
+                const target = resolution.targets.get(contextGraphId);
+                if (target === undefined) {
+                  return options.allowAcceptedRfc64FinalizedAbsence === true
+                    ? { kind: 'unregistered' } as const
+                    : {
+                        kind: 'unavailable' as const,
+                        reason: 'finalized-name-absence-unaccepted' as const,
+                        detail: 'finalized name absence has no accepted owner-signed unregistered authority',
+                      };
                 }
-              }
-              return {
-                kind: 'registered',
-                onChainId: target.expectedOnChainId,
-                provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
-              } as const;
-            } finally {
-              await indexReader.whenIdle();
-            }
-          })
-        ), {
+                if (
+                  target.expectedOnChainId <= 0n
+                  || target.expectedOnChainId >= (1n << 256n)
+                ) {
+                  throw new Error('finalized Context Graph id is outside uint256');
+                }
+                if (target.kind === 'resolved-snapshot') {
+                  const snapshot = target.finalizedSnapshot;
+                  if (
+                    snapshot.active !== true
+                    || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
+                    || this.contextGraphWireId(snapshot.nameHash)
+                      !== this.contextGraphWireId(target.expectedNameHash)
+                  ) {
+                    throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
+                  }
+                }
+                return {
+                  kind: 'registered',
+                  onChainId: target.expectedOnChainId,
+                  provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
+                } as const;
+              },
+            );
+          } finally {
+            // The index reader's drain is global — one activity set shared with
+            // the bulk catalog lane — so it must run OUTSIDE the foreground
+            // permit: holding the permit across it would make every sibling
+            // registration read wait on unrelated bulk index activity inside
+            // this boundary's policy-read budget. It stays inside the bounded
+            // operation, so it keeps today's abort and timeout scope.
+            await indexReader.whenIdle();
+          }
+        }, {
           label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
           timeoutMs: registrationResolutionTimeoutMs,
           signal: options.signal,

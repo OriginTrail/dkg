@@ -79,10 +79,9 @@ export interface Rfc64AuthorityReadRunOptionsV1 {
    * recovery evidence. In effect it behaves as an additional half-open probe
    * rather than as a bypass.
    *
-   * On `run` it also queues behind the same serializer, so at most one of them
-   * reaches the pool at a time. `runUnqueued` accepts this option too and
-   * provides no such bound: several of them can reach an exhausted pool at
-   * once. Only pass it there for a read that is genuinely rare.
+   * It still queues behind its lane's permit, so at most one of them reaches
+   * the pool per lane at a time. Both lanes accept the option; only pass it
+   * for a read that is genuinely rare.
    */
   readonly admitWhileOpen?: boolean;
 }
@@ -136,23 +135,23 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 /**
  * Node-local governor shared by every registered RFC-64 authority read.
  *
- * Reads submitted through `run` are serialized even while the circuit is
- * closed. This covers authority bootstrap calls that do not pass through the
- * periodic loop's permit pool and guarantees that, after one full-pool
- * exhaustion, queued graphs observe the open circuit instead of stampeding the
- * same endpoints. Past the retry deadline the serializer admits reads again one
- * at a time; a success that reached the pool closes the circuit and an
- * exhaustion reopens it with the next backoff step.
+ * Reads are serialized even while the circuit is closed. This covers authority
+ * bootstrap calls that do not pass through the periodic loop's permit pool and
+ * guarantees that, after one full-pool exhaustion, queued graphs observe the
+ * open circuit instead of stampeding the same endpoints. Past the retry
+ * deadline reads are admitted again one at a time; a success that reached the
+ * pool closes the circuit and an exhaustion reopens it with the next backoff
+ * step.
  *
- * Serialization is a property of `run` alone. `runUnqueued` is for a
- * latency-bounded foreground read that must not spend its budget behind a bulk
- * pass; it keeps everything else the governor provides — the admission check
- * that refuses while the circuit is open, the trip on provider exhaustion, the
- * evidence-gated close, and retirement through `whenIdle`/`close` — but it can
- * run alongside `run` and alongside itself. Because reads on the two lanes
- * overlap, circuit transitions are keyed to a trip generation: a result cannot
- * close a trip that happened after it was admitted, and the failures of one
- * outage round coalesce into a single backoff step.
+ * There are two permits, not one. `run` is the bulk lane for per-graph passes.
+ * `runForeground` is a second single-permit lane for a latency-bounded
+ * caller-driven read that must not spend its budget behind a cold bulk scan;
+ * it is bounded on its own so that a per-graph fan-out through that boundary
+ * cannot walk an exhausted pool, but it never waits on bulk work. Because the
+ * two lanes overlap each other, circuit transitions are keyed to a trip
+ * generation: a result cannot close a trip that happened after it was
+ * admitted, and the failures of one outage round coalesce into a single
+ * backoff step.
  *
  * Recovery needs evidence, not merely a fulfilled callback. A read that was
  * answered from local or cached state says nothing about the pool it never
@@ -179,9 +178,10 @@ export class Rfc64AuthorityReadCoordinatorV1 {
    */
   #tripGeneration = 0;
   #exhaustedAtMs = 0;
+  /** Single permit for bulk per-graph passes. */
   #tail: Promise<void> = Promise.resolve();
-  /** In-flight reads admitted without the serializer, retired by `whenIdle`. */
-  readonly #unqueued = new Set<Promise<unknown>>();
+  /** Single permit for latency-bounded caller-driven reads. */
+  #foregroundTail: Promise<void> = Promise.resolve();
   #lifecycleAbort = new AbortController();
 
   constructor(options: Rfc64AuthorityReadCoordinatorOptionsV1 = {}) {
@@ -209,6 +209,14 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     this.#random = options.random ?? Math.random;
   }
 
+  /**
+   * Run a governed read on the shared bulk lane.
+   *
+   * This is the lane for per-graph passes — catalog refresh, listing
+   * enrichment, VM reconcile — where FIFO admission is the anti-stampede
+   * mechanism: after one full-pool exhaustion the next admitted read observes
+   * the open circuit instead of walking the same endpoints.
+   */
   async run<T>(
     signal: AbortSignal | undefined,
     operation: (
@@ -217,73 +225,67 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     ) => Promise<T>,
     options: Rfc64AuthorityReadRunOptionsV1 = {},
   ): Promise<T> {
+    return this.#enqueue('bulk', signal, operation, options);
+  }
+
+  /**
+   * Run a governed read on the latency-bounded foreground lane.
+   *
+   * A caller-driven read that fails closed under a policy-read budget must not
+   * queue behind a cold whole-contract scan: it would spend its entire budget
+   * waiting and deny a decision on a node whose pool is healthy. It therefore
+   * gets its own single permit rather than the bulk lane's.
+   *
+   * Its own permit, not none at all. The boundary this lane serves is fanned
+   * out per graph, so admitting at call time would let a whole batch walk an
+   * exhausted pool before any of them reported back. One permit bounds that to
+   * a single probe: the gate is re-evaluated after the permit is acquired, so
+   * once the first read of a batch trips the circuit its siblings are refused
+   * without reaching a provider.
+   *
+   * The two lanes still overlap each other, so circuit transitions stay keyed
+   * to a trip generation: a result cannot close a trip that happened after it
+   * was admitted, and the failures of one outage round coalesce into a single
+   * backoff step.
+   */
+  async runForeground<T>(
+    signal: AbortSignal | undefined,
+    operation: (
+      signal: AbortSignal,
+      evidence: Rfc64AuthorityRpcProbeEvidenceV1,
+    ) => Promise<T>,
+    options: Rfc64AuthorityReadRunOptionsV1 = {},
+  ): Promise<T> {
+    return this.#enqueue('foreground', signal, operation, options);
+  }
+
+  /**
+   * Take the named lane's single permit, then run one guarded attempt.
+   *
+   * A waiter settles for its caller on abort, but its queue token stays in
+   * FIFO order until the predecessor retires, so both lanes race the queued
+   * work against the abort and consume the token's later cancellation.
+   */
+  async #enqueue<T>(
+    lane: 'bulk' | 'foreground',
+    signal: AbortSignal | undefined,
+    operation: (
+      signal: AbortSignal,
+      evidence: Rfc64AuthorityRpcProbeEvidenceV1,
+    ) => Promise<T>,
+    options: Rfc64AuthorityReadRunOptionsV1,
+  ): Promise<T> {
     const runSignal = signal === undefined
       ? this.#lifecycleAbort.signal
       : AbortSignal.any([signal, this.#lifecycleAbort.signal]);
-    const previous = this.#tail;
+    const previous = lane === 'bulk' ? this.#tail : this.#foregroundTail;
     let release!: () => void;
-    this.#tail = new Promise<void>((resolve) => { release = resolve; });
+    const token = new Promise<void>((resolve) => { release = resolve; });
+    if (lane === 'bulk') this.#tail = token;
+    else this.#foregroundTail = token;
     const queued = previous.then(async () => {
       try {
-        throwIfAborted(runSignal);
-        const now = this.#now();
-        if (options.admitWhileOpen !== true && now < this.#retryAtMs) {
-          throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
-            this.#retryAtMs,
-            this.#retryAtMs - now,
-          );
-        }
-
-        const admittedGeneration = this.#tripGeneration;
-        const poolEvidence: {
-          value: 'none' | 'attempt' | 'proven' | 'unproven';
-        } = { value: 'none' };
-        const markRpcAttempt = () => {
-          if (poolEvidence.value !== 'proven') poolEvidence.value = 'attempt';
-        };
-        const observeProjectionServed = (
-          served: ContextGraphAuthorityProjectionServedEvidence,
-        ) => {
-          if (served.source === 'scan') {
-            // A completed scan is definitive pool evidence and must outrank an
-            // earlier stale-cache answer from another subread in this operation.
-            poolEvidence.value = 'proven';
-          } else if (
-            served.source === 'cache'
-            && this.#now() - served.ageMs > this.#exhaustedAtMs
-          ) {
-            poolEvidence.value = 'proven';
-          } else if (poolEvidence.value !== 'proven') {
-            // A stale/old cache or a node-local log fold voids a preceding
-            // attempt marker, but cannot erase a completed scan proven by
-            // another subread. A log fold contacted no endpoint in this read,
-            // so its tick timestamp is never evidence that this pool recovered.
-            poolEvidence.value = 'unproven';
-          }
-        };
-        const chainReadOptions = (signal?: AbortSignal): ChainReadOptions => {
-          markRpcAttempt();
-          return Object.freeze({
-            ...(signal === undefined ? {} : { signal }),
-            onContextGraphAuthorityProjectionServed: observeProjectionServed,
-          });
-        };
-        const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
-          agentResolverReadOptions: (signal?: AbortSignal) => Object.freeze({
-            ...(signal === undefined ? {} : { signal }),
-            onRpcRead: markRpcAttempt,
-            onContextGraphAuthorityProjectionServed: observeProjectionServed,
-          }),
-          chainReadOptions,
-        });
-        try {
-          const result = await operation(runSignal, evidence);
-          this.#recordSuccess(poolEvidence.value, admittedGeneration);
-          return result;
-        } catch (error) {
-          if (isRpcEndpointsExhaustedError(error)) this.#open(error);
-          throw error;
-        }
+        return await this.#attempt(runSignal, operation, options);
       } finally {
         release();
       }
@@ -310,34 +312,23 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   }
 
   /**
-   * Circuit state for one caller-driven read, without queue admission.
+   * One guarded attempt, shared by both lanes.
    *
-   * FIFO admission is the anti-stampede mechanism for bulk per-graph passes:
-   * it is what stops a hundred graphs from each walking an exhausted pool. A
-   * latency-bounded foreground read that fails closed must not inherit it —
-   * queued behind a cold whole-contract scan it would spend its entire budget
-   * waiting and deny a policy decision on a node whose pool is healthy. Such a
-   * read still refuses while the circuit is open, still trips the circuit on
-   * provider exhaustion, and still closes it on proven recovery; it only skips
-   * the serializer.
-   *
-   * Retirement still covers it: `whenIdle` and `close` wait for these reads
-   * too, so shutdown cannot leave one in flight.
+   * Admission is evaluated HERE — after the lane's permit — and never at call
+   * time, so a read that was still waiting when a sibling tripped the circuit
+   * is refused instead of walking the pool it already knows is exhausted.
    */
-  async runUnqueued<T>(
-    signal: AbortSignal | undefined,
+  async #attempt<T>(
+    runSignal: AbortSignal,
     operation: (
       signal: AbortSignal,
       evidence: Rfc64AuthorityRpcProbeEvidenceV1,
     ) => Promise<T>,
-    options: Rfc64AuthorityReadRunOptionsV1 = {},
+    options: Rfc64AuthorityReadRunOptionsV1,
   ): Promise<T> {
-    const runSignal = signal === undefined
-      ? this.#lifecycleAbort.signal
-      : AbortSignal.any([signal, this.#lifecycleAbort.signal]);
     throwIfAborted(runSignal);
     const now = this.#now();
-    if (options.admitWhileOpen !== true && now < this.#retryAtMs) {
+    if (options.admitWhileOpen !== true && this.#roundInProgress(now)) {
       throw new Rfc64AuthorityRpcCircuitOpenErrorV1(
         this.#retryAtMs,
         this.#retryAtMs - now,
@@ -355,6 +346,8 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       served: ContextGraphAuthorityProjectionServedEvidence,
     ) => {
       if (served.source === 'scan') {
+        // A completed scan is definitive pool evidence and must outrank an
+        // earlier stale-cache answer from another subread in this operation.
         poolEvidence.value = 'proven';
       } else if (
         served.source === 'cache'
@@ -362,6 +355,10 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       ) {
         poolEvidence.value = 'proven';
       } else if (poolEvidence.value !== 'proven') {
+        // A stale/old cache or a node-local log fold voids a preceding
+        // attempt marker, but cannot erase a completed scan proven by
+        // another subread. A log fold contacted no endpoint in this read,
+        // so its tick timestamp is never evidence that this pool recovered.
         poolEvidence.value = 'unproven';
       }
     };
@@ -380,30 +377,24 @@ export class Rfc64AuthorityReadCoordinatorV1 {
       }),
       chainReadOptions,
     });
-    const active = (async () => {
-      try {
-        const result = await operation(runSignal, evidence);
-        this.#recordSuccess(poolEvidence.value, admittedGeneration);
-        return result;
-      } catch (error) {
-        if (isRpcEndpointsExhaustedError(error)) this.#open(error);
-        throw error;
-      }
-    })();
-    this.#unqueued.add(active);
-    const untrack = (): void => { this.#unqueued.delete(active); };
-    void active.then(untrack, untrack);
-    return active;
+    try {
+      const result = await operation(runSignal, evidence);
+      this.#recordSuccess(poolEvidence.value, admittedGeneration);
+      return result;
+    } catch (error) {
+      if (isRpcEndpointsExhaustedError(error)) this.#open(error);
+      throw error;
+    }
   }
 
   async whenIdle(): Promise<void> {
-    // Unqueued reads retire independently of the serializer, so quiescence is
-    // only reached when neither lane admitted new work while this waited.
+    // The two lanes admit independently, so quiescence is only reached when
+    // neither of them took new work while this waited.
     for (;;) {
       const tail = this.#tail;
-      const unqueued = [...this.#unqueued];
-      await Promise.allSettled([tail, ...unqueued]);
-      if (this.#tail === tail && this.#unqueued.size === 0) return;
+      const foregroundTail = this.#foregroundTail;
+      await Promise.allSettled([tail, foregroundTail]);
+      if (this.#tail === tail && this.#foregroundTail === foregroundTail) return;
     }
   }
 
@@ -424,7 +415,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     return Object.freeze({
       state: this.#consecutiveExhaustions === 0
         ? 'closed'
-        : now < this.#retryAtMs
+        : this.#roundInProgress(now)
           ? 'open'
           : 'half-open',
       consecutiveExhaustions: this.#consecutiveExhaustions,
@@ -433,14 +424,30 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   }
 
   /**
+   * Is the current outage round still inside its published backoff window?
+   *
+   * One predicate for one concept: it is what `snapshot()` reports as `open`,
+   * what refuses a read at the admission gate, and what tells `#open` that a
+   * failure belongs to the round already being served rather than to a new
+   * one. Deliberately the deadline and not the admitted generation: an
+   * `admitWhileOpen` probe is admitted UNDER the current generation, so a
+   * generation comparison would read its failure as a new round and ratchet
+   * the backoff ladder on every probe.
+   */
+  #roundInProgress(now = this.#now()): boolean {
+    return now < this.#retryAtMs;
+  }
+
+  /**
    * Clear an outstanding exhaustion once a read proves the pool answered.
    *
    * A local or cached answer cannot prove that an exhausted pool came back, so
    * it never clears. Neither can a read that was admitted before the trip it
-   * would be clearing: `runUnqueued` overlaps `run`, so a read that reached the
-   * pool while it was still healthy can settle after a later read exhausted it,
-   * and honoring that as evidence would discard a live cooldown and restart the
-   * backoff ladder. Only evidence gathered under the current generation counts.
+   * would be clearing: the foreground lane overlaps the bulk lane, so a read
+   * that reached the pool while it was still healthy can settle after a later
+   * read exhausted it, and honoring that as evidence would discard a live
+   * cooldown and restart the backoff ladder. Only evidence gathered under the
+   * current generation counts.
    */
   #recordSuccess(
     poolEvidence: 'none' | 'attempt' | 'proven' | 'unproven',
@@ -459,18 +466,24 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   }
 
   #open(error: RpcEndpointsExhaustedErrorLike): void {
-    // One outage round costs one backoff step. Under `run` the serializer
-    // enforced that on its own: after the first trip the next admitted read was
-    // refused before it reached a provider. `runUnqueued` admits at call time,
-    // so every read already in flight when the pool failed lands here with the
-    // same outage. Escalation is the job of the read that fails after the
-    // deadline has passed, not of that read's concurrent siblings.
+    // One outage round costs one backoff step. Each lane's permit enforces
+    // part of that on its own — after the first trip the next read admitted on
+    // the same lane is refused before it reaches a provider — but the two
+    // lanes overlap, so a read already in flight on the other one lands here
+    // with the same outage. Escalation is the job of the read that fails after
+    // the deadline has passed, not of that read's concurrent siblings.
     const providerDelay = typeof error.retryAfterMs === 'number'
       && Number.isFinite(error.retryAfterMs)
       && error.retryAfterMs >= 0
       ? Math.round(error.retryAfterMs)
       : 0;
-    if (this.#now() < this.#retryAtMs) {
+    // The freshness watermark is not part of the ladder and is never
+    // coalesced: it is what tells a later projection answer whether the state
+    // it reports predates this outage. A coalesced sibling still observed the
+    // pool failing now, so an answer cached between the two failures must not
+    // count as proof that the pool recovered.
+    this.#exhaustedAtMs = this.#now();
+    if (this.#roundInProgress()) {
       // Coalescing suppresses the backoff ladder, not the provider's own
       // backpressure: a sibling that was told to wait longer still moves the
       // shared deadline out, without advancing the generation or the counter.
@@ -484,7 +497,6 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     }
     this.#tripGeneration += 1;
     this.#consecutiveExhaustions += 1;
-    this.#exhaustedAtMs = this.#now();
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);
     const exponential = Math.min(
       this.#maxBackoffMs,
