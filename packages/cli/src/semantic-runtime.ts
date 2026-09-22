@@ -65,6 +65,7 @@ export interface StoredSemanticProgram {
   version: string;
   source: string;
   requiredTools: string[];
+  requestedPermissions?: Record<string, unknown>;
   permittedPrograms: string[];
   label?: string;
   description?: string;
@@ -221,12 +222,13 @@ export async function loadStoredSemanticProgram(
   validateSemanticMemoryLayer(programLayer, 'programLayer');
   const safeProgramIri = sparqlIri(programIri);
   const result = await agent.query(`
-    SELECT DISTINCT ?g ?language ?version ?source ?tool ?permittedProgram ?label ?description WHERE {
+    SELECT DISTINCT ?g ?language ?version ?source ?tool ?permittedProgram ?label ?description ?requestedPermissions WHERE {
       GRAPH ?g {
         ${safeProgramIri} <${RDF_TYPE}> <${SR}Program> ;
           <${SR}language> ?language ;
           <${SR}version> ?version ;
           <${SR}source> ?source .
+        OPTIONAL { ${safeProgramIri} <${SR}requestedToolPermissions> ?requestedPermissions }
         OPTIONAL { ${safeProgramIri} <${SR}requiresTool> ?tool }
         OPTIONAL { ${safeProgramIri} <${SR}permitsProgram> ?permittedProgram }
         OPTIONAL { ${safeProgramIri} <${RDFS}label> ?label }
@@ -254,6 +256,7 @@ export async function loadStoredSemanticProgram(
   const authors = new Set<string>();
   const requiredTools = new Set<string>();
   const permittedPrograms = new Set<string>();
+  const permissions = new Set<string>();
   const labels = new Set<string>();
   const descriptions = new Set<string>();
   for (const { row, authorAgentAddress } of rows) {
@@ -264,12 +267,13 @@ export async function loadStoredSemanticProgram(
     };
     definitions.set(JSON.stringify(definition), definition);
     authors.add(authorAgentAddress);
+    if (row.requestedPermissions !== undefined) permissions.add(literalValue(row.requestedPermissions));
     if (row.tool !== undefined) requiredTools.add(iriValue(row.tool));
     if (row.permittedProgram !== undefined) permittedPrograms.add(iriValue(row.permittedProgram));
     if (row.label !== undefined) labels.add(literalValue(row.label));
     if (row.description !== undefined) descriptions.add(literalValue(row.description));
   }
-  if (definitions.size !== 1 || authors.size !== 1 || labels.size > 1 || descriptions.size > 1) {
+  if (definitions.size !== 1 || authors.size !== 1 || labels.size > 1 || descriptions.size > 1 || permissions.size > 1) {
     throw new SemanticProgramError(
       'PROGRAM_AMBIGUOUS',
       'Program has multiple definitions or authors',
@@ -291,6 +295,7 @@ export async function loadStoredSemanticProgram(
     authorAgentAddress: [...authors][0],
     ...definition,
     requiredTools: [...requiredTools].sort(),
+    ...(permissions.size ? { requestedPermissions: parseRequestedPermissions([...permissions][0]) } : {}),
     permittedPrograms: [...permittedPrograms].sort(),
     ...([...labels][0] ? { label: [...labels][0] } : {}),
     ...([...descriptions][0] ? { description: [...descriptions][0] } : {}),
@@ -416,6 +421,7 @@ export async function forkStoredSemanticProgram(
     literalQuad(newProgramIri, `${SR}version`, source.version),
     literalQuad(newProgramIri, `${SR}source`, source.source),
     iriQuad(newProgramIri, `${PROV}wasDerivedFrom`, sourceProgramIri),
+    ...(source.requestedPermissions ? [literalQuad(newProgramIri, `${SR}requestedToolPermissions`, JSON.stringify(source.requestedPermissions))] : []),
     ...source.requiredTools.map((toolIri) =>
       iriQuad(newProgramIri, `${SR}requiresTool`, toolIri)),
     ...source.permittedPrograms.map((permittedProgram) =>
@@ -524,15 +530,7 @@ export async function invokeBoundSemanticProgram(
   );
   // Replays and fresh executions both pass the current grant and query contract.
   await assertAuthorized();
-  if (binding.query) {
-    const rows = await readContextGraphQueryCatalogBindings(agent, contextGraphId, {
-      callerAgentAddress: binding.executorAgentAddress, source: 'semantic-runtime-query-catalog',
-    });
-    const item = findSavedQuery(decodeQueryCatalogBindings(rows, { contextGraphId }), binding.query.selector);
-    if (!item) throw new SemanticProgramError('PROGRAM_QUERY_UNAVAILABLE', 'The approved query is unavailable', 409);
-    try { assertSemanticQueryDefinition([binding.query], binding.query.selector, item); }
-    catch { throw new SemanticProgramError('PROGRAM_QUERY_CHANGED', 'The query differs from the tenant approval', 409); }
-  }
+  await assertBoundQueryDefinition(agent, binding);
   for (const output of result.outputs ?? []) {
     let parsed: { kind?: unknown; queryIri?: unknown; result?: unknown };
     try { parsed = JSON.parse(output); } catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match its approved tools', 409); }
@@ -560,6 +558,18 @@ export async function invokeBoundSemanticProgram(
   return result;
 }
 
+async function assertBoundQueryDefinition(agent: DKGAgent, binding: SemanticProgramBinding): Promise<void> {
+  if (binding.query) {
+    const rows = await readContextGraphQueryCatalogBindings(agent, binding.contextGraphId, {
+      callerAgentAddress: binding.executorAgentAddress, source: 'semantic-runtime-query-catalog',
+    });
+    const item = findSavedQuery(decodeQueryCatalogBindings(rows, { contextGraphId: binding.contextGraphId }), binding.query.selector);
+    if (!item) throw new SemanticProgramError('PROGRAM_QUERY_UNAVAILABLE', 'The approved query is unavailable', 409);
+    try { assertSemanticQueryDefinition([binding.query], binding.query.selector, item); }
+    catch { throw new SemanticProgramError('PROGRAM_QUERY_CHANGED', 'The query differs from the tenant approval', 409); }
+  }
+}
+
 /** Resolve an approval candidate without invoking it or granting runtime authority. */
 export async function validateBoundSemanticProgram(
   agent: DKGAgent,
@@ -582,13 +592,6 @@ export async function validateBoundSemanticProgram(
     }
   };
   await check();
-  if (binding.typescript) {
-    const program = await validateTypeScriptProgram(agent, runtime, binding, check);
-    return { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
-      executingNode: `did:dkg:agent:${executor.agentAddress}`,
-      selectedPolicy: { iri: `urn:dkg:program-binding:${programBindingDigest(binding)}`, version: '1', hash: programBindingDigest(binding) },
-      requiredTools: [], previousExecutions: [], executable: true };
-  }
   if (binding.sparqlRead?.layer === 'swm' && !await agent.canUseSharedMemoryForContextGraph(binding.contextGraphId, { callerAgentAddress: executor.agentAddress })) {
     throw new SemanticProgramError('PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE', 'The data graph is unavailable for shared-memory reads', 503);
   }
@@ -597,6 +600,10 @@ export async function validateBoundSemanticProgram(
     if (!access.storeAvailable || !access.exists || !access.callerAuthorized) {
       throw new SemanticProgramError('PROGRAM_EXECUTOR_WRITE_DENIED', 'Executor cannot create assets in the data graph', 403);
     }
+  }
+  if (binding.typescript) {
+    const program = await validateTypeScriptProgram(agent, runtime, binding, check);
+    return (await resolveTypeScriptTools(agent, runtime, binding, program, config, check)).public;
   }
   const resolved = await resolveInternal(agent, binding.contextGraphId, binding.program.programIri, binding.program.programLayer,
     config, undefined, executor.agentAddress, executor.agentAddress, binding.executionLayer ?? 'wm', undefined, check,
@@ -637,8 +644,59 @@ export async function validateBoundSemanticProgram(
 
 interface TypeScriptComposition {
   ancestors: string[];
-  budget: { calls: number; maximum: number; deadline: number; cancelled: boolean };
+  budget: { calls: number; maximum: number; deadline: number; cancelled: boolean; uncertainEffect?: SemanticProgramError };
   assertParent(): Promise<void>;
+}
+
+function parseRequestedPermissions(json: string): Record<string, unknown> {
+  try {
+    if (Buffer.byteLength(json) > 65536) throw new Error();
+    const value = JSON.parse(json);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    canonicalizeJson(value, { maxBytes: 65536, maxDepth: 20 });
+    return value;
+  } catch { throw new SemanticProgramError('INVALID_PROGRAM_PERMISSIONS', 'Requested tool permissions must be a JSON object of at most 64 KiB', 422); }
+}
+
+/** Compare the stored request to owner-approved scope, excluding server-computed pins. */
+function assertRequestedToolPermissions(program: StoredSemanticProgram, binding: SemanticProgramBinding): void {
+  const requested = program.requestedPermissions;
+  const scope = {
+    graphId: binding.contextGraphId, executionLayer: binding.executionLayer ?? 'wm',
+    ...(binding.query ? { query: { selector: binding.query.selector, outputSchema: binding.query.outputSchema } } : {}),
+    ...(binding.sparqlRead ? { sparqlRead: (({ outputSchemaSha256: _, ...grant }) => grant)(binding.sparqlRead) } : {}),
+    ...(binding.assetCreation ? { assetCreation: binding.assetCreation } : {}),
+  };
+  const tools = new Set(program.requiredTools);
+  const expectedCount = Number(!!binding.query) + Number(!!binding.sparqlRead) + Number(!!binding.assetCreation);
+  if (!sameSet(tools, new Set(binding.typescript?.requiredTools ?? []))
+    || tools.size !== expectedCount
+    || binding.sparqlRead && !tools.has(binding.sparqlRead.toolIri)
+    || binding.assetCreation && !tools.has(binding.assetCreation.toolIri)
+    || (expectedCount > 0 && !requested)) {
+    throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Declared tools must match the approved tool grants', 403);
+  }
+  if (requested) {
+    const normalized = { executionLayer: 'wm', ...requested,
+      graphId: typeof requested.graphId === 'string' ? requested.graphId.replace(/^did:dkg:context-graph:/, '') : null };
+    if (canonicalizeJson(normalized as CanonicalJsonValue) !== canonicalizeJson(scope as CanonicalJsonValue)) {
+      throw new SemanticProgramError('PROGRAM_PERMISSION_MISMATCH', 'Approval differs from the Program requested tool scope', 403);
+    }
+  }
+}
+
+async function resolveTypeScriptTools(agent: DKGAgent, runtime: ConfiguredSemanticRuntimeService,
+  binding: SemanticProgramBinding, program: StoredSemanticProgram, config: SemanticRuntimeConfig, check: () => Promise<void>) {
+  const digest = programBindingDigest(binding);
+  const resolved = await resolveProgramTools(agent, binding.contextGraphId, program, config, undefined,
+    binding.executorAgentAddress, binding.executorAgentAddress, binding.executionLayer ?? 'wm', undefined, check,
+    { binding, digest, assertAuthorized: check }, runtime.store);
+  if (resolved.tools.some(tool => !tool.effective)) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'A requested adapter is unavailable', 409);
+  return { registry: resolved.registry, policyHashHex: resolved.policyHashHex,
+    public: { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
+      executingNode: resolved.operatorIri,
+      selectedPolicy: { iri: resolved.policyIri, version: resolved.policyVersion, hash: `sha256:${resolved.policyHashHex}` },
+      requiredTools: resolved.tools, previousExecutions: [], executable: true } };
 }
 
 async function validateTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSemanticRuntimeService,
@@ -648,9 +706,10 @@ async function validateTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSem
     binding.program.programLayer, binding.executorAgentAddress);
   if (program.language !== 'typescript-v1' || sourceHashOf(program) !== binding.program.sourceHash
     || program.authorAgentAddress.toLowerCase() !== binding.program.authorAgentAddress.toLowerCase()
-    || program.requiredTools.length || !sameSet(new Set(program.permittedPrograms), new Set(binding.typescript!.children.map(child => child.programIri)))) {
+    || !sameSet(new Set(program.permittedPrograms), new Set(binding.typescript!.children.map(child => child.programIri)))) {
     throw new SemanticProgramError('PROGRAM_BINDING_MISMATCH', 'TypeScript source, author or declared child Programs differ from approval', 403);
   }
+  assertRequestedToolPermissions(program, binding);
   if (!runtime.typescript) throw new SemanticProgramError('TYPESCRIPT_RUNTIME_UNAVAILABLE', 'TypeScript execution is unavailable', 409);
   try { await runtime.typescript.compile(program.source); }
   catch (error) { throw new SemanticProgramError('PROGRAM_COMPILATION_FAILED', safeMessage(error), 422); }
@@ -671,10 +730,12 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
   let inputJson: string;
   try { inputJson = canonicalProgramInputs(inputs); }
   catch { throw new SemanticProgramError('INVALID_PROGRAM_INPUTS', 'inputs must be a JSON array of at most 64 KiB and depth 20', 400); }
-  const budget = parent?.budget ?? { calls: 0, maximum: grant.maxCalls, deadline: Date.now() + grant.timeoutMs, cancelled: false };
+  const budget: TypeScriptComposition['budget'] = parent?.budget ?? { calls: 0, maximum: grant.maxCalls, deadline: Date.now() + grant.timeoutMs, cancelled: false };
   const check = async () => {
+    if (budget.uncertainEffect) throw budget.uncertainEffect;
     if (budget.cancelled || Date.now() > budget.deadline) throw new SemanticProgramError('PROGRAM_EXECUTION_CANCELLED', 'Execution is cancelled or expired', 409);
     await authorized();
+    await assertBoundQueryDefinition(agent, binding);
     const visited = new Set<string>();
     const checkChildren = (selected: SemanticProgramBinding, ancestors: string[]) => {
       for (const pin of selected.typescript?.children ?? []) {
@@ -719,18 +780,35 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
       await check();
       return { invocationId, executionIri, executionLayer: layer, ...(layer === 'vm' ? { executionUal: history.publishedUal } : {}), outputs, persisted: true };
     }
+    const resolved = await resolveTypeScriptTools(agent, runtime, binding, program, config, check);
     const artifact = await runtime.typescript!.compile(program.source);
     const manifest = new TextEncoder().encode(artifact.manifest), planId = hashCanonicalPlan(manifest);
     runtime.store.registerStrategyArtifact({ artifactHash: planId, strategyId: program.programIri, version: program.version,
       canonicalPlan: manifest, sourceRef: program.programIri, reviewState: 'approved', createdAt: Date.now() });
     runtime.store.createExecution({ executionId: executionIri, planId, partitionId: hashParts([graph]),
       status: 'active', graphRevision: identity, policyEpoch: 1n, rootProcessId: executionIri, leaseEpoch: 0n });
+    const authority = {
+      adapterVersions: new Map(resolved.public.requiredTools.map(tool => [tool.operation!, tool.semanticVersion!])),
+      allowedEffectClasses: new Set(resolved.public.requiredTools.map(tool => resolved.registry.describe(tool.operation!, tool.semanticVersion!)!.effectClass)),
+    };
+    const dispatchTool = createProgramToolDispatcher(runtime, resolved, authority, executionIri, invocationId, check,
+      { binding, digest, assertAuthorized: check });
     const childExecutions: string[] = [], startedAt = new Date();
     try {
       const output = await runtime.typescript!.execute(artifact, inputJson,
         { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => {
           await check();
           if (++budget.calls > budget.maximum) throw new SemanticProgramError('PROGRAM_CALL_BUDGET_EXCEEDED', 'Program tree exceeds its call budget', 403);
+          if (effect.kind === 'tool') {
+            let output: string;
+            try { output = await dispatchTool(effect.tool, effect.input, String(effect.id)); }
+            catch (error) {
+              if (error instanceof SemanticProgramError && error.code === 'INVOCATION_REQUIRES_RECONCILIATION') budget.uncertainEffect = error;
+              throw error;
+            }
+            // Adapter output envelopes are preserved, with JSON decoded for TypeScript.
+            try { return JSON.parse(output); } catch { return output; }
+          }
           const pin = grant.children.find(child => child.programIri === effect.program);
           if (!pin) throw new SemanticProgramError('PROGRAM_CHILD_FORBIDDEN', 'Child Program is not approved', 403);
           // Deterministic effect-specific IDs link persisted child executions to
@@ -748,7 +826,7 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
       const quads = buildExecutionQuads({ bound: { binding, digest, assertAuthorized: check }, executionIri, invocationId,
         programIri: program.programIri, operatorIri: `did:dkg:agent:${executor.agentAddress}`, callerIri: `did:dkg:agent:${caller}`,
         policy: { iri: `urn:dkg:program-binding:${digest}`, version: '1', hash: digest }, programHash: artifact.hash,
-        tools: [], events: [], agents: [], outputs: [{ role: 'result', processId: new Uint8Array(), value: output }],
+        tools: resolved.public.requiredTools, events: [], agents: [], outputs: [{ role: 'result', processId: new Uint8Array(), value: output }],
         childExecutions, startedAt, finishedAt: new Date() });
       quads.push(literalQuad(executionIri, `${SR}inputHash`, createHash('sha256').update(inputJson).digest('hex')));
       const persistence = await persistExecutionKnowledgeAsset(agent, graph, name, executor.agentAddress, quads, history, layer);
@@ -758,6 +836,7 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
     } catch (error) {
       runtime.store.setExecutionStatus(executionIri, 'failed');
       if (error instanceof SemanticProgramError) throw error;
+      if (budget.uncertainEffect) throw budget.uncertainEffect;
       throw new SemanticProgramError('TYPESCRIPT_EXECUTION_FAILED', safeMessage(error), 422);
     }
   };
@@ -845,77 +924,17 @@ interface InternalResolution {
   policyHashHex: string;
 }
 
-async function resolveInternal(
-  agent: DKGAgent,
-  contextGraphId: string,
-  programIri: string,
-  programLayer: SemanticMemoryLayer,
-  config: SemanticRuntimeConfig | undefined,
-  llmConfig?: LlmConfig,
-  callerAgentAddress?: string,
-  executingAgentAddress?: string,
-  executionLayer: SemanticMemoryLayer = 'vm',
-  childInvoker?: SemanticProgramChildInvoker,
-  assertAuthorized?: () => Promise<void>,
-  bound?: BoundProgramInvocation,
-  assetStore?: SemanticRuntimeStore,
-): Promise<InternalResolution> {
-  await bound?.assertAuthorized();
+async function resolveProgramTools(
+  agent: DKGAgent, contextGraphId: string, program: StoredSemanticProgram,
+  config: SemanticRuntimeConfig | undefined, llmConfig: LlmConfig | undefined,
+  callerAgentAddress: string | undefined, executingAgentAddress: string | undefined,
+  executionLayer: SemanticMemoryLayer, childInvoker: SemanticProgramChildInvoker | undefined,
+  assertAuthorized: (() => Promise<void>) | undefined, bound: BoundProgramInvocation | undefined,
+  assetStore: SemanticRuntimeStore | undefined,
+) {
+  const programIri = program.programIri, programLayer = program.layer;
   const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
-  // Only an already-authorized bound caller gets this readiness diagnostic.
-  // Otherwise the query API's empty-on-denial behavior would look like a
-  // missing Program. This preflight never substitutes for query-time checks.
-  if (bound && programLayer === 'swm'
-    && !await agent.canUseSharedMemoryForContextGraph(bound.binding.program.contextGraphId, {
-      callerAgentAddress: readPrincipal,
-    })) {
-    throw new SemanticProgramError(
-      'PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE',
-      'The approved Program graph is not ready for Shared Working Memory reads by the tenant executor',
-      503,
-    );
-  }
-  const program = await loadStoredSemanticProgram(
-    agent,
-    bound?.binding.program.contextGraphId ?? contextGraphId,
-    programIri,
-    programLayer,
-    readPrincipal,
-  );
-  if (program.language === 'typescript-v1') {
-    throw new SemanticProgramError('PROGRAM_BINDING_REQUIRED', 'TypeScript Programs require a TypeScript operation approval', 403);
-  }
-  if (bound && (sourceHashOf(program) !== bound.binding.program.sourceHash
-    || program.authorAgentAddress.toLowerCase() !== bound.binding.program.authorAgentAddress.toLowerCase()
-    || program.permittedPrograms.length !== 0)) {
-    throw new SemanticProgramError('PROGRAM_BINDING_MISMATCH', 'Program identity differs from the tenant approval', 403);
-  }
   const originalCaller = callerAgentAddress ?? program.authorAgentAddress;
-  if (!bound && config?.programPolicy) {
-    validateProgramPin(config, program);
-    if (!await agent.canReadContextGraph(contextGraphId, { callerAgentAddress: originalCaller })) {
-      throw new SemanticProgramError('PROGRAM_CALLER_ACCESS_DENIED', 'Caller cannot read the Context Graph', 403);
-    }
-  }
-  const compilation = await new WasmStrategyAdmissionClient({ startupTimeoutMs: config?.startupTimeoutMs })
-    .compileAndAdmit(program.source);
-  if (!compilation.ok) {
-    const diagnostic = compilation.diagnostics[0];
-    throw new SemanticProgramError(
-      'PROGRAM_REJECTED',
-      diagnostic
-        ? `${diagnostic.code} at ${diagnostic.primary.start.line}:${diagnostic.primary.start.column}: ${diagnostic.message}`
-        : 'Program admission failed',
-      422,
-    );
-  }
-  if (bound && (compilation.plan.adapterVersions.size !== program.requiredTools.length
-    || [...compilation.plan.adapterVersions].some(([operation, version]) => version !== 1
-      || !(operation === 'dkg/query' && bound.binding.query || operation === 'dkg/asset-create' && bound.binding.assetCreation
-        || operation === 'dkg/sparql-read' && bound.binding.sparqlRead))
-    || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
-    throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
-  }
   const operatorAddress = executingAgentAddress
     ? checksumAgentAddress(executingAgentAddress, 'INVALID_EXECUTING_WALLET')
     : program.authorAgentAddress;
@@ -1012,7 +1031,7 @@ async function resolveInternal(
     }
   }
 
-  const childPrograms = await Promise.all(program.permittedPrograms.map(async (childIri) => {
+  const childPrograms = await Promise.all((bound ? [] : program.permittedPrograms).map(async (childIri) => {
     if (childIri === programIri) {
       throw new SemanticProgramError('PROGRAM_SELF_PERMISSION', 'A Program cannot permit itself', 409);
     }
@@ -1103,6 +1122,83 @@ async function resolveInternal(
       unavailableReason,
     };
   });
+  return { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex };
+}
+
+async function resolveInternal(
+  agent: DKGAgent,
+  contextGraphId: string,
+  programIri: string,
+  programLayer: SemanticMemoryLayer,
+  config: SemanticRuntimeConfig | undefined,
+  llmConfig?: LlmConfig,
+  callerAgentAddress?: string,
+  executingAgentAddress?: string,
+  executionLayer: SemanticMemoryLayer = 'vm',
+  childInvoker?: SemanticProgramChildInvoker,
+  assertAuthorized?: () => Promise<void>,
+  bound?: BoundProgramInvocation,
+  assetStore?: SemanticRuntimeStore,
+): Promise<InternalResolution> {
+  await bound?.assertAuthorized();
+  const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
+  // Only an already-authorized bound caller gets this readiness diagnostic.
+  // Otherwise the query API's empty-on-denial behavior would look like a
+  // missing Program. This preflight never substitutes for query-time checks.
+  if (bound && programLayer === 'swm'
+    && !await agent.canUseSharedMemoryForContextGraph(bound.binding.program.contextGraphId, {
+      callerAgentAddress: readPrincipal,
+    })) {
+    throw new SemanticProgramError(
+      'PROGRAM_GRAPH_AUTHORITY_UNAVAILABLE',
+      'The approved Program graph is not ready for Shared Working Memory reads by the tenant executor',
+      503,
+    );
+  }
+  const program = await loadStoredSemanticProgram(
+    agent,
+    bound?.binding.program.contextGraphId ?? contextGraphId,
+    programIri,
+    programLayer,
+    readPrincipal,
+  );
+  if (program.language === 'typescript-v1') {
+    throw new SemanticProgramError('PROGRAM_BINDING_REQUIRED', 'TypeScript Programs require a TypeScript operation approval', 403);
+  }
+  if (bound && (sourceHashOf(program) !== bound.binding.program.sourceHash
+    || program.authorAgentAddress.toLowerCase() !== bound.binding.program.authorAgentAddress.toLowerCase()
+    || program.permittedPrograms.length !== 0)) {
+    throw new SemanticProgramError('PROGRAM_BINDING_MISMATCH', 'Program identity differs from the tenant approval', 403);
+  }
+  const originalCaller = callerAgentAddress ?? program.authorAgentAddress;
+  if (!bound && config?.programPolicy) {
+    validateProgramPin(config, program);
+    if (!await agent.canReadContextGraph(contextGraphId, { callerAgentAddress: originalCaller })) {
+      throw new SemanticProgramError('PROGRAM_CALLER_ACCESS_DENIED', 'Caller cannot read the Context Graph', 403);
+    }
+  }
+  const compilation = await new WasmStrategyAdmissionClient({ startupTimeoutMs: config?.startupTimeoutMs })
+    .compileAndAdmit(program.source);
+  if (!compilation.ok) {
+    const diagnostic = compilation.diagnostics[0];
+    throw new SemanticProgramError(
+      'PROGRAM_REJECTED',
+      diagnostic
+        ? `${diagnostic.code} at ${diagnostic.primary.start.line}:${diagnostic.primary.start.column}: ${diagnostic.message}`
+        : 'Program admission failed',
+      422,
+    );
+  }
+  if (bound && (compilation.plan.adapterVersions.size !== program.requiredTools.length
+    || [...compilation.plan.adapterVersions].some(([operation, version]) => version !== 1
+      || !(operation === 'dkg/query' && bound.binding.query || operation === 'dkg/asset-create' && bound.binding.assetCreation
+        || operation === 'dkg/sparql-read' && bound.binding.sparqlRead))
+    || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
+    throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
+  }
+  const { tools, registry, operatorAddress, operatorIri, policyIri, policyVersion, policyHashHex } = await resolveProgramTools(
+    agent, contextGraphId, program, config, llmConfig, callerAgentAddress, executingAgentAddress,
+    executionLayer, childInvoker, assertAuthorized, bound, assetStore);
   const declaredAdapters = new Set(
     tools.flatMap((tool) => tool.operation && tool.semanticVersion
       ? [`${tool.operation}@${tool.semanticVersion}`]
@@ -1149,6 +1245,134 @@ async function resolveInternal(
     registry,
     operatorAddress,
     policyHashHex,
+  };
+}
+
+/** Both language front ends use this broker, capability and durable write journal. */
+function createProgramToolDispatcher(
+  runtime: ConfiguredSemanticRuntimeService,
+  resolved: Pick<InternalResolution, 'public' | 'registry' | 'policyHashHex'>,
+  authority: import('@origintrail-official/dkg-semantic-runtime').AdmittedPlanAuthority,
+  executionIri: string, invocationId: string, assertAuthorized: () => Promise<void>, bound?: BoundProgramInvocation,
+): (toolIri: string, input: unknown, callId: string) => Promise<string> {
+  const policyFactsDigest = Uint8Array.from(Buffer.from(resolved.policyHashHex, 'hex'));
+  const broker = new RuntimeEffectBroker(
+    runtime.store,
+    {
+      evaluate: async () => {
+        await assertAuthorized();
+        return {
+          decision: 'allow',
+          policyId: resolved.public.selectedPolicy.iri,
+          policyEpoch: 1n,
+          factsDigest: policyFactsDigest,
+          reasonCode: bound ? 'TENANT_PROGRAM_BINDING_ALLOW' : 'OPERATOR_POLICY_ALLOW',
+        };
+      },
+    },
+    resolved.registry,
+    authority,
+  );
+  const capabilityId = `urn:sr:capability:${invocationId}`;
+  if (!runtime.store.capability(capabilityId)) {
+    const now = Date.now();
+    const capabilityVerbs = [...new Set(resolved.public.requiredTools.flatMap((tool) => {
+      if (!tool.operation || !tool.semanticVersion) return [];
+      const descriptor = resolved.registry.describe(tool.operation, tool.semanticVersion);
+      return descriptor ? [descriptor.verb] : [];
+    }))];
+    const readOnly = [...authority.allowedEffectClasses].every(effectClass => effectClass === 'read');
+    runtime.store.putCapability({
+      capabilityId,
+      executionId: executionIri,
+      metadataCbor: encodeCapabilityMetadata({
+        subject: resolved.public.executingNode,
+        audience: 'dkg-semantic-runtime',
+        executionId: executionIri,
+        verbs: capabilityVerbs,
+        resources: resolved.public.requiredTools.map(tool => tool.toolIri),
+        delegationDepth: 0,
+        oneShot: !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
+        budgetMicros: 0n,
+      }),
+      hostBindingKey: resolved.public.requiredTools[0]?.adapterHash ?? 'no-adapter',
+      policyEpoch: 1n,
+      notBefore: now - 1_000,
+      expiresAt: now + 30 * 24 * 60 * 60 * 1_000,
+      oneShot: !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
+      consumedAt: null,
+      revokedAt: null,
+    });
+  }
+
+  return async (toolIri, input, callId) => {
+    await assertAuthorized();
+    const tool = resolved.public.requiredTools.find(candidate => candidate.toolIri === toolIri);
+    if (!tool) throw new SemanticProgramError('UNSUPPORTED_PROGRAM_TOOL', 'Tool is not declared and approved', 403);
+    if (bound && tool.operation === 'dkg/query') {
+      const value = input as { selector?: unknown; parameters?: unknown } | null;
+      if (!value || value.selector !== bound.binding.query?.selector
+        || (value.parameters !== undefined && (!value.parameters || typeof value.parameters !== 'object'
+          || Array.isArray(value.parameters) || Object.keys(value.parameters).length))) {
+        throw new SemanticProgramError('PROGRAM_BINDING_QUERY_FORBIDDEN', 'Only the approved catalog query with fixed arguments can be invoked', 403);
+      }
+    }
+    const descriptor = resolved.registry.describe(tool.operation!, tool.semanticVersion!);
+    if (!descriptor || !tool.effective) {
+      throw new SemanticProgramError('UNSUPPORTED_PROGRAM_TOOL', 'Unsupported WASI tool import', 422);
+    }
+    const effectId = `urn:sr:effect:${invocationId}:${callId}`;
+    const proposal = {
+      effectId,
+      executionId: executionIri,
+      processId: `tool:${tool.operation}`,
+      stepId: `tool-${callId}`,
+      attemptId: 'attempt-1',
+      principal: resolved.public.executingNode,
+      adapterId: tool.operation!,
+      adapterVersion: tool.semanticVersion!,
+      verb: descriptor.verb,
+      resource: tool.toolIri,
+      normalizedInput: input,
+      capabilityId,
+      idempotencyKey: `${executionIri}:${callId}`,
+      budgetReservation: 0n,
+      now: Date.now(),
+    };
+    let outcome;
+    if (descriptor.effectClass === 'read') {
+      try {
+        outcome = await broker.dispatchRead(proposal);
+      } catch (error) {
+        throw new SemanticProgramError(
+          'QUERY_REQUEST_FAILED',
+          `DKG query failed: ${safeMessage(error)}`,
+          502,
+        );
+      }
+    } else {
+      await broker.prepareEffect(proposal);
+      outcome = broker.readOutcome(effectId);
+      if (outcome?.state === 'prepared') {
+        await broker.dispatchPrepared(effectId, Date.now());
+        outcome = broker.readOutcome(effectId);
+      } else if (tool.operation === 'dkg/asset-create' && ['unknown', 'reconciling', 'manual_review_required'].includes(outcome?.state ?? '')) {
+        await broker.resumeUnknown(effectId, Date.now());
+        outcome = broker.readOutcome(effectId);
+      }
+    }
+    if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
+      if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling' || outcome?.state === 'manual_review_required') {
+        throw new SemanticProgramError(
+          'INVOCATION_REQUIRES_RECONCILIATION',
+          'The tool call may have reached its target; it will not be dispatched again automatically',
+          409,
+        );
+      }
+      throw new SemanticProgramError('TOOL_REQUEST_FAILED', 'WASI tool request failed', 502);
+    }
+    await assertAuthorized();
+    return outcome.output;
   };
 }
 
@@ -1352,56 +1576,8 @@ async function invokeResolved(
     revoked: false,
     approvals: [...resolved.plan.approvalRequirements],
   };
-  const policyFactsDigest = Uint8Array.from(Buffer.from(resolved.policyHashHex, 'hex'));
-  const broker = new RuntimeEffectBroker(
-    runtime.store,
-    {
-      evaluate: async () => {
-        await assertAuthorized();
-        return {
-          decision: 'allow',
-          policyId: resolved.public.selectedPolicy.iri,
-          policyEpoch: 1n,
-          factsDigest: policyFactsDigest,
-          reasonCode: bound ? 'TENANT_PROGRAM_BINDING_ALLOW' : 'OPERATOR_POLICY_ALLOW',
-        };
-      },
-    },
-    resolved.registry,
-    admittedPlanAuthority(resolved.plan),
-  );
-  const capabilityId = `urn:sr:capability:${invocationId}`;
-  if (!runtime.store.capability(capabilityId)) {
-    const now = Date.now();
-    const capabilityVerbs = [...new Set(resolved.public.requiredTools.flatMap((tool) => {
-      if (!tool.operation || !tool.semanticVersion) return [];
-      const descriptor = resolved.registry.describe(tool.operation, tool.semanticVersion);
-      return descriptor ? [descriptor.verb] : [];
-    }))];
-    const readOnly = resolved.plan.effectUpperBound.every((effectClass) => effectClass === 'read');
-    runtime.store.putCapability({
-      capabilityId,
-      executionId: executionIri,
-      metadataCbor: encodeCapabilityMetadata({
-        subject: resolved.public.executingNode,
-        audience: 'dkg-semantic-runtime',
-        executionId: executionIri,
-        verbs: capabilityVerbs,
-        resources: resolved.program.requiredTools,
-        delegationDepth: 0,
-        oneShot: !readOnly && !resolved.plan.adapterVersions.has('dkg/asset-create'),
-        budgetMicros: 0n,
-      }),
-      hostBindingKey: resolved.public.requiredTools[0]?.adapterHash ?? 'no-adapter',
-      policyEpoch: 1n,
-      notBefore: now - 1_000,
-      expiresAt: now + 30 * 24 * 60 * 60 * 1_000,
-      oneShot: !readOnly && !resolved.plan.adapterVersions.has('dkg/asset-create'),
-      consumedAt: null,
-      revokedAt: null,
-    });
-  }
-
+  const dispatchTool = createProgramToolDispatcher(runtime, resolved, admittedPlanAuthority(resolved.plan),
+    executionIri, invocationId, assertAuthorized, bound);
   const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
     if (bound && !(call.kind === 'asset-create' && bound.binding.assetCreation)
@@ -1438,62 +1614,8 @@ async function invokeResolved(
     const tool = resolved.public.requiredTools.find((candidate) =>
       candidate.operation === binding.operation
       && candidate.semanticVersion === binding.version);
-    const descriptor = resolved.registry.describe(binding.operation, binding.version);
-    if (!tool || !descriptor) {
-      throw new SemanticProgramError('UNSUPPORTED_PROGRAM_TOOL', 'Unsupported WASI tool import', 422);
-    }
-    const effectId = `urn:sr:effect:${invocationId}:${call.effectId}`;
-    const proposal = {
-      effectId,
-      executionId: executionIri,
-      processId: `wasi:${call.kind}`,
-      stepId: `wasi-tool-${call.effectId}`,
-      attemptId: 'attempt-1',
-      principal: resolved.public.executingNode,
-      adapterId: binding.operation,
-      adapterVersion: binding.version,
-      verb: descriptor.verb,
-      resource: tool.toolIri,
-      normalizedInput: binding.normalizedInput,
-      capabilityId,
-      idempotencyKey: `${executionIri}:${call.effectId}`,
-      budgetReservation: 0n,
-      now: Date.now(),
-    };
-    let outcome;
-    if (descriptor.effectClass === 'read') {
-      try {
-        outcome = await broker.dispatchRead(proposal);
-      } catch (error) {
-        runtime.store.setExecutionStatus(executionIri, 'failed');
-        throw new SemanticProgramError(
-          'QUERY_REQUEST_FAILED',
-          `DKG query failed: ${safeMessage(error)}`,
-          502,
-        );
-      }
-    } else {
-      await broker.prepareEffect(proposal);
-      outcome = broker.readOutcome(effectId);
-      if (outcome?.state === 'prepared') {
-        await broker.dispatchPrepared(effectId, Date.now());
-        outcome = broker.readOutcome(effectId);
-      } else if (call.kind === 'asset-create' && ['unknown', 'reconciling', 'manual_review_required'].includes(outcome?.state ?? '')) {
-        await broker.resumeUnknown(effectId, Date.now());
-        outcome = broker.readOutcome(effectId);
-      }
-    }
-    if (outcome?.state !== 'succeeded' || typeof outcome.output !== 'string') {
-      if (outcome?.state === 'dispatching' || outcome?.state === 'unknown' || outcome?.state === 'reconciling' || outcome?.state === 'manual_review_required') {
-        throw new SemanticProgramError(
-          'INVOCATION_REQUIRES_RECONCILIATION',
-          'The tool call may have reached its target; it will not be dispatched again automatically',
-          409,
-        );
-      }
-      runtime.store.setExecutionStatus(executionIri, 'failed');
-      throw new SemanticProgramError('TOOL_REQUEST_FAILED', 'WASI tool request failed', 502);
-    }
+    if (!tool) throw new SemanticProgramError('UNSUPPORTED_PROGRAM_TOOL', 'Unsupported WASI tool import', 422);
+    const outcome = { output: await dispatchTool(tool.toolIri, binding.normalizedInput, String(call.effectId)) };
     if (call.kind === 'investigator') return { kind: 'investigator', output: outcome.output };
     if (call.kind === 'safe-llm') {
       let safeResult: { output?: unknown; childExecutions?: unknown };

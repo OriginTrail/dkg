@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { SemanticTypeScriptGrant } from './program-policy.js';
 
 export interface CompiledTypeScriptProgram { directory: string; hash: string; manifest: string; source: string }
-type Effect = { id: number; program: string; args: unknown[] };
+type Effect = { id: number } & ({ kind: 'program'; program: string; args: unknown[] } | { kind: 'tool'; tool: string; input: unknown });
 
 /** Trusted compiler output only. Raw JS/Wasm artifacts are never accepted from callers. */
 export class TypeScriptProgramHost {
@@ -98,7 +98,7 @@ export class TypeScriptProgramHost {
             }
             if (!Array.isArray(state.effects)) throw new Error('Invalid effect list');
             if (state.terminal) {
-              if (pending.size || state.effects.length) throw new Error('Program returned with unawaited child calls');
+              if (pending.size || state.effects.length) throw new Error('Program returned with unawaited calls');
               if (!state.terminal.ok) throw new Error(state.terminal.error);
               const result = JSON.stringify(state.terminal.value);
               if (result === undefined || Buffer.byteLength(result) > 262144) throw new Error('Program must return bounded JSON');
@@ -110,8 +110,12 @@ export class TypeScriptProgramHost {
               throw new Error('TYPESCRIPT_CALL_BUDGET_EXCEEDED');
             for (const effect of state.effects as Effect[]) {
               if (!Number.isSafeInteger(effect.id) || effect.id < 1 || seen.has(effect.id)
-                || typeof effect.program !== 'string' || effect.program.length > 2048 || !Array.isArray(effect.args)
-                || Buffer.byteLength(JSON.stringify(effect.args)) > 65536) throw new Error('Invalid Program effect');
+                || !['program', 'tool'].includes(effect.kind)) throw new Error('Invalid Program effect');
+              const target = effect.kind === 'program' ? effect.program : effect.tool;
+              const input = effect.kind === 'program' ? effect.args : effect.input;
+              if (typeof target !== 'string' || target.length > 2048 || !/^[a-z][a-z0-9+.-]*:/i.test(target)
+                || (effect.kind === 'program' && !Array.isArray(input))
+                || input === undefined || Buffer.byteLength(JSON.stringify(input)) > 65536) throw new Error('Invalid Program effect');
               seen.add(effect.id);
               pending.add(effect.id);
               void Promise.resolve().then(() => {

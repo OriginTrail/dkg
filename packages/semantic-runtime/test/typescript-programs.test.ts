@@ -17,6 +17,7 @@ describe('stored TypeScript Program runtime', () => {
       }`);
     let active = 0, peak = 0;
     const output = await runtime.execute(artifact, '[[1,2,3,4,5,6]]', grant, async effect => {
+      if (effect.kind !== 'program') throw new Error('Expected child call');
       peak = Math.max(peak, ++active);
       await new Promise(resolve => setTimeout(resolve, (7 - Number(effect.args[0])) * 5));
       active--;
@@ -25,6 +26,28 @@ describe('stored TypeScript Program runtime', () => {
     expect(JSON.parse(output)).toEqual([2, 4, 6, 8, 10, 12]);
     expect(peak).toBe(4);
     expect(active).toBe(0);
+  }, 60000);
+
+  it('pipes direct tools and child Programs through one bounded host channel', async () => {
+    const runtime = host();
+    const artifact = await runtime.compile(`import { invoke_tool, invoke_program } from '${api}';
+      export async function run() {
+        const rows = await invoke_tool('urn:tool:read', {sparql: 'SELECT'});
+        return invoke_program('urn:program:double', [rows[0]]);
+      }`);
+    const calls: unknown[] = [];
+    expect(await runtime.execute(artifact, '[]', grant, async effect => {
+      calls.push(effect);
+      return effect.kind === 'tool' ? [6] : Number(effect.args[0]) * 2;
+    })).toBe('12');
+    expect(calls).toEqual([
+      {id: 1, kind: 'tool', tool: 'urn:tool:read', input: {sparql: 'SELECT'}},
+      {id: 2, kind: 'program', program: 'urn:program:double', args: [6]},
+    ]);
+    let dispatched = 0;
+    await expect(runtime.execute(artifact, '[]', {...grant, maxCalls: 1}, async () => { dispatched++; return [6]; }))
+      .rejects.toThrow('BUDGET');
+    expect(dispatched).toBe(1);
   }, 60000);
 
   it('rejects imports outside the guest API during compilation', async () => {

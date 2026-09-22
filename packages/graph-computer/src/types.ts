@@ -59,6 +59,8 @@ export interface UploadProgram {
   version?: string;
   /** Tool IRIs declared by the Program. This does not grant permission to use them. */
   requiredTools: string[];
+  /** Stored request only; the graph owner must separately approve these permissions. */
+  requestedPermissions?: RequestedToolPermissions;
 }
 
 export interface StoredProgram {
@@ -72,6 +74,8 @@ export interface StoredProgram {
   sourceHash: string;
   authorAgentAddress: string;
   requiredTools: string[];
+  /** Stored request only; the graph owner must separately approve these permissions. */
+  requestedPermissions?: RequestedToolPermissions;
   permittedPrograms: string[];
 }
 
@@ -110,6 +114,8 @@ export interface ApproveProgram extends Operation {
   query?: QueryPermission;
   assetCreation?: { toolIri: string };
   typescript?: {
+    /** Pinned tool identities; the server fills these from the stored Program. */
+    requiredTools?: string[];
     children: Array<{ graphId: string; operationIri: string; programIri?: string; bindingDigest?: string }>;
     maxCalls?: number; maxConcurrency?: number; timeoutMs?: number;
   };
@@ -129,6 +135,8 @@ export interface ProgramBinding {
   query?: QueryPermission & { queryIri: string; definitionSha256: string; outputSchemaSha256: string };
   assetCreation?: { toolIri: string };
   typescript?: {
+    /** Pinned tool identities; the server fills these from the stored Program. */
+    requiredTools?: string[];
     children: Array<{ contextGraphId: string; operationIri: string; programIri: string; bindingDigest: string }>;
     maxCalls: number; maxConcurrency: number; timeoutMs: number;
   };
@@ -174,4 +182,13 @@ export interface Execution {
   /** JSON outputs are decoded; plain-text outputs remain strings. RDF terms are unchanged. */
   outputs: JsonValue[];
   rawOutputs: string[];
+}
+
+/** Exact requested tool scope stored with a TypeScript Program. Never grants authority itself. */
+export interface RequestedToolPermissions {
+  graphId: string;
+  executionLayer?: MemoryLayer;
+  query?: QueryPermission;
+  sparqlRead?: SparqlReadPermission;
+  assetCreation?: { toolIri: string };
 }

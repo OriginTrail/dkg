@@ -1,5 +1,5 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer } from '@origintrail-official/dkg-graph-computer';
+import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer, RequestedToolPermissions } from '@origintrail-official/dkg-graph-computer';
 import { createUuid } from '@origintrail-official/dkg-graph-computer';
 import { programClient, fetchProgramAgents, type ProgramAgent } from './client.js';
 import { useModalDismiss } from '../Modals/useModalDismiss.js';
@@ -24,7 +24,7 @@ function matchesProgram(approval: Approval, program: ProgramReference) {
     && pin.authorAgentAddress.toLowerCase() === program.authorAgentAddress.toLowerCase();
 }
 type Child = { graphId: string; operationIri: string; programIri: string };
-type Saved = { name: string; program: ProgramReference; source: string; version: string; children: string[] };
+type Saved = { name: string; program: ProgramReference; source: string; version: string; children: string[]; tools: string[]; permissions: string };
 export interface ProgramEditorProps {
   contextGraphId: string;
   existing?: { programIri: string; programLayer: MemoryLayer; label?: string };
@@ -42,6 +42,8 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const [graphId, setGraphId] = useState(contextGraphId);
   const [operationIri, setOperationIri] = useState('');
   const [callers, setCallers] = useState(address ?? '');
+  const [toolsText, setToolsText] = useState('');
+  const [permissionsText, setPermissionsText] = useState('');
   const [children, setChildren] = useState<Child[]>([]);
   const [maxCalls, setMaxCalls] = useState(64);
   const [maxConcurrency, setMaxConcurrency] = useState(4);
@@ -59,7 +61,8 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const saveAttempt = useRef<{ fingerprint: string; programIri: string; name: string } | null>(null);
   const key = JSON.stringify([canonicalGraph(graphId), operationIri.trim()]);
   const childIris = [...new Set(children.map(child => child.programIri.trim()))].sort();
-  const dirty = (!existing && !saved) || (!!saved && (name !== saved.name || source !== saved.source || version !== saved.version || JSON.stringify(childIris) !== JSON.stringify(saved.children)));
+  const toolIris = [...new Set(toolsText.split(/[\s,]+/).filter(Boolean))].sort();
+  const dirty = (!existing && !saved) || (!!saved && (name !== saved.name || source !== saved.source || version !== saved.version || JSON.stringify(childIris) !== JSON.stringify(saved.children) || JSON.stringify(toolIris) !== JSON.stringify(saved.tools) || permissionsText !== saved.permissions));
   const canRun = !!approved?.binding.enabled && !dirty && approved.contextGraphId === canonicalGraph(graphId)
     && approved.operationIri === operationIri.trim() && !!saved && matchesProgram(approved, saved.program);
   const recoveryKey = `dkg-program-invocation:${location.origin}:${address?.toLowerCase()}:${key}`;
@@ -70,7 +73,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     setSaved(null);
     setSource(existing ? '' : TEMPLATE);
     setName(existing?.label ?? 'Untitled Program');
-    setVersion('1.0.0'); setChildren([]);
+    setVersion('1.0.0'); setChildren([]); setToolsText(''); setPermissionsText('');
     saveAttempt.current = null;
     setApproved(null); setReviewed(null); setResult(null); setBusy('');
     return () => { generation.current++; };
@@ -126,30 +129,46 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     const value = await client.programs.getSource({ graphId: contextGraphId, ...existing! }); check();
     if (value.language !== 'typescript-v1') throw new Error('This editor supports TypeScript Programs.');
     const loadedName = value.label ?? existing?.label ?? value.programIri;
+    const permissions = value.requestedPermissions ? JSON.stringify(value.requestedPermissions, null, 2) : '';
+    setToolsText((value.requiredTools ?? []).join('\n')); setPermissionsText(permissions);
+    if (value.requestedPermissions) setGraphId(value.requestedPermissions.graphId);
     setName(loadedName); setSource(value.source); setVersion(value.version);
     setChildren(value.permittedPrograms.map(programIri => ({ graphId, operationIri: '', programIri })));
-    setSaved({ name: loadedName, source: value.source, version: value.version, children: [...value.permittedPrograms].sort(),
+    setSaved({ tools: [...(value.requiredTools ?? [])].sort(), permissions, name: loadedName, source: value.source, version: value.version, children: [...value.permittedPrograms].sort(),
       program: { graphId: value.contextGraphId, programIri: value.programIri, programLayer: value.layer,
         sourceHash: value.sourceHash, authorAgentAddress: value.authorAgentAddress } });
     invalidate(); setNotice('Source loaded. Saving creates a new Program version.');
     });
   };
 
+  function parsePermissions(): RequestedToolPermissions | undefined {
+    if (!permissionsText.trim()) return undefined;
+    const value = JSON.parse(permissionsText);
+    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.graphId !== 'string'
+      || Object.keys(value).some(key => !['graphId', 'executionLayer', 'query', 'sparqlRead', 'assetCreation'].includes(key))) {
+      throw new Error('Permissions need graphId and only query, sparqlRead, assetCreation or executionLayer fields.');
+    }
+    return value;
+  }
+
   const save = () => action('Saving new version…', async (client, check) => {
     if (!name.trim()) throw new Error('Give the Program a name.');
     if (!source.trim()) throw new Error('Write a Program first.');
     if (new TextEncoder().encode(source).length > 262144) throw new Error('Source exceeds 256 KiB.');
     if (childIris.some(iri => !iri) || childIris.length !== children.length) throw new Error('Each child needs a distinct Program IRI.');
-    const fingerprint = JSON.stringify([name.trim(), source, version, childIris]);
+    const requestedPermissions = parsePermissions();
+    if (toolIris.length && !requestedPermissions) throw new Error('Describe the requested tool permissions before saving.');
+    const fingerprint = JSON.stringify([name.trim(), source, version, childIris, toolIris, requestedPermissions]);
     if (saveAttempt.current?.fingerprint !== fingerprint) {
       const id = createUuid();
       saveAttempt.current = { fingerprint, programIri: `urn:dkg:program:${id}`, name: `${name.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 100) || 'program'}-${id}` };
     }
     const attempt = saveAttempt.current!;
     const value = await client.programs.upload({ graphId: contextGraphId, source, version, language: 'typescript-v1',
-      requiredTools: [], permittedPrograms: childIris, programIri: attempt.programIri, name: attempt.name, label: name.trim(),
+      requiredTools: toolIris, requestedPermissions, permittedPrograms: childIris, programIri: attempt.programIri, name: attempt.name, label: name.trim(),
       derivedFrom: saved?.program.programIri ?? existing?.programIri }); check();
-    setSaved({ name, program: value, source, version, children: childIris }); invalidate();
+    setSaved({ tools: toolIris, permissions: permissionsText, name, program: value, source, version, children: childIris }); invalidate();
+    if (requestedPermissions) setGraphId(requestedPermissions.graphId);
     setNotice('Saved in Working Memory. Execution permission has not changed.');
     onSaved();
   });
@@ -176,8 +195,10 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
       if (!approval.binding.enabled || approval.binding.program.programIri !== child.programIri.trim()) throw new Error('A child operation does not match the declared Program.');
       pins.push({ graphId: child.graphId.trim(), operationIri: child.operationIri.trim(), programIri: child.programIri.trim(), bindingDigest: approval.bindingDigest });
     }
-    const request = { ...operation(), program: saved.program, allowedCallers: callers.split(/[\s,]+/).filter(Boolean),
-      typescript: { children: pins, maxCalls, maxConcurrency, timeoutMs } };
+    const permissions = parsePermissions();
+    if (permissions && canonicalGraph(permissions.graphId) !== canonicalGraph(graphId)) throw new Error('Operation graph must match the stored requested data graph.');
+    const request = { ...permissions, ...operation(), program: saved.program, allowedCallers: callers.split(/[\s,]+/).filter(Boolean),
+      typescript: { children: pins, requiredTools: saved.tools, maxCalls, maxConcurrency, timeoutMs } };
     const value = reviewed.value
       ? await client.programs.updateApproval({ ...request, expectedRevision: reviewed.value.revision })
       : await client.programs.approve(request);
@@ -224,6 +245,16 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
             <label>Operation graph<input value={graphId} onChange={event => setGraphId(event.target.value)} /></label>
             <label>Operation IRI<input value={operationIri} placeholder="urn:example:operation:total" onChange={event => setOperationIri(event.target.value)} /></label>
             <label>Allowed caller addresses<textarea rows={3} value={callers} onChange={event => { setCallers(event.target.value); invalidate(); }} /></label>
+            <h4>Requested tools</h4>
+            <p className="program-editor-help">Stored with the Program. These requests become usable only after the graph owner approves this operation.</p>
+            <label>Tool IRIs<textarea rows={3} value={toolsText} placeholder="urn:example:tool:read-devices" onChange={event => { setToolsText(event.target.value); invalidate(); }} /></label>
+            <label>Requested tool permissions (JSON)<textarea rows={9} value={permissionsText} placeholder={'{ "graphId": "your-data-graph", "assetCreation": { "toolIri": "urn:example:tool:create-asset" } }'}
+              onChange={event => { setPermissionsText(event.target.value); invalidate(); }} /></label>
+            <p className="program-editor-help">Use query for a fixed catalog query, sparqlRead for bounded reads, or assetCreation for writes. The data graph, memory layer, output contract and read limits are part of the saved request.</p>
+            {saved?.tools.length ? <section aria-label="Permissions to approve"><strong>Tools requested by this saved Program</strong>
+              <ul>{saved.tools.map(tool => <li key={tool}><code>{tool}</code></li>)}</ul>
+              <pre>{saved.permissions}</pre>
+            </section> : null}
             <h4>Approved child Programs</h4>
             <p className="program-editor-help">Each child must already have an approved operation on this node. Call it using its Program IRI.</p>
             {children.map((child, index) => <div className="program-editor-child" key={index}>

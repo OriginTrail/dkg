@@ -1,3 +1,7 @@
+/** Invoke a declared tool through the host's current approval and effect broker. */
+export function invoke_tool(_toolIri: string, _input: unknown): Promise<unknown> {
+  throw new Error('invoke_tool is available inside compiled Graph Computer Programs');
+}
 /** Guest-only API. The TypeScript Program compiler supplies the implementation. */
 export function invoke_program(_program: string, _args: unknown[]): Promise<unknown> {
   throw new Error('invoke_program is available inside compiled Graph Computer Programs');

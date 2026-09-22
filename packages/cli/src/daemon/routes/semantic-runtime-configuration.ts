@@ -100,7 +100,10 @@ async function prepareBinding(ctx: RequestContext, raw: Record<string, unknown>)
   }
   if (raw.typescript !== undefined) {
     if (!record(raw.typescript) || !Array.isArray(raw.typescript.children) || raw.typescript.children.length > 32) badRequest('typescript.children must contain at most 32 operations');
-    closed(raw.typescript, ['children', 'maxCalls', 'maxConcurrency', 'timeoutMs']);
+    closed(raw.typescript, ['children', 'maxCalls', 'maxConcurrency', 'timeoutMs', 'requiredTools']);
+    if (raw.typescript.requiredTools !== undefined && JSON.stringify(raw.typescript.requiredTools) !== JSON.stringify(program.requiredTools)) {
+      throw new SemanticProgramError('PROGRAM_APPROVAL_PIN_MISMATCH', 'requiredTools differs from the stored Program', 409);
+    }
     const children = await Promise.all(raw.typescript.children.map(async (child: unknown) => {
       if (!record(child)) badRequest('Invalid child operation');
       closed(child, ['contextGraphId', 'operationIri', 'programIri', 'bindingDigest']);
@@ -112,7 +115,7 @@ async function prepareBinding(ctx: RequestContext, raw: Record<string, unknown>)
         programIri: pin(child.programIri, selected.program.programIri, 'child programIri'),
         bindingDigest: pin(child.bindingDigest, programBindingDigest(selected), 'child bindingDigest') };
     }));
-    binding.typescript = { children, maxCalls: (raw.typescript.maxCalls ?? 64) as number,
+    binding.typescript = { children, requiredTools: program.requiredTools, maxCalls: (raw.typescript.maxCalls ?? 64) as number,
       maxConcurrency: (raw.typescript.maxConcurrency ?? 4) as number, timeoutMs: (raw.typescript.timeoutMs ?? 30000) as number };
   }
   validateProgramBindings([binding]);

@@ -47,12 +47,17 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
     if (binding.sparqlRead && binding.assetCreation && (binding.sparqlRead as { toolIri: string }).toolIri === binding.assetCreation.toolIri) throw new Error('DUPLICATE_PROGRAM_TOOL');
     if (binding.typescript !== undefined) {
       const grant = binding.typescript;
-      if (!record(grant) || !keys(grant, ['children', 'maxCalls', 'maxConcurrency', 'timeoutMs'])
+      if (!record(grant) || !keys(grant, ['children', 'maxCalls', 'maxConcurrency', 'timeoutMs', 'requiredTools'])
         || !Array.isArray(grant.children) || grant.children.length > 32
         || !Number.isSafeInteger(grant.maxCalls) || Number(grant.maxCalls) < 1 || Number(grant.maxCalls) > 256
         || !Number.isSafeInteger(grant.maxConcurrency) || Number(grant.maxConcurrency) < 1 || Number(grant.maxConcurrency) > 8
-        || !Number.isSafeInteger(grant.timeoutMs) || Number(grant.timeoutMs) < 100 || Number(grant.timeoutMs) > 120000
-        || binding.query || binding.sparqlRead || binding.assetCreation) throw new Error('INVALID_TYPESCRIPT_GRANT');
+        || !Number.isSafeInteger(grant.timeoutMs) || Number(grant.timeoutMs) < 100 || Number(grant.timeoutMs) > 120000) throw new Error('INVALID_TYPESCRIPT_GRANT');
+      if (grant.requiredTools !== undefined) {
+        if (!Array.isArray(grant.requiredTools) || grant.requiredTools.length > 3
+          || new Set(grant.requiredTools).size !== grant.requiredTools.length
+          || grant.requiredTools.some(iri => typeof iri !== 'string' || iri.length > 2048 || !/^[a-z][a-z0-9+.-]*:/i.test(iri))) throw new Error('INVALID_TYPESCRIPT_TOOLS');
+        for (const iri of grant.requiredTools) sparqlIri(iri);
+      }
       const children = new Set<string>();
       for (const child of grant.children) {
         if (!record(child) || !keys(child, ['contextGraphId', 'operationIri', 'programIri', 'bindingDigest'])

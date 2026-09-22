@@ -21,6 +21,7 @@ function loadRuntime() {
         module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.NodeJs,
         strict: true, noEmit: true, lib: ['lib.es2022.d.ts'] });
       ts.typescriptDefaults.addExtraLib(`declare module '@origintrail-official/dkg-graph-computer/program' {
+        export function invoke_tool(toolIri: string, input: unknown): Promise<unknown>;
         export function invoke_program(program: string, args: unknown[]): Promise<unknown>;
         type Stage = (value: unknown) => unknown | Promise<unknown>;
         export function pipe(value: unknown, ...stages: Stage[]): Promise<unknown>;

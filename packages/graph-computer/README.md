@@ -302,6 +302,68 @@ the root invocation can arrive through another DKG node. Remote arguments use
 the version-4 delegation scope, which includes their canonical JSON hash.
 Unparameterized calls retain the version-3 scope.
 
+## Direct tools from TypeScript
+
+Use `invoke_tool(toolIri, input)` for an installed tool, and `invoke_program(programIri, args)` for an approved child Program. Both can appear in the same `pipe`/`map`/`reduce` workflow. Inputs and outputs are JSON. Tool results retain their existing envelopes; SPARQL rows are in `result.bindings`.
+
+```ts
+import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';
+
+export async function run(sparql: string) {
+  return invoke_tool('urn:example:tool:device-read', { sparql });
+}
+```
+
+Store the requested scope along with the source, then approve it separately:
+
+```ts
+const requiredTools = ['urn:example:tool:device-read'];
+const requestedPermissions = {
+  graphId: dataGraph,
+  sparqlRead: {
+    toolIri: requiredTools[0], layer: 'wm' as const,
+    timeoutMs: 5000, maxResultItems: 10, maxOutputBytes: 16384,
+    outputSchema: {
+      type: 'object' as const, additionalProperties: false as const,
+      required: ['bindings'], properties: {
+        bindings: { type: 'array' as const, maxItems: 10, items: {
+          type: 'object' as const, additionalProperties: false as const,
+          required: ['device'], properties: { device: { type: 'string' as const, maxLength: 256 } },
+        } },
+      },
+    },
+  },
+};
+const program = await owner.programs.upload({
+  graphId: programGraph, source, language: 'typescript-v1',
+  requiredTools, requestedPermissions,
+});
+await owner.programs.approve({
+  ...requestedPermissions, program,
+  operationIri: 'urn:example:operation:device-read',
+  allowedCallers: [callerAddress],
+  typescript: { children: [], maxCalls: 16, maxConcurrency: 4, timeoutMs: 30000 },
+});
+const result = await caller.programs.invoke({
+  graphId: dataGraph, operationIri: 'urn:example:operation:device-read',
+  inputs: ['SELECT ?device WHERE { ?device a <urn:example:Device> } LIMIT 10'],
+});
+```
+
+Current operation approvals support the same three tool grants for both languages:
+
+| Grant | `invoke_tool` input | Result |
+| --- | --- | --- |
+| `query: { selector, outputSchema }` | `{ selector }` | `{ queryIri, result }` |
+| `sparqlRead: { toolIri, layer, timeoutMs, maxResultItems, maxOutputBytes, outputSchema }` | `{ sparql }` | Existing scoped SPARQL result envelope |
+| `assetCreation: { toolIri }` | `{ quads: [{ subject, predicate, object }] }` | Existing asset creation receipt |
+
+A catalog grant permits only its fixed selector and no runtime query parameters. List its tool IRI in `requiredTools`, alongside any read/create tool IRIs. There is at most one grant per adapter. Set `executionLayer` in requested permissions when assets/receipts should be stored outside WM. Tool arguments cannot select another data graph, executor or layer. Raw SPARQL grants are read-only; writes use the asset creation adapter. PostgreSQL and model calls are not new built-in grants on this approval API.
+
+The Program stores tool IRIs as `sr:requiresTool` and its JSON scope as `sr:requestedToolPermissions`. These triples request permissions; they never authorize execution. Approval pins the tool IRIs, source, executor, graph, layer, query definition and output contract. A scope change requires a new saved request and explicit owner approval. The editor shows these requests under **Requested tools** and includes them in **Approve Program**.
+
+Both languages resolve adapters through the same host registry, then use the same `RuntimeEffectBroker`, current permission checks, capability checks, input/output validation and durable write journal. Direct tools and child invocations consume the same TypeScript call/concurrency budgets. Revocation is checked during execution and before returning results. A lost write response returns `INVOCATION_REQUIRES_RECONCILIATION`, even if TypeScript catches the tool exception; retry never silently replays a failed or interrupted workflow.
+
 ## Retry and recovery
 
 `invoke()` generates a UUID before the first request. Transient network/gateway failures retry with **the same UUID**, a fresh HTTP nonce/signature and fresh forwarding authorization. Defaults: two additional attempts, 60 seconds per attempt, exponential delay starting at 250 ms. Server `Retry-After` is honored; delays longer than five seconds are returned to the application instead of retried early.
@@ -323,7 +385,7 @@ For TypeScript, a completed result is persisted and can be retrieved with the
 same invocation ID and inputs after a node restart. Reusing an ID with different
 inputs is rejected. Pending JavaScript callbacks are not checkpointed: failed or
 interrupted executions return `INVOCATION_NOT_RETRYABLE` and never automatically
-repeat child effects. Inspect child execution records before deliberately starting
+repeat tool or child effects. Inspect the durable effect journal and child execution records before deliberately starting
 a new invocation. Parent receipts link successful child execution references.
 
 Every network method accepts `{ signal: AbortSignal }` as its second argument. Constructor options include `timeoutMs`, `retries`, `retryDelayMs`, `maxResponseBytes` (default 4 MiB) and an optional `fetch` implementation.

@@ -52,6 +52,8 @@ sr:language a rdf:Property .
 sr:version a rdf:Property .
 sr:source a rdf:Property .
 sr:requiresTool a rdf:Property .
+# Requested JSON scope is descriptive; only a separately authorized operation grants execution.
+sr:requestedToolPermissions a rdf:Property .
 sr:permitsProgram a rdf:Property .
 sr:offersTool a rdf:Property .
 sr:usesExecutionPolicy a rdf:Property .

@@ -52,6 +52,10 @@ class Programs {
     const language = input.language ?? 'sexpr-v1';
     if (!['sexpr-v1', 'typescript-v1'].includes(language)) throw new TypeError('Unsupported Program language');
     if (input.permittedPrograms !== undefined && !Array.isArray(input.permittedPrograms)) throw new TypeError('permittedPrograms must be an array');
+    const requestedPermissions = input.requestedPermissions === undefined ? undefined : JSON.stringify({
+      ...input.requestedPermissions, graphId: graph(input.requestedPermissions.graphId),
+    });
+    if (requestedPermissions && new TextEncoder().encode(requestedPermissions).length > 65536) throw new TypeError('Requested permissions exceed 64 KiB');
     const id = createUuid();
     const programIri = iri(input.programIri ?? `urn:dkg:program:${id}`);
     const name = input.name ?? `program-${id}`;
@@ -67,6 +71,7 @@ class Programs {
         quad(`${SR}language`, JSON.stringify(language)),
         quad(`${SR}version`, JSON.stringify(version)),
         quad(`${SR}source`, JSON.stringify(input.source)),
+        ...(requestedPermissions ? [quad(`${SR}requestedToolPermissions`, JSON.stringify(requestedPermissions))] : []),
         ...[...new Set(input.requiredTools)].map(tool => quad(`${SR}requiresTool`, iri(tool))),
         ...[...new Set(input.permittedPrograms ?? [])].map(program => quad(`${SR}permitsProgram`, iri(program))),
         ...(input.derivedFrom ? [quad('http://www.w3.org/ns/prov#wasDerivedFrom', iri(input.derivedFrom))] : []),

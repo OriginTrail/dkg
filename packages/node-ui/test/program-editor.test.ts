@@ -61,6 +61,22 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); window.confirm = originalConfirm; vi.restoreAllMocks(); });
 
 describe('TypeScript Program editor', () => {
+  it('persists and displays requested tool permissions before owner approval', async () => {
+    const permissions = {graphId: 'school', assetCreation: {toolIri: 'urn:school:write'}};
+    await render(); await fill('Operation IRI', operation.operationIri);
+    await fill('Tool IRIs', 'urn:school:write');
+    await fill('Requested tool permissions (JSON)', JSON.stringify(permissions));
+    await click('Save new version');
+    expect(programs.upload.mock.calls[0][0]).toMatchObject({requiredTools: ['urn:school:write'], requestedPermissions: permissions});
+    expect(container.querySelector('[aria-label="Permissions to approve"]')?.textContent).toContain('assetCreation');
+    expect(programs.approve).not.toHaveBeenCalled();
+    await click('Check approval'); await click('Approve Program');
+    expect(programs.approve.mock.calls[0][0]).toMatchObject(permissions);
+    await fill('Requested tool permissions (JSON)', JSON.stringify({...permissions, executionLayer: 'swm'}));
+    expect(button('Run Program').disabled).toBe(true);
+    expect(button('Save new version').disabled).toBe(false);
+  });
+
   it('saves source without granting permission, explicitly approves, then invokes the saved Program', async () => {
     await render(); await fill('Operation IRI', operation.operationIri); await click('Save new version');
     expect(programs.approve).not.toHaveBeenCalled();

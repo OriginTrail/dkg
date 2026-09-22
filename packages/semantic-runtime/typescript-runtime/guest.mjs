@@ -7,8 +7,16 @@ export function begin() { running = true; }
 export function invoke_program(program, args) {
   if (!running) throw new Error('invoke_program must be called from the run entrypoint');
   if (typeof program !== 'string' || !Array.isArray(args)) throw new Error('invoke_program expects an IRI and argument array');
+  return enqueue({ kind: 'program', program, args });
+}
+export function invoke_tool(tool, input) {
+  if (!running) throw new Error('invoke_tool must be called from the run entrypoint');
+  if (typeof tool !== 'string') throw new Error('invoke_tool expects a tool IRI and JSON input');
+  return enqueue({ kind: 'tool', tool, input });
+}
+function enqueue(effect) {
   const id = ++nextId;
-  outgoing.push({ id, program, args });
+  outgoing.push({ id, ...effect });
   return new Promise((resolve, reject) => { waiting.set(id, { resolve, reject }); });
 }
 export function complete(id, json) {
