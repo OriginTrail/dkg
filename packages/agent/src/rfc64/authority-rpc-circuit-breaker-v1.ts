@@ -63,12 +63,16 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    */
   agentResolverReadOptions(signal?: AbortSignal): Rfc64AgentAuthorityResolverReadOptionsV1;
   /**
-   * Mark and build options for a direct finalized chain/index read. The
-   * options carry the projection-served callback, so a consumer that needs
-   * the served provenance itself (the scoped read's private-roster freshness
-   * bound) composes with it rather than replacing it.
+   * Mark and build options for a direct finalized chain/index read. A consumer
+   * that needs the served provenance itself (the scoped read's private-roster
+   * freshness gate) passes `onProjectionServed`: the options report to the
+   * circuit's own observer first and then to it, so a consumer can observe
+   * the report but never replace the evidence recovery depends on.
    */
-  chainReadOptions(signal?: AbortSignal): ContextGraphAuthorityReadOptions;
+  chainReadOptions(
+    signal?: AbortSignal,
+    onProjectionServed?: (served: ContextGraphAuthorityProjectionServedEvidence) => void,
+  ): ContextGraphAuthorityReadOptions;
 }
 
 export interface Rfc64AuthorityReadRunOptionsV1 {
@@ -366,11 +370,19 @@ export class Rfc64AuthorityReadCoordinatorV1 {
         poolEvidence.value = 'unproven';
       }
     };
-    const chainReadOptions = (signal?: AbortSignal): ContextGraphAuthorityReadOptions => {
+    const chainReadOptions = (
+      signal?: AbortSignal,
+      onProjectionServed?: (served: ContextGraphAuthorityProjectionServedEvidence) => void,
+    ): ContextGraphAuthorityReadOptions => {
       markRpcAttempt();
       return Object.freeze({
         ...(signal === undefined ? {} : { signal }),
-        onContextGraphAuthorityProjectionServed: observeProjectionServed,
+        onContextGraphAuthorityProjectionServed: onProjectionServed === undefined
+          ? observeProjectionServed
+          : (served: ContextGraphAuthorityProjectionServedEvidence) => {
+              observeProjectionServed(served);
+              onProjectionServed(served);
+            },
       });
     };
     const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({

@@ -13,6 +13,8 @@ import {
   CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphReadAuthorityUnavailableError,
 } from '../src/context-graph-read-authority.js';
+import type { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 
 const MEMBER = '0x0000000000000000000000000000000000000001';
 const NON_MEMBER = '0x00000000000000000000000000000000000000ff';
@@ -418,14 +420,19 @@ describe('private read authorization uses the on-chain participant roster', () =
     Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-adapter', configurable: true });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(authoritativeBinding(7n));
-    const finalized = vi.spyOn(agent, 'resolveFinalizedRegisteredContextGraphAccessPolicyV1');
+    // A legacy adapter binds no finalized index, so the finalized lane has
+    // nothing to read and must not take the circuit's foreground permit.
+    expect(Reflect.get(chain, 'contextGraphAuthorityIndexRevisionReader')).toBeUndefined();
+    const foreground = vi.spyOn(
+      Reflect.get(agent, 'rfc64AuthorityReadCoordinatorV1') as Rfc64AuthorityReadCoordinatorV1,
+      'runForeground',
+    );
     const live = mockLivePolicy(agent, 0);
 
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toBeDefined();
-    expect(finalized).toHaveBeenCalledTimes(1);
-    await expect(finalized.mock.results[0]?.value).resolves.toBeUndefined();
+    expect(foreground).not.toHaveBeenCalled();
     expect(live).toHaveBeenCalledTimes(1);
   });
 

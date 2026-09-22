@@ -132,6 +132,10 @@ import {
 } from '@origintrail-official/dkg-query';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   './rfc64/authority-rpc-circuit-breaker-v1.js';
+import {
+  finalizedContextGraphSnapshotMismatchV1,
+  resolveFinalizedContextGraphNameBindingV1,
+} from './internal/context-graph-authority/finalized-context-graph-binding.js';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -484,41 +488,6 @@ type ContextGraphRegistrationRoute =
   | { kind: 'local'; target: NonNullable<ReturnType<DKGAgent['resolveContextGraphNameHashBindingTarget']>> }
   | { kind: 'numeric' }
   | { kind: 'name-hash' };
-
-/**
- * The one finalized name commitment every finalized-index consumer binds a
- * numeric authority slot against. A locally admitted subscription owns its
- * commitment. Otherwise the persisted wire id wins over hashing the requested
- * string: a wire-id-keyed placeholder row (staged from a `ContextGraphCreated`
- * event before its cleartext arrives) already IS the commitment, and hashing
- * it again can never equal the chain's `nameHash`. A durable row hint applies
- * only before its subscription is installed. The binding target already
- * consulted the subscription map (direct key, then reverse wire id), so a
- * `null` target means no local row exists for the requested id.
- */
-export function resolveFinalizedContextGraphNameBindingV1(
-  agent: {
-    resolveContextGraphNameHashBindingTarget: OmitThisParameter<DKGAgent['resolveContextGraphNameHashBindingTarget']>;
-    contextGraphNameCommitment: OmitThisParameter<DKGAgent['contextGraphNameCommitment']>;
-    contextGraphWireId: OmitThisParameter<DKGAgent['contextGraphWireId']>;
-  },
-  requestedId: string,
-  durableBinding?: Readonly<DurableContextGraphSubscriptionBinding>,
-): {
-  localId: string;
-  subscription: ContextGraphSub | undefined;
-  expectedNameHash: string;
-} {
-  const canonicalTarget = agent.resolveContextGraphNameHashBindingTarget(requestedId);
-  const localId = canonicalTarget?.localId ?? requestedId;
-  const subscription = canonicalTarget?.subscription;
-  const persistedNameHash = subscription?.onChainHash ?? durableBinding?.onChainHash;
-  const expectedNameHash = canonicalTarget?.nameHash
-    ?? (persistedNameHash === undefined
-      ? agent.contextGraphNameCommitment(localId)
-      : agent.contextGraphWireId(persistedNameHash));
-  return { localId, subscription, expectedNameHash };
-}
 
 /** The shared route order for ordinary registration and prepared cold reads. */
 function selectContextGraphRegistrationRoute(
@@ -1232,16 +1201,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
                 ) {
                   throw new Error('finalized Context Graph id is outside uint256');
                 }
-                if (target.kind === 'resolved-snapshot') {
-                  const snapshot = target.finalizedSnapshot;
-                  if (
-                    snapshot.active !== true
-                    || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
-                    || this.contextGraphWireId(snapshot.nameHash)
-                      !== this.contextGraphWireId(target.expectedNameHash)
-                  ) {
-                    throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
-                  }
+                if (
+                  target.kind === 'resolved-snapshot'
+                  && finalizedContextGraphSnapshotMismatchV1(target.finalizedSnapshot, {
+                    onChainId: target.expectedOnChainId,
+                    nameHash: target.expectedNameHash,
+                  }) !== undefined
+                ) {
+                  throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
                 }
                 return {
                   kind: 'registered',

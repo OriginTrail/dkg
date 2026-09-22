@@ -515,6 +515,8 @@ import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
 import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import { finalizedContextGraphSnapshotMismatchV1 } from
+  './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -3683,9 +3685,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (
             target.expectedOnChainId <= 0n
             || target.expectedOnChainId > ethers.MaxUint256
-            || snapshot.active !== true
-            || snapshot.contextGraphId !== expectedOnChainId
-            || this.contextGraphWireId(snapshot.nameHash) !== expectedNameHash
+            || finalizedContextGraphSnapshotMismatchV1(snapshot, {
+              onChainId: target.expectedOnChainId,
+              nameHash: expectedNameHash,
+            }) !== undefined
           ) {
             throw new Error(`Invalid finalized VM authority evidence for "${localCgId}"`);
           }
