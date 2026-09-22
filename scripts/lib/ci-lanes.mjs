@@ -36,30 +36,38 @@ export const TEST_LANE_METADATA = Object.freeze({
   'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'ccl_v0_1/requirements.txt'] },
 });
 
-/** Executable candidate topology: consumed by Actions matrices, runners and receipt aggregation.
- * The immutable controller still owns whether a lane may run or skip.
+/** Vitest groups per controller lane. Lanes without groups run bespoke jobs
+ * (live Blazegraph, arm64 image, Windows lifecycle, browser E2E).
  * Agent subdivisions come from its existing timing/overhead policy, without a second count.
  */
-export const CI_LANE_TOPOLOGY = {
-  tornado_core: { job: 'tornado-core', groups: [
+const LANE_GROUPS = {
+  tornado_core: [
     { id: 'core', packages: ['core', 'http-utils', 'rdf-utils', 'storage'], shards: 1, label: 'core + RDF + storage' },
     { id: 'chain', packages: ['chain'], shards: 3, runner: 'weighted' },
-  ] },
-  tornado_blazegraph: { job: 'tornado-blazegraph' },
-  tornado_publisher: { job: 'tornado-publisher', groups: [{ id: 'publisher', packages: ['publisher'], shards: 4, runner: 'vitest' }] },
-  tornado_agent: { job: 'tornado-agent', groups: [{ id: 'agent', packages: ['agent'], shards: AGENT_SHARD_POLICY.descriptors.length, runner: 'agent' }] },
-  tornado_agent_windows: { job: 'inventory-windows' },
-  bura_cli: { job: 'bura-cli', groups: [{ id: 'cli', packages: ['cli'], shards: 4, runner: 'weighted' }] },
-  bura_blazegraph_arm64: { job: 'bura-blazegraph-arm64' },
-  bura_query: { job: 'bura-supporting', groups: [{ id: 'query', packages: ['query'], shards: 1 }] },
-  kosava_node_ui: { job: 'kosava-node-ui', groups: [{ id: 'node-ui', packages: ['node-ui'], shards: 1 }] },
-  kosava_node_ui_e2e: { job: 'kosava-node-ui-e2e' },
-  kosava_supporting: { job: 'kosava-supporting', groups: [{
+  ],
+  tornado_publisher: [{ id: 'publisher', packages: ['publisher'], shards: 4, runner: 'vitest' }],
+  tornado_agent: [{ id: 'agent', packages: ['agent'], shards: AGENT_SHARD_POLICY.descriptors.length, runner: 'agent' }],
+  bura_cli: [{ id: 'cli', packages: ['cli'], shards: 4, runner: 'weighted' }],
+  bura_query: [{ id: 'query', packages: ['query'], shards: 1 }],
+  kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui'], shards: 1 }],
+  kosava_supporting: [{
     id: 'supporting', shards: 1, concurrency: 3, maxWorkers: 2,
     packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
-  }] },
-  kosava_hardhat_plugins: { job: 'kosava-hardhat-plugins', groups: [{ id: 'plugins', packages: ['random-sampling', 'kafka-plugin'], shards: 1 }] },
+  }],
+  kosava_hardhat_plugins: [{ id: 'plugins', packages: ['random-sampling', 'kafka-plugin'], shards: 1 }],
 };
+for (const lane of Object.keys(LANE_GROUPS)) {
+  if (!Object.hasOwn(PRIMARY_LANE_JOBS, lane)) throw new Error(`test groups reference unknown controller lane ${lane}`);
+}
+
+/** Executable candidate topology: consumed by Actions matrices, runners and receipt aggregation.
+ * Lanes and their workflow jobs come only from the trusted controller's PRIMARY_LANE_JOBS (the
+ * controller cannot import this module), and the controller still owns whether a lane may run.
+ */
+export const CI_LANE_TOPOLOGY = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [
+  lane,
+  LANE_GROUPS[lane] ? { job, groups: LANE_GROUPS[lane] } : { job },
+]));
 
 export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
   const jobs = {};
@@ -88,13 +96,6 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
   return { jobs, matrices, packageCounts };
 }
 
-// The trusted controller owns the lane -> job map and cannot import this module
-// (it must stay loadable from its four-file sparse checkout), so the executable
-// topology is held to the controller's map here, before anything consumes it.
-const topologyJobs = Object.entries(CI_LANE_TOPOLOGY).map(([lane, { job }]) => [lane, job]);
-if (JSON.stringify(topologyJobs) !== JSON.stringify(Object.entries(PRIMARY_LANE_JOBS))) {
-  throw new Error('CI_LANE_TOPOLOGY must list exactly the controller lanes and jobs of PRIMARY_LANE_JOBS, in order');
-}
 const compiled = compileCiTopology();
 export const COVERAGE_JOBS = compiled.jobs;
 export const CI_MATRICES = compiled.matrices;
