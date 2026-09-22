@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityIndexId, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -325,11 +325,17 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
-import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import {
+  createAbortError,
+  isBoundedOperationTimeoutError,
+  runBoundedOperation,
+} from './bounded-operation.js';
 import type { RegisteredContextGraphAuthority } from
   './registered-context-graph-authority.js';
 import type { LiveOnChainAccessPolicyState } from
   './internal/context-graph-authority/context-graph-access-policy.js';
+import { parseRfc64AuthoritySnapshotV1 } from
+  './rfc64/release-native-catalog-authority-v1.js';
 // Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
 // the same stable public contract as the package root.
 export type { RegisteredContextGraphAuthority } from
@@ -1554,13 +1560,15 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical live authority for a registered context graph.
+   * Canonical authority for a registered context graph.
    *
-   * All security-sensitive consumers use this discriminant so a failed chain
-   * read cannot be confused with an unregistered graph and fall through to
-   * local/RFC-64 policy. Roster caching is deliberately opt-in and is only
-   * suitable for host-mode gossip admission; read, encryption, and mutation
-   * callers require a fresh chain view.
+   * All security-sensitive consumers use this discriminant so an authority
+   * outage cannot be confused with an unregistered graph and fall through to
+   * local/RFC-64 policy. Mutation, encryption, subscription admission, and
+   * legacy adapters retain current-state reads. Scoped query authorization may
+   * instead consume the complete deployment-scoped finalized index snapshot;
+   * it atomically binds liveness, policy, roster, numeric id, and name hash and
+   * fails closed on any missing or mismatched evidence.
    */
   async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
@@ -1573,6 +1581,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
+      /**
+       * Scoped reads may consume the complete finalized authority projection.
+       * Mutation, encryption, and admission callers retain current-state reads.
+       */
+      authorityReadMode?: 'live-current' | 'finalized-index';
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
@@ -1591,19 +1604,101 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const { onChainId } = registration;
 
     let accessPolicyState: LiveOnChainAccessPolicyState;
-    try {
-      accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
-        onChainId.toString(),
-        createOperationContext('system'),
-        { signal: options.signal },
-      );
-    } catch (err) {
-      return {
-        kind: 'unavailable',
-        onChainId,
-        reason: 'chain-access-policy-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-      };
+    const finalizedIndexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
+    const readFinalizedSnapshots = finalizedIndexReader
+      ?.readContextGraphAuthorityIndexSnapshots;
+    if (
+      options.authorityReadMode === 'finalized-index'
+      && finalizedIndexReader !== undefined
+      && readFinalizedSnapshots !== undefined
+    ) {
+      try {
+        const authorityIndexId = onChainId.toString();
+        assertContextGraphAuthorityIndexId(
+          authorityIndexId,
+          'scoped read finalized authority index id',
+        );
+        const snapshots = await runBoundedOperation(
+          (signal) => readFinalizedSnapshots.call(
+            finalizedIndexReader,
+            [authorityIndexId as ContextGraphAuthorityIndexId],
+            { signal },
+          ),
+          {
+            label: `readFinalizedContextGraphAuthority(${onChainId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
+        const rawSnapshot = snapshots.get(authorityIndexId as ContextGraphAuthorityIndexId);
+        if (rawSnapshot === undefined) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-access-policy-unknown',
+            detail: 'finalized authority index has no snapshot for the registered Context Graph',
+          };
+        }
+        const snapshot = parseRfc64AuthoritySnapshotV1(rawSnapshot, onChainId);
+        if (snapshot.active !== true) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-access-policy-unknown',
+            detail: 'finalized authority snapshot is inactive',
+          };
+        }
+        if (registration.provenance !== 'numeric-id') {
+          const bindingTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+          const durableNameHash = options.durableSubscriptionBinding?.onChainHash;
+          const expectedNameHash = bindingTarget?.nameHash
+            ?? (durableNameHash === undefined
+              ? this.contextGraphNameCommitment(contextGraphId)
+              : this.contextGraphWireId(durableNameHash));
+          if (
+            this.contextGraphWireId(snapshot.nameHash)
+            !== this.contextGraphWireId(expectedNameHash)
+          ) {
+            return {
+              kind: 'unavailable',
+              onChainId,
+              reason: 'chain-access-policy-unknown',
+              detail: 'finalized authority snapshot name commitment does not match the registered Context Graph',
+            };
+          }
+        }
+        accessPolicyState = snapshot.accessPolicy === 0
+          ? { kind: 'available', accessPolicy: 0 }
+          : {
+              kind: 'available',
+              accessPolicy: 1,
+              participantAgents: snapshot.participantAgents,
+            };
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: isBoundedOperationTimeoutError(err)
+            ? 'chain-access-policy-timeout'
+            : 'chain-access-policy-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+    } else {
+      try {
+        accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
+          onChainId.toString(),
+          createOperationContext('system'),
+          { signal: options.signal },
+        );
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-access-policy-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
     }
     if (accessPolicyState.kind === 'unavailable') {
       return { ...accessPolicyState, onChainId };
