@@ -1036,7 +1036,7 @@ export function changelogSchemaQuad(): Quad {
   };
 }
 
-/** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */
+/** Append well-formed `{ seq, graph, op }` rows from a SELECT binding set, skipping malformed rows. */
 function collectChangeRecords(
   bindings: ReadonlyArray<Record<string, string | undefined>>,
   out: ChangeRecord[],
@@ -1050,6 +1050,7 @@ function collectChangeRecords(
   }
 }
 
+/** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */
 function parseIntTerm(term: string | undefined): number | null {
   if (term == null) return null;
   const m = term.match(/-?\d+/);
