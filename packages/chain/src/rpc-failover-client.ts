@@ -67,6 +67,7 @@ import {
 } from './rpc-request-transport.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
+  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
@@ -100,6 +101,8 @@ export interface RpcEndpoint {
  *     one-RPC node.
  *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
  *     stall selection (capped on EVERY attempt, including single-RPC).
+ *   - `securityGatePointRead` — a live authorization read whose multi-RPC
+ *     attempts must fail over inside the caller's 2.5s fail-closed deadline.
  */
 export type ReadPolicy =
   | 'pointRead'
@@ -107,7 +110,8 @@ export type ReadPolicy =
   | 'durablePagedLogScan'
   | 'watchdogPointRead'
   | 'watchdogWideLogScan'
-  | 'failOpenFundingRead';
+  | 'failOpenFundingRead'
+  | 'securityGatePointRead';
 
 /**
  * The human-facing label and the low-cardinality telemetry owner for one RPC
@@ -282,6 +286,7 @@ export function isContractViewRetryable(err: unknown): boolean {
  *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
  *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
+ *   | securityGatePointRead | SECURITY_GATE (1s)     | uncapped                |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
  * to; #894). The watchdog policies are for background reads that must clear
@@ -295,6 +300,7 @@ export function resolveCapMs(policy: ReadPolicy, providerCount: number): number 
   }
   if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
   if (providerCount <= 1) return undefined;
+  if (policy === 'securityGatePointRead') return RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
 
@@ -572,6 +578,19 @@ export class RpcFailoverClient {
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
           } catch (estErr) {
+            // A CALL_EXCEPTION is the contract's deterministic answer to THIS exact call. Running
+            // `signer.populateTransaction(populated)` after that answer asks for the same gas
+            // estimate again (and fetches a nonce that can never be used) before surfacing the
+            // same revert. RandomSampling's expected NoEligibleContextGraph result is the dominant
+            // idle-path example. Preserve the original error for the feature boundary to translate;
+            // no nonce is allocated, nothing is signed, and nothing is broadcast.
+            //
+            // Keep every other estimate failure on the established policy below: local governor
+            // pressure retries later, endpoint failures fail over where possible, and the final
+            // endpoint may still use ethers' unbuffered population fallback.
+            if (errorCode(estErr) === 'CALL_EXCEPTION') {
+              throw estErr;
+            }
             // Local governor pressure is caller-level backpressure, not an
             // endpoint defect and not permission to drop the requested OOG
             // headroom. Preserve the original retry-later error unchanged:

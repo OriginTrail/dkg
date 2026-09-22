@@ -10,6 +10,7 @@ import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
   ContextGraphAuthorityIndexProjectionCache,
+  resolveProjectionFetchedAtMs,
   contextGraphAuthorityIndexScope,
   resolveContextGraphAuthorityIndexTickMs,
   type ContextGraphAuthorityIndexCompletedProjection,
@@ -135,6 +136,7 @@ function makeHarness(options: Readonly<{
       },
       requiresAnchorValidation: (options.holdback ?? 0) > 0,
       view,
+      origin: Object.freeze({ kind: 'scan' as const }),
     });
   };
 
@@ -240,6 +242,32 @@ describe('finalized Context Graph authority projection cache', () => {
       { source: 'cache', ageMs: T - 1 },
     ]);
   });
+
+  it.each([Number.NaN, START_MS + 1])(
+    'keeps log provenance when its data timestamp is unusable (%s)',
+    async (dataFetchedAtMs) => {
+      const h = makeHarness();
+      const completed = await h.refresh();
+      const evidence: ContextGraphAuthorityProjectionServedEvidence[] = [];
+      const cache = new ContextGraphAuthorityIndexProjectionCache({
+        tickMs: T,
+        now: () => h.clock.nowMs,
+      });
+
+      const projection = await cache.read({
+        scope: h.scope,
+        project: (candidate) => ({ complete: true, value: candidate }),
+        refresh: async () => Object.freeze({
+          ...completed,
+          origin: Object.freeze({ kind: 'log' as const, dataFetchedAtMs }),
+        }),
+        onServed: (served) => { evidence.push(served); },
+      });
+
+      expect(projection.fetchedAtMs).toBe(START_MS);
+      expect(evidence).toEqual([{ source: 'log', ageMs: 0 }]);
+    },
+  );
 
   it('refreshes once the projection is T old, and sees what the chain did meanwhile', async () => {
     const h = makeHarness();
@@ -1051,5 +1079,71 @@ describe('finalized Context Graph authority projection cache', () => {
     h.clock.nowMs += 1;
     await h.read();
     expect(h.reads.refreshes).toBe(2);
+  });
+
+  it('believes only an OLDER reported fetch instant, and still calls a fold a fold', async () => {
+    const h = makeHarness();
+    // A fold whose reported instant is NOT older than the refresh start. The
+    // node's wall clock stepped BACKWARDS (an NTP correction between the tick's
+    // head fetch and this read), or the store's clock runs ahead of it — a
+    // devnet after `evm_increaseTime` does exactly this.
+    //
+    // The AGE must fall back to this cache's own pre-refresh stamp. Believing
+    // the reported one, `#refresh` reports `Math.max(0, now - future) = 0` —
+    // the under-report `dataFetchedAtMs` exists to forbid — `#serve` then
+    // computes a NEGATIVE age and misses forever, refolding on every read, and
+    // `#publish`'s lagging-endpoint guard INVERTS, because the difference
+    // against a retained projection is large and positive, so a LOWER head
+    // from a lagging endpoint displaces a newer one.
+    //
+    // The PROVENANCE must NOT fall back with it. `source` answers "did this
+    // answer touch the pool", and the fold touched nothing but local SQLite;
+    // `Rfc64AuthorityReadCoordinatorV1.observeProjectionServed` calls
+    // `provePool()` unconditionally on `scan`, so a fold relabelled here would
+    // zero the RFC-64 breaker's exhaustion count while every endpoint was
+    // down. That is why the discriminator is `origin.kind` and not the stamp
+    // derived from it: this is the input where the two disagree.
+    const folded = await h.read(9n, undefined, async () => ({
+      ...(await h.refresh()),
+      origin: { kind: 'log' as const, dataFetchedAtMs: h.clock.nowMs + 10_000 },
+    }));
+    expect(folded.fetchedAtMs).toBe(START_MS);
+    expect(h.served).toEqual([{ source: 'log', ageMs: 0 }]);
+
+    // Retained under the believable stamp, so it still ages — and it is still
+    // a fold on the way back out of `#serve`, not a `cache` entry.
+    h.clock.nowMs += 1_000;
+    await h.read();
+    expect(h.reads.refreshes).toBe(1);
+    expect(h.served.at(-1)).toEqual({ source: 'log', ageMs: 1_000 });
+  });
+});
+
+/**
+ * The ONE expression that turns a completed refresh into a projection. The log
+ * fast path's synthetic candidate goes through this too, so the view a read is
+ * ADMITTED by and the view the cache ages and reports cannot disagree; these
+ * assertions therefore pin both sites at once.
+ */
+describe('the projection stamp', () => {
+  const scan = { kind: 'scan' } as const;
+  const log = (dataFetchedAtMs: number) => ({ kind: 'log', dataFetchedAtMs } as const);
+
+  it('falls back to the floor unless the refresh proved its data is older', () => {
+    // A live scan reports nothing older: it is fetching now, so the floor is
+    // already the conservative answer.
+    expect(resolveProjectionFetchedAtMs(START_MS, scan)).toBe(START_MS);
+    // A fold proved OLDER — the only claim ever believed.
+    expect(resolveProjectionFetchedAtMs(START_MS, log(START_MS - 1))).toBe(START_MS - 1);
+    // At or after the floor would move the age towards zero. Refused, both ways.
+    expect(resolveProjectionFetchedAtMs(START_MS, log(START_MS))).toBe(START_MS);
+    expect(resolveProjectionFetchedAtMs(START_MS, log(START_MS + 10_000))).toBe(START_MS);
+    // An instant that is not a safe integer proves nothing at all, and must not
+    // leak into an age subtraction as NaN/Infinity/a fraction. This is the case
+    // the reader's own copy of this rule used to get wrong: a bare `Math.min`
+    // believes every one of these.
+    for (const unusable of [Number.NaN, Infinity, -Infinity, START_MS - 0.5, 2 ** 53]) {
+      expect(resolveProjectionFetchedAtMs(START_MS, log(unusable))).toBe(START_MS);
+    }
   });
 });

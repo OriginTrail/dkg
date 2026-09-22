@@ -24,7 +24,7 @@ import {
   type ContextGraphLiveAuthority,
 } from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type ContextGraphFinalizedCreation, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
@@ -756,7 +756,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
             'getContextGraph',
             [contextGraphId],
-            { signal: flightSignal },
+            {
+              signal: flightSignal,
+              // The agent's live authority gate fails closed after 2.5s. A
+              // normal point read gives one endpoint 4s, so its caller abort
+              // would pre-empt transport failover. This named policy lets a
+              // stalled endpoint yield to a configured fallback while keeping
+              // the outer security deadline unchanged.
+              policy: 'securityGatePointRead',
+            },
           );
         } catch (err) {
           if (flightSignal.aborted) throw err;
@@ -1116,9 +1124,66 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     });
   }
 
+  /**
+   * Two positive `ContextGraphStorage` views below read the ONE log first.
+   *
+   * `latest`, not `finalized`, and that is what makes them stand in for the
+   * call at all: each one replaces an UNPINNED `eth_call`, answered at the
+   * chain's current head with that head's tip-reorg exposure. Reading them at
+   * the settled cursor instead would be a DIFFERENT answer, fifty blocks behind
+   * the call it replaces, and a KA registered inside that window would read as
+   * not registered.
+   *
+   * THE EXPOSURE IS THAT CALL'S WINDOW PLUS UP TO ONE TICK INTERVAL, and it is
+   * worth stating plainly rather than claiming parity. An `eth_call` self-heals
+   * the moment its endpoint follows a reorg; a tail row does not disappear
+   * until the tick's NEXT pass replaces the tail wholesale, so a registration
+   * orphaned by a tip reorg can still be folded into a positive `bound` or a
+   * known ordinal for up to `chain.indexTickMs`. The module's
+   * write-once justification (knowledge-asset-read-model.ts) is about a SETTLED
+   * row and does not cover the tail. Bounded by the tick's own liveness gate,
+   * not attacker-choosable — the id must have been emitted on a fork this
+   * node's own tick followed — and `verifyContextGraphBinding` still
+   * cross-checks the local id on the admission path this reaches.
+   *
+   * Negative bindings and counts never use the log: unlike a durable positive
+   * binding or already-known ordinal, they may change in the block immediately
+   * after the tick's head observation. Every other refusal — a cold log, a
+   * stalled tick, a held fork suspicion, a backfill that has not reached the
+   * graph's creation block, an ordinal past what the log holds — runs the
+   * `eth_call` exactly as it did before the log existed.
+   */
+  private async knowledgeAssetsFromLogFor(contract: Contract) {
+    const binding = this.chainEventLogBinding;
+    if (binding?.knowledgeAssets === undefined
+      || binding.contextGraphStorageAddress === undefined) return undefined;
+    let currentAddress: string;
+    try {
+      currentAddress = (await contract.getAddress()).toLowerCase();
+    } catch {
+      return undefined;
+    }
+    // A Hub self-heal may resolve the successor before the detached one-log
+    // runtime has rebuilt. Never answer the successor from the retired proxy's
+    // folded rows; an address mismatch takes the existing live eth_call below.
+    return binding.contextGraphStorageAddress === currentAddress
+      ? { binding, readModel: binding.knowledgeAssets }
+      : undefined;
+  }
+
   async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphForKa(
+      kaId,
+      { view: 'latest' },
+    );
+    if (logged !== undefined
+      && knowledgeAssetsFromLog !== undefined
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)) {
+      return logged.contextGraphId;
+    }
     const cgId: bigint = await this.readContractWithOptions(
       cgs,
       'cgStorage.kaToContextGraph',
@@ -1131,6 +1196,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
+    // Count is mutable. Even complete coverage only proves the tick's last
+    // observed head, while this unpinned call must include a registration that
+    // lands immediately afterwards. Keep the live call for that distinction.
     const cgs = this.requireContextGraphStorage();
     const count: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaCount', 'getContextGraphKaCount', contextGraphId,
@@ -1141,6 +1209,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaList(
+      contextGraphId,
+      { view: 'latest' },
+    );
+    // Position IS the ordinal — the on-chain list only ever appends. An index
+    // the log does not hold is NOT an out-of-range answer to invent: the chain
+    // reverts on one, and callers read that revert, so the call below must be
+    // the thing that produces it.
+    if (logged !== undefined
+      && knowledgeAssetsFromLog !== undefined
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)
+      && index >= 0n
+      && index < BigInt(logged.kaIds.length)) {
+      return logged.kaIds[Number(index)]!;
+    }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
     );
@@ -1440,6 +1524,57 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         policy: 'wideLogScan',
       },
     );
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    await this.init();
+    options.signal?.throwIfAborted();
+    const contractAddress = (
+      await this.requireContextGraphStorage().getAddress()
+    ).toLowerCase();
+    const binding = this.chainEventLogBinding;
+    const source = binding?.contextGraphAuthority;
+    const read = source?.readContextGraphFinalizedCreation;
+    if (binding === undefined
+      || source === undefined
+      || read === undefined
+      || binding.contextGraphStorageAddress !== contractAddress
+      || source.contractAddress !== contractAddress) {
+      return undefined;
+    }
+    const creation = await read.call(
+      source,
+      contextGraphId,
+      { signal: options.signal },
+    );
+    options.signal?.throwIfAborted();
+    // `getAddress()` is local for an ethers Contract but remains a Promise.
+    // Resolve it before the final synchronous generation check so there is no
+    // await between proving the binding current and handing the pair over.
+    const currentAddress = (
+      await this.requireContextGraphStorage().getAddress()
+    ).toLowerCase();
+    options.signal?.throwIfAborted();
+    if (creation === undefined
+      || currentAddress !== contractAddress
+      || !this.chainEventLogBindingIsCurrent(binding)
+      || binding.contextGraphAuthority !== source
+      || binding.contextGraphStorageAddress !== contractAddress
+      || source.contractAddress !== contractAddress) {
+      return undefined;
+    }
+    if (!ethers.isHexString(creation.nameHash, 32)
+      || creation.nameHash.toLowerCase() === ethers.ZeroHash
+      || (creation.accessPolicy !== 0 && creation.accessPolicy !== 1)) {
+      return undefined;
+    }
+    return Object.freeze({
+      nameHash: creation.nameHash.toLowerCase(),
+      accessPolicy: creation.accessPolicy,
+    });
   }
 
   /**

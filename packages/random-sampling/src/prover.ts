@@ -536,6 +536,7 @@ export class RandomSamplingProver {
 
     let challenge: NodeChallenge;
     let cgId: bigint;
+    let observedDurationInBlocks: bigint | undefined;
     // Same wall-clock stale check as the solved branch above. Without
     // it, an unsolved challenge whose period has expired (but whose
     // on-chain cursor never advanced because no submit/create tx
@@ -554,11 +555,16 @@ export class RandomSamplingProver {
     }
     if (currentExisting !== null && !currentExisting.solved && !unsolvedStale) {
       challenge = currentExisting;
+      observedDurationInBlocks = status.proofingPeriodDurationInBlocks;
       cgId = await this.chain.getKAContextGraphId(challenge.knowledgeAssetId);
     } else {
       try {
         const created = await this.chain.createChallenge();
         challenge = created.challenge;
+        // A challenge created by this transaction pins the then-effective
+        // duration. Unlike an older challenge, it cannot carry a duration from
+        // a previous epoch's schedule.
+        observedDurationInBlocks = challenge.proofingPeriodDurationInBlocks;
         cgId = created.contextGraphId;
       } catch (err) {
         if (err instanceof NoEligibleContextGraphError) {
@@ -861,6 +867,11 @@ export class RandomSamplingProver {
         txHash: txResult.hash,
       }),
     );
+    await this.solvedPeriodSkip.observeSubmittedProof({
+      observationBindingId: solvedPeriodRead.observationBindingId,
+      challenge,
+      durationInBlocks: observedDurationInBlocks,
+    });
     this.log.info('rs.tick.submitted', {
       kaId: kaId.toString(),
       cgId: cgId.toString(),

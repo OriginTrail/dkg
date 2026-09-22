@@ -56,8 +56,9 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    configured tick, and it counts as health provided that scan started AFTER the
    *    outstanding exhaustion. Without this, a node served entirely from the
    *    cache would keep being judged by a failure it has long recovered from.
-   *  - anything else — `stale-cache` (the refresh FAILED and an older
-   *    projection answered instead) or a cache hit that predates the
+   *  - anything else — `log` (folded from the node-local chain event log,
+   *    which contacted no endpoint), `stale-cache` (the refresh FAILED and an
+   *    older projection answered instead) or a cache hit that predates the
    *    exhaustion: the operation succeeds for its caller but proves nothing
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
@@ -230,8 +231,10 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           ) {
             poolEvidence.value = 'proven';
           } else if (poolEvidence.value !== 'proven') {
-            // A stale/old cache answer voids a preceding attempt marker, but it
-            // cannot erase a completed scan proven by another subread.
+            // A stale/old cache or a node-local log fold voids a preceding
+            // attempt marker, but cannot erase a completed scan proven by
+            // another subread. A log fold contacted no endpoint in this read,
+            // so its tick timestamp is never evidence that this pool recovered.
             poolEvidence.value = 'unproven';
           }
         };

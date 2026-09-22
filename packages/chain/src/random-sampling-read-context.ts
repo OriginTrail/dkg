@@ -4,6 +4,17 @@
 export interface RandomSamplingReadContext {
   readonly bindingId: string;
   readonly chronosEpoch: bigint;
+  /** Physical Chronos binding generation, when the adapter can expose it. */
+  readonly epochBindingId?: string;
+}
+
+/**
+ * A current chain-tip snapshot whose epoch is derived from that exact block.
+ * EVM adapters can supply this from one `eth_getBlockByNumber` after learning
+ * the immutable Chronos schedule for the currently-bound Chronos contract.
+ */
+export interface RandomSamplingBlockContext extends RandomSamplingReadContext {
+  readonly headBlockNumber: bigint;
 }
 
 /**
@@ -14,5 +25,7 @@ export interface RandomSamplingReadContext {
 export interface RandomSamplingReadContextReader {
   getRandomSamplingBindingId(): string | undefined;
   readRandomSamplingContext(): Promise<RandomSamplingReadContext | undefined>;
+  /** Optional one-RPC head + epoch snapshot used by the solved-period guard. */
+  readRandomSamplingBlockContext?(): Promise<RandomSamplingBlockContext | undefined>;
   isRandomSamplingBindingCurrent(bindingId: string): boolean;
 }

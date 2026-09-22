@@ -97,7 +97,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -3260,6 +3260,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           batchId: item.batchId,
           versionBlock: item.versionBlock,
           authorAddress: item.authorAddress,
+          // The public-authority consumer validates this lease after its last
+          // store/CG-gate await; stale evidence falls back to live reads.
+          versionSnapshot: Object.freeze({
+            ...item.versionSnapshot,
+            latestRoot: item.merkleRoot.slice(),
+          }),
+          signal,
         }, ctx);
         if (outcome === 'promoted') return 'materialized';
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
@@ -5602,11 +5609,97 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   clearRecentVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
     this.recentReconciledUals.deleteByPrefix(`${localCgId}\0`);
+    this.vmReconcileFinalizedSlotEvidence.deleteByPrefix(`${localCgId}\0`);
   }
 
   vmReconcileCacheKey(this: DKGAgent, localCgId: string, ual: string, merkleRoot: Uint8Array): string {
     const rootHex = Array.from(merkleRoot, (byte) => byte.toString(16).padStart(2, '0')).join('');
     return `${localCgId}\0${ual}#${rootHex}`;
+  }
+
+  /**
+   * Resolve the exact finalized height used by the adapter's coherent KA
+   * snapshot. Absent/invalid adapter depth disables the fast path rather than
+   * guessing at finality.
+   */
+  vmReconcileFinalizedBlockAtHead(
+    this: DKGAgent,
+    headBlock: number | undefined,
+  ): number | undefined {
+    if (!Number.isSafeInteger(headBlock) || headBlock === undefined || headBlock < 0) {
+      return undefined;
+    }
+    const confirmations = this.chain.getFinalityConfirmations?.();
+    if (!Number.isSafeInteger(confirmations) || confirmations === undefined || confirmations <= 0) {
+      return undefined;
+    }
+    const finalizedBlock = headBlock - confirmations + 1;
+    return finalizedBlock >= 0 ? finalizedBlock : undefined;
+  }
+
+  vmReconcileFinalizedSlotKey(
+    this: DKGAgent,
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+  ): string {
+    return `${localCgId}\0finalized-slot:${onChainCgId}:${ordinal}`;
+  }
+
+  async confirmAndRememberVmReconcileFinalizedSlot(
+    this: DKGAgent,
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+    finalizedBlock: number | undefined,
+    kaId: bigint,
+    merkleRoot: Uint8Array,
+    publisherAddress: string,
+  ): Promise<void> {
+    if (
+      finalizedBlock === undefined
+      || !this.chain.readKnowledgeAssetVersionSnapshot
+    ) return;
+    let snapshot: KnowledgeAssetVersionSnapshot | null | undefined;
+    try {
+      snapshot = await this.chain.readKnowledgeAssetVersionSnapshot(kaId);
+      if (
+        !snapshot
+        || snapshot.knowledgeAssetId !== kaId
+        || snapshot.blockNumber !== finalizedBlock
+        || typeof snapshot.blockHash !== 'string'
+        || !ethers.isHexString(snapshot.blockHash, 32)
+        || typeof snapshot.knowledgeAssetStorageAddress !== 'string'
+        || !ethers.isAddress(snapshot.knowledgeAssetStorageAddress)
+        || !Number.isSafeInteger(snapshot.knowledgeAssetStorageGeneration)
+        || snapshot.knowledgeAssetStorageGeneration! < 0
+        || snapshot.rootCount <= 0n
+        || !ethers.isHexString(snapshot.latestRoot, 32)
+        || !ethers.isAddress(snapshot.latestAuthor)
+        || merkleRoot.length !== 32
+        || !ethers.isAddress(snapshot.latestPublisher)
+        || !ethers.isAddress(publisherAddress)
+        || ethers.getAddress(snapshot.latestPublisher) === ethers.ZeroAddress
+        || ethers.getAddress(snapshot.latestAuthor) === ethers.ZeroAddress
+        || ethers.getAddress(publisherAddress) === ethers.ZeroAddress
+        || !ethers.getBytes(snapshot.latestRoot).every(
+          (byte, index) => byte === merkleRoot[index],
+        )
+        || ethers.getAddress(snapshot.latestPublisher) !== ethers.getAddress(publisherAddress)
+      ) return;
+    } catch {
+      // The successful reconciliation remains truthful; a failed validation
+      // merely withholds the same-finalized-block fast path.
+      return;
+    }
+    if (!snapshot) return;
+    this.vmReconcileFinalizedSlotEvidence.set(
+      this.vmReconcileFinalizedSlotKey(localCgId, onChainCgId, ordinal),
+      {
+        kaId,
+        snapshot: Object.freeze({ ...snapshot }),
+      },
+    );
   }
 
   vmReconcileCacheKeyPrefix(this: DKGAgent, cacheKey: string): string {
@@ -6510,9 +6603,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * latest on-chain merkle root + publisher, build the UAL, and ask the
    * finalization handler to promote the matching local SWM snapshot to VM
    * (verifying the CG binding from chain). When no local SWM matches, run an
-   * active core-first catch-up fetch and retry once. `headBlock` is reused as
-   * the materialization version AND echoed back as the cursor observation block
-   * (reorg gate). See {@link OrdinalOutcome} for the status contract.
+   * active core-first catch-up fetch and retry once. A successful result is
+   * validated against one coherent pinned version snapshot before it earns a
+   * same-finalized-block shortcut; a new block always reads again. `headBlock`
+   * remains the independent cursor observation for the reorg-depth gate. See
+   * {@link OrdinalOutcome} for the status contract.
    */
   async reconcileChainOrdinal(this: DKGAgent,
     localCgId: string,
@@ -6532,6 +6627,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let kaId: bigint;
     let merkleRoot: Uint8Array;
     let publisherAddress: string;
+    let finalizedSlotBlock: number | undefined;
     let ual: string;
     let cacheKey = '';
     try {
@@ -6541,15 +6637,49 @@ export class SwmHostModeMethods extends DKGAgentBase {
         : undefined;
       if (!storageAddr) return { status: 'skip' };
       ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+      finalizedSlotBlock = this.vmReconcileFinalizedBlockAtHead(headBlock);
+      if (finalizedSlotBlock !== undefined) {
+        const finalizedSlotKey = this.vmReconcileFinalizedSlotKey(
+          localCgId,
+          onChainCgId,
+          ordinal,
+        );
+        const evidence = this.vmReconcileFinalizedSlotEvidence.get(finalizedSlotKey);
+        if (evidence !== undefined) {
+          let current = false;
+          if (
+            evidence.kaId === kaId
+            && evidence.snapshot.blockNumber === finalizedSlotBlock
+            && typeof evidence.snapshot.knowledgeAssetStorageAddress === 'string'
+            && ethers.isAddress(storageAddr)
+            && ethers.isAddress(evidence.snapshot.knowledgeAssetStorageAddress)
+            && ethers.getAddress(storageAddr)
+              === ethers.getAddress(evidence.snapshot.knowledgeAssetStorageAddress)
+            && this.chain.knowledgeAssetVersionSnapshotIsCurrent
+          ) {
+            try {
+              current = await this.chain.knowledgeAssetVersionSnapshotIsCurrent(
+                kaId,
+                evidence.snapshot,
+              );
+            } catch {
+              // Optimization-only lease unavailable: preserve the unchanged live
+              // root/publisher/materialization path below.
+            }
+          }
+          if (options.isTargetCurrent && !options.isTargetCurrent()) {
+            return { status: 'skip' };
+          }
+          if (current) {
+            this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
+            return { status: 'already', blockNumber: headBlock! };
+          }
+          this.vmReconcileFinalizedSlotEvidence.delete(finalizedSlotKey);
+        }
+      }
+
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
       cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
-
-      // Recently reconciled (live-burst guard): treat as already-done so the
-      // cursor advances without redoing chain reads + an SWM scan.
-      if (this.recentReconciledUals.has(cacheKey)) {
-        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
-        return { status: 'already', blockNumber: versionBlock };
-      }
 
       if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
@@ -6723,37 +6853,68 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { status: 'skip' };
     }
 
+    // Cursor finality remains tied to this sweep's raw head observation. The
+    // pinned version block orders materialized metadata but must not shorten
+    // the independent reconciliation confirmation-depth gate.
+    const completionBlock = headBlock ?? 0;
     switch (outcome) {
       case 'promoted':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.recentReconciledUals.add(cacheKey);
+        await this.confirmAndRememberVmReconcileFinalizedSlot(
+          localCgId,
+          onChainCgId,
+          ordinal,
+          finalizedSlotBlock,
+          kaId,
+          merkleRoot,
+          publisherAddress,
+        );
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'promote', ordinal, kaId: kaId.toString(), ual,
         });
-        return { status: 'reconciled', blockNumber: versionBlock };
+        return { status: 'reconciled', blockNumber: completionBlock };
       case 'already-confirmed':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.recentReconciledUals.add(cacheKey);
+        await this.confirmAndRememberVmReconcileFinalizedSlot(
+          localCgId,
+          onChainCgId,
+          ordinal,
+          finalizedSlotBlock,
+          kaId,
+          merkleRoot,
+          publisherAddress,
+        );
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock };
+        return { status: 'already', blockNumber: completionBlock };
       case 'stale-target':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         // A newer root won; do not prune its cache/recent state.
         this.recentReconciledUals.add(cacheKey);
+        await this.confirmAndRememberVmReconcileFinalizedSlot(
+          localCgId,
+          onChainCgId,
+          ordinal,
+          finalizedSlotBlock,
+          kaId,
+          merkleRoot,
+          publisherAddress,
+        );
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock };
+        return { status: 'already', blockNumber: completionBlock };
       case 'no-swm':
         if (activeFetchRan && !activeFetchHadUsableResponse) {
           this.clearVmReconcileActiveFetchCooldown(localCgId);

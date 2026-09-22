@@ -143,6 +143,8 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { prepareRfc64LateLegacySwmBoundaryV1 } from
+  './rfc64/legacy-swm-boundary-v1.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -1110,6 +1112,16 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         legacyApplyAllowedOracle: (cgId: string, subGraphName: string | null) => (
           this.rfc64LegacySwmApplyAllowedForScope(cgId, subGraphName)
         ),
+        resolveDurableRootAtomicCompanion: (input) => {
+          if (this.config.dataDir === undefined) return;
+          return prepareRfc64LateLegacySwmBoundaryV1(
+            this,
+            input.contextGraphId,
+            input.kaUal,
+            input.shareOperationId,
+            input.assertionVersion,
+          );
+        },
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members

@@ -62,6 +62,7 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
+  ChainEventLogStore,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
@@ -1833,6 +1834,13 @@ export interface DKGAgentConfig {
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
+  /**
+   * Durable backing for the node's ONE chain log. Giving it to the agent is
+   * what starts the single background tick: the agent's own chain adapter owns
+   * it, and every other adapter in the process reads the same log rather than
+   * opening a scanner of its own.
+   */
+  chainEventLogStore?: ChainEventLogStore;
   /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
   authorityIndex?: AuthorityIndexConfig;
   /**

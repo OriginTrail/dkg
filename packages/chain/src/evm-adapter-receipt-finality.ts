@@ -7,6 +7,7 @@ import type { ChainReadOptions } from './chain-adapter.js';
 import { requiredHeadBlockForReceipt } from './evm-adapter-constants.js';
 import { isEvmBlockUnavailableError } from './evm-error-text.js';
 import type { ReadOpts } from './rpc-failover-client.js';
+import { withRpcUsageConsumer } from './rpc-usage.js';
 
 const RECEIPT_BLOCK_HEADER_CACHE_MAX_ENTRIES = 256;
 
@@ -60,12 +61,18 @@ export class EvmReceiptFinalityReader {
         );
         let providerHead: number | undefined;
         if (requiredBlockNumber > receipt.blockNumber) {
-          providerHead = await provider.getBlockNumber();
+          providerHead = await withRpcUsageConsumer(
+            'receiptFinality.head',
+            () => provider.getBlockNumber(),
+          );
           if (providerHead < requiredBlockNumber) return null;
         }
         let atHeight;
         try {
-          atHeight = await provider.getBlock(receipt.blockNumber);
+          atHeight = await withRpcUsageConsumer(
+            'receiptFinality.header',
+            () => provider.getBlock(receipt.blockNumber),
+          );
         } catch (error) {
           if (isEvmBlockUnavailableError(error)) {
             // Some clients report an above-head block as an error rather than
@@ -73,7 +80,10 @@ export class EvmReceiptFinalityReader {
             // nullable failover signal: the same bare message from an endpoint
             // already at this height indicates a sync/restart fault and must
             // surface instead of turning into a ten-minute receipt poll.
-            providerHead ??= await provider.getBlockNumber();
+            providerHead ??= await withRpcUsageConsumer(
+              'receiptFinality.head',
+              () => provider.getBlockNumber(),
+            );
             if (providerHead < receipt.blockNumber) return null;
           }
           throw error;
@@ -90,7 +100,13 @@ export class EvmReceiptFinalityReader {
           canonical: header.hash === receipt.blockHash.toLowerCase(),
         };
       },
-      { signal: options.signal, deadlineMs: options.deadlineMs },
+      {
+        signal: options.signal,
+        deadlineMs: options.deadlineMs,
+        // The callback assigns the two physical header reads separately. Do
+        // not let the outer failover label overwrite those fixed consumers.
+        rpcUsageConsumer: null,
+      },
     );
     return resolved?.canonical === true ? resolved.header : null;
   }

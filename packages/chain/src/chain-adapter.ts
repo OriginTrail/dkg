@@ -323,8 +323,18 @@ export type CanonicalFinalizationReceiptResolution =
  * absence.
  */
 export type PublishTransactionResolution =
-  /** Mined, successful, and carries a publish this adapter parsed. */
-  | { status: 'confirmed'; publish: OnChainPublishResult }
+  /**
+   * Mined, successful, and carries a publish this adapter parsed. An adapter
+   * that established the verdict from a canonical receipt may also carry that
+   * exact receipt so same-operation consumers do not have to re-prove it.
+   * Absence preserves compatibility with adapters that cannot project the
+   * stricter receipt shape; callers must then perform their existing read.
+   */
+  | {
+      status: 'confirmed';
+      publish: OnChainPublishResult;
+      canonicalReceipt?: CanonicalFinalizationReceipt;
+    }
   /** Mined with a failure receipt: proven ineffective, and permanently so. */
   | { status: 'reverted' }
   /**
@@ -457,6 +467,17 @@ export interface ChainEvent {
 }
 
 /**
+ * A process-local, non-serializable lease over one conservative background
+ * event-scan boundary. It has no chain-head, finality or authorization
+ * meaning. Consumers must re-check `holds()` after every awaited dispatch and
+ * immediately before advancing or persisting their cursor.
+ */
+export interface EventScanHorizonLease {
+  readonly throughBlockNumber: number;
+  holds(): Promise<boolean>;
+}
+
+/**
  * Why an off-chain ACK signer pre-flight rejected a recovered signer.
  * Mirrors the two on-chain gates in
  * `KnowledgeAssetsV10._verifyACKSignature` plus an explicit
@@ -570,6 +591,17 @@ export interface ContextGraphAuthoritySnapshot {
   readonly rosterVersion: string;
   readonly sourceBlockNumber: string;
   readonly sourceBlockHash: string;
+}
+
+/**
+ * The two write-once fields committed by one finalized
+ * `ContextGraphCreated` event. This value is deliberately all-or-nothing:
+ * callers must never combine one field from the event index with the other
+ * from a later unpinned point read.
+ */
+export interface ContextGraphFinalizedCreation {
+  readonly nameHash: string;
+  readonly accessPolicy: 0 | 1;
 }
 
 /**
@@ -1297,6 +1329,23 @@ export interface ChainReadOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * One coherent finalized Knowledge Asset version and the immutable physical
+ * evidence that produced it. The binding fields are optional only for legacy
+ * and third-party adapters; optimizations must refuse reuse when any is absent.
+ */
+export interface KnowledgeAssetVersionSnapshot {
+  knowledgeAssetId?: bigint;
+  latestRoot: string;
+  rootCount: bigint;
+  latestAuthor: string;
+  latestPublisher: string;
+  blockNumber: number;
+  blockHash?: string;
+  knowledgeAssetStorageAddress?: string;
+  knowledgeAssetStorageGeneration?: number;
+}
+
 /** Options honored only by the shared live-authority read. */
 export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   /**
@@ -1313,10 +1362,27 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
 export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
   /**
    * Finalized Context Graph authority reads only: told how the read was
-   * answered — by a scan that exercised the RPC pool, by the projection cache
-   * inside `chain.indexTickMs`, or by a stale projection after a FAILED
-   * refresh. A health governor needs the distinction; every other reader
-   * ignores it and no other read reports it.
+   * answered. FOUR ways, and a consumer that assumes three will read the
+   * fourth as something it is not:
+   *
+   *  - `scan` exercised the RPC pool now.
+   *  - `cache` came from a projection still inside `chain.indexTickMs`.
+   *  - `log` was FOLDED out of the node-local chain event log's stored rows and
+   *    touched no endpoint at all. It is neither inside `chain.indexTickMs`
+   *    (its bound is `min(max(3T, 15s), 5m)` against the background tick's last
+   *    head read, not T) nor the consequence of any failure — a healthy node
+   *    answers this way in the steady state. That combination is what makes it
+   *    worth naming here: the pre-log rule "a non-scan answer is either fresh
+   *    inside T or a failure" is no longer true of this interface.
+   *  - `stale-cache` was answered DESPITE a failed refresh.
+   *
+   * ONLY `scan` and `cache` are evidence that the pool is alive. A health
+   * governor — the RFC-64 authority circuit breaker is the one that exists —
+   * needs the distinction and must default to the no-proof side, so a member
+   * added later cannot be mistaken for health by omission.
+   * {@link ContextGraphAuthorityProjectionServedEvidence} carries the full
+   * statement of each member. Every other reader ignores this and no other read
+   * reports it.
    */
   onContextGraphAuthorityProjectionServed?: (
     evidence: ContextGraphAuthorityProjectionServedEvidence,
@@ -1529,6 +1595,15 @@ export interface ChainAdapter {
   // Block height (used by ChainEventPoller to seed the scan cursor)
   getBlockNumber?(): Promise<number>;
 
+  /**
+   * Conservative, possibly lagging one-log horizon for background event
+   * polling. This is not a canonical head, finality fact, or authorization
+   * input; absence makes the poller use `getBlockNumber()` exactly as before.
+   */
+  acquireEventScanHorizonLease?(
+    eventTypes: readonly string[],
+  ): Promise<EventScanHorizonLease | undefined>;
+
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
 
@@ -1557,6 +1632,17 @@ export interface ChainAdapter {
       contextGraphId: bigint,
       options?: ContextGraphAuthorityReadOptions,
     ): Promise<ContextGraphAuthoritySnapshot>;
+    /**
+     * Read the immutable creation pair from one complete, current finalized
+     * authority projection. Returns `undefined` when the event index cannot
+     * prove a positive non-zero name commitment; callers then keep their
+     * existing live reads. Implementations must not cache misses or either
+     * field independently.
+     */
+    getContextGraphFinalizedCreation?(
+      contextGraphId: bigint,
+      options?: ContextGraphAuthorityReadOptions,
+    ): Promise<ContextGraphFinalizedCreation | undefined>;
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
    * Used by the daemon's curated-CG registration preflight to populate the
@@ -2170,13 +2256,18 @@ export interface ChainAdapter {
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,
     options?: ChainReadOptions,
-  ): Promise<{
-    latestRoot: string;
-    rootCount: bigint;
-    latestAuthor: string;
-    latestPublisher: string;
-    blockNumber: number;
-  } | null>;
+  ): Promise<KnowledgeAssetVersionSnapshot | null>;
+
+  /**
+   * Cheap lease validation for a previously-read coherent snapshot. A true
+   * result proves that the same finalized block hash and exact physical KAS
+   * binding generation are still current. Missing evidence is always false.
+   */
+  knowledgeAssetVersionSnapshotIsCurrent?(
+    kaId: bigint,
+    snapshot: KnowledgeAssetVersionSnapshot,
+    options?: ChainReadOptions,
+  ): Promise<boolean>;
 
   /**
    * Constant-cost scalar update context for a KA. Consumers that need version

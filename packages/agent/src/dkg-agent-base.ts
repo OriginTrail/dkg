@@ -137,7 +137,7 @@ import {
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -281,6 +281,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
   reconcileContextGraph,
+  RecentReconcileEvidenceMap,
   RecentUalSet,
   type VmReconcileSchedulingRuntime,
   type ChainReconcilerDeps,
@@ -1120,8 +1121,14 @@ export class DKGAgentBase {
     bindingGeneration: number;
   }>();
   protected selectedVmReconcileBindingGeneration = 0;
-  /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
+  /** Bounded root bookkeeping for sibling cleanup only; never currentness authority. */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /** Bounded same-finalized-block leases; never durable across a stagnant head. */
+  protected readonly vmReconcileFinalizedSlotEvidence =
+    new RecentReconcileEvidenceMap<{
+      kaId: bigint;
+      snapshot: KnowledgeAssetVersionSnapshot;
+    }>();
   /**
    * In-flight core-hosted recordings launched from the synchronous StorageACK
    * pre-sign hook. Tracked so rejections are logged and graceful stop() can

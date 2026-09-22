@@ -134,6 +134,8 @@ export default defineConfig({
           // #1066 Item 1 — metrics presence gate. Pure logic (injected clock).
           'test/metrics-presence.test.ts',
           'test/rpc-usage-log.test.ts',
+          'test/rpc-usage-snapshot-route.test.ts',
+          'test/publisher-runner-rpc-usage.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',

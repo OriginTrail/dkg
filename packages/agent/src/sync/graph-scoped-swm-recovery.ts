@@ -692,9 +692,19 @@ export async function materializeGraphScopedSwmRecoveryAsset(params: {
   const { locator } = descriptor.snapshotSource;
   let raw: Quad[] | null;
   if (locator.kind === 'graph') {
-    raw = params.fetchedDataQuads
-      .filter((quad) => quad.graph === locator.graph)
-      .map((quad) => ({ ...quad, graph: '' }));
+    // The SWM responder serves the canonical per-KA assertion graph through
+    // the ordinary `_shared_memory/{address}/{number}` data lane. The legacy
+    // `publicSnapshotGraph` is provenance for stores that predate snapshot
+    // blobs; it is outside that responder graph family and is therefore not
+    // normally present on the wire. Prefer the descriptor's independently
+    // validated assertion graph, while retaining read compatibility with peers
+    // that explicitly transported the legacy locator graph.
+    const assertionRows = params.fetchedDataQuads
+      .filter((quad) => quad.graph === descriptor.assertionGraph);
+    const sourceRows = assertionRows.length > 0 || descriptor.publicQuadsCount === 0
+      ? assertionRows
+      : params.fetchedDataQuads.filter((quad) => quad.graph === locator.graph);
+    raw = sourceRows.map((quad) => ({ ...quad, graph: '' }));
   } else {
     if (!params.publicSnapshotStore) {
       throw new Error(`Graph-scoped SWM recovery requires a public snapshot store for ${descriptor.kaUal}`);

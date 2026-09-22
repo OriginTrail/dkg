@@ -30,7 +30,6 @@ import type {
 } from './catalog-access-policy-v1.js';
 import {
   normalizeRfc64CatalogTransportAuthorizerV1,
-  recheckCurrentRfc64CatalogPolicyAfterAwaitV1,
   withAuthorizedCurrentRfc64CatalogPolicyV1,
   withCurrentRfc64CatalogPolicyV1,
 } from './catalog-transport-authorization-v1.js';
@@ -523,28 +522,27 @@ export class Rfc64PublicCatalogTransportV1 {
     const peerId = snapshotPeerId(remotePeerId);
     const announcement = parseAnnouncement(encodeAnnouncement(announcementInput));
     const request = requestFromAnnouncement(announcement);
-    const response = await this.withCurrentCatalogPolicy(
+    return this.withCurrentCatalogPolicy(
       'fetch-outbound',
       peerId,
       announcement,
-      () => this.router.send(
-        peerId,
-        RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
-        encodeFetchRequest(request),
-        sendOptions,
-      ),
+      async () => {
+        const response = await this.router.send(
+          peerId,
+          RFC64_PUBLIC_CATALOG_HEAD_FETCH_PROTOCOL_V1,
+          encodeFetchRequest(request),
+          sendOptions,
+        );
+        const envelope = parseFetchResponse(response);
+        if (envelope === null) return null;
+        assertHeadMatchesAnnouncement(envelope, announcement);
+        const issuerSignature = await this.verifyExactIssuerSignature(envelope);
+        return Object.freeze({
+          envelope: deepFreeze(envelope),
+          issuerSignature,
+        });
+      },
     );
-    const envelope = parseFetchResponse(response);
-    if (envelope === null) return null;
-    assertHeadMatchesAnnouncement(envelope, announcement);
-    const issuerSignature = await recheckCurrentRfc64CatalogPolicyAfterAwaitV1(
-      () => this.requireCatalogPolicy('fetch-outbound', peerId, announcement),
-      () => this.verifyExactIssuerSignature(envelope),
-    );
-    return Object.freeze({
-      envelope: deepFreeze(envelope),
-      issuerSignature,
-    });
   }
 
   private async handleAnnouncement(

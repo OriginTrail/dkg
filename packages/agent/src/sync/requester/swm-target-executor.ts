@@ -62,6 +62,10 @@ export interface SwmTargetExecutorPortsV1 {
   readonly fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   readonly processSharedMemoryBatch: SharedMemorySyncContext['processSharedMemoryBatch'];
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Process-local RFC-64 authority decision; this port must not perform I/O. */
+  readonly ordinaryRootSnapshotApplyAllowed?: (contextGraphId: string) => boolean;
+  readonly resolveRootSnapshotAtomicCompanion?:
+    SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
   readonly recordDrops: OversizeGuardHooks['recordDrops'];
   readonly invalidateListContextGraphsCache: () => void;
   readonly markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -175,6 +179,7 @@ export class SwmTargetExecutorV1 {
       writeLocks: this.#ports.writeLocks,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       snapshotMaterializer: this.#snapshotMaterializer,
+      resolveRootAtomicCompanion: this.#ports.resolveRootSnapshotAtomicCompanion,
       store: this.#recoveryMutation.store,
       replaceMetaForRoots: (roots, metaGraphs) => this.#recoveryMutation
         .replaceMetaForRoots(
@@ -274,6 +279,9 @@ export class SwmTargetExecutorV1 {
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       snapshotMaterializer: this.#snapshotMaterializer,
+      ordinaryRootSnapshotApplyAllowed: this.#ports.ordinaryRootSnapshotApplyAllowed,
+      resolveRootSnapshotAtomicCompanion:
+        this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
         const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
           store: this.#ports.store,

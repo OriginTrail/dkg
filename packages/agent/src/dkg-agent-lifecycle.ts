@@ -734,7 +734,10 @@ import {
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
-import { initializeRfc64LegacySwmBoundaryV1 } from
+import {
+  initializeRfc64LegacySwmBoundaryV1,
+  prepareRfc64LateLegacySwmBoundaryV1,
+} from
   './rfc64/legacy-swm-boundary-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
@@ -2833,6 +2836,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
               workspaceWriteLocks: this.writeLocks,
+              resolveDurableRootAtomicCompanion: (input) => {
+                if (this.config.dataDir === undefined) return;
+                return prepareRfc64LateLegacySwmBoundaryV1(
+                  this,
+                  input.contextGraphId,
+                  input.kaUal,
+                  input.shareOperationId,
+                  input.assertionVersion,
+                );
+              },
               ackHandlerDeadlineMs: this.config.storageAckTiming.handlerDeadlineMs,
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`

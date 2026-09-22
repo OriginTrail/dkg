@@ -366,6 +366,17 @@ DELETE FROM rfc64_swm_author_inventory_rows_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author
   AND ka_ual = :kaUal;`,
+
+  deleteSwmAuthorRows: `
+DELETE FROM rfc64_swm_author_inventory_rows_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author;`,
+
+  deleteSwmAuthorHeadCas: `
+DELETE FROM rfc64_swm_author_inventory_heads_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author
+  AND current_head_digest = :expectedHead;`,
   listFinalizedPrivatePlacementRepairs: `
 SELECT repair_digest, repair_json
 FROM rfc64_finalized_private_placement_repairs_v1
@@ -430,6 +441,8 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   updateSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-update.v1',
   upsertSwmAuthorRow: 'rfc64.swm-author-inventory.row.upsert.v1',
   deleteSwmAuthorRow: 'rfc64.swm-author-inventory.row.delete.v1',
+  deleteSwmAuthorRows: 'rfc64.swm-author-inventory.rows.delete.v1',
+  deleteSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-delete.v1',
   listFinalizedPrivatePlacementRepairs: 'rfc64.finalized-private-placement-repair.list.v1',
   insertFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.insert.v1',
   deleteFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.delete.v1',
@@ -475,6 +488,7 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'updateSwmAuthorHeadCas',
   'upsertSwmAuthorRow',
   'deleteSwmAuthorRow',
+  'deleteSwmAuthorHeadCas',
   'insertFinalizedPrivatePlacementRepair',
   'deleteFinalizedPrivatePlacementRepair',
   'insertUnregisteredAuthoritySeed',

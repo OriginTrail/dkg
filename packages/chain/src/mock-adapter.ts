@@ -41,6 +41,7 @@ import type {
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
+  ContextGraphFinalizedCreation,
 } from './chain-adapter.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
@@ -1830,6 +1831,21 @@ export class MockChainAdapter implements ChainAdapter {
       rosterVersion: cg.rosterVersion.toString(10),
       sourceBlockNumber: cg.authoritySourceBlockNumber.toString(10),
       sourceBlockHash: cg.authoritySourceBlockHash,
+    });
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined || typeof cg.nameHash !== 'string'
+      || cg.nameHash === ethers.ZeroHash) return undefined;
+    if (cg.accessPolicy !== 0 && cg.accessPolicy !== 1) return undefined;
+    return Object.freeze({
+      nameHash: cg.nameHash,
+      accessPolicy: cg.accessPolicy as 0 | 1,
     });
   }
 

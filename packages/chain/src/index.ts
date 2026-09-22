@@ -39,6 +39,7 @@ export {
   type PublicFinalizedMaterializationAuthorityRequest,
   type PublicFinalizedMaterializationAuthorityResult,
   type PublicFinalizedMaterializationAuthorityUnavailableReason,
+  type PublicFinalizedMaterializationVersionSnapshot,
 } from './public-finalized-materialization-authority.js';
 export {
   CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
@@ -159,16 +160,29 @@ export {
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
   RPC_ENDPOINT_SLOT_LABELS,
+  RPC_USAGE_ADAPTER_ROLES,
+  RPC_USAGE_SNAPSHOT_CONSUMERS,
+  RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION,
   normalizeRpcUsageWindow,
+  normalizeRpcUsageAdapterRole,
   normalizeRpcEndpointSlotLabel,
+  boundedRpcUsageSnapshotConsumerLabel,
   rpcUsageWindowTotal,
+  snapshotProcessRpcUsage,
   RpcUsageTracker,
+  RpcUsageCumulativeAccumulator,
   // Call-site attribution: splits a funnel read (`cgStorage.getContextGraph`)
   // by the caller that wanted it. See `withRpcUsageSite`.
   withRpcUsageSite,
   withRpcUsageConsumer,
+  withRpcUsageAdapterRole,
   type RpcEndpointSlotLabel,
+  type RpcUsageAdapterRole,
   type RpcUsageAttribution,
+  type RpcUsageCumulativeSnapshot,
+  type RpcUsageSnapshotClock,
+  type RpcUsageSnapshotCompleteness,
+  type RpcUsageSnapshotSourcePopulation,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
   type RpcUsageRecorder,
@@ -182,6 +196,7 @@ export {
 } from './context-graph-authority-rpc-sites.js';
 export {
   type RandomSamplingReadContext,
+  type RandomSamplingBlockContext,
   type RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 export {
@@ -291,3 +306,28 @@ export {
   type RandomSamplingAvailabilityResolver,
   type LegacyRandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';
+
+/** Store contract supplied by the daemon to the one-log runtime. */
+export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
+
+/**
+ * How the process hands that log DOWN to each adapter. There is one log per
+ * node and many adapters, so this is a binding, never a construction.
+ */
+export type {
+  ChainEventLogBinding,
+  ChainEventLogBindingSource,
+  ChainEventLogEventScanIdentity,
+  ChainEventLogEventScanLease,
+  ChainEventLogIndexedEventType,
+  ChainEventLogHubRotation,
+  ChainEventLogHubRotationWindow,
+} from './chain-event-log-binding.js';
+
+/** The ONE construction of that log. Exactly one adapter per process owns it. */
+export {
+  createEvmChainIndexRuntime,
+  type EvmChainIndexContract,
+  type EvmChainIndexRuntime,
+  type EvmChainIndexRuntimeOptions,
+} from './evm-chain-index-runtime.js';

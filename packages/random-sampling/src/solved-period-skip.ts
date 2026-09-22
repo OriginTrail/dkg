@@ -14,6 +14,7 @@ export interface SolvedPeriodRecord {
   readonly challengePeriodEpoch: bigint;
   readonly periodStartBlock: bigint;
   readonly bindingId: string;
+  readonly epochBindingId: string;
   readonly chronosEpoch: bigint;
   readonly rereadAtBlock: bigint;
   readonly rereadAtMs: number;
@@ -39,6 +40,8 @@ export type SolvedPeriodReadResult<T> =
   | Readonly<{
       kind: 'live';
       value: T;
+      /** RS/RSS binding captured before the caller's live reads. */
+      observationBindingId?: string;
       currentChallenge?: Readonly<{
         challenge: NodeChallenge;
         stale: boolean;
@@ -94,15 +97,23 @@ export class SolvedPeriodSkip {
     const current = live.currentChallenge;
     if (current === undefined) {
       this.#record = undefined;
-      return Object.freeze({ kind: 'live', value: live.value });
+      return Object.freeze({
+        kind: 'live',
+        value: live.value,
+        ...(bindingId === undefined ? {} : { observationBindingId: bindingId }),
+      });
     }
 
+    const blockContext = await this.#captureBlockContext(bindingId);
     const staleness = await this.#readCachedChallengeStaleness(
       current.challenge,
       current.durationInBlocks,
+      blockContext?.headBlockNumber,
     );
     if (current.challenge.solved && !staleness.stale) {
-      const context = await this.#captureReadContext(bindingId);
+      const context = blockContext ?? (
+        this.#hasBlockContextCapability() ? undefined : await this.#captureReadContext(bindingId)
+      );
       this.#observe({
         context,
         challenge: current.challenge,
@@ -115,10 +126,50 @@ export class SolvedPeriodSkip {
     return Object.freeze({
       kind: 'live',
       value: live.value,
+      ...(bindingId === undefined ? {} : { observationBindingId: bindingId }),
       currentChallenge: Object.freeze({
         challenge: current.challenge,
         stale: staleness.stale,
       }),
+    });
+  }
+
+  /**
+   * Install the same bounded record after this node's proof transaction has
+   * succeeded. The submission is stronger evidence than a follow-up
+   * `getNodeChallenge` read, but it is reusable only when the pre-read RS/RSS
+   * binding is still current and the live tip remains in the challenge period.
+   */
+  async observeSubmittedProof(input: Readonly<{
+    observationBindingId?: string;
+    challenge: NodeChallenge;
+    durationInBlocks?: bigint;
+  }>): Promise<boolean> {
+    const { observationBindingId, challenge, durationInBlocks } = input;
+    if (observationBindingId === undefined) {
+      this.#record = undefined;
+      return false;
+    }
+    const blockContext = await this.#captureBlockContext(observationBindingId);
+    const staleness = await this.#readCachedChallengeStaleness(
+      challenge,
+      durationInBlocks,
+      blockContext?.headBlockNumber,
+    );
+    if (staleness.stale) {
+      this.#record = undefined;
+      return false;
+    }
+    const context = blockContext ?? (
+      this.#hasBlockContextCapability()
+        ? undefined
+        : await this.#captureReadContext(observationBindingId)
+    );
+    return this.#observe({
+      context,
+      challenge: Object.freeze({ ...challenge, solved: true }),
+      staleness,
+      durationInBlocks,
     });
   }
 
@@ -146,18 +197,37 @@ export class SolvedPeriodSkip {
     }
   }
 
+  async #captureBlockContext(bindingId: string | undefined) {
+    if (!this.#contextReader?.readRandomSamplingBlockContext || bindingId === undefined) {
+      return undefined;
+    }
+    try {
+      const context = await this.#contextReader.readRandomSamplingBlockContext();
+      return context?.bindingId === bindingId ? context : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  #hasBlockContextCapability(): boolean {
+    return typeof this.#contextReader?.readRandomSamplingBlockContext === 'function';
+  }
+
   async #readCachedChallengeStaleness(
     existing: NodeChallenge,
     liveDurationInBlocks?: bigint,
+    contextHead?: bigint,
   ): Promise<CachedChallengeStaleness> {
-    if (!this.#chain.getBlockNumber) return { stale: false };
     const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
     if (duration <= 0n) return { stale: false };
-    let head: bigint;
-    try {
-      head = BigInt(await this.#chain.getBlockNumber());
-    } catch {
-      return { stale: false };
+    let head = contextHead;
+    if (head === undefined) {
+      if (!this.#chain.getBlockNumber) return { stale: false };
+      try {
+        head = BigInt(await this.#chain.getBlockNumber());
+      } catch {
+        return { stale: false };
+      }
     }
     return {
       stale: head >= existing.activeProofPeriodStartBlock + duration,
@@ -194,6 +264,7 @@ export class SolvedPeriodSkip {
       challengePeriodEpoch: challenge.epoch,
       periodStartBlock: challenge.activeProofPeriodStartBlock,
       bindingId: context.bindingId,
+      epochBindingId: context.epochBindingId ?? context.bindingId,
       chronosEpoch: context.chronosEpoch,
       rereadAtBlock: halfPeriodRereadBlock < latestOpenPeriodBlock
         ? halfPeriodRereadBlock
@@ -206,7 +277,7 @@ export class SolvedPeriodSkip {
   /** Return the reusable record, or forget it on the first failed guard. */
   async #reusable(): Promise<SolvedPeriodRecord | undefined> {
     const record = this.#record;
-    if (!record || !this.#chain.getBlockNumber || !this.#contextReader) {
+    if (!record || !this.#contextReader) {
       this.#record = undefined;
       return undefined;
     }
@@ -214,11 +285,25 @@ export class SolvedPeriodSkip {
       this.#record = undefined;
       return undefined;
     }
-    let head: bigint;
+    let head: bigint | undefined;
     let context: RandomSamplingReadContext | undefined;
     try {
-      head = BigInt(await this.#chain.getBlockNumber());
-      context = await this.#contextReader.readRandomSamplingContext();
+      const blockContext = await this.#captureBlockContext(record.bindingId);
+      if (blockContext !== undefined) {
+        head = blockContext.headBlockNumber;
+        context = blockContext;
+      } else {
+        if (this.#hasBlockContextCapability()) {
+          this.#record = undefined;
+          return undefined;
+        }
+        if (!this.#chain.getBlockNumber) {
+          this.#record = undefined;
+          return undefined;
+        }
+        head = BigInt(await this.#chain.getBlockNumber());
+        context = await this.#contextReader.readRandomSamplingContext();
+      }
     } catch {
       this.#record = undefined;
       return undefined;
@@ -227,7 +312,9 @@ export class SolvedPeriodSkip {
       context !== undefined
       && this.#stillBound(record, this.#now())
       && context.bindingId === record.bindingId
+      && (context.epochBindingId ?? context.bindingId) === record.epochBindingId
       && context.chronosEpoch === record.chronosEpoch
+      && head !== undefined
       && head >= record.periodStartBlock
       && head < record.rereadAtBlock
     );

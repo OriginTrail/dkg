@@ -2086,7 +2086,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
-  it('does not infer "solved" from its own submit — the next tick confirms it on chain first', async () => {
+  it('reuses a binding-checked confirmed submission without re-reading its challenge', async () => {
     const store = new OxigraphStore();
     const fixture: KCFixture = {
       cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
@@ -2114,14 +2114,14 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
 
     expect((await prover.tick()).kind).toBe('submitted');
-    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 0, epoch: 0 });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 1, epoch: 1 });
 
     state.challengeForNode = { ...challenge, solved: true };
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
 
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
     await prover.close();
   });
 
