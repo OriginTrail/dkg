@@ -169,38 +169,70 @@ test('the browser suite follows only the UI surface it drives on pull requests',
   }
 });
 
-test('the Windows lifecycle lane follows agent persistence code on pull requests', () => {
-  const plain = pullRequestPlan([change('packages/agent/src/sync/policy.ts')]);
-  assert.equal(plain.lanes.tornado_agent, true);
-  assert.equal(plain.lanes.tornado_agent_windows, false);
-
-  for (const filePath of [
-    'packages/agent/src/finalization-recovery-sqlite-store.ts',
-    'packages/agent/src/finalization-recovery-store.ts',
-    'packages/agent/src/sqlite/owned-sqlite-v1.ts',
-    'packages/agent/src/rfc64/control-object-store-v1-internal.ts',
-    'packages/agent/src/rfc64/durable-file-store-v1.ts',
-    'packages/agent/src/rfc64/persistence-root-ownership-v1-internal.ts',
-    'packages/agent/src/rfc64/secure-filesystem-policy-v1.ts',
-    'packages/agent/src/rfc64/author-catalog-producer.ts',
-    'packages/agent/src/rfc64/inventory-v1/sql.ts',
-    'packages/agent/test/rfc64-inventory-v1-candidates.test.ts',
-    'packages/agent/test/finalization-recovery-sqlite-test-helpers.ts',
-    'packages/agent/test/fixtures/rfc64-inventory-v1-child.ts',
-    'packages/agent/vitest.unit.config.ts',
-  ]) {
-    const plan = pullRequestPlan([change(filePath)]);
-    assert.equal(plan.mode, 'delta', filePath);
-    assert.equal(plan.lanes.tornado_agent_windows, true, filePath);
-    assert.deepEqual(
-      selectedLanes(plan).filter((lane) => lane !== 'tornado_agent_windows'),
-      selectedLanes(plain),
-      `${filePath} keeps the ordinary agent lanes`,
+test('the Windows lifecycle lane follows the agent dependency closure its harnesses load', () => {
+  // The Windows job runs the SQLite persistence suites and the RFC-64 Gate 0
+  // and evidence harnesses, which start a real agent and run on no Linux lane,
+  // so it must run wherever the agent lane does.
+  for (const [workspace, rule] of Object.entries(WORKSPACE_RULES)) {
+    if (rule.forceFull) continue;
+    assert.equal(
+      rule.lanes.includes('tornado_agent_windows'),
+      rule.lanes.includes('tornado_agent'),
+      workspace,
     );
   }
 
-  // Every selector the Windows job runs must still be a trigger here.
+  // Derive the closure from what the harnesses actually import, so a new
+  // import or dependency cannot silently drop the lane.
+  const manifests = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
+    workspace,
+    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')),
+  ]));
+  const workspaceByName = new Map([...manifests].map(([workspace, manifest]) => [manifest.name, workspace]));
+  const harnessSources = [
+    ...fs.readdirSync(path.join(REPO_ROOT, 'devnet/rfc64-persistence-lifecycle'), { recursive: true })
+      .map((file) => path.join('devnet/rfc64-persistence-lifecycle', file)),
+    ...fs.readdirSync(path.join(REPO_ROOT, 'devnet/_bootstrap'))
+      .filter((file) => file.startsWith('rfc64-evidence'))
+      .map((file) => path.join('devnet/_bootstrap', file)),
+  ].filter((file) => /\.[cm]?tsx?$/.test(file) && !file.split(path.sep).includes('node_modules'))
+    .filter((file) => fs.statSync(path.join(REPO_ROOT, file)).isFile());
+  const queue = harnessSources.flatMap((file) => [
+    ...fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').matchAll(/from '(@origintrail-official\/[a-z-]+)/g),
+  ].map(([, name]) => workspaceByName.get(name)).filter(Boolean));
+  assert.ok(queue.includes('packages/agent'), 'the Gate 0 harness starts a real agent');
+  const closure = new Set();
+  while (queue.length) {
+    const workspace = queue.shift();
+    if (closure.has(workspace)) continue;
+    closure.add(workspace);
+    const { dependencies = {}, devDependencies = {} } = manifests.get(workspace);
+    for (const name of Object.keys({ ...dependencies, ...devDependencies })) {
+      if (workspaceByName.has(name)) queue.push(workspaceByName.get(name));
+    }
+  }
+  for (const workspace of closure) {
+    assert.ok(WORKSPACE_RULES[workspace].lanes.includes('tornado_agent_windows'), workspace);
+  }
+
+  // The Windows workflow's own push filter names the same packages.
   const windowsWorkflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/rfc64-inventory-windows.yml'), 'utf8'));
+  for (const filter of windowsWorkflow.on.push.paths) {
+    const workspace = filter.match(/^(packages\/[^/]+)\/\*\*$/)?.[1];
+    if (workspace) assert.ok(WORKSPACE_RULES[workspace].lanes.includes('tornado_agent_windows'), filter);
+  }
+
+  // Modules the harness loads, new or renamed persistence modules, and every
+  // suite the job runs all keep the lane; unrelated workspaces do not.
+  for (const filePath of [
+    'packages/agent/src/finalization-recovery-worker.ts',
+    'packages/agent/src/rfc64/journal-store-v1.ts',
+    'packages/agent/src/finalization-recovery-sqlite-store-v2.ts',
+    'packages/storage/src/oxigraph-store.ts',
+    'packages/core/src/index.ts',
+  ]) {
+    assert.equal(pullRequestPlan([change(filePath)]).lanes.tornado_agent_windows, true, filePath);
+  }
   const selectors = windowsWorkflow.jobs['inventory-lifecycle'].strategy.matrix.include
     .flatMap((group) => group.tests.trim().split(/\s+/));
   const agentTests = fs.readdirSync(path.join(REPO_ROOT, 'packages/agent/test'));
@@ -210,6 +242,9 @@ test('the Windows lifecycle lane follows agent persistence code on pull requests
     for (const file of matches) {
       assert.equal(pullRequestPlan([change(`packages/agent/test/${file}`)]).lanes.tornado_agent_windows, true, file);
     }
+  }
+  for (const filePath of ['packages/node-ui/src/ui/pages/Dashboard.tsx', 'packages/network-sim/src/index.ts']) {
+    assert.equal(pullRequestPlan([change(filePath)]).lanes.tornado_agent_windows, false, filePath);
   }
 
   const persistence = pullRequestPlan([change('packages/agent/src/sqlite/owned-sqlite-v1.ts')]);
@@ -225,8 +260,8 @@ test('the Windows lifecycle lane follows agent persistence code on pull requests
     /inventory-windows was selected but ended with skipped/,
   );
 
-  // The Gate 0 harness selects only the self-building Windows job plus the
-  // shared build checks, and full plans always include the lane.
+  // The Gate 0 harness itself selects only the self-building Windows job plus
+  // the shared build checks, and full plans always include the lane.
   const harness = pullRequestPlan([change('devnet/rfc64-persistence-lifecycle/verify.ts')]);
   assert.deepEqual(selectedLanes(harness), ['tornado_agent_windows']);
   assert.equal(harness.runNode, true);

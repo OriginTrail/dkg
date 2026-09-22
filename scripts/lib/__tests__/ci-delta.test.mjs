@@ -205,6 +205,7 @@ test('leaf and shared package snapshots include conservative downstream consumer
   const agent = pullRequestPlan([change('packages/agent/src/agent.ts')]);
   assert.deepEqual(selectedLanes(agent), [
     'tornado_agent',
+    'tornado_agent_windows',
     'bura_cli',
     'kosava_supporting',
     'kosava_hardhat_plugins',
@@ -229,6 +230,7 @@ test('leaf and shared package snapshots include conservative downstream consumer
     'tornado_blazegraph',
     'tornado_publisher',
     'tornado_agent',
+    'tornado_agent_windows',
     'bura_cli',
     'bura_query',
     'kosava_node_ui',

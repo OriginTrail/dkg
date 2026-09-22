@@ -51,6 +51,12 @@ export function needsNodeTestArtifacts(plan) {
 // lanes plus bura_cli's daemon tests; the browser suite still runs for them on
 // every protected push, merge-queue candidate and nightly run (full CI), and
 // `ci:full` opts a PR in before merging.
+//
+// The Windows lifecycle job (rfc64-inventory-windows.yml) runs wherever the
+// agent lane does. Besides the SQLite persistence suites it runs the RFC-64
+// Gate 0 lifecycle and evidence harnesses, which start a real agent (agent,
+// core, chain, storage and their dependencies) and run on no Linux lane, so
+// every workspace in that closure selects it.
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
     lanes: [
@@ -58,6 +64,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
@@ -72,6 +79,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
@@ -86,6 +94,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
@@ -100,6 +109,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_supporting',
@@ -112,6 +122,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_core',
       'tornado_publisher',
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -122,6 +133,7 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_publisher',
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_supporting',
@@ -133,6 +145,7 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_publisher',
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -142,6 +155,7 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/random-sampling': {
     lanes: [
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -151,6 +165,7 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/agent': {
     lanes: [
       'tornado_agent',
+      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -344,24 +359,6 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
 ];
 
 
-// The Windows lifecycle job (rfc64-inventory-windows.yml) re-runs the agent's
-// SQLite and filesystem persistence suites on windows-latest. The same suites
-// run on Linux in tornado_agent for every agent change, so on pull requests
-// the Windows run follows the code only Windows can break: the stores those
-// suites are about, the suites themselves and the agent build/test config the
-// job uses. (Their transitive imports cover almost all of agent/src, so an
-// import closure would select Windows for every agent change.) Protected
-// pushes, merge-queue candidates and the nightly run still run it in full.
-const WINDOWS_LIFECYCLE_PATTERNS = [
-  /^packages\/agent\/src\/finalization-recovery-(?:sqlite-[a-z-]+|store)\.ts$/,
-  /^packages\/agent\/src\/sqlite\//,
-  /^packages\/agent\/src\/rfc64\/(?:author-catalog-producer|control-object-store-v1(?:-internal)?|durable-file-store-v1|persistence-[a-z0-9-]+|secure-filesystem-policy-v1)\.ts$/,
-  /^packages\/agent\/src\/rfc64\/inventory-v1\//,
-  /^packages\/agent\/test\/(?:finalization-recovery-sqlite-|rfc64-inventory-v1|rfc64-agent-inventory-lifecycle|rfc64-author-catalog-producer|rfc64-control-object-store|rfc64-durable-file-store|rfc64-secure-filesystem-policy)/,
-  /^packages\/agent\/test\/fixtures\/rfc64-inventory-v1-child\.ts$/,
-  /^packages\/agent\/(?:package\.json|tsconfig\.json|vitest\.unit\.config\.ts|vitest\.rfc64-unit-tests\.ts)$/,
-];
-
 // File-level triggers: lanes or EVM scopes that specific paths select on top
 // of the rule for the area that owns them (a workspace or a support route). A
 // path outside every area is classified by its triggers alone. Per-file
@@ -378,12 +375,6 @@ const PATH_TRIGGERS = Object.freeze([
     lanes: [],
     evmScopes: ['chain'],
     reason: 'identity-wallet browser actions require real EVM coverage',
-  },
-  {
-    patterns: WINDOWS_LIFECYCLE_PATTERNS,
-    lanes: ['tornado_agent_windows'],
-    evmScopes: [],
-    reason: 'agent persistence changes re-run the Windows lifecycle suites',
   },
 ]);
 
