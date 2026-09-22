@@ -12,17 +12,17 @@ authority index from chain history in `local-history` mode. On mainnet over a
 public RPC endpoint that rebuild took 24 minutes for a freshly registered graph
 and did not finish within 50 minutes for two-week-old graphs, and while the
 index is unresolved an edge denies public-graph subscriptions and skips their
-SWM sync. 10.0.18 bootstraps edge indexes from core snapshots by default and
-keeps the 10.0.17 scan as the fallback, so no node starts slower than it did
-on 10.0.17. **No smart-contract, ABI, wire-protocol, or deployment registry
-changes are required.**
+SWM sync. 10.0.18 bootstraps edge indexes from snapshots served by the
+network's relay cores by default and keeps the 10.0.17 scan as the fallback,
+so no node starts slower than it did on 10.0.17. **No smart-contract, ABI,
+wire-protocol, or deployment registry changes are required.**
 
 ### Upgrading from 10.0.17
 
 | Change | Impact | Action |
 | --- | --- | --- |
-| Edge nodes bootstrap the authority index from discovered cores by default | An edge with no `authorityIndex` block and a configured EVM chain with operational keys builds its trust set from the relays listed in the network file plus agent-registry cores verified on chain, and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s). An edge without that chain wiring (mock chain adapter, no chain configuration, or no operational wallets) keeps the local-history scan and logs why | No configuration change is required; update directly from 10.0.16 or 10.0.17. An explicit `authorityIndex` block keeps its pinned trust |
-| Local history remains the fallback | If no discovered core supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and continues with the 10.0.17 local-history scan, resuming from any checkpoint it already scanned locally instead of rescanning; the scan now logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
+| Edge nodes bootstrap the authority index from the network relays by default | An edge with no `authorityIndex` block and a configured EVM chain with operational keys trusts the relays listed in its network file, each pinned by the PeerID in its multiaddr, and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s). An edge without that chain wiring (mock chain adapter, no chain configuration, or no operational wallets) or with `relay: "none"` keeps the local-history scan and logs why | No configuration change is required; update directly from 10.0.16 or 10.0.17. An explicit `authorityIndex` block keeps its pinned trust |
+| Local history remains the fallback | If no relay supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and continues with the 10.0.17 local-history scan, resuming from any checkpoint it already scanned locally instead of rescanning; the scan now logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
 
 ### Fixed
 
@@ -37,32 +37,37 @@ changes are required.**
 
 ### Changed
 
-- **Runtime core discovery for snapshot bootstrap**: an edge with no explicit
-  `authorityIndex` block builds its trust set at runtime from the relays
-  listed in the network file plus agent-registry (phonebook) cores, and
-  requests a snapshot over `/dkg/10.0.0/authority-index-snapshot/1`.
-  Phonebook cores must verify on chain: a core is asked only after its
-  operational address resolves to a sharding-table member. Network-file
-  relays are additionally checked on chain when their registry profile has an
-  address. Operator-configured `relay` and `preferredRelays` entries never
-  enter the trust set. The startup line reports `mode=core-snapshot
-  trustedCoreCount=discovered discovery=on-chain-cores fallback=local-history`
+- **Network relays seed edge snapshot bootstrap**: an edge with no explicit
+  `authorityIndex` block trusts the relays listed in its network file (at
+  most eight, each pinned by the PeerID in its multiaddr; placeholder entries
+  are skipped) and requests a snapshot over
+  `/dkg/10.0.0/authority-index-snapshot/1`. The network file is the trust
+  anchor, as it already is for the chain the node joins. Operator-configured
+  `relay` and `preferredRelays` entries never enter the trust set, and
+  neither do agent-registry (phonebook) cores: registry profiles are
+  unauthenticated gossip, and nothing binds a profile's PeerID to the staked
+  identity it names. The startup line reports `mode=core-snapshot
+  trustedCoreCount=<relays> source=network-relays fallback=local-history`
   together with the tail and cache-epoch values.
-- **The default applies only where it can run**: the discovered default needs
-  a configured EVM chain (`chain.rpcUrl` and `chain.hubAddress`) with
-  operational keys, which the agent requires for any core-snapshot
-  configuration. An edge on the mock chain adapter, without a chain
-  configuration, or without operational wallets keeps the local-history scan:
-  its startup line reports `mode=local-history`, preceded by
-  `[authority-index] discovered core-snapshot default skipped: <reason>; using local history`.
-- **Local-history fallback**: when no discovered core supplies a usable
-  snapshot within the 30 s bootstrap budget, the node logs it and continues
-  with the local-history scan, resuming from any checkpoint it already
-  scanned locally instead of rescanning from the deployment block, so it is
-  never worse than 10.0.17.
-- An explicit `authorityIndex` block still wins over the discovered default and
-  keeps its pinned trusted-core semantics and its existing startup line. Cores
-  receive no default and keep building the index from chain history.
+- **The default applies only where it can run**: it needs a configured EVM
+  chain (`chain.rpcUrl` and `chain.hubAddress`) with operational keys and a
+  local index store, which the agent requires for any core-snapshot
+  configuration, plus at least one usable network-file relay. An edge on the
+  mock chain adapter, without a chain configuration, without operational
+  wallets, or with `relay: "none"` keeps the local-history scan: its startup
+  line reports `mode=local-history`, preceded by
+  `[authority-index] network-relay default skipped: <reason>; using local history`.
+  The agent makes this decision from its own configuration; the daemon logs
+  the same decision before constructing it.
+- **Local-history fallback**: when no relay supplies a usable snapshot within
+  the 30 s bootstrap budget, the node logs it and continues with the
+  local-history scan, resuming from any checkpoint it already scanned locally
+  instead of rescanning from the deployment block, so it is never worse than
+  10.0.17.
+- An explicit `authorityIndex` block still wins over the network-relay default
+  and keeps its pinned trusted-core semantics, its fail-closed behavior, and
+  its existing startup line. Cores receive no default and keep building the
+  index from chain history.
 - Authority-index scans now log their progress.
 
 ### Deployment and validation

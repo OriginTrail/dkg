@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
-  resolveDefaultAuthorityIndexConfig,
-  type AuthorityIndexConfig,
+  type AuthorityIndexBootstrapPlan,
+  type DKGAgentConfig,
   type ResolvedAuthorityIndexConfig,
 } from '../src/index.js';
 
@@ -14,11 +15,15 @@ resolveAuthorityIndexConfig(rawConfig, 'core');
 // @ts-expect-error The caller must supply a role so core nodes cannot silently default to edge.
 resolveAuthorityIndexConfig(rawConfig);
 
-const defaults: ResolvedAuthorityIndexConfig | undefined = resolveDefaultAuthorityIndexConfig('edge');
-const discovery: 'on-chain-cores' | undefined = defaults?.discovery;
-// @ts-expect-error The role default is a role decision too.
-resolveDefaultAuthorityIndexConfig();
-// @ts-expect-error Discovery is a resolver decision, never persisted configuration.
-const explicit: AuthorityIndexConfig = { mode: 'core-snapshot', trustedCorePeers: [], discovery: 'on-chain-cores' };
-void discovery;
-void explicit;
+// The daemon plans from the very config it hands DKGAgent.create.
+declare const agentConfig: DKGAgentConfig;
+const plan: AuthorityIndexBootstrapPlan = planAuthorityIndexBootstrap(agentConfig);
+if (plan.source !== 'local-history') {
+  const seeded: ResolvedAuthorityIndexConfig = plan.config;
+  void seeded;
+} else {
+  const reason: string | undefined = plan.skipReason;
+  void reason;
+}
+// @ts-expect-error Only a local-history plan can explain a skipped default.
+void plan.skipReason;

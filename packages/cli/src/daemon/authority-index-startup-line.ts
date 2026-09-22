@@ -1,40 +1,36 @@
 /**
- * Format the `[info] [authority-index]` daemon startup line.
+ * Format the `[info] [authority-index]` daemon startup line from the agent's
+ * authority-index bootstrap plan.
  *
- * Extracted to a pure function so both bootstrap policies can be unit-tested
- * without standing up a daemon. Operators and the release harness grep this
- * line, so its field order is a contract:
+ * Extracted to a pure function so every plan can be unit-tested without
+ * standing up a daemon. Operators grep this line, so its field order is a
+ * contract:
  *
- * - an explicit operator `authorityIndex` block (pinned trusted cores) keeps
- *   the pre-10.0.18 shape, and so does `undefined` (a core, or a node without
- *   any index config), which reports `local-history`;
- * - the runtime-discovered edge default (`discovery: 'on-chain-cores'`) has no
- *   pinned peers to count, so it reports `trustedCoreCount=discovered`, the
- *   discovery source, and the local-history fallback it degrades to when no
- *   discovered core supplies a usable snapshot inside the bootstrap budget.
+ * - an operator `authorityIndex` block (pinned trusted cores) and local
+ *   history (a core, or an edge that cannot seed) keep the pre-10.0.18 shape;
+ * - the network-relay edge default adds its trust source and the
+ *   local-history fallback it degrades to when no relay supplies a usable
+ *   snapshot inside the bootstrap budget.
  *
- * The input is structural rather than the agent's `ResolvedAuthorityIndexConfig`
+ * The input is structural rather than the agent's `AuthorityIndexBootstrapPlan`
  * so this module has no transitive imports; that type is assignable to it.
  */
 export interface AuthorityIndexStartupLineInput {
-  readonly mode: 'core-snapshot';
-  readonly trustedCorePeers: readonly string[];
-  readonly maxTailBlocks: number;
-  readonly cacheEpoch: number;
-  /** Present only on the runtime-discovered edge default, never on explicit config. */
-  readonly discovery?: 'on-chain-cores';
+  readonly source: 'operator' | 'network-relays' | 'local-history';
+  readonly config?: {
+    readonly mode: 'core-snapshot';
+    readonly trustedCorePeers: readonly string[];
+    readonly maxTailBlocks: number;
+    readonly cacheEpoch: number;
+  };
 }
 
-export function formatAuthorityIndexStartupLine(
-  authorityIndex: AuthorityIndexStartupLineInput | undefined,
-): string {
-  if (authorityIndex?.discovery === 'on-chain-cores') {
-    return `[info] [authority-index] mode=${authorityIndex.mode} trustedCoreCount=discovered `
-      + `discovery=${authorityIndex.discovery} fallback=local-history `
-      + `maxTailBlocks=${authorityIndex.maxTailBlocks} cacheEpoch=${authorityIndex.cacheEpoch}`;
+export function formatAuthorityIndexStartupLine(plan: AuthorityIndexStartupLineInput): string {
+  const config = plan.config;
+  if (config === undefined) {
+    return '[info] [authority-index] mode=local-history trustedCoreCount=0 maxTailBlocks=unbounded cacheEpoch=0';
   }
-  return `[info] [authority-index] mode=${authorityIndex?.mode ?? 'local-history'} `
-    + `trustedCoreCount=${authorityIndex?.trustedCorePeers.length ?? 0} `
-    + `maxTailBlocks=${authorityIndex?.maxTailBlocks ?? 'unbounded'} `
-    + `cacheEpoch=${authorityIndex?.cacheEpoch ?? 0}`;
+  const source = plan.source === 'network-relays' ? ' source=network-relays fallback=local-history' : '';
+  return `[info] [authority-index] mode=${config.mode} trustedCoreCount=${config.trustedCorePeers.length}${source} `
+    + `maxTailBlocks=${config.maxTailBlocks} cacheEpoch=${config.cacheEpoch}`;
 }

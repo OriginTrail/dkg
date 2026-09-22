@@ -138,14 +138,13 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     address: '0x1111111111111111111111111111111111111111',
     privateKey: `0x${'11'.repeat(32)}`,
   };
-  const discoveredStartupLine =
-    '[info] [authority-index] mode=core-snapshot trustedCoreCount=discovered discovery=on-chain-cores fallback=local-history maxTailBlocks=2000 cacheEpoch=0';
   const localHistoryStartupLine =
     '[info] [authority-index] mode=local-history trustedCoreCount=0 maxTailBlocks=unbounded cacheEpoch=0';
-  const skippedDefaultPrefix = '[info] [authority-index] discovered core-snapshot default skipped: ';
+  const skippedDefaultPrefix = '[info] [authority-index] network-relay default skipped: ';
 
   it.each([undefined, 200, 10_000])(
     'forwards explicit edge snapshot trust with bounded tail %j', async maxTailBlocks => {
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
       const createArg = await captureCreateArg({
         nodeRole: 'edge',
         authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], maxTailBlocks },
@@ -164,6 +163,7 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
   );
 
   it('forwards an explicit cache reset epoch and logs its active value', async () => {
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
     const createArg = await captureCreateArg({
       nodeRole: 'edge',
       authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer], cacheEpoch: 3 },
@@ -171,110 +171,86 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     expect(createArg.authorityIndex.cacheEpoch).toBe(3);
     const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
     expect(logs).toContain('mode=core-snapshot trustedCoreCount=1 maxTailBlocks=2000 cacheEpoch=3');
-    // Explicit trust is forwarded even though the harness wallets.json is
-    // empty: the daemon never downgrades it, the agent enforces preconditions.
-    expect(createArg.chainConfig.operationalKeys).toEqual([]);
-    expect(logs).not.toContain(skippedDefaultPrefix);
+    expect(logs).not.toContain('source=network-relays');
   });
 
-  it('defaults an unconfigured edge with an EVM chain and operational wallets to runtime core discovery, never pinning relays or network-config peers', async () => {
+  it('fails startup on explicit trust the agent cannot run instead of downgrading it', async () => {
+    // The harness wallets.json is empty: no operational key for the EVM chain.
+    await expect(runDaemonInner(true, {
+      name: 'explicit-authority-index-without-keys',
+      networkConfig: 'mainnet-gnosis',
+      listenPort: 0,
+      nodeRole: 'edge',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
+      authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer] },
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(
+      'authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store',
+    );
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+  });
+
+  it('seeds an unconfigured edge from the network file relays, never its authorityIndex block or operator relays', async () => {
+    const operatorRelay = '/dns4/relay.operator.example/tcp/9090/p2p/12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
     mocks.loadNetworkConfig.mockResolvedValue({
       networkName: 'DKG V10 Gnosis Mainnet',
       genesisId: 'gnosis-mainnet',
       genesisVersion: 1,
-      relays: [trustedCorePeer],
+      relays: [networkFileRelay],
       authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer] },
     });
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
-    const createArg = await captureCreateArg({ nodeRole: 'edge' });
-    // 10.0.18: an edge with no explicit `authorityIndex` block bootstraps from
-    // cores discovered on chain at runtime and falls back to local history.
-    // The network file's block and its relays still never become pinned trust.
-    expect(createArg.authorityIndex).toMatchObject({
-      mode: 'core-snapshot',
-      discovery: 'on-chain-cores',
-      trustedCorePeers: [],
-      maxTailBlocks: 2_000,
-      cacheEpoch: 0,
-    });
-    // The same facts DKGAgent.create checks before accepting core-snapshot mode.
-    expect(createArg.chainAdapter).toBeUndefined();
-    expect(createArg.chainConfig.operationalKeys).toEqual([operationalWallet.privateKey]);
-    expect(createArg.localContextGraphAuthorityIndexStore).toBeDefined();
-    // The network file's relays reach the agent as the discovered trust set's
-    // relay source; they are still not pinned as `authorityIndex` trust.
-    expect(createArg.networkRelays).toEqual([trustedCorePeer]);
-    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
-    expect(logs).toContain(discoveredStartupLine);
-    expect(logs).not.toContain(skippedDefaultPrefix);
-  });
-
-  it('keeps an unconfigured mock-chain edge on local history and logs why', async () => {
-    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
-    const createArg = await captureCreateArg({
-      nodeRole: 'edge',
-      chain: { type: 'mock', chainId: 'mock:31337' },
-    });
-    // The agent would reject core-snapshot mode with an injected adapter, so
-    // the daemon never announces discovery here; it explains and runs history.
-    expect(createArg.chainAdapter).toBeDefined();
-    expect(createArg.chainConfig).toBeUndefined();
-    expect(createArg.authorityIndex).toBeUndefined();
-    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
-    expect(logs).toContain(
-      `${skippedDefaultPrefix}the node runs the mock chain adapter (chain.type is "mock"); using local history`,
-    );
-    expect(logs).toContain(localHistoryStartupLine);
-    expect(logs).not.toContain('discovery=on-chain-cores');
-  });
-
-  it('keeps an unconfigured edge without operational wallets on local history and logs why', async () => {
-    // The harness default: an EVM chain config but an empty wallets.json.
-    const createArg = await captureCreateArg({ nodeRole: 'edge' });
-    expect(createArg.chainConfig.operationalKeys).toEqual([]);
-    expect(createArg.authorityIndex).toBeUndefined();
-    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
-    expect(logs).toContain(
-      `${skippedDefaultPrefix}no operational wallet is configured (wallets.json has no operational keys); using local history`,
-    );
-    expect(logs).toContain(localHistoryStartupLine);
-    expect(logs).not.toContain('discovery=on-chain-cores');
-  });
-
-  it('keeps an unconfigured chain-less edge on local history and logs why', async () => {
-    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
-    const createArg = await captureCreateArg({ nodeRole: 'edge', chain: undefined });
-    expect(createArg.chainAdapter).toBeUndefined();
-    expect(createArg.chainConfig).toBeUndefined();
-    expect(createArg.authorityIndex).toBeUndefined();
-    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
-    expect(logs).toContain(
-      `${skippedDefaultPrefix}no EVM chain is configured (chain.rpcUrl and chain.hubAddress are required); using local history`,
-    );
-    expect(logs).toContain(localHistoryStartupLine);
-    expect(logs).not.toContain('discovery=on-chain-cores');
-  });
-
-  it('keeps an unconfigured core on its local-history index build without a skip reason', async () => {
-    // Chain wiring that would satisfy an edge: a core still has no default.
-    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
-    const createArg = await captureCreateArg();
-    expect(createArg.chainConfig.operationalKeys).toEqual([operationalWallet.privateKey]);
-    expect(createArg.authorityIndex).toBeUndefined();
-    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
-    expect(logs).toContain(localHistoryStartupLine);
-    expect(logs).not.toContain(skippedDefaultPrefix);
-    expect(logs).not.toContain('discovery=on-chain-cores');
-  });
-
-  it('forwards the network file relays to the agent even when the operator overrides the transport relay', async () => {
-    const operatorRelay = '/dns4/relay.operator.example/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
     const createArg = await captureCreateArg({ nodeRole: 'edge', relay: operatorRelay });
-    // `relayPeers` is the transport preference (operator `relay` wins there);
-    // `networkRelays` is always the network file's list, which is the only
-    // relay source the discovered authority-index trust set may use.
+    // The operator block stays the only `authorityIndex`; the agent plans the
+    // relay default from `networkRelays`, the network file's list alone.
+    expect(createArg.authorityIndex).toBeUndefined();
     expect(createArg.relayPeers).toEqual([operatorRelay]);
     expect(createArg.networkRelays).toEqual([networkFileRelay]);
+    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(logs).toContain(
+      '[info] [authority-index] mode=core-snapshot trustedCoreCount=1 source=network-relays '
+      + 'fallback=local-history maxTailBlocks=2000 cacheEpoch=0',
+    );
+    expect(logs).not.toContain(skippedDefaultPrefix);
+  });
+
+  it('keeps a relay "none" edge off every relay, authority-index seeding included', async () => {
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+    const createArg = await captureCreateArg({ nodeRole: 'edge', relay: 'none' });
+    expect(createArg.relayPeers).toBeUndefined();
+    expect(createArg.networkRelays).toEqual([]);
+    expect(createArg.authorityIndex).toBeUndefined();
+    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(logs).toContain(`${skippedDefaultPrefix}no network relay is available to seed from; using local history`);
+    expect(logs).toContain(localHistoryStartupLine);
+  });
+
+  it.each([
+    ['the mock chain adapter', { chain: { type: 'mock', chainId: 'mock:31337' } }, [operationalWallet],
+      'the chain adapter is injected (such as the mock chain), not a configured EVM chain'],
+    ['no chain configuration', { chain: undefined }, [operationalWallet], 'no EVM chain is configured'],
+    ['no operational wallet', {}, [], 'no operational key is configured'],
+  ])('keeps an unconfigured edge with %s on local history and logs why', async (_label, overrides, wallets, reason) => {
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets });
+    const createArg = await captureCreateArg({ nodeRole: 'edge', ...overrides });
+    expect(createArg.networkRelays).toEqual([networkFileRelay]);
+    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(logs).toContain(`${skippedDefaultPrefix}${reason}; using local history`);
+    expect(logs).toContain(localHistoryStartupLine);
+    expect(logs).not.toContain('source=network-relays');
+  });
+
+  it('keeps an unconfigured core on its chain-history index without a skip reason', async () => {
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+    const createArg = await captureCreateArg();
+    expect(createArg.authorityIndex).toBeUndefined();
+    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(logs).toContain(localHistoryStartupLine);
+    expect(logs).not.toContain(skippedDefaultPrefix);
   });
 
   it.each([

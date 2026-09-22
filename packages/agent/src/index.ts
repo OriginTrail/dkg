@@ -1,8 +1,12 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
+  authorityIndexTrustDomain,
+  planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
-  resolveDefaultAuthorityIndexConfig,
+  type AuthorityIndexBootstrapInput,
+  type AuthorityIndexBootstrapPlan,
   type AuthorityIndexConfig,
+  type AuthorityIndexSnapshotPlan,
   type ResolvedAuthorityIndexConfig,
 } from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';

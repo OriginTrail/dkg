@@ -44,7 +44,6 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
-import { decideAuthorityIndexBootstrap } from './authority-index-bootstrap-decision.js';
 import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
@@ -74,9 +73,10 @@ import {
   DKGAgent,
   loadOpWallets,
   KaNumberAllocator,
+  planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
-  resolveDefaultAuthorityIndexConfig,
   resolveSyncAgentsMeta,
+  type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -1137,16 +1137,12 @@ async function runDaemonInnerWithStartupOwnership(
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
-  // Snapshot peers supply authority-bearing state, so explicit operator config
-  // is validated before allocating startup resources and always wins. Without
-  // an `authorityIndex` block an edge defaults to discovering on-chain cores
-  // for snapshot bootstrap (falling back to local history), but that default
-  // is decided only once the agent's chain wiring is known, below: the agent
-  // rejects core-snapshot mode without a real EVM chain, operational keys and
-  // a local index store, and the startup line must never announce a mode the
-  // node will not run. Cores keep building the index from chain history.
+  // Snapshot peers supply authority-bearing state. Validate explicit operator
+  // trust before allocating startup resources; it always wins. Without it an
+  // edge seeds from the network file's relays, planned below from the
+  // finished agent config.
   assertAuthorityIndexConfigPlacement(config);
-  const explicitAuthorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
+  const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1818,32 +1814,6 @@ async function runDaemonInnerWithStartupOwnership(
   const kaNumberStore = new SqliteKaNumberStore(dashDb);
   const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
 
-  // The discovered edge default is decided here, from the same facts the agent
-  // checks in `DKGAgent.create`: the projected EVM chain config (`chainConfig`
-  // below), no injected mock adapter, the operational keys, and the daemon's
-  // durable index store. When they do not hold the node runs local history and
-  // the log says why, so the `[authority-index]` line never announces on-chain
-  // discovery for a mock-chain or chain-less edge. Explicit config still wins
-  // unconditionally; the agent enforces its own preconditions for it.
-  const authorityIndexDecision = decideAuthorityIndexBootstrap({
-    explicitAuthorityIndex,
-    nodeRole: role,
-    hasEvmChainConfig: runtimeEvmChainConfig !== undefined,
-    usesMockChainAdapter: mockChainAdapter !== undefined,
-    operationalWalletCount: opWallets.wallets.length,
-    // Always constructed by the daemon; only SDK embedders can omit the store.
-    hasLocalAuthorityIndexStore: localContextGraphAuthorityIndexStore !== undefined,
-    resolveDefault: resolveDefaultAuthorityIndexConfig,
-  });
-  const effectiveAuthorityIndex = authorityIndexDecision.authorityIndex;
-  if (authorityIndexDecision.reason !== undefined) {
-    log(
-      `[info] [authority-index] discovered core-snapshot default skipped: `
-      + `${authorityIndexDecision.reason}; using local history`,
-    );
-  }
-  log(formatAuthorityIndexStartupLine(effectiveAuthorityIndex));
-
   // Mint managed authority only after the complete agent config has been
   // assembled. Passing the start-up result through an ordinary object literal
   // would intentionally strip its non-enumerable runtime authority.
@@ -1854,7 +1824,7 @@ async function runDaemonInnerWithStartupOwnership(
     changelogEraGuard,
   });
 
-  const agent = await DKGAgent.create({
+  const agentConfig: DKGAgentConfig = {
     kaNumberAllocator,
     name: config.name,
     genesisId: network?.genesisId,
@@ -1869,15 +1839,14 @@ async function runDaemonInnerWithStartupOwnership(
     dataDir: dkgDir(),
     bootstrapPeers: config.bootstrapPeers,
     relayPeers,
-    // The relays listed in the network file are the relay part of the
-    // discovered authority-index trust set. `relayPeers` above may instead
-    // carry the operator's `relay` / `preferredRelays` transport preferences,
-    // which never become snapshot trust.
-    networkRelays: network?.relays ?? [],
+    // Only the network file's relays seed an edge without `authorityIndex`:
+    // `relayPeers` may carry operator transport relays, which never become
+    // snapshot trust, and `relay: "none"` means no relay is contacted at all.
+    networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
-    authorityIndex: effectiveAuthorityIndex,
+    authorityIndex,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
     logging: config.logging,
@@ -2165,7 +2134,18 @@ async function runDaemonInnerWithStartupOwnership(
         detail: event.detail ?? null,
       });
     },
-  });
+  };
+  // The agent plans again from this same config, so the startup line always
+  // describes the authority-index policy the node runs.
+  const authorityIndexPlan = planAuthorityIndexBootstrap(agentConfig);
+  if (authorityIndexPlan.source === 'local-history' && authorityIndexPlan.skipReason !== undefined) {
+    log(
+      `[info] [authority-index] network-relay default skipped: ${authorityIndexPlan.skipReason}; `
+      + 'using local history',
+    );
+  }
+  log(formatAuthorityIndexStartupLine(authorityIndexPlan));
+  const agent = await DKGAgent.create(agentConfig);
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the

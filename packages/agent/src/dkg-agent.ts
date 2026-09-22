@@ -1,7 +1,7 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
-import { createHash, randomUUID } from 'node:crypto';
-import { resolveAuthorityIndexConfig } from './authority-index-config.js';
-import { createAgentCorePeerResolver } from './authority-index-core-discovery.js';
+import { randomUUID } from 'node:crypto';
+import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
+import { planAuthorityIndexBootstrap } from './authority-index-config.js';
 import { createAuthorityIndexSnapshotTransport } from './authority-index-snapshot-transport.js';
 import {
   createAuthorityIndexSnapshotClient,
@@ -110,7 +110,7 @@ import {
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphAuthorityIndexBootstrap, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -694,23 +694,6 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalized
   };
 }
 
-const AUTHORITY_INDEX_SCAN_PROGRESS_LOG_INTERVAL_MS = 30_000;
-
-/** One line per scope per 30 s: a mainnet history scan pages for many minutes. */
-function createAuthorityIndexScanProgressLogger(
-  info: (message: string) => void,
-): NonNullable<ContextGraphAuthorityIndexBootstrap['onScanProgress']> {
-  const lastLoggedAt = new Map<string, number>();
-  return (progress) => {
-    const at = Date.now();
-    const last = lastLoggedAt.get(progress.scope);
-    if (last !== undefined && at - last < AUTHORITY_INDEX_SCAN_PROGRESS_LOG_INTERVAL_MS) return;
-    lastLoggedAt.set(progress.scope, at);
-    info(`[authority-index] scope=${progress.scope} scanned=${progress.scannedBlocks} `
-      + `through=${progress.throughBlockNumber} behind=${progress.finalizedNumber - progress.throughBlockNumber}`);
-  };
-}
-
 function constructConfiguredChainAdapter(
   config: StorageAckNormalizedDKGAgentConfig,
   contextGraphAuthorityIndexBootstrap?: EVMAdapterConfig['contextGraphAuthorityIndexBootstrap'],
@@ -1216,20 +1199,9 @@ export class DKGAgent extends DKGAgentBase {
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
     const log = new Logger('DKGAgent');
     const ctx = createOperationContext('system');
-    const authorityIndex = resolveAuthorityIndexConfig(
-      inputConfig.authorityIndex,
-      inputConfig.nodeRole ?? 'edge',
-    );
-    // One invariant for explicit configuration and the role default alike: the
-    // daemon applies the default only where these hold, so reaching here
-    // without them is a wiring error, never a reason to downgrade silently.
-    if (authorityIndex !== undefined && (
-      inputConfig.chainAdapter !== undefined
-      || !inputConfig.chainConfig?.operationalKeys?.length
-      || inputConfig.localContextGraphAuthorityIndexStore === undefined
-    )) {
-      throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
-    }
+    // The daemon logs this same plan from this same config before calling here.
+    const authorityIndexPlan = planAuthorityIndexBootstrap(inputConfig);
+    const authorityIndex = authorityIndexPlan.config;
     let agentRef: DKGAgent | undefined;
     const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
       normalizedConfig: authorityIndex.snapshot,
@@ -1238,16 +1210,6 @@ export class DKGAgent extends DKGAgentBase {
         node: agentRef.node,
         router: agentRef.router,
       }),
-      // Only the network file's relays are trusted without a chain verdict;
-      // `relayPeers` is the connectivity set and may carry operator relays.
-      resolvePeers: authorityIndex.discovery !== 'on-chain-cores' ? undefined
-        : createAgentCorePeerResolver(() => agentRef === undefined ? undefined : {
-          started: agentRef.started,
-          node: agentRef.node,
-          discovery: agentRef.discovery,
-          chain: agentRef.chain,
-          networkRelays: agentRef.config.networkRelays ?? [],
-        }),
     });
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
@@ -1272,35 +1234,14 @@ export class DKGAgent extends DKGAgentBase {
     ) {
       throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
     }
-    const trustedPeerIds = authorityIndex === undefined ? undefined
-      : authorityIndex.snapshot.trustedCorePeers.map((peer) => peer.peerId).sort();
     const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(
       normalizedConfig,
-      snapshotClient === undefined || authorityIndex === undefined ? undefined : {
-        maxTailBlocks: authorityIndex.maxTailBlocks,
-        // Epoch zero preserves the original namespace. Increasing it lets an
-        // operator discard a suspect imported prefix without changing peers.
-        // A discovered trust set has no peer list to key on: its namespace is
-        // the discovery mode itself.
-        trustDomain: createHash('sha256').update(JSON.stringify(
-          authorityIndex.discovery !== undefined
-            ? { discovery: authorityIndex.discovery, cacheEpoch: authorityIndex.cacheEpoch }
-            : (authorityIndex.cacheEpoch ?? 0) === 0 ? trustedPeerIds : {
-              trustedCorePeers: trustedPeerIds,
-              cacheEpoch: authorityIndex.cacheEpoch,
-            },
-        )).digest('hex'),
-        fetchSnapshot: (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
-        ...(authorityIndex.discovery === undefined ? {} : {
-          // Discovery may find no core at all; the edge must still bind graphs.
-          localHistoryFallback: true,
-          onLocalHistoryFallback: ({ scope, reason }: { scope: string; reason: string }) => log.warn(
-            ctx,
-            `[authority-index] no on-chain core supplied a snapshot for ${scope}; falling back to local history: ${reason}`,
-          ),
-          onScanProgress: createAuthorityIndexScanProgressLogger((message) => log.info(ctx, message)),
-        }),
-      },
+      snapshotClient === undefined || authorityIndexPlan.source === 'local-history' ? undefined
+        : createAuthorityIndexBootstrap(
+          authorityIndexPlan,
+          (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
+          { info: (message) => log.info(ctx, message), warn: (message) => log.warn(ctx, message) },
+        ),
     );
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
     if (
