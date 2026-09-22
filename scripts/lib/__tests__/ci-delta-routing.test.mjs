@@ -141,6 +141,36 @@ test('repository support paths route to the lanes that execute them', () => {
   }
 });
 
+test('each changed path gets one routing decision with a fixed precedence', () => {
+  // 1. Global CI inputs win over the support area or trigger they sit in.
+  for (const filePath of [
+    '.github/actions/upload-vitest-junit/action.yml',
+    '.github/workflows/nested/policy.yml',
+    '.github/workflows/rfc64-inventory-windows.yml',
+    'scripts/ci/plan-ci.mjs',
+    'devnet/v10-stress/package.json',
+  ]) {
+    assert.equal(pullRequestPlan([change(filePath)]).mode, 'full', filePath);
+  }
+  // 2. A workspace wins over a support area with the same path shape.
+  const agentDevnet = pullRequestPlan([change('packages/agent/devnet/rfc64-private-catalog/run.mjs')]);
+  assert.deepEqual(selectedLanes(agentDevnet), selectedLanes(pullRequestPlan([change('packages/agent/src/agent.ts')])));
+  assert.equal(agentDevnet.buildChecks, false);
+  // 3. Support areas declare the shared build checks explicitly.
+  for (const filePath of ['.github/CODEOWNERS', 'tools/observability/lib/w1.mjs']) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'delta', filePath);
+    assert.equal(plan.buildChecks, true, filePath);
+    assert.deepEqual(selectedLanes(plan), [], filePath);
+  }
+  // 4. A path claimed only by a trigger is routed by it alone.
+  const imageContract = pullRequestPlan([change('blazegraph-image.json')]);
+  assert.deepEqual(selectedLanes(imageContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  assert.equal(imageContract.buildChecks, false);
+  // 5. Everything else fails closed.
+  assert.match(pullRequestPlan([change('new-root-tool.ts')]).reasons[0], /^Unclassified path changed/);
+});
+
 test('support routes include every package lane that imports from them', () => {
   // A package file importing something outside the workspaces (bench/,
   // devnet/, test-systems/, tools/) makes that package's lane a CI consumer
