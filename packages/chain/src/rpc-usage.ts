@@ -569,8 +569,15 @@ const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
   'ContextGraphStorage',
 ] as const;
 
-/** Update deliberately when a new code-owned consumer is added. */
-export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 1 as const;
+/**
+ * Update deliberately when a new code-owned consumer is added.
+ *
+ * v2 adds the fourteen residual `cgStorage.getContextGraph:cgAuth.*` call-site
+ * labels. Membership only — the snapshot SHAPE is versioned separately by
+ * `schemaVersion`, so a reader that pins a label vocabulary must gate on this
+ * field rather than infer stability from the shape version.
+ */
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 2 as const;
 
 /** Complete closed vocabulary that the cumulative diagnostic may serialize. */
 export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(

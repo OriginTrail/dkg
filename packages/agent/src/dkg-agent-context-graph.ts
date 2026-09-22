@@ -95,7 +95,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, classifyContextGraphRegistrationFailure, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, classifyContextGraphRegistrationFailure, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -2110,9 +2110,12 @@ export class ContextGraphMethods extends DKGAgentBase {
       // `allowCachedRoster` is passed explicitly so a future default cannot
       // quietly hand the idempotence filter a projection to read.
       rosterFreshness: 'live',
-      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(
-        contextGraphId,
-        { allowCachedRoster: false },
+      resolveAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.memberAdd,
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          { allowCachedRoster: false },
+        ),
       ),
     });
 
@@ -2345,9 +2348,12 @@ export class ContextGraphMethods extends DKGAgentBase {
       // is sent, and it stays on the chain roster while local state records a
       // removal. See `prepareRegisteredParticipantMutation`.
       rosterFreshness: 'live',
-      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(
-        contextGraphId,
-        { allowCachedRoster: false },
+      resolveAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.memberRemove,
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          { allowCachedRoster: false },
+        ),
       ),
     });
     await commitRegisteredParticipantMutation({

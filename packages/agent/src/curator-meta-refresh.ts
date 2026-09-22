@@ -36,6 +36,8 @@ import type {
 } from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
+import { isCanonicalAuthoritativeContextGraphId } from
+  './context-graph-binding-state.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -242,15 +244,16 @@ function applyCuratorRegistrationBinding(
   const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
   let onChainId: string | undefined;
   let onChainHash: string | undefined;
+  let invalidOnChainId = false;
 
   for (const quad of snapshot) {
     if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
     const value = stripLiteral(quad.object);
-    if (quad.predicate === onChainIdPredicate && /^\d+$/.test(value)) {
-      try {
-        if (BigInt(value) > 0n) onChainId = value;
-      } catch {
-        // Ignore malformed or out-of-domain curator metadata fail-closed.
+    if (quad.predicate === onChainIdPredicate) {
+      if (isCanonicalAuthoritativeContextGraphId(value)) {
+        onChainId = value;
+      } else {
+        invalidOnChainId = true;
       }
     } else if (
       quad.predicate === onChainHashPredicate
@@ -259,6 +262,11 @@ function applyCuratorRegistrationBinding(
       onChainHash = value.toLowerCase();
     }
   }
+
+  // Treat the numeric slot and commitment as one registration claim. A
+  // malformed or out-of-uint256 slot must not leave behind a hash-only durable
+  // binding or turn untrusted metadata into a strict-writer exception.
+  if (invalidOnChainId) return;
 
   let changed = false;
   if (onChainId && sub.onChainId !== onChainId) {

@@ -20,7 +20,10 @@ import {
   ContextGraphLiveAuthorityCoalescer,
 } from '../src/context-graph-live-authority-coalescer.js';
 import { ContextGraphLiveAuthorityUnsupportedError } from '../src/chain-adapter.js';
-import { withRpcRequestContext } from '../src/rpc-request-transport.js';
+import {
+  activeRpcRequestContext,
+  withRpcRequestContext,
+} from '../src/rpc-request-transport.js';
 
 type Authority = { readonly id: string } | null;
 
@@ -94,6 +97,40 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
       return { id: 'live' };
     })).resolves.toEqual({ id: 'live' });
     expect(calls).toBe(1);
+  });
+
+  it('handles abandonment when a synchronous loader aborts its initiating waiter', () => {
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import { ContextGraphLiveAuthorityCoalescer } from `
+          + `'./src/context-graph-live-authority-coalescer.ts'; `
+          + `const caller = new AbortController(); `
+          + `let unhandled = 0; `
+          + `process.on('unhandledRejection', () => { unhandled += 1; }); `
+          + `const flight = new ContextGraphLiveAuthorityCoalescer({ `
+          + `defer: (dispatch) => dispatch() }); `
+          + `await flight.run('k', async () => { `
+          + `caller.abort(new Error('left during synchronous dispatch')); `
+          + `return new Promise(() => {}); `
+          + `}, { signal: caller.signal }).catch(() => undefined); `
+          + `await new Promise((resolve) => setTimeout(resolve, 0)); `
+          + `process.stdout.write(String(unhandled));`,
+      ],
+      {
+        cwd: new URL('..', import.meta.url),
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stderr).toBe('');
+    expect(child.stdout).toBe('0');
   });
 
   it('#2666: a joiner never inherits the initiator\'s failed read; they share ONE re-read', async () => {
@@ -243,6 +280,87 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     expect(calls).toHaveLength(5);
   });
 
+  it('bounds a cross-turn burst behind one zero-staleness successor read', async () => {
+    const scheduler = manualScheduler();
+    const flight = coalescer(scheduler);
+    const { load, calls } = controllableLoader();
+
+    const active = settled(flight.run(KEY, load, {}));
+    await scheduler.flush();
+    expect(calls).toHaveLength(1);
+
+    // These callers arrive in distinct turns AFTER the active read began. They
+    // may not consume its result, but they must also not open one physical RPC
+    // each while it is stalled. They form one waiting successor cohort.
+    const late: Array<{
+      done: boolean;
+      value: Authority | undefined;
+      error: unknown;
+    }> = [];
+    for (let i = 0; i < 16; i += 1) {
+      late.push(settled(flight.run(KEY, load, {})));
+      await scheduler.flush();
+      expect(calls).toHaveLength(1);
+      expect(scheduler.pending()).toBe(0);
+    }
+
+    calls[0]!.resolve({ id: 'pre-arrival-read' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(active.value).toEqual({ id: 'pre-arrival-read' });
+    expect(late.every((caller) => !caller.done)).toBe(true);
+    expect(scheduler.pending()).toBe(1);
+
+    await scheduler.flush();
+    expect(calls).toHaveLength(2);
+    calls[1]!.resolve({ id: 'successor-read' });
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const caller of late) {
+      expect(caller.error).toBeUndefined();
+      expect(caller.value).toEqual({ id: 'successor-read' });
+    }
+  });
+
+  it('keeps successor cancellation waiter-local and skips an abandoned cohort', async () => {
+    const scheduler = manualScheduler();
+    const flight = coalescer(scheduler);
+    const { load, calls } = controllableLoader();
+
+    const active = flight.run(KEY, load, {});
+    await scheduler.flush();
+    expect(calls).toHaveLength(1);
+
+    const leaving = new AbortController();
+    const staying = new AbortController();
+    const leaves = settled(flight.run(KEY, load, { signal: leaving.signal }));
+    const stays = settled(flight.run(KEY, load, { signal: staying.signal }));
+    leaving.abort(new Error('successor waiter left'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(leaves.error).toBeInstanceOf(Error);
+    expect(calls[0]!.signal.aborted).toBe(false);
+
+    calls[0]!.resolve({ id: 'active' });
+    expect(await active).toEqual({ id: 'active' });
+    await scheduler.flush();
+    expect(calls).toHaveLength(2);
+    calls[1]!.resolve({ id: 'successor' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(stays.value).toEqual({ id: 'successor' });
+
+    const next = flight.run(KEY, load, {});
+    await scheduler.flush();
+    expect(calls).toHaveLength(3);
+    const abandons = new AbortController();
+    const abandoned = settled(flight.run(KEY, load, { signal: abandons.signal }));
+    abandons.abort(new Error('whole successor cohort left'));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(abandoned.error).toBeInstanceOf(Error);
+    calls[2]!.resolve({ id: 'next-active' });
+    expect(await next).toEqual({ id: 'next-active' });
+    await scheduler.flush();
+    // No physical successor was issued after its only waiter detached.
+    expect(calls).toHaveLength(3);
+  });
+
   it('partitions by request class so a foreground gate never waits on a throttled background read', async () => {
     const scheduler = manualScheduler();
     const flight = coalescer(scheduler);
@@ -275,6 +393,26 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     calls[1]!.resolve({ id: 'fg' });
     expect(await ambientBackground).toEqual({ id: 'bg' });
     expect(await ambientForeground).toEqual({ id: 'fg' });
+  });
+
+  it('carries authority admission priority into the deferred physical read', async () => {
+    const scheduler = manualScheduler();
+    const flight = coalescer(scheduler);
+    let physicalPriority: string | undefined;
+    const result = withRpcRequestContext(
+      { admissionPriority: 'authority' },
+      () => flight.run(KEY, async () => {
+        physicalPriority = activeRpcRequestContext().admissionPriority;
+        return { id: 'authority' };
+      }),
+    );
+
+    // The manual scheduler deliberately dispatches outside the initiating
+    // AsyncLocalStorage turn, so this pins explicit flight propagation rather
+    // than relying on Node timer-context behavior.
+    await scheduler.flush();
+    expect(await result).toEqual({ id: 'authority' });
+    expect(physicalPriority).toBe('authority');
   });
 
   it('settles a flight whose classifier THROWS, instead of wedging its waiters', async () => {
@@ -391,6 +529,35 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     // No caller ever sees an invalidation error in place of its answer.
     expect(await enrolled).toEqual({ id: 'pre-rotation' });
     expect(await afterRotation).toEqual({ id: 'post-rotation' });
+  });
+
+  it('detachment lets an already-enrolled successor finish without crossing into the new lineage', async () => {
+    const scheduler = manualScheduler();
+    const flight = coalescer(scheduler);
+    const { load, calls } = controllableLoader();
+
+    const oldActive = flight.run(KEY, load, {});
+    await scheduler.flush();
+    expect(calls).toHaveLength(1);
+    const oldSuccessor = settled(flight.run(KEY, load, {}));
+
+    flight.detachAll();
+    const fresh = flight.run(KEY, load, {});
+    await scheduler.flush();
+    expect(calls).toHaveLength(2);
+
+    calls[0]!.resolve({ id: 'old-active' });
+    calls[1]!.resolve({ id: 'fresh-lineage' });
+    expect(await oldActive).toEqual({ id: 'old-active' });
+    expect(await fresh).toEqual({ id: 'fresh-lineage' });
+    expect(oldSuccessor.done).toBe(false);
+    expect(scheduler.pending()).toBe(1);
+
+    await scheduler.flush();
+    expect(calls).toHaveLength(3);
+    calls[2]!.resolve({ id: 'old-successor' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(oldSuccessor.value).toEqual({ id: 'old-successor' });
   });
 
   it('rejects an already-aborted caller before opening a flight', async () => {

@@ -36,6 +36,7 @@ import {
   type PromoteRequest,
 } from '../src/async-promote-queue-types.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import { PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
 
 describe('TripleStoreAsyncPromoteQueue', () => {
   let store: OxigraphStore;
@@ -1799,5 +1800,157 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
     const jobs = await queue.list();
     expect(jobs.map((j) => j.request.assertionName)).toEqual(['valid']);
+  });
+  // ---------------------------------------------------------------------------
+  // Post-commit recovery sweep
+  // ---------------------------------------------------------------------------
+
+  /** Record the failure the worker persists for a publisher post-commit failure. */
+  async function failPostCommit(
+    queue: AsyncPromoteQueue,
+    jobId: string,
+    claimToken: string,
+    overrides: Partial<Parameters<AsyncPromoteQueue['fail']>[2]> = {},
+  ): Promise<void> {
+    await queue.fail(jobId, claimToken, {
+      message: PROMOTE_POST_COMMIT_FAILURE_MESSAGE,
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+      diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      ...overrides,
+    });
+  }
+
+  it('34. recoverPostCommitFailures() requeues a post-commit failure with backoff and keeps its attempt count', async () => {
+    const queue = createQueue({ backoff: (attempt) => attempt * 1_000 });
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+
+    advance(10);
+    expect(await queue.recoverPostCommitFailures()).toEqual([{
+      jobId, action: 'requeued', attempt: 1, maxAttempts: 5, nextRetryAt: now + 1_000,
+    }]);
+    const requeued = (await queue.getStatus(jobId))!;
+    expect(requeued.state).toBe('failed_retrying');
+    expect(requeued.attempt).toMatchObject({ count: 1, maxRetries: 5, nextRetryAt: now + 1_000 });
+    expect(requeued.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+    expect(requeued.reason).toBeUndefined();
+    expect(requeued.lease).toBeUndefined();
+
+    // The replay honours the backoff and consumes the job's own retry budget.
+    expect(await queue.claimNext('worker-2')).toBeNull();
+    advance(1_000);
+    const replay = await queue.claimNext('worker-2');
+    expect(replay?.jobId).toBe(jobId);
+    expect(replay?.attempt.count).toBe(2);
+    expect(replay?.commitMarker?.promoteStarted).toBe(false);
+    // Idempotent: a sweep while the replay runs (or after it succeeds) is a no-op.
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    await queue.recordCommitMarker(jobId, replay!.lease!.claimToken, 'swmInserted');
+    await queue.succeed(jobId, replay!.lease!.claimToken, { promotedCount: 0, succeededAt: now });
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('succeeded');
+  });
+
+  it('34a. recoverPostCommitFailures() marks a spent replay budget exhausted exactly once, leaving operator recovery open', async () => {
+    const queue = createQueue({ maxRetries: 2, backoff: () => 100 });
+    const jobId = await queue.enqueue(makeRequest());
+    let claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ action: 'requeued', attempt: 1, maxAttempts: 2 }]);
+    advance(100);
+    claimed = await queue.claimNext('worker-1');
+    expect(claimed?.attempt.count).toBe(2);
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([
+      { jobId, action: 'exhausted', attempt: 2, maxAttempts: 2 },
+    ]);
+    const exhausted = (await queue.getStatus(jobId))!;
+    expect(exhausted.state).toBe('failed');
+    expect(exhausted.reason).toBe('automatic post-commit recovery exhausted after 2 attempts; needs operator inspection');
+    expect(exhausted.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+    // The verdict is durable: later sweeps neither repeat it nor requeue the row.
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+
+    // The manual command keeps working and grants a fresh budget.
+    await queue.recover(jobId);
+    const recovered = (await queue.getStatus(jobId))!;
+    expect(recovered.state).toBe('queued');
+    expect(recovered.attempt.count).toBe(0);
+    expect(recovered.reason).toBeUndefined();
+  });
+
+  it('34b. recoverPostCommitFailures() only touches post-commit failures without an operator reason', async () => {
+    const queue = createQueue();
+    const otherFatal = await queue.enqueue(makeRequest({ assertionName: 'other-fatal' }));
+    let claimed = await queue.claimNext('worker-1');
+    await queue.fail(otherFatal, claimed!.lease!.claimToken, {
+      message: 'assertion not found', retryable: false, classification: 'fatal', recordedAt: now,
+    });
+    const cancelled = await queue.enqueue(makeRequest({ assertionName: 'cancelled' }));
+    await queue.cancel(cancelled);
+    const ambiguous = await queue.enqueue(makeRequest({ assertionName: 'ambiguous' }));
+    claimed = await queue.claimNext('worker-1');
+    await queue.recordCommitMarker(ambiguous, claimed!.lease!.claimToken, 'swmInserted');
+    await failPostCommit(queue, ambiguous, claimed!.lease!.claimToken);
+    const otherDiagnostic = await queue.enqueue(makeRequest({ assertionName: 'other-diagnostic' }));
+    claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, otherDiagnostic, claimed!.lease!.claimToken, {
+      diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE',
+    });
+    const legacyRow = await queue.enqueue(makeRequest({ assertionName: 'legacy-row' }));
+    claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, legacyRow, claimed!.lease!.claimToken);
+    const legacy = (await queue.getStatus(legacyRow))!;
+    await store.deleteByPattern({ subject: jobSubject(legacyRow), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob({ ...legacy, formatVersion: 1 }, DEFAULT_PROMOTE_CONTROL_GRAPH_URI));
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    for (const jobId of [otherFatal, cancelled, ambiguous, otherDiagnostic, legacyRow]) {
+      expect((await queue.getStatus(jobId))?.state).toBe('failed');
+    }
+    expect((await queue.getStatus(ambiguous))?.reason).toContain('partial promote ambiguity');
+  });
+
+  it('34c. recoverPostCommitFailures() recognizes rows recorded before the diagnostic code existed by the exact producer message', async () => {
+    const queue = createQueue();
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: PROMOTE_POST_COMMIT_FAILURE_MESSAGE, retryable: false, classification: 'fatal', recordedAt: now,
+    });
+    expect((await queue.getStatus(jobId))?.attempt.lastError?.diagnosticCode).toBeUndefined();
+    const lookalike = await queue.enqueue(makeRequest({ assertionName: 'lookalike' }));
+    const lookalikeClaim = await queue.claimNext('worker-1');
+    await queue.fail(lookalike, lookalikeClaim!.lease!.claimToken, {
+      message: `${PROMOTE_POST_COMMIT_FAILURE_MESSAGE} (mirrored by a caller)`,
+      retryable: false, classification: 'fatal', recordedAt: now,
+    });
+
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed_retrying');
+    expect((await queue.getStatus(lookalike))?.state).toBe('failed');
+  });
+
+  it('34d. recoverPostCommitFailures() defers a row whose assertion is owned by another active job', async () => {
+    const queue = createQueue({ backoff: () => 100 });
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    const replacement = await queue.enqueue(makeRequest());
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+    expect((await queue.getStatus(jobId))?.reason).toBeUndefined();
+
+    // Once the conflicting job leaves the active states the row is recovered.
+    await queue.cancel(replacement);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
+    await expect(queue.enqueue(makeRequest())).rejects.toBeInstanceOf(PromoteJobConflictError);
   });
 });

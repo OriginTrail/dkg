@@ -433,7 +433,7 @@ describe('ChainIndexRunner', () => {
       await harness.runner.stop();
     });
 
-    it('does not reserve the duration of a long failing pass', async () => {
+    it('recovers idle backoff after a long failing pass', async () => {
       const onError = vi.fn();
       const harness = rig({
         intervalMs: 6_000,
@@ -446,8 +446,8 @@ describe('ChainIndexRunner', () => {
 
       for (let pass = 0; pass < 4; pass += 1) await harness.fire();
 
-      // The 30s failure owns one ordinary failure period but contributes no
-      // successful-duration sample. Three fast successes may still widen.
+      // The 30s failure owns one ordinary failure period. After three fresh,
+      // fast successes the scope is quiet again and may widen normally.
       expect(harness.delays).toEqual([0, 6_000, 6_000, 6_000, 10_000]);
       expect(onError).toHaveBeenCalledTimes(1);
       await harness.runner.stop();

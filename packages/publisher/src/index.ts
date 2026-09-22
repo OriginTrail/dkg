@@ -414,6 +414,7 @@ export {
   type PromoteJobState,
   type PromoteLease,
   type PromoteListFilter,
+  type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
   type PromoteResult,

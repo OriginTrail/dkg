@@ -30,6 +30,12 @@ type BoundedPolicyRead<T> =
   | { kind: 'timeout' };
 
 export interface LiveOnChainAccessPolicyDependencies {
+  /**
+   * The deadline `runBoundedRead` applies, quoted in the fail-closed timeout
+   * diagnostics. Defaults to the package constant for callers that bound
+   * their reads with it.
+   */
+  readTimeoutMs?: number;
   isContextGraphActiveOnChain:
     | ((onChainId: bigint, signal?: AbortSignal) => Promise<boolean>)
     | undefined;
@@ -120,7 +126,7 @@ export async function resolveLiveOnChainAccessPolicyState(
   if (live.kind === 'timeout') {
     const detail =
       `isContextGraphActiveOnChain(${onChainId}) timed out after ` +
-      `${CHAIN_POLICY_READ_TIMEOUT_MS}ms`;
+      `${dependencies.readTimeoutMs ?? CHAIN_POLICY_READ_TIMEOUT_MS}ms`;
     dependencies.warn(
       opCtx ?? createOperationContext('share'),
       `readLiveOnChainAccessPolicy(${onChainId}): ${detail} — ` +
@@ -147,7 +153,7 @@ export async function resolveLiveOnChainAccessPolicyState(
   if (policy.kind === 'timeout') {
     const detail =
       `getContextGraphAccessPolicy(${onChainId}) timed out after ` +
-      `${CHAIN_POLICY_READ_TIMEOUT_MS}ms`;
+      `${dependencies.readTimeoutMs ?? CHAIN_POLICY_READ_TIMEOUT_MS}ms`;
     dependencies.warn(
       opCtx ?? createOperationContext('share'),
       `readLiveOnChainAccessPolicy(${onChainId}): ${detail} — ` +
@@ -226,7 +232,7 @@ async function resolveFromLiveAuthority(
   if (read.kind === 'timeout') {
     const detail =
       `getContextGraphLiveAuthority(${onChainId}) timed out after ` +
-      `${CHAIN_POLICY_READ_TIMEOUT_MS}ms`;
+      `${dependencies.readTimeoutMs ?? CHAIN_POLICY_READ_TIMEOUT_MS}ms`;
     dependencies.warn(
       opCtx ?? createOperationContext('share'),
       `readLiveOnChainAccessPolicy(${onChainId}): ${detail} — ` +
