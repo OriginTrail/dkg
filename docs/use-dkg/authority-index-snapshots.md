@@ -14,7 +14,9 @@ scan once and preserve their progress in the local index store.
 
 The table includes owners, participants, permission state, and historical version
 counters. It is authority-bearing data. Enable snapshots only for core operators
-you trust to supply the complete, correct table.
+you trust to supply the complete, correct table. Without configuration, an edge
+trusts only the relays its network file lists; see
+[Authority index bootstrap](#authority-index-bootstrap).
 
 ## Authority index bootstrap
 

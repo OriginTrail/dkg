@@ -465,12 +465,26 @@ describe('authority index snapshot production wiring', () => {
         dial: vi.fn(async () => ({})),
       };
       vi.spyOn(agent.node, 'libp2p', 'get').mockReturnValue(libp2p as any);
+      // A forged registry row: a "core" claiming a staked member's operational
+      // address under an unrelated PeerID, which the chain would vouch for.
+      const findAgents = vi.spyOn(agent.discovery, 'findAgents').mockResolvedValue([{
+        agentUri: 'did:dkg:agent:0x00000000000000000000000000000000000000c0',
+        name: 'forged-core',
+        peerId: '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
+        nodeRole: 'core',
+        agentAddress: '0x00000000000000000000000000000000000000c0',
+        lastSeen: new Date().toISOString(),
+      }]);
+      vi.spyOn(chain, 'getIdentityIdForAddress').mockResolvedValue(7n);
+      vi.spyOn(chain, 'isShardingTableMember').mockResolvedValue(true);
       const send = vi.fn(async () => encode({ version: 1, status: 'ok', snapshot }));
       (agent as any).router = { send };
       (agent as any).started = true;
       const validate = vi.fn(async () => {});
       await expect(bootstrap.fetchSnapshot(request, new AbortController().signal, validate)).resolves.toEqual(snapshot);
-      // Only the network relay is asked, dialed by the address the network file pins.
+      // Only the network relay is asked, dialed by the address the network file
+      // pins; the phonebook is never consulted, so no registry row earns trust.
+      expect(findAgents).not.toHaveBeenCalled();
       expect(send.mock.calls.map(([peerId]) => peerId)).toEqual([PINNED_PEER]);
       expect(libp2p.dial).toHaveBeenCalledExactlyOnceWith(multiaddr(pinnedAddress), { signal: expect.any(AbortSignal) });
       expect(validate).toHaveBeenCalledOnce();
