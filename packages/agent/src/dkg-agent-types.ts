@@ -810,6 +810,17 @@ export interface ContextGraphSubscriptionRecord {
   syncScoped: boolean;
 }
 
+/**
+ * Exact durable identity carried from one freshly loaded subscription row into
+ * bootstrap authority resolution. It may shortcut or repair name-to-id
+ * discovery, but never substitutes for fresh policy or roster authority.
+ */
+export interface DurableContextGraphSubscriptionBinding {
+  contextGraphId: string;
+  onChainId?: string;
+  onChainHash?: string;
+}
+
 export interface VmReconcilePeerTopologyPeer {
   peerId: string;
   core: boolean;
