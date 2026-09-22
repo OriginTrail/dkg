@@ -17,8 +17,10 @@ import {
 } from './context-graph-authority-index-admission.js';
 import { ContextGraphAuthorityIndexRetryableError } from
   './context-graph-authority-index-errors.js';
-import { ContextGraphAuthorityIndexRepository } from
-  './context-graph-authority-index-repository.js';
+import {
+  ContextGraphAuthorityIndexRepository,
+  type ContextGraphAuthorityIndexRepositoryRecord,
+} from './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 import {
   ContextGraphAuthorityIndexProjectionCache,
@@ -42,6 +44,23 @@ import {
 } from './context-graph-authority-index-snapshot.js';
 
 const MAX_SERVABLE_CHECKPOINTS = 8;
+
+/** Bootstrap observers only watch the scan: a throwing one must never fail it. */
+function notify<T>(observer: ((info: T) => void) | undefined, info: T): void {
+  if (observer === undefined) return;
+  try {
+    observer(info);
+  } catch {
+    // Observability only.
+  }
+}
+
+/** The coordinator's own error, or the same failure raised by another copy of this package. */
+function isBootstrapUnavailable(error: unknown): boolean {
+  return error instanceof ContextGraphAuthorityIndexBootstrapUnavailableError
+    || (typeof error === 'object' && error !== null
+      && (error as { code?: unknown }).code === 'AUTHORITY_INDEX_BOOTSTRAP_UNAVAILABLE');
+}
 
 type ServableCheckpoint = Readonly<{
   deploymentBlockNumber: number;
@@ -200,6 +219,10 @@ export class ContextGraphAuthorityIndex {
    * not reorg-settled, so it must never reach this method.
    */
   #rememberServable(scope: string, durableCheckpoint: ContextGraphAuthorityIndexCheckpoint): void {
+    // An index with bootstrap never serves, whichever repository its scan ended
+    // on: the trust-domain checkpoint may be imported, and this map is keyed by
+    // scope alone, so it could not tell that one from a fallback's plain-scope
+    // checkpoint.
     if (this.bootstrap !== undefined) return;
     const snapshot = Object.freeze({ version: 1 as const, scope, checkpoint: durableCheckpoint });
     const entry: ServableCheckpoint = Object.freeze({
@@ -250,12 +273,6 @@ export class ContextGraphAuthorityIndex {
   }
 
   /**
-   * Answer from the last completed projection of `input.scope` while it is
-   * younger than `chain.indexTickMs`, otherwise through `input.refresh` — the
-   * caller's complete read, which ends in {@link view}. See
-   * `ContextGraphAuthorityIndexProjectionCache` for the staleness contract.
-   */
-  /**
    * Answer ONLY from the last completed projection, or report a miss.
    *
    * The counterpart to {@link projection} for a caller that prefers a local
@@ -270,6 +287,12 @@ export class ContextGraphAuthorityIndex {
     return this.#projections.peek(input);
   }
 
+  /**
+   * Answer from the last completed projection of `input.scope` while it is
+   * younger than `chain.indexTickMs`, otherwise through `input.refresh` — the
+   * caller's complete read, which ends in {@link view}. See
+   * `ContextGraphAuthorityIndexProjectionCache` for the staleness contract.
+   */
   async projection<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
     if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
     return this.#projections.read(input);
@@ -313,10 +336,11 @@ export class ContextGraphAuthorityIndex {
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     const scope = input.scope;
     // Imported authority is never promoted into an independently scanned index
-    // after a trust-policy change or when snapshot bootstrap is disabled.
-    const repositoryScope = this.bootstrap === undefined ? scope
-      : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`;
-    const repository = this.#repository.forScope(repositoryScope);
+    // after a trust-policy change or when snapshot bootstrap is disabled. The
+    // plain scope IS that independent index: a seeded scan keeps to its
+    // trust-domain key, and only the local-history fallback below moves here.
+    let repository = this.#repository.forScope(this.bootstrap === undefined ? scope
+      : `${scope}:trusted-bootstrap:${this.bootstrap.trustDomain}`);
     const deploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
@@ -341,15 +365,23 @@ export class ContextGraphAuthorityIndex {
       servableEpoch = (this.#servableEpochs.get(scope) ?? 0) + 1;
       this.#servableEpochs.set(scope, servableEpoch);
     };
-    let durable = await admitContextGraphAuthorityIndexCheckpoint({
-      repository,
-      initial: await repository.load(),
-      deploymentBlockNumber,
-      finalized: { number: finalizedNumber, hash: finalizedHash },
-      readBlockHash: input.readBlockHash,
-      lifecycleSignal,
-      onRejectedCheckpoint,
-    });
+    // The one admission path for every durable record this scan adopts: the
+    // one it starts from, a CAS winner, and the plain-scope checkpoint the
+    // fallback resumes from. Reads `repository` at call time on purpose.
+    const admit = (
+      initial: ContextGraphAuthorityIndexRepositoryRecord,
+    ): Promise<ContextGraphAuthorityIndexRepositoryRecord> => (
+      admitContextGraphAuthorityIndexCheckpoint({
+        repository,
+        initial,
+        deploymentBlockNumber,
+        finalized: { number: finalizedNumber, hash: finalizedHash },
+        readBlockHash: input.readBlockHash,
+        lifecycleSignal,
+        onRejectedCheckpoint,
+      })
+    );
+    let durable = await admit(await repository.load());
 
     // Highest block this scan may WRITE DOWN. Never below the deployment block:
     // holding the cursor back past the start of history would persist nothing.
@@ -371,7 +403,10 @@ export class ContextGraphAuthorityIndex {
     let scannedBlocks = 0;
     // Set once the scan passes the horizon; from then on nothing is committed.
     let tail: ContextGraphAuthorityIndexCheckpoint | undefined;
-    const seedSession = this.#bootstrapCoordinator?.start({
+    // Cleared once no trusted core could seed this scan and the operator opted
+    // in; from then on this is the local-history scan: never reseeded, never
+    // budgeted, and on the plain scope.
+    let seedSession = this.#bootstrapCoordinator?.start({
       request: Object.freeze({
         scope, deploymentBlockNumber,
         minThroughBlockNumber: minimumSeedBlock,
@@ -388,7 +423,28 @@ export class ContextGraphAuthorityIndex {
       for (;;) {
         lifecycleSignal.throwIfAborted();
         if (seedSession !== undefined && tail === undefined && seedSession.needsSeed(durable)) {
-          durable = await seedSession.seed(durable);
+          try {
+            durable = await seedSession.seed(durable);
+          } catch (error) {
+            if (bootstrap === undefined || bootstrap.localHistoryFallback !== true
+              || !isBootstrapUnavailable(error)) {
+              throw error;
+            }
+            seedSession.close();
+            seedSession = undefined;
+            notify(bootstrap.onLocalHistoryFallback, {
+              scope,
+              reason: error instanceof Error ? error.message : String(error),
+            });
+            // Continue exactly as an index without bootstrap would: from the
+            // checkpoint it keeps under the plain scope (built before this node
+            // had a trusted set, or by an earlier fallback) rather than from
+            // the deployment block, committing there. The trust-domain key is
+            // left alone: its imported prefix is not this scan's to build on,
+            // and nothing scanned here is written under it.
+            repository = this.#repository.forScope(scope);
+            durable = await admit(await repository.load());
+          }
           continue;
         }
         const checkpoint = tail ?? (durable.kind === 'checkpoint'
@@ -417,7 +473,8 @@ export class ContextGraphAuthorityIndex {
         const throughBlockNumber = committing
           ? Math.min(pageThroughBlockNumber, persistThroughBlockNumber)
           : pageThroughBlockNumber;
-        if (bootstrap !== undefined
+        // The tail budget binds only while a trusted seed may still be imported.
+        if (bootstrap !== undefined && seedSession !== undefined
           && scannedBlocks + throughBlockNumber - fromBlockNumber + 1 > bootstrap.maxTailBlocks) {
           throw new ContextGraphAuthorityIndexBootstrapUnavailableError(new Error(
             'Context Graph authority index local tail scan budget exhausted',
@@ -447,6 +504,9 @@ export class ContextGraphAuthorityIndex {
           events,
         });
         const next = reduction.checkpoint;
+        notify(bootstrap?.onScanProgress, {
+          scope, fromBlockNumber, throughBlockNumber, finalizedNumber, scannedBlocks,
+        });
 
         if (!committing) {
           // Above the reorg horizon: project, do not persist.
@@ -461,15 +521,7 @@ export class ContextGraphAuthorityIndex {
         if (commit.kind === 'winner') {
           // Another valid provider completion won the page. Reload its result
           // and continue from that cursor rather than overwriting or rescanning.
-          durable = await admitContextGraphAuthorityIndexCheckpoint({
-            repository,
-            initial: commit.record,
-            deploymentBlockNumber,
-            finalized: { number: finalizedNumber, hash: finalizedHash },
-            readBlockHash: input.readBlockHash,
-            lifecycleSignal,
-            onRejectedCheckpoint,
-          });
+          durable = await admit(commit.record);
           continue;
         }
         // A newer cache entry can belong to a concurrently scanned provider

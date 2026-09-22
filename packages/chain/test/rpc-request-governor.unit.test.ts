@@ -83,6 +83,54 @@ describe('RpcRequestGovernor', () => {
     expect(order).toEqual(['foreground', 'background']);
   });
 
+  it('admits an authority gate at the head of a saturated ordinary foreground queue', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 80,
+      burstRequests: 1,
+      maxQueueSize: 2,
+      startupJitterMs: 0,
+    });
+
+    await governor.acquire('foreground');
+    const order: string[] = [];
+    const ordinaryA = governor.acquire('foreground').then(() => { order.push('ordinary-a'); });
+    const ordinaryB = governor.acquire('foreground').then(() => { order.push('ordinary-b'); });
+    const authorities = Array.from({ length: 4 }, (_, index) => (
+      withRpcRequestContext(
+        { admissionPriority: 'authority' },
+        () => governor.acquireActiveRequest(),
+      ).then(() => { order.push(`authority-${index}`); })
+    ));
+    await expect(withRpcRequestContext(
+      { admissionPriority: 'authority' },
+      () => governor.acquireActiveRequest(),
+    )).rejects.toBeInstanceOf(RpcRequestGovernorQueueFullError);
+
+    expect(governor.snapshot()).toMatchObject({ foregroundQueued: 6 });
+    await vi.advanceTimersByTimeAsync(4_000);
+    await Promise.all(authorities);
+    expect(order).toEqual([
+      'authority-0',
+      'authority-1',
+      'authority-2',
+      'authority-3',
+    ]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await Promise.all([ordinaryA, ordinaryB]);
+    expect(order).toEqual([
+      'authority-0',
+      'authority-1',
+      'authority-2',
+      'authority-3',
+      'ordinary-a',
+      'ordinary-b',
+    ]);
+  });
+
   it('eventually admits aged background work during sustained foreground demand', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

@@ -353,7 +353,7 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
       expect(receiverWasHandler).toBe(true);
     });
 
-    it('attributes the production host-admission oracle instead of the shared read label', async () => {
+    it('attributes the host-envelope caller instead of its inner host-admission oracle', async () => {
       const allowed = ethers.Wallet.createRandom();
       const recipientKey = recipientKeyFor(allowed.address);
       const tracker = new RpcUsageTracker(() => '31337');
@@ -373,7 +373,7 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
 
       expect(verdict.accepted).toBe(true);
       expect(tracker.drainWindow().ethCallByConsumer).toEqual({
-        'cgStorage.getContextGraph:cgAuth.hostAdmit': 1,
+        'cgStorage.getContextGraph:cgAuth.hostEnvelope': 1,
       });
     });
 

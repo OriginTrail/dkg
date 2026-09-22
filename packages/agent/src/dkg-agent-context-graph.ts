@@ -95,7 +95,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, classifyContextGraphRegistrationFailure, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, classifyContextGraphRegistrationFailure, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -2106,7 +2106,10 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: candidateChainAgents,
       chain: this.chain,
-      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      resolveAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.memberAdd,
+        () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      ),
     });
 
     return this.contextGraphMembershipMutations.prepare(
@@ -2333,7 +2336,10 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: [normalizedAgentAddress],
       chain: this.chain,
-      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      resolveAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.memberRemove,
+        () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      ),
     });
     await commitRegisteredParticipantMutation({
       prepared: registeredParticipantMutation,

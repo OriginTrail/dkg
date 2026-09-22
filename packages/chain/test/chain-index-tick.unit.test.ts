@@ -308,6 +308,28 @@ describe('ChainIndexTick — one log', () => {
     expect(result.pendingWork).toBe(true);
   });
 
+  it('keeps a caught-up empty head pass pending while historical coverage is incomplete', async () => {
+    const store = new MemoryChainEventLogStore();
+    const rig = harness();
+    const index = tick(store, rig.ports, { backfillPageBlocks: 10 });
+    await index.runOnce(new AbortController().signal);
+    expect((await store.load(SCOPE))!.coverage.some((entry) => (
+      !chainEventLogCoverageIsComplete(entry)
+    ))).toBe(true);
+    rig.requests.length = 0;
+
+    // The forward lane reaches the unchanged head with no rows, but history
+    // still starts above each family's floor. Deleting the coverage half of
+    // `pendingWork` would make this pass look quiet and let the runner widen
+    // while backfill still owes data.
+    const result = await index.runOnce(new AbortController().signal);
+
+    expect(result.outcome).toBe('advanced');
+    expect(result.fetchedRows).toBe(0);
+    expect(rig.requests.at(-1)?.toBlock).toBe(rig.head.number);
+    expect(result.pendingWork).toBe(true);
+  });
+
   it('restarts coverage at the fetched range when the subscribed topic set changes', async () => {
     const store = new MemoryChainEventLogStore();
     const rig = harness();

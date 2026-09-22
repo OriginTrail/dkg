@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ContextGraphAuthorityIndex as ContextGraphAuthorityIndexBase } from
   '../src/context-graph-authority-index.js';
@@ -10,7 +10,15 @@ import {
   reduceContextGraphAuthorityIndexPage,
   type RawContextGraphAuthorityIndexEvent as ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
-import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
+  ContextGraphAuthorityIndexBootstrapUnavailableError,
+  type ContextGraphAuthorityIndexBootstrap,
+} from '../src/context-graph-authority-index-snapshot.js';
+import {
+  MemoryAuthorityIndexStore,
+  ScopedAuthorityIndexStore,
+} from './helpers/context-graph-authority-index.js';
 
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
@@ -605,5 +613,346 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       message: 'Context Graph authority index lifecycle cleared',
     });
     expect(store.commits).toEqual([]);
+  });
+
+  describe('trusted core bootstrap local-history fallback', () => {
+    const SCOPE = makeInput(9n, {}, async () => []).scope;
+    /** Where a seeded scan lives; the fallback runs on the plain `SCOPE` instead. */
+    const TRUST_DOMAIN_SCOPE = `${SCOPE}:trusted-bootstrap:trusted-core-A`;
+    // 251 blocks of history: more than the 200-block tail budget below allows.
+    const FINALIZED = 260;
+    const readEvents = async (from: number, to: number) => allEvents.filter((entry) => (
+      entry.blockNumber >= from && entry.blockNumber <= to
+    ));
+    /** Every trusted core is down unless an override says otherwise. */
+    const unavailableBootstrap = (
+      overrides: Partial<ContextGraphAuthorityIndexBootstrap> = {},
+    ): ContextGraphAuthorityIndexBootstrap => ({
+      trustDomain: 'trusted-core-A',
+      maxTailBlocks: 200,
+      fetchSnapshot: async () => { throw new Error('trusted cores unavailable'); },
+      ...overrides,
+    });
+    const scan = (
+      readPage: (from: number, to: number) => Promise<readonly ContextGraphAuthorityIndexEvent[]>,
+      finalizedNumber = FINALIZED,
+    ) => ({ ...makeInput(9n, {}, readPage, finalizedNumber), pageSize: 50 });
+    type ScanProgress = Parameters<NonNullable<ContextGraphAuthorityIndexBootstrap['onScanProgress']>>[0];
+
+    it('scans unbudgeted local history when no core can seed and the operator opted in', async () => {
+      const localStore = new ScopedAuthorityIndexStore();
+      const expected = await new ContextGraphAuthorityIndex(localStore).resolve(scan(readEvents));
+
+      const store = new ScopedAuthorityIndexStore();
+      const fallbacks: Array<{ scope: string; reason: string }> = [];
+      let fetches = 0;
+      const index = new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        fetchSnapshot: async () => { fetches += 1; throw new Error('trusted cores unavailable'); },
+        localHistoryFallback: true,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+      }));
+      const ranges: Array<readonly [number, number]> = [];
+      const state = await index.resolve(scan(async (from, to) => {
+        ranges.push([from, to]);
+        return readEvents(from, to);
+      }));
+
+      expect(state).toEqual(expected);
+      expect(ranges[0]).toEqual([10, 59]);
+      expect(ranges.at(-1)).toEqual([260, 260]);
+      expect(ranges.reduce((total, [from, to]) => total + to - from + 1, 0)).toBe(251);
+      // Committed exactly where an index without bootstrap keeps its own.
+      expect(store.records.get(SCOPE)?.value).toEqual(localStore.records.get(SCOPE)?.value);
+      expect(store.records.has(TRUST_DOMAIN_SCOPE)).toBe(false);
+      expect(fetches).toBe(1);
+      expect(fallbacks).toEqual([{
+        scope: SCOPE,
+        reason: expect.stringContaining('trusted cores unavailable'),
+      }]);
+
+      // The fallback checkpoint is durable. The next scan still gives the
+      // cores their turn (here the seed failure cooldown answers for them),
+      // falls back again and resumes above it instead of rescanning.
+      const resumed: Array<readonly [number, number]> = [];
+      await index.resolve(scan(async (from, to) => {
+        resumed.push([from, to]);
+        return readEvents(from, to);
+      }, 265));
+      expect(resumed).toEqual([[261, 265]]);
+      expect(fetches).toBe(1);
+      expect(fallbacks).toHaveLength(2);
+      expect(store.records.get(SCOPE)?.value).toMatchObject({ cursor: { throughBlockNumber: 265 } });
+      expect(store.records.has(TRUST_DOMAIN_SCOPE)).toBe(false);
+    });
+
+    it('resumes the fallback from the checkpoint an index without bootstrap left under the plain scope', async () => {
+      // 10.0.17 built the complete index in local-history mode, under the plain scope.
+      const store = new ScopedAuthorityIndexStore();
+      await new ContextGraphAuthorityIndex(store).resolve(scan(readEvents));
+      const local = store.records.get(SCOPE);
+      expect(local?.value).toMatchObject({ cursor: { throughBlockNumber: FINALIZED } });
+      const expected = await new ContextGraphAuthorityIndex(new ScopedAuthorityIndexStore())
+        .resolve(scan(readEvents, 265));
+
+      // 10.0.18 on the same store: a discovered trust set, every core down.
+      const fallbacks: unknown[] = [];
+      const index = new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        localHistoryFallback: true,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+      }));
+      const ranges: Array<readonly [number, number]> = [];
+      const state = await index.resolve(scan(async (from, to) => {
+        ranges.push([from, to]);
+        return readEvents(from, to);
+      }, 265));
+
+      expect(fallbacks).toHaveLength(1);
+      // Cursor + 1, not the deployment block: the fresh trust-domain namespace
+      // does not cost the edge a rescan of history it already holds.
+      expect(ranges).toEqual([[261, 265]]);
+      expect(state).toEqual(expected);
+      expect(store.records.get(SCOPE)).toMatchObject({
+        token: local!.token + 1,
+        value: { cursor: { throughBlockNumber: 265 } },
+      });
+      expect(store.records.has(TRUST_DOMAIN_SCOPE)).toBe(false);
+      // An edge never serves, not even its independently scanned fallback checkpoint.
+      expect(index.exportSnapshot({
+        scope: SCOPE, deploymentBlockNumber: 10, minThroughBlockNumber: 10, maxThroughBlockNumber: 265,
+      })).toBeNull();
+    });
+
+    it('neither resumes from nor promotes the trust-domain checkpoint when falling back', async () => {
+      // An earlier seeded scan left an imported prefix under the trust-domain
+      // key, by now too old to continue without a fresh seed.
+      const store = new ScopedAuthorityIndexStore();
+      const imported = { token: 3, value: reduceContextGraphAuthorityIndexPage({
+        deploymentBlockNumber: 10,
+        throughBlockNumber: 40,
+        throughBlockHash: blockHash(40),
+        events: allEvents.filter((entry) => entry.blockNumber <= 40),
+      }).checkpoint };
+      store.records.set(TRUST_DOMAIN_SCOPE, imported);
+      const expected = await new ContextGraphAuthorityIndex(new ScopedAuthorityIndexStore())
+        .resolve(scan(readEvents));
+
+      const fallbacks: unknown[] = [];
+      const ranges: Array<readonly [number, number]> = [];
+      const state = await new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        localHistoryFallback: true,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+      })).resolve(scan(async (from, to) => {
+        ranges.push([from, to]);
+        return readEvents(from, to);
+      }));
+
+      expect(fallbacks).toHaveLength(1);
+      // The plain scope was empty, so the independent index starts at the
+      // deployment block: the imported prefix is not its to build on.
+      expect(ranges[0]).toEqual([10, 59]);
+      expect(state).toEqual(expected);
+      expect(store.records.get(SCOPE)?.value).toMatchObject({ cursor: { throughBlockNumber: FINALIZED } });
+      expect(store.records.get(TRUST_DOMAIN_SCOPE)).toBe(imported);
+    });
+
+    it('seeds the trust-domain key on a later scan without touching the fallback checkpoint', async () => {
+      const store = new ScopedAuthorityIndexStore();
+      await new ContextGraphAuthorityIndex(store, unavailableBootstrap({ localHistoryFallback: true }))
+        .resolve(scan(readEvents));
+      const fallen = store.records.get(SCOPE);
+      expect(fallen?.value).toMatchObject({ cursor: { throughBlockNumber: FINALIZED } });
+      expect(store.records.has(TRUST_DOMAIN_SCOPE)).toBe(false);
+
+      // The cores are back: the seed lands under the trust-domain key and only
+      // the tail above it is scanned. The plain-scope checkpoint is neither
+      // read nor rewritten, so the two lineages never mix.
+      const seed = reduceContextGraphAuthorityIndexPage({
+        deploymentBlockNumber: 10,
+        throughBlockNumber: 250,
+        throughBlockHash: blockHash(250),
+        events: allEvents.filter((entry) => entry.blockNumber <= 250),
+      }).checkpoint;
+      const fallbacks: unknown[] = [];
+      const ranges: Array<readonly [number, number]> = [];
+      const state = await new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        fetchSnapshot: async () => ({ version: 1, scope: SCOPE, checkpoint: seed }),
+        localHistoryFallback: true,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+      })).resolve(scan(async (from, to) => {
+        ranges.push([from, to]);
+        return readEvents(from, to);
+      }, 270));
+
+      expect(fallbacks).toEqual([]);
+      expect(ranges).toEqual([[251, 270]]);
+      expect(state).toMatchObject({ contextGraphId: '9', ownershipEra: 1 });
+      expect(store.records.get(TRUST_DOMAIN_SCOPE)?.value)
+        .toMatchObject({ cursor: { throughBlockNumber: 270 } });
+      expect(store.records.get(SCOPE)).toBe(fallen);
+    });
+
+    it.each([
+      {},
+      { localHistoryFallback: false },
+    ])('keeps failing when no core can seed and the fallback is not enabled: %j', async (flag) => {
+      const store = new MemoryAuthorityIndexStore();
+      const fallbacks: unknown[] = [];
+      let pages = 0;
+      const error = await new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        ...flag,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+      })).resolve(scan(async () => { pages += 1; return []; })).catch((cause: unknown) => cause);
+
+      expect(error).toBeInstanceOf(ContextGraphAuthorityIndexBootstrapUnavailableError);
+      expect(error).toMatchObject({ code: 'AUTHORITY_INDEX_BOOTSTRAP_UNAVAILABLE' });
+      expect(pages).toBe(0);
+      expect(fallbacks).toEqual([]);
+      expect(store.record).toBeUndefined();
+    });
+
+    it('still propagates a lifecycle abort raised while seeding instead of falling back', async () => {
+      let started!: () => void;
+      const ready = new Promise<void>((resolve) => { started = resolve; });
+      const fallbacks: unknown[] = [];
+      let pages = 0;
+      const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore(), unavailableBootstrap({
+        fetchSnapshot: async (_request, signal) => new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          started();
+        }),
+        localHistoryFallback: true,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+      }));
+      const pending = index.resolve(scan(async () => { pages += 1; return []; }));
+      await ready;
+      index.clear();
+
+      await expect(pending).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'Context Graph authority index lifecycle cleared',
+      });
+      expect(fallbacks).toEqual([]);
+      expect(pages).toBe(0);
+    });
+
+    it('falls back at the bootstrap deadline when the transport never settles', async () => {
+      const expected = await new ContextGraphAuthorityIndex(new ScopedAuthorityIndexStore())
+        .resolve(scan(readEvents));
+      vi.useFakeTimers();
+      try {
+        const store = new ScopedAuthorityIndexStore();
+        const fallbacks: Array<{ scope: string; reason: string }> = [];
+        const ranges: Array<readonly [number, number]> = [];
+        const index = new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+          fetchSnapshot: async (_request, signal) => new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+          localHistoryFallback: true,
+          onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+        }));
+        const pending = index.resolve(scan(async (from, to) => {
+          ranges.push([from, to]);
+          return readEvents(from, to);
+        }));
+
+        await vi.advanceTimersByTimeAsync(CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS - 1);
+        expect(fallbacks).toEqual([]);
+        expect(ranges).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(pending).resolves.toEqual(expected);
+        expect(fallbacks).toEqual([{
+          scope: SCOPE,
+          reason: expect.stringContaining('snapshot bootstrap deadline exceeded'),
+        }]);
+        expect(ranges[0]).toEqual([10, 59]);
+        expect(ranges.at(-1)).toEqual([260, 260]);
+        expect(store.records.get(SCOPE)?.value)
+          .toMatchObject({ cursor: { throughBlockNumber: FINALIZED } });
+        expect(store.records.has(TRUST_DOMAIN_SCOPE)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports every reduced page of the fallback scan in ascending block order', async () => {
+      const progress: ScanProgress[] = [];
+      const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore(), unavailableBootstrap({
+        localHistoryFallback: true,
+        onScanProgress: (info) => { progress.push(info); },
+      }));
+      const ranges: Array<readonly [number, number]> = [];
+      await index.resolve({
+        ...scan(async (from, to) => {
+          ranges.push([from, to]);
+          return readEvents(from, to);
+        }),
+        durableReorgHoldbackBlocks: 8,
+      });
+
+      // Committed pages up to the horizon, then the in-memory tail page.
+      expect(ranges).toEqual([
+        [10, 59], [60, 109], [110, 159], [160, 209], [210, 252], [253, 260],
+      ]);
+      expect(progress.map(({ fromBlockNumber, throughBlockNumber }) => (
+        [fromBlockNumber, throughBlockNumber]
+      ))).toEqual(ranges);
+      expect(progress.slice(1).every((entry, offset) => (
+        entry.throughBlockNumber > progress[offset]!.throughBlockNumber
+      ))).toBe(true);
+      expect(progress.map(({ scannedBlocks }) => scannedBlocks)).toEqual([50, 100, 150, 200, 243, 251]);
+      expect(progress.every(({ scope, finalizedNumber }) => (
+        scope === SCOPE && finalizedNumber === FINALIZED
+      ))).toBe(true);
+    });
+
+    it('reports the seeded tail pages too and leaves the fallback idle when a core answers', async () => {
+      const seed = reduceContextGraphAuthorityIndexPage({
+        deploymentBlockNumber: 10,
+        throughBlockNumber: 200,
+        throughBlockHash: blockHash(200),
+        events: allEvents.filter((entry) => entry.blockNumber <= 200),
+      }).checkpoint;
+      const progress: Array<readonly [number, number]> = [];
+      const fallbacks: unknown[] = [];
+      const store = new ScopedAuthorityIndexStore();
+      const index = new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        fetchSnapshot: async () => ({ version: 1, scope: SCOPE, checkpoint: seed }),
+        localHistoryFallback: true,
+        onLocalHistoryFallback: (info) => { fallbacks.push(info); },
+        onScanProgress: ({ fromBlockNumber, throughBlockNumber }) => {
+          progress.push([fromBlockNumber, throughBlockNumber]);
+        },
+      }));
+      const ranges: Array<readonly [number, number]> = [];
+      const state = await index.resolve(scan(async (from, to) => {
+        ranges.push([from, to]);
+        return readEvents(from, to);
+      }));
+
+      expect(state).toMatchObject({ contextGraphId: '9', ownershipEra: 1 });
+      expect(ranges).toEqual([[201, 250], [251, 260]]);
+      expect(progress).toEqual(ranges);
+      expect(fallbacks).toEqual([]);
+      // A seeded scan lives under the trust-domain key; the fallback opt-in
+      // alone writes nothing under the plain scope.
+      expect(store.records.get(TRUST_DOMAIN_SCOPE)?.value)
+        .toMatchObject({ cursor: { throughBlockNumber: FINALIZED } });
+      expect(store.records.has(SCOPE)).toBe(false);
+    });
+
+    it('ignores throwing observers instead of failing the scan', async () => {
+      const store = new MemoryAuthorityIndexStore();
+      let progressCalls = 0;
+      const index = new ContextGraphAuthorityIndex(store, unavailableBootstrap({
+        localHistoryFallback: true,
+        onLocalHistoryFallback: () => { throw new Error('observer failed'); },
+        onScanProgress: () => { progressCalls += 1; throw new Error('observer failed'); },
+      }));
+
+      await expect(index.resolve(scan(readEvents)))
+        .resolves.toMatchObject({ contextGraphId: '9', ownershipEra: 1 });
+      expect(progressCalls).toBe(6);
+      expect(store.record?.value).toMatchObject({ cursor: { throughBlockNumber: FINALIZED } });
+    });
   });
 });

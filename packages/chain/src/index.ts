@@ -208,6 +208,7 @@ export {
   withOwnedRpcRequestContext,
   withRpcRequestContext,
   withRpcRequestTimeout,
+  type RpcRequestAdmissionPriority,
   type RpcRequestClass,
   type RpcRequestAdmission,
   type RpcRequestContext,

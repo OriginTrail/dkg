@@ -2,12 +2,17 @@ import type {
   EVMAdapterConfig,
   RpcRequestGovernor,
 } from '@origintrail-official/dkg-chain';
+import type { ChainAuthorityReadBudgetsConfig } from '@origintrail-official/dkg-agent';
 import {
   resolveApprovalPolicy,
   type ResolvedChainConfig,
 } from './config.js';
 
-/** Adapter-facing chain fields shared by daemon and publisher construction. */
+/**
+ * Adapter-facing chain fields shared by daemon and publisher construction,
+ * plus the agent-level authority read deadlines that ride along in the same
+ * `chain` block (the adapter ignores them; the agent resolves them).
+ */
 export type RuntimeEvmChainConfig = Pick<
   EVMAdapterConfig,
   | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
@@ -16,7 +21,7 @@ export type RuntimeEvmChainConfig = Pick<
   | 'maxFeePerGasWei'
   | 'minPublisherNativeWei' | 'minPublisherTracWei'
   | 'rpcRequestAdmission'
->;
+> & ChainAuthorityReadBudgetsConfig;
 
 /** Pure resolved values before the composition root attaches process state. */
 export type RuntimeEvmChainConfigProjection = Omit<
@@ -47,6 +52,8 @@ export function projectRuntimeEvmChainConfig(
     receiptTimeoutMs: chain.receiptTimeoutMs,
     finalityConfirmations: chain.finalityConfirmations,
     indexTickMs: chain.indexTickMs,
+    authorityReadTimeoutMs: chain.authorityReadTimeoutMs,
+    authorityColdResolutionTimeoutMs: chain.authorityColdResolutionTimeoutMs,
     maxFeePerGasWei: chain.maxFeePerGasWei,
     approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy),
     cgRegistryScanPageSize: chain.cgRegistryScanPageSize,

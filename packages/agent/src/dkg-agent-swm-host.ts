@@ -432,9 +432,9 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -515,6 +515,8 @@ import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
 import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import { finalizedContextGraphSnapshotMismatchV1 } from
+  './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -2682,10 +2684,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   async readCoreHostedPublicCgAccessPolicy(this: DKGAgent, onChainId: string): Promise<0 | 1 | null> {
     const numericId = BigInt(onChainId);
+    const readTimeoutMs = chainAuthorityReadBudgetsOf(this).requestTimeoutMs;
     const raceChainRead = async <T>(start: () => T | Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
-        timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
+        timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), readTimeoutMs);
         timer.unref?.();
       });
       let work: Promise<T>;
@@ -2708,7 +2711,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           this.log.warn(
             createOperationContext('system'),
             `recordCoreHostedPublicCg(${onChainId}): getContextGraphAccessPolicy timed out after ` +
-            `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating hosted CG access policy as UNKNOWN`,
+            `${readTimeoutMs}ms — treating hosted CG access policy as UNKNOWN`,
           );
           return null;
         }
@@ -2731,7 +2734,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.log.warn(
         createOperationContext('system'),
         `recordCoreHostedPublicCg(${onChainId}): isContextGraphActiveOnChain timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — falling back to ACK-backed access policy read`,
+        `${readTimeoutMs}ms — falling back to ACK-backed access policy read`,
       );
     } catch (err) {
       this.log.warn(
@@ -3683,9 +3686,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (
             target.expectedOnChainId <= 0n
             || target.expectedOnChainId > ethers.MaxUint256
-            || snapshot.active !== true
-            || snapshot.contextGraphId !== expectedOnChainId
-            || this.contextGraphWireId(snapshot.nameHash) !== expectedNameHash
+            || finalizedContextGraphSnapshotMismatchV1(snapshot, {
+              onChainId: target.expectedOnChainId,
+              nameHash: expectedNameHash,
+            }) !== undefined
           ) {
             throw new Error(`Invalid finalized VM authority evidence for "${localCgId}"`);
           }

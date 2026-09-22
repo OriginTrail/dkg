@@ -3,9 +3,10 @@
 import {
   activeRpcRequestContext,
   withOwnedRpcRequestContext,
+  type RpcRequestAdmissionPriority,
   type RpcRequestClass,
 } from './rpc-request-transport.js';
-import { AbortableDeferredKeyedFlight } from './keyed-ttl-single-flight-cache.js';
+import { abortError, waitForSignal } from './wait-for-signal.js';
 
 /**
  * In-flight de-duplication for the one-read Context Graph live authority.
@@ -22,14 +23,17 @@ import { AbortableDeferredKeyedFlight } from './keyed-ttl-single-flight-cache.js
  * asked. That introduces exactly zero staleness, which is what makes it safe
  * at a gate.
  *
- * BATCHING, NOT WAITING (review R6/F4). A flight is created on the first
- * caller but DISPATCHED one macrotask later, so every caller arriving in the
- * same turn shares it. A caller arriving after dispatch never waits for the
- * running flight to settle — it opens (or joins) the SUCCESSOR, immediately.
- * The rejected alternative was to make late callers wait up to ~750 ms for the
- * running flight: with dense-but-serial callers almost every caller is late,
- * and adding that wait to its own read would push reads that succeed today
- * past the caller's 2,500 ms fail-closed budget.
+ * BOUNDED SUCCESSION. A flight is created on the first caller and dispatched
+ * one macrotask later, so every caller arriving before dispatch shares it. A
+ * caller arriving after dispatch may NOT consume that already-started read;
+ * it joins one successor cohort whose physical read starts only after the
+ * active read settles. This preserves zero staleness while bounding a slow
+ * endpoint to one active read plus one waiting cohort per key. Without that
+ * bound, dense callers on consecutive event-loop turns each opened another
+ * physical read, and an unhealthy endpoint amplified one gate timeout into a
+ * self-sustaining RPC failover herd. The caller's own 2,500 ms deadline still
+ * owns availability: a waiter that cannot stay for the successor simply
+ * detaches and fails closed, without cancelling peers.
  *
  * A JOINER ONLY EVER SHARES A DEFINITIVE ANSWER (the #2666 defect). Draft PR
  * #2666 shared the whole bounded agent resolution, so the INITIATOR's 2,500 ms
@@ -72,6 +76,206 @@ type ContextGraphLiveAuthorityFlightOutcome<V> =
   | { readonly kind: 'value'; readonly value: V }
   | { readonly kind: 'definitive-error'; readonly error: unknown }
   | { readonly kind: 'indefinite-error'; readonly error: unknown };
+
+interface SequencedFlight<V> {
+  readonly controller: AbortController;
+  readonly outcome: Promise<V>;
+  readonly resolve: (value: V) => void;
+  readonly reject: (error: unknown) => void;
+  readonly load: (signal: AbortSignal) => Promise<V>;
+  waiters: number;
+  dispatched: boolean;
+  settled: boolean;
+}
+
+interface SequencedLane<V> {
+  active: SequencedFlight<V>;
+  successor: SequencedFlight<V> | undefined;
+}
+
+interface SequencedFlightResult<V> {
+  /** True only for the first caller enrolled in this cohort. */
+  readonly initiated: boolean;
+  readonly value: V;
+}
+
+/**
+ * One active physical read and, while it runs, at most one successor cohort.
+ *
+ * The successor is deliberately a COHORT rather than a retained value. Its
+ * read has not started yet, so every enrolled caller is guaranteed that the
+ * read it may consume begins after that caller arrived. When the active read
+ * settles, the cohort is promoted and dispatched on the configured scheduler;
+ * callers arriving before that dispatch may join it, while callers arriving
+ * after dispatch open the following successor. Thus no generation crosses the
+ * zero-staleness boundary and no key can fan out an unbounded number of
+ * simultaneous RPCs during a slow endpoint/failover window.
+ */
+class SequencedDeferredKeyedFlight<K, V> {
+  readonly #lanes = new Map<K, SequencedLane<V>>();
+  readonly #defer: (dispatch: () => void) => void;
+  readonly #abandonmentMessage: string;
+
+  constructor(options: {
+    readonly defer: (dispatch: () => void) => void;
+    readonly abandonmentMessage: string;
+  }) {
+    this.#defer = options.defer;
+    this.#abandonmentMessage = options.abandonmentMessage;
+  }
+
+  async run(
+    key: K,
+    load: (signal: AbortSignal) => Promise<V>,
+    waiterSignal?: AbortSignal,
+  ): Promise<SequencedFlightResult<V>> {
+    waiterSignal?.throwIfAborted();
+    let lane = this.#lanes.get(key);
+    let flight: SequencedFlight<V>;
+    let initiated = false;
+    if (lane === undefined) {
+      flight = this.#createFlight(load);
+      lane = { active: flight, successor: undefined };
+      this.#lanes.set(key, lane);
+      initiated = true;
+      this.#schedule(key, lane, flight);
+    } else if (!lane.active.dispatched) {
+      flight = lane.active;
+      flight.waiters += 1;
+    } else if (lane.successor !== undefined) {
+      flight = lane.successor;
+      flight.waiters += 1;
+    } else {
+      flight = this.#createFlight(load);
+      lane.successor = flight;
+      initiated = true;
+    }
+
+    try {
+      const value = await waitForSignal(flight.outcome, waiterSignal);
+      return { initiated, value };
+    } finally {
+      this.#leave(key, lane, flight);
+    }
+  }
+
+  /** New callers start a fresh lineage while already-enrolled callers finish. */
+  detachAll(): void {
+    this.#lanes.clear();
+  }
+
+  #createFlight(load: (signal: AbortSignal) => Promise<V>): SequencedFlight<V> {
+    const controller = new AbortController();
+    let resolve!: (value: V) => void;
+    let reject!: (error: unknown) => void;
+    const outcome = new Promise<V>((resolveOutcome, rejectOutcome) => {
+      resolve = resolveOutcome;
+      reject = rejectOutcome;
+    });
+    // A synchronous `defer` may run the loader before `run()` reaches
+    // `waitForSignal`. If that loader aborts the initiating waiter, its
+    // `finally` abandons and rejects this outcome before that caller can attach
+    // a rejection handler. Mark the shared promise handled immediately while
+    // leaving it rejected for every real awaiter.
+    void outcome.catch(() => undefined);
+    return {
+      controller,
+      outcome,
+      resolve,
+      reject,
+      load,
+      waiters: 1,
+      dispatched: false,
+      settled: false,
+    };
+  }
+
+  #schedule(
+    key: K,
+    lane: SequencedLane<V>,
+    flight: SequencedFlight<V>,
+  ): void {
+    try {
+      this.#defer(() => this.#dispatch(key, lane, flight));
+    } catch (error) {
+      this.#finish(key, lane, flight, { kind: 'error', error });
+    }
+  }
+
+  #dispatch(
+    key: K,
+    lane: SequencedLane<V>,
+    flight: SequencedFlight<V>,
+  ): void {
+    if (flight.settled) return;
+    if (flight.waiters === 0) {
+      this.#abandon(key, lane, flight);
+      return;
+    }
+    flight.dispatched = true;
+    let loaded: Promise<V>;
+    try {
+      loaded = flight.load(flight.controller.signal);
+    } catch (error) {
+      this.#finish(key, lane, flight, { kind: 'error', error });
+      return;
+    }
+    void loaded.then(
+      (value) => this.#finish(key, lane, flight, { kind: 'value', value }),
+      (error) => this.#finish(key, lane, flight, { kind: 'error', error }),
+    );
+  }
+
+  #finish(
+    key: K,
+    lane: SequencedLane<V>,
+    flight: SequencedFlight<V>,
+    result: { readonly kind: 'value'; readonly value: V }
+      | { readonly kind: 'error'; readonly error: unknown },
+  ): void {
+    if (flight.settled) return;
+    flight.settled = true;
+    if (result.kind === 'value') flight.resolve(result.value);
+    else flight.reject(result.error);
+
+    // A detach/rotation may already have installed a fresh lane for this key.
+    // The old lane remains self-contained: its already-enrolled successor must
+    // still run, but completion may never delete or mutate the new map entry.
+    const attached = this.#lanes.get(key) === lane;
+    if (lane.active !== flight) {
+      if (lane.successor === flight) lane.successor = undefined;
+      return;
+    }
+    const successor = lane.successor;
+    if (successor === undefined || successor.waiters === 0 || successor.settled) {
+      if (attached) this.#lanes.delete(key);
+      return;
+    }
+    lane.active = successor;
+    lane.successor = undefined;
+    this.#schedule(key, lane, successor);
+  }
+
+  #leave(
+    key: K,
+    lane: SequencedLane<V>,
+    flight: SequencedFlight<V>,
+  ): void {
+    flight.waiters -= 1;
+    if (flight.waiters > 0 || flight.settled) return;
+    this.#abandon(key, lane, flight);
+  }
+
+  #abandon(
+    key: K,
+    lane: SequencedLane<V>,
+    flight: SequencedFlight<V>,
+  ): void {
+    const abandoned = abortError(this.#abandonmentMessage);
+    if (!flight.controller.signal.aborted) flight.controller.abort(abandoned);
+    this.#finish(key, lane, flight, { kind: 'error', error: abandoned });
+  }
+}
 
 export interface ContextGraphLiveAuthorityCoalescerOptions {
   /**
@@ -125,7 +329,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
   readonly #partitions: Readonly<
     Record<
       RpcRequestClass,
-      AbortableDeferredKeyedFlight<string, ContextGraphLiveAuthorityFlightOutcome<V>>
+      SequencedDeferredKeyedFlight<string, ContextGraphLiveAuthorityFlightOutcome<V>>
     >
   >;
 
@@ -138,7 +342,7 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
       // finish the operation it is awaiting instead of exiting before dispatch.
       setTimeout(dispatch, 0);
     });
-    const partition = () => new AbortableDeferredKeyedFlight<
+    const partition = () => new SequencedDeferredKeyedFlight<
       string,
       ContextGraphLiveAuthorityFlightOutcome<V>
     >({ defer, abandonmentMessage: ABANDONED_FLIGHT_MESSAGE });
@@ -160,7 +364,10 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
     options: ContextGraphLiveAuthorityRunOptions = {},
   ): Promise<V> {
     options.signal?.throwIfAborted();
-    const requestClass = options.requestClass ?? activeRpcRequestContext().requestClass;
+    const callerContext = activeRpcRequestContext();
+    const requestClass = options.requestClass ?? callerContext.requestClass;
+    const admissionPriority: RpcRequestAdmissionPriority | undefined =
+      callerContext.admissionPriority;
     const partition = this.#partitions[requestClass];
     for (let retries = 0; ; retries += 1) {
       const { initiated, value: outcome } = await partition.run(
@@ -168,7 +375,11 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
         async (flightSignal) => {
           try {
             const value = await withOwnedRpcRequestContext(
-              { signal: flightSignal, requestClass },
+              {
+                signal: flightSignal,
+                requestClass,
+                ...(admissionPriority === undefined ? {} : { admissionPriority }),
+              },
               () => load(flightSignal),
             );
             return { kind: 'value', value };

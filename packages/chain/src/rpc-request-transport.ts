@@ -24,14 +24,23 @@ import {
 
 export type RpcRequestClass = 'foreground' | 'background';
 
+/**
+ * Internal admission priority for a foreground read that must complete before
+ * its fail-closed security deadline. It changes queue order only: the request
+ * still consumes the operator's ordinary foreground rate budget.
+ */
+export type RpcRequestAdmissionPriority = 'authority';
+
 /** One raw-RPC policy context: priority and cancellation cannot drift apart. */
 export interface RpcRequestContext {
   readonly requestClass: RpcRequestClass;
+  readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
 }
 
 export interface RpcRequestContextInput {
   readonly requestClass?: RpcRequestClass;
+  readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
 }
 
@@ -47,6 +56,7 @@ export function activeRpcRequestContext(): RpcRequestContext {
  */
 export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () => T): T {
   const parent = activeRpcRequestContext();
+  const admissionPriority = input.admissionPriority ?? parent.admissionPriority;
   const inheritedSignal = parent.signal;
   const signal = inheritedSignal === undefined
     ? input.signal
@@ -55,6 +65,7 @@ export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () =
       : AbortSignal.any([inheritedSignal, input.signal]);
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
+    ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(signal === undefined ? {} : { signal }),
   }, fn);
 }
@@ -69,8 +80,10 @@ export function withOwnedRpcRequestContext<T>(
   fn: () => T,
 ): T {
   const parent = activeRpcRequestContext();
+  const admissionPriority = input.admissionPriority ?? parent.admissionPriority;
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
+    ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }, fn);
 }

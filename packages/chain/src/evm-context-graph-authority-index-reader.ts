@@ -790,18 +790,6 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   /**
-   * Every finalized READ of this capability. It is answered from the index's
-   * last completed projection while that is younger than `chain.indexTickMs`;
-   * otherwise `rescanFinalizedProjection` above runs exactly as it always has
-   * (head, cursor admission, scan, stabilize) and its result is kept. The
-   * projection is handed over only AFTER the stabilization fence, so a scan
-   * whose anchor moved is never retained.
-   *
-   * `snapshots.refresh` is NOT routed through here: the core's background loop
-   * must advance the durable cursor every pass and feeds only the servable
-   * durable snapshot.
-   */
-  /**
    * The same retained-projection read, minus the escalation.
    *
    * {@link readFinalizedProjection} answers at any cost: a miss ends in
@@ -841,26 +829,52 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       scope,
       signal: options.signal,
       project: read,
-      validateAnchor: async (cached) => dependencies.readTipProvider(
-        `${operationLabel} cached projection anchor`,
-        async (provider) => {
-          const anchor = await withRpcUsageConsumer(
-            'authorityProjection.validateAnchor',
-            () => readEvmContextGraphAuthorityIndexRpcV1(
-              `${operationLabel} cached projection anchor block`,
-              () => provider.getBlock(cached.finalized.number),
-              options.signal,
-            ),
-          );
-          if (anchor?.hash == null) return undefined;
-          return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();
-        },
-        { signal: options.signal },
-      ),
+      validateAnchor: async (cached) => {
+        // THE SAME short-circuit the escalating read uses. Without it a bounded
+        // reader pays a block read the live path would have avoided, which
+        // inverts the whole point: the read that was trying to save an
+        // `eth_call` ends up costing an `eth_getBlockByNumber` the live caller
+        // never spends.
+        const provenByLog = await contextGraphAuthorityProjectionAnchorProvenByLogV1(
+          cached,
+          dependencies.chainEventLogAuthority?.(),
+          await dependencies.requireContextGraphStorage().getAddress(),
+        );
+        options.signal?.throwIfAborted();
+        if (provenByLog === true) return true;
+        return dependencies.readTipProvider(
+          `${operationLabel} cached projection anchor`,
+          async (provider) => {
+            const anchor = await withRpcUsageConsumer(
+              'authorityProjection.validateAnchor',
+              () => readEvmContextGraphAuthorityIndexRpcV1(
+                `${operationLabel} cached projection anchor block`,
+                () => provider.getBlock(cached.finalized.number),
+                options.signal,
+              ),
+            );
+            if (anchor?.hash == null) return undefined;
+            return anchor.hash.toLowerCase() === cached.finalized.hash.toLowerCase();
+          },
+          { signal: options.signal },
+        );
+      },
       onServed: options.onContextGraphAuthorityProjectionServed,
     });
   };
 
+  /**
+   * Every finalized READ of this capability. It is answered from the index's
+   * last completed projection while that is younger than `chain.indexTickMs`;
+   * otherwise `rescanFinalizedProjection` above runs exactly as it always has
+   * (head, cursor admission, scan, stabilize) and its result is kept. The
+   * projection is handed over only AFTER the stabilization fence, so a scan
+   * whose anchor moved is never retained.
+   *
+   * `snapshots.refresh` is NOT routed through here: the core's background loop
+   * must advance the durable cursor every pass and feeds only the servable
+   * durable snapshot.
+   */
   const readFinalizedProjection = async <T>(
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
