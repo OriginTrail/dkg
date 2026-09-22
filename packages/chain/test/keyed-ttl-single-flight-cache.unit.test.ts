@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { KeyedSingleFlight, ReadThroughTtlCache, TtlValueCache } from '../src/keyed-ttl-single-flight-cache.js';
+import {
+  AbortableKeyedSingleFlight,
+  KeyedSingleFlight,
+  ReadThroughTtlCache,
+  SingleFlightInvalidatedError,
+  TtlValueCache,
+} from '../src/keyed-ttl-single-flight-cache.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -120,6 +126,138 @@ describe('KeyedSingleFlight', () => {
     expect(results).toEqual([1, 2]);
     expect(calls).toBe(2);
   });
+});
+
+describe('AbortableKeyedSingleFlight', () => {
+  it('keeps shared work alive when one of two waiters cancels', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const loaded = deferred<number>();
+    let physicalSignal: AbortSignal | undefined;
+    const load = (signal: AbortSignal) => {
+      physicalSignal = signal;
+      return loaded.promise;
+    };
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = flight.run('chain', load, firstController.signal);
+    const second = flight.run('chain', load, secondController.signal);
+    firstController.abort(new Error('first left'));
+    await expect(first).rejects.toThrow('first left');
+    expect(physicalSignal?.aborted).toBe(false);
+    loaded.resolve(31337);
+    await expect(second).resolves.toBe(31337);
+  });
+
+  it('aborts physical work when the final waiter leaves and admits a fresh run', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const controller = new AbortController();
+    let firstPhysicalSignal: AbortSignal | undefined;
+    const first = flight.run('chain', async (signal) => {
+      firstPhysicalSignal = signal;
+      return new Promise<number>(() => undefined);
+    }, controller.signal);
+    controller.abort(new Error('deadline'));
+    await expect(first).rejects.toThrow('deadline');
+    expect(firstPhysicalSignal?.aborted).toBe(true);
+    await expect(flight.run('chain', async () => 84532)).resolves.toBe(84532);
+  });
+
+  it('rejects invalidated waiters and suppresses stale success without removing the newer run', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const stale = deferred<number>();
+    const fresh = deferred<number>();
+    const successes: number[] = [];
+    const oldRun = flight.run(
+      'chain',
+      async () => stale.promise,
+      undefined,
+      (value) => successes.push(value),
+    );
+    flight.invalidate('chain');
+    const newRun = flight.run(
+      'chain',
+      async () => fresh.promise,
+      undefined,
+      (value) => successes.push(value),
+    );
+    stale.resolve(1);
+    fresh.resolve(2);
+    await expect(oldRun).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+    await expect(newRun).resolves.toBe(2);
+    expect(successes).toEqual([2]);
+  });
+
+  it('propagates invalidation through a typed signal independent of its message', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const pending = flight.run('chain', async (signal) => new Promise<number>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    await Promise.resolve();
+
+    flight.invalidate('chain', 'wording may change');
+
+    await expect(pending).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+    await expect(pending).rejects.toMatchObject({
+      code: 'SINGLE_FLIGHT_INVALIDATED',
+      message: 'wording may change',
+      retryable: false,
+    });
+  });
+
+  it('carries an explicit logical-retry disposition without message matching', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const pending = flight.run('chain', async (signal) => new Promise<number>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    await Promise.resolve();
+
+    flight.invalidate('chain', 'source generation advanced', { retryable: true });
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'SINGLE_FLIGHT_INVALIDATED',
+      message: 'source generation advanced',
+      retryable: true,
+    });
+  });
+
+  it.each(['key', 'all'] as const)(
+    'rejects a completed but undelivered result after %s invalidation',
+    async (scope) => {
+      const flight = new AbortableKeyedSingleFlight<string, number>();
+      const stale = deferred<number>();
+      const fresh = deferred<number>();
+      const successes: number[] = [];
+      let replacement: Promise<number> | undefined;
+      const oldRun = flight.run(
+        'chain',
+        async () => stale.promise,
+        undefined,
+        (value) => successes.push(value),
+      );
+
+      stale.resolve(1);
+      queueMicrotask(() => {
+        if (scope === 'key') flight.invalidate('chain', 'newer proof');
+        else flight.invalidateAll('newer proof');
+        replacement = flight.run(
+          'chain',
+          async () => fresh.promise,
+          undefined,
+          (value) => successes.push(value),
+        );
+      });
+
+      await expect(oldRun).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+      await expect(oldRun).rejects.toMatchObject({
+        code: 'SINGLE_FLIGHT_INVALIDATED',
+        message: 'newer proof',
+      });
+      fresh.resolve(2);
+      expect(replacement).toBeDefined();
+      await expect(replacement!).resolves.toBe(2);
+      expect(successes).toEqual([2]);
+    },
+  );
 });
 
 describe('ReadThroughTtlCache', () => {

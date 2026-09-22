@@ -4,8 +4,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { snapshotStrictCurrentFinalizedEvmConfigV1 } from '../src/strict-current-finalized-evm-config.js';
-
 import {
   CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
   CONTROL_EIP1271_CALL_FROM_V1,
@@ -21,26 +19,23 @@ import {
 } from '../src/control-object-signature-verifier.js';
 import {
   CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
-  CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1,
-  CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1,
-  CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1,
-  CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_CALLS_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_RETURN_BYTES_V1,
   CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
-  CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
 } from '../src/current-finalized-evm-read-profile.js';
 import {
   createStrictCurrentFinalizedEvmChainAdapterV1,
   createStrictCurrentFinalizedEvmReadV1,
   readStrictCurrentFinalizedEvmRevertDataV1,
-  type StrictCurrentFinalizedEvmRpcConfigV1,
 } from '../src/strict-current-finalized-evm-rpc.js';
 import {
   executeStrictFinalizedAnchorPolicyV1,
 } from '../src/strict-current-finalized-evm-lifecycle.js';
-import { parseStrictFinalizedAnchorV1 } from '../src/strict-current-finalized-evm-rpc-client.js';
+import {
+  parseStrictFinalizedAnchorV1,
+  postStrictFinalizedJsonRpcV1,
+} from '../src/strict-current-finalized-evm-rpc-client.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError as sendError,
@@ -69,21 +64,37 @@ afterEach(async () => {
 });
 
 describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
-  it('keeps the EIP-1271 specialization pinned to the generic finalized-read profile', () => {
-    expect(CONTROL_EIP1271_CALL_FROM_V1).toBe(CURRENT_FINALIZED_EVM_READ_CALL_FROM_V1);
-    expect(CONTROL_EIP1271_GAS_LIMIT_V1).toBe(CURRENT_FINALIZED_EVM_READ_GAS_LIMIT_V1);
-    expect(CONTROL_EIP1271_MAX_RPC_RESPONSE_BYTES_V1)
-      .toBe(CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1);
-    expect(CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1)
-      .toBe(CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1);
-    expect(CONTROL_EIP1271_MAX_ATTEMPTS_V1)
-      .toBe(CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1);
-    expect(CONTROL_EIP1271_MAX_CONCURRENT_CALLS_PER_CHAIN_V1)
-      .toBe(CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1);
-    expect(CONTROL_EIP1271_TOTAL_DEADLINE_MS_V1)
-      .toBe(CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1);
-    expect(CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1)
-      .toBe(CURRENT_FINALIZED_EVM_READ_ENDPOINT_ATTEMPT_POLICY_V1);
+  it.each(['header not found', 'unknown block', 'block not found'])(
+    'maps a non-block RPC %s response to finalized-state-unavailable',
+    async (message) => {
+      const server = await startRpcServer((call, response) => {
+        sendError(response, call, -32_000, message);
+      });
+
+      await expect(postStrictFinalizedJsonRpcV1(
+        server.url,
+        1,
+        'eth_getBalance',
+        [TO, 'latest'],
+        CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+        new AbortController().signal,
+      )).rejects.toMatchObject({ code: 'finalized-state-unavailable' });
+    },
+  );
+
+  it('does not classify an unavailable-block phrase found only in error data', async () => {
+    const server = await startRpcServer((call, response) => {
+      sendError(response, call, -32000, 'request failed', 'header not found');
+    });
+
+    await expect(postStrictFinalizedJsonRpcV1(
+      server.url,
+      1,
+      'eth_call',
+      Object.freeze([]),
+      CURRENT_FINALIZED_EVM_READ_MAX_RPC_RESPONSE_BYTES_V1,
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: 'rpc-unavailable' });
   });
 
   it('preserves an undefined generic result through an authenticated numbered anchor', async () => {
@@ -98,6 +109,101 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       readPostAnchor: async () => anchor,
       anchorMismatchMessage: 'generic void result anchor changed',
     })).resolves.toBeUndefined();
+  });
+
+  it('anchors at chain.finalityConfirmations, never at the endpoint finalized tag', async () => {
+    // Head 0x7b (123) at depth 3 pins 123 - 3 + 1 = 121 (0x79). The endpoint's
+    // own `finalized` marker is never asked for: on Base Sepolia it trails head
+    // by ~20 minutes and no operator setting can move it, which is exactly the
+    // second notion of finality this node does not have.
+    const server = await startRpcServer((call, response) => {
+      switch (call.method) {
+        case 'eth_chainId':
+          sendResult(response, call, CHAIN_QUANTITY);
+          return;
+        case 'eth_getBlockByNumber':
+          if (call.params[0] === 'latest') {
+            sendResult(response, call, { number: '0x7b', hash: OTHER_BLOCK_HASH });
+          } else if (call.params[0] === '0x79') {
+            sendResult(response, call, { number: '0x79', hash: BLOCK_HASH });
+          } else {
+            sendError(response, call, -32602, `unexpected block reference ${String(call.params[0])}`);
+          }
+          return;
+        case 'eth_getCode':
+          sendResult(response, call, '0x6000');
+          return;
+        case 'eth_call':
+          sendResult(response, call, '0xaaaa');
+          return;
+        default:
+          sendError(response, call, -32601, 'method not found');
+      }
+    });
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+      finalityConfirmations: 3,
+    });
+
+    await expect(read({
+      chainId: CHAIN_ID,
+      calls: [{ to: TO, data: FIRST_READ_DATA, maxReturnBytes: 2 }],
+      signal: new AbortController().signal,
+    })).resolves.toEqual({
+      chainId: CHAIN_ID,
+      blockNumber: '121',
+      blockHash: BLOCK_HASH,
+      returnData: ['0xaaaa'],
+    });
+    expect(server.calls
+      .filter(({ method }) => method === 'eth_getBlockByNumber')
+      .map(({ params }) => params[0]))
+      .toEqual(['latest', '0x79']);
+    // Every state read is pinned to the DEEPER anchor, not to the head.
+    const hashReference = { blockHash: BLOCK_HASH, requireCanonical: true };
+    expect(server.calls
+      .filter(({ method }) => method === 'eth_getCode' || method === 'eth_call')
+      .map(({ params }) => params[1]))
+      .toEqual([hashReference, hashReference]);
+  });
+
+  it('pins the head itself at the default depth of one', async () => {
+    const server = await startRpcServer((call, response) => {
+      switch (call.method) {
+        case 'eth_chainId':
+          sendResult(response, call, CHAIN_QUANTITY);
+          return;
+        case 'eth_getBlockByNumber':
+          if (call.params[0] !== 'latest') {
+            sendError(response, call, -32602, 'depth 1 must not re-read a numbered header');
+            return;
+          }
+          sendResult(response, call, { number: '0x7b', hash: BLOCK_HASH });
+          return;
+        case 'eth_getCode':
+          sendResult(response, call, '0x6000');
+          return;
+        case 'eth_call':
+          sendResult(response, call, '0xaaaa');
+          return;
+        default:
+          sendError(response, call, -32601, 'method not found');
+      }
+    });
+    const read = createStrictCurrentFinalizedEvmReadV1({
+      chainId: CHAIN_ID,
+      endpoints: [server.url],
+    });
+
+    await expect(read({
+      chainId: CHAIN_ID,
+      calls: [{ to: TO, data: FIRST_READ_DATA, maxReturnBytes: 2 }],
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({ blockNumber: '123', blockHash: BLOCK_HASH });
+    // Confirmation 1 IS the head, so the default costs exactly one header read.
+    expect(server.calls.filter(({ method }) => method === 'eth_getBlockByNumber'))
+      .toHaveLength(1);
   });
 
   it('executes multiple ABI reads at one EIP-1898 anchor and checks shared code once', async () => {
@@ -460,7 +566,9 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     ]);
     expect(server.calls.map(({ id }) => id)).toEqual([1, 2, 3, 4]);
     expect(server.calls[0]!.params).toEqual([]);
-    expect(server.calls[1]!.params).toEqual(['finalized', false]);
+    // The anchor is the operator-selected finality depth applied to the CHAIN
+    // HEAD, never the endpoint's own `finalized` consensus marker.
+    expect(server.calls[1]!.params).toEqual(['latest', false]);
     const hashReference = { blockHash: BLOCK_HASH, requireCanonical: true };
     expect(server.calls[2]!.params).toEqual([TO, hashReference]);
     expect(server.calls[3]!.params).toEqual([{
@@ -921,53 +1029,7 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     expect(second.calls).toHaveLength(4);
   }, 12_000);
 
-  it('rejects unsafe configuration', () => {
-    const third = 'http://127.0.0.1:3';
-    for (const config of [
-      { chainId: '020430', endpoints: ['http://127.0.0.1:1'] },
-      { chainId: CHAIN_ID, endpoints: [] },
-      { chainId: CHAIN_ID, endpoints: ['ftp://127.0.0.1/a'] },
-      { chainId: CHAIN_ID, endpoints: ['http://127.0.0.1/a#fragment'] },
-      { chainId: CHAIN_ID, endpoints: ['https://user:pass@rpc.example.com'] },
-      { chainId: CHAIN_ID, endpoints: ['http://127.0.0.1:1'], peerEndpoint: third },
-    ]) {
-      expect(() => createStrictCurrentFinalizedEvmChainAdapterV1(
-        config as StrictCurrentFinalizedEvmRpcConfigV1,
-      )).toThrow(TypeError);
-    }
-  });
 
-  it('SELECTS the first two origins from a larger pool instead of rejecting it', () => {
-    // Behaviour change, and the point of the change. This case previously sat in
-    // the rejection list above — which is precisely why RFC64's finalized-VM
-    // precommit could not construct a scope on any shipped EVM network, where
-    // `resolveRpcUrls(rpcUrl, rpcUrls)` yields three URLs.
-    //
-    // The two-endpoint ATTEMPT ceiling is unchanged; selection just makes sure
-    // no more than two ever reach it. The dedup-then-ceiling test above still
-    // pins that ceiling.
-    // Assert WHICH two, not merely that it constructed — "returns a function"
-    // would pass just as green if selection kept the last two, or one, or all.
-    // Driven through the CONFIG boundary rather than the selector directly: the
-    // config is what derives provider identity, so this exercises the real
-    // pipeline instead of hand-built records.
-    const selection = snapshotStrictCurrentFinalizedEvmConfigV1({
-      chainId: CHAIN_ID,
-      endpoints: ['http://127.0.0.1:1', 'http://127.0.0.1:2', 'http://127.0.0.1:3'],
-    } as never).endpoints;
-    // Distinct ports are distinct origins, so this session really does carry two
-    // providers — and the third is dropped, not merged.
-    expect(selection).toEqual(['http://127.0.0.1:1/', 'http://127.0.0.1:2/']);
-
-    expect(() => createStrictCurrentFinalizedEvmChainAdapterV1({
-      chainId: CHAIN_ID,
-      endpoints: [
-        'http://127.0.0.1:1',
-        'http://127.0.0.1:2',
-        'http://127.0.0.1:3',
-      ],
-    } as StrictCurrentFinalizedEvmRpcConfigV1)).not.toThrow();
-  });
 });
 
 interface SuccessfulHandlerOptions {

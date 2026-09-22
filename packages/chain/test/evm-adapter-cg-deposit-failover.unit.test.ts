@@ -55,6 +55,7 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
   function makeCgAdapter(opts: {
     depositRead: (endpointIndex: 0 | 1) => Promise<bigint>;
     firstRevert?: () => unknown; // first-attempt submitCreate error (default TooLowAllowance)
+    approvalFailure?: unknown;
   }) {
     const a: any = new EVMChainAdapter(minimalConfig());
     a.initialized = true;
@@ -78,7 +79,9 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
       },
     };
 
-    const ensureSpy = recorder(async (..._a: unknown[]) => {});
+    const ensureSpy = recorder(async (..._a: unknown[]) => {
+      if (opts.approvalFailure !== undefined) throw opts.approvalFailure;
+    });
     a.ensureV10ApproveTrac = ensureSpy;
 
     // submitCreate → sendContractTransaction: revert once, then mine a receipt.
@@ -134,6 +137,43 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
     expect(backupHits).toBe(0); // no failover on a healthy primary
     expect(ensureSpy.calls).toHaveLength(1);
     expect(result.success).toBe(true);
+  });
+
+  it('marks an approval failure as occurring before the Context Graph retry was submitted', async () => {
+    const approvalFailure = Object.assign(new Error('approval receipt unavailable'), {
+      code: 'RPC_RECEIPT_LOOKUP_FAILED',
+      txHash: `0x${'ab'.repeat(32)}`,
+    });
+    const { a, ensureSpy, sendSpy } = makeCgAdapter({
+      depositRead: async () => DEPOSIT,
+      approvalFailure,
+    });
+
+    await expect(a.createOnChainContextGraph(CG_PARAMS)).rejects.toBe(approvalFailure);
+
+    expect((approvalFailure as Error & {
+      contextGraphRegistrationSubmitted?: boolean;
+    }).contextGraphRegistrationSubmitted).toBe(false);
+    expect(ensureSpy.calls).toHaveLength(1);
+    expect(sendSpy.calls).toHaveLength(1);
+  });
+
+  it('wraps a non-extensible approval failure with the pre-submission marker', async () => {
+    const approvalFailure = Object.preventExtensions(new Error('sealed approval failure'));
+    const { a, sendSpy } = makeCgAdapter({
+      depositRead: async () => DEPOSIT,
+      approvalFailure,
+    });
+
+    const thrown = await a.createOnChainContextGraph(CG_PARAMS).catch((error) => error);
+
+    expect(thrown).not.toBe(approvalFailure);
+    expect(thrown).toMatchObject({
+      message: approvalFailure.message,
+      cause: approvalFailure,
+      contextGraphRegistrationSubmitted: false,
+    });
+    expect(sendSpy.calls).toHaveLength(1);
   });
 
   it('dormant deposit (reads 0): no approve (deposit===0n branch), original revert propagates', async () => {

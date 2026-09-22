@@ -27,7 +27,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chainResetWipe, detectBackendSwitch, detectNetworkSwitch } from '../src/daemon/chain-reset-wipe.js';
+import {
+  chainResetWipe,
+  detectBackendSwitch,
+  detectNetworkSwitch,
+} from '../src/daemon/chain-reset-wipe.js';
 
 const STATE_FILE = '.network-state.json';
 const NEW_MARKER = 'v10-rs-staking-consolidation-2026-04-30';
@@ -71,11 +75,11 @@ describe('chainResetWipe — opt-in protocol', () => {
     seedAllFiles(dataDir);
     const result = await chainResetWipe({ dataDir, currentMarker: undefined });
 
-    expect(result.wiped).toBe(false);
+    expect(result.status).toBe('inactive');
     expect(result.prevMarker).toBeNull();
     expect(result.removedFiles).toEqual([]);
     // New #679 result fields are inert on the no-op path.
-    expect(result.skipped).toBe(false);
+
     expect(result.backedUpFiles).toEqual([]);
     // No state file is created when the protocol isn't active.
     expect(existsSync(join(dataDir, STATE_FILE))).toBe(false);
@@ -96,7 +100,7 @@ describe('chainResetWipe — first boot with marker present', () => {
       log: (msg) => logs.push(msg),
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(result.prevMarker).toBeNull();
     // Under the default backupStore=true, store.nq is RENAMED (→ backedUpFiles),
     // not hard-deleted; the regenerable files are still removed outright.
@@ -138,7 +142,7 @@ describe('chainResetWipe — first boot with marker present', () => {
   it('still records the marker on a fresh install with no chain-state files yet', async () => {
     const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(result.removedFiles).toEqual([]);
     expect(existsSync(join(dataDir, STATE_FILE))).toBe(true);
   });
@@ -154,11 +158,11 @@ describe('chainResetWipe — same marker (steady state)', () => {
 
     const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
 
-    expect(result.wiped).toBe(false);
+    expect(result.status).toBe('steady');
     expect(result.prevMarker).toBe(NEW_MARKER);
     expect(result.removedFiles).toEqual([]);
     // New #679 result fields are inert on the equal-marker no-op path too.
-    expect(result.skipped).toBe(false);
+
     expect(result.backedUpFiles).toEqual([]);
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
     expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(true);
@@ -180,7 +184,7 @@ describe('chainResetWipe — marker changed (chain reset)', () => {
       log: (msg) => logs.push(msg),
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(result.prevMarker).toBe(OLD_MARKER);
 
     // Wiped:
@@ -225,7 +229,7 @@ describe('chainResetWipe — marker changed (chain reset)', () => {
 
     const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     // store.nq is backed up (renamed), not in removedFiles; nothing else existed.
     expect(result.removedFiles).toEqual([]);
     expect(result.backedUpFiles).toHaveLength(1);
@@ -242,13 +246,13 @@ describe('chainResetWipe — marker changed (chain reset)', () => {
     seedAllFiles(dataDir);
 
     const first = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
-    expect(first.wiped).toBe(true);
+    expect(first.status).toBe('completed');
 
     // Re-seed the chain-state files to simulate "boot, work, boot again".
     writeFileSync(join(dataDir, 'store.nq'), '<s> <p> <o> .');
 
     const second = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
-    expect(second.wiped).toBe(false);
+    expect(second.status).toBe('steady');
     expect(second.prevMarker).toBe(NEW_MARKER);
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
   });
@@ -261,7 +265,7 @@ describe('chainResetWipe — corrupt state file', () => {
 
     const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(result.prevMarker).toBeNull();
     // State file gets rewritten with the current marker.
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
@@ -296,8 +300,8 @@ describe('chainResetWipe — operator-mode invariant (#679)', () => {
     // operator guarantee).
     const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: false });
 
-    expect(result.wiped).toBe(true);
-    expect(result.skipped).toBe(false);
+    expect(result.status).toBe('completed');
+
     expect(result.prevMarker).toBe(OLD_MARKER);
 
     // Chain-state gone (store.nq via backup, the rest hard-deleted)...
@@ -335,7 +339,7 @@ describe('chainResetWipe — custom random-sampling WAL path (PR #357 feedback)'
       randomSamplingWalPath: customWal,
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(existsSync(customWal)).toBe(false);
     // Default path untouched: prover never reads it under this config.
     expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(true);
@@ -350,7 +354,7 @@ describe('chainResetWipe — custom random-sampling WAL path (PR #357 feedback)'
       randomSamplingWalPath: '',
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
   });
 
@@ -366,7 +370,7 @@ describe('chainResetWipe — custom random-sampling WAL path (PR #357 feedback)'
         randomSamplingWalPath: externalWal,
       });
 
-      expect(result.wiped).toBe(true);
+      expect(result.status).toBe('completed');
       expect(existsSync(externalWal)).toBe(false);
       // Display label should be the absolute path (informative for operators).
       expect(result.removedFiles.some((f) => f === externalWal)).toBe(true);
@@ -382,41 +386,30 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
   // to boot. Crashing here would create a worse failure mode (node down)
   // than the original problem (stale state).
 
-  it('logs and continues when saveState throws (e.g. read-only FS)', async () => {
-    // Make dataDir read-only so writeFileSync on the state file throws.
-    // Skip on platforms where chmod 0o555 doesn't actually deny root or
-    // where tests run as root (CI containers); the scenario we care
-    // about is non-root operator with a misconfigured volume mount.
-    const originalMode = statSync(dataDir).mode;
-    let logsCaptured: string[] = [];
+  it('reports marker-write failure separately and completes after the state path is repaired', async () => {
+    // A directory at the state-file path deterministically prevents writes,
+    // including as root and on Windows; the data files can still be removed.
+    mkdirSync(join(dataDir, STATE_FILE));
+    writeFileSync(join(dataDir, 'random-sampling.wal'), 'OLD WAL');
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+    });
 
-    try {
-      chmodSync(dataDir, 0o555);
+    expect(result.status).toBe('marker-write-failed');
+    if (result.status !== 'marker-write-failed') throw new Error('Expected marker-write failure');
+    expect(result.markerError).toEqual(expect.any(String));
+    expect(result.markerError.length).toBeGreaterThan(0);
+    expect(result.failedFiles).toEqual([]);
+    expect(result.removedFiles).toContain('random-sampling.wal');
+    expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
+    expect(statSync(join(dataDir, STATE_FILE)).isDirectory()).toBe(true);
 
-      // Quick capability check: if writeFileSync still works (root /
-      // certain FUSE mounts), skip the rest of the assertion — we
-      // can't synthesize the failure deterministically.
-      try {
-        writeFileSync(join(dataDir, '.probe'), 'x');
-        rmSync(join(dataDir, '.probe'), { force: true });
-        return;
-      } catch {
-        // Good: FS denied the write. Now run the wipe.
-      }
-
-      await expect(
-        chainResetWipe({
-          dataDir,
-          currentMarker: NEW_MARKER,
-          log: (msg) => logsCaptured.push(msg),
-        }),
-      ).resolves.toBeDefined();
-
-      // Loud log so operators can find this in journalctl.
-      expect(logsCaptured.some((l) => l.includes('failed to persist chain reset marker'))).toBe(true);
-    } finally {
-      chmodSync(dataDir, originalMode);
-    }
+    rmSync(join(dataDir, STATE_FILE), { recursive: true });
+    const retry = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
+    expect(retry.status).toBe('completed');
+    expect(JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8')).chainResetMarker).toBe(NEW_MARKER);
+    expect((await chainResetWipe({ dataDir, currentMarker: NEW_MARKER })).status).toBe('steady');
   });
 
   it('does not save the marker when an individual file wipe throws', async () => {
@@ -443,6 +436,7 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
         currentMarker: NEW_MARKER,
         log: (msg) => logsCaptured.push(msg),
       });
+      expect(result.status).toBe('incomplete');
       expect(result.failedFiles.some((f) => f.file === 'store.nq')).toBe(true);
     } finally {
       chmodSync(dataDir, originalMode);
@@ -451,7 +445,7 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
 
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
     expect(persisted.chainResetMarker).toBe(OLD_MARKER);
-    expect(logsCaptured.some((l) => l.includes('marker was not persisted'))).toBe(true);
+    expect(logsCaptured.some((l) => l.includes('failed to back up store.nq'))).toBe(true);
   });
 });
 
@@ -512,7 +506,7 @@ describe('chainResetWipe — external SPARQL wipe', () => {
       fetch: fn,
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(result.failedFiles).toEqual([]);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe('http://blaze.test/sparql');
@@ -538,7 +532,7 @@ describe('chainResetWipe — external SPARQL wipe', () => {
       fetch: fn,
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(calls).toHaveLength(1);
     const update = decodeUpdateBody(calls[0].init?.body);
     expect(update).toContain('DELETE');
@@ -572,7 +566,8 @@ describe('chainResetWipe — external SPARQL wipe', () => {
       log: (m) => logs.push(m),
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('incomplete');
+    if (result.status !== 'incomplete') throw new Error('Expected incomplete cleanup');
     expect(result.failedFiles).toHaveLength(1);
     expect(result.failedFiles[0].file).toContain('scoped-delete');
     expect(result.failedFiles[0].error).toContain('500');
@@ -583,7 +578,33 @@ describe('chainResetWipe — external SPARQL wipe', () => {
     // Marker NOT persisted — retry on next boot.
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
     expect(persisted.chainResetMarker).toBe(OLD_MARKER);
-    expect(logs.some((l) => l.includes('Chain reset marker was not persisted'))).toBe(true);
+    expect(logs.some((l) => l.includes('external wipe failed'))).toBe(true);
+  });
+
+  it('requires namespace re-tagging after an ambiguous managed DROP failure', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    const { fn } = mockFetch(
+      () => new Response('DROP applied but response failed', { status: 500, statusText: 'Server Error' }),
+    );
+
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      storeConfig: {
+        backend: 'blazegraph',
+        options: { url: 'http://managed.test/sparql', managedByDkg: true },
+      },
+      fetch: fn,
+    });
+
+    expect(result).toMatchObject({
+      status: 'incomplete',
+      attempted: true,
+      requiresStoreRetag: true,
+    });
   });
 
   it('records transport error in failedFiles', async () => {
@@ -603,6 +624,7 @@ describe('chainResetWipe — external SPARQL wipe', () => {
       fetch: fn,
     });
 
+    expect(result.status).toBe('incomplete');
     expect(result.failedFiles.some((f) => f.error.includes('ECONNREFUSED'))).toBe(true);
   });
 
@@ -623,7 +645,7 @@ describe('chainResetWipe — external SPARQL wipe', () => {
       fetch: fn,
     });
 
-    expect(result.wiped).toBe(true);
+    expect(result.status).toBe('completed');
     expect(calls).toHaveLength(0);
     expect(result.failedFiles).toEqual([]);
   });
@@ -938,4 +960,16 @@ describe('detectNetworkSwitch', () => {
     expect(persisted.lastBackend).toBe('oxigraph-worker');
     expect(persisted.lastNetworkConfig).toBe('mainnet-gnosis');
   });
+});
+
+it('reports an absolute WAL label for a sibling directory sharing the data-directory prefix', async () => {
+  const sibling = `${dataDir}-sibling`;
+  mkdirSync(sibling, { recursive: true });
+  const wal = join(sibling, 'sampling.wal');
+  writeFileSync(wal, 'old chain WAL');
+  try {
+    const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, randomSamplingWalPath: wal });
+    expect(result.removedFiles).toContain(wal);
+    expect(existsSync(wal)).toBe(false);
+  } finally { rmSync(sibling, { recursive: true, force: true }); }
 });

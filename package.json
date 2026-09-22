@@ -1,12 +1,13 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.16",
+  "version": "10.0.17",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
     "releaseRuntimeBuildScript": "build:runtime:packages"
   },
   "scripts": {
+    "preinstall": "node packages/cli/scripts/verify-node-sqlite-runtime.mjs",
     "promotion:closes": "node scripts/promotion-closes.mjs",
     "build": "node scripts/build.mjs",
     "build:packages": "turbo build",

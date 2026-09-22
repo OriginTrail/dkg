@@ -8,9 +8,12 @@ import {
   computeCatalogRoot,
   contextGraphCatalogUri,
   createGraphKnowledgeAssetScope,
+  decodeStorageACK,
   decodePublishIntent,
   encodePublishIntent,
+  isStorageACKDecline,
   knowledgeAssetLayerGraphUri,
+  STORAGE_ACK_DECLINE_CODES,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
@@ -23,6 +26,7 @@ import {
   computeFlatKCMerkleLeafCountV10,
   computeFlatKCRootV10,
 } from '../src/merkle.js';
+import { swmKaWriteLockKey, withKeyedLocks } from '../src/keyed-lock.js';
 
 const CONTEXT_GRAPH_ID = '42';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -63,6 +67,154 @@ function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'obj
 }
 
 describe('graph-scoped publish storage ACKs', () => {
+  it.each([
+    { label: 'clean capability refusal', throwAfterCommit: false, expectedSettle: false },
+    { label: 'indeterminate post-commit failure', throwAfterCommit: true, expectedSettle: undefined },
+  ])('preserves atomic root-boundary semantics on $label', async ({
+    throwAfterCommit,
+    expectedSettle,
+  }) => {
+    const base = new OxigraphStore();
+    const quads: Quad[] = [{
+      subject: 'urn:asset:root-boundary',
+      predicate: 'urn:p:value',
+      object: '"root-boundary"',
+      graph: SWM_GRAPH,
+    }];
+    await base.insert(quads);
+    if (throwAfterCommit) {
+      const atomicReplace = base.replaceGraphAndSubject!.bind(base);
+      base.replaceGraphAndSubject = async (...args) => {
+        await atomicReplace(...args);
+        throw new Error('response lost after compound StorageACK commit');
+      };
+    }
+    const store = throwAfterCommit
+      ? base
+      : new Proxy(base, {
+          get(target, property, receiver) {
+            if (property === 'replaceGraphAndSubject') return undefined;
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+    const markerGraph = 'urn:test:rfc64-late-boundary';
+    const markerSubject = 'urn:test:rfc64-late-boundary:storage-ack';
+    const settle = vi.fn();
+    const handler = new StorageACKHandler(
+      store,
+      {
+        ...handlerConfig(ethers.Wallet.createRandom(), false),
+        resolveDurableRootAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"storage-ack"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      },
+      new TypedEventBus(),
+    );
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(quads, []),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: byteSizeFloor(quads),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    const decoded = decodeStorageACK(await handler.handler(intent, PEER));
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(settle).toHaveBeenCalledWith(expectedSettle);
+    await expect(base.query(
+      `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({
+      type: 'boolean',
+      value: throwAfterCommit,
+    });
+  });
+
+  it('serializes workspace persistence in the shared per-KA lock domain', async () => {
+    const store = new OxigraphStore();
+    const writeLocks = new Map<string, Promise<void>>();
+    const quads: Quad[] = [{
+      subject: 'urn:asset:locked',
+      predicate: 'urn:p:value',
+      object: '"locked"',
+      graph: SWM_GRAPH,
+    }];
+    await store.insert(quads);
+    const config = handlerConfig(ethers.Wallet.createRandom(), false);
+    const handler = new StorageACKHandler(
+      store,
+      { ...config, workspaceWriteLocks: writeLocks },
+      new TypedEventBus(),
+    );
+    const merkleRoot = computeFlatKCRootV10(quads, []);
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: byteSizeFloor(quads),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const lockEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const lock = withKeyedLocks(
+      writeLocks,
+      [swmKaWriteLockKey(CONTEXT_GRAPH_ID, undefined, UAL)],
+      async () => {
+        entered();
+        await blocked;
+      },
+    );
+    await lockEntered;
+
+    let settled = false;
+    const response = handler.handler(intent, PEER).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+
+    release();
+    await lock;
+    await expect(response).resolves.toBeInstanceOf(Uint8Array);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ kaUal: UAL });
+  });
+
   it.each([
     {
       label: 'content without triples',
@@ -276,8 +428,11 @@ describe('graph-scoped publish storage ACKs', () => {
       publicTripleCount: quads.length,
       privateTripleCount: 0,
       publisherPeerId: 'publisher-peer',
-      accessPolicy: 'allowList',
-      allowedPeers: ['12D3KooWReader'],
+      access: {
+        kind: 'persisted',
+        accessPolicy: 'allowList',
+        allowedPeers: ['12D3KooWReader'],
+      },
     });
   });
 

@@ -1903,11 +1903,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // distinct from transient authority unavailability at the HTTP boundary;
     // both fail closed and leave no subscription or catch-up-job side effect.
     const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
-    let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphReadAuthority>>;
+    let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphSubscriptionBootstrapAuthority>>;
     try {
-      readAuthority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
+      readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
         callerAgentAddress: callerAddr,
         allowSubscriptionFallback: false,
+        // This explicit admission boundary may spend a bounded cold lookup to
+        // populate the chain adapter's reverse name-hash index. Ordinary
+        // queries and restart rehydration retain the short fail-closed timeout.
       });
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
@@ -1926,6 +1929,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
+    const admittedOnChainId = readAuthority.onChainId?.toString(10);
     // Preview the only existing-live-state promotion rule without mutating the
     // agent. The authoritative normalization still happens in
     // subscribeToContextGraph below, after the shutdown admission guard and
@@ -1943,6 +1947,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           acceptingJobs: daemonState.catchupAcceptingJobs,
           subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
             syncMode: requestedSyncMode,
+            ...(admittedOnChainId === undefined ? {} : { onChainId: admittedOnChainId }),
           }).syncMode,
         });
         if (!lifetimeMutation.accepted) {
@@ -1994,6 +1999,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           acceptingJobs: daemonState.catchupAcceptingJobs,
           subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
             syncMode: requestedSyncMode,
+            ...(admittedOnChainId === undefined ? {} : { onChainId: admittedOnChainId }),
           }).syncMode,
         });
         if (!lifetimeMutation.accepted) {
@@ -2070,6 +2076,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
       syncMode: requestedSyncMode,
+      ...(admittedOnChainId === undefined ? {} : { onChainId: admittedOnChainId }),
     }).syncMode;
     console.log(
       `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode} forceCatchup=${forceCatchup}`,

@@ -1,3 +1,5 @@
+import schema from '../src/schemas/epcis-json-schema.json' with { type: 'json' };
+import { epcisDocumentForValidation } from '../src/capture-event-types.js';
 import { describe, it, expect } from 'vitest';
 import {
   createValidator,
@@ -15,6 +17,21 @@ import {
 
 describe('EPCIS validation', () => {
   const validator = createValidator();
+
+  it('adapts only event-list discriminators without changing the document or bundled schema', () => {
+    const canonical = 'https://gs1.github.io/EPCIS/ObjectEvent';
+    const extension = Object.freeze({ type: canonical, category: ['ObjectEvent'] });
+    const event = Object.freeze({ ...VALID_OBJECT_EVENT_DOC.epcisBody!.eventList[0], type: canonical, 'https://example.org/detail': extension });
+    const document = Object.freeze({ ...VALID_OBJECT_EVENT_DOC, epcisBody: Object.freeze({ eventList: Object.freeze([event]) }) });
+    const schemaBefore = structuredClone(schema);
+    expect(epcisDocumentForValidation(document)).toMatchObject({
+      epcisBody: { eventList: [{ type: 'ObjectEvent', 'https://example.org/detail': { type: canonical, category: ['ObjectEvent'] } }] },
+    });
+    expect(validator.validate(document).valid).toBe(true);
+    expect(document.epcisBody.eventList[0].type).toBe(canonical);
+    expect(document.epcisBody.eventList[0]['https://example.org/detail']).toBe(extension);
+    expect(schema).toEqual(schemaBefore);
+  });
 
   it('accepts a valid ObjectEvent document', () => {
     const result = validator.validate(VALID_OBJECT_EVENT_DOC);

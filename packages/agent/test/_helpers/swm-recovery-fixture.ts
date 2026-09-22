@@ -3,12 +3,14 @@ import {
   contextGraphWorkspaceMetaGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
+import type { SyncPhase } from '../../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../../src/sync/requester/page-fetch.js';
 import { createSharedMemorySnapshotMaterializer } from
   '../../src/sync/requester/swm-snapshot-materializer.js';
+export { MemoryWorkspaceSnapshotStore as MemorySnapshotStore } from
+  './memory-workspace-snapshot-store.js';
 
 export const CG = 'ws00-recovery';
 export const WS = contextGraphWorkspaceGraphUri(CG);
@@ -24,23 +26,11 @@ export const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 export const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7';
 export const UAL_2 = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/8';
 
-export class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
-  readonly snapshots = new Map<string, Quad[]>();
-
-  async putSnapshot(input: { readonly digest: string; readonly quads: readonly Quad[] }) {
-    this.snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
-    return { ref: input.digest, byteLength: 0 };
-  }
-
-  async getSnapshot(ref: string): Promise<Quad[] | null> {
-    return this.snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null;
-  }
-}
-
 export function recoveryPage(quads: Quad[], completed = true): SyncPageResult {
   return {
     quads,
     bytesReceived: 0,
+    timedOut: false,
     resumedFromOffset: 0,
     nextOffset: quads.length,
     checkpointKey: 'k',
@@ -100,7 +90,7 @@ export function makeRecoveryDeps(
       _peerId: string,
       _contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ): Promise<SyncPageResult> => recoveryPage(
       phase === 'data' ? sourceData : sourceMeta,
     ),

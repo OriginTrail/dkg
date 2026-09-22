@@ -41,6 +41,8 @@ import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryEligibility } from
+  '../src/finalization-recovery-eligibility.js';
 import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 import { protobufScalarToBigInt } from '../src/protobuf-scalars.js';
 import {
@@ -147,10 +149,12 @@ async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): P
 function recoveryOptions(
   recoveryStore: FinalizationRecoveryStore,
   localTopicOnChainContextGraphId = '42',
+  finalizationRecoveryEligibility: FinalizationRecoveryEligibility = async () => true,
 ) {
   return {
     recoveryStore,
     resolveContextGraphOnChainId: async () => localTopicOnChainContextGraphId,
+    finalizationRecoveryEligibility,
   };
 }
 
@@ -636,6 +640,42 @@ describe('graph-scoped finalization handler', () => {
       } }`,
     );
     expect(metadata).toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it.each([
+    {
+      label: 'accepts an authenticated publisher envelope',
+      sourcePeerId: '12D3KooWPublisher',
+      expectedPolicy: 'allowList',
+      expectsReader: true,
+    },
+    {
+      label: 'ignores the same envelope from a relay',
+      sourcePeerId: '12D3KooWUntrustedRelay',
+      expectedPolicy: 'ownerOnly',
+      expectsReader: false,
+    },
+  ])('$label when private legacy workspace metadata omitted accessPolicy', async ({
+    sourcePeerId,
+    expectedPolicy,
+    expectsReader,
+  }) => {
+    const { message } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...message,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWReader'],
+    }), CG, sourcePeerId);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + `<http://dkg.io/ontology/accessPolicy> "${expectedPolicy}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + '<http://dkg.io/ontology/allowedPeer> "12D3KooWReader" } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: expectsReader });
   });
 
   it('ignores an access envelope supplied by a relay that is not the durable owner', async () => {
@@ -1246,7 +1286,10 @@ describe('graph-scoped finalization handler', () => {
       );
 
       const query = store.query.bind(store);
-      let busyReads = 2;
+      // Publisher-authority observation now owns the first store probe. Keep
+      // both materialization attempts busy as well so this still exercises the
+      // durable pre-verification timeout path.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
@@ -1370,7 +1413,8 @@ describe('graph-scoped finalization handler', () => {
         chain,
         recoveryOptions(inbox),
       );
-      let busyReads = 2;
+      // One authority probe precedes the two bounded materialization attempts.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
@@ -1412,7 +1456,7 @@ describe('graph-scoped finalization handler', () => {
 
       await vi.waitFor(async () => {
         expect(await inbox!.list()).toMatchObject([{ state: 'SETTLED' }]);
-      });
+      }, { timeout: 7_000 });
       expect(await store.countQuads(vmGraph)).toBe(2);
       const health = await inbox.health();
       expect(health.ready).toBe(true);
@@ -1611,7 +1655,7 @@ describe('graph-scoped finalization handler', () => {
         listDue: async () => [],
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
-        recordAttempt: async () => {},
+        recordAttempt: async () => ({ status: 'stale' }),
         health: async () => ({
           available: true,
           closed: false,
@@ -1684,10 +1728,15 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
 
       boundContextGraphId = 42n;
+      const [deferred] = await inbox.list();
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        Math.max(0, (deferred?.nextAttemptAt ?? Date.now()) - Date.now()) + 10,
+      ));
       await recoveryHandler.handleFinalizationMessage(
         encodeFinalizationMessage(message),
         CG,
@@ -1736,7 +1785,7 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
     } finally {
       await closeInbox(inbox);
@@ -2407,6 +2456,53 @@ describe('graph-scoped finalization handler', () => {
       <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
       FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
     `);
+  });
+
+  it('threads exact-fetch version evidence without repeating version RPCs', async () => {
+    const { message, vmGraph } = await stageGraph();
+    const active = vi.fn(async () => true);
+    const access = vi.fn(async () => 0);
+    const getMerkleRootCount = vi.fn(async () => {
+      throw new Error('coherent snapshot must replace root-count rereads');
+    });
+    const getLatestMerkleRoot = vi.fn(async () => {
+      throw new Error('coherent snapshot must replace latest-root rereads');
+    });
+    const getLatestMerkleRootAuthor = vi.fn(async () => {
+      throw new Error('coherent snapshot must replace author rereads');
+    });
+    const knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
+    const publicHandler = makePublicReconcileHandler(message, {
+      isContextGraphActiveOnChain: active,
+      getContextGraphAccessPolicy: access,
+      getMerkleRootCount,
+      getLatestMerkleRoot,
+      getLatestMerkleRootAuthor,
+      knowledgeAssetVersionSnapshotIsCurrent,
+    });
+
+    await expect(reconcileGraphScoped(publicHandler, message, {
+      assertionVersion: 1n,
+      versionSnapshot: {
+        knowledgeAssetId: PACKED_KA_ID,
+        latestRoot: message.kcMerkleRoot,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 123,
+        blockHash: `0x${'44'.repeat(32)}`,
+        knowledgeAssetStorageAddress: `0x${'33'.repeat(20)}`,
+        knowledgeAssetStorageGeneration: 1,
+      },
+    })).resolves.toBe('promoted');
+
+    expect(active).toHaveBeenCalledOnce();
+    expect(access).toHaveBeenCalledOnce();
+    expect(getMerkleRootCount).not.toHaveBeenCalled();
+    expect(getLatestMerkleRoot).not.toHaveBeenCalled();
+    expect(getLatestMerkleRootAuthor).not.toHaveBeenCalled();
+    expect(knowledgeAssetVersionSnapshotIsCurrent).toHaveBeenCalledOnce();
+    expect(await store.countQuads(vmGraph)).toBe(2);
   });
 
   it('retires the exact SWM twin after receiptless public chain promotion', async () => {
@@ -3747,7 +3843,7 @@ describe('graph-scoped finalization handler', () => {
       graphManager,
       contextGraphId: CG,
       kaUal: UAL,
-    })).rejects.toThrow(/head carries 2 shareOperationId values/);
+    })).rejects.toThrow(/head references a missing share operation/);
 
     const internals = handler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
@@ -3766,6 +3862,53 @@ describe('graph-scoped finalization handler', () => {
       authorAddress: AUTHOR,
     }, createOperationContext('system')))
       .resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('resolves an equivalent storage-ACK workspace-head alias during finalization', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const equivalentOperationId = 'storage-ack-equivalent';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: equivalentOperationId,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      quads: [{
+        subject: 'urn:asset:one',
+        predicate: 'urn:predicate:value',
+        object: '"one"',
+        graph: swmGraph,
+      }, {
+        subject: 'urn:asset:two',
+        predicate: 'urn:predicate:value',
+        object: '"two"',
+        graph: swmGraph,
+      }],
+      privateMerkleRoot: message.privateMerkleRoot,
+      privateTripleCount: message.privateTripleCount,
+      publisherPeerId: '12D3KooWPublisher',
+      timestamp: new Date(Date.now() + 1_000),
+    });
+    await store.insert([{
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(equivalentOperationId),
+    }]);
+
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: equivalentOperationId });
+    await expect(handler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    )).resolves.toBeUndefined();
 
     expect(await store.countQuads(vmGraph)).toBe(2);
   });

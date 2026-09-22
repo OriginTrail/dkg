@@ -36,10 +36,13 @@ import {
   resolveReceiptTimeoutMs,
   resolveTxSerializerStallAfterMs,
   RPC_READ_STALL_TIMEOUT_MS,
+  CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
   RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS,
   RPC_RECEIPT_POLL_INTERVAL_MS,
   RPC_RECEIPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
+import { DEFAULT_RPC_REQUEST_GOVERNOR_POLICY } from '../src/rpc-request-governor.js';
+import { CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS } from '../src/evm-context-graph-name-hash-fence.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -72,6 +75,16 @@ it('defaults an omitted receipt deadline to ten minutes', () => {
 it('rejects an explicitly invalid receipt deadline at the adapter boundary', () => {
   expect(() => new EVMChainAdapter(minimalConfig({ receiptTimeoutMs: 999 })))
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
+});
+
+it('accepts a narrow RPC admission capability without a concrete governor', () => {
+  const acquireActiveRequest = vi.fn(async () => undefined);
+  const adapter = new EVMChainAdapter(minimalConfig({
+    rpcRequestAdmission: { acquireActiveRequest },
+  }));
+
+  expect(adapter).toBeInstanceOf(EVMChainAdapter);
+  adapter.destroy();
 });
 
 it('derives the signer-lane no-progress threshold from the receipt deadline', () => {
@@ -118,16 +131,16 @@ it('retries a transient finality read inside the receipt deadline', async () => 
     adapter.providers = [{
       getNetwork: async () => ({ chainId: 31337n }),
       getTransactionReceipt: async () => receipt,
-      getBlockNumber: async () => {
+      // At the default depth 1 the finality read IS the block-hash read (no eth_blockNumber).
+      getBlock: async () => {
         finalityAttempt += 1;
         if (finalityAttempt === 1) {
           const error = new Error('temporary finality RPC failure') as Error & { code: string };
           error.code = 'NETWORK_ERROR';
           throw error;
         }
-        return 10;
+        return { number: 10, hash: blockHash };
       },
-      getBlock: async () => ({ number: 10, hash: blockHash }),
     }];
     const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish');
     await vi.advanceTimersByTimeAsync(RPC_RECEIPT_POLL_INTERVAL_MS + 1);
@@ -148,8 +161,7 @@ it('bounds a stalled finality read by the receipt deadline', async () => {
     adapter.providers = [{
       getNetwork: async () => ({ chainId: 31337n }),
       getTransactionReceipt: async () => receipt,
-      getBlockNumber: async () => new Promise<number>(() => {}),
-      getBlock: async () => ({ number: 10, hash: blockHash }),
+      getBlock: async () => new Promise<never>(() => {}),
     }];
     const outcome = adapter.waitForReceiptWithFailover(receipt.hash, 'publish').then(
       (value: unknown) => ({ ok: true as const, value }),
@@ -2033,8 +2045,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2063,6 +2077,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2081,7 +2097,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
-        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageChanged',
+        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageRemoved',
       ));
     } finally {
       warnSpy.mockRestore();
@@ -2121,8 +2137,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       interface: new ethers.Interface([
         'event NewContract(string contractName, address newContractAddress)',
         'event ContractChanged(string contractName, address newContractAddress)',
+        'event ContractRemoved(string contractName, address contractAddress)',
         'event NewAssetStorage(string contractName, address newContractAddress)',
         'event AssetStorageChanged(string contractName, address newContractAddress)',
+        'event AssetStorageRemoved(string contractName, address contractAddress)',
       ]),
       getAddress: async () => '0x0000000000000000000000000000000000000001',
     };
@@ -2143,8 +2161,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const changed = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
       'ContextGraphs',
@@ -2198,8 +2218,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
         iface.getEvent('ContractChanged')!.topicHash,
         iface.getEvent('NewContract')!.topicHash,
+        iface.getEvent('ContractRemoved')!.topicHash,
         iface.getEvent('AssetStorageChanged')!.topicHash,
         iface.getEvent('NewAssetStorage')!.topicHash,
+        iface.getEvent('AssetStorageRemoved')!.topicHash,
       ]);
       expect(a.contracts.contextGraphs).toEqual({ stale: true });
       expect(a.cachedKav10Address).toBeUndefined();
@@ -2217,8 +2239,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2304,6 +2328,48 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(returned).toBe(freshPair);
     expect((a as any).contracts.randomSampling).toBe(freshPair.rs);
     expect((a as any).contracts.randomSamplingStorage).toBe(freshPair.rss);
+  });
+
+  it('Random Sampling read context fails closed when a resolved handle has no string target', async () => {
+    // The prover reuses a remembered read only while the address-derived id is
+    // available, so "cannot tell" must land on the side of a chain re-read.
+    const a = new EVMChainAdapter(minimalConfig());
+    const pairs = [
+      { rs: { opaque: 'rs-1' }, rss: { opaque: 'rss-1' } },
+      { rs: { opaque: 'rs-2' }, rss: { opaque: 'rss-2' } },
+    ];
+    (a as any).randomSamplingPairCache = {
+      currentGeneration: () => 0,
+      get: async () => pairs.shift(),
+    };
+    const reader = a.getRandomSamplingReadContextReader();
+
+    await (a as any).resolveAndAssignRandomSamplingPair();
+    expect(reader.getRandomSamplingBindingId()).toBeUndefined();
+    await (a as any).resolveAndAssignRandomSamplingPair();
+    expect(reader.getRandomSamplingBindingId()).toBeUndefined();
+  });
+
+  it('getCurrentEpoch resolves Chronos once and reads the live epoch', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const chronos = { target: '0x0000000000000000000000000000000000000004' };
+    const resolveContract = vi.spyOn(a as any, 'resolveContract').mockResolvedValue(chronos);
+    const readContract = vi.spyOn(a as any, 'readContract')
+      .mockResolvedValueOnce('17')
+      .mockResolvedValueOnce(18n);
+
+    await expect(a.getCurrentEpoch()).resolves.toBe(17n);
+    await expect(a.getCurrentEpoch()).resolves.toBe(18n);
+
+    expect(resolveContract).toHaveBeenCalledOnce();
+    expect(resolveContract).toHaveBeenCalledWith('Chronos');
+    expect(readContract).toHaveBeenNthCalledWith(
+      1,
+      chronos,
+      'chronos.getCurrentEpoch',
+      'getCurrentEpoch',
+    );
+    expect(readContract).toHaveBeenCalledTimes(2);
   });
 
   it('isContractMissingRevert recognises both the legacy (ZeroAddress→string) shape and ContractDoesNotExist revert (Codex N16)', () => {
@@ -2902,11 +2968,45 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
 
     const first = a.getEvmChainId();
     const firstTimeout = expect(first).rejects.toThrow('configured chainId validation timed out');
-    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS);
     await firstTimeout;
 
     await expect(a.getEvmChainId()).resolves.toBe(31337n);
     expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets a healthy-but-slow configured chainId validation finish', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig({ staticNetwork: true }));
+    // Governor admission is awaited inside the RPC's own timeout window, so a
+    // queued-but-healthy eth_chainId can sit far past the 4s point-read budget
+    // before it is dispatched. It must still be allowed to answer.
+    const provider = {
+      send: vi.fn(() => new Promise((resolve) => {
+        setTimeout(() => resolve('0x7a69'), RPC_READ_STALL_TIMEOUT_MS + 100);
+      })),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+
+    const pending = a.getEvmChainId();
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 100);
+    await expect(pending).resolves.toBe(31337n);
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('budgets the chainId gate above every local admission delay', () => {
+    const policy = DEFAULT_RPC_REQUEST_GOVERNOR_POLICY;
+    // Worst-case foreground queue wait, spent inside the gate's own window.
+    expect(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS).toBeGreaterThan(
+      (policy.maxQueueSize / policy.maxRequestsPerSecond) * 1000,
+    );
+    // Background admission is additionally gated by startup jitter.
+    expect(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS).toBeGreaterThan(policy.startupJitterMs);
+    // Stay under the fence's own budget so its surfaced label stays deterministic.
+    expect(CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS).toBeLessThan(
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
+    );
   });
 });
 
@@ -4167,6 +4267,31 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.cause).toBeDefined(); // original error preserved
   });
 
+  it('names the publish receipt block timestamp read by the receipt block hash', async () => {
+    // The parser must pass the canonical receipt block hash through to the
+    // timestamp reader; the separate redundant-head-read suite pins cache reuse.
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    const kasInterface = new ethers.Interface(['event KnowledgeAssetCreated(uint256 id, address author)']);
+    const created = kasInterface.encodeEventLog('KnowledgeAssetCreated', [55n, ethers.ZeroAddress]);
+    const blockHash = `0x${'cd'.repeat(32)}`;
+    (a as any).contracts.knowledgeAssetStorage = { target: PARITY_KA_ADDRESS, interface: kasInterface };
+    (a as any).dispatchSerializedV10Write = recorder(async () => ({
+      hash: `0x${'ab'.repeat(32)}`,
+      blockNumber: 123,
+      blockHash,
+      index: 0,
+      logs: [{ address: PARITY_KA_ADDRESS, topics: created.topics, data: created.data }],
+    }));
+    const getFinalizedBlockTimestamp = recorder(async (..._args: unknown[]) => 1_700);
+    (a as any).getFinalizedBlockTimestamp = getFinalizedBlockTimestamp;
+
+    const result = await a.createKnowledgeAssets(makeV10PublishParams());
+
+    expect(result.kaId).toBe(55n);
+    expect(result.blockTimestamp).toBe(1_700);
+    expect(getFinalizedBlockTimestamp.calls).toEqual([[123, blockHash]]);
+  });
+
   it('kill-switch keeps legacy routing balance-blind but cannot bypass strict publish planning', async () => {
     const prev = process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION;
     process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION = '1';
@@ -5381,6 +5506,24 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       randomSpy.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it('does not retry the provider set when local RPC capacity is saturated', async () => {
+    const { a, ensureSpy, signer } = makeRecoveryAdapter();
+    const queueFull = Object.assign(new Error('RPC request queue is full'), {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
+    const populateAndSign = recorder(async () => { throw queueFull; });
+    (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+    await expect(
+      (a as any).populateAndSignV10WithAllowanceRecovery(
+        signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
+      ),
+    ).rejects.toBe(queueFull);
+
+    expect(populateAndSign.calls).toHaveLength(1);
+    expect(ensureSpy.calls).toEqual([]);
   });
 
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {

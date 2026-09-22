@@ -107,6 +107,21 @@ describe('bounded SPARQL analysis cache policy', () => {
     expect(cache.has('query-256')).toBe(true);
   });
 
+  it('invalidates one entry and releases its capacity without evicting another cached value', () => {
+    const cache = new BoundedLruCache<string, object>(2);
+    const survivor = {};
+    cache.set('invalid', {});
+    cache.set('survivor', survivor);
+    expect(cache.delete('invalid')).toBe(true);
+    expect(cache.delete('invalid')).toBe(false);
+    expect(cache.has('invalid')).toBe(false);
+    expect(cache.get('invalid')).toBeUndefined();
+    expect(cache.size).toBe(1);
+    cache.set('replacement', {});
+    expect(cache.size).toBe(2);
+    expect(cache.get('survivor')).toBe(survivor);
+  });
+
   it('does not admit a source over 64 KiB', () => {
     const cache = createCache();
     const oversized = 'x'.repeat(maxSourceLength + 1);
@@ -143,6 +158,18 @@ describe('bounded SPARQL analysis cache policy', () => {
     expect(cache.size).toBe(1);
     expect(cache.get('kept')).toBe(2);
     expect(cache.has('blocked')).toBe(false);
+  });
+
+  it('supports explicit entry and lifecycle invalidation', () => {
+    const cache = createCache();
+    cache.set('first', {});
+    cache.set('second', {});
+    expect(cache.delete('first')).toBe(true);
+    expect(cache.delete('missing')).toBe(false);
+    expect(cache.has('first')).toBe(false);
+    cache.clear();
+    expect(cache.size).toBe(0);
+    expect(cache.has('second')).toBe(false);
   });
 
   const smallMaxSourceLength = 64 * 1024;

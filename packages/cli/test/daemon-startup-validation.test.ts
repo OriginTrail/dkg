@@ -90,6 +90,32 @@ describe('daemon startup network validation', () => {
     tempHome = undefined;
   });
 
+  it('rejects an unsupported Node runtime before agent creation', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-node-runtime-startup-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process, 'getBuiltinModule').mockImplementation(() => undefined);
+
+    await expect(runDaemonInner(true, {
+      name: 'node-runtime-startup-test',
+      listenPort: 0,
+      nodeRole: 'edge',
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(
+      'Node runtime preflight failed',
+    );
+
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+    expect(stdoutSpy.mock.calls.map(call => String(call[0])).join('')).toContain(
+      'FATAL: node:sqlite is unavailable',
+    );
+  });
+
   it('exits before agent creation when the selected network is pre-deployment', async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dkg-predeployment-startup-'));
     originalDkgHome = process.env.DKG_HOME;
@@ -247,7 +273,58 @@ describe('daemon startup network validation', () => {
         load: expect.any(Function),
         save: expect.any(Function),
       },
+      localContextGraphAuthorityHistoryStore: {
+        load: expect.any(Function),
+        save: expect.any(Function),
+        delete: expect.any(Function),
+      },
+      localContextGraphAuthorityIndexStore: {
+        load: expect.any(Function),
+        compareAndSwap: expect.any(Function),
+        invalidate: expect.any(Function),
+      },
+      chainEventLogStore: {
+        load: expect.any(Function),
+        commit: expect.any(Function),
+        tombstone: expect.any(Function),
+        readEvents: expect.any(Function),
+        blockHashAt: expect.any(Function),
+      },
     });
+    const authorityCheckpoint = {
+      version: 1,
+      state: { throughBlockNumber: 30 },
+      integrity: `0x${'11'.repeat(32)}`,
+    };
+    await createArg.localContextGraphAuthorityHistoryStore.save(
+      'daemon-startup-wiring',
+      authorityCheckpoint,
+    );
+    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+      .resolves.toEqual(authorityCheckpoint);
+    await createArg.localContextGraphAuthorityHistoryStore.delete('daemon-startup-wiring');
+    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+      .resolves.toBeUndefined();
+    const indexCheckpoint = {
+      version: 1,
+      cursor: { throughBlockNumber: 30 },
+      integrity: `0x${'22'.repeat(32)}`,
+    };
+    await expect(createArg.localContextGraphAuthorityIndexStore.compareAndSwap(
+      'daemon-startup-index-wiring',
+      undefined,
+      indexCheckpoint,
+    )).resolves.toBe(1);
+    await expect(createArg.localContextGraphAuthorityIndexStore.load(
+      'daemon-startup-index-wiring',
+    )).resolves.toEqual({ token: 1, value: indexCheckpoint });
+    await expect(createArg.localContextGraphAuthorityIndexStore.invalidate(
+      'daemon-startup-index-wiring',
+      1,
+    )).resolves.toBe(2);
+    await expect(createArg.localContextGraphAuthorityIndexStore.load(
+      'daemon-startup-index-wiring',
+    )).resolves.toEqual({ token: 2, value: null });
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
       chainId: 'gnosis:100',
       hubAddress: '0x1234567890123456789012345678901234567890',

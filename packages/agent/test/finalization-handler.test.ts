@@ -76,8 +76,15 @@ describe('FinalizationHandler', () => {
     });
     const author = '0x1111111111111111111111111111111111111111';
     const packedKaId = (BigInt(author) << 96n) | 7n;
+    const ual = `did:dkg:otp:20430/${author}/7`;
+    await store.insert([{
+      subject: `${ual}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/assertionVersion',
+      object: '"1"',
+      graph: new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH),
+    } as Quad]);
     await configured.handleFinalizationMessage(encodeFinalizationMessage({
-      ual: `did:dkg:otp:20430/${author}/7`,
+      ual,
       contextGraphId: CONTEXT_GRAPH,
       kcMerkleRoot: new Uint8Array(32),
       txHash: `0x${'ab'.repeat(32)}`,
@@ -637,6 +644,73 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
       `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> <${cgDid}> } }`,
     );
     expect(catalogManifestRoot.type === 'boolean' && catalogManifestRoot.value).toBe(false);
+  });
+
+  it('uses one finalized creation pair for private catalog regeneration', async () => {
+    const store = new OxigraphStore();
+    await seedSwmSnapshot(store);
+    const merkleRoot = computeFlatKCRootV10(
+      [
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+      [],
+    );
+    const chain = makeBindingChain(42n) as ChainAdapter & Record<string, unknown>;
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => ({
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+      accessPolicy: 1,
+    });
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      throw new Error('split name read');
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      throw new Error('split policy read');
+    };
+    const handler = new FinalizationHandler(store, chain);
+
+    await expect(handler.handleChainReconciledKC(
+      input(merkleRoot),
+      createOperationContext('system'),
+    )).resolves.toBe('promoted');
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+  });
+
+  it('fails closed without split reads when the finalized creation proof fails', async () => {
+    const store = new OxigraphStore();
+    await seedSwmSnapshot(store);
+    const merkleRoot = computeFlatKCRootV10(
+      [
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+      [],
+    );
+    const chain = makeBindingChain(42n) as ChainAdapter & Record<string, unknown>;
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => {
+      throw new Error('lineage changed');
+    };
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      return 1;
+    };
+    const handler = new FinalizationHandler(store, chain);
+
+    await expect(handler.handleChainReconciledKC(
+      input(merkleRoot),
+      createOperationContext('system'),
+    )).resolves.toBe('no-swm');
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
   });
 
   it('does not regenerate the private-CG catalog floor for public on-chain access policy', async () => {

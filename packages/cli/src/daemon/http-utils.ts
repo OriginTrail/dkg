@@ -113,6 +113,49 @@ export function classifyStoreUnavailable(
   };
 }
 
+/**
+ * Kept structural for the same package-boundary reason as
+ * CALLER_SPARQL_REJECTED in routes/query-error.ts: the agent emits this
+ * internal marker, while the daemon owns its public HTTP representation.
+ */
+export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
+  'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE';
+
+export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return false;
+  try {
+    return Reflect.get(err, 'code') === CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE
+      && Reflect.get(err, 'retryable') === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Uniform retryable response for an unresolvable Context Graph read authority.
+ * Shared by every route that reaches `DKGAgent.query` with a scoped
+ * `contextGraphId`, so a chain/metadata outage is never reported as a 500 and
+ * the graph id, authority source, and internal reason stay out of the body.
+ */
+export function respondIfContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  err: unknown,
+): boolean {
+  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  jsonResponse(
+    res,
+    503,
+    {
+      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '3' },
+  );
+  return true;
+}
+
 export function respondIfStoreUnavailable(
   res: ServerResponse,
   err: unknown,
@@ -177,6 +220,11 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.
+  } else if (respondIfContextGraphReadAuthorityUnavailable(res, err)) {
+    // A scoped read whose authority source could not answer is retryable, not a
+    // server bug: any route that RE-THROWS gets the same uniform 503 the
+    // `/api/query` boundary returns instead of a 500 that also echoes the
+    // internal authority source/reason in its message.
   } else if (respondIfChainRpcTransportError(res, err)) {
     // Transient transport exhaustion (RPC_ENDPOINTS_EXHAUSTED /
     // RPC_RECEIPT_LOOKUP_FAILED → 503, TIMEOUT → 504) is retryable — a route
@@ -341,6 +389,7 @@ export function sanitizeRpcMessage(msg: string): string {
  * keyed STRICTLY on `err.code` (never message text):
  *   - `RPC_ENDPOINTS_EXHAUSTED`   → 503 (all configured endpoints failed over)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` → 503 (receipt lookup failed on every endpoint)
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` → 503 (operation outcome is conservative)
  *   - `TIMEOUT`                   → 504 (receipt wait / RPC request timed out)
  *
  * Returns `undefined` for anything else. On-chain reverts (`CALL_EXCEPTION`),
@@ -386,6 +435,17 @@ export function classifyChainRpcTransportStatus(
           code,
         ),
       };
+    case "RPC_REQUEST_GOVERNOR_QUEUE_FULL":
+      return {
+        status: 503,
+        body: {
+          ...transportBody(msg || "Chain RPC request capacity is temporarily full.", code),
+          retryable: true,
+          // Admission failed for this raw attempt, but the containing operation
+          // may already have reached another endpoint (especially writes).
+          outcome: "indeterminate",
+        },
+      };
     case "RPC_TIMEOUT":
       // Internal, chain-namespaced timeout code. Expose the public/legacy
       // `code: "TIMEOUT"` in the 504 body (clients key on that), keeping the
@@ -420,6 +480,9 @@ export function respondIfChainRpcTransportError(
 ): boolean {
   const transport = classifyChainRpcTransportStatus(err);
   if (!transport) return false;
+  if (transport.body.code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL') {
+    res.setHeader('Retry-After', '1');
+  }
   jsonResponse(res, transport.status, extraBody ? { ...extraBody, ...transport.body } : transport.body);
   return true;
 }
@@ -1835,10 +1898,12 @@ export function applyServerLimits(
 
 /**
  * Cheap GET/HEAD paths exempt from concurrency admission control — liveness /
- * health / manifest handlers that must stay answerable under load (monitoring,
+ * manifest handlers that must stay answerable under load (monitoring,
  * `dkg status`, doctor, MCP setup probes), plus the long-lived `/api/events`
  * SSE stream (which must NOT hold an in-flight slot for the connection's whole
- * lifetime, or a few open dashboard tabs would exhaust the pool).
+ * lifetime, or a few open dashboard tabs would exhaust the pool). RPC health
+ * GET is intentionally absent because it performs outbound work; only its
+ * cheap HEAD form is exempt.
  *
  * NOTE: this is one of several HTTP path-category tables in the daemon (see
  * `auth.ts` public paths, `isLoopbackRateLimitExemptPath`, and the default
@@ -1847,7 +1912,6 @@ export function applyServerLimits(
  */
 const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
   '/api/status',
-  '/api/chain/rpc-health',
   '/api/events',
   '/.well-known/skill.md',
   '/.well-known/skill-importer.md',
@@ -1863,6 +1927,7 @@ const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
  */
 export function isAdmissionExempt(method: string | undefined, pathname: string): boolean {
   if (method === 'OPTIONS') return true;
+  if (method === 'HEAD' && pathname === '/api/chain/rpc-health') return true;
   if ((method === 'GET' || method === 'HEAD') && ADMISSION_EXEMPT_GET_PATHS.has(pathname)) return true;
   return false;
 }

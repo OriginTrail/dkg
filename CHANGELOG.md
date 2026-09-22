@@ -4,9 +4,242 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-### Documentation corrections
+## [10.0.17] - 2026-09-22
 
-- Since the curator/member author-resolution change (#1780), calling `publishFromFinalizedAssertion(cg, name)` without an explicit `agentAddress` can select a single finalized member author's Knowledge Asset from stored metadata. A call that previously returned 409 because the node did not author the asset can now publish it, spending the publishing node wallet's gas/TRAC, subject to on-chain publish authorization. Callers that require a particular author must pass that author's `agentAddress`; the explicit selector is authoritative and is never substituted (#1785).
+An RPC-bounded RFC-64 operational-hardening release. RFC-64 remains active by
+default for persistent nodes and keeps its 10.0.16 responsibility model, while
+authority history is collected through one durable contract-wide index,
+unchanged Context Graphs skip ordinary per-graph reconciliation, and chain
+reads pass through one process-wide admission budget. Registry discovery is
+split into a current live lane and a durable, bounded historical repair lane.
+Operators gain restart-stable canary controls, privacy-safe RPC attribution,
+and status evidence. **No smart-contract, ABI, wire-protocol, or deployment
+registry changes are required.**
+
+### Upgrading from 10.0.16
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| RFC-64 remains active by default on persistent nodes | Omitting RFC-64 controls still selects catalog authority for root-scope responsibilities; this release reduces its control-plane RPC cost without disabling SWM catalog synchronization | No activation change is required. Confirm `/api/status` reports effective `catalog` mode and `legacySyncAllowed: false` for intended root CGs |
+| Authority reads use a durable contract-wide index | The first lookup on a fresh node may read a larger whole-contract event page, but concurrent CGs join one scan; completed pages survive provider failure and restart, and reads at an unchanged finalized head do not replay history | Allow the initial warm-up to complete and preserve the node SQLite database. No manual migration or checkpoint reset is required |
+| Unchanged indexed CGs use delta-driven refresh | Authority changes are still selected on the five-minute cadence, while unchanged graphs normally receive one full safety reconciliation per 15 minutes instead of one every five minutes | No configuration change is required. Use consumer-attributed RPC telemetry to confirm the expected steady-state reduction |
+| Provider-pool exhaustion opens one shared RFC-64 circuit | Queued authority reads defer behind one half-open recovery probe rather than walking every endpoint per CG; authorization remains fail closed and no unauthenticated fallback is enabled | Monitor `authorityRpcCircuit` in `/api/status`; investigate sustained `open` state or repeated exhaustion rather than disabling RFC-64 |
+| Shared RPC admission is enabled by default | A node is capped at 10 requests/s by default; background RFC-64 work receives at most 20% of that sustained capacity, while foreground publishing and control operations can use the full process budget | Keep the defaults initially. Tune `chain.rpcRequestBudget` only from measured provider capacity and node telemetry |
+| Registry discovery is live-first and resumable | New Context Graph registrations remain current while historical verification advances in bounded background slices instead of replaying the full registry after restart | No migration action. Preserve the node data directory so both live and repair checkpoints survive restart |
+| RFC-64 rollout controls are restart-stable | Omission still selects `catalog`; operators can instead choose a legacy default, per-CG `shadow` or `catalog` overrides, or a global kill switch | Leave the block omitted for the normal RFC-64 default. Use bounded overrides only for staged rollout or rollback |
+| Daemon SQLite advances to schema v36 | One opaque authority-index checkpoint is stored per physical deployment scope | No manual migration is required; normal daemon startup performs the schema upgrade |
+
+### Added
+
+- **Durable shared authority index** (#2540, #2548, #2554, #2555, #2558):
+  one finalized contract-wide event stream materializes canonical owner, policy,
+  publish-authority, and participant-roster state for every Context Graph;
+  durable page checkpoints resume after restart and concurrent readers share
+  the same scan.
+- **RPC attribution** (#2549): `rpc_usage_by_consumer` reports raw `eth_call`
+  and `eth_getLogs` attempts by bounded consumer name and non-secret endpoint
+  slot while preserving the existing aggregate `rpc_usage` totals.
+- **Process-wide RPC request governor** (#2553): all daemon and publisher-wallet
+  transports share one request-count budget. Initial attempts, provider retries,
+  and endpoint fallbacks each require admission; foreground work has priority
+  over bounded background queues.
+- **Bounded resumable registry repair** (#2561): current-tail discovery runs
+  before a separate durable historical repair generation. Each invocation is
+  bounded to 30 logical pages, uses a distinct background RPC classification,
+  and acknowledges progress only after reconstructibility-critical local state
+  is durable.
+- **Bounded RFC-64 rollout controls and status** (#2557): a restart-stable
+  default mode, exact per-CG overrides, a process kill switch, authority-circuit
+  state, and fixed-cardinality shadow evidence support staged promotion without
+  exposing private identifiers.
+### Changed
+
+- RFC-64 roster authorization shares one finalized roster snapshot only within
+  a single authorization operation. Independent authorization decisions and
+  the three security gates retain live, fail-closed chain reads.
+- Finalized Knowledge Asset version evidence, Context Graph creation pairs,
+  Random Sampling period context, canonical creation receipts, and publisher
+  event horizons are reused only inside their bounded canonical bindings,
+  generations, or leases. They are not promoted into a long-lived node-wide
+  cache.
+- Publisher wallets can borrow the process one-log binding, and deterministic
+  gas-estimation reverts stop retrying equivalent providers.
+- Cumulative RPC diagnostics attribute bounded, privacy-safe consumers while
+  redacting sensitive dynamic labels and preserving issuer context.
+- Authority history pages combine six authority-bearing event signatures into
+  one `eth_getLogs` filter. The logical single-CG cold case falls from `6P`
+  requests to `P` pages (83.3%), while multiple CGs amortize across the same
+  scan; provider retries, adaptive splits, response size, and billing weights
+  can change realized credit savings.
+- Indexed snapshots materialize current authority without a separate
+  `getContextGraph` call, reducing the stable indexed snapshot shape from
+  approximately three point requests per CG to two.
+- Delta scheduling advances the shared finalized index once per cadence and
+  fully reconciles only changed, first-pass, safety-pass, or unindexed
+  responsibilities. Unchanged indexed CGs perform 66.7% fewer full per-graph
+  reconciliations over a 15-minute steady-state interval; this is not a claim
+  of 66.7% fewer whole-node RPC calls.
+- Full endpoint-pool exhaustion is coordinated node-wide for RFC-64 authority
+  reads. Deterministic graph failures retain their normal handling, while
+  repeated provider exhaustion backs off and admits one half-open probe.
+- Background RFC-64 reads can lag under sustained pressure, but they cannot
+  consume the foreground reservation or bypass the shared cap through retries
+  and endpoint fallback.
+- A genuinely missing or rollback-ahead registry watermark seeds the current
+  reorg-protected tail instead of turning startup into a deployment-to-head
+  replay. An unreadable durable watermark fails closed and is retried, so a
+  transient store failure cannot skip the unscanned gap. Older stable history
+  converges independently through durable repair.
+- Simultaneous process restarts apply randomized background-only startup jitter
+  so otherwise identical nodes do not align their initial chain-read bursts.
+- RFC-64 omission behavior remains `catalog`; explicit `legacy`, `shadow`,
+  and kill-switch controls remain visible operational choices rather than
+  silent defaults.
+
+### Fixed
+
+- Random Sampling period reuse is fenced across generations and adapter
+  teardown; publisher event-horizon leases are revalidated immediately before
+  and after each dispatched event and again before cursor persistence, so
+  retirement prevents stale dispatch and cursor advancement.
+- Knowledge Asset snapshot reuse is fenced by canonical binding, and publisher
+  receipt fixtures use valid canonical contracts.
+- Authority scan progress no longer disappears on daemon restart, and stale or
+  corrupt checkpoints fail closed without erasing a valid concurrent winner.
+- Authority-index admission, cache invalidation, compare-and-swap, and
+  lifecycle teardown cannot republish stale state or multiply page scans under
+  concurrent readers.
+- RFC-64 replay and startup paths remain bounded during peer churn and
+  Blazegraph startup while preserving complete catalog recovery and fail-closed
+  authority checks.
+
+### Other notable changes
+
+- Finalization recovery parks repeated stable failures and journals recovery
+  only for locally stored Knowledge Assets.
+- Durable messenger outbox work is bounded by payload bytes, public snapshot
+  validation is reused when unchanged, and unbound Context Graph self-prime
+  work is bounded.
+- MCP client configuration can be uninstalled per client with atomic,
+  metadata-preserving edits, and local-LLM detection now requires actual
+  service readiness.
+- Since the curator/member author-resolution change (#1780), calling
+  `publishFromFinalizedAssertion(cg, name)` without an explicit
+  `agentAddress` can select a single finalized member author's Knowledge
+  Asset from stored metadata. A call that previously returned 409 because the
+  node did not author the asset can now publish it, spending the publishing
+  node wallet's gas/TRAC, subject to on-chain publish authorization. Callers
+  that require a particular author must pass that author's `agentAddress`;
+  the explicit selector is authoritative and is never substituted (#1785).
+
+### RPC-volume expectations
+
+- The final four-cell Blackbox campaign observed 9,134 to 11,442 raw workload
+  RPC calls across the six-node 50-SWM/50-VM workload, with 100% publication
+  and synchronization in every cell. These are workload measurements rather
+  than a provider-credit guarantee; topology, idle cadence, failover, and
+  provider billing can change the total.
+- At the measured canary registry history of approximately 27,000 logical
+  pages, missing-watermark startup falls from a full replay to the current tail
+  plus at most 30 repair pages (approximately 99.89% fewer startup logical
+  ranges).
+- The former daily full replay becomes at most 30 repair pages every 30 minutes
+  (approximately 94.67% fewer historical-repair logical ranges per day).
+- The default process budget permits 10 requests/s in total and at most
+  2 requests/s of sustained background work. Provider telemetry remains the
+  authority for billed units because one logical page may still cause retries
+  or failover attempts.
+
+### Deployment and validation
+
+- Deploy through the normal package path; no contract, ABI, or deployment
+  registry change is required.
+- Daemon SQLite schema v36 is applied automatically and stores the durable
+  contract-wide authority checkpoint. Preserve the database across upgrades
+  and restarts.
+- Roll out to testnet canaries sequentially and require exact 10.0.17 commit
+  identity, RFC-64 `catalog` mode with legacy root authority disabled, healthy
+  synchronization, and one complete 30-minute RPC observation window without
+  provider exhaustion. Retain a second window as post-release corroboration.
+- All workspace package manifests are aligned at `10.0.17`.
+
+### Known limitations
+
+- RFC-64 catalog inventory, publication, replay, and recovery remain root-scope
+  only; named subgraphs retain the non-overlapping legacy compatibility lane.
+- Persistent catalog operation still requires `dataDir`; explicitly ephemeral
+  agents retain the legacy root lane and cannot be used as default-release
+  evidence.
+- A fresh authority index performs a whole-contract cold scan before
+  steady-state savings apply. Direct SDK consumers without the daemon-local
+  index store retain the legacy per-CG reader.
+- Historical registry repair intentionally favors fresh registration visibility
+  and bounded provider usage over immediate full-history completion. At the
+  measured canary history and default cadence, one complete repair generation
+  takes approximately 18.8 days.
+- Provider credits may weight RPC methods and response sizes differently from
+  raw daemon request counts. Validate both consumer-attributed DKG calls and
+  provider-side billed usage before declaring provider-quota pressure resolved.
+
+### Final canary fixes (2026-09-20 to 2026-09-22)
+
+Landed on the canary after the section above was written; all are included in
+the 10.0.17 release commit.
+
+#### Fixed
+
+- **Beacon storage stability** (#2712): the OT-RFC-59 changelog page read
+  scanned and sorted the whole node-global log on every sync poll (2.4 million
+  entries on a testnet beacon), tripped the 30 s managed-store deadline and made
+  the node restart Oxigraph hundreds of times per day. Pages are now read by
+  direct entry lookup; duplicate seqs from A/B release-swap writer overlap are
+  tolerated and holes fall back to the exact scan.
+- **Scoped query authority from the finalized index** (#2711): query
+  authorization reads the deployment-scoped finalized authority snapshot instead
+  of a live chain RPC on every request; a finalized-lane fault or deadline falls
+  back to the bounded live read, while absent, inactive or mismatched snapshots
+  still fail closed.
+- **RFC-64 authority and recovery hardening** (#2695, #2696, #2697, #2698,
+  #2707, #2708, #2709, #2710): responsibility retries after finality lag,
+  catalog recovery after late authority finalization, atomic pre-catalog root
+  boundaries, graph-backed SWM recovery transport, safe retry of live authority
+  timeouts, bounded live authority successor flights, deterministic recovery of
+  persisted authority bindings, and reserved RPC capacity for Context Graph
+  authority gates.
+- **Chain index and Hub resilience** (#2683, #2685, #2699, #2700, #2701,
+  #2705): Hub rotation target identity retained, fallback when Hub log reads
+  fail, and index period/idle-headroom handling that keeps capped RPC budgets
+  from starving the scan.
+- **Storage ACK admission** (#2693, #2694): ACK peer admission is preflighted
+  and hardened.
+- **Registration discovery governance** (#2661): discovery is governed and the
+  half-open circuit status documentation corrected.
+
+#### Performance
+
+- **Chain RPC demand reductions** (#2675, #2676, #2677, #2681, #2682): fewer
+  chain calls on the publish, receipt and random-sampling paths; finalized
+  Context Graph authority reads served from the index projection cache; every
+  `getContextGraph` caller attributed and simultaneous live authority reads
+  shared.
+
+#### Security and hygiene
+
+- Wallet-action integration errors are no longer exposed and the secure wallet
+  bridge error handling is documented (#2687, #2688); remaining high-severity
+  CodeQL findings removed (#2689); one-log scope isolation is enforced by test
+  (#2686); publisher lane cursor flags replaced by typed strategies (#2612).
+
+#### Known issues (tracked in #2713)
+
+- Author/host and share paths still depend on a live on-chain authority read
+  with a hard-coded 2.5 s fail-closed deadline; under slow RPC providers or a
+  CPU-saturated publisher this can stall an author's catalog for its own graph
+  and slow receiver convergence. A non-member node querying a private graph can
+  answer 503 instead of 403 when authority cannot be resolved in time (no data
+  is exposed). A store timeout inside a promote's post-dispatch settle step is
+  classified fatal and needs `recover-share-job`. Fixes are in #2714 and #2715,
+  targeted at 10.0.18.
 
 ## [10.0.16] - 2026-09-03
 
@@ -134,7 +367,7 @@ A selected-public convergence and publisher-recovery release. An Edge node can o
 | Selected VM recovery uses bounded footprint-aware batches | Multiple small assets can share one recovery request, while byte, quad and heap estimates keep large transfers bounded | No action; the scheduler derives safe batches from authoritative or conservative size evidence |
 | Persisted user subscriptions rehydrate on daemon startup | An operator-selected graph resumes automatically after restart instead of remaining a dormant database row | Set `DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED=false` only as an emergency kill-switch |
 | Dashboard SQLite schema 32 → 33 | Selected-VM cursors are fenced by deployment identity; v32 optimization cursors are discarded so a redeploy cannot reuse another chain deployment's numeric IDs or watermark | No action; the graph data is retained and selected VM reconciliation safely resumes from chain inventory |
-| `chain.finalityConfirmations` controls mined-receipt finality | The receipt block counts as confirmation 1. The default of `1` releases a publisher wallet as soon as the receipt block is canonical, with no successor-block reorganization buffer. Larger values wait for more blocks and reduce throughput | Keep the default only when lower latency is worth the reorganization risk. Set a larger positive integer when reversal resistance is more important than publish speed |
+| `chain.finalityConfirmations` is the node's SINGLE finality depth | It no longer governs only mined-receipt finality. The same depth now anchors the Context Graph authority index, named-Context-Graph resolution and both RFC-64 precommits, replacing the RPC `finalized` block tag on those paths. The receipt block still counts as confirmation 1, and the default of `1` still releases a publisher wallet as soon as the receipt block is canonical, with no successor-block reorganization buffer | Re-read your setting before upgrading: raising it now ALSO delays how quickly a newly registered Context Graph becomes authoritative on this node, by roughly that many block times. Keep the default unless reversal resistance matters more than both publish speed and authority freshness |
 | `AsyncLiftPublisherConfig.chainRecoveryResolver` is replaced by `chainProofResolver` | **Node operators are not affected** — the node wires this itself. This affects code that constructs `TripleStoreAsyncLiftPublisher` directly from `@origintrail-official/dkg-publisher`. The callback now receives a lookup and returns `recovered`, `reverted`, `not-found`, `pending`, or `inconclusive`. The old key is rejected instead of ignored | If you embed the publisher package directly, rename the field and adapt the callback to the verdict contract. If you run a node, no action |
 | Jobs already stuck at upgrade time may need one manual clear | Recovery needs to know whether a held job was creating or updating an asset. Jobs recorded before this upgrade do not carry that marker, so the node reports them as needing operator action instead of guessing. Jobs enqueued after the upgrade record the marker automatically | Run `dkg publisher jobs --status failed`. After verifying a legacy held job on chain, clear that exact job with `POST /api/publisher/clear-job {"jobId":"<id>"}`. Bulk clear deliberately skips held jobs |
 

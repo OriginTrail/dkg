@@ -1,5 +1,7 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './context-graph-storage-uri.js';
+export * from './context-graph-snapshot-uri.js';
 export * from './agent-identity.js';
 export * from './agents-list-wire.js';
 export * from './assertion-scoped-graphs.js';
@@ -15,6 +17,7 @@ export * from './trust.js';
 export * from './sparql-operation.js';
 export * from './code-point-order.js';
 export { BoundedLruCache } from './bounded-lru-cache.js';
+export * from './coalescing-recurring-task.js';
 export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
@@ -265,7 +268,12 @@ export {
   isEntityPredicate,
   isAssertionEntityPredicate,
 } from './entity-predicate.js';
-export { withRetry, type RetryOptions } from './retry.js';
+export {
+  withRetry,
+  withRetryContext,
+  type RetryAttemptContext,
+  type RetryOptions,
+} from './retry.js';
 export { resolveWithinAbort } from './abort-boundary.js';
 export {
   RetryQueue,
@@ -281,15 +289,29 @@ export {
   type LegacyProtocolOutboxStore,
   type CompatibleProtocolOutboxStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
+  type ProtocolOutboxPageBudget,
+  type ProtocolOutboxPage,
+  type ProtocolOutboxQueueStats,
+  type ProtocolOutboxPolicyConfiguration,
+  type ProtocolOutboxStorePolicy,
+  type BoundedProtocolOutboxStore,
+  type ProtocolOutboxPersistence,
+  type ProtocolOutboxInspection,
+  type ProtocolOutboxPayloadInspection,
   type KaNumberStore,
   RESPONSE_CACHE_BYTES,
   RESPONSE_GONE_MARKER,
 } from './messenger-types.js';
 export {
   ProtocolOutbox,
+  BoundedProtocolOutbox,
+  assertBoundedProtocolOutboxStore,
+  protocolOutboxPayloadInspection,
   type ProtocolOutboxOptions,
   DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
   DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
+  validateProtocolOutboxPageBudget,
   InMemoryProtocolOutboxStore,
   InMemoryMessageIdempotencyStore,
 } from './protocol-outbox.js';

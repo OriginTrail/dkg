@@ -12,7 +12,6 @@ import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
-import { SyncOnConnectPeerScheduler } from '../src/sync/on-connect/peer-scheduler.js';
 import {
   allowAllNetworkAdmission,
   createSyncOnConnectPeerJobRunnerForTest,
@@ -21,6 +20,8 @@ import {
   emptyDetailedSync,
   flushTimers,
   installSyncOnConnectPeerJobStub,
+  installPeerSyncSessionSchedulerForTest,
+  peerSyncSessionDriver,
 } from './_helpers/sync-on-connect-test-fixture.js';
 import {
   RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
@@ -58,6 +59,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       recoveryConfig,
     );
     const deleteProvider = vi.fn();
+    const resolveDynamicallyAcceptedPolicy = vi.fn(() => null);
     const runtime = new Rfc64SwmRecoveryRuntimeV1({
       authority: {
         resolveRuntimeSelection: () => selection,
@@ -74,6 +76,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
           reconciliationLane: 'catalog-apply',
         }),
         resolveRecoveryConfig: () => normalizedRecoveryConfig,
+        resolveDynamicallyAcceptedPolicy,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider },
@@ -81,6 +84,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
 
     expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
       .toMatchObject({ active: true, lane: 'selected-public' });
+    expect(resolveDynamicallyAcceptedPolicy).not.toHaveBeenCalled();
     expect(runtime.resolveConfiguredCompleteProviderPeerIds(
       RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
     )).toEqual([PEER_A]);
@@ -118,6 +122,101 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     });
   });
 
+  it.each([
+    ['public', 0, 'selected-public'],
+    ['private', 1, 'ordinary-private'],
+  ] as const)(
+    'resolves a dynamically accepted owner-signed %s policy without static bootstrap',
+    (_label, accessPolicy, lane) => {
+      let selected = true;
+      let killSwitchActive = false;
+      const runtime = new Rfc64SwmRecoveryRuntimeV1({
+        authority: {
+          resolveRuntimeSelection: () => ({
+            selectedContextGraphs: selected ? [RFC64_ROLLOUT_CONTEXT_GRAPH_ID] : [],
+            eligibleContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+            subscriptionDriven: true,
+          }),
+          resolveConfigured: (contextGraphId) => ({
+            contextGraphId,
+            selected: true,
+            eligible: true,
+            active: !killSwitchActive,
+            mode: 'catalog',
+            killSwitchActive,
+            legacySyncAllowed: false,
+            track2Enabled: !killSwitchActive,
+            authoringAllowed: !killSwitchActive,
+            reconciliationLane: killSwitchActive ? 'disabled' : 'catalog-apply',
+          } as const),
+          resolveRecoveryConfig: () => undefined,
+          resolveDynamicallyAcceptedPolicy: () => ({
+            accessPolicy,
+            source: {
+              kind: 'owner-signed-unregistered',
+              ownerAddress: '0x1111111111111111111111111111111111111111',
+              ownerAuthorityEra: '0',
+            },
+          }),
+        },
+        admission: { invalidateContextGraph: () => [] },
+        cooldown: { deleteProvider: vi.fn() },
+      });
+
+      expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+        .toMatchObject({ active: true, lane });
+
+      selected = false;
+      expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+        .toMatchObject({ active: false, lane });
+
+      selected = true;
+      killSwitchActive = true;
+      expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+        .toMatchObject({ active: false, lane });
+    },
+  );
+
+  it('resolves a finalized release-native policy without static bootstrap', () => {
+    const runtime = new Rfc64SwmRecoveryRuntimeV1({
+      authority: {
+        resolveRuntimeSelection: () => ({
+          selectedContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+          eligibleContextGraphs: [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+          subscriptionDriven: true,
+        }),
+        resolveConfigured: (contextGraphId) => ({
+          contextGraphId,
+          selected: true,
+          eligible: true,
+          active: true,
+          mode: 'catalog',
+          killSwitchActive: false,
+          legacySyncAllowed: false,
+          track2Enabled: true,
+          authoringAllowed: true,
+          reconciliationLane: 'catalog-apply',
+        }),
+        resolveRecoveryConfig: () => undefined,
+        resolveDynamicallyAcceptedPolicy: () => ({
+          accessPolicy: 0,
+          source: {
+            kind: 'finalized-chain',
+            chainId: '20430',
+            contractAddress: '0x2222222222222222222222222222222222222222',
+            blockNumber: '1',
+            blockHash: `0x${'33'.repeat(32)}`,
+          },
+        }),
+      },
+      admission: { invalidateContextGraph: () => [] },
+      cooldown: { deleteProvider: vi.fn() },
+    });
+
+    expect(runtime.resolveRuntimeAuthority(RFC64_ROLLOUT_CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: true, lane: 'selected-public' });
+  });
+
   it('projects every subscription lifecycle effect from one transition snapshot', () => {
     const project = vi.fn()
       .mockReturnValueOnce({
@@ -137,6 +236,8 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const invalidate = vi.fn();
     const queueGossip = vi.fn();
     const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
+    const pushReplay = vi.fn(async () => ({ attempted: 0, admitted: 0 }));
+    const bootstrapMetadata = vi.fn(async () => 'local-author' as const);
     const startSupervisor = vi.fn();
     const agent = {
       projectRfc64CatalogSubscriptionTransitionV1: project,
@@ -147,6 +248,10 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       invalidateRfc64PublicCatalogBootstrapPassV1: invalidate,
       queueSharedMemoryGossipSubscription: queueGossip,
       requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      replayRfc64CatalogToConnectedPeersV1: pushReplay,
+      bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: bootstrapMetadata,
+      // Author of record for this graph: the activation push is allowed.
+      localContextGraphProvenance: { hasLocalCreate: () => true },
       startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
     };
     const handle = LifecycleSyncMethods.prototype
@@ -180,6 +285,58 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     expect(invalidate).toHaveBeenCalledTimes(2);
     expect(queueGossip).toHaveBeenCalledTimes(2);
     expect(replay).toHaveBeenCalledOnce();
+    // Activation must also PUSH replay to already-connected peers: a replica
+    // that connected before this CG existed gets no connect-time replay and
+    // cannot pull without the policy digest, so it would otherwise never
+    // receive the head or the policy. Deactivation must not push.
+    expect(pushReplay).toHaveBeenCalledOnce();
+    expect(pushReplay).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
+    // Activation also pulls `<cg>/_meta` from already-connected peers: the
+    // catalog lane carries no declaration and a catalog-authoritative CG is
+    // outside legacy durable sync. Deactivation must not pull.
+    expect(bootstrapMetadata).toHaveBeenCalledOnce();
+    expect(bootstrapMetadata).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
+    expect(startSupervisor).toHaveBeenCalledOnce();
+  });
+
+  it('does not push catalog replay to connected peers on activation for a graph this node did not author', () => {
+    // A replica taking replay fences toward its own provider at activation
+    // starved its bootstrap pass ("no configured provider was reachable"), so
+    // the push is author-of-record only; everything else still happens.
+    const project = vi.fn().mockReturnValueOnce({
+      previousReceiverActive: false,
+      nextReceiverActive: true,
+      receiverChanged: true,
+      recoveryChanged: false,
+    });
+    const pushReplay = vi.fn(async () => ({ attempted: 0, admitted: 0 }));
+    const replay = vi.fn(async () => ({ requested: 0, failed: 0 }));
+    const bootstrapMetadata = vi.fn(async () => 'not-found' as const);
+    const startSupervisor = vi.fn();
+    const agent = {
+      projectRfc64CatalogSubscriptionTransitionV1: project,
+      rfc64PublicCatalogServiceV1: { deactivateReceiverContextGraph: vi.fn() },
+      clearRfc64CatalogOperationalTargetsV1: vi.fn(),
+      invalidateRfc64PublicCatalogBootstrapPassV1: vi.fn(),
+      queueSharedMemoryGossipSubscription: vi.fn(),
+      requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      replayRfc64CatalogToConnectedPeersV1: pushReplay,
+      bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: bootstrapMetadata,
+      localContextGraphProvenance: { hasLocalCreate: () => false },
+      startRfc64SwmCatalogProjectionSupervisorV1: startSupervisor,
+    };
+    LifecycleSyncMethods.prototype.handleRfc64CatalogReceiverSelectionTransitionV1
+      .call(agent as never, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, {
+        kind: 'subscription' as const,
+        previousSubscribed: false,
+        nextSubscribed: true,
+      });
+
+    expect(pushReplay).not.toHaveBeenCalled();
+    expect(replay).toHaveBeenCalledOnce();
+    // A replica is exactly the node that has to pull `_meta` from its peers.
+    expect(bootstrapMetadata).toHaveBeenCalledOnce();
+    expect(bootstrapMetadata).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID);
     expect(startSupervisor).toHaveBeenCalledOnce();
   });
 
@@ -268,7 +425,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     const selectedRun = vi.fn(async () => undefined);
     installSyncOnConnectPeerJobStub(agent, { runSelected: selectedRun });
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['existing-cg']);
-    agent.rfc64ExactCatchupOnConnectAt.set(PEER_A, Date.now());
+    peerSyncSessionDriver(agent).recordExactQueued(PEER_A, Date.now());
 
     expect(agent.rfc64SwmRecoveryRuntimeV1.resolveConfiguredCompleteProviderPeerIds(
       RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
@@ -286,7 +443,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
     ))
       .toEqual([PEER_A]);
-    expect(agent.rfc64ExactCatchupOnConnectAt.has(PEER_A)).toBe(false);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastExactQueued > 0).toBe(false);
     expect(agent.selectedSwmBootstrapAdmission.snapshot(PEER_A)).toEqual({
       contextGraphIds: ['existing-cg'],
       phase: 'retry-required',
@@ -555,7 +712,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     });
     agent.syncSelectedSharedMemoryFromPeerDetailed = selectedSync;
     const ordinaryRun = vi.fn(async () => { ordering.push('ordinary'); });
-    agent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+    installPeerSyncSessionSchedulerForTest(agent, {
       createJob: (remotePeer) => {
         const runner = createSyncOnConnectPeerJobRunnerForTest(agent, remotePeer);
         return {
@@ -578,8 +735,8 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       handleSyncError,
       0,
     )).toBe(true);
-    expect(agent.catchupOnConnectAt.size).toBe(1);
-    expect(agent.syncOnConnectPeerScheduler.size).toBe(1);
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).lastQueued).toBeGreaterThan(0);
+    expect(agent.getSyncOnConnectPeerScheduler().size).toBe(1);
 
     await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledOnce());
 
@@ -597,8 +754,8 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       }),
     );
     expect(selectedSync.mock.calls[0]![2].requestedScope.plan).toBe(authorized);
-    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
-    expect(agent.syncReconcilerBackoff.has(PEER_A)).toBe(false);
+    await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
+    expect(peerSyncSessionDriver(agent).snapshot(PEER_A).backoff !== undefined).toBe(false);
     expect(errors).toEqual([]);
     ordinaryRun.mockClear();
 
@@ -610,11 +767,11 @@ describe('RFC-64 recovery-plan queue authorization', () => {
       ordering.push('ordinary-in-flight');
       await ordinaryBlocked;
     });
-    agent.catchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
-    agent.rfc64ExactCatchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordExactQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
@@ -628,7 +785,7 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     releaseOrdinary();
     await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledTimes(2));
     expect(ordinaryRun).toHaveBeenCalledOnce();
-    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
 
     // A periodic exact plan inside its own cooldown must not use the ordinary
     // owner's one-time post-catalog bypass again.
@@ -644,24 +801,24 @@ describe('RFC-64 recovery-plan queue authorization', () => {
     // After the real cooldown expires, a generic owner may finish before the
     // catalog plan arrives. That first exact plan still gets one bypass; the
     // next periodic plan in the same window does not.
-    agent.catchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
-    agent.rfc64ExactCatchupOnConnectAt.set(
+    peerSyncSessionDriver(agent).recordExactQueued(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
     );
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
     expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,
       0,
     )).toBe(true);
     await vi.waitFor(() => expect(selectedSync).toHaveBeenCalledTimes(3));
-    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
     expect(agent.queueAuthorizedRfc64SwmRecoveryPlanFromPeerOnConnect(
       authorized,
       handleSyncError,

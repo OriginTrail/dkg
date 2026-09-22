@@ -12,17 +12,25 @@ test.describe('Triple counts — project overview', () => {
   });
 
   test('overview stat strip shows a positive triple total', async ({ projectLayer }) => {
-    const cells = await projectLayer.getStatStripCells();
-    const triples = cells.find((c) => c.label.toLowerCase().includes('triple'));
-    expect(triples).toBeTruthy();
-    const n = Number(String(triples?.value ?? '').replace(/[^0-9]/g, ''));
-    expect(n).toBeGreaterThanOrEqual(1);
+    await expect.poll(async () => {
+      const cells = await projectLayer.getStatStripCells();
+      const triples = cells.find((c) => c.label.toLowerCase().includes('triple'));
+      return Number(String(triples?.value ?? '').replace(/[^0-9]/g, ''));
+    }, {
+      message: 'seeded triples should appear after the live memory layers load',
+      timeout: 30_000,
+    }).toBeGreaterThanOrEqual(1);
   });
 
   test('overview entity count reflects seeded entities', async ({ projectLayer }) => {
-    const cells = await projectLayer.getStatStripCells();
-    const entities = cells.find((c) => c.label.toLowerCase().includes('entit'));
-    expect(parseInt(entities?.value ?? '0', 10)).toBeGreaterThanOrEqual(1);
+    await expect.poll(async () => {
+      const cells = await projectLayer.getStatStripCells();
+      const entities = cells.find((c) => c.label.toLowerCase().includes('entit'));
+      return parseInt(entities?.value ?? '0', 10);
+    }, {
+      message: 'seeded entities should appear after the live memory layers load',
+      timeout: 30_000,
+    }).toBeGreaterThanOrEqual(1);
   });
 
   test('knowledge pipeline cards show per-layer breakdown', async ({ page }) => {

@@ -8,13 +8,19 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { canReadUnscopedQuery } from './unscoped-query-admission.js';
+import {
+  prepareUnscopedContextGraphReadChecks,
+  type ContextGraphReadCheck,
+} from './prepare-unscoped-context-graph-read-checks.js';
+import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
-  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+  contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
@@ -31,7 +37,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS,
   assertContextGraphIdV1, assertNetworkIdV1,
   type ContextGraphIdV1, type NetworkIdV1,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
@@ -94,7 +100,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -300,6 +306,7 @@ import {
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
+  CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
@@ -314,7 +321,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -329,6 +335,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -376,9 +383,18 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  ContextGraphReadAuthorityUnavailableError,
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
+import { runBoundedOperation } from './bounded-operation.js';
+import { isRfc64UnregisteredOwnerUnresolvedErrorV1 } from './dkg-agent-rfc64-catalog.js';
+import type { Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 } from './dkg-agent-rfc64-seed-fetch.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -515,24 +531,44 @@ export class QueryMethods extends DKGAgentBase {
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
 
+    let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
+    if (opts.contextGraphId) {
+      const scopedContextGraphId = opts.contextGraphId;
+      // Keep the public read-authority seam: tests and embedders stub it, and
+      // the outer `query` RPC site already owns attribution for the nested call.
+      scopedReadAuthority = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.query,
+        () => this.resolveContextGraphReadAuthority(scopedContextGraphId, {
+          callerAgentAddress: callerAgentAddressStr,
+          allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
+          signal: opts.signal,
+          authorityReadMode: 'finalized-index',
+        }),
+      );
+      if (scopedReadAuthority.outcome === 'unavailable') {
+        throw new ContextGraphReadAuthorityUnavailableError(
+          opts.contextGraphId,
+          scopedReadAuthority,
+        );
+      }
+      if (scopedReadAuthority.outcome === 'denied') {
+        this.log.info(ctx, `Query denied for context graph "${opts.contextGraphId}"`);
+        // A-1 follow-up review: synthetic deny must match the SPARQL form
+        // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
+        // instead of a SELECT-shaped `{ bindings: [] }`.
+        return emptyQueryResultForKind(sparql);
+      }
+    }
+
     if (
       opts.contextGraphId
       && targetsSharedMemory
       && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
         callerAgentAddress: callerAgentAddressStr,
+        readAuthority: scopedReadAuthority,
       }))
     ) {
       this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
-      return emptyQueryResultForKind(sparql);
-    }
-
-    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId, {
-      callerAgentAddress: callerAgentAddressStr,
-    }))) {
-      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      // A-1 follow-up review: synthetic deny must match the SPARQL form
-      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
-      // instead of a SELECT-shaped `{ bindings: [] }`.
       return emptyQueryResultForKind(sparql);
     }
 
@@ -604,32 +640,6 @@ export class QueryMethods extends DKGAgentBase {
       return emptyQueryResultForKind(sparql);
     }
 
-    // When no context graph is specified, exclude private CGs the caller cannot
-    // read to prevent data leakage via unscoped or FROM-less SPARQL.
-    let excludeGraphPrefixes: string[] | undefined;
-    if (!opts.contextGraphId) {
-      excludeGraphPrefixes = await this.getDisallowedGraphPrefixes({
-        callerAgentAddress: callerAgentAddressStr,
-      });
-      // Per spec Axiom 1 every shared query must be resolved within a CG.
-      // Reject explicit GRAPH/FROM clauses that reference private CGs the
-      // caller cannot read — post-filtering alone cannot prevent leaks via
-      // aggregates (ASK, COUNT) or projections that omit graph/subject.
-      if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
-        this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
-        return emptyQueryResultForKind(sparql);
-      }
-      // Post-filtering cannot make arbitrary unscoped SPARQL safe: ASK,
-      // aggregates, and projections that omit the GRAPH variable can disclose
-      // private rows before bindings are filtered. Until the query engine owns
-      // a dataset-level graph exclusion, fail closed when this caller lacks any
-      // private CG on the node. Scoped public queries remain available.
-      if (excludeGraphPrefixes.length > 0) {
-        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every private context graph');
-        return emptyQueryResultForKind(sparql);
-      }
-    }
-
     // #1106 (3): an UNAUTHENTICATED / admin caller omitting `agentAddress`
     // on a working-memory read previously fell back to the bare peerId
     // namespace — but rc.17 WM data is keyed by the agent's EVM wallet, so
@@ -658,9 +668,8 @@ export class QueryMethods extends DKGAgentBase {
         effectiveWmAddress.toLowerCase() === defaultEvmLc ? [this.peerId!] : [this.defaultAgentAddress!];
     }
 
-    const result = await this.queryEngine.query(sparql, {
+    const execute = () => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
-      excludeGraphPrefixes,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
@@ -680,6 +689,31 @@ export class QueryMethods extends DKGAgentBase {
       // engines needing to know about both names.
       minTrust: opts.minTrust ?? opts._minTrust,
     });
+    // Arbitrary unscoped SPARQL can reveal private data through aggregates or
+    // projections without a graph column. The executor owns admission and both
+    // local consistency checks, including the release of the materialized result.
+    const result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
+      store: this.store,
+      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+      admit: () => canReadUnscopedQuery({
+        store: this.store,
+        knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
+        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
+          callerAgentAddress: callerAgentAddressStr,
+          signal,
+        }),
+        prepareReadChecks: (ids, signal) => (
+          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
+            this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
+          )
+        ),
+      }, { signal: opts.signal }),
+      execute,
+      denied: () => {
+        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
+        return emptyQueryResultForKind(sparql);
+      },
+    });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }
@@ -695,9 +729,56 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
-    return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
+    return (await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.canRead,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, opts),
+    )).outcome === 'allowed';
+  }
+
+  /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
+  private contextGraphReadAuthorityCandidateSeeds(this: DKGAgent): ReadonlySet<string> {
+    return new Set([
+      ...(this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []).flatMap(
+        ({ policyEnvelope }) => policyEnvelope.payload.accessPolicy === 1
+          ? [policyEnvelope.payload.contextGraphId]
+          : [],
+      ),
+      ...this.subscribedContextGraphs.keys(),
+      ...(this.config.syncContextGraphs ?? []),
+    ]);
+  }
+
+  /** Keep batch preparation beside the canonical authority resolver and its sources. */
+  private prepareContextGraphReadAuthorityChecks(this: DKGAgent,
+    ids: readonly string[],
+    opts: { callerAgentAddress?: string; signal: AbortSignal },
+  ): Promise<ContextGraphReadCheck> {
+    return prepareUnscopedContextGraphReadChecks({
+      createReadAuthorityInput: (id, signal) => (
+        QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+          this,
+          id,
+          { callerAgentAddress: opts.callerAgentAddress, signal },
+          CHAIN_POLICY_READ_TIMEOUT_MS,
+          undefined,
+          'finalized-index',
+        )
+      ),
+      prepareRegistrationReadPlan: (candidateIds, readSignal) => (
+        this.prepareContextGraphRegistrationReadPlan(candidateIds, {
+          signal: readSignal,
+        })
+      ),
+      prepareReadAuthorityFactsSnapshot: (candidateIds, readSignal) => (
+        this.contextGraphMetaProjection.prepareReadAuthorityFactsSnapshot(
+          candidateIds,
+          { signal: readSignal },
+        )
+      ),
+    }, ids, opts.signal);
   }
 
   public async resolveContextGraphReadAuthority(this: DKGAgent,
@@ -705,32 +786,241 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+      /**
+       * Scoped query reads consume the finalized authority projection; every
+       * other caller (admission, `canReadContextGraph`) keeps current state.
+       */
+      authorityReadMode?: 'live-current' | 'finalized-index';
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
+    const { authorityReadMode, ...readOpts } = opts;
+    return withRpcUsageSite(
+      CG_AUTH_RPC_SITES.readAuthority,
+      () => QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+        this,
+        contextGraphId,
+        readOpts,
+        CHAIN_POLICY_READ_TIMEOUT_MS,
+        authorityReadMode,
+      ),
+    );
+  }
+
+  /** Subscription admission may populate a cold chain name-hash index. */
+  public async resolveContextGraphSubscriptionBootstrapAuthority(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+      /**
+       * Freshly loaded durable row for this exact bootstrap candidate. Its
+       * canonical numeric id may skip name discovery, but never the fresh
+       * policy/roster authority gate below.
+       */
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
+    } = {},
+  ): Promise<ContextGraphReadAuthorityDecision> {
+    try {
+      return await runBoundedOperation(
+        async (signal) => {
+          const boundedOpts = { ...opts, signal };
+          const resolve = () => resolveContextGraphReadAuthorityDecision(
+            QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+              this,
+              contextGraphId,
+              boundedOpts,
+              CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+              this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                ? true
+                : undefined,
+            ),
+          );
+          const initial = await resolve();
+          if (
+            initial.outcome !== 'unavailable'
+            || initial.reason !== 'finalized-name-absence-unaccepted'
+          ) return initial;
+
+          // The finalized index proved exact absence, but a replica cannot
+          // consume that fact until it authenticates the owner-signed policy
+          // (keyed seed store, or the deprecated ontology-graph copy). Reconcile
+          // once at this explicit admission boundary; ordinary reads and
+          // periodic sweeps remain unable to promote unsigned metadata or
+          // reopen legacy scalar RPC discovery. A forged/missing seed preserves
+          // the initial denial. Local state runs FIRST so a replica that
+          // already holds the seed never spends its caller's budget (restart
+          // rehydration passes CHAIN_POLICY_READ_TIMEOUT_MS) on the network.
+          const finalizedAbsence = Object.freeze({ kind: 'finalized-absence' as const });
+          try {
+            await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);
+          } catch (error) {
+            // Only "no authenticated owner authority" is curable by fetching
+            // the seed; every other failure keeps the initial denial.
+            if (!isRfc64UnregisteredOwnerUnresolvedErrorV1(error)) return initial;
+
+            // A replica that connected after the graph was created, or an
+            // edge that never syncs the ontology graph, may hold no owner-
+            // signed seed at all. Pull it from currently connected peers
+            // (bounded fan-out, first verified envelope wins) under the same
+            // caller signal, so the fan-out can never outlive the caller's
+            // budget. The fetched seed is only persisted through the keyed
+            // store, never accepted here: the reconcile fences still decide.
+            let fetched: Rfc64UnregisteredAuthoritySeedFetchOutcomeV1;
+            try {
+              fetched = await this.fetchRfc64UnregisteredAuthoritySeedFromPeersV1(contextGraphId, signal);
+            } catch {
+              return initial;
+            }
+            if (signal.aborted) return initial;
+            if (fetched !== 'fetched' && fetched !== 'already-present') return initial;
+            try {
+              await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);
+            } catch {
+              return initial;
+            }
+          }
+          const afterReplicaAcceptance = await resolve();
+          if (afterReplicaAcceptance.outcome !== 'allowed') {
+            return afterReplicaAcceptance;
+          }
+          if (
+            afterReplicaAcceptance.source !== 'registered-chain'
+            || afterReplicaAcceptance.onChainId === undefined
+          ) return afterReplicaAcceptance;
+
+          // Registration may finalize while the signed ontology evidence is
+          // being authenticated. Do not return a registered admission while
+          // the catalog still holds the just-accepted public unregistered
+          // generation: a private registration would otherwise create a
+          // permissive window when the route activates its subscription.
+          // Refresh the exact finalized generation before returning; failure
+          // remains unavailable and the route creates no subscription.
+          try {
+            const requests = await this.createRfc64CatalogAuthorityRefreshRequestsV1(
+              [contextGraphId],
+              signal,
+            );
+            const request = requests.get(contextGraphId);
+            if (request?.kind !== 'finalized-evidence') {
+              return {
+                outcome: 'unavailable',
+                source: 'registered-chain',
+                reason: 'chain-name-binding-unavailable',
+                metadataBootstrap: 'eligible',
+              };
+            }
+            await this.reconcileRfc64CatalogAccessAuthorityV1(
+              contextGraphId,
+              signal,
+              request,
+            );
+          } catch {
+            return {
+              outcome: 'unavailable',
+              source: 'registered-chain',
+              reason: 'registered-authority-error',
+              metadataBootstrap: 'eligible',
+            };
+          }
+          return resolve();
+        },
+        {
+          label: `resolveContextGraphSubscriptionBootstrapAuthority(${contextGraphId})`,
+          timeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+          signal: opts.signal,
+        },
+      );
+    } catch {
+      return {
+        outcome: 'unavailable',
+        source: 'registered-chain',
+        reason: 'chain-name-binding-unavailable',
+        metadataBootstrap: 'eligible',
+      };
+    }
+  }
+
+  private async resolveContextGraphReadAuthorityWithRegistrationTimeout(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+    },
+    registrationTimeoutMs: number,
+    authorityReadMode: 'live-current' | 'finalized-index' = 'live-current',
+  ): Promise<ContextGraphReadAuthorityDecision> {
+    return resolveContextGraphReadAuthorityDecision(
+      QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+        this,
+        contextGraphId,
+        opts,
+        registrationTimeoutMs,
+        undefined,
+        authorityReadMode,
+      ),
+    );
+  }
+
+  private createContextGraphReadAuthorityInput(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
+    },
+    registrationTimeoutMs: number,
+    hasAcceptedRfc64PublicPolicy?: boolean,
+    authorityReadMode: 'live-current' | 'finalized-index' = 'live-current',
+  ): ContextGraphReadAuthorityInput {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
-    return resolveContextGraphReadAuthorityDecision({
+    return {
       contextGraphId,
       callerAgentAddress: opts.callerAgentAddress,
       allowSubscriptionFallback: opts.allowSubscriptionFallback !== false,
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
       getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
-      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      getRegisteredAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.readRegistered,
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          {
+            registrationTimeoutMs,
+            signal: opts.signal,
+            ...(opts.durableSubscriptionBinding === undefined
+              ? {}
+              : { durableSubscriptionBinding: opts.durableSubscriptionBinding }),
+            allowAcceptedRfc64FinalizedAbsence:
+              this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+            authorityReadMode,
+          },
+        ),
+      ),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
       resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
       rfc64LocalAgentAddress: this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress,
       defaultAgentAddress: this.defaultAgentAddress,
-      hasAcceptedRfc64PublicPolicy: acceptedPublicPolicies.some(({ policyEnvelope }) => (
-        policyEnvelope.payload.contextGraphId === contextGraphId
-        && policyEnvelope.payload.accessPolicy === 0
-      )),
+      hasAcceptedRfc64PublicPolicy: hasAcceptedRfc64PublicPolicy ?? (
+        this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+        || acceptedPublicPolicies.some(({ policyEnvelope }) => (
+          policyEnvelope.payload.contextGraphId === contextGraphId
+          && policyEnvelope.payload.accessPolicy === 0
+        ))
+      ),
       isPendingMetadata:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
       isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),
-      getLocalAgentGate: () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      getLocalAgentGate: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.readLocalGate,
+        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      ),
       getLegacyParticipants: () => this.getPrivateContextGraphParticipants(contextGraphId),
       // A crash-safe join approval may restore a restricted pending-metadata
       // row before ordinary read authority is proven. Its durable subscription
@@ -742,7 +1032,7 @@ export class QueryMethods extends DKGAgentBase {
           || (this.config.syncContextGraphs ?? []).includes(contextGraphId)
         ),
       getLocalIdentityId: () => this.chain.getIdentityId(),
-    });
+    };
   }
 
   /**
@@ -812,67 +1102,6 @@ export class QueryMethods extends DKGAgentBase {
       }
     }
     return null;
-  }
-
-  /**
-   * Returns graph URI prefixes for private CGs the caller cannot read.
-   * Used to exclude them from unscoped queries.
-   */
-  async getDisallowedGraphPrefixes(this: DKGAgent, opts: { callerAgentAddress?: string } = {}): Promise<string[]> {
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const result = await this.store.query(
-      `SELECT ?cg WHERE {
-        GRAPH <${ontologyGraph}> {
-          ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
-        }
-      }`,
-      { source: 'agent.query.privateGraphAccessPolicy' },
-    );
-    const privateContextGraphIds = new Set<string>();
-    if (result.type === 'bindings') {
-      for (const row of result.bindings) {
-        const cgUri = row['cg'];
-        if (!cgUri) continue;
-        const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
-        if (match?.[1]) privateContextGraphIds.add(match[1]);
-      }
-    }
-    for (const { policyEnvelope } of this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
-      if (policyEnvelope.payload.accessPolicy === 1) {
-        privateContextGraphIds.add(policyEnvelope.payload.contextGraphId);
-      }
-    }
-    // Runtime authority can be accepted independently of startup bootstrap.
-    // Subscription/sync selection and the bounded local graph-name index
-    // supply CG candidates without exposing the private policy registry itself.
-    const runtimeCandidates = new Set<string>([
-      ...this.subscribedContextGraphs.keys(),
-      ...(this.config.syncContextGraphs ?? []),
-      ...await new GraphManager(this.store).listContextGraphs({
-        source: 'agent.query.rfc64RuntimePrivateGraphs',
-      }),
-    ]);
-    for (const contextGraphId of runtimeCandidates) {
-      if (this.resolveRfc64PrivateReadRosterV1(contextGraphId) !== undefined) {
-        privateContextGraphIds.add(contextGraphId);
-      }
-    }
-    const prefixes: string[] = [];
-    for (const contextGraphId of privateContextGraphIds) {
-      if (await this.canReadContextGraph(contextGraphId, {
-        callerAgentAddress: opts.callerAgentAddress,
-      })) continue;
-      // Exclude all named graphs under this CG (data, _meta, _shared_memory, etc.)
-      prefixes.push(`did:dkg:context-graph:${contextGraphId}`);
-    }
-    return prefixes;
-  }
-
-  sparqlReferencesPrivateGraphs(this: DKGAgent, sparql: string, disallowedPrefixes: string[]): boolean {
-    if (disallowedPrefixes.length === 0) return false;
-    const upper = sparql.toUpperCase();
-    if (!upper.includes('GRAPH') && !upper.includes('FROM')) return false;
-    return disallowedPrefixes.some(prefix => sparql.includes(prefix));
   }
 
   /**

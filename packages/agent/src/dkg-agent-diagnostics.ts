@@ -252,8 +252,7 @@ export async function getPeerDiagnostics(
   // top-level summary's shape so tooling can render a per-
   // protocol view with zero extra plumbing.
   const peerEntries = deps.messenger
-    .listOutbox()
-    .filter((entry) => entry.peer === peerKey)
+    .listOutboxMetadata(peerKey)
     .sort((a, b) => a.firstFailureAt - b.firstFailureAt);
   const chatPending = peerEntries.filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
   const byProtocol: Record<string, { pendingCount: number; oldestFirstFailureAt: number | null; attempts: number[] }> = {};

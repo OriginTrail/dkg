@@ -228,7 +228,7 @@ describe('PcaAccountCard', () => {
     expect(container.textContent).toContain('2 of 3 wallets approved');
     expect(container.textContent).toContain('2 of 3 node publishing wallets approved');
     expect(container.textContent).toContain('pay the direct cost');
-    expect(container.querySelectorAll('.v10-pca-wallet-row')).toHaveLength(1); // owner row only
+    expect(container.querySelectorAll('.v10-wallet-row')).toHaveLength(1); // owner row only
     // Use-for-publishing wired.
     Array.from(container.querySelectorAll('button'))
       .find((b) => b.textContent === 'Use for publishing')!

@@ -12,7 +12,12 @@ export type LiveOnChainAccessPolicyUnavailable = {
 
 export type RegisteredContextGraphAuthorityUnavailableReason =
   | LiveOnChainAccessPolicyUnavailableReason
+  | 'finalized-name-absence-unaccepted'
   | 'chain-name-binding-unavailable'
+  // The shared RFC-64 authority circuit is cooling down. This is a deferral,
+  // not a failed chain read: the pool was not contacted, and a caller may
+  // retry on the circuit's own cadence.
+  | 'authority-circuit-open'
   | 'local-chain-binding-unavailable'
   | 'local-existence-unavailable'
   | 'chain-access-policy-unavailable'

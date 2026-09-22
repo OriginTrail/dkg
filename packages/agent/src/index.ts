@@ -1,5 +1,16 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexConfig,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
+export {
+  CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
+  isContextGraphMembershipSource,
+  type KnownContextGraphMembershipSource,
+  type ContextGraphMembershipSource,
+} from './dkg-agent-types.js';
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   generateAgentToken, hashAgentToken,
@@ -24,6 +35,13 @@ export {
   type SkillOfferingConfig,
 } from './profile.js';
 export { ProfileManager } from './profile-manager.js';
+export {
+  MAX_AGENT_PEER_PAGE_SIZE,
+  type AgentPeerDiscovery,
+  type AgentPeerPage,
+  type AgentPeerPageRequest,
+} from './agent-peer-discovery.js';
+export type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
 export {
   DiscoveryClient,
   discoveredAgentIdentityKey,
@@ -54,6 +72,7 @@ export * from './rfc64/swm-author-inventory-producer-v1.js';
 export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
+export * from './rfc64/unregistered-authority-transport-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
 export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';
@@ -70,6 +89,10 @@ export * from './rfc64/public-open-catalog-scope-v1.js';
 export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
+export type {
+  Rfc64AgentAuthorityResolverReadOptionsV1,
+  Rfc64AuthorityReadCoordinatorSnapshotV1,
+} from './rfc64/authority-rpc-circuit-breaker-v1.js';
 export * from './rfc64/policy-cell-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -164,6 +187,7 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,
@@ -190,8 +214,15 @@ export type {
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 export type {
+  Rfc64CatalogShadowExecutionStatusV1,
+} from './rfc64/catalog-shadow-observability-v1.js';
+export type {
   Rfc64PublicCatalogBootstrapStatusV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+export type {
+  PersistVerifiedRfc64UnregisteredAuthoritySeedInputV1,
+  ReadRfc64UnregisteredAuthoritySeedInputV1,
+} from './dkg-agent-rfc64-seed-store.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
@@ -308,6 +339,8 @@ export {
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
+  type MessengerOutboxDrainOptions,
+  type MessengerOutboxStats,
   type ContextGraphSub,
   type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,
@@ -320,6 +353,9 @@ export {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type LocalContextGraphOriginRecord,
+  type LocalContextGraphOriginPersistence,
+  type LocalContextGraphOriginSource,
   type ContextGraphJoinPolicyMode,
   type ContextGraphJoinPolicyRecord,
   type ContextGraphJoinPolicyAuditEventType,
@@ -344,10 +380,12 @@ export {
   type ImportedArtifactByteStore,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type FinalizationRecoveryStoreFactory,
   type SharedMemorySyncDiagnostics,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
 } from './dkg-agent-types.js';
+export type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
 export {
   computeImportedArtifactSelector,
   IMPORTED_ARTIFACT_AUTH_PURPOSE,
@@ -523,7 +561,12 @@ export {
 // walk reduces across peers with the same rule the agent uses across Context
 // Graphs — two implementations is how a numerator and a denominator end up
 // coming from different peers.
-export { selectSwmSnapshotCoverage } from './sync/requester/shared-memory-sync.js';
+export {
+  emptySharedMemorySyncResult,
+  mergeFleetSharedMemoryDiagnostics,
+  mergeSamePeerSharedMemoryDiagnostics,
+  selectSwmSnapshotCoverage,
+} from './sync/shared-memory-diagnostics.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

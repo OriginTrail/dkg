@@ -18,6 +18,49 @@ describe('init chain overrides (#1307)', () => {
   it('preserves explicit backup removal when the network supplies backups', () => {
     expect(buildInitChainOverrides({ ...answers, rpcUrlsInput: 'none' }, defaults, undefined, sameNetwork)).toEqual({ type: 'evm', rpcUrls: [] });
   });
+  it('preserves the exact RPC request budget across reinitialization and network switches', () => {
+    const rpcRequestBudget = {
+      maxRequestsPerSecond: 7,
+      foregroundReservePercent: 75,
+      burstRequests: 11,
+      maxQueueSize: 37,
+      startupJitterMs: 12_345,
+    };
+    const prior = { ...defaults, rpcRequestBudget };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', rpcRequestBudget });
+    const nextNetwork = {
+      ...defaults,
+      rpcUrl: 'https://next.invalid',
+      hubAddress: 'next-hub',
+      chainId: 'base:8453',
+      rpcUrls: [],
+    };
+    expect(buildInitChainOverrides(
+      { ...nextNetwork, rpcUrlsInput: '' },
+      nextNetwork,
+      prior,
+      { isNetworkSwitch: true },
+    )).toEqual({ type: 'evm', rpcRequestBudget });
+  });
+  it('preserves chain.indexTickMs across reinitialization and network switches', () => {
+    const prior = { ...defaults, indexTickMs: 12_345 };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', indexTickMs: 12_345 });
+    const nextNetwork = {
+      ...defaults,
+      rpcUrl: 'https://next.invalid',
+      hubAddress: 'next-hub',
+      chainId: 'base:8453',
+      rpcUrls: [],
+    };
+    expect(buildInitChainOverrides(
+      { ...nextNetwork, rpcUrlsInput: '' },
+      nextNetwork,
+      prior,
+      { isNetworkSwitch: true },
+    )).toEqual({ type: 'evm', indexTickMs: 12_345 });
+  });
   it('writes full answers when no network defaults exist', () => {
     expect(buildInitChainOverrides(answers, undefined, undefined, sameNetwork)).toEqual(defaults);
   });

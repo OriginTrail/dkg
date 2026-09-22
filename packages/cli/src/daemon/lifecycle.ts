@@ -66,8 +66,15 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
+  snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  loadOpWallets,
+  KaNumberAllocator,
+  resolveAuthorityIndexConfig,
+  resolveSyncAgentsMeta,
+} from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
@@ -97,12 +104,16 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
+  SqliteChainEventLogStore,
+  SqliteContextGraphAuthorityIndexStore,
+  SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
+  assertAuthorityIndexConfigPlacement,
   saveConfig,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
@@ -146,7 +157,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
-import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
+import { createDaemonRpcRuntime } from './rpc-runtime.js';
 import {
   resolveOtlpLogEndpoint,
   type ActiveLogExporterMode,
@@ -155,6 +166,7 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
+import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
   exitAfterFatalLogDrain,
@@ -163,14 +175,17 @@ import {
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
 import {
+  CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 // The scan policy lived here until GH#2323; the implementation moved to its
 // own module, but the public import path stays valid for existing consumers.
 export {
+  CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   CHAIN_FULL_SCAN_EVERY,
+  CHAIN_REPAIR_AUDIT_EVERY_TICKS,
   chainDiscoveryScanOptions,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
@@ -182,6 +197,7 @@ import {
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
   decodeVmReconcileNegativeRow,
@@ -357,6 +373,7 @@ import {
   chainResetWipe,
   detectBackendSwitch,
   detectNetworkSwitch,
+  formatChainResetWipeOutcome,
   skipChainResetWipe,
 } from './chain-reset-wipe.js';
 import {
@@ -1117,6 +1134,10 @@ async function runDaemonInnerWithStartupOwnership(
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
+  // Snapshot peers supply authority-bearing state. Validate explicit operator
+  // trust before allocating startup resources, never infer it from relays.
+  assertAuthorityIndexConfigPlacement(config);
+  const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1189,6 +1210,9 @@ async function runDaemonInnerWithStartupOwnership(
     const line = `[${new Date().toISOString()}] ${msg}`;
     if (foreground) origStdoutWrite(line + "\n");
     daemonLogFileWriter.push(line + "\n");
+  }
+  if (!assertNodeRuntimeSupported(log)) {
+    throw new Error('Node runtime preflight failed; see the preceding fatal message.');
   }
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
@@ -1279,6 +1303,12 @@ async function runDaemonInnerWithStartupOwnership(
     ? `v${nodeVersion}, ${nodeCommit}`
     : `v${nodeVersion}`;
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
+  log(
+    `[info] [authority-index] mode=${authorityIndex?.mode ?? 'local-history'} `
+    + `trustedCoreCount=${authorityIndex?.trustedCorePeers.length ?? 0} `
+    + `maxTailBlocks=${authorityIndex?.maxTailBlocks ?? 'unbounded'} `
+    + `cacheEpoch=${authorityIndex?.cacheEpoch ?? 0}`,
+  );
 
   // RFC-41 §4.9 / §4.3: structured startup log lines for telemetry.
   // The doctor's state summary correlates these with /api/status —
@@ -1343,32 +1373,23 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
-  const unifiedRfc64Disabled = config.rfc64Catalog?.enabled === false;
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
-    unifiedRfc64Disabled
-      ? {
-          rfc64Catalog: config.rfc64Catalog,
-          // The unified rollback is authoritative at the daemon boundary too.
-          // Do not let stale deprecated controls extend sync scope, fail
-          // validation, or reach the agent while the replacement is disabled.
-          rfc64PublicCatalog: undefined,
-        }
-      : config,
+    config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
+  const rfc64CatalogActivationState = rfc64CatalogActivations.activationState;
   const rfc64RollbackTimestamp = new Date().toISOString();
-  const explicitDisabled = unifiedRfc64Disabled
-    || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
-  if (explicitDisabled) {
+  if (rfc64CatalogActivationState.execution.mode === 'compatibility-rollback') {
     log(
       `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs; `
       + 'RFC-64 default correctness is disabled for this compatibility release',
     );
   }
-  const emergencyModes = Object.entries(rfc64Catalog.rollout.contextGraphModes)
+  const effectiveRfc64Rollout = rfc64CatalogActivationState.execution.rollout;
+  const emergencyModes = Object.entries(effectiveRfc64Rollout.contextGraphModes)
     .filter(([, mode]) => mode === 'legacy' || mode === 'shadow')
     .sort(([left], [right]) => left.localeCompare(right));
   if (emergencyModes.length > 0) {
@@ -1377,7 +1398,7 @@ async function runDaemonInnerWithStartupOwnership(
       + `timestamp=${rfc64RollbackTimestamp} affected=${JSON.stringify(emergencyModes)}`,
     );
   }
-  if (rfc64Catalog.rollout.killSwitch) {
+  if (effectiveRfc64Rollout.killSwitch) {
     log(
       `[rfc64-catalog-rollback] WARNING source=kill-switch reason=global-emergency-stop `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs`,
@@ -1537,21 +1558,7 @@ async function runDaemonInnerWithStartupOwnership(
     // namespace silently corrupt each other. Fires BEFORE
     // chainResetWipe so a mismatched tag never triggers a wipe of
     // someone else's data.
-    const identity = await checkOrSetStoreIdentity({
-      storeConfig: runtimeStore,
-      nodeName: config.name,
-    });
-    if (!identity.ok) {
-      if (identity.action === 'mismatch') {
-        log(formatIdentityTagMismatch(identity));
-      } else {
-        log(`[STORE-IDENTITY] failed to verify namespace ownership: ${identity.error}`);
-      }
-      process.exit(1);
-    }
-    if (identity.action === 'tagged') {
-      log(`Tagged triple-store namespace for node "${identity.nodeName}".`);
-    }
+    await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'startup');
   }
 
   const wipeResult = await chainResetWipe({
@@ -1572,31 +1579,15 @@ async function runDaemonInnerWithStartupOwnership(
     storeConfig: runtimeStore,
     log,
   });
-  if (wipeResult.wiped) {
-    log(
-      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +
-      `${wipeResult.backedUpFiles.length} backed up ` +
-      `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
-    );
-    // A DKG-managed external wipe uses DROP ALL, which also removes the
-    // namespace ownership tag verified above. Re-tag before continuing so
-    // this daemon never runs against an unclaimed namespace.
+  for (const message of formatChainResetWipeOutcome(wipeResult, network?.chainResetMarker)) {
+    log(message);
+  }
+  if (wipeResult.requiresStoreRetag) {
+    // A DKG-managed DROP ALL may have removed the namespace ownership tag.
+    // Re-tag even when cleanup or marker persistence failed: the remote
+    // request can take effect independently of those local outcomes.
     if (isExternalBackend(runtimeStore?.backend)) {
-      const identity = await checkOrSetStoreIdentity({
-        storeConfig: runtimeStore,
-        nodeName: config.name,
-      });
-      if (!identity.ok) {
-        if (identity.action === 'mismatch') {
-          log(formatIdentityTagMismatch(identity));
-        } else {
-          log(`[STORE-IDENTITY] failed to re-tag namespace after wipe: ${identity.error}`);
-        }
-        process.exit(1);
-      }
-      if (identity.action === 'tagged') {
-        log(`Re-tagged triple-store namespace for node "${identity.nodeName}" after chain-state wipe.`);
-      }
+      await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'post-wipe');
     }
   }
 
@@ -1616,7 +1607,11 @@ async function runDaemonInnerWithStartupOwnership(
   // Field-level merge of CLI config + network/<env>.json#chain.
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
-  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
+  // The composition root creates exactly one budget plus direct-route usage
+  // tracker, and derives every adapter/route capability from that object.
+  const daemonRpcRuntime = createDaemonRpcRuntime(chainBase);
+  const rpcRequestGovernor = daemonRpcRuntime?.governor;
+  const runtimeEvmChainConfig = daemonRpcRuntime?.chainConfig;
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -1790,6 +1785,20 @@ async function runDaemonInnerWithStartupOwnership(
   const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
+  // DashboardDB is process-owned local state under the same integrity boundary
+  // as the node identity/configuration. Authority generations cannot be proven
+  // from a watermark hash alone, so this composition-root admission is
+  // deliberately explicit rather than inferred from a structural store type.
+  const localContextGraphAuthorityHistoryStore =
+    new SqliteContextGraphAuthorityHistoryStore(dashDb);
+  const localContextGraphAuthorityIndexStore =
+    new SqliteContextGraphAuthorityIndexStore(dashDb);
+  // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
+  // adapter builds the tick, starts it, and publishes the binding every other
+  // eligible reader consults. Per-wallet publisher adapters receive only a
+  // late-bound binding getter below — never this store — because a second store
+  // would be a second scanner, which is what this log exists to delete.
+  const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1834,6 +1843,7 @@ async function runDaemonInnerWithStartupOwnership(
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
+    authorityIndex,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
     logging: config.logging,
@@ -1846,19 +1856,9 @@ async function runDaemonInnerWithStartupOwnership(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
-    // The agent owns authoritative activation against the chain adapter it
-    // actually constructed. This daemon-side resolved value is only a
-    // fail-fast/status preview and must not become a second runtime contract.
-    rfc64PublicCatalogActivation: config.rfc64PublicCatalog === undefined
-      ? undefined
-      : rfc64PublicCatalog.enabled
-        ? config.rfc64PublicCatalog
-        : { enabled: false },
-    rfc64CatalogActivation: config.rfc64Catalog === undefined
-      ? undefined
-      : rfc64Catalog.enabled
-        ? config.rfc64Catalog
-        : { enabled: false },
+    // Forward the structurally validated resolved snapshot. The agent consumes exactly the
+    // same precedence/fallback decision used for sync scope and status.
+    rfc64CatalogActivations,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
@@ -1919,6 +1919,9 @@ async function runDaemonInnerWithStartupOwnership(
     changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
+    localContextGraphAuthorityHistoryStore,
+    localContextGraphAuthorityIndexStore,
+    chainEventLogStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2038,6 +2041,9 @@ async function runDaemonInnerWithStartupOwnership(
           principalId: row.principal_id,
           role: row.role ?? undefined,
           status: row.status,
+          // Preserve application-specific labels for public custom-store
+          // compatibility. The agent's provenance classifier recognizes only
+          // its two trusted local-origin literals.
           source: row.source ?? undefined,
           displayName: row.display_name ?? undefined,
           ...(metadata ? { metadata } : {}),
@@ -2045,6 +2051,20 @@ async function runDaemonInnerWithStartupOwnership(
           updatedAt: row.updated_at,
         };
       }),
+      localOrigins: {
+        loadLocalOrigins: async () => dashDb.listLocalContextGraphOrigins().map((row) => ({
+          contextGraphId: row.context_graph_id,
+          source: row.source,
+          createdAt: row.created_at,
+        })),
+        recordLocalOrigin: async (record) => {
+          dashDb.recordLocalContextGraphOrigin({
+            context_graph_id: record.contextGraphId,
+            source: record.source,
+            created_at: record.createdAt,
+          });
+        },
+      },
       upsert: async (record) => {
         dashDb.upsertContextGraphMember({
           context_graph_id: record.contextGraphId,
@@ -2085,6 +2105,7 @@ async function runDaemonInnerWithStartupOwnership(
       commitAutomaticApproval: async (input) =>
         dashDb.commitContextGraphAutomaticApproval(input),
     },
+    messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
       idempotencyStore: messengerIdempotencyStore,
       outboxStore: messengerOutboxStore,
@@ -2420,6 +2441,10 @@ async function runDaemonInnerWithStartupOwnership(
           store: agent.store,
           keypair: agent.wallet.keypair,
           chainBase: publisherChainBase,
+          // Late-bound: Hub rotation/rebuild clears the owner binding before a
+          // replacement exists, and every wallet must observe that gap as a
+          // live-fallback signal rather than retain the retired generation.
+          chainEventLogBindingSource: () => agent.getChainEventLogBinding(),
           ackTransportFactory: agent.createACKTransportFactory({
             sendTimeoutMs: storageAckTiming.sendTimeoutMs,
             log,
@@ -2487,15 +2512,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
-  const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   const runChainDiscoveryScan = createChainDiscoveryScanRunner({
     agent,
     log,
     pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+    intervalMs: CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   });
-  setTimeout(runChainDiscoveryScan, 15_000);
-  const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
-  if (chainScanTimer.unref) chainScanTimer.unref();
+  runChainDiscoveryScan.schedule(15_000);
 
   // Periodic peer health ping (every 2 minutes)
   const PING_INTERVAL_MS = 2 * 60 * 1000;
@@ -3013,7 +3036,11 @@ async function runDaemonInnerWithStartupOwnership(
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
         publisherState.runtime?.drainRpcUsage(),
+        daemonRpcRuntime?.drainRouteRpcUsage(),
       ),
+      ...(rpcRequestGovernor === undefined
+        ? {}
+        : { drainRpcRequestGovernor: () => rpcRequestGovernor.drainWindow() }),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,
@@ -3429,7 +3456,6 @@ async function runDaemonInnerWithStartupOwnership(
     config.rateLimit?.requestsPerMinute ?? 120,
     config.rateLimit?.exempt ?? [
       "/api/status",
-      "/api/chain/rpc-health",
       "/.well-known/skill.md",
     ],
   );
@@ -3535,6 +3561,19 @@ async function runDaemonInnerWithStartupOwnership(
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
+
+      // Auth runs first and the route also requires a loopback peer. Snapshot
+      // capture is pure in-memory accounting: it never drains counters or
+      // initiates chain reconciliation/RPC.
+      if (handleRpcUsageSnapshotRequest({
+        req,
+        res,
+        url: reqUrl,
+        // Unlike ordinary routes, local-only diagnostics are unavailable when
+        // the operator explicitly disables API authentication.
+        authenticated: authEnabled,
+        snapshot: snapshotProcessRpcUsage,
+      })) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked
@@ -3659,6 +3698,7 @@ async function runDaemonInnerWithStartupOwnership(
         publisherState,
         config,
         rfc64Catalog,
+        rfc64CatalogActivationState,
         rfc64PublicCatalog,
         startedAt,
         dashDb,
@@ -3682,6 +3722,7 @@ async function runDaemonInnerWithStartupOwnership(
         routePlugins,
         admission: admissionStats,
         localLlm,
+        routeRpcTransport: daemonRpcRuntime?.routeTransport,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3783,15 +3824,13 @@ async function runDaemonInnerWithStartupOwnership(
     const cleanup = (async () => {
       try {
         if (updateInterval) clearInterval(updateInterval);
-        clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        await runChainDiscoveryScan.close().catch((err: unknown) => {
+          log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
+        });
         logVolumePruner.stop();
         backpressureMonitor.stop();
-        // Clears the timer AND performs the final best-effort drain (BEFORE
-        // telemetry stops), so a partial window still reaches Loki — keeps
-        // log-derived request totals exact across process lifecycles.
-        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
         natStatusWatcherStop?.();
@@ -3836,6 +3875,9 @@ async function runDaemonInnerWithStartupOwnership(
                 );
             },
             stopAgent: () => agent.stop(),
+            // Clears the timer and drains only after HTTP, catch-up, publisher,
+            // and agent RPC producers have stopped, while logging is still live.
+            stopRpcUsageTelemetry: () => rpcUsageTelemetry.stop(),
             // Detaches the sink, stops its exporter, and shuts down the OTel SDK.
             stopTelemetry: stopDaemonLogging,
             log,
@@ -3881,4 +3923,28 @@ async function runDaemonInnerWithStartupOwnership(
 
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+}
+type StoreIdentityPhase = 'startup' | 'post-wipe';
+
+async function ensureStoreIdentityOrExit(
+  storeConfig: Parameters<typeof checkOrSetStoreIdentity>[0]['storeConfig'],
+  nodeName: string,
+  log: (message: string) => void,
+  phase: StoreIdentityPhase,
+): Promise<void> {
+  const identity = await checkOrSetStoreIdentity({ storeConfig, nodeName });
+  if (!identity.ok) {
+    if (identity.action === 'mismatch') {
+      log(formatIdentityTagMismatch(identity));
+    } else {
+      const action = phase === 'post-wipe' ? 're-tag' : 'verify namespace ownership';
+      log(`[STORE-IDENTITY] failed to ${action}: ${identity.error}`);
+    }
+    process.exit(1);
+  }
+  if (identity.action === 'tagged') {
+    log(phase === 'post-wipe'
+      ? `Re-tagged triple-store namespace for node "${identity.nodeName}" after chain-state wipe.`
+      : `Tagged triple-store namespace for node "${identity.nodeName}".`);
+  }
 }

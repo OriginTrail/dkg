@@ -8,10 +8,10 @@
 import { randomBytes, createHmac, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { readFileSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { dkgDir } from './config.js';
+import { DkgHomeFiles } from './config.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -166,62 +166,49 @@ export function authenticatedAgentAddress(
 // Token file management
 // ---------------------------------------------------------------------------
 
-function tokenFilePath(): string {
-  return join(dkgDir(), 'auth.token');
+function tokenFilePath(homeFiles = new DkgHomeFiles()): string {
+  return homeFiles.tokenPath;
 }
 
 function generateToken(): string {
   return randomBytes(32).toString('base64url');
 }
 
-/**
- * Load tokens from disk + config. Auto-generates a token file if none exists.
- * Returns the set of valid tokens.
- */
-export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
+/** Shared token-file policy; daemon reconciliation is deliberately outside it. */
+async function loadOrCreateTokenFile(filePath: string, generateIfEmpty: boolean): Promise<Set<string>> {
   const tokens = new Set<string>();
-  const fileTokens = new Set<string>();
-  // auth.ts:203). Track config-pinned
-  // tokens separately from file-derived ones so reconciliation /
-  // rotation can preserve them when a token happens to live in BOTH
-  // sources (a real-world rollout shape — operators sync the same
-  // admin token across config and `auth.token`).
-  const configTokens = new Set<string>();
-
-  if (authConfig?.tokens) {
-    for (const t of authConfig.tokens) {
-      if (t.length > 0) {
-        tokens.add(t);
-        configTokens.add(t);
-      }
-    }
-  }
-
-  // Load or generate the file-based token
-  const filePath = tokenFilePath();
   if (existsSync(filePath)) {
     try {
       const raw = await readFile(filePath, 'utf-8');
       for (const line of raw.split('\n')) {
-        const t = line.trim();
-        if (t.length > 0 && !t.startsWith('#')) {
-          tokens.add(t);
-          fileTokens.add(t);
-        }
+        const token = line.trim();
+        if (token.length > 0 && !token.startsWith('#')) tokens.add(token);
       }
-    } catch {
-      // Unreadable — generate a fresh one
-    }
+    } catch { /* Unreadable files follow the same generation policy as empty files. */ }
   }
-
-  if (tokens.size === 0) {
+  if (tokens.size === 0 && generateIfEmpty) {
     const token = generateToken();
     tokens.add(token);
-    fileTokens.add(token);
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, `# DKG node API token — treat this like a password\n${token}\n`, { mode: 0o600 });
     await chmod(filePath, 0o600);
   }
+  return tokens;
+}
+
+/** Select the first file token without registering daemon hot-reload state. */
+export async function loadApiClientToken(homeFiles: DkgHomeFiles): Promise<string | undefined> {
+  return (await loadOrCreateTokenFile(tokenFilePath(homeFiles), true)).values().next().value;
+}
+
+/** Load daemon tokens from config and disk, generating only when both are empty. */
+export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
+  const filePath = tokenFilePath();
+  // Keep config tokens first and retain their provenance when a token also
+  // appears in the file, so rotation/reconciliation cannot revoke a pinned token.
+  const configTokens = new Set(authConfig?.tokens?.filter((token) => token.length > 0));
+  const fileTokens = await loadOrCreateTokenFile(filePath, configTokens.size === 0);
+  const tokens = new Set([...configTokens, ...fileTokens]);
 
   // CLI-11: record the file snapshot so `verifyToken`'s mtime-gated
   // reconciliation knows which tokens originated on disk and can

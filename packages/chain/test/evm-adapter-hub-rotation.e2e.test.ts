@@ -52,8 +52,10 @@ const HUB_ABI = [
   'function setAssetStorageAddress(string, address) external',
   'event ContractChanged(string contractName, address newContractAddress)',
   'event NewContract(string contractName, address newContractAddress)',
+  'event ContractRemoved(string contractName, address contractAddress)',
   'event AssetStorageChanged(string contractName, address newContractAddress)',
   'event NewAssetStorage(string contractName, address newContractAddress)',
+  'event AssetStorageRemoved(string contractName, address contractAddress)',
 ];
 
 let ctx: HardhatContext;
@@ -171,6 +173,29 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   afterAll(async () => {
     await killHardhat(ctx);
   });
+
+  it('typed Random Sampling availability refreshes a rotated Hub binding', async () => {
+    const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 60_000);
+    const identityId = 1n;
+    const before = await adapter.resolveRandomSamplingAvailability(identityId);
+    expect(before.kind).toBe('available');
+    await drainHistoricalRotationEvents(adapter);
+    const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER, ctx.provider);
+    const original = await readHubAddress(ctx.hubAddress, deployer, 'RandomSampling');
+    const replacement = freshAddress();
+    try {
+      await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', replacement);
+      await pollHubRotations(adapter);
+      expect(adapter.isRandomSamplingReady()).toBe(false);
+      expect(await adapter.resolveRandomSamplingAvailability(identityId)).toEqual(before);
+      expect(adapter.isRandomSamplingReady()).toBe(true);
+      const pair = (adapter as any).randomSamplingPairCache.peek() as { rs: Contract };
+      expect((await pair.rs.getAddress()).toLowerCase()).toBe(replacement.toLowerCase());
+    } finally {
+      await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', original);
+      await pollHubRotations(adapter);
+    }
+  }, 60_000);
 
   it(
     'TTL refresh: cached RandomSampling address is re-resolved after the TTL elapses',

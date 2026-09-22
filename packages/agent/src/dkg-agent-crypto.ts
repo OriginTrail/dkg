@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -337,7 +337,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -400,6 +399,10 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import { localContextGraphIdMatchesCommittedNameHash } from './context-graph-binding-state.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 
@@ -465,6 +468,52 @@ function mapContextGraphSlotBindingOutcome(
     throw outcome.error;
   }
   return false;
+}
+
+function evaluateContextGraphSlotBindingCommitment(
+  contextGraphId: string,
+  onChainId: string,
+  onChainHash: string | null,
+  allowNumericSelfAddress: boolean,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+  warn: (message: string) => void,
+): ContextGraphSlotBindingOutcome {
+  let numericId: bigint;
+  try {
+    numericId = BigInt(onChainId);
+  } catch {
+    return { kind: 'unprovable' };
+  }
+  if (numericId <= 0n) return { kind: 'unprovable' };
+
+  const trimmed = contextGraphId.trim();
+  if (
+    allowNumericSelfAddress
+    && /^\d+$/.test(trimmed)
+    && trimmed === numericId.toString()
+  ) {
+    return { kind: 'match' };
+  }
+  if (!onChainHash || !/^0x[0-9a-fA-F]{64}$/.test(onChainHash)) {
+    warn(
+      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO `
+      + 'valid committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). '
+      + 'Treating CG as NOT public (fail-closed).',
+    );
+    return { kind: 'mismatch' };
+  }
+  if (localContextGraphIdMatchesCommittedNameHash(
+    trimmed,
+    onChainHash,
+    isWireIdKeyedSubscription,
+  )) return { kind: 'match' };
+
+  warn(
+    `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits `
+    + `name-hash ${onChainHash.toLowerCase()} that does not match this CG's local identity — `
+    + 'local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).',
+  );
+  return { kind: 'mismatch' };
 }
 
 async function evaluateContextGraphSlotBinding(
@@ -533,28 +582,30 @@ async function evaluateContextGraphSlotBinding(
       ),
     };
   }
-  if (!onChainHash) {
-    warn(
-      opCtx ?? createOperationContext('share'),
-      `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} has NO `
-      + 'committed name-hash — cannot affirmatively bind identity (slot reused on a fresh chain?). '
-      + 'Treating CG as NOT public (fail-closed).',
-    );
-    return { kind: 'mismatch' };
-  }
-  if (localContextGraphIdMatchesCommittedNameHash(
-    trimmed,
+  return evaluateContextGraphSlotBindingCommitment(
+    contextGraphId,
+    onChainId,
     onChainHash,
+    allowNumericSelfAddress,
     isWireIdKeyedSubscription,
-  )) return { kind: 'match' };
-
-  warn(
-    opCtx ?? createOperationContext('share'),
-    `isContextGraphPublicOnChain(${contextGraphId}): locally-mapped on-chain id ${onChainId} commits `
-    + `name-hash ${onChainHash.toLowerCase()} that does not match this CG's local identity — `
-    + 'local mapping is STALE (slot reused on a fresh chain?). Treating CG as NOT public (fail-closed).',
+    (message) => warn(opCtx ?? createOperationContext('share'), message),
   );
-  return { kind: 'mismatch' };
+}
+
+const LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS = 60_000;
+
+/**
+ * Bind an optional chain point read. Options are passed ONLY when a signal is
+ * present, so the call keeps the arity callers and spies have always observed.
+ */
+function bindOptionalChainRead<T>(
+  chain: unknown,
+  read: ((numericId: bigint, options?: { signal?: AbortSignal }) => Promise<T>) | undefined,
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => signal
+    ? read.call(chain, numericId, { signal })
+    : read.call(chain, numericId);
 }
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
@@ -614,7 +665,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<ContextGraphAgentGateAuthority> {
-    return resolveContextGraphAgentGateAuthorityDecision({
+    return withRpcUsageSite(CG_AUTH_RPC_SITES.gate, () => resolveContextGraphAgentGateAuthorityDecision({
       contextGraphId,
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
@@ -625,7 +676,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
       ),
-    });
+    }));
   }
 
   /** Compatibility projection for admission callers that only need fail-closed gate values. */
@@ -661,9 +712,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
-      contextGraphId,
-      { signal: options.signal },
+    const registeredAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recoveryGate,
+      () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        { signal: options.signal },
+      ),
     );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
     if (registeredAuthority.kind !== 'unregistered') return null;
@@ -800,18 +854,28 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * {@link CHAIN_POLICY_READ_TIMEOUT_MS}, so callers fail closed instead of
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
+   *
+   * `start` receives the bounded signal so the deadline reaches the read
+   * itself: a hung RPC is cancelled rather than merely abandoned, and a
+   * timed-out caller leaves any flight it was sharing.
    */
   private async raceChainPolicyRead<T>(
-    start: () => Promise<T>,
+    start: (signal: AbortSignal) => Promise<T>,
     label: string,
     signal?: AbortSignal,
   ): Promise<T | typeof TIMEOUT_SENTINEL> {
     try {
-      return await runBoundedOperation(start, {
-        label,
-        timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
-        signal,
-      });
+      // This remains inside the ordinary foreground RATE budget, but it must
+      // not wait behind a harness-sized queue longer than its 2.5s fail-closed
+      // deadline. Background callers retain their background class; the
+      // governor honors this priority only for foreground authority gates.
+      return await withRpcRequestContext({ admissionPriority: 'authority' }, () => (
+        runBoundedOperation(start, {
+          label,
+          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          signal,
+        })
+      ));
     } catch (error) {
       if (isBoundedOperationTimeoutError(error)) return TIMEOUT_SENTINEL;
       throw error;
@@ -845,18 +909,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   ): Promise<LiveOnChainAccessPolicyState> {
     const readLiveness = this.chain.isContextGraphActiveOnChain;
     const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    const readLiveAuthority = this.chain.getContextGraphLiveAuthority;
     return resolveLiveAccessPolicyState(
       {
-        isContextGraphActiveOnChain: typeof readLiveness === 'function'
-          ? (numericId, signal) => signal
-            ? readLiveness.call(this.chain, numericId, { signal })
-            : readLiveness.call(this.chain, numericId)
-          : undefined,
-        getContextGraphAccessPolicy: typeof readAccessPolicy === 'function'
-          ? (numericId, signal) => signal
-            ? readAccessPolicy.call(this.chain, numericId, { signal })
-            : readAccessPolicy.call(this.chain, numericId)
-          : undefined,
+        readLiveAuthority: bindOptionalChainRead(this.chain, readLiveAuthority),
+        isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
+        getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
         runBoundedRead: async (start, label, signal) => {
           const value = await this.raceChainPolicyRead(start, label, signal);
           return value === TIMEOUT_SENTINEL
@@ -866,6 +924,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         claimMissingLivenessWarning: () => {
           if (this.warnedMissingCgLivenessProbe) return false;
           this.warnedMissingCgLivenessProbe = true;
+          return true;
+        },
+        // Unlike the static condition above this one comes and goes (a node
+        // throttling at the JSON-RPC level reaches it too), so it is limited
+        // by time rather than to once per process.
+        claimLiveAuthorityFallbackWarning: () => {
+          const now = Date.now();
+          if (now - this.lastLiveAuthorityFallbackWarnAt < LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS) return false;
+          this.lastLiveAuthorityFallbackWarnAt = now;
           return true;
         },
         warn: (ctx, message) => this.log.warn(ctx, message),
@@ -883,7 +950,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<0 | 1 | null> {
-    const state = await this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options);
+    const state = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.livePolicy,
+      () => this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options),
+    );
     return state.kind === 'available' ? state.accessPolicy : null;
   }
 
@@ -893,14 +963,100 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     operationContext: OperationContext,
   ): Promise<ActivePublicContextGraphChainProof> {
     return resolveStrictActivePublicChainProof(
-      (id, resolverOperationContext, options) => this.resolveOnChainAccessPolicyState(
+      (id, resolverOperationContext) => this.resolveFinalizedOnChainAccessPolicyState(
         id,
         resolverOperationContext,
-        options,
       ),
       contextGraphId,
       operationContext,
     );
+  }
+
+  /**
+   * Metadata-bootstrap authority proof. Indexed adapters resolve identity,
+   * liveness, and policy from one finalized snapshot; legacy adapters retain
+   * the strict current-state repair path explicitly at this boundary.
+   */
+  async resolveFinalizedOnChainAccessPolicyState(this: DKGAgent,
+    contextGraphId: string,
+    opCtx?: OperationContext,
+  ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    const trimmed = contextGraphId.trim();
+    let onChainId: string | null = null;
+    let resolvedFromLocalCg = false;
+    if (typeof this.getContextGraphOnChainId === 'function') {
+      onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      if (onChainId) resolvedFromLocalCg = true;
+    }
+    if (!onChainId && /^\d+$/.test(trimmed)) {
+      if (typeof this.contextGraphExists === 'function') {
+        try {
+          if (!(await this.contextGraphExists(trimmed))) onChainId = trimmed;
+        } catch {
+          return 'unknown';
+        }
+      } else {
+        onChainId = trimmed;
+      }
+    }
+    if (!onChainId) return 'unregistered';
+
+    try {
+      const parsed = BigInt(onChainId);
+      if (
+        parsed <= 0n
+        || parsed > ethers.MaxUint256
+        || parsed.toString(10) !== onChainId
+      ) return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+
+    const indexedSnapshot = await this.readRfc64BatchedFinalizedAuthoritySnapshotV1(
+      onChainId,
+    );
+    if (indexedSnapshot === undefined) {
+      // Preserve the exact address resolution above when a legacy adapter has
+      // no finalized-index capability. Re-resolving through the generic
+      // policy helper can reinterpret a numeric local CG as a raw slot after
+      // a stateful resolver changes, bypassing its required name-hash proof.
+      if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(
+        contextGraphId,
+        onChainId,
+        opCtx,
+        { bindingMode: 'chain-attested-repair' },
+      ))) return 'unknown';
+      const policy = await this.readLiveOnChainAccessPolicy(onChainId, opCtx);
+      return policy === 0 || policy === 1 ? policy : 'unknown';
+    }
+    if (
+      indexedSnapshot === null
+      || indexedSnapshot.contextGraphId !== onChainId
+      || indexedSnapshot.active !== true
+    ) return 'unknown';
+
+    if (resolvedFromLocalCg) {
+      const bindingOutcome = evaluateContextGraphSlotBindingCommitment(
+        contextGraphId,
+        onChainId,
+        indexedSnapshot.nameHash,
+        false,
+        (localId) => this.isWireIdKeyedSubscription(localId),
+        (message) => this.log.warn(
+          opCtx ?? createOperationContext('share'),
+          message,
+        ),
+      );
+      if (!mapContextGraphSlotBindingOutcome(
+        bindingOutcome,
+        'chain-attested-repair',
+      )) return 'unknown';
+    }
+
+    const accessPolicy = indexedSnapshot.accessPolicy;
+    if (accessPolicy !== 0 && accessPolicy !== 1) return 'unknown';
+    this.onChainAccessPolicyCache.set(onChainId, accessPolicy);
+    return accessPolicy;
   }
 
   /**
@@ -958,10 +1114,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // resolver collapses unknown↔not-public ONLY for this boolean predicate;
       // the publish-inline probe consumes the tri-state directly so it can
       // REFUSE (rather than choose plaintext) on a genuine UNKNOWN.
-      return (await this.resolveOnChainAccessPolicyState(
-        contextGraphId,
-        opCtx,
-        options,
+      return (await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publicProbe,
+        () => this.resolveOnChainAccessPolicyState(contextGraphId, opCtx, options),
       )) === 0;
     } catch (err) {
       // Fail closed (curated/encrypted) on any lookup failure, but not
@@ -1012,7 +1167,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveOnChainAccessPolicyState(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
-    options: { slotBindingMode?: PublicPolicySlotBindingMode } = {},
+    options: {
+      slotBindingMode?: PublicPolicySlotBindingMode;
+    } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
     const trimmed = contextGraphId.trim();
 
@@ -1238,7 +1395,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(input.contextGraphId);
+    const registeredAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recipients,
+      () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId),
+    );
     if (registeredAuthority.kind === 'unregistered') {
       return resolveWorkspaceAgentRecipients(this.store, input);
     }
@@ -2199,7 +2359,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       );
     }
 
-    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(pkg.contextGraphId);
+    const agentGateAddresses = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.senderKeyAccept,
+      () => this.getContextGraphAgentGateAddresses(pkg.contextGraphId),
+    );
     if (!agentGateAddresses) {
       // A cold private member can receive Sender Key setup after the finalized
       // chain binding but before its accepted RFC-64 roster or legacy `_meta`
@@ -2653,7 +2816,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
   ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
-    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId);
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.signer,
+      () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
+    );
     if (authority.kind === 'ungated') {
       return this.getWorkspaceGossipSigningAgent();
     }

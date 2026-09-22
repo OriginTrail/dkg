@@ -11,7 +11,10 @@
  * sweep then triggers its reconcile. Hermetic — MockChainAdapter, no network.
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  type ContextGraphAuthoritySnapshot,
+} from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -19,8 +22,15 @@ import {
   createOperationContext,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { DKGAgent } from '../src/index.js';
+import {
+  DKGAgent,
+  type ContextGraphSubscriptionRecord,
+} from '../src/index.js';
+import {
+  VmReconcileSchedulingRuntime,
+} from '../src/chain-reconciler.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { ethers } from 'ethers';
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -33,6 +43,8 @@ function deferred<T>(): {
 
 interface AgentInternals {
   runVmReconcileSweep(): Promise<void>;
+  isVmReconcileTargetSelected(contextGraphId: string): boolean;
+  rfc64SelectedVmReconcileTargetIds(): readonly string[];
   resolveVmReconcileTarget(localCgId: string): Promise<unknown>;
   fetchContextGraphAssets(localCgId: string, requestedUals: readonly string[]): Promise<unknown>;
   selfPrimeSubscriptionOnChainId(
@@ -50,14 +62,54 @@ interface AgentInternals {
     provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
   } | null>;
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
+  bindSubscriptionOnChainId(
+    localCgId: string,
+    sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
+    onChainId: string,
+  ): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
-  vmReconcileDispatcher: {
-    dispatch: (cg: string, reason: 'live' | 'periodic') => Promise<boolean>;
-    triggerLive: (cg: string) => void;
-    triggerPeriodic: (cg: string) => void;
-    tryTriggerPeriodic: (cg: string) => boolean;
-  } | null;
+  vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   store: TripleStore;
+}
+
+function finalizedVmSnapshot(
+  contextGraphId: string,
+  onChainId = '298',
+): ContextGraphAuthoritySnapshot {
+  return Object.freeze({
+    chainId: '31337',
+    governanceContract: `0x${'11'.repeat(20)}`,
+    contextGraphId: onChainId,
+    owner: `0x${'22'.repeat(20)}`,
+    active: true,
+    accessPolicy: 0,
+    publishPolicy: 1,
+    publishAuthority: null,
+    publishAuthorityAccountId: '0',
+    participantAgents: [],
+    nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+    ownershipEra: '1',
+    policyVersion: '1',
+    rosterVersion: '0',
+    sourceBlockNumber: '42',
+    sourceBlockHash: `0x${'33'.repeat(32)}`,
+  });
+}
+
+function installFinalizedVmIndex(
+  chain: MockChainAdapter,
+  resolve: (nameHashes: readonly string[]) => Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>,
+) {
+  const whenIdle = vi.fn(async () => undefined);
+  const resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes = vi.fn(resolve);
+  Object.assign(chain, {
+    contextGraphAuthorityIndexRevisionReader: {
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes,
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      whenIdle,
+    },
+  });
+  return { resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes, whenIdle };
 }
 
 // DKGNode getter throws on peerId access without a real start(); stub it so the
@@ -69,11 +121,323 @@ function stubNode(agent: DKGAgent): void {
   };
 }
 
+function installVmReconcileScheduling(
+  internals: AgentInternals,
+  scheduling: VmReconcileSchedulingRuntime<boolean>,
+): VmReconcileSchedulingRuntime<boolean> {
+  internals.vmReconcileScheduling = scheduling;
+  return scheduling;
+}
+
+/** Exercise admission through the real dispatcher and canonical authorization/binding owner. */
+function targetDispatcher(internals: AgentInternals) {
+  const triggered: string[] = [];
+  const dispatcher = installVmReconcileScheduling(internals, new VmReconcileSchedulingRuntime(async (cg, source) => {
+    await internals.resolveVmReconcileTarget(cg);
+    triggered.push(`${source}:${cg}`);
+    return true;
+  }, () => undefined, { concurrency: 2, maxPending: 32 }));
+  return { dispatcher, triggered };
+}
+
 describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscribed CG', () => {
   let agent: DKGAgent | null = null;
   afterEach(async () => {
     if (agent) { await agent.stop().catch(() => undefined); agent = null; }
     vi.restoreAllMocks();
+  });
+
+  it('keeps accepted owner-signed unregistered subscriptions out of every VM sweep', async () => {
+    const chain = new MockChainAdapter();
+    const index = installFinalizedVmIndex(chain, async () => new Map());
+    agent = await DKGAgent.create({ name: 'Rfc64UnregisteredVmDormant', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const contextGraphId = 'rfc64-unregistered-vm-dormant';
+    internals.subscribedContextGraphs.set(contextGraphId, { subscribed: true });
+    vi.spyOn(internals as any, 'hasAcceptedRfc64UnregisteredAuthorityV1')
+      .mockImplementation((id: string) => id === contextGraphId);
+    const legacyLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const dispatch = vi.fn(async () => true);
+    installVmReconcileScheduling(
+      internals,
+      new VmReconcileSchedulingRuntime(dispatch, () => undefined),
+    );
+
+    expect(internals.isVmReconcileTargetSelected(contextGraphId)).toBe(false);
+    await internals.runVmReconcileSweep();
+    await internals.runVmReconcileSweep();
+    await internals.runVmReconcileSweep();
+    await expect(internals.resolveVmReconcileTarget(contextGraphId))
+      .rejects.toMatchObject({ code: 'ContextGraphNotFound' });
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(index.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
+      .toHaveBeenCalledOnce();
+    expect(index.whenIdle).toHaveBeenCalledOnce();
+    expect(legacyLookup).not.toHaveBeenCalled();
+  });
+
+  it('keeps accepted unregistered reverse candidates out of sweeps but promotes a finalized transition', async () => {
+    const chain = new MockChainAdapter();
+    const contextGraphId = 'rfc64-unregistered-reverse-transition';
+    const snapshot = finalizedVmSnapshot(contextGraphId);
+    const index = installFinalizedVmIndex(chain, async (nameHashes) => new Map([
+      [nameHashes[0]!, snapshot],
+    ]));
+    agent = await DKGAgent.create({ name: 'Rfc64UnregisteredReverseTransition', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const subscription = { subscribed: true };
+    internals.subscribedContextGraphs.set(contextGraphId, subscription);
+    (internals as any).bindSubscriptionReverseNameHashOnChainId(
+      contextGraphId,
+      subscription,
+      '297',
+      snapshot.nameHash,
+    );
+    vi.spyOn(internals as any, 'hasAcceptedRfc64UnregisteredAuthorityV1')
+      .mockImplementation((id: string) => id === contextGraphId);
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+    const legacyLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const dispatch = vi.fn(async () => true);
+    installVmReconcileScheduling(
+      internals,
+      new VmReconcileSchedulingRuntime(dispatch, () => undefined),
+    );
+
+    expect(internals.isVmReconcileTargetSelected(contextGraphId)).toBe(false);
+    const target = await internals.resolveVmReconcileTarget(contextGraphId);
+
+    expect(target).toMatchObject({
+      kind: 'subscription',
+      bindingKind: 'authoritative',
+      onChainId: '298',
+    });
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      onChainId: '298',
+      onChainHash: snapshot.nameHash,
+    });
+    // The accepted RFC-64 source intentionally remains stale-unregistered.
+    // Once a finalized lookup installs an authoritative binding, the periodic
+    // selector must admit it without waiting for an unrelated policy refresh.
+    expect(internals.isVmReconcileTargetSelected(contextGraphId)).toBe(true);
+    await internals.runVmReconcileSweep();
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(index.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
+      .toHaveBeenCalledOnce();
+    expect(legacyLookup).not.toHaveBeenCalled();
+  });
+
+  it('fails an indexed unbound subscription closed without reopening the legacy history scan', async () => {
+    const chain = new MockChainAdapter();
+    const index = installFinalizedVmIndex(chain, async () => new Map());
+    agent = await DKGAgent.create({ name: 'Rfc64PendingAbsenceVmFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const contextGraphId = 'rfc64-pending-absence-vm-fence';
+    internals.subscribedContextGraphs.set(contextGraphId, { subscribed: true });
+    const legacyLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const readAuthority = vi.spyOn(agent, 'canReadContextGraph');
+
+    await expect(internals.resolveVmReconcileTarget(contextGraphId))
+      .rejects.toMatchObject({ code: 'ContextGraphOnChainIdUnresolved' });
+
+    expect(index.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
+      // The governed authority lane always supplies a signal, so a coordinator
+      // close can cancel this read even when the caller passed none.
+      .toHaveBeenCalledWith([
+        (internals as any).contextGraphNameCommitment(contextGraphId),
+      ], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(index.whenIdle).toHaveBeenCalledOnce();
+    expect(legacyLookup).not.toHaveBeenCalled();
+    expect(readAuthority).not.toHaveBeenCalled();
+  });
+
+  it('carries direct numeric subscription authority through subscribe and VM resolution', async () => {
+    const chain = new MockChainAdapter();
+    const persistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
+    const index = installFinalizedVmIndex(chain, async () => {
+      throw new Error('numeric authority must not reverse-resolve a name hash');
+    });
+    agent = await DKGAgent.create({
+      name: 'NumericFinalizedSubscribeAuthority',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persistedSubscriptions.values()].map((record) => ({ ...record })),
+        save: async (record) => {
+          persistedSubscriptions.set(record.id, { ...record });
+        },
+        delete: async (contextGraphId) => {
+          persistedSubscriptions.delete(contextGraphId);
+        },
+      },
+    });
+    stubNode(agent);
+    Object.assign(agent as any, {
+      gossip: {
+        subscribe: vi.fn(),
+        onMessage: vi.fn(),
+      },
+    });
+    const internals = agent as unknown as AgentInternals;
+    vi.spyOn(agent as any, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
+      kind: 'available',
+      accessPolicy: 0,
+    });
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+    const legacyLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+
+    const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority('298', {
+      allowSubscriptionFallback: false,
+    });
+    expect(authority).toMatchObject({
+      outcome: 'allowed',
+      source: 'registered-chain',
+      onChainId: 298n,
+    });
+    const subscription = agent.subscribeToContextGraph('298', {
+      onChainId: authority.onChainId?.toString(10),
+    });
+    const target = await internals.resolveVmReconcileTarget('298');
+
+    expect(subscription).toMatchObject({ subscribed: true, onChainId: '298' });
+    await vi.waitFor(() => expect(persistedSubscriptions.get('298'))
+      .toMatchObject({ id: '298', onChainId: '298' }));
+    expect(target).toMatchObject({
+      kind: 'subscription',
+      bindingKind: 'authoritative',
+      onChainId: '298',
+    });
+    expect(index.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
+      .not.toHaveBeenCalled();
+    expect(index.whenIdle).not.toHaveBeenCalled();
+    expect(legacyLookup).not.toHaveBeenCalled();
+
+    await agent.stop();
+    agent = await DKGAgent.create({
+      name: 'NumericFinalizedSubscribeAuthorityRestart',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persistedSubscriptions.values()].map((record) => ({ ...record })),
+        save: async (record) => {
+          persistedSubscriptions.set(record.id, { ...record });
+        },
+        delete: async (contextGraphId) => {
+          persistedSubscriptions.delete(contextGraphId);
+        },
+      },
+    });
+    stubNode(agent);
+    Object.assign(agent as any, {
+      gossip: {
+        subscribe: vi.fn(),
+        onMessage: vi.fn(),
+      },
+    });
+    vi.spyOn(agent as any, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
+      kind: 'available',
+      accessPolicy: 0,
+    });
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+
+    await agent.rehydrateContextGraphSubscriptions(null);
+    const restartedInternals = agent as unknown as AgentInternals;
+    const restartedTarget = await restartedInternals.resolveVmReconcileTarget('298');
+
+    expect(agent.getSubscribedContextGraphs().get('298')).toMatchObject({
+      subscribed: true,
+      onChainId: '298',
+    });
+    expect(restartedTarget).toMatchObject({
+      kind: 'subscription',
+      bindingKind: 'authoritative',
+      onChainId: '298',
+    });
+    expect(index.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
+      .not.toHaveBeenCalled();
+    expect(legacyLookup).not.toHaveBeenCalled();
+  });
+
+  it('promotes exact active finalized evidence before applying the existing VM read policy', async () => {
+    const chain = new MockChainAdapter();
+    const contextGraphId = 'rfc64-finalized-vm-binding';
+    const snapshot = finalizedVmSnapshot(contextGraphId);
+    const index = installFinalizedVmIndex(chain, async (nameHashes) => new Map([
+      [nameHashes[0]!, snapshot],
+    ]));
+    agent = await DKGAgent.create({ name: 'Rfc64FinalizedVmBinding', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.set(contextGraphId, { subscribed: true });
+    const legacyLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const readAuthority = vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+
+    const target = await internals.resolveVmReconcileTarget(contextGraphId);
+
+    expect(target).toMatchObject({
+      kind: 'subscription',
+      bindingKind: 'authoritative',
+      onChainId: '298',
+    });
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '298',
+      onChainHash: snapshot.nameHash,
+    });
+    expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
+      allowSubscriptionFallback: false,
+    });
+    expect(index.whenIdle).toHaveBeenCalledOnce();
+    expect(legacyLookup).not.toHaveBeenCalled();
+  });
+
+  it('does not overwrite an authoritative binding installed during a finalized VM lookup', async () => {
+    const chain = new MockChainAdapter();
+    const contextGraphId = 'rfc64-finalized-vm-generation-fence';
+    const snapshot = finalizedVmSnapshot(contextGraphId);
+    const scan = deferred<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>();
+    installFinalizedVmIndex(chain, async () => scan.promise);
+    agent = await DKGAgent.create({ name: 'Rfc64FinalizedVmGenerationFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const subscription = { subscribed: true };
+    internals.subscribedContextGraphs.set(contextGraphId, subscription);
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+
+    const target = internals.resolveVmReconcileTarget(contextGraphId);
+    await Promise.resolve();
+    internals.bindSubscriptionOnChainId(contextGraphId, subscription, '999');
+    scan.resolve(new Map([[snapshot.nameHash, snapshot]]));
+
+    await expect(target).rejects.toMatchObject({ code: 'VmReconcileQueueClosed' });
+    expect(internals.subscribedContextGraphs.get(contextGraphId)?.onChainId).toBe('999');
+  });
+
+  it('rejects invalid finalized VM evidence without binding or falling back to legacy', async () => {
+    const chain = new MockChainAdapter();
+    const contextGraphId = 'rfc64-invalid-finalized-vm-binding';
+    const invalid = Object.freeze({
+      ...finalizedVmSnapshot(contextGraphId),
+      active: false,
+    });
+    const index = installFinalizedVmIndex(chain, async (nameHashes) => new Map([
+      [nameHashes[0]!, invalid],
+    ]));
+    agent = await DKGAgent.create({ name: 'Rfc64InvalidFinalizedVmBinding', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    internals.subscribedContextGraphs.set(contextGraphId, { subscribed: true });
+    const legacyLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const readAuthority = vi.spyOn(agent, 'canReadContextGraph');
+
+    await expect(internals.resolveVmReconcileTarget(contextGraphId))
+      .rejects.toThrow('Invalid finalized VM authority evidence');
+
+    expect(internals.subscribedContextGraphs.get(contextGraphId)?.onChainId).toBeUndefined();
+    expect(index.whenIdle).toHaveBeenCalledOnce();
+    expect(legacyLookup).not.toHaveBeenCalled();
+    expect(readAuthority).not.toHaveBeenCalled();
   });
 
   it('binds onChainId from the ontology quad, persists, and triggers reconcile for a subscribed-but-unbound CG', async () => {
@@ -102,24 +466,13 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     // The #1098 state: a pre-subscribed member CG with NO onChainId bound.
     internals.subscribedContextGraphs.set(LOCAL, { subscribed: true });
 
-    const triggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      dispatch: async (cg: string, reason: 'live' | 'periodic') => {
-        triggered.push(`${reason}:${cg}`);
-        return true;
-      },
-      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
-      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
-      tryTriggerPeriodic: (cg: string) => {
-        triggered.push(`periodic:${cg}`);
-        return true;
-      },
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     // Precondition: unbound before the sweep (so the assertion below is meaningful).
     expect(internals.subscribedContextGraphs.get(LOCAL)?.onChainId).toBeUndefined();
 
     await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
 
     // Post-fix: the sweep self-primed onChainId from the ontology quad and then
     // — no longer skipped by the `!onChainId` guard — triggered its reconcile.
@@ -132,6 +485,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     agent = await DKGAgent.create({ name: 'SelfPrimeRejectsInvalidIds', chainAdapter: chain });
     stubNode(agent);
     const internals = agent as unknown as AgentInternals;
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const invalidBindings = [
       ['gh1098-empty-id', ''],
@@ -150,17 +504,12 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       internals.subscribedContextGraphs.set(localCgId, { subscribed: true });
     }
 
-    const dispatch = vi.fn(async () => true);
-    internals.vmReconcileDispatcher = {
-      dispatch,
-      triggerLive: vi.fn(),
-      triggerPeriodic: vi.fn(),
-      tryTriggerPeriodic: vi.fn(() => true),
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
 
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(triggered).toEqual([]);
     for (const [localCgId] of invalidBindings) {
       expect(internals.subscribedContextGraphs.get(localCgId)?.onChainId).toBeUndefined();
     }
@@ -176,22 +525,16 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(denied, { subscribed: true, onChainId: '401' });
     internals.subscribedContextGraphs.set(member, { subscribed: true, onChainId: '402' });
     vi.spyOn(agent, 'canReadContextGraph').mockImplementation(async (contextGraphId, opts) => {
-      expect(opts.allowSubscriptionFallback).toBe(false);
+      expect(opts?.allowSubscriptionFallback).toBe(false);
       return contextGraphId === member;
     });
 
-    const dispatch = vi.fn(async () => true);
-    internals.vmReconcileDispatcher = {
-      dispatch,
-      triggerLive: vi.fn(),
-      triggerPeriodic: vi.fn(),
-      tryTriggerPeriodic: vi.fn(() => true),
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
 
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch).toHaveBeenCalledWith(member, 'periodic');
+    expect(triggered).toEqual([`periodic:${member}`]);
     await expect(internals.resolveVmReconcileTarget(denied))
       .rejects.toMatchObject({ code: 'ContextGraphNotFound' });
     await expect(internals.fetchContextGraphAssets(denied, [
@@ -237,21 +580,44 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(selected, passiveDiscoveryRow);
 
     const triggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      dispatch: async (cg: string, reason: 'live' | 'periodic') => {
-        triggered.push(`${reason}:${cg}`);
-        return true;
-      },
-      triggerLive: () => undefined,
-      triggerPeriodic: () => undefined,
-      tryTriggerPeriodic: () => true,
-    };
+    const scheduling = new VmReconcileSchedulingRuntime(async (cg, reason) => {
+      triggered.push(`${reason}:${cg}`);
+      return true;
+    }, () => undefined);
+    installVmReconcileScheduling(internals, scheduling);
 
     await internals.runVmReconcileSweep();
 
     expect(triggered).toEqual([`periodic:${selected}`]);
     expect(internals.subscribedContextGraphs.size).toBe(1);
     expect(internals.subscribedContextGraphs.get(selected)).toBe(passiveDiscoveryRow);
+  });
+
+  it('normalizes legacy RFC-64 selection and excludes member/core-owned targets', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'Rfc64LegacyVmSelection', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const config = (internals as any).config;
+    const selected = ['legacy-z', 'legacy-a', 'legacy-member', 'legacy-core', 'legacy-private'];
+    config.syncContextGraphs = selected;
+    config.rfc64CatalogBootstrap = undefined;
+    config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: selected.map((contextGraphId, index) => ({
+        policyEnvelope: {
+          payload: { accessPolicy: index === 4 ? 1 : 0, contextGraphId },
+        },
+        targets: [],
+      })),
+    };
+    internals.subscribedContextGraphs.clear();
+    internals.subscribedContextGraphs.set('legacy-member', { subscribed: true });
+    internals.subscribedContextGraphs.set('legacy-core', {
+      subscribed: false,
+      coreHosted: true,
+    });
+
+    expect(internals.rfc64SelectedVmReconcileTargetIds()).toEqual(['legacy-a', 'legacy-z']);
   });
 
   it.each([false, true])(
@@ -286,13 +652,11 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
         }],
       };
       internals.subscribedContextGraphs.clear();
-      const dispatch = vi.fn(async () => true);
-      internals.vmReconcileDispatcher = {
-        dispatch,
-        triggerLive: vi.fn(),
-        triggerPeriodic: vi.fn(),
-        tryTriggerPeriodic: vi.fn(() => true),
-      };
+      const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic' | 'manual') => true);
+      installVmReconcileScheduling(
+        internals,
+        new VmReconcileSchedulingRuntime(dispatch, () => undefined),
+      );
 
       await internals.runVmReconcileSweep();
 
@@ -449,7 +813,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const resolveOnChainId = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(298n);
     chain.getContextGraphKCCount = vi.fn(async () => 1n);
-    chain.getBlockNumber = vi.fn(async () => 100);
+    Object.assign(chain, { getBlockNumber: vi.fn(async () => 100) });
     const reconcileOrdinal = vi.fn(async (
       _localCgId: string,
       _onChainCgId: bigint,
@@ -530,7 +894,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       .mockResolvedValueOnce(298n)
       .mockResolvedValueOnce(299n);
     chain.getContextGraphKCCount = vi.fn(async () => 1n);
-    chain.getBlockNumber = vi.fn(async () => 100);
+    Object.assign(chain, { getBlockNumber: vi.fn(async () => 100) });
     chain.getContextGraphKCAt = vi.fn(async () => 42n);
     chain.getLatestMerkleRoot = vi.fn(async () => new Uint8Array(32).fill(7));
     chain.getLatestMerkleRootPublisher = vi.fn(async () => `0x${'11'.repeat(20)}`);
@@ -816,6 +1180,42 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.size).toBe(0);
   });
 
+  it('resolves and revalidates selected-only VM targets through finalized snapshots only', async () => {
+    const chain = new MockChainAdapter();
+    const selected = 'rfc64-selected-vm-finalized-fence';
+    let onChainId = '298';
+    const index = installFinalizedVmIndex(chain, async (nameHashes) => new Map([
+      [nameHashes[0]!, finalizedVmSnapshot(selected, onChainId)],
+    ]));
+    agent = await DKGAgent.create({ name: 'Rfc64SelectedVmFinalizedFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const config = (internals as any).config;
+    config.syncContextGraphs = [selected];
+    config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { accessPolicy: 0, contextGraphId: selected } },
+        targets: [],
+      }],
+    };
+    const legacyLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+
+    const target = await (internals as any).resolveVmReconcileTarget(selected);
+    onChainId = '299';
+    await expect((internals as any).revalidateVmReconcileTarget(
+      selected,
+      target,
+      (internals as any).vmReconcileLifecycleGeneration,
+    )).resolves.toBe(false);
+
+    expect(target).toMatchObject({ kind: 'rfc64-selected', onChainId: '298' });
+    expect(index.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
+      .toHaveBeenCalledTimes(2);
+    expect(index.whenIdle).toHaveBeenCalledTimes(2);
+    expect(legacyLookup).not.toHaveBeenCalled();
+    expect(internals.subscribedContextGraphs.size).toBe(0);
+  });
+
   it('keeps every VM reconcile entry point dormant when syncReconcilerEnabled is false', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -834,13 +1234,11 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
         targets: [],
       }],
     };
-    const dispatch = vi.fn(async () => true);
-    internals.vmReconcileDispatcher = {
-      dispatch,
-      triggerLive: vi.fn(),
-      triggerPeriodic: vi.fn(),
-      tryTriggerPeriodic: vi.fn(() => true),
-    };
+    const dispatch = vi.fn(async (_cg: string, _reason: 'live' | 'periodic' | 'manual') => true);
+    installVmReconcileScheduling(
+      internals,
+      new VmReconcileSchedulingRuntime(dispatch, () => undefined),
+    );
     const resolveOnChainId = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockResolvedValue(298n);
 
@@ -906,39 +1304,6 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
 
     await expect(target).rejects.toMatchObject({ code: 'VmReconcileQueueClosed' });
     expect(internals.subscribedContextGraphs.size).toBe(0);
-  });
-
-  it('KACG nudge targeting: binds ONLY the unbound CG whose on-chain id matches the event, not an unrelated one', async () => {
-    // This exercises the SAME `selfPrimeSubscriptionOnChainId` helper the live
-    // onKARegisteredToContextGraph nudge delegates to, with a `targetOnChainId`
-    // (the event's CG id). The nudge loops subscribed-unbound CGs and binds the
-    // one whose resolved id matches the event — so an unrelated CG must NOT bind.
-    const chain = new MockChainAdapter();
-    agent = await DKGAgent.create({ name: 'SelfPrimeTargeted', chainAdapter: chain });
-    stubNode(agent);
-    const internals = agent as unknown as AgentInternals;
-
-    const CG_MATCH = 'gh1098-match';
-    const CG_OTHER = 'gh1098-other';
-    const ON_MATCH = '500';
-    const ON_OTHER = '600';
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    await internals.store.insert([
-      { subject: `did:dkg:context-graph:${CG_MATCH}`, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${ON_MATCH}"`, graph: ontologyGraph },
-      { subject: `did:dkg:context-graph:${CG_OTHER}`, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${ON_OTHER}"`, graph: ontologyGraph },
-    ]);
-    internals.subscribedContextGraphs.set(CG_MATCH, { subscribed: true });
-    internals.subscribedContextGraphs.set(CG_OTHER, { subscribed: true });
-
-    // Event for ON_MATCH: the other CG (resolves to ON_OTHER) must NOT bind.
-    const other = await internals.selfPrimeSubscriptionOnChainId(CG_OTHER, internals.subscribedContextGraphs.get(CG_OTHER)!, BigInt(ON_MATCH));
-    expect(other).toBeNull();
-    expect(internals.subscribedContextGraphs.get(CG_OTHER)?.onChainId).toBeUndefined();
-
-    // The matching CG binds.
-    const matched = await internals.selfPrimeSubscriptionOnChainId(CG_MATCH, internals.subscribedContextGraphs.get(CG_MATCH)!, BigInt(ON_MATCH));
-    expect(matched).toBe(ON_MATCH);
-    expect(internals.subscribedContextGraphs.get(CG_MATCH)?.onChainId).toBe(ON_MATCH);
   });
 
   it('does not bind or persist a replacement subscription after delayed self-prime is invalidated', async () => {
@@ -1125,16 +1490,13 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(persist).not.toHaveBeenCalled();
   });
 
-  it('live KACG nudge handler: with multiple subscribed-unbound CGs, binds + reconciles ONLY the one matching the event id', async () => {
-    // Exercises the EXACT branch the live `onKARegisteredToContextGraph` poller
-    // hook runs (extracted to `handleKARegisteredNudge`), not just the underlying
-    // self-prime helper — so the loop-and-target logic is covered end to end.
-    // Three pre-subscribed PUBLIC member CGs are unbound (the #1098 state); a KA
-    // registration arrives for ONE of their on-chain ids. Only that CG must bind
-    // and reconcile; the other two are left untouched.
+  it('an ignored live event heals through the bounded periodic sweep once ontology metadata is available', async () => {
+    // An unknown numeric event does no global lookup. The periodic safety net
+    // still resolves and strictly persists all three already-present bindings.
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'KacgNudgeLive', chainAdapter: chain });
     stubNode(agent);
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
     const internals = agent as unknown as AgentInternals;
 
     const CG_HIT = 'gh1098-nudge-hit';
@@ -1153,23 +1515,20 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_MISS_A, { subscribed: true });
     internals.subscribedContextGraphs.set(CG_MISS_B, { subscribed: true });
 
-    const triggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      dispatch: async () => true,
-      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
-      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
-      tryTriggerPeriodic: () => true,
-    };
+    const { dispatcher, triggered } = targetDispatcher(internals);
 
     // The event names ON_HIT's on-chain id. None is bound yet.
     const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, createOperationContext('system'));
 
-    expect(reconciled).toBe(CG_HIT);
+    expect(reconciled).toBeNull();
+    expect(triggered).toEqual([]);
+    expect(internals.subscribedContextGraphs.get(CG_HIT)?.onChainId).toBeUndefined();
+    await internals.runVmReconcileSweep();
+    await dispatcher.waitForIdle();
     expect(internals.subscribedContextGraphs.get(CG_HIT)?.onChainId).toBe(ON_HIT);
-    // The other two pre-subscribed CGs were NOT bound and NOT reconciled.
-    expect(internals.subscribedContextGraphs.get(CG_MISS_A)?.onChainId).toBeUndefined();
-    expect(internals.subscribedContextGraphs.get(CG_MISS_B)?.onChainId).toBeUndefined();
-    expect(triggered).toEqual([`live:${CG_HIT}`]);
+    expect(internals.subscribedContextGraphs.get(CG_MISS_A)?.onChainId).toBe(ON_MISS_A);
+    expect(internals.subscribedContextGraphs.get(CG_MISS_B)?.onChainId).toBe(ON_MISS_B);
+    expect(triggered).toEqual([CG_HIT, CG_MISS_A, CG_MISS_B].map((cg) => `periodic:${cg}`));
   });
 
   it('live KACG nudge handler: an already-bound CG reconciles directly without a self-prime scan', async () => {
@@ -1186,15 +1545,42 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_BOUND, { subscribed: true, onChainId: ON_BOUND });
 
     const triggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      dispatch: async () => true,
-      triggerLive: (cg: string) => { triggered.push(`live:${cg}`); },
-      triggerPeriodic: (cg: string) => { triggered.push(`periodic:${cg}`); },
-      tryTriggerPeriodic: () => true,
-    };
+    const scheduling = new VmReconcileSchedulingRuntime(async (cg, source) => {
+      triggered.push(`${source}:${cg}`);
+      return true;
+    }, () => undefined);
+    installVmReconcileScheduling(internals, scheduling);
 
     const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'));
+    await internals.vmReconcileScheduling.waitForIdle();
     expect(reconciled).toBe(CG_BOUND);
     expect(triggered).toEqual([`live:${CG_BOUND}`]);
+  });
+
+  it('releases an unbound discovery failure when a binding lands before the next periodic sweep', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeBindingReleasesLiveHold', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-late-binding';
+    const onChainId = '8081';
+    const sub = { subscribed: true };
+    internals.subscribedContextGraphs.set(localCgId, sub);
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+    internals.resolveContextGraphOnChainIdBinding = async () => null;
+    const { dispatcher, triggered } = targetDispatcher(internals);
+
+    await expect(dispatcher.dispatch(localCgId, 'periodic')).rejects.toBeDefined();
+    expect(triggered).toEqual([]);
+
+    internals.bindSubscriptionOnChainId(localCgId, sub, onChainId);
+    await expect(internals.handleKARegisteredNudge(
+      onChainId,
+      1n,
+      createOperationContext('system'),
+    )).resolves.toBe(localCgId);
+    await dispatcher.waitForIdle(localCgId);
+
+    expect(triggered).toEqual([`live:${localCgId}`]);
   });
 });

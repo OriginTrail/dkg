@@ -48,9 +48,12 @@ import {
 } from './durable-sync-compat.js';
 import {
   classifyExactDurableFetch,
+  classifyExactAssetResponderCapability,
   exactAssetFetchSessionPolicy,
   filterExactAssetDurablePayload,
+  mergeExactAssetResponderCapability,
   mergeExactDurableFetchDisposition,
+  type ExactAssetResponderCapability,
   type ExactDurableFetchDisposition,
 } from './exact-durable-fetch.js';
 import {
@@ -80,7 +83,10 @@ export type {
 } from './durable-sync-budget.js';
 export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
 export { filterExactAssetDurablePayload } from './exact-durable-fetch.js';
-export type { ExactDurableFetchDisposition } from './exact-durable-fetch.js';
+export type {
+  ExactAssetResponderCapability,
+  ExactDurableFetchDisposition,
+} from './exact-durable-fetch.js';
 
 /** Normalize arbitrary AbortSignal reasons without mutating caller-owned errors. */
 function normalizeDurableSyncAbortReason(reason: unknown): Error {
@@ -104,6 +110,8 @@ export interface DetailedDurableSyncResult {
   readonly result: InitializedDurableSyncResult;
   /** Present only when this physical run used an exact-asset filter. */
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
+  /** Present when a clean legacy response proved the exact filter was ignored. */
+  readonly exactResponderCapability?: ExactAssetResponderCapability;
 }
 
 /** Invocation-local proof material returned by the non-durable exact fetch. */
@@ -286,6 +294,7 @@ function prepareDurableVerificationPayload(input: {
   readonly dataResult: SyncPageResult;
   readonly metaResult: SyncPageResult;
   readonly exactDescriptorCoverageComplete: boolean;
+  readonly exactReturnedDescriptorCount: number;
 } {
   if (input.exactAssetSelection === undefined) {
     return {
@@ -293,6 +302,7 @@ function prepareDurableVerificationPayload(input: {
       metaResult: input.preparedMeta.metaForManifest,
       exactDescriptorCoverageComplete:
         input.preparedMeta.exactDescriptorCoverageComplete,
+      exactReturnedDescriptorCount: 0,
     };
   }
   const exact = filterExactAssetDurablePayload(
@@ -314,6 +324,7 @@ function prepareDurableVerificationPayload(input: {
         : { quadRawOffsets: undefined }),
     },
     exactDescriptorCoverageComplete: exact.descriptorCoverageComplete,
+    exactReturnedDescriptorCount: exact.returnedDescriptorCount,
   };
 }
 
@@ -585,6 +596,9 @@ export async function runDurableSyncDetailed(
     ...(detailed.exactFetchDisposition === undefined
       ? {}
       : { exactFetchDisposition: detailed.exactFetchDisposition }),
+    ...(detailed.exactResponderCapability === undefined
+      ? {}
+      : { exactResponderCapability: detailed.exactResponderCapability }),
   };
 }
 
@@ -658,6 +672,7 @@ async function runDurableSyncWithBudget(
 
   const accumulator = createDurableSyncAccumulator();
   const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
+  const exactResponderCapabilities: (ExactAssetResponderCapability | undefined)[] = [];
   const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
 
   const recordPhaseOutcome = (
@@ -770,6 +785,7 @@ async function runDurableSyncWithBudget(
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
     let exactFetchDispositionIndex: number | undefined;
+    let exactResponderCapabilityIndex: number | undefined;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
       activePhase = phase;
       onPhase?.(phase, 'start');
@@ -828,6 +844,7 @@ async function runDurableSyncWithBudget(
         && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
         exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
+        exactResponderCapabilityIndex = exactResponderCapabilities.push(undefined) - 1;
       }
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -1030,6 +1047,8 @@ async function runDurableSyncWithBudget(
       const effectiveMetaResult = preparedPayload.metaResult;
       const exactAssetDescriptorCoverageComplete =
         preparedPayload.exactDescriptorCoverageComplete;
+      const exactAssetReturnedDescriptorCount =
+        preparedPayload.exactReturnedDescriptorCount;
       if (exactAssetUals !== undefined && !exactAssetDescriptorCoverageComplete) {
         logWarn(
           ctx,
@@ -1125,14 +1144,26 @@ async function runDurableSyncWithBudget(
         }
         if (bounded) {
           dataForVerification = bounded.dataQuads;
-          effectiveDataResult = {
-            ...dataResult,
-            quads: bounded.dataQuads,
-            nextOffset: bounded.safeNextOffset,
-            rawNextOffset: bounded.safeRawNextOffset,
-            completed: dataResult.completed
-              && bounded.safeNextOffset === bounded.manifestRowCount,
-          };
+          const boundedCompleted = dataResult.completed
+            && bounded.safeNextOffset === bounded.manifestRowCount;
+          if (boundedCompleted) {
+            const { localYield: _impossibleLocalYield, ...completedResult } = dataResult;
+            effectiveDataResult = {
+              ...completedResult,
+              quads: bounded.dataQuads,
+              nextOffset: bounded.safeNextOffset,
+              rawNextOffset: bounded.safeRawNextOffset,
+              completed: true,
+            };
+          } else {
+            effectiveDataResult = {
+              ...dataResult,
+              quads: bounded.dataQuads,
+              nextOffset: bounded.safeNextOffset,
+              rawNextOffset: bounded.safeRawNextOffset,
+              completed: false,
+            };
+          }
           verificationMode = {
             kind: 'changelogPage',
             changedDataGraphs: bounded.changedDataGraphs,
@@ -1269,6 +1300,19 @@ async function runDurableSyncWithBudget(
           dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
         })
       );
+      const settledExactResponderCapability = (): ExactAssetResponderCapability | undefined => {
+        if (exactAssetSelection?.kind !== 'ual-only') return undefined;
+        return classifyExactAssetResponderCapability({
+          requestedAssetCount: exactAssetUals?.length ?? 0,
+          metaResult,
+          dataResult: rawDataResult,
+          metaFetched: !skipAgentsMeta,
+          descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
+          returnedDescriptorCount: exactAssetReturnedDescriptorCount,
+          rejectedKcs: processed.rejectedKcs,
+          dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+        });
+      };
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -1297,6 +1341,9 @@ async function runDurableSyncWithBudget(
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
         if (exactFetchDispositionIndex !== undefined) {
           exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
+        }
+        if (exactResponderCapabilityIndex !== undefined) {
+          exactResponderCapabilities[exactResponderCapabilityIndex] = settledExactResponderCapability();
         }
         if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
@@ -1466,6 +1513,9 @@ async function runDurableSyncWithBudget(
       if (exactFetchDispositionIndex !== undefined) {
         exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
       }
+      if (exactResponderCapabilityIndex !== undefined) {
+        exactResponderCapabilities[exactResponderCapabilityIndex] = settledExactResponderCapability();
+      }
       endPhase();
       if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
@@ -1533,10 +1583,15 @@ async function runDurableSyncWithBudget(
     mergeExactDurableFetchDisposition,
     undefined,
   );
+  const exactResponderCapability = exactResponderCapabilities.reduce<ExactAssetResponderCapability | undefined>(
+    mergeExactAssetResponderCapability,
+    undefined,
+  );
 
   return {
     result,
     ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
+    ...(exactResponderCapability ? { exactResponderCapability } : {}),
     ...(authenticatedExactAssets.length === 0
       ? {}
       : { authenticatedExactAssets: Object.freeze([...authenticatedExactAssets]) }),

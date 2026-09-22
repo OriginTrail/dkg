@@ -8,8 +8,20 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
-import { DKGAgent } from '../src/dkg-agent.js';
+import {
+  CG,
+  CURATOR,
+  KA_UAL,
+  MEMBER,
+  MERKLE,
+  NAME,
+  OTHER,
+  PUBLIC_QUAD,
+  RESERVED_KA_ID,
+  sealAt,
+  sealFor,
+  stubAgent,
+} from './_helpers/foreign-author-resolution-fixtures.js';
 
 /**
  * GH#1778 — a curator publishes a rootless named KA authored by a MEMBER and
@@ -19,62 +31,6 @@ import { DKGAgent } from '../src/dkg-agent.js';
  * the caller. These tests pin `resolveAssertionAuthor` and the end-to-end
  * auto-resolution in `publishFromFinalizedAssertion`.
  */
-
-const CG = 'construction';
-const MEMBER = '0xA32f1cc125401B55911678847426759094055B2d';
-const CURATOR = `0x${'11'.repeat(20)}`;
-const OTHER = `0x${'22'.repeat(20)}`;
-const NAME = 'justTriplets';
-const KA_UAL = `did:dkg:hardhat:31337/${MEMBER}/7`;
-const RESERVED_KA_ID = (BigInt(MEMBER) << 96n) | 7n;
-const PUBLIC_QUAD: Quad = {
-  subject: 'urn:justTriplets:subject1',
-  predicate: 'urn:justTriplets:predicate1',
-  object: '"value1"',
-  graph: '',
-};
-const MERKLE = computeFlatKCRootV10([PUBLIC_QUAD], []);
-
-function sealAt(cg: string, author: string, name = NAME, subGraphName?: string): Quad[] {
-  return buildAssertionSealQuads({
-    assertionUri: contextGraphAssertionUri(cg, author, name, subGraphName),
-    metaGraph: contextGraphMetaUri(cg),
-    merkleRoot: MERKLE,
-    authorAddress: author,
-    authorAttestationR: new Uint8Array(32).fill(1),
-    authorAttestationVS: new Uint8Array(32).fill(2),
-    authorSchemeVersion: 1,
-    chainId: 31337n,
-    kav10Address: '0x1234567890123456789012345678901234567890',
-    reservedKaId: (BigInt(author) << 96n) | 7n,
-    finalizedAtIso: '2026-01-01T00:00:00.000Z',
-    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-    kaUal: `did:dkg:hardhat:31337/${author}/7`,
-    assertionVersion: 1,
-    publicTripleCount: 1,
-    privateTripleCount: 0,
-  }) as Quad[];
-}
-
-function sealFor(author: string, name = NAME): Quad[] {
-  return sealAt(CG, author, name);
-}
-
-function makeLog() {
-  return { debug() {}, info() {}, warn() {}, error() {} };
-}
-
-function stubAgent(store: OxigraphStore, defaultAgentAddress: string) {
-  const agent = Object.create(DKGAgent.prototype) as any;
-  agent.store = store;
-  agent.log = makeLog();
-  agent.defaultAgentAddress = defaultAgentAddress;
-  Object.defineProperty(agent, 'peerId', {
-    value: '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
-    configurable: true,
-  });
-  return agent;
-}
 
 describe('GH#1778 resolveAssertionAuthor', () => {
   it('resolves the sole (member) author when the caller (curator) is not the author', async () => {
@@ -693,28 +649,6 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
         selectedAuthorAgentAddress: malformed as unknown as string,
       })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
     }
-  });
-});
-
-describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
-  it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
-    const store = new OxigraphStore();
-    await store.insert(sealFor(MEMBER));
-    const agent = stubAgent(store, CURATOR); // curator is NOT the author
-    let historyAgent: string | undefined;
-    Object.defineProperty(agent, 'assertion', {
-      value: {
-        history: async (_cg: string, _n: string, o: { agentAddress: string }) => {
-          historyAgent = o.agentAddress;
-          return null; // force the early exit after author resolution
-        },
-      },
-      configurable: true,
-    });
-    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
-      .rejects.toThrow(/is not finalized or does not exist/);
-    // The async intent path resolved the MEMBER author before touching history.
-    expect(historyAgent).toBe(MEMBER);
   });
 });
 

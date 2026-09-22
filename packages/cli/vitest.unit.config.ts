@@ -12,7 +12,12 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/mcp-config-document.test.ts',
+          'test/mcp-physical-config.test.ts',
+          'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
+          'test/finalized-publish-options.test.ts',
+          'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
@@ -31,6 +36,7 @@ export default defineConfig({
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
+          'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
@@ -46,11 +52,17 @@ export default defineConfig({
           'test/daemon-local-llm-service.test.ts',
           'test/local-llm-runtime-factory.test.ts',
           'test/memory-graph-events.test.ts',
+          // Read-authority gate on POST /api/memory/search — a pure route-handler
+          // test (fake req/res, stubbed agent + vector store), no hardhat.
+          'test/memory-search-read-authority.test.ts',
+          // Guarded per-view fan-out on the same route (pure handler).
+          'test/memory-search-guarded-query-path.test.ts',
           'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
+          'test/daemon-identity-wallet-routes.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
@@ -59,6 +71,7 @@ export default defineConfig({
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
+          'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
@@ -72,6 +85,7 @@ export default defineConfig({
           'test/auto-update.test.ts',
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
+          'test/node-runtime-preflight.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
@@ -120,6 +134,8 @@ export default defineConfig({
           // #1066 Item 1 — metrics presence gate. Pure logic (injected clock).
           'test/metrics-presence.test.ts',
           'test/rpc-usage-log.test.ts',
+          'test/rpc-usage-snapshot-route.test.ts',
+          'test/publisher-runner-rpc-usage.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',
@@ -129,7 +145,9 @@ export default defineConfig({
           // (mocked fetch + in-memory config); cheap to keep in the
           // fast unit lane.
           'test/chain-reset-wipe.test.ts',
+          'test/chain-reset-wipe-outcome.test.ts',
           'test/chain-reset-wipe-backup.test.ts',
+          'test/daemon-chain-reset-wipe.test.ts',
           'test/store-health-check.test.ts',
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',

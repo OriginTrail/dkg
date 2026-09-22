@@ -189,6 +189,11 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     manualTargets: 1,
     bootstrap: true,
   }));
+  const unselectedStatus = await shadow.child.requestRollout('rolloutStatus', 'shadow-unselected-status', {
+    contextGraphId: `${CONTEXT_GRAPH_ID}-unselected`,
+    completeProviderPeerId: authorReady.peerId as string,
+  });
+  assert.equal(unselectedStatus.vmChainInventorySelected, false);
   const seededVmSource = await shadow.child.requestRollout(
     'seedVmSourceSwm',
     'shadow-seed-vm-source',
@@ -564,6 +569,7 @@ function assertVmReconciled(value: Gate1VmReconcileResult, label: string): void 
 function assertVmAuthorityRejected(value: Gate1VmReconcileResult, label: string): void {
   assert.equal(value.chainReadDelta.active >= 1, true);
   assert.equal(value.chainReadDelta.accessPolicy >= 1, true);
+  assert.equal(value.chainReadDelta.nameHashResolution, 0);
   assert.equal(
     value.replicationEvents.some((event) => event.action === 'promote'),
     false,

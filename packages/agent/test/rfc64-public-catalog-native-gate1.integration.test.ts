@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,6 +20,7 @@ import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeControlObjectDigestHex,
   computeKaChunkTreeRootV1,
+  contextGraphWorkspaceGraphUri,
   decodeOpaqueKaBundleV1,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   deriveAuthorCatalogScopeFromHeadV1,
@@ -62,6 +63,13 @@ import {
   type Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
 import { readVerifiedAuthorCatalogRowAuthorshipV1 } from '../src/rfc64/catalog-row-authorship.js';
+import {
+  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
+  initializeRfc64LegacySwmBoundaryV1,
+  prepareRfc64LateLegacySwmBoundaryV1,
+  readRfc64LegacySwmBoundaryCountV1,
+  resolveRfc64LegacySwmColdBootstrapOmissionsV1,
+} from '../src/rfc64/legacy-swm-boundary-v1.js';
 import { createRfc64FinalizedVmAgentPrecommitV1 } from '../src/rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   computeRfc64AppliedInventoryDigestV1,
@@ -271,6 +279,419 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(sealRead).toMatchObject({ type: 'bindings' });
     if (sealRead.type !== 'bindings') throw new Error('stale seal query was not bindings');
     expect(sealRead.bindings).toHaveLength(1);
+  }, 30_000);
+
+  it('preserves a durably marked omitted legacy root graph during cold bootstrap', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(
+      owner,
+      boundaryRoot,
+      fixture.receiverStore,
+    );
+    const legacyGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      SECOND_UAL,
+      'durable-cold-bootstrap-legacy-share',
+      '1',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      legacyGraph,
+      [{
+        graph: legacyGraph,
+        subject: 'https://example.org/legacy',
+        predicate: 'https://schema.org/name',
+        object: '"preserved"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => resolveRfc64LegacySwmColdBootstrapOmissionsV1(owner, scope),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .resolves.toMatchObject({ inventoryRowCount: 1 });
+    await expect(fixture.receiverStore.hasGraph(legacyGraph)).resolves.toBe(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+
+    const restartedOwner = {};
+    await initializeRfc64LegacySwmBoundaryV1(
+      restartedOwner,
+      boundaryRoot,
+      fixture.receiverStore,
+    );
+    await expect(resolveRfc64LegacySwmColdBootstrapOmissionsV1(
+      restartedOwner,
+      fixture.scope,
+    )).resolves.toEqual(new Set([legacyGraph]));
+  }, 30_000);
+
+  it('rejects a cold-bootstrap target older than a durable same-UAL late root', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-stale-cold');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const targetGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-newer-cold-root',
+      '2',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      targetGraph,
+      [{
+        graph: targetGraph,
+        subject: 'urn:test:newer-cold-root',
+        predicate: 'urn:test:version',
+        object: '"2"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-history',
+        message: expect.stringContaining('precedes its durable late SWM generation'),
+      });
+    const preserved = await fixture.receiverStore.query(
+      `SELECT ?o WHERE { GRAPH <${targetGraph}> { `
+        + `<urn:test:newer-cold-root> <urn:test:version> ?o } } LIMIT 1`,
+    );
+    expect(preserved).toMatchObject({
+      type: 'bindings',
+      bindings: [{ o: '"2"' }],
+    });
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+  }, 30_000);
+
+  it('rejects exact-head replay older than a durable same-UAL late root', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-stale-replay');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .resolves.toMatchObject({ appliedHeadStatus: 'applied' });
+    const targetGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-newer-replay-root',
+      '2',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      targetGraph,
+      [{
+        graph: targetGraph,
+        subject: 'urn:test:newer-replay-root',
+        predicate: 'urn:test:version',
+        object: '"2"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-history',
+        message: expect.stringContaining('precedes its durable late SWM generation'),
+      });
+    const preserved = await fixture.receiverStore.query(
+      `SELECT ?o WHERE { GRAPH <${targetGraph}> { `
+        + `<urn:test:newer-replay-root> <urn:test:version> ?o } } LIMIT 1`,
+    );
+    expect(preserved).toMatchObject({
+      type: 'bindings',
+      bindings: [{ o: '"2"' }],
+    });
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+  }, 30_000);
+
+  it('admits an equal catalog generation while its receiver lease blocks new prepares', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-equal-race');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const targetGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-equal-cold-root',
+      '1',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      targetGraph,
+      [{
+        graph: targetGraph,
+        subject: 'urn:test:equal-cold-root',
+        predicate: 'urn:test:version',
+        object: '"1"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    let announceLeaseAcquired!: () => void;
+    const leaseAcquired = new Promise<void>((resolve) => { announceLeaseAcquired = resolve; });
+    let allowLeaseReturn!: () => void;
+    const leaseMayReturn = new Promise<void>((resolve) => { allowLeaseReturn = resolve; });
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (scope) => {
+        const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope);
+        announceLeaseAcquired();
+        await leaseMayReturn;
+        return lease;
+      },
+    );
+    const synchronization = fixture.synchronize(fixture.announcement, receiver);
+    await leaseAcquired;
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'concurrent-newer-root',
+      '2',
+    )).toThrow(/retirement is in progress/);
+    allowLeaseReturn();
+
+    await expect(synchronization).resolves.toMatchObject({ appliedHeadStatus: 'applied' });
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
+    const immediateNextPreparation = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'immediate-post-receiver-root',
+      '2',
+    );
+    immediateNextPreparation.settle(false);
+  }, 30_000);
+
+  it('keeps an omitted author seal fail-closed when its root graph is allowlisted', async () => {
+    const fixture = await setupLiveReceiver();
+    const decoded = decodeOpaqueKaBundleV1(fixture.secondRowBundle.bundleBytes);
+    const seal = parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes);
+    const placement = deriveCanonicalGraphScopedAuthorSealPlacementV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      assertionCoordinate: fixture.secondRowBundle.row.assertionCoordinate,
+    });
+    const legacyGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${SECOND_KA_NUMBER}`;
+    await fixture.receiverStore.insert([
+      {
+        subject: 'https://example.org/legacy-with-seal',
+        predicate: 'https://schema.org/name',
+        object: '"preserved"',
+        graph: legacyGraph,
+      },
+      ...projectCanonicalGraphScopedAuthorSealRowsV1(seal, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        assertionCoordinate: fixture.secondRowBundle.row.assertionCoordinate,
+      }),
+    ]);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      async () => new Set([legacyGraph]),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .rejects.toMatchObject({ code: 'catalog-native-receiver-history' });
+    await expect(fixture.receiverStore.hasGraph(legacyGraph)).resolves.toBe(true);
+    const sealRead = await fixture.receiverStore.query(
+      `SELECT ?p ?o WHERE { GRAPH <${placement.metaGraph}> { `
+        + `<${placement.subject}> ?p ?o } } LIMIT 1`,
+    );
+    expect(sealRead).toMatchObject({ type: 'bindings' });
+    if (sealRead.type !== 'bindings') throw new Error('legacy seal query was not bindings');
+    expect(sealRead.bindings).toHaveLength(1);
+  }, 30_000);
+
+  it('refuses empty cold bootstrap when unmarked root SWM and its seal exist', async () => {
+    const fixture = await setupLiveReceiver();
+    const decoded = decodeOpaqueKaBundleV1(fixture.rowBundle.bundleBytes);
+    const seal = parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes);
+    const staleGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    await fixture.receiverStore.insert([
+      {
+        graph: staleGraph,
+        subject: 'urn:test:unmarked-empty-genesis-root',
+        predicate: 'urn:test:value',
+        object: '"preserved"',
+      },
+      ...projectCanonicalGraphScopedAuthorSealRowsV1(seal, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        assertionCoordinate: fixture.rowBundle.row.assertionCoordinate,
+      }),
+    ]);
+
+    await expect(fixture.bootstrap()).rejects.toMatchObject({
+      code: 'catalog-native-receiver-history',
+      message: expect.stringContaining('omitted by the fetched exact head'),
+    });
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )).toBeNull();
+    await expect(fixture.receiverStore.hasGraph(staleGraph)).resolves.toBe(true);
+  }, 30_000);
+
+  it('allows empty cold bootstrap to preserve a durably marked root omission', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-empty-marked');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    const legacyGraph = `${contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID)}`
+      + `/${AUTHOR}/${KA_NUMBER}`;
+    const companion = prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'durable-empty-genesis-root',
+      '1',
+    );
+    await fixture.receiverStore.replaceGraphAndSubject!(
+      legacyGraph,
+      [{
+        graph: legacyGraph,
+        subject: 'urn:test:marked-empty-genesis-root',
+        predicate: 'urn:test:value',
+        object: '"preserved"',
+      }],
+      companion.graphUri,
+      companion.subject,
+      [...companion.quads],
+    );
+    companion.settle(true);
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+
+    await expect(fixture.bootstrap(fixture.genesisAnnouncement, receiver))
+      .resolves.toMatchObject({ inventoryRowCount: 0, appliedHeadStatus: 'applied' });
+    await expect(fixture.receiverStore.hasGraph(legacyGraph)).resolves.toBe(true);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
+  }, 30_000);
+
+  it('holds the boundary lease through empty-genesis post-head work', async () => {
+    const fixture = await setupLiveReceiver();
+    const owner = {};
+    const boundaryRoot = join(fixture.receiverDirectory, 'legacy-boundary-empty-race');
+    await mkdir(boundaryRoot, { mode: 0o700 });
+    await initializeRfc64LegacySwmBoundaryV1(owner, boundaryRoot, fixture.receiverStore);
+    let announcePostHead!: () => void;
+    const postHeadEntered = new Promise<void>((resolve) => { announcePostHead = resolve; });
+    let allowPostHead!: () => void;
+    const postHeadMayFinish = new Promise<void>((resolve) => { allowPostHead = resolve; });
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      fixture.receiverStore,
+      async () => appliedHeadLifecycleV1(null, async () => {
+        announcePostHead();
+        await postHeadMayFinish;
+      }),
+      undefined,
+      undefined,
+      undefined,
+      (scope) => acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, scope),
+    );
+    const bootstrap = fixture.bootstrap(fixture.genesisAnnouncement, receiver);
+    await postHeadEntered;
+    expect(() => prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      CONTEXT_GRAPH_ID,
+      UAL,
+      'concurrent-empty-genesis-root',
+      '1',
+    )).toThrow(/retirement is in progress/);
+    allowPostHead();
+
+    await expect(bootstrap).resolves.toMatchObject({
+      inventoryRowCount: 0,
+      appliedHeadStatus: 'applied',
+    });
   }, 30_000);
 
   it('bootstraps exact empty genesis then activates one successor without manual seeding', async () => {
@@ -2829,6 +3250,12 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     > =
       receiverPersistence.kaBundles,
     verifyIssuerSignature?: typeof verifyControlEnvelopeIssuerSignatureV1,
+    resolveColdBootstrapLegacySwmGraphAllowlist?: (
+      scope: Readonly<AuthorCatalogScopeV1>,
+    ) => Promise<ReadonlySet<string>>,
+    acquireLegacySwmBoundaryLease?: (
+      scope: Readonly<AuthorCatalogScopeV1>,
+    ) => ReturnType<typeof acquireRfc64LegacySwmBoundaryReceiverLeaseV1>,
   ) => new Rfc64PublicCatalogNativeReceiverV1({
     headTransport: { fetchCatalogHead: receiverHeadFetch },
     contentTransport,
@@ -2838,6 +3265,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     store,
     verifyIssuerSignature,
     beforeAppliedHeadCommit,
+    resolveColdBootstrapLegacySwmGraphAllowlist,
+    acquireLegacySwmBoundaryLease,
   });
   const createCasObservedReceiver = (contentTransport?: Pick<
     Rfc64PublicCatalogNativeTransportV1,

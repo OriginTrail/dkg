@@ -6,8 +6,6 @@ import {
   type KaNumberStore,
   type MessageDirection,
   type MessageIdempotencyStore,
-  type ProtocolOutboxEntry,
-  type ProtocolOutboxStore,
   type ContextGraphJoinPolicyRecord,
   parseContextGraphJoinPolicyRecord,
   DEFAULT_SYNC_CHECKPOINT_TTL_MS,
@@ -26,10 +24,14 @@ import {
 } from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityIndexStore,
+  SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-export const SCHEMA_VERSION = 35;
+export { SqliteProtocolOutboxStore, type SqliteProtocolOutboxStoreOptions } from './protocol-outbox-store.js';
+
+export const SCHEMA_VERSION = 38;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -344,6 +346,95 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
       }
     };
+    const ensureContextGraphAuthorityIndexSchema = () => this.db.exec(`
+      CREATE TABLE IF NOT EXISTS context_graph_authority_indexes (
+        scope TEXT PRIMARY KEY CHECK (length(trim(scope)) > 0),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        checkpoint_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    /**
+     * The node's ONE chain log.
+     *
+     * One cursor, one raw event table, and one coverage record. Everything that
+     * needs an indexed on-chain event reads these tables; there is deliberately
+     * no second cursor, table or scan anywhere in the node.
+     */
+    const ensureChainEventLogSchema = () => this.db.exec(`
+      CREATE TABLE IF NOT EXISTS chain_index_cursor (
+        scope TEXT PRIMARY KEY CHECK (length(trim(scope)) > 0),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        -- Block hash at the deployment block. Binds the scope to ONE chain
+        -- instance: node-ui.db survives a chain reset, and a deterministic
+        -- redeploy reproduces the same chain id and Hub address.
+        lineage TEXT NOT NULL,
+        deployment_block INTEGER NOT NULL CHECK (deployment_block >= 0),
+        -- -1 means "nothing settled yet", the state a first pass starts from.
+        settled_block INTEGER NOT NULL CHECK (settled_block >= -1),
+        settled_hash TEXT NOT NULL,
+        head_block INTEGER NOT NULL CHECK (head_block >= 0),
+        head_hash TEXT NOT NULL,
+        head_timestamp_seconds INTEGER NOT NULL,
+        head_fetched_at_ms INTEGER NOT NULL,
+        topic_set_version TEXT NOT NULL,
+        suspected_fork_block INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS chain_events (
+        scope TEXT NOT NULL,
+        block_number INTEGER NOT NULL CHECK (block_number >= 0),
+        log_index INTEGER NOT NULL CHECK (log_index >= 0),
+        block_hash TEXT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        address TEXT NOT NULL,
+        topic0 TEXT NOT NULL,
+        topic1 TEXT,
+        topic2 TEXT,
+        topic3 TEXT,
+        data TEXT NOT NULL,
+        -- 0 while inside the reorg tail. The tail is replaced wholesale each
+        -- tick; a settled row is written once and never fetched again.
+        settled INTEGER NOT NULL CHECK (settled IN (0, 1)),
+        PRIMARY KEY (scope, block_number, log_index)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS idx_chain_events_scope_address_topic
+        ON chain_events(scope, address, topic0, topic1, block_number, log_index);
+      CREATE INDEX IF NOT EXISTS idx_chain_events_scope_unsettled
+        ON chain_events(scope, settled);
+      CREATE TABLE IF NOT EXISTS chain_index_coverage (
+        scope TEXT NOT NULL,
+        family TEXT NOT NULL,
+        address TEXT NOT NULL,
+        covered_from_block INTEGER NOT NULL CHECK (covered_from_block >= 0),
+        covered_through_block INTEGER NOT NULL CHECK (covered_through_block >= 0),
+        -- Lowest block that must be held before ABSENCE is knowable at all.
+        floor_block INTEGER NOT NULL CHECK (floor_block >= 0),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (scope, family, address)
+      );
+    `);
+    const ensureLocalContextGraphOriginSchema = () => this.db.exec(`
+      CREATE TABLE IF NOT EXISTS local_context_graph_origins (
+        context_graph_id TEXT PRIMARY KEY CHECK (length(trim(context_graph_id)) > 0),
+        source TEXT NOT NULL CHECK (source IN ('local-create', 'implicit-swm-write')),
+        created_at INTEGER NOT NULL CHECK (created_at >= 0)
+      );
+      INSERT OR IGNORE INTO local_context_graph_origins (
+        context_graph_id, source, created_at
+      )
+      SELECT
+        context_graph_id,
+        CASE
+          WHEN MAX(CASE WHEN source = 'local-create' THEN 1 ELSE 0 END) = 1
+            THEN 'local-create'
+          ELSE 'implicit-swm-write'
+        END,
+        MIN(first_seen_at)
+      FROM context_graph_memberships
+      WHERE source IN ('local-create', 'implicit-swm-write')
+      GROUP BY context_graph_id;
+    `);
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -351,6 +442,9 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
+      ensureContextGraphAuthorityIndexSchema();
+      ensureLocalContextGraphOriginSchema();
+      ensureChainEventLogSchema();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1288,6 +1382,22 @@ export class DashboardDB {
       // row ids, so overflow checks are O(1) and each prune touches at most one
       // configured batch.
       installRoutineLogRetentionSchema(this.db);
+    }
+    if (version < 36) {
+      // One opaque checkpoint per physical ContextGraphStorage deployment.
+      // Chain owns decoding/integrity; SQLite owns atomic revision CAS.
+      ensureContextGraphAuthorityIndexSchema();
+    }
+    if (version < 37) {
+      // Local graph origin is immutable provenance, not mutable membership.
+      // Seed the graph-keyed journal once from trusted legacy source labels.
+      ensureLocalContextGraphOriginSchema();
+    }
+    if (version < 38) {
+      // The one chain log. Empty on arrival: the existing authority checkpoint
+      // keeps its revision and its folded prefix, so the first tick resumes at
+      // that cursor and no node rescans history to adopt this table.
+      ensureChainEventLogSchema();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -2285,6 +2395,26 @@ export class DashboardDB {
       'deleteContextGraphMember',
       'DELETE FROM context_graph_memberships WHERE context_graph_id = ? AND principal_type = ? AND principal_id = ?',
     ).run(contextGraphId, principalType, principalId);
+  }
+
+  recordLocalContextGraphOrigin(record: {
+    context_graph_id: string;
+    source: LocalContextGraphOriginSource;
+    created_at: number;
+  }): void {
+    this.stmt('recordLocalContextGraphOrigin', `
+      INSERT OR IGNORE INTO local_context_graph_origins (
+        context_graph_id, source, created_at
+      ) VALUES (@context_graph_id, @source, @created_at)
+    `).run(record);
+  }
+
+  listLocalContextGraphOrigins(): LocalContextGraphOriginRow[] {
+    return this.db.prepare(`
+      SELECT context_graph_id, source, created_at
+      FROM local_context_graph_origins
+      ORDER BY context_graph_id ASC
+    `).all() as LocalContextGraphOriginRow[];
   }
 
   getSnapshotHistory(from: number, to: number, maxPoints = 500): MetricSnapshotRow[] {
@@ -3734,312 +3864,6 @@ export class SqliteMessageIdempotencyStore implements MessageIdempotencyStore {
 }
 
 /**
- * SQLite-backed `ProtocolOutboxStore` against the V12
- * `protocol_outbox` table. Sender-side durable retry queue, keyed
- * by `(peer, protocol, message_id)`. The substrate's reliability
- * floor: a daemon crash mid-retry doesn't lose the message — the
- * next startup's `Messenger.processOutboxTick` picks up exactly
- * where the crash left off (modulo the in-flight bytes that died
- * with the process, which is documented as the "in-flight queue
- * caveat" in CHANGELOG for rc.9).
- *
- * The backoff ladder + max-age are NOT stored in SQL — they live
- * on the wrapping `ProtocolOutbox` in `packages/core`, and only
- * the resulting `next_attempt_at` and `first_failure_at` timestamps
- * land in the table. This keeps the schema independent of policy
- * changes: bumping the ladder doesn't require a migration.
- *
- * Constructor takes a `maxAgeMs` so `dropExpired` can apply it
- * directly in SQL (avoiding a full table read).
- */
-export interface SqliteProtocolOutboxStoreOptions {
-  /**
-   * Max age (ms) from `firstFailureAt` before `dropExpired(now)`
-   * evicts an entry. Defaults to 24h. Mirrors the wrapping
-   * `ProtocolOutbox`'s `maxAgeMs` so both layers agree.
-   */
-  maxAgeMs?: number;
-  /**
-   * Function that returns the backoff (ms) to apply for an entry
-   * about to bump to `attempts`. The schema does NOT store the
-   * ladder; PR-2's `lifecycle.ts` wiring passes the wrapping
-   * `ProtocolOutbox`'s `backoffFor` method here so policy lives in
-   * one place. Defaults to a flat 5s backoff so the store works
-   * standalone in tests + before the wrapping outbox is wired.
-   */
-  backoffFor?: (attempts: number) => number;
-}
-
-export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
-  private readonly db: Database.Database;
-  private maxAgeMs = 24 * 60 * 60 * 1000;
-  private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
-
-  constructor(dashboard: DashboardDB, options: SqliteProtocolOutboxStoreOptions = {}) {
-    this.db = dashboard.db;
-    this.configurePolicy(options);
-  }
-
-  configurePolicy(options: SqliteProtocolOutboxStoreOptions = {}): void {
-    this.maxAgeMs = options.maxAgeMs ?? this.maxAgeMs;
-    this.backoffFor = options.backoffFor ?? this.backoffFor;
-  }
-
-  enqueue(
-    peer: string,
-    protocol: string,
-    messageId: string,
-    payload: Uint8Array,
-    error: string,
-    now: number,
-  ): ProtocolOutboxEntry {
-    const existing = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .get(peer, protocol, messageId) as
-      | {
-          peer_id: string;
-          protocol: string;
-          message_id: string;
-          payload: Buffer;
-          attempts: number;
-          first_failure_at: number;
-          last_attempt_at: number;
-          next_attempt_at: number;
-          last_error: string | null;
-        }
-      | undefined;
-
-    if (existing) {
-      const newAttempts = existing.attempts + 1;
-      const nextAttemptAt = now + this.backoffFor(newAttempts);
-      this.db
-        .prepare(
-          `UPDATE protocol_outbox
-           SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
-           WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-        )
-        .run(newAttempts, now, nextAttemptAt, error, peer, protocol, messageId);
-      return {
-        peer,
-        protocol,
-        messageId,
-        payload: new Uint8Array(existing.payload),
-        attempts: newAttempts,
-        firstFailureAt: existing.first_failure_at,
-        lastAttemptAt: now,
-        nextAttemptAt,
-        lastError: error,
-      };
-    }
-
-    const attempts = 1;
-    const nextAttemptAt = now + this.backoffFor(attempts);
-    const blob = Buffer.from(payload);
-    this.db
-      .prepare(
-        `INSERT INTO protocol_outbox
-           (peer_id, protocol, message_id, payload, attempts,
-            first_failure_at, last_attempt_at, next_attempt_at, last_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(peer, protocol, messageId, blob, attempts, now, now, nextAttemptAt, error);
-    return {
-      peer,
-      protocol,
-      messageId,
-      payload: new Uint8Array(blob),
-      attempts,
-      firstFailureAt: now,
-      lastAttemptAt: now,
-      nextAttemptAt,
-      lastError: error,
-    };
-  }
-
-  markDelivered(peer: string, protocol: string, messageId: string): boolean {
-    const result = this.db
-      .prepare(
-        `DELETE FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .run(peer, protocol, messageId);
-    return result.changes > 0;
-  }
-
-  hasEntry(peer: string, protocol: string, messageId: string): boolean {
-    const row = this.db
-      .prepare(
-        `SELECT 1 FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ? LIMIT 1`,
-      )
-      .get(peer, protocol, messageId) as { 1: number } | undefined;
-    return row !== undefined;
-  }
-
-  hasPendingFor(peer: string): boolean {
-    return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
-  }
-
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE peer_id = ?
-         ORDER BY first_failure_at ASC, protocol ASC, message_id ASC`,
-      )
-      .all(peer) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  due(now: number): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE next_attempt_at <= ?
-         ORDER BY next_attempt_at ASC, first_failure_at ASC,
-                  peer_id ASC, protocol ASC, message_id ASC`,
-      )
-      .all(now) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE next_attempt_at <= ?
-         ORDER BY next_attempt_at ASC, first_failure_at ASC,
-                  peer_id ASC, protocol ASC, message_id ASC
-         LIMIT ?`,
-      )
-      .all(now, limit) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  dropExpired(now: number): ProtocolOutboxEntry[] {
-    const cutoff = now - this.maxAgeMs;
-    const rows = this.db
-      .prepare(`SELECT * FROM protocol_outbox WHERE first_failure_at < ?`)
-      .all(cutoff) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  size(): number {
-    const row = this.db.prepare(`SELECT COUNT(*) as c FROM protocol_outbox`).get() as {
-      c: number;
-    };
-    return row.c;
-  }
-
-  list(): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM protocol_outbox ORDER BY first_failure_at ASC`)
-      .all() as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .get(peer, protocol, messageId) as
-      | {
-          peer_id: string;
-          protocol: string;
-          message_id: string;
-          payload: Buffer;
-          attempts: number;
-          first_failure_at: number;
-          last_attempt_at: number;
-          next_attempt_at: number;
-          last_error: string | null;
-        }
-      | undefined;
-    if (!row) return undefined;
-    return SqliteProtocolOutboxStore.rowToEntry(row);
-  }
-
-  private static rowToEntry(row: {
-    peer_id: string;
-    protocol: string;
-    message_id: string;
-    payload: Buffer;
-    attempts: number;
-    first_failure_at: number;
-    last_attempt_at: number;
-    next_attempt_at: number;
-    last_error: string | null;
-  }): ProtocolOutboxEntry {
-    return {
-      peer: row.peer_id,
-      protocol: row.protocol,
-      messageId: row.message_id,
-      payload: new Uint8Array(row.payload),
-      attempts: row.attempts,
-      firstFailureAt: row.first_failure_at,
-      lastAttemptAt: row.last_attempt_at,
-      nextAttemptAt: row.next_attempt_at,
-      lastError: row.last_error ?? '',
-    };
-  }
-}
-
-/**
  * SQLite-backed `KaNumberStore` against the V20 `ka_numbers` table.
  * Per-author durable KA-number allocator for OT-RFC-43 Option-1
  * deterministic KA identity (B2 allocator core, OFF-CHAIN only).
@@ -4439,6 +4263,16 @@ export interface ContextGraphMemberRow {
   metadata: string | null;
   first_seen_at: number;
   updated_at: number;
+}
+
+export type LocalContextGraphOriginSource =
+  | 'local-create'
+  | 'implicit-swm-write';
+
+export interface LocalContextGraphOriginRow {
+  context_graph_id: string;
+  source: LocalContextGraphOriginSource;
+  created_at: number;
 }
 
 export interface SpendingPeriod {

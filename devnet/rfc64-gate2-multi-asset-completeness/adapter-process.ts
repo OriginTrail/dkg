@@ -52,6 +52,7 @@ import {
   type FinalizedVmHarnessRuntimeV1,
 } from './finalized-vm-harness-runtime.ts';
 import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
+import { createRuntimeProcessIdentityV1 } from '../rfc64-runtime-process-evidence.mts';
 import { stagePrivateCatalogBulkPredecessorV1 } from
   '../rfc64-cp2-private-swm-vm-recovery/bulk-predecessor.ts';
 import { wireSynchronizationEvidence } from './synchronization-evidence-wire.ts';
@@ -60,6 +61,7 @@ const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE2_ADAPTER_DATA_DIR;
 const masterKeyHex = process.env.DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX;
 const runtimeBuildManifestDigest = process.env.DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST;
+const runtimeHostIdentity = process.env.DKG_RFC64_RUNTIME_HOST_IDENTITY;
 const finalizedVmConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_VM_CONFIG;
 const networkChainIdInput = process.env.DKG_RFC64_GATE2_NETWORK_CHAIN_ID;
 const localCatalogAgentAddressInput =
@@ -77,6 +79,10 @@ if (!masterKeyHex || !/^[0-9a-f]{64}$/u.test(masterKeyHex)) {
 if (!runtimeBuildManifestDigest || !/^0x[0-9a-f]{64}$/u.test(runtimeBuildManifestDigest)) {
   throw new Error('DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST must be a canonical digest');
 }
+if (runtimeHostIdentity === undefined) {
+  throw new Error('DKG_RFC64_RUNTIME_HOST_IDENTITY is required');
+}
+const processIdentity = createRuntimeProcessIdentityV1(runtimeHostIdentity, process.pid);
 
 const dataDir = resolve(dataDirInput);
 const pinnedMasterKeyHex = masterKeyHex;
@@ -220,6 +226,7 @@ async function boot(): Promise<void> {
     peerId: created.peerId,
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
     processId: process.pid,
+    processIdentity,
     runtimeBuildManifestDigest,
     finalizedVmRuntime: finalizedVmConfig !== null,
     startupRepair: null,
@@ -651,6 +658,7 @@ async function handle(command: Command): Promise<void> {
       emit({
         event: 'kill-restart-ready',
         executedRuntimeManifest: sealGate2ExecutedRuntimeManifestV1(),
+        processIdentity,
         requestId: command.requestId,
       });
       return;
@@ -1104,6 +1112,7 @@ async function stop(exitCode: number, requestId?: string): Promise<never> {
       await emitAndFlush({
         event: 'stopped',
         executedRuntimeManifest: sealGate2ExecutedRuntimeManifestV1(),
+        processIdentity,
         requestId,
       });
     }

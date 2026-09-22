@@ -6,6 +6,7 @@
 // high-degree node's subscribe round can't flood its own store).
 import { describe, it, expect } from 'vitest';
 import {
+  everyWithConcurrency,
   mapWithConcurrency,
   mapWithConcurrencySettled,
 } from '../src/map-with-concurrency.js';
@@ -84,6 +85,53 @@ describe('mapWithConcurrency', () => {
         return n;
       }),
     ).rejects.toThrow('boom');
+  });
+
+  it('settles false promptly and does not schedule queued predicates', async () => {
+    let release!: () => void;
+    const hanging = new Promise<void>((resolve) => { release = resolve; });
+    const started: number[] = [];
+    const signals: AbortSignal[] = [];
+    const pending = everyWithConcurrency([0, 1, 2, 3, 4, 5], 3, async (item, _index, signal) => {
+      started.push(item);
+      signals.push(signal);
+      if (item === 0) return false;
+      await hanging;
+      return true;
+    });
+    await expect(pending).resolves.toBe(false);
+    expect(started).toEqual([0, 1, 2]);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    release();
+    await tick();
+    expect(started).toEqual([0, 1, 2]);
+  });
+
+  it('returns true only after every bounded predicate succeeds', async () => {
+    const seen: number[] = [];
+    await expect(everyWithConcurrency([1, 2, 3, 4], 2, async (item) => {
+      await tick();
+      seen.push(item);
+      return true;
+    })).resolves.toBe(true);
+    expect(seen.sort()).toEqual([1, 2, 3, 4]);
+  });
+
+  it('rejects promptly on external abort and forwards it to active predicates', async () => {
+    const stop = new AbortController();
+    const signals: AbortSignal[] = [];
+    const pending = everyWithConcurrency([0, 1, 2, 3], 2, async (_item, _index, signal) => {
+      signals.push(signal);
+      return await new Promise<boolean>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    }, stop.signal);
+    await tick();
+    const reason = new Error('caller stopped');
+    stop.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(signals).toHaveLength(2);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
   });
 
   it('settles every bounded callback and preserves fulfillment and rejection order', async () => {

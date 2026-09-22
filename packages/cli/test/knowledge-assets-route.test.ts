@@ -542,7 +542,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
     it('advances the SWM pointer (real promote→share)', async () => {
       await createKa(REG, 'share');
       await write(REG, 'share', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/share/wm/finalize', { contextGraphId: REG });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/share/wm/finalize', { contextGraphId: REG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
       const res = await postJson(daemon, '/api/knowledge-assets/share/swm/share', { contextGraphId: REG });
       expect(res.status).toBe(200);
       expect(res.body.swmShared).toBe(true);
@@ -596,12 +597,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       });
 
       it('a bare FULL share (no skipSeal) → 200 sealed:true / publishReady:true', async () => {
-        await createKa(REG, 'share-full-default');
-        await write(REG, 'share-full-default', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+        const created = await createKa(REG, 'share-full-default');
+        expect(created.status, `full share create: ${JSON.stringify(created.body)}`).toBe(201);
+        const written = await write(REG, 'share-full-default', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+        expect(written.status, `full share write: ${JSON.stringify(written.body)}`).toBe(200);
         const res = await postJson(daemon, '/api/knowledge-assets/share-full-default/swm/share', {
           contextGraphId: REG,
         });
-        expect(res.status).toBe(200);
+        expect(res.status, `full share: ${JSON.stringify(res.body)}`).toBe(200);
         expect(res.body.swmShared).toBe(true);
         expect(res.body.promotedCount).toBeGreaterThan(0);
         expect(res.body.sealed).toBe(true);
@@ -691,7 +694,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       await createKa(PUBREG, 'pub-noshare');
       // A UNIQUE subject so a later cross-match can't accidentally share it.
       await write(PUBREG, 'pub-noshare', [{ subject: 'ex:noshare-only', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/pub-noshare/wm/finalize', { contextGraphId: PUBREG });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-noshare/wm/finalize', { contextGraphId: PUBREG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
       const res = await postJson(daemon, '/api/knowledge-assets/pub-noshare/vm/publish', { contextGraphId: PUBREG });
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('PUBLISH_NOT_FULL_SHARE');
@@ -742,7 +746,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // devnet-tier case below.)
       await createKa(REG, 'pub-real');
       await write(REG, 'pub-real', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/pub-real/wm/finalize', { contextGraphId: REG });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-real/wm/finalize', { contextGraphId: REG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
       await postJson(daemon, '/api/knowledge-assets/pub-real/swm/share', { contextGraphId: REG });
       const res = await postJson(daemon, '/api/knowledge-assets/pub-real/vm/publish', { contextGraphId: REG });
       expect(res.status).toBeGreaterThanOrEqual(500);
@@ -761,7 +766,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       await createKa(LOCAL_AUTOREG, 'pub-autoreg');
       // Unique subject so the SWM selection can't cross-match another KA's quad.
       await write(LOCAL_AUTOREG, 'pub-autoreg', [{ subject: 'ex:autoreg-only', predicate: 'ex:p', object: '"x"' }]);
-      await postJson(daemon, '/api/knowledge-assets/pub-autoreg/wm/finalize', { contextGraphId: LOCAL_AUTOREG });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-autoreg/wm/finalize', { contextGraphId: LOCAL_AUTOREG });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
       await postJson(daemon, '/api/knowledge-assets/pub-autoreg/swm/share', { contextGraphId: LOCAL_AUTOREG });
 
       const res = await postJson(daemon, '/api/knowledge-assets/pub-autoreg/vm/publish', { contextGraphId: LOCAL_AUTOREG });
@@ -793,7 +799,8 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       // Unique subject so the seal's selection can't cross-match another KA's shared quad.
       await write(LOCAL_NOSHARE, 'pub-noshare-unreg', [{ subject: 'ex:noshare-unreg-only', predicate: 'ex:p', object: '"x"' }]);
       // FINALIZE (seals the WM draft) but DELIBERATELY do NOT swm/share → SWM stays empty.
-      await postJson(daemon, '/api/knowledge-assets/pub-noshare-unreg/wm/finalize', { contextGraphId: LOCAL_NOSHARE });
+      const finalized = await postJson(daemon, '/api/knowledge-assets/pub-noshare-unreg/wm/finalize', { contextGraphId: LOCAL_NOSHARE });
+      expect(finalized.status, `finalize failed: ${JSON.stringify(finalized.body)}`).toBe(200);
 
       const res = await postJson(daemon, '/api/knowledge-assets/pub-noshare-unreg/vm/publish', { contextGraphId: LOCAL_NOSHARE });
 

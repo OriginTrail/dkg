@@ -47,10 +47,11 @@ export type {
 
 export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
 
-/** Full semantic reconciliation supplied by the wired service. */
-export interface Rfc64PublicCatalogReceiverReconcilerV1 {
-  /** True only when this exact inventory head is durably recorded as applied. */
-  isHeadApplied(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
+export type Rfc64PublicCatalogHeadSatisfactionCheckV1 = (
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+) => Promise<boolean>;
+
+interface Rfc64PublicCatalogReceiverReconcilerBaseV1 {
   /**
    * Fetch, verify, activate, exact-post-read, then durably commit applied state.
    * The operation must be idempotent so a restart can repair the semantic-store
@@ -61,6 +62,48 @@ export interface Rfc64PublicCatalogReceiverReconcilerV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     signal: AbortSignal,
   ): Promise<Rfc64PublicCatalogReconcileResultV1>;
+}
+
+/** Current full semantic reconciliation supplied by the wired service. */
+export interface Rfc64PublicCatalogCurrentReceiverReconcilerV1
+  extends Rfc64PublicCatalogReceiverReconcilerBaseV1 {
+  /**
+   * True when this exact head is durable or a newer same-scope durable head
+   * strictly supersedes it. Equal-version conflicts are never deduplicated.
+   */
+  isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+}
+
+/** Constructor compatibility for implementations compiled against the V1 name. */
+export interface Rfc64PublicCatalogLegacyReceiverReconcilerV1
+  extends Rfc64PublicCatalogReceiverReconcilerBaseV1 {
+  /** @deprecated V1 compatibility name; use isHeadSatisfied in new code. */
+  isHeadApplied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+}
+
+/** Public V1 input accepts either the established or current method name. */
+export type Rfc64PublicCatalogReceiverReconcilerV1 =
+  | Rfc64PublicCatalogCurrentReceiverReconcilerV1
+  | Rfc64PublicCatalogLegacyReceiverReconcilerV1;
+
+/** Normalize the compatibility union once at the ownership boundary. */
+export function normalizeRfc64PublicCatalogReceiverReconcilerV1(
+  reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
+): Rfc64PublicCatalogCurrentReceiverReconcilerV1 {
+  if ('isHeadSatisfied' in reconciler) return reconciler;
+  if ('isHeadApplied' in reconciler) {
+    return Object.freeze({
+      reconcileHead: (
+        remotePeerId: string,
+        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+        signal: AbortSignal,
+      ) =>
+        reconciler.reconcileHead(remotePeerId, announcement, signal),
+      isHeadSatisfied: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
+        reconciler.isHeadApplied(announcement),
+    });
+  }
+  throw new TypeError('RFC-64 receiver reconciler requires a head satisfaction check');
 }
 
 export interface Rfc64PublicCatalogReceiverOptionsV1 {
@@ -95,6 +138,20 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     remotePeerId: string,
   ) => void;
   /**
+   * Terminal observer for a head that every retained provider reported as
+   * not-found. Nothing is thrown on this path, so without an observer the
+   * outcome is invisible to operators even though the head was never applied.
+   */
+  readonly onNotFound?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    providerAttempts: number,
+    providerCount: number,
+  ) => void;
+  /** Single typed terminal boundary for ambient and explicit work alike. */
+  readonly onTerminalEvent?: (
+    event: Rfc64PublicCatalogReceiverTerminalEventV1,
+  ) => void;
+  /**
    * Scheduling-time observer called once for a distinct exact-head request.
    * It is not an execution boundary and must not own attempt-scoped state.
    */
@@ -115,17 +172,21 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     attemptToken: number,
   ) => void;
-  /** Authenticated verified-current-head work was accepted into the receiver queue. */
+  /** Single admission/settlement boundary for authenticated current-head work. */
+  readonly onVerifiedCurrentHeadTargetLifecycleEvent?: (
+    event: Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
+  ) => void;
+  /** @deprecated Use onVerifiedCurrentHeadTargetLifecycleEvent. */
   readonly onVerifiedCurrentHeadTargetAccepted?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     targetToken: number,
   ) => void;
-  /** Authenticated work could not enter bounded pending capacity full of explicit work. */
+  /** @deprecated Use onVerifiedCurrentHeadTargetLifecycleEvent. */
   readonly onVerifiedCurrentHeadTargetRejected?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     outcome: 'dropped',
   ) => void;
-  /** Balanced terminal observer for accepted verified-current-head work. */
+  /** @deprecated Use onVerifiedCurrentHeadTargetLifecycleEvent. */
   readonly onVerifiedCurrentHeadTargetSettled?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     targetToken: number,
@@ -140,6 +201,33 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
   ) => void;
 }
 
+export type Rfc64PublicCatalogReceiverTerminalEventV1 = Readonly<{
+  readonly kind: 'receiver-completed';
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  readonly outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'];
+}>;
+
+export type Rfc64VerifiedCurrentHeadTargetLifecycleEventV1 =
+  | Readonly<{
+    readonly kind: 'admission-result';
+    readonly result: 'accepted';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly targetToken: number;
+  }>
+  | Readonly<{
+    readonly kind: 'admission-result';
+    readonly result: 'rejected';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly outcome: 'dropped';
+  }>
+  | Readonly<{
+    readonly kind: 'settled';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly targetToken: number;
+    readonly attemptToken: number | null;
+    readonly outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'];
+  }>;
+
 export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly scheduled: number;
   readonly dedupedInFlight: number;
@@ -152,6 +240,11 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly droppedProviders: number;
   /** Older ambient heads discarded after a verified current head became durable. */
   readonly supersededQueued: number;
+  /**
+   * Active strictly-older ambient tasks aborted so a verified current head for
+   * the same scope could start instead of waiting behind stale provider work.
+   */
+  readonly preemptedActive: number;
   /**
    * Times a task stepped aside for a busy finalized chain lane. Distinct from
    * `failed`: the head is still pending, not lost.
@@ -225,6 +318,15 @@ interface ReceiverProviderV1 {
   hintRevision: bigint;
 }
 
+/**
+ * A parked idle wait. `isIdle` is the waiter's OWN scope — the whole node, or
+ * one context graph — so settlement never has to know which kind it is waking.
+ */
+interface ReceiverIdleWaiterV1 {
+  readonly isIdle: () => boolean;
+  readonly resolve: () => void;
+}
+
 type ReceiverTaskOutcomeV1 =
   | { readonly kind: 'defer-admission' }
   | { readonly kind: 'aborted' }
@@ -272,14 +374,53 @@ const DEFAULTS = Object.freeze({
  */
 const DEFAULT_DEFERRABLE_ERROR = isFinalizedChainAdmissionContention;
 
+function normalizeVerifiedCurrentHeadTargetLifecycleObserverV1(
+  options: Rfc64PublicCatalogReceiverOptionsV1,
+): Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetLifecycleEvent'] {
+  const typed = options.onVerifiedCurrentHeadTargetLifecycleEvent;
+  const accepted = options.onVerifiedCurrentHeadTargetAccepted;
+  const rejected = options.onVerifiedCurrentHeadTargetRejected;
+  const settled = options.onVerifiedCurrentHeadTargetSettled;
+  if (typed === undefined && accepted === undefined && rejected === undefined
+    && settled === undefined) return undefined;
+  const notify = (observer: (() => void) | undefined): void => {
+    if (observer === undefined) return;
+    try { observer(); } catch { /* observer failures never own receiver work */ }
+  };
+  return (event) => {
+    notify(typed === undefined ? undefined : () => typed(event));
+    if (event.kind === 'settled') {
+      notify(settled === undefined ? undefined : () => settled(
+        event.announcement,
+        event.targetToken,
+        event.attemptToken,
+        event.outcome,
+      ));
+    } else if (event.result === 'accepted') {
+      notify(accepted === undefined ? undefined : () => accepted(
+        event.announcement,
+        event.targetToken,
+      ));
+    } else {
+      notify(rejected === undefined ? undefined : () => rejected(
+        event.announcement,
+        event.outcome,
+      ));
+    }
+  };
+}
+
 export class Rfc64PublicCatalogReceiverV1 {
-  readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerV1;
+  readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerBaseV1;
+  readonly #isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
   readonly #maxConcurrent: number;
   readonly #maxQueue: number;
   readonly #maxAttempts: number;
   readonly #maxProvidersPerHead: number;
   readonly #retryBackoffMs: number;
   readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
+  readonly #onNotFound?: Rfc64PublicCatalogReceiverOptionsV1['onNotFound'];
+  readonly #onTerminalEvent?: Rfc64PublicCatalogReceiverOptionsV1['onTerminalEvent'];
   readonly #onAttemptStart?: Rfc64PublicCatalogReceiverOptionsV1['onAttemptStart'];
   readonly #onReconciliationAttemptStart?:
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptStart'];
@@ -287,21 +428,19 @@ export class Rfc64PublicCatalogReceiverV1 {
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptSuccess'];
   readonly #onReconciliationAttemptEnd?:
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptEnd'];
-  readonly #onVerifiedCurrentHeadTargetAccepted?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetAccepted'];
-  readonly #onVerifiedCurrentHeadTargetRejected?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetRejected'];
-  readonly #onVerifiedCurrentHeadTargetSettled?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetSettled'];
+  readonly #onVerifiedCurrentHeadTargetLifecycleEvent?:
+    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetLifecycleEvent'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   /** Every exact head and its queued/deferred/terminal task lifecycle. */
-  readonly #tasks = new Rfc64ReceiverTaskLifecycleV1<ReceiverTaskV1>();
+  readonly #tasks = new Rfc64ReceiverTaskLifecycleV1<ReceiverTaskV1>(
+    (task, result) => this.#observeTaskSettlement(task, result),
+  );
   /** Execution promises only; task state and scope ownership live in #tasks. */
   readonly #active = new Set<Promise<void>>();
   readonly #closing = new AbortController();
   #closed = false;
-  #idleWaiters: Array<() => void> = [];
+  #idleWaiters: ReceiverIdleWaiterV1[] = [];
 
   readonly #admissionDeferralMs: number;
   readonly #maxAdmissionDeferrals: number;
@@ -320,6 +459,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   #droppedQueueFull = 0;
   #droppedProviders = 0;
   #supersededQueued = 0;
+  #preemptedActive = 0;
   #providerAttempts = 0;
   #providerSwitches = 0;
   #providerSuccesses = 0;
@@ -329,7 +469,9 @@ export class Rfc64PublicCatalogReceiverV1 {
     reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
     options: Rfc64PublicCatalogReceiverOptionsV1 = {},
   ) {
-    this.#reconciler = reconciler;
+    const normalizedReconciler = normalizeRfc64PublicCatalogReceiverReconcilerV1(reconciler);
+    this.#reconciler = normalizedReconciler;
+    this.#isHeadSatisfied = normalizedReconciler.isHeadSatisfied;
     this.#maxConcurrent = rfc64ReceiverPositiveIntV1(
       options.maxConcurrent,
       DEFAULTS.maxConcurrent,
@@ -357,13 +499,14 @@ export class Rfc64PublicCatalogReceiverV1 {
     );
     this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
+    this.#onNotFound = options.onNotFound;
+    this.#onTerminalEvent = options.onTerminalEvent;
     this.#onAttemptStart = options.onAttemptStart;
     this.#onReconciliationAttemptStart = options.onReconciliationAttemptStart;
     this.#onReconciliationAttemptSuccess = options.onReconciliationAttemptSuccess;
     this.#onReconciliationAttemptEnd = options.onReconciliationAttemptEnd;
-    this.#onVerifiedCurrentHeadTargetAccepted = options.onVerifiedCurrentHeadTargetAccepted;
-    this.#onVerifiedCurrentHeadTargetRejected = options.onVerifiedCurrentHeadTargetRejected;
-    this.#onVerifiedCurrentHeadTargetSettled = options.onVerifiedCurrentHeadTargetSettled;
+    this.#onVerifiedCurrentHeadTargetLifecycleEvent =
+      normalizeVerifiedCurrentHeadTargetLifecycleObserverV1(options);
     this.#onError = options.onError;
   }
 
@@ -462,7 +605,16 @@ export class Rfc64PublicCatalogReceiverV1 {
       remotePeerId: string;
     }>[],
   ): void {
-    if (this.#closed) return;
+    if (this.#closed) {
+      const observedHeadKeys = new Set<string>();
+      for (const { announcement } of inputs) {
+        const headKey = rfc64ReceiverHeadKeyV1(announcement);
+        if (observedHeadKeys.has(headKey)) continue;
+        observedHeadKeys.add(headKey);
+        this.#observeCompletion(announcement, 'closed');
+      }
+      return;
+    }
     for (const { announcement, remotePeerId } of inputs) {
       this.#scheduled += 1;
       const key = rfc64ReceiverHeadKeyV1(announcement);
@@ -493,6 +645,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       }
       if (!this.#hasAdmissionCapacity()) {
         this.#droppedQueueFull += 1;
+        this.#observeCompletion(announcement, 'dropped');
         continue;
       }
       this.#safeNotify(() => this.#onAttemptStart?.(announcement));
@@ -575,6 +728,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     // queue, so resolve at the scheduling boundary instead of enqueuing a
     // completion that can never settle.
     if (this.#closed) {
+      this.#observeCompletion(inputs[0]!.announcement, 'closed');
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
         providerAttempts: 0,
@@ -583,6 +737,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
     this.#scheduled += inputs.length;
     const first = inputs[0]!;
+    let evictedAmbient = false;
     if (
       schedulingClass === 'verified-current-head'
       && !this.#hasAdmissionCapacity()
@@ -596,29 +751,34 @@ export class Rfc64PublicCatalogReceiverV1 {
       const finalizeAmbient = this.#tasks.queuedCount >= this.#maxQueue
         ? this.#tasks.finalizeOneQueuedWhere.bind(this.#tasks)
         : this.#tasks.finalizeOneNonRunningWhere.bind(this.#tasks);
-      const evicted = finalizeAmbient(
+      evictedAmbient = finalizeAmbient(
         (task) => task.schedulingPolicy.schedulingClass === 'ambient',
         (task) => createRfc64PublicCatalogReceiverCompletionV1({
           outcome: 'dropped',
           providerAttempts: task.providerAttempts ?? 0,
         }),
-        (task) => this.#finishReconciliationAttempt(task),
         (waiter) => this.#safeNotify(waiter),
       );
-      if (evicted) this.#droppedQueueFull += 1;
+      if (evictedAmbient) this.#droppedQueueFull += 1;
     }
     if (!this.#hasAdmissionCapacity()) {
       this.#droppedQueueFull += 1;
       if (schedulingClass === 'verified-current-head') {
-        this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetRejected?.(
-          first.announcement,
-          'dropped',
-        ));
+        this.#observeVerifiedCurrentHeadTargetLifecycle({
+          kind: 'admission-result',
+          result: 'rejected',
+          announcement: first.announcement,
+          outcome: 'dropped',
+        });
       }
+      this.#observeCompletion(first.announcement, 'dropped');
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'dropped',
         providerAttempts: 0,
       }));
+      // Requeued deferrals can leave the queue over its bound, so one eviction
+      // does not always buy admission; the evicted graph may be idle regardless.
+      if (evictedAmbient) this.#settleIdleWaiters();
       return;
     }
     this.#safeNotify(() => this.#onAttemptStart?.(first.announcement));
@@ -630,22 +790,75 @@ export class Rfc64PublicCatalogReceiverV1 {
       }`,
       completion,
     );
+    this.#preemptSupersededActiveAmbientHead(task);
     this.#tasks.schedule(task);
     if (schedulingClass === 'verified-current-head') {
       task.verifiedCurrentHeadTargetAccepted = true;
       task.verifiedCurrentHeadTargetToken = ++this.#verifiedCurrentHeadTargetSequence;
-      this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetAccepted?.(
-        first.announcement,
-        task.verifiedCurrentHeadTargetToken!,
-      ));
+      this.#observeVerifiedCurrentHeadTargetLifecycle({
+        kind: 'admission-result',
+        result: 'accepted',
+        announcement: first.announcement,
+        targetToken: task.verifiedCurrentHeadTargetToken,
+      });
     }
     this.#pump();
+    // The evicted ambient task can belong to ANY context graph and may have
+    // been that graph's last one. Settle only now that the admitted task is
+    // scheduled: evicting and admitting within one graph must not wake its
+    // waiter in the gap between the two.
+    if (evictedAmbient) this.#settleIdleWaiters();
   }
 
   /** Resolve once no work is queued or in-flight. */
   whenIdle(): Promise<void> {
-    if (this.#isIdle()) return Promise.resolve();
-    return new Promise<void>((resolve) => this.#idleWaiters.push(resolve));
+    return this.#whenIdle(() => this.#tasks.isIdle);
+  }
+
+  /**
+   * Resolve once ONE context graph has no work queued, deferred, or in-flight,
+   * without waiting for other context graphs to drain theirs. Scoped is not
+   * unqueued: this graph's own tasks still take their turn in the shared FIFO
+   * queue and slot pool, so other graphs' work ahead of them delays this too.
+   */
+  whenIdleForContextGraph(
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.#whenIdle(
+      () => this.#tasks.isIdleForContextGraph(contextGraphId),
+      signal,
+    );
+  }
+
+  #whenIdle(isIdle: () => boolean, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (isIdle()) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let waiter!: ReceiverIdleWaiterV1;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        const index = this.#idleWaiters.indexOf(waiter);
+        if (index >= 0) this.#idleWaiters.splice(index, 1);
+        signal?.removeEventListener('abort', onAbort);
+        reject(signal?.reason ?? new DOMException(
+          'RFC-64 receiver idle wait aborted',
+          'AbortError',
+        ));
+      };
+      waiter = { isIdle, resolve: finish };
+      this.#idleWaiters.push(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
   }
 
   /** Fence queued, deferred, and active work for one no-longer-selected CG. */
@@ -657,13 +870,13 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }),
-      (task) => {
-        this.#settleVerifiedCurrentHeadTarget(task, 'closed');
-        this.#finishReconciliationAttempt(task);
-      },
       (waiter) => this.#safeNotify(waiter),
     );
-    if (this.#isIdle()) this.#resolveIdle();
+    // Unconditional: this context graph's queued and deferred tasks are gone
+    // even when the node as a whole is still busy, and a scoped waiter for it
+    // must not outlive them. Running tasks are only aborted here; they leave
+    // through their run's `.finally`, which settles again.
+    this.#settleIdleWaiters();
   }
 
   /**
@@ -678,20 +891,28 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#closed = true;
     this.#tasks.abortAll(new Error('RFC-64 public catalog receiver closing'));
     this.#tasks.clearDeferredTimers();
+    this.#finalizeNonRunningAsClosed();
+    this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
+    await Promise.allSettled([...this.#active]);
+    // A run whose `.then` had already deferred or requeued its task was still
+    // `running` when the fence above ran, so that pass skipped it; its timer is
+    // cleared and a closed receiver never pumps, so nothing else would finalize
+    // it. Sweep again now that every run has drained.
+    this.#finalizeNonRunningAsClosed();
+    // Only now has every task settled, so per-waiter evaluation releases all
+    // waiters, scoped or not. That matters: the graceful-close fence awaits
+    // this same wait, and a waiter left parked here would hang shutdown.
+    this.#settleIdleWaiters();
+  }
+
+  #finalizeNonRunningAsClosed(): void {
     this.#tasks.finalizeNonRunning(
       (task) => createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }),
-      (task) => {
-        this.#settleVerifiedCurrentHeadTarget(task, 'closed');
-        this.#finishReconciliationAttempt(task);
-      },
       (waiter) => this.#safeNotify(waiter),
     );
-    this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
-    await Promise.allSettled([...this.#active]);
-    this.#resolveIdle();
   }
 
   stats(): Rfc64PublicCatalogReceiverStatsV1 {
@@ -706,6 +927,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       droppedQueueFull: this.#droppedQueueFull,
       droppedProviders: this.#droppedProviders,
       supersededQueued: this.#supersededQueued,
+      preemptedActive: this.#preemptedActive,
       admissionDeferred: this.#admissionDeferred,
       deferred: this.#tasks.deferredCount,
       inFlight: this.#tasks.activeCount,
@@ -794,13 +1016,22 @@ export class Rfc64PublicCatalogReceiverV1 {
               providerAttempts: task.providerAttempts ?? 0,
             }));
             break;
-          case 'not-found':
+          case 'not-found': {
             this.#notFound += 1;
+            const firstProvider = task.providers.values().next().value;
+            if (firstProvider !== undefined) {
+              this.#safeNotify(() => this.#onNotFound?.(
+                firstProvider.announcement,
+                task.providerAttempts ?? 0,
+                task.providers.size,
+              ));
+            }
             this.#finishTask(task, createRfc64PublicCatalogReceiverCompletionV1({
               outcome: 'not-found',
               providerAttempts: task.providerAttempts ?? 0,
             }));
             break;
+          }
           case 'failed':
             this.#failed += 1;
             this.#safeNotify(() => this.#onError?.(
@@ -826,7 +1057,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         this.#tasks.finishRunning(task);
         this.#active.delete(run);
         if (!this.#closed) this.#pump();
-        if (this.#isIdle()) this.#resolveIdle();
+        this.#settleIdleWaiters();
       });
       this.#active.add(run);
     }
@@ -856,7 +1087,8 @@ export class Rfc64PublicCatalogReceiverV1 {
         providerAttempts: task.providerAttempts ?? 0,
         error: new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
       }));
-      if (this.#isIdle()) this.#resolveIdle();
+      // No settle here: this only runs from the run's `.then`, where the task
+      // is still active, and that run's `.finally` settles right after.
       return;
     }
     // Registered BEFORE the timer is armed: between these two statements the
@@ -871,7 +1103,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           outcome: 'closed',
           providerAttempts: task.providerAttempts ?? 0,
         }));
-        if (this.#isIdle()) this.#resolveIdle();
+        this.#settleIdleWaiters();
         return;
       }
       if (this.#tasks.requeue(task)) this.#pump();
@@ -947,7 +1179,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         task.lastProviderKey = provider.key;
       };
       try {
-        if (await this.#reconciler.isHeadApplied(provider.announcement)) {
+        if (await this.#isHeadSatisfied(provider.announcement)) {
           recordProviderAttempt();
           return { kind: 'already-applied', announcement: provider.announcement };
         }
@@ -1059,22 +1291,88 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: candidate.providerAttempts ?? 0,
       }),
-      (candidate) => this.#finishReconciliationAttempt(candidate),
       (waiter) => this.#safeNotify(waiter),
     );
+  }
+
+  /**
+   * The admission half of the version-dominance rule over ambient work; the
+   * durable-success half is {@link #retireSupersededAmbientHeads}. Both are
+   * declared as policy data (`preemptsOlderActiveAmbient`,
+   * `retiresOlderAmbientAfterDurableSuccess`) and hold only for
+   * `verified-current-head`. A verified current head must not wait behind a
+   * strictly older ambient task that is merely slow (iterating unreachable
+   * providers): placement alone only reorders the queue, while the scope lock
+   * is held by the ACTIVE task, so abort it. Its run returns `aborted` and
+   * settles as `closed`, releasing the scope so the pump can start the
+   * verified task. Equal or newer active work, and every non-ambient class,
+   * is never preempted.
+   *
+   * Unlike retirement this fires at admission, before the verified head is
+   * known to succeed, so a nearly finished older reconcile can be discarded
+   * for a head that then fails. That trade is deliberate: the admitted head
+   * passed exact fetch, signature, scope and authority verification and is
+   * strictly newer, so the aborted head is stale by construction;
+   * `reconcileHead` is idempotent by contract, so an aborted run leaves
+   * nothing a later run cannot redo; and the caller that admitted the
+   * verified head owns its retry (the bounded announced-head re-pull for the
+   * acceleration lane), while the older head stays reachable via replay.
+   *
+   * The preempted task settles as `closed`, the same outcome as receiver
+   * shutdown or CG deactivation, and its abort reason is not carried into
+   * the completion, so terminal-event consumers cannot tell the two apart;
+   * `preemptedActive` is the discriminating counter. A dedicated outcome
+   * would widen the completion type observability records and is left for a
+   * follow-up.
+   */
+  #preemptSupersededActiveAmbientHead(admittedTask: ReceiverTaskV1): void {
+    if (!admittedTask.schedulingPolicy.preemptsOlderActiveAmbient) return;
+    const active = this.#tasks.activeForScope(admittedTask.scopeKey);
+    if (
+      active === undefined
+      || active.schedulingPolicy.schedulingClass !== 'ambient'
+      || active.cancellation.signal.aborted
+      || active.catalogVersion >= admittedTask.catalogVersion
+    ) return;
+    this.#preemptedActive += 1;
+    active.cancellation.abort(new Error(
+      'RFC-64 receiver preempted an older active ambient head for a verified current head',
+    ));
   }
 
   #finishTask(
     task: ReceiverTaskV1,
     result: Rfc64PublicCatalogReceiverCompletionV1,
   ): void {
-    this.#settleVerifiedCurrentHeadTarget(task, result.outcome);
     this.#tasks.finalize(
       task,
       result,
-      (settledTask) => this.#finishReconciliationAttempt(settledTask),
       (waiter) => this.#safeNotify(waiter),
     );
+  }
+
+  #observeCompletion(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
+  ): void {
+    this.#safeNotify(() => this.#onTerminalEvent?.({
+      kind: 'receiver-completed',
+      announcement,
+      outcome,
+    }));
+  }
+
+  /** Single terminal hook for every accepted task lifecycle. */
+  #observeTaskSettlement(
+    task: ReceiverTaskV1,
+    result: Rfc64PublicCatalogReceiverCompletionV1,
+  ): void {
+    const firstProvider = task.providers.values().next().value;
+    if (firstProvider !== undefined) {
+      this.#observeCompletion(firstProvider.announcement, result.outcome);
+    }
+    this.#settleVerifiedCurrentHeadTarget(task, result.outcome);
+    this.#finishReconciliationAttempt(task);
   }
 
   #settleVerifiedCurrentHeadTarget(
@@ -1091,12 +1389,19 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (targetToken === undefined) return;
     const firstProvider = task.providers.values().next().value;
     if (firstProvider === undefined) return;
-    this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetSettled?.(
-      firstProvider.announcement,
+    this.#observeVerifiedCurrentHeadTargetLifecycle({
+      kind: 'settled',
+      announcement: firstProvider.announcement,
       targetToken,
-      task.reconciliationAttemptToken ?? null,
+      attemptToken: task.reconciliationAttemptToken ?? null,
       outcome,
-    ));
+    });
+  }
+
+  #observeVerifiedCurrentHeadTargetLifecycle(
+    event: Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
+  ): void {
+    this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetLifecycleEvent?.(event));
   }
 
   #finishReconciliationAttempt(task: ReceiverTaskV1): void {
@@ -1112,20 +1417,29 @@ export class Rfc64PublicCatalogReceiverV1 {
     ));
   }
 
-  #isIdle(): boolean {
-    return this.#tasks.isIdle;
-  }
-
   #hasAdmissionCapacity(): boolean {
     return this.#tasks.queuedCount < this.#maxQueue
       && this.#tasks.pendingCount < this.#maxQueue + this.#maxConcurrent;
   }
 
-  #resolveIdle(): void {
-    if (!this.#isIdle()) return;
-    const waiters = this.#idleWaiters;
+  /**
+   * Wake every waiter whose OWN scope has gone idle. Global waiters still wait
+   * for global idle; a waiter scoped to one context graph wakes as soon as that
+   * graph's work has drained, even while other graphs keep the node busy.
+   *
+   * Call sites run this unconditionally: a task leaving the lifecycle can idle
+   * ONE graph while the node stays busy, so "is the node idle?" is no longer a
+   * usable shortcut, and a site that skips it strands that graph's waiter
+   * until some unrelated run happens to finish.
+   */
+  #settleIdleWaiters(): void {
+    if (this.#idleWaiters.length === 0) return;
+    const parked = this.#idleWaiters;
     this.#idleWaiters = [];
-    for (const resolve of waiters) resolve();
+    for (const waiter of parked) {
+      if (waiter.isIdle()) waiter.resolve();
+      else this.#idleWaiters.push(waiter);
+    }
   }
 }
 

@@ -408,6 +408,60 @@ describe('graph-scoped private access', () => {
     expect(new TextDecoder().decode(response.nquads)).toContain('exact-version-secret');
     expect(toHex(response.privateMerkleRoot)).toBe(toHex(privateMerkleRoot));
   });
+
+  it('keeps a legacy-default private workspace head owner-only for non-owner requests', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const privateStore = new PrivateContentStore(store, graphManager);
+    const ual = 'did:dkg:mock:31337/0x1111111111111111111111111111111111111111/10';
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const privateQuads: Quad[] = [{
+      subject: 'urn:rootless:legacy-private',
+      predicate: 'urn:p:secret',
+      object: '"legacy-default-secret"',
+      graph: '',
+    }];
+    const privateMerkleRoot = computePrivateRootV10(privateQuads)!;
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      scope,
+      privateQuads,
+    );
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'graph-access-legacy-default',
+      kaUal: ual,
+      assertionVersion: scope.assertionVersion,
+      quads: [],
+      privateMerkleRoot,
+      privateTripleCount: privateQuads.length,
+      publisherPeerId: 'owner-peer',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'graph-access-legacy-default',
+      kaUal: ual,
+      assertionVersion: scope.assertionVersion,
+    });
+
+    const response = decodeAccessResponse(await new AccessHandler(
+      store,
+      new TypedEventBus(),
+    ).handler(encodeAccessRequest({
+      kaUal: ual,
+      requesterPeerId: 'reader-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    }), 'reader-peer' as any));
+
+    expect(response.granted).toBe(false);
+    expect(response.rejectionReason).toContain('owner-only');
+    expect(new TextDecoder().decode(response.nquads)).not.toContain('legacy-default-secret');
+  });
 });
 
 describe('I-005: Policy checks run before signature verification (perf + clarity)', () => {

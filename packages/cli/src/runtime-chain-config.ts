@@ -1,4 +1,7 @@
-import type { EVMAdapterConfig } from '@origintrail-official/dkg-chain';
+import type {
+  EVMAdapterConfig,
+  RpcRequestGovernor,
+} from '@origintrail-official/dkg-chain';
 import {
   resolveApprovalPolicy,
   type ResolvedChainConfig,
@@ -9,15 +12,30 @@ export type RuntimeEvmChainConfig = Pick<
   EVMAdapterConfig,
   | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
   | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
-  | 'finalityConfirmations'
+  | 'finalityConfirmations' | 'indexTickMs'
   | 'maxFeePerGasWei'
   | 'minPublisherNativeWei' | 'minPublisherTracWei'
+  | 'rpcRequestAdmission'
 >;
+
+/** Pure resolved values before the composition root attaches process state. */
+export type RuntimeEvmChainConfigProjection = Omit<
+  RuntimeEvmChainConfig,
+  'rpcRequestAdmission'
+>;
+
+/** Bind an explicitly process-owned governor to a pure resolved projection. */
+export function bindRuntimeRpcRequestGovernor(
+  projected: RuntimeEvmChainConfigProjection,
+  rpcRequestGovernor: RpcRequestGovernor,
+): RuntimeEvmChainConfig {
+  return { ...projected, rpcRequestAdmission: rpcRequestGovernor };
+}
 
 /** Neutral projection shared by the agent and every publisher adapter. */
 export function projectRuntimeEvmChainConfig(
   chain: ResolvedChainConfig | undefined,
-): RuntimeEvmChainConfig | undefined {
+): RuntimeEvmChainConfigProjection | undefined {
   if (!chain?.rpcUrl || !chain.hubAddress) return undefined;
   return {
     rpcUrl: chain.rpcUrl,
@@ -28,6 +46,7 @@ export function projectRuntimeEvmChainConfig(
     chainId: chain.chainId,
     receiptTimeoutMs: chain.receiptTimeoutMs,
     finalityConfirmations: chain.finalityConfirmations,
+    indexTickMs: chain.indexTickMs,
     maxFeePerGasWei: chain.maxFeePerGasWei,
     approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy),
     cgRegistryScanPageSize: chain.cgRegistryScanPageSize,

@@ -2,6 +2,10 @@ import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncRequestEnvelope } from './request-build.js';
 import { isMemberRecoveryAuthorized } from '../../swm/member-recovery-auth.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 interface AuthLookupOptions {
   signal?: AbortSignal;
@@ -195,7 +199,10 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   // path would be an auth bypass). The gate is a FRESH `_meta`-only read; null/
   // empty hard-denies and we never widen via `refreshMetaFromCurator`.
   if (request.recovery) {
-    const recoveryGate = await getMemberRecoveryGate(request.contextGraphId, lookupOptions);
+    const recoveryGate = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.syncRecovery,
+      () => getMemberRecoveryGate(request.contextGraphId, lookupOptions),
+    );
     throwIfAborted(signal);
     const recoveryAllowed = isMemberRecoveryAuthorized(recoveredAddress, recoveryGate);
     logInfo(
@@ -213,7 +220,10 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
 
   let participants = await getParticipants(request.contextGraphId, lookupOptions);
   throwIfAborted(signal);
-  let agentGateAddresses = await getAgentGateAddresses(request.contextGraphId, lookupOptions);
+  let agentGateAddresses = await withRpcUsageSite(
+    CG_AUTH_RPC_SITES.syncAuthorize,
+    () => getAgentGateAddresses(request.contextGraphId, lookupOptions),
+  );
   throwIfAborted(signal);
   let allowedPeers = await getAllowedPeers(request.contextGraphId, lookupOptions);
   throwIfAborted(signal);
@@ -259,7 +269,10 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     if (refreshed) {
       participants = await getParticipants(request.contextGraphId, lookupOptions);
       throwIfAborted(signal);
-      agentGateAddresses = await getAgentGateAddresses(request.contextGraphId, lookupOptions);
+      agentGateAddresses = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.syncAuthorizeRetry,
+        () => getAgentGateAddresses(request.contextGraphId, lookupOptions),
+      );
       throwIfAborted(signal);
       allowedPeers = await getAllowedPeers(request.contextGraphId, lookupOptions);
       throwIfAborted(signal);

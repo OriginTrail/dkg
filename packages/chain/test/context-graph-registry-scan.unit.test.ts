@@ -1,151 +1,24 @@
 import { describe, it, expect, vi } from 'vitest';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { ContextGraphChainScanPartialError, type ContextGraphChainScanOptions, type ContextGraphOnChain, type ContextGraphRegistryScanOptions } from '../src/chain-adapter.js';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
+import {
+  ContextGraphChainScanPartialError,
+  type ContextGraphChainScanOptions,
+} from '../src/chain-adapter.js';
 import {
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from '../src/evm-adapter-base.js';
+import {
+  MemoryRegistryScanCursorStore,
+  REGISTRY,
+  collectRegistryScan,
+  makeAdapter,
+  makeRegistry,
+  minimalConfig,
+  recorder,
+  seam,
+} from './context-graph-registry-scan-fixture.js';
 
-function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
-  const calls: A[] = [];
-  const fn = (...args: A): R => {
-    calls.push(args);
-    return impl(...args);
-  };
-  return Object.assign(fn, { calls });
-}
-
-// A mutable di-seam double: records every call and runs the current `impl`.
-// `setImpl` swaps the steady-state behaviour (the no-mock analogue of
-// `mockResolvedValue`/`mockReturnValue`); `queueOnce` enqueues one-shot
-// outcomes consumed before the steady-state impl (the analogue of
-// `mockResolvedValueOnce`/`mockRejectedValueOnce`); `reset` clears both the
-// recorded calls and any queued/steady behaviour back to a returns-undefined
-// default (the analogue of `mockReset`); `clear` drops only recorded calls
-// (the analogue of `mockClear`).
-type OnceOutcome<R> = { type: 'return'; value: R } | { type: 'throw'; error: unknown };
-function seam<A extends unknown[], R>(initialImpl: (...args: A) => R) {
-  const calls: A[] = [];
-  const queue: OnceOutcome<R>[] = [];
-  let impl = initialImpl;
-  const fn = (...args: A): R => {
-    calls.push(args);
-    if (queue.length > 0) {
-      const next = queue.shift() as OnceOutcome<R>;
-      if (next.type === 'throw') throw next.error;
-      return next.value;
-    }
-    return impl(...args);
-  };
-  return Object.assign(fn, {
-    calls,
-    setImpl(next: (...args: A) => R) {
-      impl = next;
-    },
-    queueOnce(outcome: OnceOutcome<R>) {
-      queue.push(outcome);
-    },
-    reset() {
-      calls.length = 0;
-      queue.length = 0;
-      impl = (() => undefined as unknown as R) as (...args: A) => R;
-    },
-    clear() {
-      calls.length = 0;
-    },
-  });
-}
-
-const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
-const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
-const REGISTRY = '0x3333333333333333333333333333333333333333';
-
-class MemoryRegistryScanCursorStore {
-  readonly values = new Map<string, number>();
-  readonly loads: string[] = [];
-  readonly saves: Array<{ key: string; nextBlock: number }> = [];
-
-  async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
-    const encoded = this.key(key);
-    this.loads.push(encoded);
-    return this.values.get(encoded);
-  }
-
-  async save(key: { chainId: string; deploymentId: string; registryAddress: string }, nextBlock: number): Promise<void> {
-    const encoded = this.key(key);
-    this.saves.push({ key: encoded, nextBlock });
-    this.values.set(encoded, nextBlock);
-  }
-
-  private key(key: { chainId: string; deploymentId: string; registryAddress: string }): string {
-    return `${key.chainId}|${key.deploymentId}|${key.registryAddress.toLowerCase()}`;
-  }
-}
-
-function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterConfig {
-  return {
-    rpcUrl: 'http://127.0.0.1:59998',
-    privateKey: DEPLOYER_PK,
-    adminPrivateKey: ADMIN_PK,
-    hubAddress: '0x0000000000000000000000000000000000000001',
-    chainId: 'evm:31337',
-    staticNetwork: false,
-    ...overrides,
-  };
-}
-
-function makeRegistry(overrides: Record<string, unknown> = {}) {
-  return {
-    getAddress: recorder(async () => REGISTRY),
-    filters: { NameClaimed: recorder(() => 'NameClaimedFilter') },
-    interface: {
-      parseLog: recorder(({ data }: { data: string }) => {
-        if (data === '0x01') {
-          return {
-            name: 'NameClaimed',
-            args: {
-              nameHash: '0xaaa0000000000000000000000000000000000000000000000000000000000001',
-              creator: '0x1111111111111111111111111111111111111111',
-              accessPolicy: 0,
-            },
-          };
-        }
-        return null;
-      }),
-    },
-    queryFilter: seam(async (_filter: unknown, _lo: number, _hi: number) => [] as unknown[]),
-    connect: recorder(() => undefined),
-    ...overrides,
-  } as any;
-}
-
-function makeAdapter(registry: any, head = 0, config: Partial<EVMAdapterConfig> = {}) {
-  const adapter = new EVMChainAdapter(minimalConfig(config));
-  registry.connect = recorder(() => registry);
-  const provider = {
-    getBlockNumber: seam(async () => head),
-    getCode: seam(async (_address: string, block?: number) =>
-      block === undefined || block >= 0 ? '0x6000' : '0x',
-    ),
-  };
-  (adapter as any).contracts = { contextGraphNameRegistry: registry };
-  (adapter as any).initialized = true;
-  (adapter as any).provider = provider;
-  (adapter as any).providers = [provider];
-  return { adapter, provider };
-}
-
-async function collectRegistryScan(
-  adapter: EVMChainAdapter,
-  options: ContextGraphRegistryScanOptions,
-): Promise<ContextGraphOnChain[]> {
-  const results: ContextGraphOnChain[] = [];
-  for await (const page of adapter.scanContextGraphRegistryPages(options)) {
-    results.push(...page.contextGraphs);
-    await page.ack();
-  }
-  return results;
-}
 
 describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
   it('anchors at the registry deploy block and paginates with the 2,000-block default', async () => {
@@ -342,7 +215,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     const seedOptions = (seedIncrementalWatermark: boolean): ContextGraphChainScanOptions => ({
       seedIncrementalWatermark,
-      resumeFromCursor: true,
+      resumeFromCursor: false,
       pageBudget: 1,
     });
 
@@ -542,11 +415,14 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000]);
   });
 
-  it('falls back to deploy-block scanning when durable cursor load fails', async () => {
+  it('fails closed on a transient cursor read and resumes from the last durable watermark', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let loadAttempt = 0;
     const store = {
       load: vi.fn(async () => {
-        throw new Error('cursor load failed');
+        loadAttempt += 1;
+        if (loadAttempt === 1) throw new Error('cursor load failed');
+        return 1_000;
       }),
       save: vi.fn(async () => {}),
     };
@@ -557,57 +433,49 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       });
       registry.queryFilter.setImpl(async () => []);
 
+      await expect(collectRegistryScan(adapter, {
+        mode: 'seedLiveTail',
+        pageBudget: 1,
+      })).rejects.toThrow('cursor load failed');
+
+      expect(store.load).toHaveBeenCalledTimes(1);
+      expect(registry.queryFilter.calls).toEqual([]);
+      expect(store.save).not.toHaveBeenCalled();
+
       await collectRegistryScan(adapter, {
-        mode: 'seedFromCursor',
+        mode: 'incremental',
         pageBudget: 1,
       });
 
-      expect(store.load).toHaveBeenCalledTimes(1);
+      expect(store.load).toHaveBeenCalledTimes(2);
       expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
-        [0, 1_999],
+        [1_000 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 2_100],
       ]);
-      expect(store.save).toHaveBeenCalledWith(expect.any(Object), 2_000);
+      expect(store.save).toHaveBeenCalledWith(expect.any(Object), 2_101);
     } finally {
       warnSpy.mockRestore();
     }
   });
 
-  it('keeps save failures non-fatal and advances the process-local registry cursor', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('fails page acknowledgement without advancing process-local state when durable cursor save fails', async () => {
     const store = {
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {
         throw new Error('cursor save failed');
       }),
     };
-    try {
-      const registry = makeRegistry();
-      const { adapter, provider } = makeAdapter(registry, 2_100, {
-        contextGraphRegistryScanCursorStore: store,
-      });
-      registry.queryFilter.setImpl(async () => []);
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
 
-      await collectRegistryScan(adapter, {
-        mode: 'seedFull',
-      });
+    await expect(collectRegistryScan(adapter, {
+      mode: 'seedFromCursor',
+      pageBudget: 1,
+    })).rejects.toThrow('cursor save failed');
 
-      expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_101);
-      provider.getCode = seam(async () => {
-        throw new Error('deploy block probing should not run with process-local cursor');
-      });
-      registry.queryFilter.clear();
-
-      await collectRegistryScan(adapter, {
-        mode: 'incremental',
-      });
-
-      expect(provider.getCode.calls).toEqual([]);
-      expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
-        [2_101 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 2_100],
-      ]);
-    } finally {
-      warnSpy.mockRestore();
-    }
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
   });
 
   it('continues cursor-resumed daemon catch-up scans from the persisted cursor', async () => {
@@ -849,5 +717,26 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     const defaulted = new EVMChainAdapter(minimalConfig({ cgRegistryScanPageSize: 0.5 }));
     expect((defaulted as any).cgRegistryScanPageSize).toBe(2_000);
+  });
+});
+
+describe('context graph list compatibility validation (#1485)', () => {
+  it.each([
+    { mode: 'listAll', incremental: false },
+    { mode: 'incremental', seedIncrementalWatermark: true },
+    { incremental: true, seedIncrementalWatermark: true },
+    { resumeFromCursor: true },
+    { seedIncrementalWatermark: false, resumeFromCursor: true },
+  ])('rejects contradictory options before adapter initialization: %j', async (options) => {
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry);
+
+    await expect(adapter.listContextGraphsFromChain(
+      undefined,
+      options as unknown as ContextGraphChainScanOptions,
+    )).rejects.toThrow();
+    expect(registry.getAddress.calls).toEqual([]);
+    expect(registry.queryFilter.calls).toEqual([]);
+    expect(provider.getBlockNumber.calls).toEqual([]);
   });
 });

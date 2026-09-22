@@ -26,6 +26,7 @@ import {
   validatePrimaryResults,
 } from '../ci-results.mjs';
 import { validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
+import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // This SHA is already reachable from the protected default branch. Candidate
@@ -347,6 +348,42 @@ test('ordinary network-sim changes remain a narrow delta after the trust hardeni
   assert.equal(plan.fullCi, false);
   assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
   assert.deepEqual(plan.evmScopes, []);
+});
+
+test('identity-wallet browser actions select the real-EVM chain scope', () => {
+  // Every shape isIdentityWalletEvmPath matches, including the extension
+  // alternation (the .tsx spelling is a shape probe, not an existing file).
+  for (const filePath of [
+    'packages/node-ui/src/ui/web3/identityWalletActions.ts',
+    'packages/node-ui/src/ui/web3/identityWalletActions.tsx',
+    'packages/node-ui/src/ui/web3/browserWalletTransaction.ts',
+    'packages/node-ui/src/ui/pages/identity-wallets/useIdentityWalletManagement.ts',
+    'packages/node-ui/integration/identity-wallet-actions-v10.test.ts',
+  ]) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.deepEqual(plan.evmScopes, ['chain'], filePath);
+    assert.match(plan.reasons.join('\n'), /identity-wallet browser actions/, filePath);
+  }
+
+  for (const filePath of [
+    'packages/node-ui/src/ui/pages/Dashboard.tsx',
+    'packages/node-ui/src/ui/web3/session.ts',
+  ]) {
+    assert.deepEqual(pullRequestPlan([change(filePath)]).evmScopes, [], filePath);
+  }
+
+  // ci-delta.mjs cannot import the manifest (it runs from the four-file
+  // trusted-controller sparse checkout), so link the two copies from here:
+  // every node-ui file the chain scope actually RUNS must also be a planner
+  // trigger, and renaming or moving the journey fails here instead of
+  // silently shrinking the lane.
+  const nodeUiChainFiles = EVM_TEST_SCOPES.chain.files
+    .filter((file) => file.startsWith('../node-ui/'))
+    .map((file) => file.replace('../node-ui/', 'packages/node-ui/'));
+  assert.ok(nodeUiChainFiles.length > 0);
+  for (const filePath of nodeUiChainFiles) {
+    assert.deepEqual(pullRequestPlan([change(filePath)]).evmScopes, ['chain'], filePath);
+  }
 });
 
 test('Blazegraph provisioning changes include the native arm64 contract lane', () => {
@@ -902,4 +939,15 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
     plan: docs,
     needs: { plan: { result: 'success' }, 'evm-integration': { result: 'skipped' } },
   }).join('\n'), /merge_group events must use full CI mode/);
+});
+
+test('EPCIS capture/query edits require the live Blazegraph lane', () => {
+  assert.ok(WORKSPACE_RULES['packages/epcis'].lanes.includes('tornado_blazegraph'));
+  assert.ok(WORKSPACE_OWNING_LANES['packages/epcis'].includes('tornado_blazegraph'));
+  const workflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const steps = workflow.jobs['tornado-blazegraph'].steps;
+  const run = steps.find(step => step.run?.includes('test/external-event-query.test.ts'));
+  assert.ok(run);
+  assert.match(run.run, /DKG_REQUIRE_BLAZEGRAPH=1[^\n]*test\/external-event-query\.test\.ts/);
+  assert.ok(run.env.BLAZEGRAPH_TEST_URL);
 });

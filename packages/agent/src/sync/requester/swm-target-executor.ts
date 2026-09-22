@@ -23,24 +23,36 @@ import {
   runSharedMemorySync,
   type SharedMemoryMetadataFetcher,
   type SharedMemorySyncContext,
-  type SharedMemorySyncSummary,
 } from './shared-memory-sync.js';
+import type { SharedMemorySyncSummary } from '../shared-memory-diagnostics.js';
 import {
   createSharedMemorySnapshotMaterializer,
   type SharedMemorySnapshotMaterializer,
 } from './swm-snapshot-materializer.js';
 import {
+  createPrivateSwmRecoveryWindow,
+  normalizePrivateSwmRecoveryBudgetMs,
+} from './private-swm-recovery-budget.js';
+import {
   recoverContextGraphSwm,
+  recoverContextGraphSwmWithProgressRetries,
+  type SwmRecoveryProgress,
   type RecoverContextGraphSwmResult,
 } from './swm-recovery.js';
 import {
   type SwmRecoveryMutationRuntimeV1,
 } from './swm-recovery-apply.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
+import {
+  PrivateSwmSnapshotWalkRegistry,
+  type PrivateSwmSnapshotWalkLease,
+} from './private-swm-snapshot-walk-registry.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
 export interface SwmTargetExecutorPortsV1 {
+  /** Defaults to ten minutes for callers composed before this port existed. */
+  readonly privateRecoveryBudgetMs?: number;
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
@@ -50,6 +62,10 @@ export interface SwmTargetExecutorPortsV1 {
   readonly fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   readonly processSharedMemoryBatch: SharedMemorySyncContext['processSharedMemoryBatch'];
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Process-local RFC-64 authority decision; this port must not perform I/O. */
+  readonly ordinaryRootSnapshotApplyAllowed?: (contextGraphId: string) => boolean;
+  readonly resolveRootSnapshotAtomicCompanion?:
+    SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
   readonly recordDrops: OversizeGuardHooks['recordDrops'];
   readonly invalidateListContextGraphsCache: () => void;
   readonly markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -89,6 +105,7 @@ export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & {
 }>;
 
 export interface PrivateSwmRecoveryTargetV1 {
+  readonly onRetry?: (progress: SwmRecoveryProgress) => void;
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly recoveryGuard?: RecoveryExecutionGuard;
@@ -104,6 +121,7 @@ export interface PrivateSwmRecoveryTargetV1 {
  */
 export class SwmTargetExecutorV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
+  readonly #privateRecoveryBudgetMs: number;
   readonly #snapshotMaterializer: SharedMemorySnapshotMaterializer;
   readonly #recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly #subGraphAdmission = new Map<
@@ -111,8 +129,14 @@ export class SwmTargetExecutorV1 {
     Promise<{ registered: string[]; excluded: string[] }>
   >();
 
-  constructor(ports: SwmTargetExecutorPortsV1) {
+  constructor(
+    ports: SwmTargetExecutorPortsV1,
+    private readonly privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+  ) {
     this.#ports = ports;
+    this.#privateRecoveryBudgetMs = normalizePrivateSwmRecoveryBudgetMs(
+      ports.privateRecoveryBudgetMs,
+    );
     this.#snapshotMaterializer = createSharedMemorySnapshotMaterializer({
       store: ports.store,
       writeLocks: ports.writeLocks,
@@ -124,13 +148,14 @@ export class SwmTargetExecutorV1 {
   async recoverPrivateTarget(
     target: PrivateSwmRecoveryTargetV1,
   ): Promise<RecoverContextGraphSwmResult> {
+    const window = createPrivateSwmRecoveryWindow(this.#privateRecoveryBudgetMs);
     const ctx = createOperationContext('sync');
     const admission = () => this.#getSubGraphAdmission(target.contextGraphId);
-    const options: RecoverContextGraphSwmOptions = {
+    let snapshotLease: PrivateSwmSnapshotWalkLease | undefined;
+    const options: Omit<RecoverContextGraphSwmOptions, 'deadline' | 'workAdmission'> = {
       ctx,
       remotePeerId: target.remotePeerId,
       contextGraphId: target.contextGraphId,
-      deadline: this.#ports.createContextGraphSyncDeadline(1),
       fetchSyncPages: (
         requestCtx,
         peerId,
@@ -154,6 +179,7 @@ export class SwmTargetExecutorV1 {
       writeLocks: this.#ports.writeLocks,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       snapshotMaterializer: this.#snapshotMaterializer,
+      resolveRootAtomicCompanion: this.#ports.resolveRootSnapshotAtomicCompanion,
       store: this.#recoveryMutation.store,
       replaceMetaForRoots: (roots, metaGraphs) => this.#recoveryMutation
         .replaceMetaForRoots(
@@ -171,11 +197,27 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async () => (await admission()).excluded,
       includeRootScope: target.includeRootScope,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
+      snapshotWalkProgress: (orderedManifest) => {
+        if (snapshotLease?.progress.matches(orderedManifest)) return snapshotLease.progress;
+        snapshotLease?.release();
+        snapshotLease = this.privateSnapshotWalks.open(target, orderedManifest);
+        snapshotLease.progress.beginRecoveryJob();
+        return snapshotLease.progress;
+      },
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
       recoveryGuard: target.recoveryGuard,
     };
-    return recoverContextGraphSwm(options);
+    const result = await recoverContextGraphSwmWithProgressRetries({
+      window,
+      createRoundDeadline: () => this.#ports.createContextGraphSyncDeadline(1),
+      onRetry: target.onRetry,
+      snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
+      recover: (_round, workAdmission, deadline) =>
+        recoverContextGraphSwm({ ...options, deadline, workAdmission }),
+    });
+    if (result.completed) snapshotLease?.release();
+    return result;
   }
 
   async syncPublicTarget(
@@ -237,6 +279,9 @@ export class SwmTargetExecutorV1 {
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       snapshotMaterializer: this.#snapshotMaterializer,
+      ordinaryRootSnapshotApplyAllowed: this.#ports.ordinaryRootSnapshotApplyAllowed,
+      resolveRootSnapshotAtomicCompanion:
+        this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
         const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
           store: this.#ports.store,
@@ -283,16 +328,21 @@ export class SwmTargetExecutorV1 {
   }
 }
 
-/** Stable typed composition; each call creates isolated session state. */
+/** Stable typed composition with isolated session caches and shared manifest progress. */
 export class SwmTargetExecutorSessionFactoryV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
+  readonly #privateSnapshotWalks: PrivateSwmSnapshotWalkRegistry;
 
-  constructor(ports: SwmTargetExecutorPortsV1) {
+  constructor(
+    ports: SwmTargetExecutorPortsV1,
+    privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+  ) {
     this.#ports = ports;
+    this.#privateSnapshotWalks = privateSnapshotWalks;
   }
 
   createSession(): SwmTargetExecutorV1 {
-    return new SwmTargetExecutorV1(this.#ports);
+    return new SwmTargetExecutorV1(this.#ports, this.#privateSnapshotWalks);
   }
 }
 

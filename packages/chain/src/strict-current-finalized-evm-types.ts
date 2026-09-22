@@ -24,12 +24,30 @@ export interface StrictCurrentFinalizedEvmRpcConfigV1 {
    * chain profile for deployments whose RPC endpoints cannot execute EIP-1898.
    */
   readonly blockReferenceProfile?: CurrentFinalizedEvmBlockReferenceProfileV1;
+  /**
+   * `chain.finalityConfirmations` — the node's SINGLE definition of finality.
+   * Confirmation 1 (the default) anchors at the current head; a larger value
+   * anchors at `head - confirmations + 1`. Omitted means 1, which keeps this
+   * PUBLISHED factory's existing `{ chainId, endpoints }` signature valid.
+   *
+   * These transports are named "strict current finalized" and the strictness is
+   * real — but it is the strictness of the ANCHOR DISCIPLINE (one endpoint, one
+   * pinned anchor, EIP-1898 or a hash sandwich, fail closed on any drift), not a
+   * second, deeper notion of finality. An operator who wants a deep precommit
+   * anchor sets a deep `chain.finalityConfirmations` and gets it everywhere.
+   */
+  readonly finalityConfirmations?: number;
 }
+
+/** Validated session: the runtime can attempt exactly one or two endpoints. */
+export type StrictFinalizedEndpointSessionV1 = readonly [string] | readonly [string, string];
 
 export interface StrictRpcConfigSnapshotV1 {
   readonly chainId: ChainIdV1;
-  readonly endpoints: readonly string[];
+  readonly endpoints: StrictFinalizedEndpointSessionV1;
   readonly blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1;
+  /** Normalized by `resolveFinalityConfirmations`; >= 1, default 1. */
+  readonly finalityConfirmations: number;
 }
 
 /**

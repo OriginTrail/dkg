@@ -1,0 +1,74 @@
+name: MCP config native metadata
+
+on:
+  pull_request:
+    paths:
+      - 'packages/cli/src/mcp-*.ts'
+      - 'packages/cli/test/fixtures/mcp-config-wsl.fixture.ts'
+      - 'packages/cli/scripts/run-mcp-config-wsl.sh'
+      - 'packages/cli/package.json'
+      - 'packages/cli/test/mcp-config-metadata.test.ts'
+      - 'packages/cli/vitest.unit.config.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/mcp-config-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-config-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    name: MCP metadata (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install test dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install Linux ACL and xattr fixture tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y acl attr
+      - name: Verify native config metadata preservation
+        env:
+          DKG_REQUIRE_NATIVE_MCP_METADATA: '1'
+        run: pnpm --dir packages/cli exec vitest run --config vitest.unit.config.ts test/mcp-config-metadata.test.ts
+
+      - name: Prepare native WSL fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node scripts/build-runtime-packages.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir packages/cli exec esbuild test/fixtures/mcp-config-wsl.fixture.ts --platform=node --format=esm --target=node22 --outfile=dist/fixtures/mcp-config-wsl.fixture.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wsl --set-default-version 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wsl --install --distribution Ubuntu-24.04 --no-launch --web-download
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify protected Windows config through real WSL setup and uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fixture = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/dist/fixtures/mcp-config-wsl.fixture.mjs").Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $temporary = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:RUNNER_TEMP").Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $script = (wsl --distribution Ubuntu-24.04 --user root --exec wslpath -u "$env:GITHUB_WORKSPACE/packages/cli/scripts/run-mcp-config-wsl.sh").Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          wsl --distribution Ubuntu-24.04 --user root --exec bash $script $fixture $temporary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

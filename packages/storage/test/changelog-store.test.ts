@@ -21,7 +21,9 @@ import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
-import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
+import {
+  ChangelogStore, CHANGELOG_GRAPH, CHANGELOG_LOOKUP_BATCH, asChangelogReader, type ChangelogEraGuard,
+} from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
@@ -323,6 +325,115 @@ describe('ChangelogStore — sequence semantics', () => {
       Array.from({ length: 12 }, (_, i) => i + 1),
     );
     expect(new Set(changes.map((c) => c.graph)).size).toBe(12);
+  });
+});
+
+describe('ChangelogStore — page reads are direct entry lookups (O(delta), never a log scan)', () => {
+  let base: OxigraphStore;
+  let spy: SpyStore;
+  let log: ChangelogStore;
+  beforeEach(() => { base = new OxigraphStore(); spy = new SpyStore(base); log = new ChangelogStore(spy); });
+  afterEach(async () => { await base.close(); });
+
+  const changelogReads = () => spy.queryCalls.filter((sparql) => sparql.includes(CHANGELOG_GRAPH));
+
+  it('serves a page by looking up the window\'s entry IRIs instead of scanning the whole log', async () => {
+    for (const g of [G1, G2, G3]) await log.insert([q(`http://ex.org/${g}`, g)]);
+    spy.queryCalls.length = 0;
+    const page = await log.readChanges(1, 100);
+    expect(page).toEqual([
+      { seq: 2, graph: G2, op: 'upsert' },
+      { seq: 3, graph: G3, op: 'upsert' },
+    ]);
+    const reads = changelogReads();
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain('VALUES ?e');
+    expect(reads[0]).toContain('<urn:dkg:changelog:e:2>');
+    expect(reads[0]).toContain('<urn:dkg:changelog:e:3>');
+    expect(reads[0]).not.toContain('<urn:dkg:changelog:e:1>');
+    expect(reads[0]).not.toContain('<urn:dkg:changelog:e:4>');
+    expect(reads[0]).not.toContain('FILTER(');
+  });
+
+  it('a caught-up (or ahead) cursor is answered from the in-memory head with no storage read', async () => {
+    await log.insert([q('http://ex.org/a', G1)]);
+    spy.queryCalls.length = 0;
+    expect(await log.readChanges(1, 100)).toEqual([]);
+    expect(await log.readChanges(50, 100)).toEqual([]);
+    expect(spy.queryCalls).toHaveLength(0);
+  });
+
+  it('caps the window at the head and at the limit', async () => {
+    for (const g of [G1, G2, G3]) await log.insert([q(`http://ex.org/${g}`, g)]);
+    spy.queryCalls.length = 0;
+    expect((await log.readChanges(0, 2)).map((c) => c.seq)).toEqual([1, 2]);
+    expect(changelogReads()[0]).not.toContain('<urn:dkg:changelog:e:3>');
+    expect((await log.readChanges(2, 100)).map((c) => c.seq)).toEqual([3]);
+  });
+
+  it('spans several lookup batches for a page wider than one batch', async () => {
+    const graphs = Array.from({ length: CHANGELOG_LOOKUP_BATCH * 2 + 3 }, (_, i) => `http://ex.org/w${i}`);
+    // One insert ⇒ one transaction ⇒ contiguous seqs 1..N in graph order.
+    await log.insert(graphs.map((g) => q(`${g}/s`, g)));
+    spy.queryCalls.length = 0;
+    const page = await log.readChanges(0, graphs.length);
+    expect(page.map((c) => c.seq)).toEqual(graphs.map((_, i) => i + 1));
+    expect(page.map((c) => c.graph)).toEqual(graphs);
+    expect(changelogReads().filter((sparql) => sparql.includes('VALUES ?e'))).toHaveLength(3);
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('a hole in the log (marker removed out-of-band) falls back to the exact range scan, never a short page', async () => {
+    const graphs = [G1, G2, G3, 'http://ex.org/g4', 'http://ex.org/g5'];
+    for (const g of graphs) await log.insert([q(`${g}/s`, g)]);
+    // Remove seq 3's marker behind the decorator's back (a reconcile-owed shape).
+    await base.deleteByPattern({ subject: 'urn:dkg:changelog:e:3', graph: CHANGELOG_GRAPH });
+    spy.queryCalls.length = 0;
+    expect((await log.readChanges(0, 3)).map((c) => c.seq)).toEqual([1, 2, 4]);
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER(?seq > 0)'))).toBe(true);
+    expect((await log.readChanges(2, 100)).map((c) => c.seq)).toEqual([4, 5]);
+    expect((await log.readChanges(0, 100)).map((c) => c.seq)).toEqual([1, 2, 4, 5]);
+    // Windows without the hole still take the lookup path.
+    spy.queryCalls.length = 0;
+    expect((await log.readChanges(3, 100)).map((c) => c.seq)).toEqual([4, 5]);
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('a seq carried by two markers (writer overlap across a release swap) stays on the lookup path', async () => {
+    for (const g of [G1, G2, G3]) await log.insert([q(`${g}/s`, g)]);
+    // A second writer process seeded at head=2 appended its own seq 3 for another graph.
+    await base.insert([
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#seq', object: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: CHANGELOG_GRAPH },
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#graph', object: 'http://ex.org/twin', graph: CHANGELOG_GRAPH },
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#op', object: '"upsert"', graph: CHANGELOG_GRAPH },
+    ]);
+    spy.queryCalls.length = 0;
+    const page = await log.readChanges(0, 100);
+    expect(page.map((c) => c.seq)).toEqual([1, 2, 3, 3]);
+    expect(new Set(page.filter((c) => c.seq === 3).map((c) => c.graph))).toEqual(new Set([G3, 'http://ex.org/twin']));
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('tags the hole fallback scan so it is attributable in the slow-query log', async () => {
+    const sources: Array<string | undefined> = [];
+    const tap = new (class extends SpyStore {
+      override query(sparql: string, options?: QueryOptions) {
+        sources.push(options?.source);
+        return super.query(sparql, options);
+      }
+    })(base);
+    const tapped = new ChangelogStore(tap);
+    for (const g of [G1, G2, G3]) await tapped.insert([q(`${g}/s`, g)]);
+    await base.deleteByPattern({ subject: 'urn:dkg:changelog:e:2', graph: CHANGELOG_GRAPH });
+    sources.length = 0;
+    expect((await tapped.readChanges(0, 100, { source: 'sync.responder.readChanges' })).map((c) => c.seq)).toEqual([1, 3]);
+    expect(sources).toEqual(['sync.responder.readChanges', 'sync.responder.readChanges.holeFallback']);
+  });
+
+  it('a disabled decorator keeps the passthrough scan semantics', async () => {
+    const off = new ChangelogStore(spy, { enabled: false });
+    await off.insert([q('http://ex.org/a', G1)]);
+    expect(await off.readChanges(0, 100)).toEqual([]);
   });
 });
 

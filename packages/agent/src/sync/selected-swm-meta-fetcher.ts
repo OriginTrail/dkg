@@ -12,20 +12,24 @@ import {
   type SyncPageResult,
 } from './requester/page-fetch.js';
 import type {
-  PublicSnapshotMetadata,
   SharedMemoryMetadataFetchRequest,
   SharedMemoryMetadataFetcher,
 } from './requester/shared-memory-sync.js';
 import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
+import type { SyncWorkAdmission } from './work-admission.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
+import {
+  SelectedManifestBoundSnapshotWalk,
+} from './requester/manifest-bound-snapshot-walk.js';
 
-/** Post-metadata continuation bound to one exact ordered manifest. */
-interface SelectedSwmSnapshotWalkState {
-  readonly orderedManifest: readonly PublicSnapshotMetadata[];
-  readonly resolvedRefs: Set<string>;
-  readonly suppressedMetadataRowsByRef: Map<string, readonly Quad[]>;
-  expiresAtMs: number;
-}
+/**
+ * Consecutive shared-pool yields a lease absorbs before returning its prefix.
+ *
+ * Low enough that a mutual stall resolves in passes rather than waiting out the
+ * retention TTL, high enough that an ordinary sibling transfer — which commits
+ * and frees its rows within a pass or two — is never made to restart.
+ */
+const MAX_CONSECUTIVE_SHARED_POOL_YIELDS = 3;
 
 /** Exact metadata prefix retained only by one selected-provider transfer owner. */
 interface SelectedSwmMetaContinuationState {
@@ -40,8 +44,10 @@ interface SelectedSwmMetaContinuationState {
   /** Prefix expiry; terminal metadata has no prefix retention clock. */
   metadataExpiresAtMs: number;
   /** Independent continuation created only after metadata is complete. */
-  snapshotWalk?: SelectedSwmSnapshotWalkState;
+  snapshotWalk?: SelectedManifestBoundSnapshotWalk;
   retentionLease: SelectedSwmMetaRetentionLease;
+  /** Consecutive shared-pool yields since this prefix last grew. */
+  sharedPoolYields: number;
 }
 
 export interface SelectedSwmMetaFetcher {
@@ -230,6 +236,7 @@ interface SelectedMetaPageFetchRequest {
   readonly contextGraphId: string;
   readonly graphUri: string;
   readonly deadline: number;
+  readonly workAdmission: SyncWorkAdmission;
   readonly returnAcceptedPrefixOnRetryableTransportFailure: true;
   readonly requesterScope: SelectedSwmMetaRetentionScope;
   readonly maxAcceptedQuads: number;
@@ -299,6 +306,7 @@ export function createSelectedSwmMetaFetcher(options: {
       completed: false,
       metadataExpiresAtMs: 0,
       retentionLease: options.retentionBudget.lease(),
+      sharedPoolYields: 0,
     };
     states.set(contextGraphId, state);
     return state;
@@ -312,10 +320,7 @@ export function createSelectedSwmMetaFetcher(options: {
 
   const hasIncompleteSnapshotWalk = (state: SelectedSwmMetaContinuationState): boolean => {
     const walk = state.snapshotWalk;
-    return state.completed
-      && walk !== undefined
-      && walk.orderedManifest.length > 0
-      && walk.resolvedRefs.size < walk.orderedManifest.length;
+    return state.completed && walk?.incomplete === true;
   };
 
   const hasRetainedContinuation = (state: SelectedSwmMetaContinuationState): boolean => (
@@ -373,6 +378,53 @@ export function createSelectedSwmMetaFetcher(options: {
     // Reserve before yielding to transport. Overlapping selected invocations
     // therefore cannot both spend the same process-wide free allowance.
     const reservation = state.retentionLease.reserve();
+    const exhaustion = reservation.exhaustion;
+    if (exhaustion === 'shared') {
+      // Sibling transfers hold the whole process-wide allowance. Spending a
+      // fetch here cannot succeed — the first returned row exceeds a zero
+      // allowance — and the thrown accumulation limit is fail-closed, so it
+      // would also discard the prefix this invocation already paid for. Yield
+      // the retained prefix instead: the continuation ledger sees no progress,
+      // bounds its own passes, and a later pass runs once capacity frees.
+      // `prefix` exhaustion is NOT yielded: that ceiling is this lease's own
+      // and no later pass can widen it, so it must keep failing closed.
+      reservation.release();
+      state.sharedPoolYields += 1;
+      if (
+        state.sharedPoolYields >= MAX_CONSECUTIVE_SHARED_POOL_YIELDS
+        && (state.nextOffset > 0 || state.quads.length > 0)
+      ) {
+        // Yielding alone cannot create capacity: what this lease holds is the
+        // committed prefix, not the reservation it just released. When every
+        // lease is in that position — each below its own prefix ceiling, the
+        // pool full of retained prefixes — waiting is a mutual stall that only
+        // the retention TTL would break, minutes later, by expiring every
+        // prefix at once. Hand this lease's rows back instead so some transfer
+        // can advance now. This one restarts from offset zero on a later pass;
+        // that is the cost of guaranteeing forward progress, and it is paid by
+        // the lease that has waited longest without growing.
+        options.deleteCheckpoint(state.checkpointKey);
+        state.retentionLease.replace(0, 0);
+        state.quads = [];
+        state.bytesEstimate = 0;
+        state.nextOffset = 0;
+        state.completed = false;
+        state.metadataExpiresAtMs = 0;
+        state.snapshotWalk = undefined;
+        state.generation += 1;
+        state.sharedPoolYields = 0;
+        completedContextGraphs.delete(request.contextGraphId);
+      }
+      return {
+        quads: state.quads,
+        bytesReceived: 0,
+        resumedFromOffset: state.nextOffset,
+        nextOffset: state.nextOffset,
+        checkpointKey: state.checkpointKey,
+        completed: false,
+        timedOut: true,
+      };
+    }
     try {
       const fetched = await options.fetchPage({
         ...request,
@@ -406,6 +458,9 @@ export function createSelectedSwmMetaFetcher(options: {
         ? state.bytesEstimate + fetchedBytesEstimate
         : fetchedBytesEstimate;
       reservation.commitReplace(nextRows, nextBytesEstimate);
+      // This lease just grew, so any contention it waited through was the
+      // transient kind. Start the stall counter over.
+      state.sharedPoolYields = 0;
       if (resumesPrefix) {
         for (const quad of fetched.quads) state.quads.push(quad);
       } else {
@@ -454,6 +509,20 @@ export function createSelectedSwmMetaFetcher(options: {
         completedContextGraphs.delete(request.contextGraphId);
         return fetchRetained(request, state, false);
       }
+      if (exhaustion === 'prefix' && error instanceof SyncPageAccumulationLimitError) {
+        // The responder's rejection of a zero allowance is the symptom; the
+        // cause is local and already known here — this lease's retained prefix
+        // is at its own per-CG ceiling, which no later pass widens. The fetch
+        // still goes out because only the responder can report that it started
+        // a fresh session (handled above), but an operator reading the log
+        // deserves the limit to raise rather than an accumulation failure that
+        // looks like a peer problem.
+        error.message = `${error.message} — the retained selected-SWM metadata `
+          + `prefix for "${request.contextGraphId}" is at its own per-Context-Graph `
+          + `ceiling (${state.quads.length} rows / ${state.bytesEstimate} bytes retained); `
+          + 'raise syncResponderSnapshotLimits.local.rows / local.bytesEstimate to '
+          + 'carry a larger manifest';
+      }
       // Only an incomplete result returned by the page fetcher is resumable.
       // Every thrown boundary is fail-closed: discard the prefix and its exact
       // responder cursor before propagating the original error unchanged.
@@ -493,70 +562,24 @@ export function createSelectedSwmMetaFetcher(options: {
     snapshotWalk(contextGraphId, orderedManifest) {
       const state = states.get(contextGraphId);
       if (!state?.completed) {
-        return {
-          orderedManifestSnapshot: () => immutableManifestSnapshot(orderedManifest),
-          isResolved: () => false,
-          resolvedCount: () => 0,
-          resolvedRefsSnapshot: () => [],
-          suppressedMetadataRows: () => [],
-          markResolved: () => {},
-        };
+        return new SelectedManifestBoundSnapshotWalk(orderedManifest, {
+          now,
+          retentionTtlMs,
+          canMutate: () => false,
+        });
       }
       const retainedWalk = state.snapshotWalk;
-      const walk = retainedWalk && manifestsEqual(retainedWalk.orderedManifest, orderedManifest)
+      let walk: SelectedManifestBoundSnapshotWalk;
+      walk = retainedWalk?.matches(orderedManifest)
         ? retainedWalk
-        : {
-          orderedManifest: immutableManifestSnapshot(orderedManifest),
-          resolvedRefs: new Set<string>(),
-          suppressedMetadataRowsByRef: new Map<string, readonly Quad[]>(),
-          expiresAtMs: 0,
-        };
+        : new SelectedManifestBoundSnapshotWalk(orderedManifest, {
+          now,
+          retentionTtlMs,
+          canMutate: () => states.get(contextGraphId) === state
+            && state.snapshotWalk === walk,
+        });
       state.snapshotWalk = walk;
-      const allowedRefs = new Set(walk.orderedManifest.map((snapshot) => snapshot.ref));
-      // Opening an unchanged walk is not progress. Sliding this deadline on
-      // every retry could retain stale completed metadata forever and prevent
-      // a corrected remote manifest from ever being observed. Creation starts
-      // the window; markResolved is the only operation allowed to extend it.
-      if (
-        walk.expiresAtMs === 0
-        && walk.orderedManifest.length > 0
-        && walk.resolvedRefs.size < walk.orderedManifest.length
-      ) {
-        walk.expiresAtMs = now() + retentionTtlMs;
-      }
-      return {
-        orderedManifestSnapshot() {
-          return immutableManifestSnapshot(walk.orderedManifest);
-        },
-        isResolved(ref: string) {
-          return walk.resolvedRefs.has(ref);
-        },
-        resolvedCount() {
-          return walk.resolvedRefs.size;
-        },
-        resolvedRefsSnapshot() {
-          return Object.freeze([...walk.resolvedRefs]);
-        },
-        suppressedMetadataRows(ref: string) {
-          return immutableQuadSnapshot(walk.suppressedMetadataRowsByRef.get(ref) ?? []);
-        },
-        markResolved(ref: string, suppressedMetadataRows: readonly Quad[] = []) {
-          if (
-            states.get(contextGraphId) !== state
-            || state.snapshotWalk !== walk
-            || !allowedRefs.has(ref)
-            || walk.resolvedRefs.has(ref)
-          ) return;
-          walk.suppressedMetadataRowsByRef.set(
-            ref,
-            immutableQuadSnapshot(suppressedMetadataRows),
-          );
-          walk.resolvedRefs.add(ref);
-          if (walk.resolvedRefs.size < walk.orderedManifest.length) {
-            walk.expiresAtMs = now() + retentionTtlMs;
-          }
-        },
-      };
+      return walk;
     },
   };
 
@@ -597,27 +620,4 @@ export function createSelectedSwmMetaFetcher(options: {
     },
   });
   return fetcher;
-}
-
-function manifestsEqual(
-  left: readonly PublicSnapshotMetadata[],
-  right: readonly PublicSnapshotMetadata[],
-): boolean {
-  return left.length === right.length
-    && left.every((snapshot, index) => {
-      const candidate = right[index];
-      return snapshot.ref === candidate.ref
-        && snapshot.digest === candidate.digest
-        && snapshot.count === candidate.count;
-    });
-}
-
-function immutableManifestSnapshot(
-  manifest: readonly PublicSnapshotMetadata[],
-): readonly PublicSnapshotMetadata[] {
-  return Object.freeze(manifest.map((snapshot) => Object.freeze({ ...snapshot })));
-}
-
-function immutableQuadSnapshot(quads: readonly Quad[]): readonly Quad[] {
-  return Object.freeze(quads.map((quad) => Object.freeze({ ...quad })));
 }

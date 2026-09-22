@@ -1,9 +1,23 @@
-import { describe, expect, it } from 'vitest';
+import type {
+  ContextGraphAuthorityIndexId,
+  ContextGraphAuthoritySnapshot,
+} from '@origintrail-official/dkg-chain';
+import { describe, expect, it, vi } from 'vitest';
 
-import { Rfc64CatalogAuthorityRefreshLoopV1 } from
+import {
+  Rfc64CatalogAuthorityRefreshLoopV1,
+  Rfc64CatalogAuthorityRevisionReadFailureV1,
+  type Rfc64CatalogAuthorityRevisionReadV1,
+  type Rfc64CatalogAuthorityRevisionSourceV1,
+} from
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
+import { Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 } from
+  '../src/rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
+
+const COMMITTED = 'committed' as const;
+const SUPERSEDED = 'superseded' as const;
 
 function createSchedulerHarness() {
   const scheduled: Array<Readonly<{
@@ -29,7 +43,244 @@ function createSchedulerHarness() {
   };
 }
 
+function completeRevisionRead(
+  revisions: ReadonlyMap<string, string>,
+): Rfc64CatalogAuthorityRevisionReadV1 {
+  return revisions;
+}
+
+function revisionSource(
+  read: Rfc64CatalogAuthorityRevisionSourceV1['read'],
+  whenIdle: Rfc64CatalogAuthorityRevisionSourceV1['whenIdle'] = async () => undefined,
+): Rfc64CatalogAuthorityRevisionSourceV1 {
+  return Object.freeze({ read, whenIdle });
+}
+
 describe('RFC-64 catalog authority refresh loop', () => {
+  it.each([
+    ['STORE_OPERATION_TIMEOUT', 'Managed Oxigraph is recovering; query was not started'],
+    ['STORE_SCHEDULER_BUSY', 'Store scheduler queue full (normal: sparql-http.query)'],
+  ])('single-flights 128 lanes and trips one selector generation on %s', async (
+    code,
+    message,
+  ) => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const contextGraphIds = Array.from({ length: 128 }, (_, index) => `cg-${index}`);
+    const failures: Array<readonly [string, unknown]> = [];
+    const attempts: string[] = [];
+    let firstGeneration = true;
+    let active = 0;
+    let peak = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => contextGraphIds,
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        active += 1;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        active -= 1;
+        if (firstGeneration) {
+          throw Object.assign(new Error(message), {
+            code,
+            retryable: true,
+            outcome: 'not_started',
+          });
+        }
+        return COMMITTED;
+      },
+      onRefreshFailure: (contextGraphId, error) => {
+        failures.push([contextGraphId, error]);
+      },
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+
+    expect(attempts).toEqual(['cg-0']);
+    expect(failures).toHaveLength(1);
+    expect(peak).toBe(1);
+
+    firstGeneration = false;
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+
+    expect(attempts.slice(1)).toEqual(contextGraphIds);
+    expect(failures).toHaveLength(1);
+    expect(peak).toBe(1);
+    await loop.close();
+  });
+
+  it('does not trip peer lanes for a graph-specific authority failure', async () => {
+    const { scheduler } = createSchedulerHarness();
+    const attempts: string[] = [];
+    const failures: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b', 'cg-c'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        active += 1;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        active -= 1;
+        if (contextGraphId === 'cg-a') throw new Error('invalid authority for cg-a');
+        return COMMITTED;
+      },
+      onRefreshFailure: (contextGraphId) => { failures.push(contextGraphId); },
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-c']);
+    expect(failures).toEqual(['cg-a']);
+    expect(peak).toBe(1);
+    await loop.close();
+  });
+
+  it('aborts one active refresh and drains queued lanes without starting them', async () => {
+    const { scheduler } = createSchedulerHarness();
+    const contextGraphIds = Array.from({ length: 128 }, (_, index) => `cg-${index}`);
+    const attempts: string[] = [];
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => contextGraphIds,
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId, signal) => {
+        attempts.push(contextGraphId);
+        markStarted();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await started;
+    await expect(loop.close()).resolves.toBeUndefined();
+
+    expect(attempts).toEqual(['cg-0']);
+  });
+
+  it('rejects a request factory that omits a selected graph', async () => {
+    const { scheduler } = createSchedulerHarness();
+    const failures: unknown[] = [];
+    const refreshContextGraph = vi.fn(async () => COMMITTED);
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(new Map([
+        ['cg-a', 'revision-1'],
+        ['cg-b', 'revision-1'],
+      ]))),
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      onAuthorityRevisionsReadFailure: (error) => { failures.push(error); },
+      createRefreshRequests: async () => new Map([
+        ['cg-a', Object.freeze({ kind: 'auto' as const })],
+      ]),
+      refreshContextGraph,
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      message: expect.stringContaining('omitted selected Context Graph "cg-b"'),
+    });
+    expect(refreshContextGraph).not.toHaveBeenCalled();
+    await loop.close();
+  });
+
+  it('performs one logical authority read per multi-graph pass and fences the next revision', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let revision = 'revision-1';
+    const indexIds = new Map<string, ContextGraphAuthorityIndexId>([
+      ['cg-a', '9' as ContextGraphAuthorityIndexId],
+      ['cg-b', '10' as ContextGraphAuthorityIndexId],
+    ]);
+    const readSnapshots = vi.fn(async (
+      targetIds: readonly ContextGraphAuthorityIndexId[],
+    ) => new Map(targetIds.map((contextGraphId) => [contextGraphId, {
+      chainId: '20430',
+      governanceContract: '0x3333333333333333333333333333333333333333',
+      contextGraphId,
+      owner: '0x1111111111111111111111111111111111111111',
+      active: true,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      participantAgents: [],
+      nameHash: `0x${contextGraphId.padStart(64, '0')}`,
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+      sourceBlockNumber: '42',
+      sourceBlockHash: `0x${'44'.repeat(32)}`,
+    } satisfies ContextGraphAuthoritySnapshot])));
+    const authorityRuntime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+      readSnapshots,
+    });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(new Map([
+        ['cg-a', revision],
+        ['cg-b', revision],
+      ]))),
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      createRefreshRequests: async (contextGraphIds, signal) => {
+        const batch = authorityRuntime.createBatch(
+          contextGraphIds.map((contextGraphId) => indexIds.get(contextGraphId)!),
+        );
+        return new Map(await Promise.all(contextGraphIds.map(async (contextGraphId) => [
+          contextGraphId,
+          {
+            kind: 'finalized-evidence' as const,
+            evidence: await batch.read(
+              indexIds.get(contextGraphId)!,
+              signal,
+            ),
+          },
+        ] as const)));
+      },
+      refreshContextGraph: async (contextGraphId, _signal, request) => {
+        expect(request.kind).toBe('finalized-evidence');
+        if (request.kind !== 'finalized-evidence') throw new Error('expected evidence');
+        expect(request.evidence).toMatchObject({
+          contextGraphAuthorityIndexId: indexIds.get(contextGraphId),
+        });
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(readSnapshots).toHaveBeenCalledOnce();
+    expect(readSnapshots).toHaveBeenLastCalledWith([
+      '9' as ContextGraphAuthorityIndexId,
+      '10' as ContextGraphAuthorityIndexId,
+    ]);
+
+    revision = 'revision-2';
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(readSnapshots).toHaveBeenCalledTimes(2);
+    await loop.close();
+  });
+
   it('reports an active-set read failure and retries on the next tick', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     const failure = new Error('catalog responsibility read failed');
@@ -45,7 +296,10 @@ describe('RFC-64 catalog authority refresh loop', () => {
         return ['cg-a'];
       },
       onActiveContextGraphIdsReadFailure: (error) => { readFailures.push(error); },
-      refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        return COMMITTED;
+      },
       onRefreshFailure: () => undefined,
       scheduler,
     });
@@ -81,6 +335,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
         markFirstStarted();
         await firstGate;
         active -= 1;
+        return COMMITTED;
       },
       onRefreshFailure: () => undefined,
       scheduler,
@@ -131,6 +386,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
         if (contextGraphId === 'cg-a') throw failure;
+        return COMMITTED;
       },
       onRefreshFailure: (contextGraphId, error) => {
         reported.push(Object.freeze({ contextGraphId, error }));
@@ -144,7 +400,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await loop.close();
   });
 
-  it('keeps healthy lanes refreshing while another graph remains stalled', async () => {
+  it('single-flights healthy lanes behind a stalled store refresh', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     let releaseStalled!: () => void;
     let markStalledStarted!: () => void;
@@ -160,37 +416,33 @@ describe('RFC-64 catalog authority refresh loop', () => {
         if (contextGraphId === 'cg-a') {
           markStalledStarted();
           await stalledGate;
-          return;
+          return COMMITTED;
         }
         healthyCalls += 1;
         markHealthyRefreshed();
+        return COMMITTED;
       },
       onRefreshFailure: () => undefined,
       scheduler,
-      maxConcurrentReads: 2,
     });
 
     loop.start();
-    await Promise.all([stalledStarted, healthyRefreshed]);
+    await stalledStarted;
+    expect(healthyCalls).toBe(0);
+    releaseStalled();
+    await healthyRefreshed;
     expect(healthyCalls).toBe(1);
-    // Let the healthy lane publish its physical-idle transition before the
-    // next cadence callback requests another pass.
-    await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+    await loop.whenIdle();
 
     healthyRefreshed = new Promise<void>((resolve) => { markHealthyRefreshed = resolve; });
     scheduled[0]!.callback();
     await healthyRefreshed;
     expect(healthyCalls).toBe(2);
 
-    let closeSettled = false;
-    const closing = loop.close().then(() => { closeSettled = true; });
-    await Promise.resolve();
-    expect(closeSettled).toBe(false);
-    releaseStalled();
-    await closing;
+    await loop.close();
   });
 
-  it('bounds independent lanes without letting one stalled graph own the queue', async () => {
+  it('serializes per-graph lanes through global store admission', async () => {
     let releaseA!: () => void;
     let releaseB!: () => void;
     let markAStarted!: () => void;
@@ -216,65 +468,21 @@ describe('RFC-64 catalog authority refresh loop', () => {
         } else {
           markCStarted();
         }
+        return COMMITTED;
       },
       onRefreshFailure: () => undefined,
-      maxConcurrentReads: 2,
     });
 
     loop.start();
-    await Promise.all([startedA, startedB]);
+    await startedA;
+    expect(attempts).toEqual(['cg-a']);
+    releaseA();
+    await startedB;
     expect(attempts).toEqual(['cg-a', 'cg-b']);
     releaseB();
     await startedC;
     expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-c']);
 
-    const closing = loop.close();
-    releaseA();
-    await closing;
-  });
-
-  it('uses the production four-read concurrency cap by default', async () => {
-    const limit = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.maxConcurrentReads;
-    expect(limit).toBe(4);
-    const contextGraphIds = Array.from(
-      { length: limit + 1 },
-      (_, index) => `cg-${index + 1}`,
-    );
-    const releases: Array<() => void> = [];
-    const gates = contextGraphIds.map(() => new Promise<void>((resolve) => {
-      releases.push(resolve);
-    }));
-    const markStarted: Array<() => void> = [];
-    const started = contextGraphIds.map(() => new Promise<void>((resolve) => {
-      markStarted.push(resolve);
-    }));
-    const attempts: string[] = [];
-    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
-      readActiveContextGraphIds: () => contextGraphIds,
-      onActiveContextGraphIdsReadFailure: () => undefined,
-      refreshContextGraph: async (contextGraphId) => {
-        const index = contextGraphIds.indexOf(contextGraphId);
-        attempts.push(contextGraphId);
-        markStarted[index]!();
-        await gates[index];
-      },
-      onRefreshFailure: () => undefined,
-    });
-
-    loop.start();
-    await Promise.all(started.slice(0, limit));
-    expect(attempts).toEqual(contextGraphIds.slice(0, limit));
-
-    let fifthStarted = false;
-    void started[limit]!.then(() => { fifthStarted = true; });
-    await Promise.resolve();
-    expect(fifthStarted).toBe(false);
-
-    releases[0]!();
-    await started[limit];
-    expect(attempts).toEqual(contextGraphIds);
-
-    for (const release of releases.slice(1)) release();
     await loop.close();
   });
 
@@ -298,15 +506,15 @@ describe('RFC-64 catalog authority refresh loop', () => {
         signal.addEventListener('abort', markAborted, { once: true });
         markStarted();
         // Deliberately ignore cancellation and resolve successfully only when
-        // the physical operation retires. The loop, not this stub, must fence
-        // the next context graph after shutdown begins.
+        // the one admitted physical operation retires. Queued graph lanes
+        // must be cancelled without starting store work.
         await retirement;
+        return COMMITTED;
       },
       onRefreshFailure: (contextGraphId, error) => {
         reported.push(Object.freeze({ contextGraphId, error }));
       },
       scheduler,
-      maxConcurrentReads: 1,
     });
 
     loop.start();
@@ -329,6 +537,63 @@ describe('RFC-64 catalog authority refresh loop', () => {
     expect(cleared).toEqual([scheduled[0]!.handle]);
   });
 
+  it('drains detached physical revision work before close settles', async () => {
+    let markReadStarted!: () => void;
+    let releasePhysicalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+    const physicalRead = new Promise<void>((resolve) => { releasePhysicalRead = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async (_contextGraphIds, signal) => {
+        markReadStarted();
+        return new Promise<Rfc64CatalogAuthorityRevisionReadV1>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }, () => physicalRead),
+      refreshContextGraph: async () => COMMITTED,
+      onRefreshFailure: () => undefined,
+    });
+
+    loop.start();
+    await readStarted;
+    let closeSettled = false;
+    const closing = loop.close().then(() => { closeSettled = true; });
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+    releasePhysicalRead();
+    await closing;
+    expect(closeSettled).toBe(true);
+  });
+
+  it('drains detached physical revision work before reporting idle', async () => {
+    let markReadStarted!: () => void;
+    let releasePhysicalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+    const physicalRead = new Promise<void>((resolve) => { releasePhysicalRead = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => {
+        markReadStarted();
+        throw new Error('revision selector timed out');
+      }, () => physicalRead),
+      refreshContextGraph: async () => COMMITTED,
+      onRefreshFailure: () => undefined,
+    });
+
+    loop.start();
+    await readStarted;
+    let idleSettled = false;
+    const idle = loop.whenIdle().then(() => { idleSettled = true; });
+    await Promise.resolve();
+    expect(idleSettled).toBe(false);
+    releasePhysicalRead();
+    await idle;
+    expect(idleSettled).toBe(true);
+    await loop.close();
+  });
+
   it('retires lanes that leave the active responsibility set and recreates them on return', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     let activeContextGraphIds = ['cg-a'];
@@ -344,16 +609,16 @@ describe('RFC-64 catalog authority refresh loop', () => {
       onActiveContextGraphIdsReadFailure: () => undefined,
       refreshContextGraph: async (contextGraphId, signal) => {
         attempts.push(contextGraphId);
-        if (attempts.length !== 1) return;
+        if (attempts.length !== 1) return COMMITTED;
         signal.addEventListener('abort', markFirstAborted, { once: true });
         markFirstStarted();
         // A non-cooperative physical read must still be drained after its lane
         // is no longer part of the desired responsibility set.
         await firstGate;
+        return COMMITTED;
       },
       onRefreshFailure: () => undefined,
       scheduler,
-      maxConcurrentReads: 1,
     });
 
     loop.start();
@@ -372,6 +637,407 @@ describe('RFC-64 catalog authority refresh loop', () => {
     scheduled[0]!.callback();
     await loop.whenIdle();
     expect(attempts).toEqual(['cg-a', 'cg-a']);
+    await loop.close();
+  });
+
+  it('refreshes only changed revisions between periodic safety passes', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let revisions = new Map([
+      ['cg-a', 'revision-a-1'],
+      ['cg-b', 'revision-b-1'],
+    ]);
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(
+        async () => completeRevisionRead(revisions),
+      ),
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+
+    revisions = new Map([
+      ['cg-a', 'revision-a-2'],
+      ['cg-b', 'revision-b-1'],
+    ]);
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a']);
+
+    // Three ordinary intervals after startup retain a full revalidation
+    // before the four-interval freshness deadline.
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a', 'cg-a', 'cg-b']);
+    await loop.close();
+  });
+
+  it('keeps unindexed responsibilities on the legacy every-pass path', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['registered', 'unregistered'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
+        new Map([['registered', 'revision-1']]),
+      )),
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['registered', 'unregistered', 'unregistered']);
+    await loop.close();
+  });
+
+  it('contains a failed ordinary delta scan but preserves full safety revalidation', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('shared index unavailable');
+    const readFailures: unknown[] = [];
+    const attempts: string[] = [];
+    let reads = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => {
+        reads += 1;
+        if (reads === 1) {
+          return completeRevisionRead(new Map([['cg-a', 'a-1'], ['cg-b', 'b-1']]));
+        }
+        throw failure;
+      }),
+      onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+    expect(readFailures).toEqual([failure, failure]);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a', 'cg-b']);
+    expect(readFailures).toEqual([failure, failure, failure]);
+    await loop.close();
+  });
+
+  it('falls back to a full first pass after revision rejection, then suppresses unchanged work', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('first authority index scan failed');
+    const readFailures: unknown[] = [];
+    const attempts: string[] = [];
+    let reads = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => {
+        reads += 1;
+        if (reads === 1) throw failure;
+        return completeRevisionRead(new Map([
+          ['cg-a', 'revision-a-1'],
+          ['cg-b', 'revision-b-1'],
+        ]));
+      }),
+      onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+    expect(readFailures).toEqual([failure]);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a', 'cg-b']);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a', 'cg-b']);
+    await loop.close();
+  });
+
+  it('retries an unchanged revision until the selected refresh commits', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('authority refresh failed');
+    const reported: unknown[] = [];
+    let calls = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
+        new Map([['cg-a', 'revision-1']]),
+      )),
+      refreshContextGraph: async () => {
+        calls += 1;
+        if (calls === 1) throw failure;
+        return COMMITTED;
+      },
+      onRefreshFailure: (_contextGraphId, error) => { reported.push(error); },
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(calls).toBe(1);
+    expect(reported).toEqual([failure]);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+    await loop.close();
+  });
+
+  it('does not accept a fulfilled refresh that reports no authority commit', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const outcomes = [SUPERSEDED, COMMITTED];
+    let calls = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
+        new Map([['cg-a', 'revision-1']]),
+      )),
+      refreshContextGraph: async () => outcomes[calls++]!,
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+    await loop.close();
+  });
+
+  it('retries an unchanged revision after a forced safety refresh is superseded', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const outcomes = [COMMITTED, SUPERSEDED, COMMITTED];
+    let calls = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
+        new Map([['cg-a', 'revision-1']]),
+      )),
+      refreshContextGraph: async () => outcomes[calls++]!,
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(1);
+
+    // The fourth pass is the forced safety revalidation. Its superseded
+    // result clears suppression, so the next ordinary pass retries at once.
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(3);
+    await loop.close();
+  });
+
+  it('coalesces a newer revision observed during an in-flight refresh', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let revision = 'revision-1';
+    let markFirstStarted!: () => void;
+    let releaseFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let calls = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
+        new Map([['cg-a', revision]]),
+      )),
+      refreshContextGraph: async () => {
+        calls += 1;
+        if (calls === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await firstStarted;
+    revision = 'revision-2';
+    scheduled[0]!.callback();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    releaseFirst();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+    await loop.close();
+  });
+
+  it('fences pass activity that starts while existing lanes drain', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let revision = 'revision-1';
+    let reads = 0;
+    let markSecondReadStarted!: () => void;
+    let releaseSecondRead!: () => void;
+    const secondReadStarted = new Promise<void>((resolve) => {
+      markSecondReadStarted = resolve;
+    });
+    const secondReadGate = new Promise<void>((resolve) => { releaseSecondRead = resolve; });
+    let refreshes = 0;
+    let markFirstRefreshStarted!: () => void;
+    let releaseFirstRefresh!: () => void;
+    let markSecondRefreshStarted!: () => void;
+    let releaseSecondRefresh!: () => void;
+    const firstRefreshStarted = new Promise<void>((resolve) => {
+      markFirstRefreshStarted = resolve;
+    });
+    const firstRefreshGate = new Promise<void>((resolve) => { releaseFirstRefresh = resolve; });
+    const secondRefreshStarted = new Promise<void>((resolve) => {
+      markSecondRefreshStarted = resolve;
+    });
+    const secondRefreshGate = new Promise<void>((resolve) => { releaseSecondRefresh = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => {
+        reads += 1;
+        if (reads === 2) {
+          markSecondReadStarted();
+          await secondReadGate;
+        }
+        return completeRevisionRead(new Map([['cg-a', revision]]));
+      }),
+      refreshContextGraph: async () => {
+        refreshes += 1;
+        if (refreshes === 1) {
+          markFirstRefreshStarted();
+          await firstRefreshGate;
+        } else {
+          markSecondRefreshStarted();
+          await secondRefreshGate;
+        }
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await firstRefreshStarted;
+    let idleSettled = false;
+    const idle = loop.whenIdle().then(() => { idleSettled = true; });
+    await Promise.resolve();
+
+    revision = 'revision-2';
+    scheduled[0]!.callback();
+    await secondReadStarted;
+    releaseFirstRefresh();
+    await Promise.resolve();
+    expect(idleSettled).toBe(false);
+
+    releaseSecondRead();
+    await secondRefreshStarted;
+    expect(idleSettled).toBe(false);
+    releaseSecondRefresh();
+    await idle;
+    expect(refreshes).toBe(2);
+    await loop.close();
+  });
+
+  it('contains mapped work after rejection but preserves known legacy refreshes', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('shared index unavailable');
+    const readFailures: unknown[] = [];
+    const attempts: string[] = [];
+    let reads = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['registered', 'unregistered'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => {
+        reads += 1;
+        if (reads > 1) {
+          throw new Rfc64CatalogAuthorityRevisionReadFailureV1(
+            failure,
+            ['unregistered'],
+          );
+        }
+        return completeRevisionRead(
+          new Map([['registered', 'revision-1']]),
+        );
+      }),
+      onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+
+    expect(attempts).toEqual(['registered', 'unregistered', 'unregistered']);
+    expect(readFailures).toEqual([failure]);
     await loop.close();
   });
 });

@@ -1,3 +1,14 @@
+export {
+  decodeEntityShareMetadata,
+  ENTITY_SHARE_METADATA_PREDICATES,
+  ENTITY_SHARE_METADATA_SIDECAR_PREDICATES,
+  ENTITY_SHARE_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
+  ENTITY_SHARE_SNAPSHOT_MERKLE_ROOT_PREDICATE,
+  type EntityShareSliceDescriptor,
+  type EntityShareOperationDescriptor,
+  type EntityShareMetadataRecord,
+} from './entity-share-metadata.js';
+export { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, isWorkspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export * from './publisher.js';
 export * from './publication-pricing.js';
 export * from './publication-payload-measurement.js';
@@ -49,6 +60,7 @@ export {
   resolveKnowledgeAssetWorkspaceHead,
   resolvePublishedKnowledgeAssetWorkspaceHead,
   resolveKnowledgeAssetOperationPublicQuads,
+  resolveKnowledgeAssetWorkspaceHeadPublicQuads,
   resolveLiftWorkspaceSlice,
   storeKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
@@ -60,7 +72,21 @@ export {
   type PublishedKnowledgeAssetWorkspaceHead,
   type ResolveKnowledgeAssetWorkspaceHeadParams,
   type KnowledgeAssetOperationPublicSnapshot,
+  type KnowledgeAssetWorkspaceOperationAlias,
+  type KnowledgeAssetWorkspaceOperationAliasClass,
+  type KnowledgeAssetWorkspaceSnapshotLocator,
 } from './workspace-resolution.js';
+export {
+  publisherWorkspaceOperationSemanticsKey,
+  canonicalPublisherWorkspaceOperationSemantics,
+  selectEquivalentWorkspaceOperation,
+  workspaceHeadIncludesShareOperationId,
+  type WorkspaceOperationModel,
+  type WorkspaceOperationProvenance,
+  type WorkspaceOperationCommitment,
+  type PublisherWorkspaceOperationSemantics,
+  type WorkspaceOperationAccessEnvelope,
+} from './workspace-operation-equivalence.js';
 export {
   type StageKnowledgeAssetSharedWorkingMemoryInputV1,
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
@@ -89,6 +115,7 @@ export {
 } from './validation.js';
 export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
+export { PROMOTE_STEP_NAMES, isPromoteStepName, type PromoteStepName } from './promote-step-tag.js';
 export {
   DKGPublisher,
   StaleWriteError,
@@ -108,6 +135,12 @@ export {
   type PublisherAssertionPromoteOptions,
   type CASCondition,
 } from './dkg-publisher.js';
+export {
+  tryReplaceGraphWithDurableRootCompanionAtomically,
+  type DurableRootMaterializationIdentity,
+  type DurableRootAtomicCompanion,
+  type DurableRootAtomicCompanionResolver,
+} from './durable-root-atomic-companion.js';
 export {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
@@ -138,6 +171,7 @@ export {
 } from './ack-transport.js';
 export {
   selectACKCandidatePeers,
+  selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
   type ACKCandidatePeerDiagnostic,
@@ -339,6 +373,7 @@ export {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
+  type CanonicalCreateEvidence,
   type CanonicalUpdateEvidence,
   type AsyncLiftChainProofLookup,
   type AsyncLiftCreateChainProofLookup,

@@ -2,14 +2,16 @@
 import { describe, it, expect } from 'vitest';
 import {
   ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
   isChainRpcTransportError,
+  isRpcEndpointsExhaustedError,
 } from '../src/chain-rpc-transport-error.js';
 import { withTimeout } from '../src/evm-adapter-rpc.js';
 
 describe('ChainRpcTransportError (typed transport boundary)', () => {
   it('carries code + message + optional rpcUrls/txHash and is an Error', () => {
     const cause = new Error('connect ECONNREFUSED');
-    const err = new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', 'all endpoints failed', {
+    const err = new RpcEndpointsExhaustedError('all endpoints failed', {
       cause,
       rpcUrls: ['https://a.example', 'https://b.example'],
     });
@@ -24,7 +26,7 @@ describe('ChainRpcTransportError (typed transport boundary)', () => {
 
   it('defensively copies rpcUrls (caller cannot mutate the captured list)', () => {
     const urls = ['https://a.example'];
-    const err = new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', 'm', { rpcUrls: urls });
+    const err = new RpcEndpointsExhaustedError('m', { rpcUrls: urls });
     urls.push('https://mutated.example');
     expect(err.rpcUrls).toEqual(['https://a.example']);
   });
@@ -60,6 +62,20 @@ describe('isChainRpcTransportError (one structural namespaced-code guard)', () =
     expect(isChainRpcTransportError('TIMEOUT')).toBe(false); // a bare string, not a coded error
     expect(isChainRpcTransportError(undefined)).toBe(false);
     expect(isChainRpcTransportError(null)).toBe(false);
+  });
+
+  it('narrows provider-pass metadata to endpoint exhaustion only', () => {
+    const exhausted = new RpcEndpointsExhaustedError('m', {
+      exhaustionKind: 'all-throttled',
+      retryAfterMs: 1_000,
+    });
+    expect(isRpcEndpointsExhaustedError(exhausted)).toBe(true);
+    expect(isRpcEndpointsExhaustedError({
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+      exhaustionKind: 'mixed',
+    })).toBe(true);
+    expect(isRpcEndpointsExhaustedError(new ChainRpcTransportError('RPC_TIMEOUT', 'm')))
+      .toBe(false);
   });
 });
 

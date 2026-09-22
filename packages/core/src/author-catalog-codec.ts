@@ -229,6 +229,25 @@ export function buildCatalogAssertionScopeV1(lane: CatalogLaneV1): CatalogAssert
   return formatCatalogAssertionScopeV1(snapshot);
 }
 
+/** Strict inverse of {@link buildCatalogAssertionScopeV1}, without authority fields. */
+export function parseCatalogAssertionScopeV1(scope: unknown): Readonly<CatalogLaneV1> {
+  if (typeof scope !== 'string') {
+    fail('catalog-schema', 'catalog assertion scope must be a string');
+  }
+  const parts = scope.split('/');
+  if (
+    parts[0] !== 'v1'
+    || !((parts[1] === 'root' && parts.length === 3)
+      || (parts[1] === 'subgraph' && parts.length === 4))
+  ) {
+    fail('catalog-schema', 'catalog assertion scope must have an exact v1 root or subgraph shape');
+  }
+  return snapshotCatalogLaneV1({
+    contextGraphId: decodeIriComponentV1(parts[2]),
+    subGraphName: parts[1] === 'root' ? null : decodeIriComponentV1(parts[3]),
+  });
+}
+
 function formatCatalogAssertionScopeV1(
   snapshot: Readonly<CatalogLaneV1>,
 ): CatalogAssertionScopeV1 {

@@ -1,3 +1,4 @@
+import { normalizeContextGraphNameHashBatch } from './context-graph-name-hash-resolver.js';
 import type {
   ChainAdapter,
   IdentityProof,
@@ -7,6 +8,8 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  ContextGraphAuthorityReadOptions,
+  ContextGraphLiveAuthorityReadOptions,
   CreateKCParams,
   FinalizedChainProofSnapshot,
   UpdateKCParams,
@@ -32,12 +35,18 @@ import type {
   ShardingTableNode,
   PcaContracts,
   PcaRpcMethod,
+  BrowserWalletRpcMethod,
+  IdentityWalletContracts,
   PublishTransactionResolution,
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
+  ContextGraphFinalizedCreation,
 } from './chain-adapter.js';
-import type { RpcUsageWindow } from './rpc-usage.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { ContextGraphLiveAuthority } from './chain-adapter.js';
+import type { RandomSamplingAvailability } from './random-sampling-availability.js';
+import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -267,7 +276,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
   drainRpcUsage(): RpcUsageWindow {
-    return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
+    return emptyRpcUsageWindow();
   }
 
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
@@ -1113,7 +1122,18 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
-  async requestPublishingConvictionRpc(method: PcaRpcMethod, _params: unknown[] = []): Promise<unknown> {
+  async getIdentityWalletContracts(): Promise<IdentityWalletContracts> {
+    return {
+      profile: ethers.getAddress('0x' + '33'.repeat(20)),
+      identity: ethers.getAddress('0x' + '44'.repeat(20)),
+      storage: ethers.getAddress('0x' + '55'.repeat(20)),
+      chainId: this.chainId,
+      rpcUrls: [],
+      walletRpcUrls: [],
+    };
+  }
+
+  async requestBrowserWalletRpc(method: BrowserWalletRpcMethod, _params: unknown[] = []): Promise<unknown> {
     switch (method) {
       case 'eth_chainId': {
         const tail = this.chainId.includes(':') ? this.chainId.split(':').pop()! : this.chainId;
@@ -1129,6 +1149,11 @@ export class MockChainAdapter implements ChainAdapter {
       case 'eth_getTransactionByHash':
         return null;
     }
+  }
+
+  /** @deprecated Use the feature-neutral browser-wallet RPC bridge. */
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
+    return this.requestBrowserWalletRpc(method, params);
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK
@@ -1526,6 +1551,39 @@ export class MockChainAdapter implements ChainAdapter {
     return true;
   }
 
+  /** The mock exposes the same cohesive solved-period capability as EVM. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = () => 'mock-random-sampling:mock-random-sampling-storage';
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && bindingId === getBindingId();
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        if (!this.isRandomSamplingReady()) return undefined;
+        return Object.freeze({
+          bindingId: getBindingId(),
+          chronosEpoch: await this.getCurrentEpoch(),
+        });
+      },
+      isRandomSamplingBindingCurrent: isCurrent,
+    });
+  }
+
+  async getCurrentEpoch(): Promise<bigint> {
+    return this.rsEpoch;
+  }
+
+  async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
+    try {
+      if (!this.isRandomSamplingReady()) {
+        return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+      }
+      return { kind: 'available', member: await this.isShardingTableMember(identityId) };
+    } catch (error) {
+      return { kind: 'indeterminate', error };
+    }
+  }
+
   async verify(params: VerifyParams): Promise<TxResult> {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {
@@ -1706,10 +1764,41 @@ export class MockChainAdapter implements ChainAdapter {
     return agents.map((a) => ethers.getAddress(a));
   }
 
+  /**
+   * Live single-read mirror, composed from the three point reads so tests that
+   * stub any of them keep observing exactly the calls they did before.
+   */
+  async getContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options: ContextGraphLiveAuthorityReadOptions = {},
+  ): Promise<ContextGraphLiveAuthority | null> {
+    options.signal?.throwIfAborted();
+    // Sequential and conditional on purpose: the three-read path this mirrors
+    // never read the policy of an inactive graph nor the roster of a public
+    // one, and suites that stub the point reads observe exactly those calls.
+    // Never `null`: the mock has no "minted but burned" state, and a graph the
+    // mock does not know is exactly what a stubbed liveness probe describes.
+    // Same call arity as the point-read wiring this replaces: options only when
+    // a signal is present. Note the agent now always supplies one on this path
+    // (the read is shared in flight, so a timed-out caller must be able to
+    // leave it), so a spy should pin the id rather than the whole call.
+    const readOptions = options.signal === undefined ? undefined : { signal: options.signal };
+    const live = await (readOptions === undefined
+      ? this.isContextGraphActiveOnChain(contextGraphId)
+      : this.isContextGraphActiveOnChain(contextGraphId, readOptions));
+    if (!live) return { active: false, accessPolicy: 0, participantAgents: [] };
+    const accessPolicy = await (readOptions === undefined
+      ? this.getContextGraphAccessPolicy(contextGraphId)
+      : this.getContextGraphAccessPolicy(contextGraphId, readOptions));
+    if (accessPolicy !== 1) return { active: true, accessPolicy, participantAgents: [] };
+    const participantAgents = await this.getContextGraphParticipantAgents(contextGraphId);
+    return { active: true, accessPolicy, participantAgents };
+  }
+
   /** Offline-development mirror of the finalized RFC-64 authority snapshot. */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphAuthorityReadOptions = {},
   ): Promise<ContextGraphAuthoritySnapshot> {
     options.signal?.throwIfAborted();
     const cg = this.contextGraphs.get(contextGraphId);
@@ -1742,6 +1831,21 @@ export class MockChainAdapter implements ChainAdapter {
       rosterVersion: cg.rosterVersion.toString(10),
       sourceBlockNumber: cg.authoritySourceBlockNumber.toString(10),
       sourceBlockHash: cg.authoritySourceBlockHash,
+    });
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    options.signal?.throwIfAborted();
+    const cg = this.contextGraphs.get(contextGraphId);
+    if (cg === undefined || typeof cg.nameHash !== 'string'
+      || cg.nameHash === ethers.ZeroHash) return undefined;
+    if (cg.accessPolicy !== 0 && cg.accessPolicy !== 1) return undefined;
+    return Object.freeze({
+      nameHash: cg.nameHash,
+      accessPolicy: cg.accessPolicy as 0 | 1,
     });
   }
 
@@ -1927,6 +2031,25 @@ export class MockChainAdapter implements ChainAdapter {
       );
     }
     return matches[0];
+  }
+
+  async resolveContextGraphIdsByNameHashes(
+    nameHashes: readonly string[],
+    options: ChainReadOptions = {},
+  ): Promise<ReadonlyMap<string, bigint | null>> {
+    options.signal?.throwIfAborted();
+    const names = normalizeContextGraphNameHashBatch(nameHashes);
+    const bindings = new Map<string, bigint | null>(names.map((name) => [name, null]));
+    for (const [id, graph] of this.contextGraphs) {
+      options.signal?.throwIfAborted();
+      const name = graph.nameHash?.toLowerCase();
+      if (!name || name === ethers.ZeroHash || !bindings.has(name)) continue;
+      if (bindings.get(name) !== null) {
+        throw new Error(`resolveContextGraphIdsByNameHashes: ambiguous ${name}`);
+      }
+      bindings.set(name, id);
+    }
+    return bindings;
   }
 
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---

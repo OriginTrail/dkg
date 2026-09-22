@@ -22,25 +22,41 @@
  *     digest survives the store round-trip (no churn).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   contextGraphWorkspaceMetaGraphUri,
   knowledgeAssetLayerGraphUri,
+  workspaceKnowledgeAssetOperationSnapshotGraph,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
   generateKnowledgeAssetShareMetadata,
+  FileWorkspacePublicSnapshotStore,
   resolveKnowledgeAssetWorkspaceHead,
   workspacePublicQuadsDigest,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { operationIdentityKey, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import {
+  canonicalGraphScopedSnapshotManifestQuads,
+  materializeGraphScopedSwmRecoveryAsset,
+  operationIdentityKey,
+  parseGraphScopedSwmRecoveryDescriptors,
+} from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import {
+  collectPublicSnapshotMetadata,
+  runSharedMemorySync,
+  type SharedMemorySyncContext,
+} from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import type { RecoveryExecutionGuard } from
+  '../src/sync/requester/recovery-execution-guard.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
 const CG = 'ws00-materializer-real-store';
@@ -247,27 +263,70 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
   });
 
   describe('end-to-end catch-up with the real materializer', () => {
-    function realHarness(store: TripleStore, served: typeof v1, servedMeta: Quad[] = served.meta) {
-      const snapshotStore = new MemorySnapshotStore();
+    function realHarness(
+      store: TripleStore,
+      served: typeof v1,
+      servedMeta: Quad[] = served.meta,
+      options: Readonly<{
+        preloadSnapshot?: boolean;
+        omitSnapshotStore?: boolean;
+        servedDataQuads?: readonly Quad[];
+        onSnapshotRequest?: (ref: string) => void;
+        snapshotStore?: WorkspacePublicSnapshotStore;
+        ordinaryRootSnapshotApplyAllowed?: (contextGraphId: string) => boolean;
+        selectedRecovery?: boolean;
+        recoveryGuard?: RecoveryExecutionGuard;
+        onExactMaterializedGraphRead?: () => void;
+        resolveRootSnapshotAtomicCompanion?:
+          SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
+      }> = {},
+    ) {
+      const snapshotStore = options.snapshotStore ?? new MemorySnapshotStore();
       const { materializer } = materializerFor(store);
       let replaceCalls = 0;
+      let atomicReplaceCalls = 0;
       const run = async () => {
-        await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
+        if (options.preloadSnapshot !== false) {
+          await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
+        }
         return runSharedMemorySync({
-          mode: { kind: 'ordinary' },
+          mode: options.selectedRecovery
+            ? {
+                kind: 'selected-recovery',
+                recoveryGuard: options.recoveryGuard ?? {
+                  signal: new AbortController().signal,
+                  assertCurrent: () => undefined,
+                },
+              }
+            : { kind: 'ordinary' },
           ctx,
           remotePeerId: 'peer-source',
           contextGraphIds: [CG],
           createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-          fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => ({
-            quads: phase === 'meta' ? [...servedMeta] : [],
-            bytesReceived: 0,
-            resumedFromOffset: 0,
-            nextOffset: phase === 'meta' ? servedMeta.length : 0,
-            checkpointKey: 'k',
-            completed: true,
-            timedOut: false,
-          }),
+          fetchSyncPages: async (
+            _c, _p, _cg, _inc, phase, _graph, _deadline, fetchOptions,
+          ): Promise<SyncPageResult> => {
+            if (phase === 'snapshot' && fetchOptions?.snapshotRef) {
+              options.onSnapshotRequest?.(fetchOptions.snapshotRef);
+            }
+            return {
+              quads: phase === 'meta'
+                ? [...servedMeta]
+                : phase === 'snapshot'
+                  ? [...served.payload]
+                  : [...(options.servedDataQuads ?? [])],
+              bytesReceived: 0,
+              resumedFromOffset: 0,
+              nextOffset: phase === 'meta'
+                ? servedMeta.length
+                : phase === 'snapshot'
+                  ? served.payload.length
+                  : (options.servedDataQuads?.length ?? 0),
+              checkpointKey: 'k',
+              completed: true,
+              timedOut: false,
+            };
+          },
           processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
             verifiedData: wsDataQuads,
             verifiedMeta: wsMetaQuads,
@@ -285,8 +344,24 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
               replaceCalls += 1;
               return materializer.replaceGraph(graphUri, quads);
             },
+            replaceGraphWithAtomicCompanion: async (graphUri, quads, companion) => {
+              atomicReplaceCalls += 1;
+              return materializer.replaceGraphWithAtomicCompanion(
+                graphUri,
+                quads,
+                companion,
+              );
+            },
+            readExactMaterializedGraph: async (descriptor) => {
+              const exact = await materializer.readExactMaterializedGraph(descriptor);
+              options.onExactMaterializedGraphRead?.();
+              return exact;
+            },
           },
-          publicSnapshotStore: snapshotStore,
+          ordinaryRootSnapshotApplyAllowed: options.ordinaryRootSnapshotApplyAllowed,
+          resolveRootSnapshotAtomicCompanion:
+            options.resolveRootSnapshotAtomicCompanion,
+          ...(options.omitSnapshotStore ? {} : { publicSnapshotStore: snapshotStore }),
           deleteCheckpoint: () => {},
           setCheckpoint: () => {},
           ensureOwnedMap: () => new Map(),
@@ -295,7 +370,11 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
           logDebug: () => {},
         });
       };
-      return { run, replaceCalls: () => replaceCalls };
+      return {
+        run,
+        replaceCalls: () => replaceCalls,
+        atomicReplaceCalls: () => atomicReplaceCalls,
+      };
     }
 
     it('heals the pre-fix broken state through the REAL content guard', async () => {
@@ -310,6 +389,315 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(h.replaceCalls()).toBe(1);
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    });
+
+    it('atomically materializes an absent store-locator root with its durable companion', async () => {
+      const store = new OxigraphStore();
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:store-locator-absent';
+      const settle = vi.fn();
+      const h = realHarness(store, v1, v1.meta, {
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"store-locator-absent"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      expect(settle).toHaveBeenCalledWith(true);
+      await expect(store.hasGraph(v1.assertionGraph)).resolves.toBe(true);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('defers an in-flight ordinary root snapshot when catalog authority takes ownership', async () => {
+      const store = new OxigraphStore();
+      let checks = 0;
+      const h = realHarness(store, v1, v1.meta, {
+        // The first check models an ordinary sync planned while legacy root
+        // scope was still admitted. Authority flips while snapshot loading
+        // yields, so the final pre-replace check must veto the mutation.
+        ordinaryRootSnapshotApplyAllowed: () => {
+          checks += 1;
+          return checks === 1;
+        },
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(checks).toBeGreaterThanOrEqual(2);
+      expect(h.replaceCalls()).toBe(0);
+      await expect(store.hasGraph(v1.assertionGraph)).resolves.toBe(false);
+      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+        .toEqual([]);
+      expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+        .toEqual([]);
+    });
+
+    it('atomically establishes a late boundary for selected recovery even when content exists', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([...v1.meta]);
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:selected';
+      const settle = vi.fn();
+      const h = realHarness(store, v1, v1.meta, {
+        selectedRecovery: true,
+        // Selected recovery is intentional under catalog authority and must
+        // not be suppressed by the ordinary lane's authority gate.
+        ordinaryRootSnapshotApplyAllowed: () => false,
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"selected"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      expect(settle).toHaveBeenCalledWith(true);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('rejects a revoked selected recovery after exact read without preparing a companion', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([...v1.meta]);
+      const revoked = new Error('selected root recovery revoked after exact read');
+      const controller = new AbortController();
+      let current = true;
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: 'urn:test:rfc64-late-boundary',
+        subject: 'urn:test:rfc64-late-boundary:revoked',
+        quads: [{
+          subject: 'urn:test:rfc64-late-boundary:revoked',
+          predicate: 'urn:test:entry',
+          object: '"revoked"',
+          graph: 'urn:test:rfc64-late-boundary',
+        }],
+      }));
+      const h = realHarness(store, v1, v1.meta, {
+        selectedRecovery: true,
+        recoveryGuard: {
+          signal: controller.signal,
+          assertCurrent: () => {
+            if (!current) throw revoked;
+          },
+        },
+        onExactMaterializedGraphRead: () => {
+          current = false;
+          controller.abort(revoked);
+        },
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+      expect(summary.failedPhases).toBe(1);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.atomicReplaceCalls()).toBe(0);
+      await expect(store.query(
+        'ASK { GRAPH <urn:test:rfc64-late-boundary> { ?s ?p ?o } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
+    it('backfills an already-materialized graph-locator descriptor from verified stored bytes', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      await store.insert(graphLocatorMeta);
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator';
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        selectedRecovery: true,
+        preloadSnapshot: false,
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"graph-locator"',
+            graph: markerGraph,
+          }],
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('does not backfill a graph-locator root when ordinary catalog authority denies it', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      await store.insert(graphLocatorMeta);
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-denied';
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: markerGraph,
+        subject: markerSubject,
+        quads: [{
+          subject: markerSubject,
+          predicate: 'urn:test:entry',
+          object: '"graph-locator-denied"',
+          graph: markerGraph,
+        }],
+      }));
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        preloadSnapshot: false,
+        ordinaryRootSnapshotApplyAllowed: () => false,
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(0);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
+    it('does not backfill a stale graph-locator root when the stored head outranks it', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([...v2.meta]);
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-stale';
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: markerGraph,
+        subject: markerSubject,
+        quads: [{
+          subject: markerSubject,
+          predicate: 'urn:test:entry',
+          object: '"graph-locator-stale"',
+          graph: markerGraph,
+        }],
+      }));
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        preloadSnapshot: false,
+        ordinaryRootSnapshotApplyAllowed: () => true,
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(0);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({
+        version: '2',
+        needsRepair: false,
+        shareOperationId: 'op-v2',
+      });
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
+    it('atomically materializes an absent graph-locator root instead of bulk-inserting it', async () => {
+      const store = new OxigraphStore();
+      const sourceGraph = workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId);
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: sourceGraph,
+            }
+          : quad
+      ));
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-absent';
+      const settle = vi.fn();
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        selectedRecovery: true,
+        preloadSnapshot: false,
+        omitSnapshotStore: true,
+        servedDataQuads: inGraph(v1.payload, sourceGraph),
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"graph-locator-absent"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      expect(settle).toHaveBeenCalledWith(true);
+      await expect(store.hasGraph(v1.assertionGraph)).resolves.toBe(true);
+      await expect(store.hasGraph(sourceGraph)).resolves.toBe(false);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
     });
 
     it('replaces an equal-count older version and leaves ONE unambiguous head', async () => {
@@ -392,6 +780,302 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(summary.failedPhases).toBe(0);
       expect(await distinctObjects(store, WS_META, storageAck.headSubject, `${DKG}shareOperationId`))
         .toEqual(['"storage-ack-equivalent"']);
+    });
+
+    it('accepts an omitted legacy policy and an explicitly persisted effective default', () => {
+      const storageAck = share(1, 'storage-ack-explicit-default', 'version-one');
+      const legacyOriginator = v1.meta.filter((row) => !(
+        row.subject === v1.operationSubject && row.predicate === `${DKG}accessPolicy`
+      ));
+      const servedMeta = [
+        ...legacyOriginator,
+        ...storageAck.meta.filter((row) => row.subject === storageAck.operationSubject),
+        ...storageAck.meta.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      expect(parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      })).toHaveLength(1);
+    });
+
+    it.each([
+      'canonical commitment',
+      'access policy',
+      'allowed peers',
+      'publisher identity',
+      'author identity',
+    ])('rejects equivalent aliases that disagree on %s', (field) => {
+      const storageAck = share(1, `storage-ack-${field.replaceAll(' ', '-')}`, 'version-one');
+      let localRows = [...v1.meta];
+      let remoteRows = [...storageAck.meta];
+      const replace = (rows: Quad[], subject: string, predicate: string, object: string) => rows.map(
+        (row) => row.subject === subject && row.predicate === predicate ? { ...row, object } : row,
+      );
+      if (field === 'canonical commitment') {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}publicQuadsCount`,
+          `"3"^^<${XSD_INTEGER}>`,
+        );
+      } else if (field === 'access policy') {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}accessPolicy`,
+          '"ownerOnly"',
+        );
+      } else if (field === 'allowed peers') {
+        localRows = replace(localRows, v1.operationSubject, `${DKG}accessPolicy`, '"allowList"');
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}accessPolicy`,
+          '"allowList"',
+        );
+        localRows.push({
+          subject: v1.operationSubject,
+          predicate: `${DKG}allowedPeer`,
+          object: '"peer-a"',
+          graph: WS_META,
+        });
+        remoteRows.push({
+          subject: storageAck.operationSubject,
+          predicate: `${DKG}allowedPeer`,
+          object: '"peer-b"',
+          graph: WS_META,
+        });
+      } else if (field === 'publisher identity') {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}publisherPeerId`,
+          '"peer-other"',
+        );
+      } else {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          'http://www.w3.org/ns/prov#wasAttributedTo',
+          '"peer-other"',
+        );
+      }
+      const servedMeta = [
+        ...localRows,
+        ...remoteRows.filter((row) => row.subject === storageAck.operationSubject),
+        ...remoteRows.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      expect(() => parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      })).toThrow(/ambiguous shareOperationId/);
+    });
+
+    it('materializes from an older graph locator while retaining the newer display alias', async () => {
+      const storageAck = share(1, 'storage-ack-locatorless', 'version-one');
+      const snapshotGraph = `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`;
+      const graphBackedOriginator = [
+        ...v1.meta.filter((row) => !(
+          row.subject === v1.operationSubject && row.predicate === `${DKG}publicSnapshotRef`
+        )),
+        {
+          subject: v1.operationSubject,
+          predicate: `${DKG}publicSnapshotGraph`,
+          object: snapshotGraph,
+          graph: WS_META,
+        },
+      ];
+      const locatorlessStorageAck = storageAck.meta
+        .filter((row) => !(
+          row.subject === storageAck.operationSubject
+          && (row.predicate === `${DKG}publicSnapshotRef`
+            || row.predicate === `${DKG}publicSnapshotGraph`)
+        ))
+        .map((row) => row.subject === storageAck.operationSubject
+          && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: '"1970-01-01T00:00:01.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }
+          : row);
+      const servedMeta = [
+        ...graphBackedOriginator,
+        ...locatorlessStorageAck.filter((row) => row.subject === storageAck.operationSubject),
+        ...locatorlessStorageAck.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+      const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(descriptor).toMatchObject({
+        shareOperationId: storageAck.operationId,
+        snapshotSource: {
+          shareOperationId: v1.operationId,
+          locator: { kind: 'graph', graph: snapshotGraph },
+        },
+      });
+      await expect(materializeGraphScopedSwmRecoveryAsset({
+        descriptor: descriptor!,
+        fetchedDataQuads: inGraph(v1.payload, snapshotGraph),
+      })).resolves.toMatchObject({ quads: inGraph(v1.payload, v1.assertionGraph) });
+    });
+
+    it('carries the complete three-locator alias class into manifest selection', () => {
+      const display = share(1, 'alias-display', 'version-one');
+      const graphAlias = share(1, 'alias-graph', 'version-one');
+      const persistedAlias = share(1, 'alias-persisted', 'version-one');
+      const snapshotGraph = `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${graphAlias.operationId}/ka`;
+      const withTimestamp = (rows: readonly Quad[], subject: string, timestamp: string) => rows.map(
+        (row) => row.subject === subject && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: `"${timestamp}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` }
+          : row,
+      );
+      const displayRows = withTimestamp(
+        display.meta.filter((row) => !(row.subject === display.operationSubject
+          && row.predicate === `${DKG}publicSnapshotRef`)),
+        display.operationSubject,
+        '1970-01-01T00:00:02.000Z',
+      );
+      const graphRows = withTimestamp([
+        ...graphAlias.meta.filter((row) => !(row.subject === graphAlias.operationSubject
+          && row.predicate === `${DKG}publicSnapshotRef`)),
+        {
+          subject: graphAlias.operationSubject,
+          predicate: `${DKG}publicSnapshotGraph`,
+          object: snapshotGraph,
+          graph: WS_META,
+        },
+      ], graphAlias.operationSubject, '1970-01-01T00:00:01.000Z');
+      const persistedRows = persistedAlias.meta.map((row) => (
+        row.subject === persistedAlias.operationSubject
+          && row.predicate === `${DKG}publicSnapshotRef`
+          ? { ...row, object: `"sha256:${'8'.repeat(64)}"` }
+          : row
+      ));
+      const servedMeta = [
+        ...displayRows,
+        ...graphRows.filter((row) => row.subject === graphAlias.operationSubject),
+        ...graphRows.filter((row) => row.subject === graphAlias.headSubject
+          && row.predicate === `${DKG}shareOperationId`),
+        ...persistedRows.filter((row) => row.subject === persistedAlias.operationSubject),
+        ...persistedRows.filter((row) => row.subject === persistedAlias.headSubject
+          && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(descriptor).toMatchObject({
+        shareOperationId: display.operationId,
+        snapshotSource: {
+          shareOperationId: graphAlias.operationId,
+          locator: { kind: 'graph', graph: snapshotGraph },
+        },
+      });
+      expect(new Set(descriptor?.equivalentOperationSubjects)).toEqual(new Set([
+        display.operationSubject,
+        graphAlias.operationSubject,
+        persistedAlias.operationSubject,
+      ]));
+      const manifestQuads = canonicalGraphScopedSnapshotManifestQuads(
+        servedMeta,
+        [descriptor!],
+      );
+      expect(new Set(manifestQuads
+        .filter((row) => row.predicate === `${DKG}publicQuadsDigest`)
+        .map((row) => row.subject))).toEqual(new Set([graphAlias.operationSubject]));
+      expect(collectPublicSnapshotMetadata(manifestQuads)).toEqual([]);
+      expect(descriptor?.metadataQuads).toContainEqual(expect.objectContaining({
+        subject: display.headSubject,
+        predicate: `${DKG}shareOperationId`,
+        object: `"${display.operationId}"`,
+      }));
+    });
+
+    it('requests and materializes the persisted ref from an older equivalent alias', async () => {
+      const selected = share(1, 'storage-ack-digest-fallback', 'version-one');
+      const persistedRef = `sha256:${'9'.repeat(64)}`;
+      const olderPersisted = v1.meta.map((row) => (
+        row.subject === v1.operationSubject && row.predicate === `${DKG}publicSnapshotRef`
+          ? { ...row, object: `"${persistedRef}"` }
+          : row
+      ));
+      const newerDigestFallback = selected.meta
+        .filter((row) => !(
+          row.subject === selected.operationSubject
+          && (row.predicate === `${DKG}publicSnapshotRef`
+            || row.predicate === `${DKG}publicSnapshotGraph`)
+        ))
+        .map((row) => row.subject === selected.operationSubject
+          && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: '"1970-01-01T00:00:01.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }
+          : row);
+      const servedMeta = [
+        ...olderPersisted,
+        ...newerDigestFallback.filter((row) => row.subject === selected.operationSubject),
+        ...newerDigestFallback.filter((row) => (
+          row.subject === selected.headSubject && row.predicate === `${DKG}shareOperationId`
+        )),
+      ];
+      const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(descriptor).toMatchObject({
+        shareOperationId: selected.operationId,
+        snapshotSource: {
+          shareOperationId: v1.operationId,
+          locator: { kind: 'store', ref: persistedRef, provenance: 'persisted-ref' },
+        },
+      });
+      expect(collectPublicSnapshotMetadata(
+        canonicalGraphScopedSnapshotManifestQuads(servedMeta, [descriptor!]),
+      ).map((snapshot) => snapshot.ref)).toEqual([persistedRef]);
+
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-swm-alias-snapshot-'));
+      const snapshotStore = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: { enabled: false },
+      });
+      const requestedRefs: string[] = [];
+      let networkAvailable = true;
+      const store = new OxigraphStore();
+      const h = realHarness(store, selected, servedMeta, {
+        preloadSnapshot: false,
+        snapshotStore,
+        onSnapshotRequest: (ref) => {
+          if (!networkAvailable) throw new Error('snapshot source unavailable');
+          requestedRefs.push(ref);
+        },
+      });
+      try {
+        const summary = await h.run();
+        expect(summary).toMatchObject({
+          failedPhases: 0,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1 },
+        });
+        expect(requestedRefs).toEqual([persistedRef]);
+        expect(await store.countQuads(v1.assertionGraph)).toBe(v1.payload.length);
+
+        networkAvailable = false;
+        await expect(h.run()).resolves.toMatchObject({
+          failedPhases: 0,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1 },
+        });
+        expect(requestedRefs).toEqual([persistedRef]);
+        await expect(resolveKnowledgeAssetWorkspaceHead({
+          store,
+          graphManager: new GraphManager(store),
+          contextGraphId: CG,
+          kaUal: UAL,
+        })).resolves.toMatchObject({ shareOperationId: selected.operationId });
+      } finally {
+        snapshotStore.stopGarbageCollection();
+        await store.close();
+        await rm(directory, { recursive: true, force: true });
+      }
     });
 
     it('still fails closed when two head operations disagree on content', () => {

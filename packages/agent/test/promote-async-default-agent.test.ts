@@ -9,8 +9,10 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
-import { ContextGraphAuthorityUnavailableError } from
-  '../src/internal/context-graph-authority/context-graph-authority.js';
+import {
+  CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS,
+  ContextGraphAuthorityUnavailableError,
+} from '../src/internal/context-graph-authority/context-graph-authority.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { AssertionPromoteOptions } from '../src/index.js';
 
@@ -115,8 +117,13 @@ describe('DKGAgent assertion promote boundary', () => {
     });
   });
 
-  it.each([
+  const PROMOTE_RETRY_POLICY_CASES = [
+    ['finalized-name-absence-unaccepted', true],
     ['chain-name-binding-unavailable', true],
+    // A cooldown ends on its own, so the promote is worth retrying. Pinned
+    // here because the policy map is the only other place that says so, and a
+    // silent flip to false would degrade it to a hard promote failure.
+    ['authority-circuit-open', true],
     ['local-chain-binding-unavailable', true],
     ['local-existence-unavailable', true],
     ['chain-access-policy-unavailable', true],
@@ -126,7 +133,16 @@ describe('DKGAgent assertion promote boundary', () => {
     ['chain-participant-authority-unavailable', true],
     ['chain-participant-authority-invalid', false],
     ['rfc64-private-read-roster-unavailable', true],
-  ] as const)(
+  ] as const;
+
+  it('enumerates every gate reason in the promotion retry policy cases', () => {
+    // Without this, a newly added reason gets a retry policy in the map that no
+    // test ever exercises: flipping it would still compile and still pass.
+    expect([...PROMOTE_RETRY_POLICY_CASES].map(([reason]) => reason).sort())
+      .toEqual([...CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS].sort());
+  });
+
+  it.each(PROMOTE_RETRY_POLICY_CASES)(
     'applies promotion retry policy for %s at the promotion boundary',
     async (reason, retryable) => {
       const authorityFailure = new ContextGraphAuthorityUnavailableError(
