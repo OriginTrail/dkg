@@ -1,3 +1,4 @@
+import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -951,11 +952,8 @@ async function resolveProgramTools(
     allowedTools = new Set(program.requiredTools);
     const descriptors: string[] = [];
     for (const toolIri of program.requiredTools) {
-      const definition = toolIri === bound.binding.assetCreation?.toolIri
-        ? { operation: 'dkg/asset-create', version: '1', wit: 'origintrail:semantic-runtime/asset-create@0.1.0' }
-        : toolIri === bound.binding.sparqlRead?.toolIri
-          ? { operation: 'dkg/sparql-read', version: '1', wit: 'origintrail:semantic-runtime/sparql-read@0.1.0' }
-          : { operation: 'dkg/query', version: '1', wit: 'origintrail:semantic-runtime/query-catalog@0.1.0' };
+      const definition = programToolDefinition(toolIri === bound.binding.assetCreation?.toolIri
+        ? 'assetCreation' : toolIri === bound.binding.sparqlRead?.toolIri ? 'sparqlRead' : 'query');
       toolDefinitions.set(toolIri, new Map([[JSON.stringify(definition), definition]]));
       descriptors.push(toolIri, definition.operation, definition.version, definition.wit);
     }

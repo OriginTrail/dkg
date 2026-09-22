@@ -3,10 +3,18 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphComputer } from '@origintrail-official/dkg-graph-computer';
-const { programs } = vi.hoisted(() => ({ programs: {
+const { queries, programs } = vi.hoisted(() => ({ queries: vi.fn(), programs: {
   upload: vi.fn(), getSource: vi.fn(), getApproval: vi.fn(), listApprovals: vi.fn(), approve: vi.fn(), updateApproval: vi.fn(), invoke: vi.fn(), prepareInvocation: vi.fn(),
 } }));
-vi.mock('../src/ui/components/Programs/client.js', () => ({ programClient: async () => ({ programs }), fetchProgramAgents: async () => ({ defaultAddress: address, agents: [ { address, name: 'Owner' }, { address: '0x0000000000000000000000000000000000000002', name: 'Second agent' } ] }) }));
+vi.mock('../src/ui/components/Programs/client.js', () => ({
+  fetchProgramGraphs: async () => [{ id: 'school', name: 'School' }, { id: 'different-graph', name: 'Different graph' }],
+  fetchProgramQueries: queries,
+  fetchProgramTools: async () => ({ enabled: true, tools: [
+    {kind: 'sparqlRead', toolIri: 'urn:dkg:tool:sparql-read', label: 'SPARQL read', description: 'Read SPARQL'},
+    {kind: 'query', toolIri: 'urn:dkg:tool:query', label: 'Saved query', description: 'Run a catalog query'},
+    {kind: 'assetCreation', toolIri: 'urn:dkg:tool:asset-create', label: 'Create Knowledge Asset', description: 'Create an asset'},
+  ] }),
+  programClient: async () => ({ programs }), fetchProgramAgents: async () => ({ defaultAddress: address, agents: [ { address, name: 'Owner' }, { address: '0x0000000000000000000000000000000000000002', name: 'Second agent' } ] }) }));
 vi.mock('../src/ui/components/Wallet/WalletConnectControl.js', () => ({ WalletConnectControl: () => null }));
 vi.mock('../src/ui/components/Programs/TypeScriptEditor.js', () => ({ default: ({ value, onChange, disabled }: any) =>
   React.createElement('textarea', { 'aria-label': 'source', value, disabled, onChange: (event: any) => onChange(event.target.value) }) }));
@@ -41,6 +49,15 @@ async function fill(label: string, value: string) {
     element.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
+async function select(label: string, value: string) {
+  const element = [...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === label)!.querySelector('select')!;
+  await act(async () => { element.value = value; element.dispatchEvent(new Event('change', { bubbles: true })); }); await settle();
+}
+async function pickTool(label: string) {
+  await click('+ Add tool');
+  const option = [...container.querySelectorAll<HTMLButtonElement>('.program-tool-option')].find(button => button.querySelector('strong')?.textContent === label)!;
+  expect(option.disabled).toBe(false); await act(async () => option.click()); await settle();
+}
 async function ready() {
   await render(); await fill('Operation IRI', operation.operationIri);
   await click('Save new version'); await click('Check approval'); await click('Approve Program');
@@ -51,6 +68,7 @@ beforeEach(() => {
   programs.upload.mockImplementation(async input => (uploaded = { ...input, programLayer: 'wm', sourceHash: 'a'.repeat(64), authorAgentAddress: address }));
   programs.getApproval.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
   programs.listApprovals.mockResolvedValue([]);
+  queries.mockResolvedValue({ items: [] });
   programs.approve.mockImplementation(async () => approval());
   programs.updateApproval.mockImplementation(async () => approval(uploaded, 4));
   const client = new GraphComputer({ nodeUrl: 'http://node', peerId: 'peer-test', signer: { getAddress: async () => address, signMessage: async () => '' } });
@@ -69,6 +87,96 @@ describe('TypeScript Program editor', () => {
       source: 'export function run() { return 7; }', version: '1', permittedPrograms: [] });
     return program;
   }
+
+  it('generates bounded SPARQL permissions without granting them and requires a new version after scope changes', async () => {
+    await render(); await pickTool('SPARQL read'); await fill('Row limit', '25');
+    await click('Save new version');
+    expect(uploaded.requiredTools).toEqual(['urn:dkg:tool:sparql-read']);
+    expect(uploaded.requestedPermissions).toMatchObject({ graphId: 'school', executionLayer: 'wm', sparqlRead: {
+      toolIri: 'urn:dkg:tool:sparql-read', layer: 'wm', timeoutMs: 5000, maxResultItems: 25, maxOutputBytes: 32768,
+      outputSchema: { properties: { bindings: { maxItems: 25, items: { required: ['s', 'p', 'o'] } } } },
+    } });
+    expect(container.textContent).toContain('await invoke_tool("urn:dkg:tool:sparql-read"');
+    expect(programs.approve).not.toHaveBeenCalled(); expect(programs.updateApproval).not.toHaveBeenCalled();
+    await select('Operation graph', 'different-graph');
+    expect(button('Run Program').disabled).toBe(true); expect(button('Save new version').disabled).toBe(false);
+    await click('Save new version'); expect(uploaded.requestedPermissions.graphId).toBe('different-graph');
+  });
+
+  it('preserves a stored custom tool ID and schema until explicitly edited', async () => {
+    const program = storedProgram();
+    const permissions = { graphId: 'school', sparqlRead: { toolIri: 'urn:legacy:read', layer: 'wm', timeoutMs: 2000,
+      maxResultItems: 10, maxOutputBytes: 8192, outputSchema: { type: 'boolean' } } };
+    programs.getSource.mockResolvedValue({ ...program, contextGraphId: 'school', layer: 'wm', language: 'typescript-v1',
+      source: 'export function run() { return 7; }', version: '1', requiredTools: ['urn:legacy:read'], requestedPermissions: permissions, permittedPrograms: [] });
+    await render({ existing });
+    expect(button('Save new version').disabled).toBe(true);
+    expect(container.textContent).toContain('custom output schema is preserved');
+    await fill('Read timeout (ms)', '3000'); await click('Save new version');
+    expect(uploaded.requiredTools).toEqual(['urn:legacy:read']);
+    expect(uploaded.requestedPermissions).toEqual({ ...permissions, sparqlRead: { ...permissions.sparqlRead, timeoutMs: 3000 } });
+  });
+
+  it('preserves invalid Advanced input and does not save it or grant access', async () => {
+    await render(); await fill('Requested tool permissions (JSON)', '{ broken');
+    expect(container.textContent).toContain('Correct the JSON under Advanced');
+    await click('Save new version'); expect(programs.upload).not.toHaveBeenCalled();
+    expect(programs.approve).not.toHaveBeenCalled();
+    expect((container.querySelector('textarea[rows="9"]') as HTMLTextAreaElement).value).toBe('{ broken');
+  });
+
+  it('selects a real query and invalidates its selector when the graph changes', async () => {
+    queries.mockResolvedValue({ items: [{ queryIri: 'urn:query:students', name: 'Students', catalogName: 'School queries', sparql: 'SELECT ?s WHERE { ?s ?p ?o }', parameters: [{ name: 'class', type: 'string', required: true }] }] });
+    await render(); await pickTool('Saved query'); await select('Saved query', 'urn:query:students');
+    await click('Save new version'); expect(uploaded.requestedPermissions.query.selector).toBe('urn:query:students');
+    expect(uploaded.requiredTools).toEqual(['urn:dkg:tool:query']);
+    expect(container.textContent).toContain('"class": "<class>"');
+    await select('Operation graph', 'different-graph'); await click('Save new version');
+    expect(programs.upload).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Select a saved query before saving');
+  });
+
+  it('selects an approved child operation and rechecks its current binding at approval time', async () => {
+    await render();
+    const child = approval({ ...existing, graphId: 'school', sourceHash: 'c'.repeat(64), authorAgentAddress: address });
+    child.operationIri = 'urn:child:run';
+    programs.listApprovals.mockResolvedValue([child, { ...child, operationIri: 'urn:disabled', binding: { ...child.binding, enabled: false } }]);
+    await click('+ Add child Program');
+    const option = container.querySelector<HTMLButtonElement>('.program-tool-option')!;
+    await act(async () => option.click()); await settle();
+    expect(container.textContent).toContain('invoke_program("urn:existing", [])');
+    expect(container.textContent).not.toContain('urn:disabled');
+    await fill('Operation IRI', operation.operationIri); await click('Save new version');
+    expect(uploaded.permittedPrograms).toEqual(['urn:existing']);
+    expect(programs.approve).not.toHaveBeenCalled();
+    await click('Check approval');
+    programs.getApproval.mockResolvedValue({ ...child, bindingDigest: 'd'.repeat(64) });
+    await click('Approve Program');
+    expect(programs.approve.mock.calls[0][0].typescript.children).toEqual([{ graphId: 'school', operationIri: 'urn:child:run', programIri: 'urn:existing', bindingDigest: 'd'.repeat(64) }]);
+  });
+
+  it('ignores saved-query responses from a graph that is no longer selected', async () => {
+    let finish!: (value: any) => void;
+    queries.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await render(); await pickTool('Saved query');
+    await select('Operation graph', 'different-graph');
+    await act(async () => finish({ items: [{ queryIri: 'urn:old-query', name: 'Old graph query', catalogName: 'Old', parameters: [] }] }));
+    await settle(); expect(container.textContent).not.toContain('Old graph query');
+    expect(programs.approve).not.toHaveBeenCalled();
+  });
+
+  it('adds a generic write capability and removes only its own declaration', async () => {
+    await render(); await pickTool('SPARQL read'); await pickTool('Create Knowledge Asset');
+    await click('Save new version');
+    expect(uploaded.requestedPermissions.assetCreation).toEqual({ toolIri: 'urn:dkg:tool:asset-create' });
+    expect(container.textContent).toContain('does not grant arbitrary SPARQL updates');
+    await act(async () => (container.querySelector('[aria-label="Remove Create Knowledge Asset"]') as HTMLButtonElement).click());
+    await click('Save new version');
+    expect(uploaded.requiredTools).toEqual(['urn:dkg:tool:sparql-read']);
+    expect(uploaded.requestedPermissions.assetCreation).toBeUndefined();
+    expect(uploaded.requestedPermissions.sparqlRead).toBeDefined();
+    expect(programs.approve).not.toHaveBeenCalled();
+  });
 
   it('loads a unique matching approval on reopen and invokes without creating a grant', async () => {
     const program = storedProgram();
@@ -109,7 +217,7 @@ describe('TypeScript Program editor', () => {
     const program = storedProgram(); let finish!: (value: any) => void;
     programs.listApprovals.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     await render({ existing });
-    await fill('Operation graph', 'different-graph');
+    await fill('Operation graph ID', 'different-graph');
     await act(async () => finish([approval(program)])); await settle();
     expect(button('Run Program').disabled).toBe(true);
     expect(container.querySelector('#program-run-unavailable')?.textContent).toContain('Operation IRI');

@@ -359,6 +359,25 @@ describe('TypeScript direct tools through shared authorization and effects', () 
 });
 
 describe('durable Program management API', () => {
+  it('discovers supported tools without activating a runtime or granting permissions', async () => {
+    const f = await fixture();
+    expect((await request(f.target, 'operator', 'GET', '/api/programs/tools')).body.enabled).toBe(true);
+    expect(f.target.runtime).toBeNull();
+    f.target.config.semanticRuntime.enabled = false;
+    expect((await request(f.target, 'operator', 'GET', '/api/programs/tools')).body).toEqual({ enabled: false, tools: [] });
+    delete f.target.config.semanticRuntime.enabled;
+    expect((await f.activate()).status).toBe(201);
+    const before = await request(f.target, 'operator', 'GET', inspect);
+    const catalog = await request(f.target, 'operator', 'GET', '/api/programs/tools');
+    expect(catalog.status).toBe(200);
+    expect(catalog.body.tools.map((tool: any) => [tool.kind, tool.definition.operation])).toEqual([
+      ['sparqlRead', 'dkg/sparql-read'], ['query', 'dkg/query'], ['assetCreation', 'dkg/asset-create'],
+    ]);
+    expect(await request(f.target, 'operator', 'GET', inspect)).toEqual(before);
+    for (const identity of ['anonymous', 'disabled-anonymous'] as const)
+      expect((await request(f.target, identity, 'GET', '/api/programs/tools')).status).toBe(403);
+  });
+
   it('lets the node session use a selected custodial agent while preserving source access and live invocation grants', async () => {
     const f = await fixture();
     const binding = bindingInput(); binding.allowedCallerAgentAddresses = [owner];

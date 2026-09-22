@@ -1,9 +1,18 @@
 import { GraphComputer } from '@origintrail-official/dkg-graph-computer';
-import { fetchStatus } from '../../api.js';
+import { fetchStatus, fetchContextGraphs, readProfileQueryCatalog } from '../../api.js';
 import { get } from '../../http.js';
 
 export interface ProgramAgent { address: string; name: string }
 export const fetchProgramAgents = () => get<{ agents: ProgramAgent[]; defaultAddress: string }>('/api/programs/agents');
+export type ToolKind = 'sparqlRead' | 'query' | 'assetCreation';
+export interface ProgramTool { kind: ToolKind; toolIri: string; label: string; description: string }
+export interface ProgramGraph { id: string; name: string }
+export const fetchProgramTools = () => get<{ enabled: boolean; tools: ProgramTool[] }>('/api/programs/tools');
+export async function fetchProgramGraphs(): Promise<ProgramGraph[]> {
+  const { contextGraphs } = await fetchContextGraphs();
+  return contextGraphs.map(graph => ({ id: graph.id, name: graph.name || graph.id }));
+}
+export const fetchProgramQueries = readProfileQueryCatalog;
 
 /** Use the existing authenticated node session; custody and graph rights are checked on the node. */
 export async function programClient(address: string): Promise<GraphComputer> {

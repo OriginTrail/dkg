@@ -1,4 +1,5 @@
 import { availableProgramAgents, programCaller } from './program-agent.js';
+import { PROGRAM_TOOL_CATALOG } from '../../semantic-runtime-tool-catalog.js';
 import { canonicalProgramInputs } from '../../semantic-runtime-bound-invocation.js';
 import {
   forkStoredSemanticProgram,
@@ -21,6 +22,14 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
     if (ctx.req.method === 'GET' && ctx.path === '/api/programs/agents')
       return jsonResponse(ctx.res, 200, availableProgramAgents(ctx));
     authenticatedCaller = programCaller(ctx);
+    if (ctx.req.method === 'GET' && ctx.path === '/api/programs/tools') {
+      // Apply the same session boundary as agent discovery. This describes
+      // capabilities only: discovery never creates a binding or grants access.
+      availableProgramAgents(ctx);
+      const enabled = ctx.config.semanticRuntime !== undefined && ctx.config.semanticRuntime.enabled !== false;
+      return jsonResponse(ctx.res, 200, { enabled,
+        tools: enabled ? PROGRAM_TOOL_CATALOG : [] });
+    }
   } catch (error) {
     if (error instanceof SemanticProgramError) return jsonResponse(ctx.res, error.status, { code: error.code, error: error.message });
     throw error;

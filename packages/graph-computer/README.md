@@ -362,6 +362,16 @@ A catalog grant permits only its fixed selector and no runtime query parameters.
 
 The Program stores tool IRIs as `sr:requiresTool` and its JSON scope as `sr:requestedToolPermissions`. These triples request permissions; they never authorize execution. Approval pins the tool IRIs, source, executor, graph, layer, query definition and output contract. A scope change requires a new saved request and explicit owner approval. The editor shows these requests under **Requested tools** and includes them in **Approve Program**.
 
+In the node UI, open **New TypeScript Program** from a Context Graph, then:
+
+1. Select the **Operation graph**. Direct tools use this graph; source stays in the graph where you created the Program.
+2. Choose **+ Add tool**. Available capabilities come from the node's authenticated `GET /api/programs/tools` catalog: **SPARQL read**, **Saved query**, or **Create Knowledge Asset**. Configure memory layer, result columns and limits in the forms. Saved queries come from the selected graph's catalog. The current runtime supports one tool of each kind per Program.
+3. Use **Copy TypeScript call** and paste it inside your `run` function (put the import at the top of the file). Adjust the query pattern, parameter values or RDF triples for your application. The picker generates the tool IDs and requested permissions; it does not execute the example.
+4. To compose Programs, use **+ Add child Program**, select its operation graph and choose an existing approved operation. Copy its `invoke_program` call and provide the child's arguments. Approval rechecks and pins the child's current binding.
+5. **Save new version**, then select/check an operation and explicitly **Approve Program** with the permitted callers. Saving or selecting a tool never grants permission. **Run Program** uses the saved, approved version.
+
+**Advanced** retains raw JSON and custom tool IDs. Custom IDs identify these supported capabilities; they do not register arbitrary adapters. Existing IDs and complex schemas are preserved when loading a Program. Changing the operation graph clears a saved-query selection, requiring a query from the new graph. Output contracts describe the inner query result (for SELECT, `{ bindings: [...] }`); `invoke_tool` returns an envelope with those rows under `result.bindings`.
+
 Both languages resolve adapters through the same host registry, then use the same `RuntimeEffectBroker`, current permission checks, capability checks, input/output validation and durable write journal. Direct tools and child invocations consume the same TypeScript call/concurrency budgets. Revocation is checked during execution and before returning results. A lost write response returns `INVOCATION_REQUIRES_RECONCILIATION`, even if TypeScript catches the tool exception; retry never silently replays a failed or interrupted workflow.
 
 ## Retry and recovery

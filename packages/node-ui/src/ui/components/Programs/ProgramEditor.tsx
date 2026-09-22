@@ -1,9 +1,12 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer, RequestedToolPermissions } from '@origintrail-official/dkg-graph-computer';
+import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer } from '@origintrail-official/dkg-graph-computer';
 import { createUuid } from '@origintrail-official/dkg-graph-computer';
-import { programClient, fetchProgramAgents, type ProgramAgent } from './client.js';
+import { programClient, fetchProgramAgents, fetchProgramGraphs, type ProgramAgent, type ProgramGraph } from './client.js';
 import { useModalDismiss } from '../Modals/useModalDismiss.js';
 import { JsonText, JsonViewer } from '../common/JsonViewer.js';
+import ToolPicker from './ToolPicker.js';
+import ChildProgramPicker from './ChildProgramPicker.js';
+import { readPermissions } from './tool-permissions.js';
 import './program-editor.css';
 
 const Editor = lazy(() => import('./TypeScriptEditor.js'));
@@ -41,6 +44,8 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const [source, setSource] = useState(existing ? '' : TEMPLATE);
   const [version, setVersion] = useState('1.0.0');
   const [graphId, setGraphId] = useState(contextGraphId);
+  const [graphs, setGraphs] = useState<ProgramGraph[]>([]);
+  const [graphError, setGraphError] = useState('');
   const [operationIri, setOperationIri] = useState('');
   const [callers, setCallers] = useState(address ?? '');
   const [toolsText, setToolsText] = useState('');
@@ -99,6 +104,12 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
       setAddress(selected?.address ?? '');
       if (!value.agents.length) setError('No agent key is available to this node session.');
     }).catch(cause => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    fetchProgramGraphs().then(value => { if (active) setGraphs(value); })
+      .catch(() => { if (active) setGraphError('Could not load graphs. Enter the graph ID under Advanced.'); });
     return () => { active = false; };
   }, []);
   useEffect(() => {
@@ -179,14 +190,18 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     });
   };
 
-  function parsePermissions(): RequestedToolPermissions | undefined {
-    if (!permissionsText.trim()) return undefined;
-    const value = JSON.parse(permissionsText);
-    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.graphId !== 'string'
-      || Object.keys(value).some(key => !['graphId', 'executionLayer', 'query', 'sparqlRead', 'assetCreation'].includes(key))) {
-      throw new Error('Permissions need graphId and only query, sparqlRead, assetCreation or executionLayer fields.');
-    }
-    return value;
+  const parsePermissions = () => readPermissions(permissionsText);
+  function changeGraph(value: string) {
+    const nextGraph = canonicalGraph(value);
+    setGraphId(nextGraph); invalidate();
+    try {
+      const permissions = parsePermissions();
+      if (permissions && canonicalGraph(permissions.graphId) !== nextGraph) {
+        // A catalog selector belongs to its original graph; require a new choice.
+        setPermissionsText(JSON.stringify({ ...permissions, graphId: nextGraph,
+          ...(permissions.query ? { query: { ...permissions.query, selector: '' } } : {}) }, null, 2));
+      }
+    } catch { /* Preserve malformed Advanced input so the user can repair it. */ }
   }
 
   const save = () => action('Saving new version…', async (client, check) => {
@@ -195,6 +210,8 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     if (new TextEncoder().encode(source).length > 262144) throw new Error('Source exceeds 256 KiB.');
     if (childIris.some(iri => !iri) || childIris.length !== children.length) throw new Error('Each child needs a distinct Program IRI.');
     const requestedPermissions = parsePermissions();
+    if (requestedPermissions && canonicalGraph(requestedPermissions.graphId) !== canonicalGraph(graphId)) throw new Error('Requested tool permissions must use the selected operation graph.');
+    if (requestedPermissions?.query && !requestedPermissions.query.selector.trim()) throw new Error('Select a saved query before saving.');
     if (toolIris.length && !requestedPermissions) throw new Error('Describe the requested tool permissions before saving.');
     const fingerprint = JSON.stringify([name.trim(), source, version, childIris, toolIris, requestedPermissions]);
     if (saveAttempt.current?.fingerprint !== fingerprint) {
@@ -286,7 +303,13 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
         <aside className="program-editor-controls">
           <h3>Execution permission</h3>
           <fieldset disabled={!!busy}>
-            <label>Operation graph<input value={graphId} onChange={event => setGraphId(event.target.value)} /></label>
+            <label>Operation graph<select value={canonicalGraph(graphId)} onChange={event => changeGraph(event.target.value)}>
+              {!graphs.some(graph => canonicalGraph(graph.id) === canonicalGraph(graphId)) && <option value={canonicalGraph(graphId)}>{graphId}</option>}
+              {graphs.map(graph => <option key={graph.id} value={canonicalGraph(graph.id)}>{graph.name}</option>)}
+            </select></label>
+            <p className="program-editor-help">All direct tools use this graph. The Program source stays in its original graph.</p>
+            {graphError && <p className="program-editor-help">{graphError}</p>}
+            <details><summary>Advanced · operation graph ID</summary><label>Operation graph ID<input value={graphId} onChange={event => changeGraph(event.target.value)} /></label></details>
             {availableApprovals.length > 0 && <label>Existing operation<select value={availableApprovals.some(value => value.operationIri === operationIri) ? operationIri : ''}
               onChange={event => { setOperationIri(event.target.value); setApprovalToLoad(availableApprovals.find(value => value.operationIri === event.target.value) ?? null); }}>
               <option value="">Select an operation</option>{availableApprovals.map(value => <option key={value.operationIri} value={value.operationIri}>{value.operationIri}{value.binding.enabled ? '' : ' (disabled)'}</option>)}
@@ -295,23 +318,15 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
             {discoveryError && <p className="program-editor-help">{discoveryError}</p>}
             <label>Allowed caller addresses<textarea rows={3} value={callers} onChange={event => { setCallers(event.target.value); invalidate(); }} /></label>
             <h4>Requested tools</h4>
-            <p className="program-editor-help">Stored with the Program. These requests become usable only after the graph owner approves this operation.</p>
-            <label>Tool IRIs<textarea rows={3} value={toolsText} placeholder="urn:example:tool:read-devices" onChange={event => { setToolsText(event.target.value); invalidate(); }} /></label>
-            <label>Requested tool permissions (JSON)<textarea rows={9} value={permissionsText} placeholder={'{ "graphId": "your-data-graph", "assetCreation": { "toolIri": "urn:example:tool:create-asset" } }'}
-              onChange={event => { setPermissionsText(event.target.value); invalidate(); }} /></label>
-            <p className="program-editor-help">Use query for a fixed catalog query, sparqlRead for bounded reads, or assetCreation for writes. The data graph, memory layer, output contract and read limits are part of the saved request.</p>
-            {saved?.tools.length ? <section aria-label="Permissions to approve"><strong>Tools requested by this saved Program</strong>
+            <ToolPicker graphId={canonicalGraph(graphId)} toolsText={toolsText} permissionsText={permissionsText}
+              onChange={(tools, permissions) => { setToolsText(tools); setPermissionsText(permissions); invalidate(); }} />
+            {saved?.tools.length ? <details aria-label="Permissions to approve"><summary>Saved permission request</summary>
               <ul>{saved.tools.map(tool => <li key={tool}><code>{tool}</code></li>)}</ul>
               {saved.permissions && <JsonText text={saved.permissions} label="Saved tool permissions" />}
-            </section> : null}
+            </details> : null}
             <h4>Approved child Programs</h4>
-            <p className="program-editor-help">Each child must already have an approved operation on this node. Call it using its Program IRI.</p>
-            {children.map((child, index) => <div className="program-editor-child" key={index}>
-              {(['programIri', 'graphId', 'operationIri'] as const).map(field => <label key={field}>{field === 'programIri' ? 'Child Program IRI' : field === 'graphId' ? 'Child graph' : 'Child operation IRI'}
-                <input value={child[field]} onChange={event => { setChildren(rows => rows.map((row, i) => i === index ? { ...row, [field]: event.target.value } : row)); invalidate(); }} /></label>)}
-              <button type="button" onClick={() => { setChildren(rows => rows.filter((_, i) => i !== index)); invalidate(); }}>Remove child</button>
-            </div>)}
-            <button type="button" disabled={children.length >= 32} onClick={() => { setChildren(rows => [...rows, { graphId, operationIri: '', programIri: '' }]); invalidate(); }}>Add child Program</button>
+            <ChildProgramPicker address={address} graphId={canonicalGraph(graphId)} graphs={graphs} children={children}
+              onChange={value => { setChildren(value); invalidate(); }} />
             <div className="program-editor-limits">
               <label>Max calls<input type="number" min={1} max={256} value={maxCalls} onChange={e => { setMaxCalls(Number(e.target.value)); invalidate(); }} /></label>
               <label>Concurrency<input type="number" min={1} max={8} value={maxConcurrency} onChange={e => { setMaxConcurrency(Number(e.target.value)); invalidate(); }} /></label>
