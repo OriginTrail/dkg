@@ -305,10 +305,11 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import type { ContextGraphAuthorityReadMode } from './dkg-agent-cg-resolve.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -730,6 +731,8 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /** Read-only gates may consume the finalized snapshot; defaults to `live-current`. */
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<boolean> {
     return (await withRpcUsageSite(
@@ -762,7 +765,7 @@ export class QueryMethods extends DKGAgentBase {
           this,
           id,
           { callerAgentAddress: opts.callerAgentAddress, signal },
-          CHAIN_POLICY_READ_TIMEOUT_MS,
+          chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
           undefined,
           'finalized-index',
         )
@@ -788,10 +791,12 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
       /**
-       * Scoped query reads consume the finalized authority projection; every
-       * other caller (admission, `canReadContextGraph`) keeps current state.
+       * Scoped query reads consume the finalized authority projection and the
+       * read-only host/sync/share gates may fall back to current state when
+       * the index has no snapshot; every other caller (admission, the default
+       * `canReadContextGraph`) keeps current state.
        */
-      authorityReadMode?: 'live-current' | 'finalized-index';
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
     const { authorityReadMode, ...readOpts } = opts;
@@ -801,7 +806,7 @@ export class QueryMethods extends DKGAgentBase {
         this,
         contextGraphId,
         readOpts,
-        CHAIN_POLICY_READ_TIMEOUT_MS,
+        chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
         authorityReadMode,
       ),
     );
@@ -851,7 +856,7 @@ export class QueryMethods extends DKGAgentBase {
           // reopen legacy scalar RPC discovery. A forged/missing seed preserves
           // the initial denial. Local state runs FIRST so a replica that
           // already holds the seed never spends its caller's budget (restart
-          // rehydration passes CHAIN_POLICY_READ_TIMEOUT_MS) on the network.
+          // rehydration passes the request-scoped authority deadline) on the network.
           const finalizedAbsence = Object.freeze({ kind: 'finalized-absence' as const });
           try {
             await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);
@@ -950,7 +955,7 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     },
     registrationTimeoutMs: number,
-    authorityReadMode: 'live-current' | 'finalized-index' = 'live-current',
+    authorityReadMode: ContextGraphAuthorityReadMode = 'live-current',
   ): Promise<ContextGraphReadAuthorityDecision> {
     return resolveContextGraphReadAuthorityDecision(
       QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
@@ -974,7 +979,7 @@ export class QueryMethods extends DKGAgentBase {
     },
     registrationTimeoutMs: number,
     hasAcceptedRfc64PublicPolicy?: boolean,
-    authorityReadMode: 'live-current' | 'finalized-index' = 'live-current',
+    authorityReadMode: ContextGraphAuthorityReadMode = 'live-current',
   ): ContextGraphReadAuthorityInput {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
