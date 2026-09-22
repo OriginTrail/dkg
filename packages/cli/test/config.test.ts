@@ -980,6 +980,46 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.relayServerCapacity).toBe(2048);
   });
 
+  it('round-trips explicitly trusted core authority index sources', async () => {
+    const authorityIndex = {
+      mode: 'core-snapshot' as const,
+      trustedCorePeers: ['/dns4/core.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+      maxTailBlocks: 2_000,
+      cacheEpoch: 1,
+    };
+    await saveConfig({
+      name: 'snapshot-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      authorityIndex,
+    });
+
+    expect((await loadConfig()).authorityIndex).toEqual(authorityIndex);
+  });
+
+  it.each(['json', 'yaml'])('rejects misplaced core.authorityIndex in persisted %s config', async (format) => {
+    const content = format === 'json'
+      ? JSON.stringify({ core: { authorityIndex: { mode: 'core-snapshot' } } })
+      : 'core:\n  authorityIndex:\n    mode: core-snapshot\n';
+    await writeFile(join(tempDir, `config.${format}`), content, 'utf8');
+    await expect(loadConfig()).rejects.toThrow(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level',
+    );
+  });
+
+  it('keeps authority index snapshot trust absent for existing configs', async () => {
+    await saveConfig({
+      name: 'existing-edge',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      relayPeers: ['/dns4/relay.example.com/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+    });
+
+    expect((await loadConfig()).authorityIndex).toBeUndefined();
+  });
+
   it('round-trips relayReservationCount through saveConfig/loadConfig (operator override)', async () => {
     // PR3 multi-reservation tuning: same contract as
     // relayServerCapacity above — operators should be able to
@@ -1460,6 +1500,24 @@ describe('resolveChainConfig (field-level merge)', () => {
         chain: { finalityConfirmations: finalityConfirmations as any },
       }, { chain: fullNetworkChain })).toThrow(
         /finalityConfirmations must be an integer >= 1/,
+      );
+    }
+  });
+
+  it('validates chain.indexTickMs as a positive integer with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.indexTickMs).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(12_000);
+    expect(resolveChainConfig({ chain: { indexTickMs: 3_000 } }, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(3_000);
+
+    for (const indexTickMs of [null, 0, -1, 1.5, Number.NaN, '6000']) {
+      expect(() => resolveChainConfig({
+        chain: { indexTickMs: indexTickMs as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /chain\.indexTickMs must be a positive integer/,
       );
     }
   });

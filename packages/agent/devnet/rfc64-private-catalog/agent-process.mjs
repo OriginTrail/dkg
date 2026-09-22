@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -30,6 +31,7 @@ import {
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
 import { sealExecutedRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-load-hook.mts';
+import { createRuntimeProcessIdentityV1 } from '../../../../devnet/rfc64-runtime-process-evidence.mts';
 import { readPrivateCatalogGraphCountEvidence } from './memory-evidence.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
@@ -37,6 +39,7 @@ const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
 const DATA_DIR = requiredEnv('DKG_RFC64_PRIVATE_DATA_DIR');
 const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST');
 const MANIFEST_PATH = process.env.DKG_RFC64_PRIVATE_MANIFEST;
+const processIdentity = createRuntimeProcessIdentityV1(hostname(), process.pid);
 
 let agent;
 let rpc;
@@ -178,6 +181,7 @@ function readyFields() {
     peerId: agent.peerId,
     multiaddr: address,
     catalogServiceStarted: agent.rfc64PublicCatalogStatsV1()?.started === true,
+    processIdentity,
     runtimeBuildManifestDigest: RUNTIME_MANIFEST_DIGEST,
   };
 }
@@ -372,6 +376,7 @@ async function shutdown(code, requestId) {
   try { await rpc?.close(); } catch { /* best effort */ }
   await emitAndFlush('stopping', requestId, {
     executedRuntimeManifest: sealExecutedRuntimeManifestV1(),
+    processIdentity,
   });
   process.exit(code);
 }

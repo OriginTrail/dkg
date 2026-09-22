@@ -45,7 +45,12 @@ export interface ACKVerifyResult {
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
-  getConnectedCorePeers: (protocol?: string) => string[];
+  /**
+   * Resolve the candidate pool before an ACK round freezes it. Implementers
+   * may return a synchronous pool for backward compatibility or await network
+   * admission; consumers must always await the result.
+   */
+  getConnectedCorePeers: (protocol?: string) => string[] | Promise<string[]>;
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -330,6 +335,26 @@ export class ACKCollector {
     this.deps = deps;
   }
 
+  private async resolveConnectedCorePeers(
+    protocol: string,
+    requiredACKs: number,
+  ): Promise<string[]> {
+    try {
+      return await this.deps.getConnectedCorePeers(protocol);
+    } catch (err) {
+      if (err instanceof QuorumUnmetError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new QuorumUnmetError({
+        collected: 0,
+        required: requiredACKs,
+        dialled: 0,
+        peerOutcomes: [],
+        legacyMessage: `ACK candidate discovery failed for protocol ${protocol}: ${message}`,
+        cause: err,
+      });
+    }
+  }
+
   async collect(params: ACKCollectorParams): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -586,7 +611,7 @@ export class ACKCollector {
     // that decode payloads as FinalizationMessages, causing decode errors.
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers(ackProtocolId);
+    const corePeers = await this.resolveConnectedCorePeers(ackProtocolId, REQUIRED_ACKS);
     if (corePeers.length === 0) {
       // Pre-dial impossibility — wrap in the typed surface but preserve
       // the legacy `ACK collection failed: no connected core peers` text
@@ -758,7 +783,7 @@ export class ACKCollector {
     const updateAckProtocolId = params.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
       ? PROTOCOL_STORAGE_UPDATE_ACK_V2
       : PROTOCOL_STORAGE_UPDATE_ACK;
-    const corePeers = this.deps.getConnectedCorePeers(updateAckProtocolId);
+    const corePeers = await this.resolveConnectedCorePeers(updateAckProtocolId, REQUIRED_ACKS);
     if (corePeers.length === 0) {
       throw new QuorumUnmetError({
         collected: 0,

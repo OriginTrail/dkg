@@ -20,6 +20,7 @@ import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-s
 import {
   RpcRequestGovernor,
   rpcUsageWindowTotal,
+  snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { createPublisherRuntimeFromAgent, type PublisherRuntime } from '../src/publisher-runner.js';
@@ -115,6 +116,7 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     // This is the same projection + process-state binding performed by the
     // daemon composition root before it constructs both consumers.
     const sharedChainConfig = bindRuntimeRpcRequestGovernor(projected!, governor);
+    const beforePublisher = snapshotProcessRpcUsage();
 
     runtime = await createPublisherRuntimeFromAgent({
       dataDir,
@@ -135,6 +137,12 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     expect(rpcUsageWindowTotal(usage!)).toBe(loopback.totalHits());
     for (const [method, count] of Object.entries(usage!.byMethod)) {
       expect(loopback.hits(method), `method ${method}`).toBe(count);
+    }
+    const afterPublisher = snapshotProcessRpcUsage();
+    for (const [method, count] of Object.entries(usage!.byMethod)) {
+      const before = beforePublisher.cumulative.adapterRoles[method]?.publisher_wallet ?? 0;
+      const after = afterPublisher.cumulative.adapterRoles[method]?.publisher_wallet ?? 0;
+      expect(after - before, `publisher role method ${method}`).toBe(count);
     }
 
     // Delta semantics survive the runtime boundary: second drain is empty.

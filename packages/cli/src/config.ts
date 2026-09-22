@@ -41,6 +41,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   resolveRpcRequestGovernorPolicy,
+  resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
@@ -229,6 +230,8 @@ export interface NetworkConfig {
      * A value of 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /** See `ChainConfig.indexTickMs`. */
+    indexTickMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint | string | number;
     /**
@@ -375,6 +378,29 @@ export interface ChainConfig {
    * successor-block buffer. Defaults to 1.
    */
   finalityConfirmations?: number;
+  /**
+   * How long (ms) one completed finalized Context Graph authority projection
+   * answers RFC-64 authority reads before the next read refreshes it from the
+   * chain. A lower value observes on-chain authority changes sooner and costs
+   * proportionally more RPC. After a failed refresh the previous projection
+   * keeps answering until it is `min(max(3 × indexTickMs, 15s), 5m)` old,
+   * then those reads fail closed. Values above five minutes do not extend
+   * cache service past the RFC-64 accepted-authority interval. A positive
+   * integer; defaults to 6000.
+   *
+   * ALSO the cadence of the node's one chain-index tick
+   * (`evm-adapter-base.ts:startChainIndexRuntime`), which runs whether or not
+   * anything reads it: one head read, one block-hash re-read and one
+   * `eth_getLogs` every T for the whole indexed event set. Lowering it to
+   * freshen authority answers therefore also buys a proportionally faster
+   * background scanner. The same T bounds how stale the log's Hub rotation
+   * window may be — `max(3T, 15s)`, with no five-minute ceiling: the ceiling
+   * above exists because a stale authority answer is still bounded by the
+   * RFC-64 accepted-authority interval, whereas a rotation listener that
+   * promises never to miss a rotation has no such backstop — before that
+   * listener goes back to scanning the chain for itself.
+   */
+  indexTickMs?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */
   maxFeePerGasWei?: bigint | string | number;
 }
@@ -567,6 +593,15 @@ export interface DkgConfig {
   apiHost?: string;
   listenPort: number;
   nodeRole: 'core' | 'edge';
+  /**
+   * Opt an edge into authority snapshots from explicitly trusted core PeerIDs.
+   * Local operator config only: network discovery/relay lists do not establish
+   * authority trust. Omission preserves the independent historical index.
+   * The edge scans at most maxTailBlocks after the snapshot (default 2,000;
+   * minimum 200, maximum 10,000), refreshing from a core when farther behind.
+   * Increment cacheEpoch to discard an old trusted snapshot without changing peers.
+   */
+  authorityIndex?: DKGAgentConfig['authorityIndex'];
   /**
    * Core-Node-specific operator tuning. Today only `allowDegradedRelay`;
    * future Core-only knobs (e.g. relay-target prioritisation) belong here
@@ -1743,6 +1778,14 @@ export function resolveChainConfig(
   if (operatorHasFinalityConfirmations || finalityConfirmations !== undefined) {
     merged.finalityConfirmations = resolveFinalityConfirmations(finalityConfirmations);
   }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasIndexTickMs = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'indexTickMs');
+  const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
+  if (operatorHasIndexTickMs || indexTickMs !== undefined) {
+    merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
+  }
   const maxFeePerGasWei = parseWeiFloor(
     cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,
     'chain.maxFeePerGasWei',
@@ -2215,9 +2258,22 @@ export function apiPortPath(): string { return new DkgHomeFiles().apiPortPath; }
 export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
 export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
+/** Reject a misplaced trust policy instead of silently ignoring it. */
+export function assertAuthorityIndexConfigPlacement(config: Pick<DkgConfig, 'core'>): void {
+  if (config.core !== null && typeof config.core === 'object'
+    && Object.hasOwn(config.core, 'authorityIndex')) {
+    throw new TypeError(
+      'core.authorityIndex is not supported. Move authorityIndex to the top level of config.json; '
+      + 'core-snapshot mode is an edge-node option.',
+    );
+  }
+}
+
 function mergePersistedConfig(raw: unknown): DkgConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...DEFAULT_CONFIG };
-  return { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
+  const config = { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
+  assertAuthorityIndexConfigPlacement(config);
+  return config;
 }
 
 function isEnoent(err: unknown): boolean {

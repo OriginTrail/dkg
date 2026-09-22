@@ -2582,8 +2582,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (!resolvedGeneration) {
       throw new Error(`Cannot notify join approval without a valid request generation`);
     }
+    // The outbox replays these bytes verbatim, so a binding missing here is
+    // missing for good; this read is admitted even while the circuit is open.
     const curatorBinding = await this.readRfc64CurrentCuratorAuthorityBindingV1(
       contextGraphId,
+      { admitWhileOpen: true },
     ).catch(() => null);
     const payload = JSON.stringify({
       type: 'join-approved',
@@ -2672,8 +2675,11 @@ export class JoinRequestMethods extends DKGAgentBase {
           `approved request has no valid generation; ask the joiner to re-submit.`,
       );
     }
+    // The outbox replays these bytes verbatim, so a binding missing here is
+    // missing for good; this read is admitted even while the circuit is open.
     const curatorBinding = await this.readRfc64CurrentCuratorAuthorityBindingV1(
       contextGraphId,
+      { admitWhileOpen: true },
     ).catch(() => null);
     const payload = JSON.stringify({
       type: 'join-approved',

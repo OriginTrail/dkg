@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/sealed-create-retry.test.ts',
       'test/workspace-snapshot-source.test.ts',
       'test/workspace-snapshot-page-index.test.ts',
       'test/graph-publish-envelope.test.ts',
@@ -80,6 +81,7 @@ export default defineConfig({
       'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',
       'test/knowledge-asset-swm-staging.test.ts',
+      'test/durable-root-atomic-companion.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

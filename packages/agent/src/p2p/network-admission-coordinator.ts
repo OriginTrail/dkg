@@ -12,6 +12,7 @@ import {
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -44,6 +45,17 @@ export interface NetworkAdmissionAttemptOptions {
   timeoutMs?: number;
 }
 
+export interface NetworkAdmissionPreflightOptions {
+  /** Bound parallel identity streams so publish cannot fan out without limit. */
+  maxConcurrency?: number;
+}
+
+export interface NetworkAdmissionPreflightResult {
+  checked: number;
+  admitted: number;
+  unresolved: number;
+}
+
 interface NetworkAdmissionAttemptPolicy {
   probeRetrySuppression: 'respect' | 'bypass';
 }
@@ -55,6 +67,8 @@ const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
 const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
+
+const DEFAULT_PREFLIGHT_CONCURRENCY = 4;
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -243,6 +257,64 @@ export class NetworkAdmissionCoordinator {
       EXPLICIT_CONNECT_ADMISSION_POLICY,
       options,
     );
+  }
+
+  /**
+   * Resolve admission for a bounded, caller-selected peer set.
+   *
+   * The coordinator remains the sole owner of accepted/rejected state. An ACK
+   * round may briefly bypass the active retry window so a healthy peer cannot
+   * be frozen out of a quorum. The admission service owns a short preflight
+   * lease inside its bounded retry state, preventing concurrent probe storms
+   * without inheriting the longer automatic backoff.
+   */
+  async preflightPeerAdmission(
+    peerIds: Iterable<string>,
+    ctx: OperationContext,
+    options: NetworkAdmissionPreflightOptions = {},
+  ): Promise<NetworkAdmissionPreflightResult> {
+    if (!this.enabled) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const canonicalPeerIds: CanonicalPeerId[] = [];
+    for (const peerId of peerIds) {
+      try {
+        canonicalPeerIds.push(canonicalAdmissionPeerId(peerId));
+      } catch {
+        // Invalid peer IDs are already rejected by the coordinator boundary.
+      }
+    }
+    const pending = [...new Set(canonicalPeerIds)]
+      .filter((peerId) => peerId !== this.selfPeerId)
+      .filter((peerId) => !this.isAcceptedPeer(peerId) && !this.isRejectedPeer(peerId));
+    if (pending.length === 0) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const requestedConcurrency = options.maxConcurrency ?? DEFAULT_PREFLIGHT_CONCURRENCY;
+    const maxConcurrency = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0
+      ? Math.min(requestedConcurrency, DEFAULT_PREFLIGHT_CONCURRENCY)
+      : 1;
+    const results = await mapWithConcurrencySettled(
+      pending,
+      maxConcurrency,
+      async (peerId) => {
+        if (!this.admission.claimRetryablePreflightProbe(peerId)) return false;
+        try {
+          return await this.ensureAdmittedWithPolicy(
+            peerId,
+            ctx,
+            EXPLICIT_CONNECT_ADMISSION_POLICY,
+            {},
+          );
+        } catch (error) {
+          this.admission.markRetryablePreflightProbeAttempted(peerId);
+          throw error;
+        }
+      },
+    );
+    const admitted = results.filter(
+      (result) => result.status === 'fulfilled' && result.value,
+    ).length;
+    const unresolved = pending.length - admitted;
+    return { checked: pending.length, admitted, unresolved };
   }
 
   private async ensureAdmittedWithPolicy(

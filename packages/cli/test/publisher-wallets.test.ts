@@ -1,9 +1,9 @@
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
@@ -42,6 +42,28 @@ describe('publisher wallets', () => {
       receiptTimeoutMs: 1_200_000,
     }, wallet.privateKey);
     expect((chain as any).receiptTimeoutMs).toBe(1_200_000);
+    (chain as EVMChainAdapter).destroy();
+  });
+
+  it('passes a late-bound one-log source into a publisher wallet without ownership', () => {
+    const wallet = ethers.Wallet.createRandom();
+    let current: any;
+    const chain = createPublisherWalletChain({
+      rpcUrl: 'http://127.0.0.1:8545',
+      hubAddress: '0x1111111111111111111111111111111111111111',
+      chainId: 'evm:31337',
+    }, wallet.privateKey, () => current) as EVMChainAdapter;
+    const binding = Object.freeze({
+      scope: `${chain.deploymentId}:0x1111111111111111111111111111111111111111`,
+      subscription: {},
+    });
+
+    expect(chain.chainEventLog).toBeUndefined();
+    current = binding;
+    expect(chain.chainEventLog).toBe(binding);
+    current = undefined;
+    expect(chain.chainEventLog).toBeUndefined();
+    chain.destroy();
   });
   it('adds, loads, and removes publisher wallets', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-wallets-'));
@@ -289,6 +311,7 @@ describe('publisher wallets', () => {
 
     await addPublisherWallet(dataDir, wallet.privateKey);
     await expect(createEVMAdapter(wallet.privateKey).getIdentityId()).resolves.toBe(0n);
+    const destroySpy = vi.spyOn(EVMChainAdapter.prototype, 'destroy');
 
     try {
       runtime = await createPublisherRuntimeFromAgent({
@@ -302,7 +325,12 @@ describe('publisher wallets', () => {
       expect(runtime.walletIds).toEqual([wallet.address]);
       expect(runtime.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
     } finally {
-      await runtime?.stop();
+      if (runtime) {
+        await runtime.stop();
+        runtime = undefined;
+        expect(destroySpy).toHaveBeenCalledTimes(1);
+      }
+      destroySpy.mockRestore();
       await store.close();
     }
   });

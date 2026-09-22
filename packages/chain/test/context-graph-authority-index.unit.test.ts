@@ -2,12 +2,13 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import { ContextGraphAuthorityIndex as ContextGraphAuthorityIndexBase } from
+  '../src/context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 import {
   reduceContextGraphAuthorityIndexPage,
-  type ContextGraphAuthorityIndexEvent,
+  type RawContextGraphAuthorityIndexEvent as ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
@@ -16,6 +17,16 @@ const NEXT_OWNER = `0x${'22'.repeat(20)}`;
 const AUTHORITY = `0x${'33'.repeat(20)}`;
 const NAME_9 = `0x${'99'.repeat(32)}`;
 const NAME_10 = `0x${'aa'.repeat(32)}`;
+
+/** Scanner lifecycle tests select their state explicitly from the canonical view. */
+class ContextGraphAuthorityIndex extends ContextGraphAuthorityIndexBase {
+  async resolve(
+    input: Parameters<ContextGraphAuthorityIndexBase['view']>[0]
+      & { readonly contextGraphId: ContextGraphAuthorityIndexId },
+  ) {
+    return (await this.view(input)).resolve(input.contextGraphId);
+  }
+}
 
 const blockHash = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
 
@@ -96,51 +107,79 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     readPage,
   });
 
-  it('keeps raw persisted checkpoints private behind purpose-specific views', () => {
-    const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
+  it('holds the durable cursor below the reorg horizon while still projecting to the anchor', async () => {
+    // The anchor is the operator's and at the default depth it is the HEAD, so a
+    // cursor written AT the anchor lives on a reorgable block: `admit…Checkpoint`
+    // re-reads the hash there, a single-block tip reorg mismatches, and the whole
+    // materialized index is discarded and rescanned from the deployment block.
+    // The cursor is a memo, not a finality decision, so it stops below a
+    // reorg-safe horizon while the READ still projects all the way to the anchor.
+    const store = new MemoryAuthorityIndexStore();
+    const index = new ContextGraphAuthorityIndex(store);
+    const scanned: Array<readonly [number, number]> = [];
 
-    expect((index as any).snapshot).toBeUndefined();
-    expect(typeof index.resolve).toBe('function');
-    expect(typeof index.resolveNameHash).toBe('function');
-    expect(typeof index.revisions).toBe('function');
+    const state = await index.resolve({
+      ...makeInput(9n, {}, async (from, to) => {
+        scanned.push([from, to]);
+        return allEvents.filter((e) => e.blockNumber >= from && e.blockNumber <= to);
+      }, 25),
+      durableReorgHoldbackBlocks: 8,
+    });
+
+    // The projection still reflects every event up to the anchor.
+    expect(state.owner).toBe(NEXT_OWNER.toLowerCase());
+    expect(scanned.at(-1)?.[1]).toBe(25);
+    // But nothing at or above the horizon was written down.
+    const persisted = (store.record?.value as { cursor: { throughBlockNumber: number } });
+    expect(persisted.cursor.throughBlockNumber).toBe(17);
+    expect(persisted.cursor.throughBlockNumber).toBeLessThanOrEqual(25 - 8);
   });
 
-  it('resolves unique name commitments from the shared snapshot and fails closed on ambiguity', async () => {
+  it('writes the cursor at the anchor when no holdback is configured', async () => {
+    // Default 0 is the behaviour before the horizon existed, so a caller that
+    // omits it is unchanged rather than newly exposed.
+    const store = new MemoryAuthorityIndexStore();
+    const index = new ContextGraphAuthorityIndex(store);
+
+    await index.resolve(makeInput(9n, {}, async (from, to) => (
+      allEvents.filter((e) => e.blockNumber >= from && e.blockNumber <= to)
+    ), 25));
+
+    const persisted = store.record?.value as
+      { cursor: { throughBlockNumber: number } } | undefined;
+    expect(persisted?.cursor.throughBlockNumber).toBe(25);
+  });
+
+  it('keeps raw persisted checkpoints private behind the single projection view', () => {
+    const index = new ContextGraphAuthorityIndexBase(new MemoryAuthorityIndexStore());
+
+    expect((index as any).snapshot).toBeUndefined();
+    expect(typeof index.view).toBe('function');
+    expect((index as any).resolve).toBeUndefined();
+    expect((index as any).resolveNameHash).toBeUndefined();
+    expect((index as any).revisions).toBeUndefined();
+  });
+
+  it('projects unique name commitments from the shared view and fails closed on ambiguity', async () => {
     const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
     const input = makeInput(9n, {}, async (from, to) => allEvents.filter((entry) => (
       entry.blockNumber >= from && entry.blockNumber <= to
     )));
+    const view = await index.view(input);
 
-    await expect(index.resolveNameHash({ ...input, nameHash: NAME_9 }))
-      .resolves.toBe('9');
-    await expect(index.resolveNameHash({ ...input, nameHash: `0x${'ff'.repeat(32)}` }))
-      .resolves.toBeNull();
-    await expect(index.resolveNameHash({ ...input, nameHash: 'not-a-hash' }))
-      .rejects.toThrow('name hash is invalid');
-
-    const zeroHashReads: Array<readonly [number, number]> = [];
-    await expect(index.resolveNameHash({
-      ...input,
-      nameHash: `0x${'00'.repeat(32)}`,
-      readPage: async (from, to) => {
-        zeroHashReads.push([from, to]);
-        return [
-          creation(11n, 11, 1, `0x${'00'.repeat(32)}`),
-          creation(12n, 12, 1, `0x${'00'.repeat(32)}`),
-        ];
-      },
-    })).resolves.toBeNull();
-    expect(zeroHashReads).toEqual([]);
+    expect(view.statesByNameHashes([NAME_9]).get(NAME_9)?.contextGraphId).toBe('9');
+    expect(view.statesByNameHashes([`0x${'ff'.repeat(32)}`]).size).toBe(0);
 
     const ambiguous = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
-    await expect(ambiguous.resolveNameHash({
+    const ambiguousView = await ambiguous.view({
       ...input,
-      nameHash: NAME_9,
       readPage: async (from, to) => [
         ...allEvents,
         creation(11n, 11, 2, NAME_9),
       ].filter((entry) => entry.blockNumber >= from && entry.blockNumber <= to),
-    })).rejects.toThrow('ambiguous across 2 finalized Context Graphs');
+    });
+    expect(() => ambiguousView.statesByNameHashes([NAME_9]))
+      .toThrow('ambiguous across 2 finalized Context Graphs');
   });
 
   it('shares one page walk across concurrent graph lookups and resumes after restart', async () => {

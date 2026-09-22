@@ -560,3 +560,44 @@ export class RecentUalSet {
     }
   }
 }
+
+/** Bounded, expiring evidence map for optimization-only reconcile leases. */
+export class RecentReconcileEvidenceMap<T> {
+  private readonly seen = new Map<string, { value: T; expiresAt: number }>();
+
+  constructor(
+    private readonly max = 1000,
+    private readonly ttlMs = 5 * 60_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  get(key: string): T | undefined {
+    const entry = this.seen.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.expiresAt <= this.now()) {
+      this.seen.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key: string, value: T): void {
+    this.seen.delete(key);
+    this.seen.set(key, { value, expiresAt: this.now() + this.ttlMs });
+    while (this.seen.size > this.max) {
+      const oldest = this.seen.keys().next().value;
+      if (oldest === undefined) break;
+      this.seen.delete(oldest);
+    }
+  }
+
+  delete(key: string): void {
+    this.seen.delete(key);
+  }
+
+  deleteByPrefix(prefix: string): void {
+    for (const key of this.seen.keys()) {
+      if (key.startsWith(prefix)) this.seen.delete(key);
+    }
+  }
+}

@@ -343,6 +343,10 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import {
+  API_QUERY_CALLER_DISCONNECTED,
+  createStoreQueryRequestLifecycle,
+} from '../store-query-lifecycle.js';
 import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-assertion-helpers.js';
 
 /**
@@ -489,6 +493,25 @@ function uniquePeerIds(peerIds: readonly string[]): string[] {
   }
   return out;
 }
+
+/**
+ * Read-authority reasons that answer "may this NODE read the context graph?"
+ * rather than "may this AGENT read it?".
+ *
+ * `resolveContextGraphReadAuthorityDecision` only consults `callerAgentAddress`
+ * on its chain-registered, RFC-64 and agent-gated-local branches. Everything
+ * below falls through to node-scoped facts (peer allowlist, local subscription,
+ * the node's own default agent), so an agent-scoped caller must NOT inherit
+ * them — doing so is the cross-CG read hole `/api/memory/search` is gated for.
+ */
+const NODE_SCOPED_READ_AUTHORITY_REASONS: ReadonlySet<string> = new Set([
+  'legacy-peer-allowlist',
+  'legacy-peer-invitation',
+  'legacy-local-agent-participant',
+  'legacy-local-identity-participant',
+  'legacy-subscription',
+  'legacy-edge-subscription',
+]);
 
 export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -657,6 +680,21 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         return true;
       }
     };
+    const usesSelectedPublicCatalogRecovery = async (cgId: string): Promise<boolean> => {
+      try {
+        if (await agent.isPrivateContextGraph(cgId)) return false;
+        const authority = agent.resolveRfc64CatalogReceiverAuthorityV1(cgId);
+        return authority.active
+          && authority.mode === 'catalog'
+          && authority.reconciliationLane === 'catalog-apply'
+          && !authority.killSwitchActive;
+      } catch {
+        // Older/compatibility agents do not expose RFC-64 receiver authority.
+        // Preserve their ordinary catch-up behavior rather than guessing that
+        // an arbitrary public graph belongs to the selected catalog lane.
+        return false;
+      }
+    };
     const unsupportedPeersForContextGraph = async (cgId: string, peers: readonly string[]): Promise<Set<string>> => {
       const unsupported = new Set<string>();
       await Promise.all(peers.map(async (peerId) => {
@@ -725,6 +763,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     type PerCgLeg = {
       contextGraphId: string;
       perPeer: PerPeerLeg[];
+      /** True when RFC-64 owns this public graph's complete ROOT recovery. */
+      selectedPublicCatalog?: boolean;
       /** Graph-owner outcome used for terminal request classification. */
       durableAttempts?: DurableCatchupAttempt[];
       insertedTriples: number;
@@ -734,6 +774,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     for (const cgId of cgIds) {
       const canUseSharedMemory = includeSharedMemory
         && await canUseSharedMemoryForContextGraph(cgId);
+      const selectedPublicCatalog = canUseSharedMemory
+        && await usesSelectedPublicCatalogRecovery(cgId);
       if (!canUseSharedMemory && !includeDurable) {
         perCgLegs.push({
           contextGraphId: cgId,
@@ -796,13 +838,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           let durableError: string | undefined;
           if (swmSelected.has(candidate)) {
             try {
-              const syncResult = await withTimeout(
-                typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
-                  ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
-                  : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
+              const syncExecution = await withTimeout(
+                selectedPublicCatalog
+                  ? agent.syncSelectedSharedMemoryFromPeerDetailed(candidate, [cgId], {
+                      selectedSwmPriority: true,
+                      requestedScope: {
+                        kind: 'selected-public',
+                        targets: [{ contextGraphId: cgId, lane: 'selected-public' }],
+                      },
+                      source: 'catchup-foreground',
+                    })
+                  : typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
+                    ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
+                    : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
                 PER_PEER_SWM_BUDGET_MS,
                 `SWM catchup from ${candidate} for ${cgId}`,
-              ) as SwmCatchupDetailedResult;
+              );
+              // Selected recovery has a typed terminal wrapper; the route's
+              // existing accounting consumes the underlying SWM diagnostics.
+              const syncResult = (selectedPublicCatalog
+                ? (syncExecution as Awaited<ReturnType<typeof agent.syncSelectedSharedMemoryFromPeerDetailed>>).shared
+                : syncExecution) as SwmCatchupDetailedResult;
               swm = Number(syncResult.insertedTriples ?? 0);
               recordSwmCatchupPeerOutcome(
                 cgId,
@@ -938,6 +994,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       perCgLegs.push({
         contextGraphId: cgId,
         perPeer,
+        ...(selectedPublicCatalog ? { selectedPublicCatalog: true } : {}),
         ...(durableAttempts ? { durableAttempts } : {}),
         insertedTriples: perPeer.reduce((sum, p) => sum + p.insertedTriples, 0),
         durableInsertedTriples: coordinatedDurableInsertedTriples
@@ -974,7 +1031,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const hostCatchup: HostCatchupLeg[] = [];
     if (hostCatchupOpted && hostCatchupSupported) {
       for (const cg of perCgLegs) {
-        if (cg.insertedTriples > 0) continue;
+        if (cg.insertedTriples > 0 || cg.selectedPublicCatalog === true) continue;
         try {
           const peerResults = await (agent as any).catchupSwmFromConnectedHosts(cg.contextGraphId, {
             peers: peerIdParam ? [peerIdParam] : undefined,
@@ -1736,6 +1793,105 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     }
     const memoryLayers = [...new Set(requestedLayers)] as Array<'wm' | 'swm' | 'vm'>;
 
+    // ── Read authority ────────────────────────────────────────────────
+    // `contextGraphId` arrives from the request body and
+    // `validateRequiredContextGraphId` only checks its SHAPE, so without this
+    // gate any holder of a valid token — including an agent-scoped token whose
+    // agent is in no roster for this CG — could name a private context graph
+    // and have both fan-outs below serve its content back:
+    //
+    //   - fan-out 1 queries the vector store, whose rows are filtered by
+    //     `context_graph_id` in SQL (see `VectorStore.search`) — so the CG the
+    //     caller names IS the CG whose embeddings, labels and snippets are
+    //     ranked and returned,
+    //   - fan-out 2 queries the memory-layer views for that CG. It now runs
+    //     through `DKGAgent.query`, which applies its own
+    //     `canReadContextGraph` check — but that check resolves per VIEW
+    //     call and returns an empty result rather than a status, so the
+    //     explicit gate here is what turns a refusal into a 403 and what
+    //     also covers the vector fan-out above.
+    //
+    // This resolves the FULL authority decision rather than the
+    // `canReadContextGraph` boolean, because the boolean collapses three
+    // outcomes into two and loses the one fact an agent-scoped caller needs:
+    // WHY the read was allowed.
+    const callerAgentAddress = authenticatedAgentAddress(authentication);
+    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
+    if (!isNodeAdmin) {
+      const authority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
+        callerAgentAddress,
+      });
+
+      // `unavailable` means the authority itself could not be established
+      // (chain RPC failed, metadata not yet synced) — NOT that the caller is
+      // forbidden. Collapsing it into 403 turns a transient blip into a
+      // terminal error on a route that previously had no chain dependency at
+      // all, and no sane client retries a 403.
+      if (authority.outcome === 'unavailable') {
+        // Response shape follows issue #2641 / PR #2649, which establishes the
+        // convention for this outcome on `/api/query`: a retryable 503 with
+        // `Retry-After`, and deliberately NO context-graph id, authority
+        // source or internal reason in the body — those would turn an
+        // outage response into the same enumeration oracle the denial path
+        // is careful about. The reason stays in the daemon log.
+        res.setHeader('Retry-After', '3');
+        return jsonResponse(res, 503, {
+          error: 'Context graph read authority is temporarily unavailable. Retry shortly.',
+          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+          retryable: true,
+        });
+      }
+
+      // An `allowed` outcome is not automatically a CALLER-scoped allow.
+      // `resolveContextGraphReadAuthorityDecision` only consults
+      // `callerAgentAddress` on the chain-registered, RFC-64 and
+      // agent-gated-local branches. For an unregistered legacy private CG
+      // whose `_meta` carries a peer allowlist but no agent gate,
+      // `getContextGraphAgentGateAddresses` returns null (`ungated`), both
+      // caller-consulting branches are skipped, and the resolver allows on
+      // NODE-scoped facts — this node's peerId is in the allowlist, this node
+      // holds a subscription, this node's own default agent is a participant.
+      // Those are answers to "may this NODE read?", not "may this AGENT read?".
+      // Honouring them for an agent-scoped token is exactly the cross-CG hole
+      // this route is being fixed for.
+      const boundToCaller = !(
+        callerAgentAddress !== undefined
+        && NODE_SCOPED_READ_AUTHORITY_REASONS.has(authority.reason)
+      );
+      if (authority.outcome !== 'allowed' || !boundToCaller) {
+        // On the 403-vs-empty-200 choice: `DKGAgent.query` denies private-CG
+        // reads with a form-matched EMPTY result so denial is indistinguishable
+        // from no-match. This route deliberately differs, and the tradeoff is
+        // real rather than absent: a 403 does disclose "this node knows that
+        // id, and you are excluded", which an empty 200 would not. We accept
+        // that here because the caller supplied an explicit `contextGraphId`
+        // (so it already asserted the id) and because an operator debugging a
+        // roster misconfiguration otherwise gets a silent empty result with no
+        // signal. Flip this to `jsonResponse(res, 200, { results: [] })` if the
+        // enumeration oracle is judged to outweigh the operability.
+        return jsonResponse(res, 403, {
+          error: `Not authorized to search context graph "${contextGraphId}".`,
+        });
+      }
+
+      // Shared memory carries a SECOND gate. `DKGAgent.query` requires
+      // `canUseSharedMemoryForContextGraph` — which additionally demands
+      // confirmed SWM metadata — for any shared-memory-targeting read
+      // (`dkg-agent-query.ts`). Reading `_shared_memory` graphs under
+      // `canReadContextGraph` alone would leave this route measurably more
+      // permissive than `/api/query` for that layer. Drop the layer rather
+      // than failing the whole request: that matches the engine's own
+      // empty-result semantics for an SWM denial, and the other requested
+      // layers remain legitimately readable.
+      if (
+        memoryLayers.includes('swm')
+        && !(await agent.canUseSharedMemoryForContextGraph(contextGraphId, { callerAgentAddress }))
+      ) {
+        const idx = memoryLayers.indexOf('swm');
+        if (idx >= 0) memoryLayers.splice(idx, 1);
+      }
+    }
+
     const results: Array<{
       entityUri: string;
       label: string | null;
@@ -1775,44 +1931,112 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       }
     }
 
-    // Fan-out 2: SPARQL text search (scoped to the requested CG + layers).
+    // Fan-out 2: text search over the memory layers, through the GUARDED
+    // query path.
+    //
+    // This used to call `agent.store.query` directly with hand-built
+    // `STRSTARTS(STR(?g), "<cg>/_working_memory")`-style filters. That
+    // bypassed `DKGQueryEngine`'s graph-scope rewrites AND `DKGAgent.query`'s
+    // per-view resolution, which meant two things had to be re-implemented
+    // here and could drift from the writer-side layout: which named graphs
+    // belong to a memory layer, and which of them the caller may read.
+    // Notably the `wm` prefixes matched EVERY agent's drafts in the context
+    // graph, so the A-1 working-memory isolation `DKGAgent.query` enforces on
+    // the `working-memory` view did not apply to this route.
+    //
+    // Fan out per view instead and let the engine own graph resolution. The
+    // caller query keeps only the text predicate; `GRAPH ?g` stays, and
+    // `constrainGraphVariablesToAllowedSet` pins it to the view's allow-set.
+    //
     // escapeSparqlLiteral escapes backslashes, quotes, and CR/LF/TAB per the
     // SPARQL STRING_LITERAL2 grammar -- a simple `replace(/"/g, '\\"')` would
     // still allow `\` to escape the closing quote and break out of the literal.
     const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
-    const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-    const graphFilters = memoryLayers.map((l) => {
-      if (l === 'wm') {
-        return `(STRSTARTS(STR(?g), "${cgUri}/_working_memory") || STRSTARTS(STR(?g), "${cgUri}/assertion/"))`;
-      }
-      if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
-      // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
-      // contextGraphVerifiableMemoryUri in dkg-core). The pre-rc.16
-      // "_verified" prefix matched nothing, so memory layer "vm" could
-      // never return SPARQL hits.
-      return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
-    }).join(' || ') || 'false';
-    try {
-      // #1096: accept both http:// and https:// schema.org forms -- real
-      // payloads overwhelmingly use https://schema.org, which the previous
-      // http-only property path silently excluded.
-      const sparqlResult = await agent.store.query(`
+    // #1096: accept both http:// and https:// schema.org forms -- real
+    // payloads overwhelmingly use https://schema.org, which the previous
+    // http-only property path silently excluded.
+    const searchSparql = `
         SELECT DISTINCT ?entity ?name ?desc WHERE {
           GRAPH ?g {
             ?entity <http://schema.org/name>|<https://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
             OPTIONAL { ?entity <http://schema.org/description>|<https://schema.org/description> ?desc }
           }
-          FILTER(${graphFilters})
           FILTER(
             CONTAINS(LCASE(STR(?name)), "${escapedQuery}")
             || (BOUND(?desc) && CONTAINS(LCASE(STR(?desc)), "${escapedQuery}"))
           )
         }
         LIMIT ${resultLimit}
-      `);
-      if (sparqlResult.type === 'bindings') {
-        for (const binding of sparqlResult.bindings) {
+      `;
+
+    // Working memory is per-agent, so the `wm` view needs an address:
+    //   - an agent-scoped caller reads its OWN working memory, and
+    //     `DKGAgent.query`'s A-1 check rejects anything else;
+    //   - a node operator spans every agent registered on this node;
+    //   - an anonymous / auth-disabled caller supplies no address, so the
+    //     engine falls back to the node's default agent — the same contract
+    //     `/api/query` applies.
+    // `swm` and `vm` are context-graph-wide by design and take no address.
+    //
+    // IMPORTANT — what the node-operator exemption does NOT buy. Skipping the
+    // route's own gate above only skips THIS route's 403. Every `agent.query`
+    // below still runs `DKGAgent.query`'s own `canReadContextGraph`
+    // (`dkg-agent-query.ts`), and a node token resolves `callerAgentAddress`
+    // to `undefined`, so that check falls back to NODE-LOCAL authority —
+    // whether any agent registered here is in the CG's roster. There is no
+    // admin bypass inside the engine.
+    //
+    // So for a context graph this node HOLDS but none of its agents are
+    // rostered for, the route admits the request and the engine returns an
+    // empty result. A node operator therefore gets a cross-AGENT view within
+    // the context graphs this node may read — not an unconditional cross-CG
+    // one. An earlier revision of this comment claimed the latter; it was
+    // wrong, and the tests could not catch it because the fake `agent.query`
+    // has no authority check of its own.
+    const workingMemoryAddresses: Array<string | undefined> = callerAgentAddress
+      ? [callerAgentAddress]
+      : isNodeAdmin
+        ? (agent.listLocalAgents().map((a) => a.agentAddress) as string[])
+        : [undefined];
+    const searchPlans: Array<{ view: 'working-memory' | 'shared-working-memory' | 'verifiable-memory'; agentAddress?: string }> = [];
+    for (const layer of memoryLayers) {
+      if (layer === 'wm') {
+        // A node operator with no registered agents still gets the engine
+        // default rather than silently skipping the whole layer.
+        const addresses = workingMemoryAddresses.length > 0 ? workingMemoryAddresses : [undefined];
+        for (const agentAddress of addresses) {
+          searchPlans.push({ view: 'working-memory', agentAddress });
+        }
+        continue;
+      }
+      searchPlans.push({
+        view: layer === 'swm' ? 'shared-working-memory' : 'verifiable-memory',
+      });
+    }
+
+    // Untrusted, planner-heavy API reads belong on the BACKGROUND admission
+    // lane, and must be cancelled when the HTTP caller goes away — otherwise a
+    // disconnected search leaves orphan store work occupying slots that
+    // promotion, reconciliation and SWM catch-up need (issue #1989).
+    // `/api/query` gets this from `createStoreQueryRequestLifecycle`; this
+    // route now multiplies store work by the number of views, so it needs it
+    // strictly more than `/api/query` does.
+    const searchLifecycle = createStoreQueryRequestLifecycle(req, res, 'api.memory.search');
+    try {
+    for (const plan of searchPlans) {
+      try {
+        const viewResult = await agent.query(searchSparql, {
+          contextGraphId,
+          view: plan.view,
+          agentAddress: plan.agentAddress,
+          callerAgentAddress,
+          signal: searchLifecycle.signal,
+          priority: searchLifecycle.priority,
+          source: searchLifecycle.source,
+        });
+        for (const binding of viewResult.bindings ?? []) {
           const uri = binding.entity;
+          if (!uri) continue;
           const label = binding.name ?? null;
           const snippet = binding.desc ?? null;
           if (seen.has(uri)) {
@@ -1834,9 +2058,27 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
             });
           }
         }
+      } catch (err) {
+        // A caller disconnect aborts the WHOLE search — continuing would keep
+        // scheduling store work for a response nobody will read.
+        if ((err as { code?: string } | undefined)?.code === API_QUERY_CALLER_DISCONNECTED) throw err;
+        // Otherwise a single view failing stays non-fatal, as the single
+        // combined query was before.
+        //
+        // Note on what this can and cannot mask: the read-authority gate near
+        // the top of this handler has already run, so a caller with no
+        // authority for the CG got a 403 and never reached here. What CAN
+        // still produce an empty layer without an error is `DKGAgent.query`'s
+        // own per-view checks — in particular `canUseSharedMemoryForContextGraph`
+        // for the `shared-working-memory` view, which additionally requires
+        // confirmed SWM metadata. That is a deliberate tightening (the
+        // replaced direct store read applied neither check), but it means an
+        // `swm` layer can come back empty for authorization reasons rather
+        // than for lack of matches.
       }
-    } catch {
-      // SPARQL search failure is non-fatal
+    }
+    } finally {
+      searchLifecycle.dispose();
     }
 
     // Sort: vector-matched results first (by similarity), then SPARQL-only

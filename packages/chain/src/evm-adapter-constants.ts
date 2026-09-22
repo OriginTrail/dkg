@@ -45,6 +45,31 @@ export const MAX_PROBE_AGE_MS = 30_000;
 export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
 
 /**
+ * Per-attempt deadline for the configured-chainId identity gate
+ * (`ensureConfiguredStaticChainIdValidated`) and its caller-side wrappers.
+ *
+ * Deliberately ALWAYS capped: unlike the `pointRead` policy this does NOT
+ * relax to uncapped on a single-RPC node (`resolveCapMs`,
+ * rpc-failover-client.ts). The gate is a chain-IDENTITY probe running on a
+ * SHARED single-flight, so #894's "do not truncate a legitimately long read"
+ * trade does not transfer: uncapping it would leave the shared promise bounded
+ * only by ethers' 300s FetchRequest expiry, with every concurrent caller
+ * coalesced onto it and none able to cancel or start a fresh probe.
+ *
+ * Sized well above RPC_READ_STALL_TIMEOUT_MS because 4s was never measuring
+ * chain latency. `admitAndObserveRpcAttempt` awaits `acquireActiveRequest()`
+ * INSIDE `request.getUrlFunc` (rpc-request-transport.ts), so local governor
+ * admission is spent inside this same window. Under
+ * DEFAULT_RPC_REQUEST_GOVERNOR_POLICY a foreground request can queue for
+ * maxQueueSize / maxRequestsPerSecond = 256 / 10 = 25.6s, and a background one
+ * is additionally gated by startupJitterMs = 30s, so any cap at or below 30s
+ * can fire on a perfectly healthy chain. 45s exceeds both, and stays below
+ * CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS (60s) so that caller's
+ * surfaced error label stays deterministic.
+ */
+export const CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS = 45_000;
+
+/**
  * Preserve the legacy Context Graph registry scan span while using smaller,
  * RPC-safe pages. Kept outside the adapter base so the dedicated reverse-name
  * resolver can consume the budget without introducing a base/resolver module
@@ -105,11 +130,28 @@ export const MIN_RPC_RECEIPT_TIMEOUT_MS = 1_000;
 export const DEFAULT_FINALITY_CONFIRMATIONS = 1;
 
 /**
- * Normalize an operator-selected mined-receipt confirmation depth.
+ * Blocks below the chain tip that this node treats as reorg-safe.
+ *
+ * Lives here, in the leaf constants module, because BOTH the Context Graph
+ * registry scan and the authority index's durable cursor need it, and the
+ * authority-index reader cannot import it from `evm-adapter-base` — that module
+ * imports the reader.
+ */
+export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
+/**
+ * Normalize the operator-selected finality depth — the node's SINGLE definition
+ * of chain finality, not a write-side knob.
  *
  * Standard EVM semantics apply: the receipt's own canonical block is
  * confirmation 1, so a value of 1 makes the receipt eligible immediately
  * after inclusion. An omitted value defaults to 1.
+ *
+ * Besides mined-receipt finality and recovery proof snapshots, this same depth
+ * selects the anchor for the Context Graph authority index, named-CG
+ * resolution and the RFC-64 precommits (see evm-finality-anchor.ts). Raising it
+ * therefore buys reorg resistance on the write side AND delays how quickly a
+ * newly registered Context Graph becomes authoritative on this node.
  */
 export function resolveFinalityConfirmations(value: unknown): number {
   if (value === undefined) return DEFAULT_FINALITY_CONFIRMATIONS;

@@ -32,6 +32,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { resolveDaemonNodeCommand } from '../daemon-entrypoint.js';
+import type { NodeRuntimeProbe } from '../node-runtime-preflight.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
@@ -555,6 +556,7 @@ export const _autoUpdateIo = {
   execSync: execSync as (...args: any[]) => any,
   // Dependency reference only; daemon command policy lives in daemon-entrypoint.ts.
   resolveDaemonNodeCommand,
+  runtime: process as NodeRuntimeProbe,
   dkgDir,
   releasesDir,
   activeSlot: activeSlot as () => Promise<'a' | 'b'>,

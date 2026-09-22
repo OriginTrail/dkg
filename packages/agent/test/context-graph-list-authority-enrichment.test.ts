@@ -6,6 +6,8 @@ import { ContextGraphBindingState } from '../src/context-graph-binding-state.js'
 import { enrichContextGraphListAuthorityV1 } from
   '../src/context-graph-list-authority-enrichment.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 
 const CALLER_ADDRESS = '0x1111111111111111111111111111111111111111';
 const MISS_COUNT = 417;
@@ -55,6 +57,10 @@ function listingAgent(input: {
   );
   const resolveFinalized = vi.fn(input.resolveFinalized);
   const fakeAgent = {
+    // Listing enrichment runs under the shared authority governor. This
+    // host is a plain object, so it carries the coordinator directly
+    // rather than through the agent's owner-backed accessor.
+    rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
     subscribedContextGraphs: new Map(),
     store: {
       query: async () => ({
@@ -246,7 +252,13 @@ describe('context graph list authority enrichment', () => {
       hashById.get(id)!,
       BigInt(index + 1_000),
     ]));
-    const resolveMany = vi.fn(async (nameHashes: readonly string[]) => {
+    const resolveMany = vi.fn(async (
+      nameHashes: readonly string[],
+      _options?: {
+        signal?: AbortSignal;
+        onContextGraphAuthorityProjectionServed?: (evidence: unknown) => void;
+      },
+    ) => {
       const resolved = new Map(nameHashes.map((nameHash) => [
         nameHash,
         onChainIdByHash.get(nameHash)!,
@@ -257,6 +269,8 @@ describe('context graph list authority enrichment', () => {
     const readRegistrationStatus = vi.fn(async () => null);
     const resolveCurrent = vi.fn(async () => null);
     const fakeAgent = {
+      // Listing enrichment runs under the shared authority governor.
+      rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
       subscribedContextGraphs: new Map(),
       contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
@@ -292,6 +306,10 @@ describe('context graph list authority enrichment', () => {
 
     expect(resolveMany).toHaveBeenCalledOnce();
     expect(resolveMany.mock.calls[0]?.[0]).toHaveLength(4_097);
+    expect(resolveMany.mock.calls[0]?.[1]).toEqual({
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(result.rows).toHaveLength(ids.length);
     expect(result.rows.every((row: { id: string; onChainId?: string }, index: number) => (
       row.id === ids[index] && row.onChainId === String(index + 1_000)
@@ -311,6 +329,8 @@ describe('context graph list authority enrichment', () => {
       return new Map([[nameHash, 9_001n]]);
     });
     const fakeAgent = {
+      // Listing enrichment runs under the shared authority governor.
+      rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
       subscribedContextGraphs: new Map(),
       contextGraphBindingState: new ContextGraphBindingState(),
       chain: {

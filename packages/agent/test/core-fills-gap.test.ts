@@ -60,6 +60,7 @@ import {
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
 import { createVmReconcilePeerTopology } from '../src/vm-reconcile-peer-topology.js';
+import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -563,14 +564,26 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(persisted?.coreHosted).toBe(true);
   });
 
-  it('ignores a numeric swmGraphId hint and falls back to the numeric id', async () => {
+  it('uses an equal numeric swmGraphId hint as the same local id', async () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => 0;
 
-    // A numeric (or equal-to-cgId) hint carries no cleartext info → numericStr.
     await internals.recordCoreHostedPublicCg('8', '8');
 
     expect(internals.subscribedContextGraphs.get('8')?.coreHosted).toBe(true);
+  });
+
+  it('keeps an all-digit cleartext hint that differs from the on-chain id', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+
+    await internals.recordCoreHostedPublicCg('5', '99');
+
+    expect(internals.subscribedContextGraphs.get('99')).toMatchObject({
+      coreHosted: true,
+      onChainId: '5',
+    });
+    expect(internals.subscribedContextGraphs.get('5')).toBeUndefined();
   });
 
   it('does NOT mark a CURATED CG (Cores host curated as opaque ciphertext, not VM)', async () => {
@@ -614,6 +627,133 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
     expect(internals.subscribedContextGraphs.get('7')?.coreHosted).toBe(true);
     expect(saved.length).toBe(savesAfterFirst); // no second persist
+  });
+
+  it('issues no chain read for an ACK on an already-recorded hosted public CG', async () => {
+    // RPC budget: the pre-sign hook fires on EVERY StorageACK. Once the row is
+    // recorded the outcome is a no-op, so it must not cost liveness + policy
+    // reads per ACK.
+    const internals = await boot();
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+
+    await internals.recordCoreHostedPublicCg('1', 'devnet-test');
+    expect(internals.subscribedContextGraphs.get('devnet-test')?.coreHosted).toBe(true);
+    // First observation still proves liveness, then reads the policy.
+    expect(isContextGraphActiveOnChain.calls).toEqual([[1n]]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([[1n]]);
+
+    for (let ack = 0; ack < 5; ack += 1) {
+      await internals.recordCoreHostedPublicCg('1', 'devnet-test');
+    }
+
+    expect(isContextGraphActiveOnChain.calls).toHaveLength(1);
+    expect(getContextGraphAccessPolicy.calls).toHaveLength(1);
+  });
+
+  it('issues no chain read for a hosted public CG restored from the persisted row', async () => {
+    const internals = await boot();
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, syncMode: 'always-on', onChainId: '1', coreHosted: true,
+    });
+
+    await internals.recordCoreHostedPublicCg('1');
+
+    expect(isContextGraphActiveOnChain.calls).toEqual([]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([]);
+    expect(saved).toHaveLength(0);
+  });
+
+  it('reads liveness BEFORE policy on the first observation of a hosted CG', async () => {
+    const internals = await boot();
+    const order: string[] = [];
+    internals.chain.isContextGraphActiveOnChain = async () => { order.push('live'); return true; };
+    internals.chain.getContextGraphAccessPolicy = async () => { order.push('policy'); return 0; };
+
+    await internals.recordCoreHostedPublicCg('11', 'first-observation');
+
+    expect(order).toEqual(['live', 'policy']);
+    expect(internals.subscribedContextGraphs.get('first-observation')?.coreHosted).toBe(true);
+  });
+
+  it('still reads chain when a core-hosted row is bound to a DIFFERENT on-chain id', async () => {
+    // The early-out is keyed on the on-chain id, not just the local row: a
+    // local id re-created under a new chain graph is a first observation.
+    const internals = await boot();
+    const isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
+    });
+
+    await internals.recordCoreHostedPublicCg('9', 'devnet-test');
+
+    expect(isContextGraphActiveOnChain.calls).toEqual([[9n]]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([[9n]]);
+    const sub = internals.subscribedContextGraphs.get('devnet-test');
+    expect(sub!.onChainId).toBe('9');
+    expect(sub!.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('never rebinds a core-hosted row to a DEACTIVATED on-chain id', async () => {
+    const internals = await boot();
+    internals.chain.isContextGraphActiveOnChain = async (id) => id !== 9n;
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
+    });
+
+    await internals.recordCoreHostedPublicCg('9', 'devnet-test');
+
+    expect(getContextGraphAccessPolicy.calls).toEqual([]); // liveness gates the policy read
+    expect(internals.subscribedContextGraphs.get('devnet-test')).toMatchObject({
+      onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    expect(saved).toHaveLength(0);
+  });
+
+  it('persists once when first ACKs for the same hosted CG race', async () => {
+    // Both calls pass the pre-read early-out; the post-read check must still
+    // stop the loser from re-persisting and re-triggering the reconcile.
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    const origSet = (internals as any).setContextGraphSubscription.bind(internals);
+    const setContextGraphSubscription = recorder((...a: unknown[]) => origSet(...a));
+    (internals as any).setContextGraphSubscription = setContextGraphSubscription;
+
+    await Promise.all([
+      internals.recordCoreHostedPublicCg('12', 'raced-first-ack'),
+      internals.recordCoreHostedPublicCg('12', 'raced-first-ack'),
+    ]);
+
+    expect(internals.subscribedContextGraphs.get('raced-first-ack')?.coreHosted).toBe(true);
+    expect(setContextGraphSubscription.calls).toHaveLength(1);
+  });
+
+  it('keys the host row under a local mapping that appears while the chain reads are in flight', async () => {
+    const internals = await boot();
+    let resolvePolicy!: (value: number) => void;
+    internals.chain.getContextGraphAccessPolicy = () => new Promise<number>((resolve) => {
+      resolvePolicy = resolve;
+    });
+    (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+
+    const recording = internals.recordCoreHostedPublicCg('13', 'publisher-hint');
+    internals.subscribedContextGraphs.set('local-name', { subscribed: true, onChainId: '13' });
+    resolvePolicy(0);
+    await recording;
+
+    expect(internals.subscribedContextGraphs.get('local-name')?.coreHosted).toBe(true);
+    expect(internals.subscribedContextGraphs.get('publisher-hint')).toBeUndefined();
   });
 
   it('preserves a pre-existing member subscription while adding coreHosted', async () => {
@@ -877,6 +1017,212 @@ describe('Phase D - VM reconcile damping', () => {
     });
   });
 
+  it('reuses a successful version snapshot only within the same finalized block', async () => {
+    const internals = await boot();
+    const localCgId = '169';
+    const onChainCgId = 169n;
+    const kaId = 9169n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    let publisher = '0x1111111111111111111111111111111111111111';
+    const author = '0x2222222222222222222222222222222222222222';
+    const rootA = `0x${'aa'.repeat(32)}`;
+    const rootB = `0x${'bb'.repeat(32)}`;
+    let finalizedBlock = 100;
+    let latestRoot = rootA;
+    const knowledgeAssetStorageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    let blockHash = `0x${'10'.repeat(32)}`;
+    const readSnapshot = recorder(async () => ({
+      knowledgeAssetId: kaId,
+      latestRoot,
+      rootCount: latestRoot === rootA ? 1n : 2n,
+      latestAuthor: author,
+      latestPublisher: publisher,
+      blockNumber: finalizedBlock,
+      blockHash,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetStorageGeneration: 1,
+    }));
+    internals.chain.readKnowledgeAssetVersionSnapshot = readSnapshot;
+    const snapshotIsCurrent = recorder(async () => true);
+    (internals.chain as any).knowledgeAssetVersionSnapshotIsCurrent = snapshotIsCurrent;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    const getLatestMerkleRoot = recorder(async () => (
+      new Uint8Array(32).fill(latestRoot === rootA ? 0xaa : 0xbb)
+    ));
+    const getLatestMerkleRootPublisher = recorder(async () => publisher);
+    internals.chain.getLatestMerkleRoot = getLatestMerkleRoot;
+    internals.chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+
+    finalizedBlock = 101;
+    blockHash = `0x${'11'.repeat(32)}`;
+    latestRoot = rootB;
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 101))
+      .resolves.toEqual({ status: 'already', blockNumber: 101 });
+
+    expect(readSnapshot.calls).toHaveLength(2);
+    expect(snapshotIsCurrent.calls).toHaveLength(1);
+    expect(getLatestMerkleRoot.calls).toHaveLength(2);
+    expect(getLatestMerkleRootPublisher.calls).toHaveLength(2);
+    expect(reconcile.calls).toHaveLength(2);
+    expect(reconcile.calls[0]?.[0]).toMatchObject({
+      versionBlock: 100,
+      merkleRoot: new Uint8Array(32).fill(0xaa),
+      publisherAddress: publisher,
+    });
+    expect(reconcile.calls[1]?.[0]).toMatchObject({
+      versionBlock: 101,
+      merkleRoot: new Uint8Array(32).fill(0xbb),
+      publisherAddress: publisher,
+    });
+  });
+
+  it('falls back to live materialization when finalized-slot evidence loses currentness', async () => {
+    const internals = await boot();
+    const localCgId = '171';
+    const onChainCgId = 171n;
+    const kaId = 9171n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    let publisher = '0x1111111111111111111111111111111111111111';
+    const root = `0x${'aa'.repeat(32)}`;
+    const knowledgeAssetStorageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const readSnapshot = recorder(async () => ({
+      knowledgeAssetId: kaId,
+      latestRoot: root,
+      rootCount: 1n,
+      latestAuthor: '0x2222222222222222222222222222222222222222',
+      latestPublisher: publisher,
+      blockNumber: 100,
+      blockHash: `0x${'10'.repeat(32)}`,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetStorageGeneration: 1,
+    }));
+    internals.chain.readKnowledgeAssetVersionSnapshot = readSnapshot;
+    let validatorThrows = false;
+    const snapshotIsCurrent = recorder(async () => {
+      if (validatorThrows) throw new Error('header unavailable');
+      return false;
+    });
+    (internals.chain as any).knowledgeAssetVersionSnapshotIsCurrent = snapshotIsCurrent;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    const getLatestMerkleRoot = recorder(async () => new Uint8Array(32).fill(0xaa));
+    const getLatestMerkleRootPublisher = recorder(async () => publisher);
+    internals.chain.getLatestMerkleRoot = getLatestMerkleRoot;
+    internals.chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100);
+    publisher = '0x3333333333333333333333333333333333333333';
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+    validatorThrows = true;
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+
+    expect(snapshotIsCurrent.calls).toHaveLength(2);
+    expect(getLatestMerkleRoot.calls).toHaveLength(3);
+    expect(getLatestMerkleRootPublisher.calls).toHaveLength(3);
+    expect(reconcile.calls).toHaveLength(3);
+    expect(reconcile.calls[2]?.[0]).toMatchObject({ publisherAddress: publisher });
+    expect(readSnapshot.calls).toHaveLength(3);
+  });
+
+  it('does not reuse finalized-slot evidence after the ordinal resolves to a replacement KA', async () => {
+    const internals = await boot();
+    const localCgId = '172';
+    const onChainCgId = 172n;
+    const originalKaId = 9172n;
+    const replacementKaId = 9272n;
+    registerUnmatchedKC(internals.chain, originalKaId, onChainCgId);
+    let currentKaId = originalKaId;
+    internals.chain.getContextGraphKCAt = async () => currentKaId;
+    const publisher = '0x1111111111111111111111111111111111111111';
+    const root = `0x${'aa'.repeat(32)}`;
+    const knowledgeAssetStorageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    internals.chain.readKnowledgeAssetVersionSnapshot = async (kaId) => ({
+      knowledgeAssetId: kaId,
+      latestRoot: root,
+      rootCount: 1n,
+      latestAuthor: '0x2222222222222222222222222222222222222222',
+      latestPublisher: publisher,
+      blockNumber: 100,
+      blockHash: `0x${'10'.repeat(32)}`,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetStorageGeneration: 1,
+    });
+    const snapshotIsCurrent = recorder(async () => true);
+    (internals.chain as any).knowledgeAssetVersionSnapshotIsCurrent = snapshotIsCurrent;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    internals.chain.getLatestMerkleRoot = async () => new Uint8Array(32).fill(0xaa);
+    internals.chain.getLatestMerkleRootPublisher = async () => publisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100);
+    currentKaId = replacementKaId;
+    await internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100);
+
+    expect(snapshotIsCurrent.calls).toHaveLength(0);
+    expect(reconcile.calls).toHaveLength(2);
+    expect(reconcile.calls[1]?.[0]).toMatchObject({ kaId: replacementKaId });
+  });
+
+  it('withholds the finalized-block shortcut when coherent validation is stale', async () => {
+    const internals = await boot();
+    const localCgId = '170';
+    const onChainCgId = 170n;
+    const kaId = 9170n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    const publisher = '0x1111111111111111111111111111111111111111';
+    const root = `0x${'aa'.repeat(32)}`;
+    const readSnapshot = recorder(async () => ({
+      latestRoot: root,
+      rootCount: 1n,
+      latestAuthor: '0x2222222222222222222222222222222222222222',
+      latestPublisher: publisher,
+      // The provider advanced after the sweep captured head=100. This result
+      // must not authorize a shortcut for the older finalized slot.
+      blockNumber: 101,
+    }));
+    internals.chain.readKnowledgeAssetVersionSnapshot = readSnapshot;
+    (internals.chain as MockChainAdapter & { getFinalityConfirmations: () => number })
+      .getFinalityConfirmations = () => 1;
+    const getLatestMerkleRoot = recorder(async () => new Uint8Array(32).fill(0xaa));
+    const getLatestMerkleRootPublisher = recorder(async () => publisher);
+    internals.chain.getLatestMerkleRoot = getLatestMerkleRoot;
+    internals.chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, 100))
+      .resolves.toEqual({ status: 'already', blockNumber: 100 });
+
+    expect(readSnapshot.calls).toHaveLength(2);
+    expect(getLatestMerkleRoot.calls).toHaveLength(2);
+    expect(getLatestMerkleRootPublisher.calls).toHaveLength(2);
+    expect(reconcile.calls).toHaveLength(2);
+  });
+
   it('keeps legacy sequential ids on the read-only contract/id UAL', async () => {
     const internals = await boot();
     const onChainCgId = 67n;
@@ -897,39 +1243,6 @@ describe('Phase D - VM reconcile damping', () => {
       kaId,
       ual: buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId),
     });
-  });
-
-  it('clears exact-recovery rotation state on the direct recent-cache terminal path', async () => {
-    const internals = await boot();
-    const localCgId = '68';
-    const onChainCgId = 68n;
-    const kaId = 9068n;
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
-    const storageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
-    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId);
-    const merkleRoot = await internals.chain.getLatestMerkleRoot(kaId);
-    const target = {
-      localCgId,
-      onChainCgId: onChainCgId.toString(),
-      ordinal: 0,
-      ual,
-      merkleRoot: bytesToHex(merkleRoot),
-      kaId: kaId.toString(),
-      reason: 'no-swm' as const,
-    };
-    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
-    (internals as any).prepareVmReconcileRotationTarget(
-      target, ['12D3KooWDirectTerminalRecent'], 100,
-    );
-    ((internals as any).recentReconciledUals as { add(key: string): void }).add(
-      (internals as any).vmReconcileCacheKey(localCgId, ual, merkleRoot),
-    );
-    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(true);
-
-    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
-      .resolves.toEqual({ status: 'already', blockNumber: 0 });
-
-    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
   });
 
   it.each([
@@ -2982,6 +3295,232 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId))
       .toEqual([fallbackPeer]);
+  });
+
+  it('falls back to bounded full sync and remembers legacy exact-filter peers', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLegacyCapability', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/legacy-capability';
+    const peerId = '12D3KooWLegacyExactFilterPeer';
+    const connectedPeer = { toString: () => peerId };
+    (internals as any).node = {
+      peerId: '12D3KooWLegacyExactFilterLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerId], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const exactFetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphId: string,
+    ) => {
+      exactFetches.push(contextGraphId);
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 1, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+        responderCapability: 'legacy-filter-unsupported',
+      };
+    };
+    const fallbacks: unknown[][] = [];
+    (internals as any).runLegacyDurableSyncDetailed = async (...args: unknown[]) => {
+      fallbacks.push(args);
+      return {
+        result: {
+          fetchedDataTriples: 3, fetchedMetaTriples: 2, insertedTriples: 5,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'legacy-capability')], 100, () => true,
+    );
+
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(fallbacks).toHaveLength(1);
+    expect(fallbacks[0]?.slice(1, 4)).toEqual([peerId, [localCgId], undefined]);
+    expect((internals as any).vmReconcileExactPeerCapabilities.get(peerId))
+      .toMatchObject({ connectionKey: expect.any(String), expiresAt: expect.any(Number) });
+
+    const nextCgId = '0x0000000000000000000000000000000000000001/legacy-capability-next';
+    const nextTarget = {
+      ...vmRecoveryTarget(nextCgId, 0, 'legacy-capability-next'),
+      onChainCgId: '2',
+    };
+    const nextResult = await internals.recoverVmReconcileBatch(
+      nextCgId, 2n, [nextTarget], 100, () => true,
+    );
+
+    expect(nextResult.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(exactFetches).toEqual([localCgId]);
+    expect(fallbacks).toHaveLength(2);
+    expect(fallbacks[1]?.slice(1, 4)).toEqual([peerId, [nextCgId], undefined]);
+  });
+
+  it('detects a legacy peer when its proven-holder microbatch misses every target', async () => {
+    const chain = new MockChainAdapter();
+    (chain as any).getKnowledgeAssetUpdateContext = async () => ({
+      merkleRootsCount: 1n,
+      byteSize: 128n,
+      merkleLeafCount: 1,
+    });
+    agent = await DKGAgent.create({ name: 'ExactVmLegacyMicrobatch', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/legacy-microbatch';
+    const peerId = '12D3KooWLegacyExactMicrobatchPeer';
+    const connectedPeer = { toString: () => peerId };
+    (internals as any).node = {
+      peerId: '12D3KooWLegacyExactMicrobatchLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerId], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    (internals as any).readLiveOnChainAccessPolicy = async () => 0;
+
+    const fetches: string[][] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      _peerId: string,
+      _contextGraphId: string,
+      uals: string[],
+    ) => {
+      fetches.push(uals);
+      const probe = uals.length === 1;
+      return {
+        result: {
+          fetchedDataTriples: probe ? 1 : 0,
+          fetchedMetaTriples: probe ? 8 : 1,
+          insertedTriples: probe ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: probe ? 'found' : 'incomplete',
+        ...(probe ? {} : { responderCapability: 'legacy-filter-unsupported' }),
+      };
+    };
+    let fallbackRan = false;
+    (internals as any).runLegacyDurableSyncDetailed = async () => {
+      fallbackRan = true;
+      return {
+        result: {
+          fetchedDataTriples: 2, fetchedMetaTriples: 16, insertedTriples: 18,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string,
+      _ocg: bigint,
+      ordinal: number,
+    ) => ordinal === 0 || fallbackRan
+      ? { status: 'reconciled', blockNumber: 100 }
+      : { status: 'pending', recovery: targets[ordinal] };
+    const targets = Array.from({ length: 3 }, (_, ordinal) =>
+      vmRecoveryTarget(localCgId, ordinal, String(ordinal + 10)));
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, targets, 100, () => true,
+    );
+
+    expect(fetches).toEqual([
+      [targets[0]!.ual],
+      [targets[1]!.ual, targets[2]!.ual],
+    ]);
+    expect(fallbackRan).toBe(true);
+    expect([...result.outcomes.values()]).toEqual([
+      { status: 'reconciled', blockNumber: 100 },
+      { status: 'reconciled', blockNumber: 100 },
+      { status: 'reconciled', blockNumber: 100 },
+    ]);
+    expect((internals as any).vmReconcileExactPeerCapabilities.get(peerId))
+      .toMatchObject({ connectionKey: expect.any(String), expiresAt: expect.any(Number) });
+  });
+
+  it('expires or invalidates remembered legacy capability when the connection changes', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLegacyCapabilityCache', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerId = '12D3KooWLegacyExactFilterCachePeer';
+    let remoteAddress = '/ip4/127.0.0.1/tcp/40101';
+    const remotePeer = { toString: () => peerId };
+    (internals as any).node = {
+      peerId: '12D3KooWLegacyExactFilterCacheLocal',
+      libp2p: {
+        getConnections: () => [{
+          remotePeer,
+          direction: 'inbound',
+          timeline: { open: 1 },
+          remoteAddr: { toString: () => remoteAddress },
+        }],
+        getPeers: () => [remotePeer],
+      },
+    };
+
+    (internals as any).rememberVmReconcileExactFilterUnsupported(peerId);
+    expect((internals as any).vmReconcileExactFilterUnsupported(peerId)).toBe(true);
+
+    remoteAddress = '/ip4/127.0.0.1/tcp/40102';
+    expect((internals as any).vmReconcileExactFilterUnsupported(peerId)).toBe(false);
+    expect((internals as any).vmReconcileExactPeerCapabilities.has(peerId)).toBe(false);
+
+    (internals as any).rememberVmReconcileExactFilterUnsupported(peerId);
+    const entry = (internals as any).vmReconcileExactPeerCapabilities.get(peerId);
+    entry.expiresAt = -1;
+    expect((internals as any).vmReconcileExactFilterUnsupported(peerId)).toBe(false);
+    expect((internals as any).vmReconcileExactPeerCapabilities.has(peerId)).toBe(false);
+  });
+
+  it('keeps remembered legacy peers eligible for bounded fallback and bounds the cache', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLegacyCapabilityBound', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerIds = Array.from(
+      { length: DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES + 1 },
+      (_, index) => `12D3KooWLegacyExactBound${index}`,
+    );
+    const connectedById = new Map(peerIds.map((peerId) => [peerId, {
+      remotePeer: { toString: () => peerId },
+      direction: 'outbound',
+      timeline: { open: 1 },
+      remoteAddr: { toString: () => `/ip4/127.0.0.1/tcp/${41000 + peerIds.indexOf(peerId)}` },
+    }]));
+    (internals as any).node = {
+      peerId: '12D3KooWLegacyExactCapabilityBoundLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()],
+        getPeers: () => [...connectedById.values()].map((connection) => connection.remotePeer),
+      },
+    };
+    for (const peerId of peerIds) {
+      (internals as any).rememberVmReconcileExactFilterUnsupported(peerId);
+    }
+
+    const policy = new VmRecoveryProviderPolicy();
+    expect((internals as any).selectVmReconcileExactCandidate(
+      undefined,
+      [peerIds[peerIds.length - 1]],
+      policy,
+    )).toBe(peerIds[peerIds.length - 1]);
+    expect((internals as any).vmReconcileExactPeerCapabilities.size)
+      .toBeLessThanOrEqual(DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES);
+
+    (internals as any).closeVmReconcileRotationState();
+    expect((internals as any).vmReconcileExactPeerCapabilities.size).toBe(0);
   });
 
   it('clears cached authoritative curators after a successful empty resolution', async () => {
