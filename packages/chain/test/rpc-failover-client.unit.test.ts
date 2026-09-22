@@ -40,6 +40,7 @@ import {
 } from '../src/rpc-failover-client.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
+  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
@@ -124,6 +125,12 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
     expect(resolveCapMs('failOpenFundingRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('failOpenFundingRead', 1)).toBe(RPC_READ_STALL_TIMEOUT_MS);
   });
+
+  it('securityGatePointRead: caps multi-RPC attempts below the outer gate but leaves single-RPC to it', () => {
+    expect(resolveCapMs('securityGatePointRead', 2)).toBe(RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS);
+    expect(resolveCapMs('securityGatePointRead', 4)).toBe(RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS);
+    expect(resolveCapMs('securityGatePointRead', 1)).toBeUndefined();
+  });
 });
 
 describe('RpcReadDescriptor — explicit read attribution ownership', () => {
@@ -192,6 +199,32 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1_500);
     expect(await p).toBe('BACKUP');
     expect(slow.calls).toHaveLength(1);
+    expect(fast.calls).toHaveLength(1);
+  });
+
+  it('readContract security gate fails over before its aborting 2.5s caller deadline', async () => {
+    vi.useFakeTimers();
+    const stalled = recorder(() => new Promise<string>(() => {}));
+    const fast = recorder(async () => 'BACKUP');
+    const p0 = {}; const p1 = {};
+    const contract = {
+      connect: (provider: unknown) => ({ view: provider === p0 ? stalled : fast }),
+    } as any;
+    const client = makeClient([p0, p1], URLS);
+    const caller = new AbortController();
+    setTimeout(() => caller.abort(new Error('security gate deadline')), 2_500);
+
+    const result = client.readContract(
+      'live authority gate',
+      contract,
+      (c: any) => c.view(),
+      { policy: 'securityGatePointRead', signal: caller.signal },
+    );
+    await vi.advanceTimersByTimeAsync(RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS + 10);
+
+    await expect(result).resolves.toBe('BACKUP');
+    expect(caller.signal.aborted).toBe(false);
+    expect(stalled.calls).toHaveLength(1);
     expect(fast.calls).toHaveLength(1);
   });
 

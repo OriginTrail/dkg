@@ -881,6 +881,132 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.broadcast).toBeUndefined();
   });
 
+  it.each([
+    'finalized-name-absence-unaccepted',
+    'chain-name-binding-unavailable',
+    'local-chain-binding-unavailable',
+    'local-existence-unavailable',
+    'chain-access-policy-unavailable',
+    'chain-access-policy-timeout',
+    'chain-participant-authority-unavailable',
+    'rfc64-private-read-roster-unavailable',
+  ])('retries transient authority reason %s from validated without inventing broadcast evidence', async (reason) => {
+    const publisher = createPublisher({
+      config: {
+        retryBackoffBaseMs: 100,
+        retryBackoffMaxMs: 1_000,
+        rand: () => 0.5,
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            throw Object.assign(
+              new Error(`signing authority is unavailable (${reason})`),
+              {
+                code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+                reason,
+              },
+            );
+          },
+        },
+      },
+    });
+    const shareOperationId = `rootless-authority-${reason}-op`;
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'authority_unavailable',
+      retryable: true,
+      resolution: 'reset_to_accepted',
+    });
+    expect(processed?.broadcast).toBeUndefined();
+    expect((processed?.timestamps.nextRetryAt ?? 0) - (processed?.timestamps.updatedAt ?? 0))
+      .toBe(100);
+    expect(publisher.describeConfiguredRetryState(processed!)).toMatchObject({
+      autoRetryEligible: true,
+      waitingReason: 'backoff',
+    });
+  });
+
+  it.each([
+    'chain-access-policy-unknown',
+    'chain-participant-authority-unsupported',
+    'chain-participant-authority-invalid',
+    'future-unclassified-authority-reason',
+  ])('keeps terminal/unknown structured authority reason %s out of the retry lane', async (reason) => {
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            throw Object.assign(new Error(`unsupported registered authority (${reason})`), {
+              code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+              reason,
+            });
+          },
+        },
+      },
+    });
+    const shareOperationId = `rootless-terminal-authority-${reason}-op`;
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'authority_forbidden',
+      retryable: false,
+    });
+    expect(processed?.broadcast).toBeUndefined();
+    expect(processed?.timestamps.nextRetryAt).toBeUndefined();
+    expect(publisher.describeConfiguredRetryState(processed!)).toMatchObject({
+      autoRetryEligible: false,
+    });
+  });
+
+  it('fails closed when a structured authority reason cannot be read', async () => {
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          execute: async () => {
+            const failure = Object.assign(new Error('unreadable registered authority reason'), {
+              code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+            });
+            Object.defineProperty(failure, 'reason', {
+              get: () => { throw new Error('hostile reason getter'); },
+            });
+            throw failure;
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-hostile-authority-reason-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.failure).toMatchObject({
+      failedFromState: 'validated',
+      code: 'authority_forbidden',
+      retryable: false,
+    });
+    expect(processed?.broadcast).toBeUndefined();
+    expect(processed?.timestamps.nextRetryAt).toBeUndefined();
+  });
+
   it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,

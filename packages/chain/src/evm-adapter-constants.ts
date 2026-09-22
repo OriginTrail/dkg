@@ -45,6 +45,16 @@ export const MAX_PROBE_AGE_MS = 30_000;
 export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
 
 /**
+ * Per-endpoint cap for a live Context Graph authority read performed under the
+ * agent's 2.5s fail-closed security deadline. The ordinary 4s point-read cap
+ * cannot fail over before that caller deadline aborts the whole read, so a
+ * stalled preferred endpoint would prevent every configured fallback from
+ * being tried. Keep this comfortably below the outer deadline; single-RPC
+ * nodes remain governed by that outer boundary rather than this transport cap.
+ */
+export const RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS = 1_000;
+
+/**
  * Per-attempt deadline for the configured-chainId identity gate
  * (`ensureConfiguredStaticChainIdValidated`) and its caller-side wrappers.
  *

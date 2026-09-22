@@ -174,9 +174,11 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
-  // No production producer (dead-code sweep is a recorded follow-up); autoRetry
-  // stays off until a producer exists to witness it.
-  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
+  // The production producer structurally admits only the agent's closed set of
+  // transient authority-unavailability reasons; terminal and unknown reasons
+  // map to authority_forbidden. The existing bounded budget/backoff owns
+  // liveness without turning a permanent authority refusal into a loop.
+  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
   authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
   validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', provenIneffective: false, autoRetry: false },

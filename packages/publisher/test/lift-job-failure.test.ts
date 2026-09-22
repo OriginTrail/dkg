@@ -195,7 +195,7 @@ describe('LiftJob failure classification', () => {
     workspace_slice_not_found: { autoRetry: false, provenIneffective: false },
     publish_intent_stale: { autoRetry: false, provenIneffective: false },
     canonicalization_failed: { autoRetry: false, provenIneffective: false },
-    authority_unavailable: { autoRetry: false, provenIneffective: false },
+    authority_unavailable: { autoRetry: true, provenIneffective: false },
     authority_forbidden: { autoRetry: false, provenIneffective: false },
     validation_timeout: { autoRetry: false, provenIneffective: false },
     wallet_claim_timeout: { autoRetry: false, provenIneffective: false },
