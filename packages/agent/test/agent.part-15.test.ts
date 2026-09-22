@@ -190,7 +190,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
-          onChainId: '0x1234',
+          onChainId: '4660',
         });
         await new Promise((resolve) => setTimeout(resolve, 0));
       } finally {
@@ -203,7 +203,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         sharedMemorySynced: true,
         metaSynced: true,
-        onChainId: '0x1234',
+        onChainId: '4660',
         syncScoped: true,
       });
       expect(persistedMembers.get(`persisted-cg|node|${agentAPeerId}`)).toMatchObject({
@@ -216,6 +216,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
 
       const agentB = await createAgentWithContextGraphPersistence('PersistedSubscriptionsB', fixture);
+      const liveAuthority = vi.spyOn(agentB, 'resolveLiveOnChainAccessPolicyState')
+        .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
 
       try {
         await agentB.start();
@@ -225,8 +227,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
-          onChainId: '0x1234',
+          onChainId: '4660',
         });
+        expect(liveAuthority).toHaveBeenCalled();
         expect((agentB as any).config.syncContextGraphs ?? []).toContain('persisted-cg');
         await new Promise((resolve) => setTimeout(resolve, 0));
         expect(persistedMembers.get(`persisted-cg|node|${agentB.peerId}`)).toMatchObject({
@@ -496,6 +499,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         contextGraphSubscriptionStore: subscriptionStore,
         nodeRole: 'core',
       });
+      const liveAuthority = vi.spyOn(agentB, 'resolveLiveOnChainAccessPolicyState')
+        .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
       try {
         await agentB.start();
         expect(agentB.getSubscribedContextGraphs().get(localCgId)).toMatchObject({
@@ -507,6 +512,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           coreHosted: true,
           onChainId: '14',
         });
+        expect(liveAuthority).toHaveBeenCalled();
         expect((agentB as any).config.syncContextGraphs ?? []).not.toContain(localCgId);
       } finally {
         await agentB.stop().catch(() => {});
@@ -523,7 +529,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: false,
           sharedMemorySynced: false,
           metaSynced: false,
-          onChainId: '0xabcd',
+          onChainId: '43981',
           syncScoped: false,
         }],
         save: async () => {},
@@ -536,6 +542,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
         contextGraphSubscriptionStore: subscriptionStore,
       });
+      const liveAuthority = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
+        .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
 
       try {
         await agent.start();
@@ -544,8 +552,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           synced: false,
           sharedMemorySynced: false,
           metaSynced: false,
-          onChainId: '0xabcd',
+          onChainId: '43981',
         });
+        expect(liveAuthority).toHaveBeenCalled();
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain('discovered-cg');
       } finally {
         await agent.stop().catch(() => {});
