@@ -44,6 +44,7 @@ describe('EVM adapter: one-read live context graph authority', () => {
     expect(label).toBe(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER);
     expect(method).toBe('getContextGraph');
     expect(args).toEqual([7n]);
+    expect(options.policy).toBe('securityGatePointRead');
     // The read is shared, so it belongs to the flight: one caller abandoning
     // its wait must not cancel it for the others. The caller's own signal only
     // detaches that caller (see the abandonment case below).
