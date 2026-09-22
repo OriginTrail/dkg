@@ -921,6 +921,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /**
+       * Freshly loaded durable subscription row for this exact candidate.
+       * This may establish only the immutable numeric binding; current policy
+       * and roster are still read after this method returns.
+       */
+      durableSubscriptionBinding?: Readonly<{
+        contextGraphId: string;
+        onChainId?: string;
+      }>;
       /** Read-authority-only proof that exact RFC-64 absence was accepted. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},
@@ -936,6 +945,44 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         reason: 'local-chain-binding-unavailable',
         detail: 'registration is in flight; chain binding discovery is suspended',
       };
+    }
+
+    // Rehydration deliberately resolves authority before installing the
+    // subscription. Without this explicit same-row hint, the authoritative
+    // on-chain id persisted by the prior process is invisible here and the
+    // node unnecessarily starts cold name discovery. The durable row is a
+    // trusted binding owner, exactly as it is after installation; validate it
+    // through the canonical binding state and fail closed on mismatch,
+    // malformed decimal, or uint256 overflow. This shortcut establishes only
+    // name -> numeric id. resolveRegisteredContextGraphAuthority() still owns
+    // a fresh live policy + roster read before admission.
+    const durableBinding = options.durableSubscriptionBinding;
+    if (durableBinding !== undefined) {
+      if (durableBinding.contextGraphId !== contextGraphId) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-chain-binding-unavailable',
+          detail: 'durable subscription binding belongs to a different Context Graph',
+        };
+      }
+      if (durableBinding.onChainId !== undefined) {
+        const authoritativeOnChainId = this.contextGraphBindingState
+          .authorityIndexOnChainIdFor(contextGraphId, {
+            onChainId: durableBinding.onChainId,
+          });
+        if (authoritativeOnChainId === undefined) {
+          return {
+            kind: 'unavailable',
+            reason: 'local-chain-binding-unavailable',
+            detail: 'durable subscription binding has an invalid on-chain id',
+          };
+        }
+        return {
+          kind: 'registered',
+          onChainId: BigInt(authoritativeOnChainId),
+          provenance: 'authoritative',
+        };
+      }
     }
 
     // A graph created by this node is explicitly local-first until its own

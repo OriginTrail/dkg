@@ -160,6 +160,128 @@ describe('Context Graph registration resolution deadlines', () => {
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
+  it('uses a freshly loaded durable-row binding before the subscription is installed', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    const resolveDirect = vi.spyOn(
+      fixture.agent,
+      'resolveContextGraphOnChainIdBinding',
+    );
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding: {
+        contextGraphId: LOCAL_ID,
+        onChainId: '42',
+      },
+    })).resolves.toEqual({
+      kind: 'registered',
+      onChainId: 42n,
+      provenance: 'authoritative',
+    });
+
+    expect(resolveDirect).not.toHaveBeenCalled();
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('still performs the fresh live policy and roster read after using the durable binding', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    const participant = '0x1000000000000000000000000000000000000001';
+    const readLiveAuthority = vi.spyOn(
+      fixture.agent,
+      'resolveLiveOnChainAccessPolicyState',
+    ).mockResolvedValue({
+      kind: 'available',
+      accessPolicy: 1,
+      participantAgents: [participant],
+    });
+
+    await expect(fixture.agent.resolveRegisteredContextGraphAuthority(LOCAL_ID, {
+      durableSubscriptionBinding: {
+        contextGraphId: LOCAL_ID,
+        onChainId: '42',
+      },
+    })).resolves.toEqual({
+      kind: 'private',
+      onChainId: 42n,
+      participantAgents: [participant],
+    });
+
+    expect(readLiveAuthority).toHaveBeenCalledWith(
+      '42',
+      expect.objectContaining({ operationName: 'system' }),
+      { signal: undefined },
+    );
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('lets registration-in-flight override a durable-row binding hint', async () => {
+    const fixture = selectedFixture();
+    Reflect.set(fixture.agent, 'contextGraphRegistrationsInFlight', new Set([LOCAL_ID]));
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding: {
+        contextGraphId: LOCAL_ID,
+        onChainId: '42',
+      },
+    })).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'local-chain-binding-unavailable',
+    });
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('lets a durable-row binding override local-first inference without installing the row', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
+    fixture.query.mockResolvedValue({
+      type: 'bindings',
+      bindings: [{ status: '"unregistered"' }],
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding: {
+        contextGraphId: LOCAL_ID,
+        onChainId: '42',
+      },
+    })).resolves.toEqual({
+      kind: 'registered',
+      onChainId: 42n,
+      provenance: 'authoritative',
+    });
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+    expect(fixture.query).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['different graph', { contextGraphId: `${LOCAL_ID}-other`, onChainId: '42' }],
+    ['non-canonical id', { contextGraphId: LOCAL_ID, onChainId: '042' }],
+    ['zero id', { contextGraphId: LOCAL_ID, onChainId: '0' }],
+    ['uint256 overflow', {
+      contextGraphId: LOCAL_ID,
+      onChainId: (1n << 256n).toString(10),
+    }],
+  ] as const)('fails closed for a malformed durable-row binding: %s', async (
+    _case,
+    durableSubscriptionBinding,
+  ) => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding,
+    })).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'local-chain-binding-unavailable',
+    });
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
   it('keeps the hot deadline for an existing reverse binding candidate', async () => {
     vi.useFakeTimers();
     try {

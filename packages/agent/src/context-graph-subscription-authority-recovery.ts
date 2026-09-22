@@ -9,8 +9,17 @@ import type {
 } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
 
-const MAX_CONCURRENT_DEFERRED_AUTHORITY_DISCOVERIES = 4;
+const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
+const MAX_UINT256 = (1n << 256n) - 1n;
+
+function hasCanonicalDurableBinding(
+  row: ContextGraphSubscriptionRecord | null,
+): boolean {
+  return isCanonicalPositiveContextGraphId(row?.onChainId)
+    && BigInt(row.onChainId) <= MAX_UINT256;
+}
 
 export interface PersistedContextGraphSubscriptionActivationPorts {
   install(
@@ -93,7 +102,7 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
   touchStatus(): void;
   clearStatus(contextGraphId: string): void;
   resolveAuthority(
-    contextGraphId: string,
+    row: ContextGraphSubscriptionRecord,
     signal: AbortSignal,
   ): Promise<ContextGraphReadAuthorityDecision>;
   activate(
@@ -112,7 +121,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
 ): Promise<void> {
   const status = ports.getStatus();
   if (!status?.rehydrationEnabled || !ports.isCurrent()) return;
-  const candidates = [...ports.dormancyById]
+  const candidateIds = [...ports.dormancyById]
     .filter(([, reason]) => reason === 'authorityUnavailable')
     .map(([id]) => id)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -124,49 +133,55 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
     : null;
   if (!ports.isCurrent()) return;
 
-  // Remote authority reads are independent. Discover them with a finite pool,
-  // then serialize activation so cap accounting and durable commits remain
-  // deterministic. A loadAll-only compatibility store is scanned once here,
-  // rather than once per candidate.
-  const discoveries = await mapWithConcurrency(
-    candidates,
-    MAX_CONCURRENT_DEFERRED_AUTHORITY_DISCOVERIES,
-    async (contextGraphId) => {
-      if (
-        !ports.isCurrent()
-        || ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
-      ) return null;
-      const revision = ports.persistRevisions.get(contextGraphId) ?? 0;
-      const candidate = ports.store.load === undefined
+  // Snapshot every durable row before issuing authority reads. A persisted
+  // canonical on-chain id owns the same authoritative zero-RPC binding that it
+  // will own after activation, so resolve those rows first. Cold/unbound rows
+  // may need the 120s finalized-name discovery budget; allowing them to sort
+  // ahead of an already-bound row would turn safe serialization into
+  // head-of-line blocking. Revision/current-row fences below still decide
+  // whether a snapshot may commit.
+  const candidates = (await mapWithConcurrency(
+    candidateIds,
+    MAX_CONCURRENT_DEFERRED_ROW_LOADS,
+    async (contextGraphId) => ({
+      contextGraphId,
+      revision: ports.persistRevisions.get(contextGraphId) ?? 0,
+      candidate: ports.store.load === undefined
         ? discoverySnapshot!.get(contextGraphId) ?? null
-        : await ports.store.load(contextGraphId);
-      if (!ports.isCurrent()) return null;
-      if (candidate === null) {
-        return Object.freeze({ contextGraphId, revision, candidate, authority: null });
-      }
-      const authority = await ports.resolveAuthority(contextGraphId, signal);
-      return Object.freeze({ contextGraphId, revision, candidate, authority });
-    },
-  );
+        : await ports.store.load(contextGraphId),
+    }),
+  )).sort((left, right) => {
+    const leftBound = hasCanonicalDurableBinding(left.candidate);
+    const rightBound = hasCanonicalDurableBinding(right.candidate);
+    if (leftBound !== rightBound) return leftBound ? -1 : 1;
+    return left.contextGraphId < right.contextGraphId
+      ? -1
+      : left.contextGraphId > right.contextGraphId ? 1 : 0;
+  });
   if (!ports.isCurrent()) return;
 
-  const needsCommitSnapshot = ports.store.load === undefined
-    && discoveries.some((discovery) => discovery?.authority?.outcome === 'allowed');
-  const commitSnapshot = needsCommitSnapshot ? await snapshotRows() : null;
-  if (!ports.isCurrent()) return;
-
-  for (const discovery of discoveries) {
-    if (discovery === null) continue;
-    const { contextGraphId, revision, candidate, authority } = discovery;
+  // Every discovery performs a fail-closed live-authority read whose 1s
+  // per-endpoint budget includes process-wide RPC governor admission. Resolve
+  // and commit one candidate at a time: distinct graphs cannot share a flight,
+  // and collecting every result before activation would make a ready bound row
+  // wait behind later cold rows for up to 120s each.
+  for (const { contextGraphId, revision, candidate } of candidates) {
+    if (
+      !ports.isCurrent()
+      || ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
+    ) continue;
     if (candidate === null) {
       ports.clearStatus(contextGraphId);
       continue;
     }
+    if (!candidate.subscribed && candidate.coreHosted !== true) continue;
+
+    const authority = await ports.resolveAuthority(candidate, signal);
+    if (!ports.isCurrent()) return;
     if (
       ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
     ) continue;
-    if (authority === null) continue;
     if (authority.outcome !== 'allowed') {
       if (authority.outcome === 'denied') {
         ports.dormancyById.set(contextGraphId, 'authorityDenied');
@@ -176,7 +191,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
     }
 
     const currentRow = ports.store.load === undefined
-      ? commitSnapshot!.get(contextGraphId) ?? null
+      ? (await snapshotRows()).get(contextGraphId) ?? null
       : await ports.store.load(contextGraphId);
     if (!ports.isCurrent()) return;
     if (
@@ -184,6 +199,10 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       || ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
       || ports.subscriptions.has(contextGraphId)
+      || currentRow.id !== candidate.id
+      || currentRow.onChainId !== candidate.onChainId
+      || currentRow.onChainHash !== candidate.onChainHash
+      || (!currentRow.subscribed && currentRow.coreHosted !== true)
     ) {
       if (currentRow === null) ports.clearStatus(contextGraphId);
       continue;

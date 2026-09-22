@@ -798,6 +798,15 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /**
+       * Freshly loaded durable row for this exact bootstrap candidate. Its
+       * canonical numeric id may skip name discovery, but never the fresh
+       * policy/roster authority gate below.
+       */
+      durableSubscriptionBinding?: Readonly<{
+        contextGraphId: string;
+        onChainId?: string;
+      }>;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
     try {
@@ -942,6 +951,10 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      durableSubscriptionBinding?: Readonly<{
+        contextGraphId: string;
+        onChainId?: string;
+      }>;
     },
     registrationTimeoutMs: number,
     hasAcceptedRfc64PublicPolicy?: boolean,
@@ -962,6 +975,9 @@ export class QueryMethods extends DKGAgentBase {
           {
             registrationTimeoutMs,
             signal: opts.signal,
+            ...(opts.durableSubscriptionBinding === undefined
+              ? {}
+              : { durableSubscriptionBinding: opts.durableSubscriptionBinding }),
             allowAcceptedRfc64FinalizedAbsence:
               this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
           },

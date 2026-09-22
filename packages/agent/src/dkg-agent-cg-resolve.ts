@@ -1568,6 +1568,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       allowCachedRoster?: boolean;
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /** Trusted only when supplied from the freshly loaded durable row. */
+      durableSubscriptionBinding?: Readonly<{
+        contextGraphId: string;
+        onChainId?: string;
+      }>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},
@@ -1577,6 +1582,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       {
         signal: options.signal,
         registrationTimeoutMs: options.registrationTimeoutMs,
+        ...(options.durableSubscriptionBinding === undefined
+          ? {}
+          : { durableSubscriptionBinding: options.durableSubscriptionBinding }),
         allowAcceptedRfc64FinalizedAbsence:
           options.allowAcceptedRfc64FinalizedAbsence,
       },

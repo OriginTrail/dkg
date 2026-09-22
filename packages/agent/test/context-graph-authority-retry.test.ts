@@ -151,7 +151,7 @@ describe('Context Graph subscription authority retry', () => {
       .gossipRegistered.has(contextGraphId)).toBe(true);
   });
 
-  it('discovers slow loadAll-only candidates concurrently and commits in stable order', async () => {
+  it('serializes slow authority discoveries and commits in stable order', async () => {
     const rows = Array.from({ length: 6 }, (_, index) => ({
       id: `deferred-${index}`,
       subscribed: true,
@@ -159,6 +159,7 @@ describe('Context Graph subscription authority retry', () => {
       sharedMemorySynced: true,
       metaSynced: true,
       syncScoped: true,
+      ...(index === 5 ? { onChainId: '7' } : {}),
     }));
     const loadAll = vi.fn(async () => rows.map((row) => ({ ...row })));
     const dormancyById = new Map(rows.map((row) => (
@@ -176,17 +177,18 @@ describe('Context Graph subscription authority retry', () => {
       completedAt: 1,
       updatedAt: 1,
     };
-    let releaseDiscovery!: () => void;
-    const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
     let activeDiscoveries = 0;
     let maxActiveDiscoveries = 0;
     const discoveryOrder: string[] = [];
     const activationOrder: string[] = [];
-    const resolveAuthority = vi.fn(async (contextGraphId: string) => {
-      discoveryOrder.push(contextGraphId);
+    const resolveAuthority = vi.fn(async (row: { id: string }) => {
+      discoveryOrder.push(row.id);
       activeDiscoveries += 1;
       maxActiveDiscoveries = Math.max(maxActiveDiscoveries, activeDiscoveries);
-      await discoveryGate;
+      // Distinct Context Graphs cannot share a live-authority flight. Keep the
+      // call open across a turn so this test detects any sibling overlap that
+      // would compete inside the background RPC governor's attempt budget.
+      await new Promise<void>((resolve) => setImmediate(resolve));
       activeDiscoveries -= 1;
       return {
         outcome: 'allowed' as const,
@@ -220,15 +222,172 @@ describe('Context Graph subscription authority retry', () => {
         activated: () => { status.activated += 1; },
       },
     );
-    await vi.waitFor(() => expect(resolveAuthority).toHaveBeenCalledTimes(4));
-    expect(maxActiveDiscoveries).toBe(4);
-    releaseDiscovery();
     await recovery;
 
     expect(resolveAuthority).toHaveBeenCalledTimes(6);
-    expect(discoveryOrder).toEqual(rows.map((row) => row.id));
-    expect(activationOrder).toEqual(rows.map((row) => row.id));
-    expect(loadAll).toHaveBeenCalledTimes(2);
+    expect(maxActiveDiscoveries).toBe(1);
+    const boundFirstOrder = [rows[5]!.id, ...rows.slice(0, 5).map((row) => row.id)];
+    expect(discoveryOrder).toEqual(boundFirstOrder);
+    expect(activationOrder).toEqual(boundFirstOrder);
+    // One candidate snapshot plus one current-row recheck per allowed row.
+    expect(loadAll).toHaveBeenCalledTimes(7);
+  });
+
+  it('activates a bound row before advancing to a later cold authority read', async () => {
+    const bound = {
+      id: 'z-bound',
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      onChainId: '7',
+    };
+    const cold = {
+      id: 'a-cold',
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    };
+    const rows = new Map([[bound.id, bound], [cold.id, cold]]);
+    const dormancyById = new Map<string, 'authorityUnavailable'>([
+      [cold.id, 'authorityUnavailable'],
+      [bound.id, 'authorityUnavailable'],
+    ]);
+    const status = {
+      rehydrationEnabled: true,
+      persistedTotal: 2,
+      systemExcluded: 0,
+      hostedActivated: 0,
+      hostedActivatedIds: [],
+      activated: 0,
+      activationCap: 0,
+      capDisabled: true,
+      completedAt: 1,
+      updatedAt: 1,
+    };
+    let releaseCold!: () => void;
+    const coldGate = new Promise<void>((resolve) => { releaseCold = resolve; });
+    const activated: string[] = [];
+    const resolveAuthority = vi.fn(async (row: { id: string }) => {
+      if (row.id === cold.id) await coldGate;
+      return {
+        outcome: 'allowed' as const,
+        source: 'registered-chain' as const,
+        reason: 'chain-participant' as const,
+        metadataBootstrap: 'eligible' as const,
+        onChainId: row.id === bound.id ? 7n : 8n,
+      };
+    });
+
+    const recovery = recoverDeferredContextGraphSubscriptionAuthorities(
+      new AbortController().signal,
+      {
+        store: {
+          loadAll: async () => [...rows.values()],
+          load: async (id) => rows.get(id) ?? null,
+          save: async () => undefined,
+          delete: async () => undefined,
+        },
+        dormancyById,
+        persistRevisions: new Map(),
+        subscriptions: new Map(),
+        getStatus: () => status,
+        isCurrent: () => true,
+        touchStatus: () => undefined,
+        clearStatus: vi.fn(),
+        resolveAuthority,
+        activate: async (row) => { activated.push(row.id); },
+        warn: vi.fn(),
+        activated: () => { status.activated += 1; },
+      },
+    );
+
+    await vi.waitFor(() => expect(activated).toEqual([bound.id]));
+    expect(resolveAuthority.mock.calls.map(([row]) => row.id)).toEqual([
+      bound.id,
+      cold.id,
+    ]);
+    releaseCold();
+    await recovery;
+    expect(activated).toEqual([bound.id, cold.id]);
+  });
+
+  it('does not activate when the durable binding changes during authority resolution', async () => {
+    const contextGraphId = 'binding-mutates-during-recovery';
+    const row = {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      onChainId: '7',
+    };
+    const rows = new Map([[contextGraphId, row]]);
+    const dormancyById = new Map<string, 'authorityUnavailable'>([
+      [contextGraphId, 'authorityUnavailable'],
+    ]);
+    const status = {
+      rehydrationEnabled: true,
+      persistedTotal: 1,
+      systemExcluded: 0,
+      hostedActivated: 0,
+      hostedActivatedIds: [],
+      activated: 0,
+      activationCap: 0,
+      capDisabled: true,
+      completedAt: 1,
+      updatedAt: 1,
+    };
+    let releaseAuthority!: () => void;
+    let enterAuthority!: () => void;
+    const authorityGate = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+    const authorityEntered = new Promise<void>((resolve) => { enterAuthority = resolve; });
+    const activate = vi.fn(async () => undefined);
+    const recovery = recoverDeferredContextGraphSubscriptionAuthorities(
+      new AbortController().signal,
+      {
+        store: {
+          loadAll: async () => [...rows.values()],
+          load: async (id) => rows.get(id) ?? null,
+          save: async () => undefined,
+          delete: async () => undefined,
+        },
+        dormancyById,
+        persistRevisions: new Map(),
+        subscriptions: new Map(),
+        getStatus: () => status,
+        isCurrent: () => true,
+        touchStatus: () => undefined,
+        clearStatus: vi.fn(),
+        resolveAuthority: async () => {
+          enterAuthority();
+          await authorityGate;
+          return {
+            outcome: 'allowed' as const,
+            source: 'registered-chain' as const,
+            reason: 'chain-participant' as const,
+            metadataBootstrap: 'eligible' as const,
+            onChainId: 7n,
+          };
+        },
+        activate,
+        warn: vi.fn(),
+        activated: () => { status.activated += 1; },
+      },
+    );
+
+    await authorityEntered;
+    rows.set(contextGraphId, { ...row, onChainId: '8' });
+    releaseAuthority();
+    await recovery;
+
+    expect(activate).not.toHaveBeenCalled();
+    expect(dormancyById.get(contextGraphId)).toBe('authorityUnavailable');
+    expect(status.activated).toBe(0);
   });
 
   it('retries a cold persisted binding after startup and restores the subscription', async () => {
@@ -328,6 +487,115 @@ describe('Context Graph subscription authority retry', () => {
       },
     });
   }, (2 * CHAIN_POLICY_READ_TIMEOUT_MS) + 24_000);
+
+  it('rehydrates a durable numeric binding without reverse name discovery', async () => {
+    const contextGraphId = 'persisted-authoritative-binding-startup';
+    const chain = new MockChainAdapter();
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      onChainId: '7',
+    }]]);
+    agent = await DKGAgent.create({
+      name: 'PersistedAuthoritativeBindingStartup',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      syncReconcilerEnabled: false,
+    });
+    mockLivePolicy(agent, 0);
+    const targetNameHash = agent.contextGraphNameCommitment(contextGraphId);
+    const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+      .mockImplementation(async (nameHash) => {
+        if (nameHash === targetNameHash) {
+          throw new Error('durable binding must bypass reverse discovery');
+        }
+        return null;
+      });
+
+    await agent.start();
+
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '7',
+    });
+    expect(reverse.mock.calls.some(([nameHash]) => nameHash === targetNameHash)).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+    });
+  });
+
+  it('retries a transient startup policy failure through the same durable binding', async () => {
+    const contextGraphId = 'persisted-authoritative-binding-retry';
+    const chain = new MockChainAdapter();
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      onChainId: '7',
+    }]]);
+    agent = await DKGAgent.create({
+      name: 'PersistedAuthoritativeBindingRetry',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      syncReconcilerEnabled: false,
+    });
+    let targetPolicyAttempts = 0;
+    vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
+      .mockImplementation(async (onChainId) => {
+        if (onChainId !== '7') return { kind: 'available', accessPolicy: 0 };
+        targetPolicyAttempts += 1;
+        return targetPolicyAttempts === 1
+          ? {
+              kind: 'unavailable',
+              reason: 'chain-access-policy-timeout',
+              detail: 'transient startup policy timeout',
+            }
+          : { kind: 'available', accessPolicy: 0 };
+      });
+    const targetNameHash = agent.contextGraphNameCommitment(contextGraphId);
+    const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+      .mockImplementation(async (nameHash) => {
+        if (nameHash === targetNameHash) {
+          throw new Error('authority retry must retain durable binding');
+        }
+        return null;
+      });
+
+    await agent.start();
+    await vi.waitFor(
+      () => expect(agent!.getSubscribedContextGraphs().get(contextGraphId))
+        .toMatchObject({ subscribed: true, onChainId: '7' }),
+      { timeout: 10_000 },
+    );
+
+    expect(targetPolicyAttempts).toBe(2);
+    expect(reverse.mock.calls.some(([nameHash]) => nameHash === targetNameHash)).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+      dormantReasons: { authorityUnavailable: [] },
+    });
+  }, 15_000);
 
   it('retries unavailable subscription authority again at the exact recurring boundary', async () => {
     const contextGraphId = 'persisted-recurring-authority-retry';

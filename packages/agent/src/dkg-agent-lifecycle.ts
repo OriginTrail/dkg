@@ -10250,10 +10250,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       clearStatus: (contextGraphId) => {
         this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
       },
-      resolveAuthority: (contextGraphId, retrySignal) => (
-        this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+      resolveAuthority: (row, retrySignal) => (
+        this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
           signal: retrySignal,
+          durableSubscriptionBinding: {
+            contextGraphId: row.id,
+            onChainId: row.onChainId,
+          },
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,
@@ -10391,6 +10395,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const authority = await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
         allowSubscriptionFallback: false,
         signal,
+        durableSubscriptionBinding: {
+          contextGraphId: row.id,
+          onChainId: row.onChainId,
+        },
       }).catch(() => ({
         outcome: 'unavailable' as const,
         source: 'legacy-local' as const,
@@ -10701,6 +10709,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const readAuthority = await this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
           signal: AbortSignal.timeout(CHAIN_POLICY_READ_TIMEOUT_MS),
+          durableSubscriptionBinding: {
+            contextGraphId: row.id,
+            onChainId: row.onChainId,
+          },
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,
