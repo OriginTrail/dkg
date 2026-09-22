@@ -4,8 +4,8 @@
 .program-editor-dialog h2, .program-editor-dialog h3 { margin: 0 0 10px; }
 .program-editor-dialog h4 { margin: 16px 0 6px; }
 .program-editor-dialog p { margin: 6px 0 12px; }
-.program-editor-body { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(310px, 1fr); overflow: auto; }
-.program-editor-code, .program-editor-controls { padding: 20px 24px; min-width: 0; }
+.program-editor-body { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(310px, 1fr); grid-template-rows: minmax(0, 1fr); min-height: 0; overflow: hidden; }
+.program-editor-code, .program-editor-controls { padding: 20px 24px; min-width: 0; overflow-y: auto; }
 .program-editor-controls { border-left: 1px solid var(--border-default, #334155); }
 .program-editor-dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; margin-bottom: 12px; }
 .program-editor-dialog label input, .program-editor-dialog label select, .program-editor-dialog label textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border-default, #475569); border-radius: 5px; padding: 8px 10px; color: inherit; background: var(--bg-surface, #17212d); font: inherit; }
@@ -45,4 +45,4 @@
 .program-tool-advanced { margin-top: 14px; }
 .program-editor-dialog summary { cursor: pointer; color: var(--text-secondary, #94a3b8); padding: 4px 0; }
 .program-editor-dialog summary:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
-@media (max-width: 820px) { .program-editor-backdrop { padding: 8px; } .program-editor-body { grid-template-columns: 1fr; } .program-editor-controls { border-left: 0; border-top: 1px solid var(--border-default, #334155); } }
+@media (max-width: 820px) { .program-editor-backdrop { padding: 8px; } .program-editor-body { display: block; overflow: auto; } .program-editor-code, .program-editor-controls { overflow: visible; } .program-editor-controls { border-left: 0; border-top: 1px solid var(--border-default, #334155); } }
