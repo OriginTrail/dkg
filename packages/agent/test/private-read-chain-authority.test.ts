@@ -13,6 +13,8 @@ import {
   CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphReadAuthorityUnavailableError,
 } from '../src/context-graph-read-authority.js';
+import { finalizedAuthorityColdResolutionOf } from
+  '../src/finalized-authority-cold-resolution.js';
 
 const MEMBER = '0x0000000000000000000000000000000000000001';
 const NON_MEMBER = '0x00000000000000000000000000000000000000ff';
@@ -106,6 +108,41 @@ describe('private read authorization uses the on-chain participant roster', () =
     })).resolves.toBeDefined();
     expect(readIndex).toHaveBeenCalledWith(['8'], { signal: expect.any(AbortSignal) });
     expect(live).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the bounded current-state read when the finalized lane faults', async () => {
+    const contextGraphId = 'finalized-faulted';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedFaultedReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-faulted', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockResolvedValue({
+      kind: 'registered',
+      onChainId: 9n,
+      provenance: 'authoritative',
+    });
+    const readIndex = installFinalizedAuthorityReader(chain, undefined)
+      .mockRejectedValue(new Error('authority index backend head probe timed out'));
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
+      .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
+    expect(live).toHaveBeenCalledTimes(1);
+
+    // Finalized EVIDENCE never falls back: an absent snapshot fails closed.
+    installFinalizedAuthorityReader(chain, undefined);
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).rejects.toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      reason: 'chain-access-policy-unknown',
+    });
+    expect(live).toHaveBeenCalledTimes(1);
   });
 
   it('uses the atomic finalized private roster and rejects mismatched name evidence', async () => {
@@ -1328,9 +1365,11 @@ describe('private read authorization uses the on-chain participant roster', () =
       readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
       whenIdle: vi.fn(async () => undefined),
     });
-    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
-    const coldResolution = Reflect.get(agent, 'finalizedAuthorityColdResolutionV1') as
-      { inFlightKeys: readonly string[] };
+    // The finalized deadline is no evidence: the request falls back to the
+    // bounded current-state read, which on this slow pool times out as well.
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
+      .mockResolvedValue({ kind: 'unavailable', reason: 'chain-access-policy-timeout' });
+    const coldResolution = finalizedAuthorityColdResolutionOf(agent);
     vi.useFakeTimers();
 
     // 1. The request fails closed at its own deadline...
@@ -1346,6 +1385,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       retryable: true,
       reason: 'chain-access-policy-timeout',
     });
+    expect(live).toHaveBeenCalledTimes(1);
     // ...while the resolution it started keeps running, unaborted.
     expect(scans).toBe(1);
     expect(scanSignals[0]?.aborted).toBe(false);
@@ -1372,7 +1412,8 @@ describe('private read authorization uses the on-chain participant roster', () =
     })).resolves.toBeDefined();
     expect(readIndex).toHaveBeenCalledTimes(2);
     expect(scans).toBe(1);
-    expect(live).not.toHaveBeenCalled();
+    // Only the timed-out first request ever needed the current-state read.
+    expect(live).toHaveBeenCalledTimes(1);
 
     // The finalized roster still denies a non-member without any RPC: the
     // scoped query is refused before execution and answered empty.
@@ -1414,11 +1455,14 @@ describe('private read authorization uses the on-chain participant roster', () =
       readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
       whenIdle: vi.fn(async () => undefined),
     });
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
+      .mockResolvedValue({ kind: 'unavailable', reason: 'chain-access-policy-timeout' });
     vi.useFakeTimers();
 
     const first = agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId }).catch((cause: unknown) => cause);
     await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
     expect(await first).toMatchObject({ reason: 'chain-access-policy-timeout' });
+    expect(live).toHaveBeenCalledTimes(1);
     expect(scanSignals[0]?.aborted).toBe(false);
 
     await vi.advanceTimersByTimeAsync(
@@ -1493,7 +1537,10 @@ describe('private read authorization uses the on-chain participant roster', () =
       source: 'registered-chain',
       reason: 'chain-name-binding-unavailable',
     });
-    expect(resolveByNameHashes).toHaveBeenCalledWith([nameHash], { signal: expect.any(AbortSignal) });
+    expect(resolveByNameHashes).toHaveBeenCalledWith(
+      [nameHash],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(scans).toBe(1);
     expect(scanSignals[0]?.aborted).toBe(false);
 

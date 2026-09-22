@@ -113,6 +113,11 @@ export {
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
 export {
+  FinalizedAuthorityColdResolutionV1,
+  finalizedAuthorityColdResolutionOf,
+  peekFinalizedAuthorityColdResolution,
+} from './finalized-authority-cold-resolution.js';
+export {
   CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_ENV,
   CHAIN_AUTHORITY_READ_TIMEOUT_ENV,
   DEFAULT_CHAIN_AUTHORITY_READ_BUDGETS,

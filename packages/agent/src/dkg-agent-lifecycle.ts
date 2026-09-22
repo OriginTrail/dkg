@@ -604,6 +604,8 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { peekFinalizedAuthorityColdResolution } from
+  './finalized-authority-cold-resolution.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -2122,7 +2124,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.contextGraphMembershipPersistence.reopen();
     // stop() aborts detached cold authority flights; a restarted agent admits
     // new ones (the runtime is created lazily on first use otherwise).
-    this.finalizedAuthorityColdResolutionRuntimeV1?.reopen();
+    peekFinalizedAuthorityColdResolution(this)?.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
@@ -2475,7 +2477,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // error, so private/curated/unregistered CGs remain denied.
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig, {
       isContextGraphPublic: (contextGraphId: string) =>
-        this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        withRpcUsageSite(
+          CG_AUTH_RPC_SITES.remoteQuery,
+          () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        ),
     });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
@@ -8902,9 +8907,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
 
-    const authority = await this.resolveContextGraphReadAuthority(contextGraphId, {
-      allowSubscriptionFallback: false,
-    }).catch(() => ({ outcome: 'unavailable' as const }));
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.joinResume,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, {
+        allowSubscriptionFallback: false,
+      }),
+    ).catch(() => ({ outcome: 'unavailable' as const }));
     if (authority.outcome !== 'allowed') {
       this.log.warn(
         ctx,
@@ -11154,10 +11162,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     return opts.readAuthority !== undefined
       ? opts.readAuthority.outcome === 'allowed'
-      : this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: opts.callerAgentAddress,
-          allowSubscriptionFallback: false,
-        });
+      : withRpcUsageSite(
+          CG_AUTH_RPC_SITES.sharedMemoryRead,
+          () => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: opts.callerAgentAddress,
+            allowSubscriptionFallback: false,
+          }),
+        );
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,

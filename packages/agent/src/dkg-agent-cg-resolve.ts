@@ -324,12 +324,10 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { finalizedAuthorityColdResolutionOf } from
+  './finalized-authority-cold-resolution.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
-import {
-  createAbortError,
-  isBoundedOperationTimeoutError,
-  runBoundedOperation,
-} from './bounded-operation.js';
+import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type { RegisteredContextGraphAuthority } from
   './registered-context-graph-authority.js';
 import type { LiveOnChainAccessPolicyState } from
@@ -1573,7 +1571,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * legacy adapters retain current-state reads. Scoped query authorization may
    * instead consume the complete deployment-scoped finalized index snapshot;
    * it atomically binds liveness, policy, roster, numeric id, and name hash and
-   * fails closed on any missing or mismatched evidence.
+   * fails closed on any missing or mismatched evidence. A finalized-lane fault
+   * or deadline is no evidence at all and falls back to the bounded
+   * current-state read rather than to local policy.
    */
   async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
@@ -1608,20 +1608,37 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 
-    let accessPolicyState: LiveOnChainAccessPolicyState;
+    let accessPolicyState: LiveOnChainAccessPolicyState | undefined;
+    // Only the finalized-index lane consults the adapter capability; current-
+    // state callers never touch it, so a receiver without a chain adapter (the
+    // access-policy boundary tests) keeps the live lane untouched.
     if (
       options.authorityReadMode === 'finalized-index'
       && this.chain.contextGraphAuthorityIndexRevisionReader
         ?.readContextGraphAuthorityIndexSnapshots !== undefined
     ) {
+      let finalizedRead: FinalizedContextGraphAuthoritySnapshotReadV1 | undefined;
       try {
-        const finalizedRead = await this.readFinalizedContextGraphAuthoritySnapshotV1(
+        finalizedRead = await this.readFinalizedContextGraphAuthoritySnapshotV1(
           onChainId,
           {
             signal: options.signal,
             label: `readFinalizedContextGraphAuthority(${onChainId})`,
           },
         );
+      } catch {
+        // A reader fault or deadline yields no evidence about the graph: the
+        // projection may be rescanning behind the RPC governor for a graph that
+        // registered moments ago, or the index may be down. The canonical
+        // current-state read below still owns the answer, exactly as it does
+        // for every other consumer, and it is bounded and reports its own
+        // outage, so the outcome stays fail-closed. Only finalized EVIDENCE
+        // (absent, inactive, or mismatched below) never falls back. The
+        // detached resolution keeps running under the cold budget meanwhile,
+        // so the retry that follows is answered from the retained projection.
+        finalizedRead = undefined;
+      }
+      if (finalizedRead !== undefined) {
         if (finalizedRead.kind !== 'snapshot') {
           return {
             kind: 'unavailable',
@@ -1630,7 +1647,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             detail: 'finalized authority index has no snapshot for the registered Context Graph',
           };
         }
-        const snapshot = parseRfc64AuthoritySnapshotV1(finalizedRead.snapshot, onChainId);
+        let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
+        try {
+          snapshot = parseRfc64AuthoritySnapshotV1(finalizedRead.snapshot, onChainId);
+        } catch (err) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-access-policy-unavailable',
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
         if (snapshot.active !== true) {
           return {
             kind: 'unavailable',
@@ -1665,17 +1692,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
               accessPolicy: 1,
               participantAgents: snapshot.participantAgents,
             };
-      } catch (err) {
-        return {
-          kind: 'unavailable',
-          onChainId,
-          reason: isBoundedOperationTimeoutError(err)
-            ? 'chain-access-policy-timeout'
-            : 'chain-access-policy-unavailable',
-          detail: err instanceof Error ? err.message : String(err),
-        };
       }
-    } else {
+    }
+    if (accessPolicyState === undefined) {
       try {
         accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
           onChainId.toString(),
@@ -1804,7 +1823,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       'finalized authority snapshot index id',
     );
     const targetId = authorityIndexId as ContextGraphAuthorityIndexId;
-    const snapshot = await this.finalizedAuthorityColdResolutionV1.read(
+    const snapshot = await finalizedAuthorityColdResolutionOf(this).read(
       `finalized-authority-snapshot:${targetId}`,
       async (flightSignal) => (
         await readSnapshots.call(reader, [targetId], { signal: flightSignal })

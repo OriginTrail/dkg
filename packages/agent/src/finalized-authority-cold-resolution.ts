@@ -4,6 +4,10 @@ import {
   createAbortError,
   runBoundedOperation,
 } from './bounded-operation.js';
+import {
+  chainAuthorityReadBudgetsOf,
+  type ChainAuthorityReadBudgets,
+} from './chain-authority-read-budgets.js';
 
 interface ColdResolutionFlight {
   readonly key: string;
@@ -158,4 +162,36 @@ export class FinalizedAuthorityColdResolutionV1 {
     promise.then(retire, retire);
     return flight;
   }
+}
+
+type FinalizedAuthorityColdResolutionHost = {
+  readonly chainAuthorityReadBudgets?: ChainAuthorityReadBudgets;
+};
+
+/**
+ * One runtime per agent-like host, created on first use. Keyed by host
+ * identity rather than stored on the class so prototype-bound test hosts own
+ * one exactly as a constructed agent does (the same pattern as the RFC-64
+ * responsibility batch runtimes).
+ */
+const runtimesByHost = new WeakMap<object, FinalizedAuthorityColdResolutionV1>();
+
+export function finalizedAuthorityColdResolutionOf(
+  host: FinalizedAuthorityColdResolutionHost,
+): FinalizedAuthorityColdResolutionV1 {
+  let runtime = runtimesByHost.get(host);
+  if (runtime === undefined) {
+    runtime = new FinalizedAuthorityColdResolutionV1({
+      coldTimeoutMs: () => chainAuthorityReadBudgetsOf(host).coldResolutionTimeoutMs,
+    });
+    runtimesByHost.set(host, runtime);
+  }
+  return runtime;
+}
+
+/** The host's runtime if one was ever created; lifecycle hooks never create one. */
+export function peekFinalizedAuthorityColdResolution(
+  host: object,
+): FinalizedAuthorityColdResolutionV1 | undefined {
+  return runtimesByHost.get(host);
 }

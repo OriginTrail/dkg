@@ -443,8 +443,6 @@ import {
   resolveChainAuthorityReadBudgets,
   type ChainAuthorityReadBudgets,
 } from './chain-authority-read-budgets.js';
-import { FinalizedAuthorityColdResolutionV1 } from
-  './finalized-authority-cold-resolution.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -1244,18 +1242,6 @@ export class DKGAgentBase {
     this.chainAuthorityReadBudgetsV1 ??= this.config?.chainAuthorityReadBudgets
       ?? resolveChainAuthorityReadBudgets(this.config?.chainConfig);
     return this.chainAuthorityReadBudgetsV1;
-  }
-  /** Created on first use so prototype-based test hosts own one as well. */
-  protected finalizedAuthorityColdResolutionRuntimeV1?: FinalizedAuthorityColdResolutionV1;
-  /**
-   * Detached single-flight owner for cold finalized authority resolutions: a
-   * request deadline bounds only the caller's wait, never the resolution.
-   */
-  protected get finalizedAuthorityColdResolutionV1(): FinalizedAuthorityColdResolutionV1 {
-    this.finalizedAuthorityColdResolutionRuntimeV1 ??= new FinalizedAuthorityColdResolutionV1({
-      coldTimeoutMs: () => this.chainAuthorityReadBudgets.coldResolutionTimeoutMs,
-    });
-    return this.finalizedAuthorityColdResolutionRuntimeV1;
   }
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource

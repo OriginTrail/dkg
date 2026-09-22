@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -130,6 +130,8 @@ import {
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
+import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
+  './rfc64/authority-rpc-circuit-breaker-v1.js';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -303,6 +305,8 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { finalizedAuthorityColdResolutionOf } from
+  './finalized-authority-cold-resolution.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
@@ -405,7 +409,8 @@ export type ContextGraphRegistrationBinding =
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'finalized-name-absence-unaccepted'
-        | 'chain-name-binding-unavailable';
+        | 'chain-name-binding-unavailable'
+        | 'authority-circuit-open';
       detail?: string;
     };
 
@@ -678,10 +683,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const localCgId = matching[0]!;
     const accessPolicy = await raceContextGraphBindingAgainstAbort(
-      this.readLiveOnChainAccessPolicy(
-        cacheKey,
-        createOperationContext('sync'),
-        { signal },
+      withRpcUsageSite(
+        CG_AUTH_RPC_SITES.samplingBinding,
+        () => this.readLiveOnChainAccessPolicy(
+          cacheKey,
+          createOperationContext('sync'),
+          { signal },
+        ),
       ),
       signal,
     );
@@ -1135,6 +1143,26 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         // name walk that outlives the deadline keeps running under the cold
         // budget and is retained by the chain reader, so the retry that
         // follows the fail-closed answer is served from the projection.
+        //
+        // Registration discovery reads the same finalized authority index as
+        // the catalog refresh pass and the VM reconcile lane, so it shares
+        // the one circuit instead of staying the last ungoverned lane into
+        // the pool: its exhaustion now trips the circuit for every other
+        // reader, and a real provider read here proves recovery for them too.
+        //
+        // It takes the FOREGROUND lane, not the bulk serializer. This
+        // boundary backs query, crypto and Context Graph operations, it
+        // fails closed, and its budget here is the request-scoped authority
+        // deadline whenever the graph has a local binding candidate — queued
+        // behind a cold whole-contract scan it would spend that budget
+        // waiting and deny a policy decision on a node whose pool is healthy.
+        //
+        // It is not one caller-driven read, though: unscoped-query admission
+        // fans this boundary out once per candidate graph, up to
+        // `SCALAR_REGISTRATION_PREPARATION_CONCURRENCY` (32) scalar
+        // preparations at a time. The foreground lane's own permit is what
+        // bounds that fan-out to a single probe against an exhausted pool;
+        // the siblings are then refused at the re-evaluated admission gate.
         const repairHints = strictFinalizedDurableBindingRepair && durableBinding !== undefined
           ? {
               durableBindingHints: new Map([[contextGraphId, {
@@ -1147,15 +1175,28 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const flightKey = repairHints === undefined
           ? `registration-binding:${contextGraphId}`
           : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
-        const resolution = await this.finalizedAuthorityColdResolutionV1.read(
+        const resolution = await finalizedAuthorityColdResolutionOf(this).read(
           flightKey,
           async (flightSignal) => {
             try {
-              return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
-                [contextGraphId],
-                { signal: flightSignal, ...(repairHints ?? {}) },
+              return await this.rfc64AuthorityReadCoordinatorV1.runForeground(
+                flightSignal,
+                (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+                  [contextGraphId],
+                  {
+                    ...evidence.agentResolverReadOptions(readSignal),
+                    ...(repairHints ?? {}),
+                  },
+                ),
               );
             } finally {
+              // The index reader's drain is global — one activity set shared with
+              // the bulk catalog lane — so it must run OUTSIDE the foreground
+              // permit: holding the permit across it would make every sibling
+              // registration read wait on unrelated bulk index activity inside
+              // this boundary's policy-read budget. It stays inside the flight,
+              // so a detached resolution retires only once its physical index
+              // work has settled.
               await indexReader.whenIdle();
             }
           },
@@ -1214,7 +1255,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       } catch (err) {
         return {
           kind: 'unavailable',
-          reason: 'chain-name-binding-unavailable',
+          // A cooldown is a deferral, not a failed chain read: nothing was
+          // asked of the pool. Reporting it as a binding failure would have a
+          // caller and its telemetry treat an unrelated graph's exhaustion as
+          // this graph's chain problem.
+          reason: isRfc64AuthorityRpcCircuitOpenErrorV1(err)
+            ? 'authority-circuit-open'
+            : 'chain-name-binding-unavailable',
           detail: err instanceof Error ? err.message : String(err),
         };
       }
