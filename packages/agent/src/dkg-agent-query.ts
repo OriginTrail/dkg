@@ -982,8 +982,9 @@ export class QueryMethods extends DKGAgentBase {
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
       getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
-      getRegisteredAuthority: () => (
-        this.resolveRegisteredContextGraphAuthority(
+      getRegisteredAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.readRegistered,
+        () => this.resolveRegisteredContextGraphAuthority(
           contextGraphId,
           {
             registrationTimeoutMs,
@@ -995,7 +996,7 @@ export class QueryMethods extends DKGAgentBase {
               this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
             authorityReadMode,
           },
-        )
+        ),
       ),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
@@ -1012,7 +1013,10 @@ export class QueryMethods extends DKGAgentBase {
       isPendingMetadata:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
       isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),
-      getLocalAgentGate: () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      getLocalAgentGate: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.readLocalGate,
+        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      ),
       getLegacyParticipants: () => this.getPrivateContextGraphParticipants(contextGraphId),
       // A crash-safe join approval may restore a restricted pending-metadata
       // row before ordinary read authority is proven. Its durable subscription
