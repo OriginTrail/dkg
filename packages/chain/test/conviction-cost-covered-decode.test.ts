@@ -67,6 +67,7 @@ describe('decodeConvictionCostCovered (B8)', () => {
     const parser = Object.create(PublishMethods.prototype) as PublishMethods & {
       contracts: Record<string, unknown>;
       getBlockTimestamp: () => Promise<number>;
+      getFinalizedBlockTimestamp: () => Promise<number>;
     };
     parser.contracts = {
       knowledgeAssetStorage: {
@@ -77,6 +78,7 @@ describe('decodeConvictionCostCovered (B8)', () => {
       },
     };
     parser.getBlockTimestamp = async () => 1234;
+    parser.getFinalizedBlockTimestamp = async () => 1234;
 
     const out = await parser.parseV10PublishReceipt({
       hash: '0xabc',

@@ -40,6 +40,8 @@ interface SwmSyncHarnessBaseOptions {
   ) => Promise<SyncPageResult>;
   /** Use real store-backed materialization by default, or explicitly disable it. */
   readonly materialization?: 'real' | 'disabled';
+  /** Override verifier output while retaining the raw data-phase transport. */
+  readonly verifiedDataOverride?: readonly Quad[];
   /** Runs before real graph replacement; throwing models a write failure. */
   readonly onReplaceGraph?: (graphUri: string, quads: readonly Quad[]) => void;
 }
@@ -118,7 +120,9 @@ export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
         }, fallback) ?? fallback;
       },
       processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
-        verifiedData: wsDataQuads,
+        verifiedData: options.verifiedDataOverride
+          ? [...options.verifiedDataOverride]
+          : wsDataQuads,
         verifiedMeta: wsMetaQuads,
         totalFetchedDataQuads: wsDataQuads.length,
         totalFetchedMetaQuads: wsMetaQuads.length,

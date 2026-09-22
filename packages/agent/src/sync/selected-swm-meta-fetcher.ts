@@ -22,6 +22,15 @@ import {
   SelectedManifestBoundSnapshotWalk,
 } from './requester/manifest-bound-snapshot-walk.js';
 
+/**
+ * Consecutive shared-pool yields a lease absorbs before returning its prefix.
+ *
+ * Low enough that a mutual stall resolves in passes rather than waiting out the
+ * retention TTL, high enough that an ordinary sibling transfer — which commits
+ * and frees its rows within a pass or two — is never made to restart.
+ */
+const MAX_CONSECUTIVE_SHARED_POOL_YIELDS = 3;
+
 /** Exact metadata prefix retained only by one selected-provider transfer owner. */
 interface SelectedSwmMetaContinuationState {
   quads: Quad[];
@@ -37,6 +46,8 @@ interface SelectedSwmMetaContinuationState {
   /** Independent continuation created only after metadata is complete. */
   snapshotWalk?: SelectedManifestBoundSnapshotWalk;
   retentionLease: SelectedSwmMetaRetentionLease;
+  /** Consecutive shared-pool yields since this prefix last grew. */
+  sharedPoolYields: number;
 }
 
 export interface SelectedSwmMetaFetcher {
@@ -295,6 +306,7 @@ export function createSelectedSwmMetaFetcher(options: {
       completed: false,
       metadataExpiresAtMs: 0,
       retentionLease: options.retentionBudget.lease(),
+      sharedPoolYields: 0,
     };
     states.set(contextGraphId, state);
     return state;
@@ -366,6 +378,53 @@ export function createSelectedSwmMetaFetcher(options: {
     // Reserve before yielding to transport. Overlapping selected invocations
     // therefore cannot both spend the same process-wide free allowance.
     const reservation = state.retentionLease.reserve();
+    const exhaustion = reservation.exhaustion;
+    if (exhaustion === 'shared') {
+      // Sibling transfers hold the whole process-wide allowance. Spending a
+      // fetch here cannot succeed — the first returned row exceeds a zero
+      // allowance — and the thrown accumulation limit is fail-closed, so it
+      // would also discard the prefix this invocation already paid for. Yield
+      // the retained prefix instead: the continuation ledger sees no progress,
+      // bounds its own passes, and a later pass runs once capacity frees.
+      // `prefix` exhaustion is NOT yielded: that ceiling is this lease's own
+      // and no later pass can widen it, so it must keep failing closed.
+      reservation.release();
+      state.sharedPoolYields += 1;
+      if (
+        state.sharedPoolYields >= MAX_CONSECUTIVE_SHARED_POOL_YIELDS
+        && (state.nextOffset > 0 || state.quads.length > 0)
+      ) {
+        // Yielding alone cannot create capacity: what this lease holds is the
+        // committed prefix, not the reservation it just released. When every
+        // lease is in that position — each below its own prefix ceiling, the
+        // pool full of retained prefixes — waiting is a mutual stall that only
+        // the retention TTL would break, minutes later, by expiring every
+        // prefix at once. Hand this lease's rows back instead so some transfer
+        // can advance now. This one restarts from offset zero on a later pass;
+        // that is the cost of guaranteeing forward progress, and it is paid by
+        // the lease that has waited longest without growing.
+        options.deleteCheckpoint(state.checkpointKey);
+        state.retentionLease.replace(0, 0);
+        state.quads = [];
+        state.bytesEstimate = 0;
+        state.nextOffset = 0;
+        state.completed = false;
+        state.metadataExpiresAtMs = 0;
+        state.snapshotWalk = undefined;
+        state.generation += 1;
+        state.sharedPoolYields = 0;
+        completedContextGraphs.delete(request.contextGraphId);
+      }
+      return {
+        quads: state.quads,
+        bytesReceived: 0,
+        resumedFromOffset: state.nextOffset,
+        nextOffset: state.nextOffset,
+        checkpointKey: state.checkpointKey,
+        completed: false,
+        timedOut: true,
+      };
+    }
     try {
       const fetched = await options.fetchPage({
         ...request,
@@ -399,6 +458,9 @@ export function createSelectedSwmMetaFetcher(options: {
         ? state.bytesEstimate + fetchedBytesEstimate
         : fetchedBytesEstimate;
       reservation.commitReplace(nextRows, nextBytesEstimate);
+      // This lease just grew, so any contention it waited through was the
+      // transient kind. Start the stall counter over.
+      state.sharedPoolYields = 0;
       if (resumesPrefix) {
         for (const quad of fetched.quads) state.quads.push(quad);
       } else {
@@ -446,6 +508,20 @@ export function createSelectedSwmMetaFetcher(options: {
         state.generation += 1;
         completedContextGraphs.delete(request.contextGraphId);
         return fetchRetained(request, state, false);
+      }
+      if (exhaustion === 'prefix' && error instanceof SyncPageAccumulationLimitError) {
+        // The responder's rejection of a zero allowance is the symptom; the
+        // cause is local and already known here — this lease's retained prefix
+        // is at its own per-CG ceiling, which no later pass widens. The fetch
+        // still goes out because only the responder can report that it started
+        // a fresh session (handled above), but an operator reading the log
+        // deserves the limit to raise rather than an accumulation failure that
+        // looks like a peer problem.
+        error.message = `${error.message} — the retained selected-SWM metadata `
+          + `prefix for "${request.contextGraphId}" is at its own per-Context-Graph `
+          + `ceiling (${state.quads.length} rows / ${state.bytesEstimate} bytes retained); `
+          + 'raise syncResponderSnapshotLimits.local.rows / local.bytesEstimate to '
+          + 'carry a larger manifest';
       }
       // Only an incomplete result returned by the page fetcher is resumable.
       // Every thrown boundary is fail-closed: discard the prefix and its exact

@@ -137,7 +137,7 @@ import {
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -281,6 +281,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
   reconcileContextGraph,
+  RecentReconcileEvidenceMap,
   RecentUalSet,
   type VmReconcileSchedulingRuntime,
   type ChainReconcilerDeps,
@@ -958,6 +959,9 @@ export class DKGAgentBase {
    */
   static readonly SWM_ACK_QUORUM_TICK_MS = 5_000;
 
+  /** Maximum expired SWM operations selected in one cleanup batch. */
+  static readonly SWM_CLEANUP_BATCH_SIZE = 250;
+
   /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
    * is the safety net behind the live `KnowledgeAssetRegisteredToContextGraph`
@@ -997,6 +1001,8 @@ export class DKGAgentBase {
   );
   /** Maximum peers connected/probed/transported by one exact-recovery pass. */
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
+  /** How long a clean legacy exact-filter miss suppresses one peer. */
+  static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
@@ -1081,6 +1087,8 @@ export class DKGAgentBase {
   /** Owns peer-event admission for the current node lifetime. */
   protected peerSyncSession = PeerSyncSession.stopped();
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Single-flight guard for SWM expiry cleanup. */
+  protected swmCleanupInFlight: Promise<number> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** One host-owned runtime for foreground dispatch and retained sweep admission. */
@@ -1113,8 +1121,14 @@ export class DKGAgentBase {
     bindingGeneration: number;
   }>();
   protected selectedVmReconcileBindingGeneration = 0;
-  /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
+  /** Bounded root bookkeeping for sibling cleanup only; never currentness authority. */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /** Bounded same-finalized-block leases; never durable across a stagnant head. */
+  protected readonly vmReconcileFinalizedSlotEvidence =
+    new RecentReconcileEvidenceMap<{
+      kaId: bigint;
+      snapshot: KnowledgeAssetVersionSnapshot;
+    }>();
   /**
    * In-flight core-hosted recordings launched from the synchronous StorageACK
    * pre-sign hook. Tracked so rejections are logged and graceful stop() can
@@ -1145,6 +1159,15 @@ export class DKGAgentBase {
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
   protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
+  /**
+   * Process-local capability evidence for exact VM recovery. Entries are
+   * connection-scoped so a reconnect can reevaluate a peer after a rolling
+   * upgrade, and the map is bounded with the other VM recovery caches.
+   */
+  protected readonly vmReconcileExactPeerCapabilities = new Map<string, {
+    connectionKey: string;
+    expiresAt: number;
+  }>();
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
   /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
@@ -1264,6 +1287,13 @@ export class DKGAgentBase {
   /** Detached owner for post-readiness persisted-subscription authority recovery. */
   protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
     CoalescingRecurringTask;
+  /** Detached owner that drains activation-cap subscriptions as slots become safe. */
+  protected contextGraphSubscriptionRehydrationPromotionRuntime?:
+    CoalescingRecurringTask;
+  /** Non-hosted rows currently consuming a rolling rehydration slot. */
+  protected readonly contextGraphSubscriptionRehydrationSlotIds = new Set<string>();
+  /** Non-hosted rows waiting behind the rolling rehydration cap. */
+  protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
@@ -1496,6 +1526,8 @@ export class DKGAgentBase {
    * kept on the encrypted path for this adapter.
    */
   protected warnedMissingCgLivenessProbe = false;
+  /** Epoch ms of the last single-read authority fallback warning; see its claim. */
+  protected lastLiveAuthorityFallbackWarnAt = Number.NEGATIVE_INFINITY;
   /**
    * Issue #872 — companion cache for the per-CG `publishPolicy` enum
    * (`0` = curators-only, `1` = open). Populated lazily by the
@@ -1700,6 +1732,7 @@ export class DKGAgentBase {
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;
+  protected authorityIndexSnapshotRuntime?: { close(): Promise<void> };
   /** Cores keep-alive-pinned on the last warm-core pass, so the next pass can
    *  unpin Cores that fell out of the selection (stale-pin / cap-drift guard). */
   protected warmedCores: Set<string> = new Set();

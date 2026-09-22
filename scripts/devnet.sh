@@ -631,7 +631,26 @@ create_node_config() {
     if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then
       local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
       local ox_port="${!ox_port_var}"
-      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+      # Declare the transactional guarantee this endpoint actually has. The
+      # container is the same Oxigraph the managed path spawns (which
+      # self-declares `atomic-readback`), but an explicitly configured
+      # sparql-http endpoint defaults to `best-effort` — it cannot know what is
+      # behind it. RFC-64 durable sync requires atomic data/metadata
+      # replacement, so without this nodes 5-6 refuse every graph-scoped
+      # materialization with VM_ATOMIC_REPLACE_UNSUPPORTED and converge nothing
+      # while nodes 1-2 pass — a matrix hole that looks like a product failure.
+      #
+      # `atomic-update` is the minimum that lifts that refusal
+      # (SparqlHttpStore.replaceGraphAndSubject gates on it). `atomic-readback`
+      # is declared deliberately instead: one Oxigraph process does guarantee
+      # read-after-write, and it additionally exercises the receipt-bearing
+      # author-commit CAS lane (rfc64AuthorCommitCasV1) over sparql-http, which
+      # this matrix otherwise never covers. A failure in that lane on nodes 5-6
+      # is therefore a real finding, not devnet drift. Note the certifications
+      # reserved for the daemon-spawned runtime (shared projection stream,
+      # exact-bindings and semantic reads) stay off here by design, so these
+      # nodes remain an external-endpoint cell rather than a managed twin.
+      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\", \"consistencyProfile\": \"atomic-readback\" } },"
     else
       store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
     fi

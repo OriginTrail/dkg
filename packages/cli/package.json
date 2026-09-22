@@ -24,6 +24,7 @@
     }
   },
   "scripts": {
+    "preinstall": "node ./scripts/verify-node-sqlite-runtime.mjs",
     "build": "pnpm run build:prerequisites && pnpm run build:prepared",
     "build:prerequisites": "node scripts/build-prerequisites.mjs",
     "build:prepared": "tsc && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",

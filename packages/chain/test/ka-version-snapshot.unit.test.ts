@@ -37,6 +37,8 @@ type Script = {
   stall?: boolean;
   /** Fail the first N head reads with `code` before serving `blockNumber` (transient-blip cases). */
   headFailures?: { count: number; code: string };
+  /** Override the canonical hash at the scripted head; null models a missing hash. */
+  blockHash?: string | null;
   latestRoot: string | null;
   rootCount: bigint;
   author?: string | null;
@@ -45,6 +47,11 @@ type Script = {
 
 const AUTHOR = `0x${'11'.repeat(20)}`;
 const PUBLISHER = `0x${'22'.repeat(20)}`;
+const KAS_ADDRESS = `0x${'33'.repeat(20)}`;
+
+function hashForBlock(blockNumber: number): string {
+  return `0x${blockNumber.toString(16).padStart(64, '0')}`;
+}
 
 function adapterOver(
   scripts: Script[],
@@ -57,14 +64,21 @@ function adapterOver(
     async getNetwork() {
       return { chainId: script.wrongChain ? 999n : 31337n };
     },
-    async getBlockNumber() {
+    async getBlock(tag: 'latest' | number) {
       if (script.stall) return new Promise(() => {}) as never;
-      if (script.headFailures && script.headFailures.count > 0) {
+      if (tag === 'latest' && script.headFailures && script.headFailures.count > 0) {
         script.headFailures.count -= 1;
         throw Object.assign(new Error('scripted head-read failure'), { code: script.headFailures.code });
       }
-      if (script.blockNumber === null) throw Object.assign(new Error('no head view'), { code: 'NETWORK_ERROR' });
-      return script.blockNumber;
+      const headBlockNumber = script.blockNumber;
+      if (headBlockNumber === null) throw Object.assign(new Error('no head view'), { code: 'NETWORK_ERROR' });
+      const number = tag === 'latest' ? headBlockNumber : tag;
+      return {
+        number,
+        hash: tag === 'latest' && script.blockHash !== undefined
+          ? script.blockHash
+          : hashForBlock(number),
+      };
     },
   }));
 
@@ -80,7 +94,8 @@ function adapterOver(
   };
   a.initialized = true;
   a.init = async () => {};
-  a.contracts = { knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {} };
+  const storage = { target: KAS_ADDRESS };
+  a.contracts = { knowledgeAssetStorage: opts.storageDeployed === false ? undefined : storage };
   a.providers = providers;
   a.rebindContract = (_c: unknown, provider: (typeof providers)[number]) => {
     const record = (call: string, overrides: { blockTag?: unknown }) =>
@@ -104,7 +119,7 @@ function adapterOver(
       },
     };
   };
-  return { adapter: a, reads, validated };
+  return { adapter: a, reads, validated, providers, storage };
 }
 
 describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', () => {
@@ -116,11 +131,15 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
 
     expect(view).toEqual({
+      knowledgeAssetId: KA_ID,
       latestRoot: `0x${'aa'.repeat(32)}`,
       rootCount: 3n,
       latestAuthor: AUTHOR,
       latestPublisher: PUBLISHER,
       blockNumber: 500,
+      blockHash: hashForBlock(500),
+      knowledgeAssetStorageAddress: KAS_ADDRESS,
+      knowledgeAssetStorageGeneration: 0,
     });
     // Coherence: every read pinned to the SAME height. Re-reading the head between calls, or
     // dropping a blockTag, lets the view straddle two blocks — which is how a stale root ends up
@@ -177,6 +196,20 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     ]);
 
     await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+  });
+
+  it('rejects same-height provider disagreement and missing canonical hashes', async () => {
+    const root = `0x${'aa'.repeat(32)}`;
+    const disagreeing = adapterOver([
+      { blockNumber: 500, blockHash: `0x${'01'.repeat(32)}`, latestRoot: root, rootCount: 3n },
+      { blockNumber: 500, blockHash: `0x${'02'.repeat(32)}`, latestRoot: root, rootCount: 3n },
+    ]).adapter;
+    await expect(disagreeing.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+
+    const missing = adapterOver([
+      { blockNumber: 500, blockHash: null, latestRoot: root, rootCount: 3n },
+    ]).adapter;
+    await expect(missing.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
   });
 
   it('a single transient blip on one endpoint does not void the unanimity poll', async () => {
@@ -260,7 +293,7 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     expect(validated).toContain(0);
   });
 
-  it('an abort completes the call rather than waiting out a stalled endpoint [r16]', async () => {
+  it('an abort completes the snapshot read rather than waiting out a stalled endpoint [r16]', async () => {
     // 3814610248 — this poll gates durable recovery and fans out over every provider, so without a
     // cancellation row a regression could leave recovery waiting on one stalled RPC indefinitely
     // while every other snapshot row stayed green.
@@ -292,5 +325,106 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     );
 
     await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+  });
+
+  it('validates a snapshot only while its finalized hash and exact KAS generation remain current', async () => {
+    const script: Script = {
+      blockNumber: 500,
+      blockHash: `0x${'50'.repeat(32)}`,
+      latestRoot: `0x${'aa'.repeat(32)}`,
+      rootCount: 3n,
+    };
+    const { adapter } = adapterOver([script]);
+    const snapshot = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+    expect(snapshot).not.toBeNull();
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshot!))
+      .resolves.toBe(true);
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID + 1n, snapshot!))
+      .resolves.toBe(false);
+
+    script.blockHash = `0x${'51'.repeat(32)}`;
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshot!))
+      .resolves.toBe(false);
+
+    script.blockHash = `0x${'50'.repeat(32)}`;
+    (adapter as any).knowledgeAssetStorageBindingGeneration += 1;
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshot!))
+      .resolves.toBe(false);
+  });
+
+  it('propagates abort while a currentness header read is stalled', async () => {
+    const script: Script = {
+      blockNumber: 500,
+      latestRoot: `0x${'aa'.repeat(32)}`,
+      rootCount: 3n,
+    };
+    const { adapter } = adapterOver([script]);
+    const snapshot = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+    expect(snapshot).not.toBeNull();
+    script.stall = true;
+    const controller = new AbortController();
+    const pending = adapter.knowledgeAssetVersionSnapshotIsCurrent(
+      KA_ID,
+      snapshot!,
+      { signal: controller.signal },
+    );
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('rejects a late currentness result after a same-address KAS object replacement', async () => {
+    const script: Script = {
+      blockNumber: 500,
+      latestRoot: `0x${'aa'.repeat(32)}`,
+      rootCount: 3n,
+    };
+    const { adapter, providers, storage } = adapterOver([script]);
+    const snapshot = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+    expect(snapshot).not.toBeNull();
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const originalGetBlock = providers[0]!.getBlock.bind(providers[0]);
+    providers[0]!.getBlock = async (tag: 'latest' | number) => {
+      started();
+      await gate;
+      return originalGetBlock(tag);
+    };
+
+    const pending = adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshot!);
+    await entered;
+    (adapter as any).contracts.knowledgeAssetStorage = { target: KAS_ADDRESS };
+    release();
+
+    await expect(pending).resolves.toBe(false);
+    expect((adapter as any).contracts.knowledgeAssetStorage).not.toBe(storage);
+  });
+
+  it('rejects a late snapshot when the KAS binding changes during its tuple reads', async () => {
+    const { adapter, storage } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const originalRebind = (adapter as any).rebindContract;
+    (adapter as any).rebindContract = (...args: unknown[]) => {
+      const bound = originalRebind(...args);
+      const original = bound.getLatestMerkleRoot;
+      bound.getLatestMerkleRoot = async (...callArgs: unknown[]) => {
+        await gate;
+        return original(...callArgs);
+      };
+      return bound;
+    };
+
+    const pending = adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
+    await Promise.resolve();
+    (adapter as any).contracts.knowledgeAssetStorage = { target: KAS_ADDRESS };
+    (adapter as any).knowledgeAssetStorageBindingGeneration += 1;
+    release();
+
+    await expect(pending).resolves.toBeNull();
+    expect((adapter as any).contracts.knowledgeAssetStorage).not.toBe(storage);
   });
 });

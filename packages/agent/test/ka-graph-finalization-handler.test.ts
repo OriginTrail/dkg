@@ -2458,6 +2458,53 @@ describe('graph-scoped finalization handler', () => {
     `);
   });
 
+  it('threads exact-fetch version evidence without repeating version RPCs', async () => {
+    const { message, vmGraph } = await stageGraph();
+    const active = vi.fn(async () => true);
+    const access = vi.fn(async () => 0);
+    const getMerkleRootCount = vi.fn(async () => {
+      throw new Error('coherent snapshot must replace root-count rereads');
+    });
+    const getLatestMerkleRoot = vi.fn(async () => {
+      throw new Error('coherent snapshot must replace latest-root rereads');
+    });
+    const getLatestMerkleRootAuthor = vi.fn(async () => {
+      throw new Error('coherent snapshot must replace author rereads');
+    });
+    const knowledgeAssetVersionSnapshotIsCurrent = vi.fn(async () => true);
+    const publicHandler = makePublicReconcileHandler(message, {
+      isContextGraphActiveOnChain: active,
+      getContextGraphAccessPolicy: access,
+      getMerkleRootCount,
+      getLatestMerkleRoot,
+      getLatestMerkleRootAuthor,
+      knowledgeAssetVersionSnapshotIsCurrent,
+    });
+
+    await expect(reconcileGraphScoped(publicHandler, message, {
+      assertionVersion: 1n,
+      versionSnapshot: {
+        knowledgeAssetId: PACKED_KA_ID,
+        latestRoot: message.kcMerkleRoot,
+        rootCount: 1n,
+        latestAuthor: AUTHOR,
+        latestPublisher: PUBLISHER,
+        blockNumber: 123,
+        blockHash: `0x${'44'.repeat(32)}`,
+        knowledgeAssetStorageAddress: `0x${'33'.repeat(20)}`,
+        knowledgeAssetStorageGeneration: 1,
+      },
+    })).resolves.toBe('promoted');
+
+    expect(active).toHaveBeenCalledOnce();
+    expect(access).toHaveBeenCalledOnce();
+    expect(getMerkleRootCount).not.toHaveBeenCalled();
+    expect(getLatestMerkleRoot).not.toHaveBeenCalled();
+    expect(getLatestMerkleRootAuthor).not.toHaveBeenCalled();
+    expect(knowledgeAssetVersionSnapshotIsCurrent).toHaveBeenCalledOnce();
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
   it('retires the exact SWM twin after receiptless public chain promotion', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const writeLocks = new Map<string, Promise<void>>();

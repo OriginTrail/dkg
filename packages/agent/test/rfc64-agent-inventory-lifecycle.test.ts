@@ -11,7 +11,7 @@ import {
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -52,6 +52,8 @@ function temporaryDataDirectory(): string {
 
 function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  // Production always owns an adapter, including no-chain deployments.
+  agent.chain = new MockChainAdapter();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
