@@ -9,16 +9,20 @@ import type {
 } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
-import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
-const MAX_UINT256 = (1n << 256n) - 1n;
+const MAX_COLD_AUTHORITY_ATTEMPTS_PER_PASS = 1;
 
 function hasCanonicalDurableBinding(
   row: ContextGraphSubscriptionRecord | null,
 ): boolean {
-  return isCanonicalPositiveContextGraphId(row?.onChainId)
-    && BigInt(row.onChainId) <= MAX_UINT256;
+  return isCanonicalAuthoritativeContextGraphId(row?.onChainId);
+}
+
+export interface DeferredContextGraphSubscriptionAuthorityRecoveryCursor {
+  /** Last cold candidate attempted by this recovery runtime. */
+  afterContextGraphId?: string;
 }
 
 export interface PersistedContextGraphSubscriptionActivationPorts {
@@ -97,6 +101,8 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
   readonly dormancyById: Map<string, ContextGraphDormancyReason>;
   readonly persistRevisions: ReadonlyMap<string, number>;
   readonly subscriptions: ReadonlyMap<string, ContextGraphSub>;
+  /** Process-local, runtime-owned cursor; never persisted as subscription state. */
+  readonly coldCursor?: DeferredContextGraphSubscriptionAuthorityRecoveryCursor;
   getStatus(): ContextGraphSubscriptionRehydrationInternalStatus | null;
   isCurrent(): boolean;
   touchStatus(): void;
@@ -140,7 +146,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   // ahead of an already-bound row would turn safe serialization into
   // head-of-line blocking. Revision/current-row fences below still decide
   // whether a snapshot may commit.
-  const candidates = (await mapWithConcurrency(
+  const candidateSnapshots = await mapWithConcurrency(
     candidateIds,
     MAX_CONCURRENT_DEFERRED_ROW_LOADS,
     async (contextGraphId) => ({
@@ -150,14 +156,32 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
         ? discoverySnapshot!.get(contextGraphId) ?? null
         : await ports.store.load(contextGraphId),
     }),
-  )).sort((left, right) => {
-    const leftBound = hasCanonicalDurableBinding(left.candidate);
-    const rightBound = hasCanonicalDurableBinding(right.candidate);
-    if (leftBound !== rightBound) return leftBound ? -1 : 1;
-    return left.contextGraphId < right.contextGraphId
+  );
+  const byId = (left: typeof candidateSnapshots[number], right: typeof left): number => (
+    left.contextGraphId < right.contextGraphId
       ? -1
-      : left.contextGraphId > right.contextGraphId ? 1 : 0;
-  });
+      : left.contextGraphId > right.contextGraphId ? 1 : 0
+  );
+  const boundCandidates = candidateSnapshots
+    .filter(({ candidate }) => hasCanonicalDurableBinding(candidate))
+    .sort(byId);
+  const coldCandidates = candidateSnapshots
+    .filter(({ candidate }) => !hasCanonicalDurableBinding(candidate))
+    .sort(byId);
+  const afterContextGraphId = ports.coldCursor?.afterContextGraphId;
+  const coldStartIndex = afterContextGraphId === undefined
+    ? 0
+    : Math.max(
+      0,
+      coldCandidates.findIndex(({ contextGraphId }) => contextGraphId > afterContextGraphId),
+    );
+  const roundRobinColdCandidates = coldCandidates.length === 0
+    ? []
+    : [
+        ...coldCandidates.slice(coldStartIndex),
+        ...coldCandidates.slice(0, coldStartIndex),
+      ];
+  const candidates = [...boundCandidates, ...roundRobinColdCandidates];
   if (!ports.isCurrent()) return;
 
   // Every discovery performs a fail-closed live-authority read whose 1s
@@ -165,6 +189,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   // and commit one candidate at a time: distinct graphs cannot share a flight,
   // and collecting every result before activation would make a ready bound row
   // wait behind later cold rows for up to 120s each.
+  let coldAttempts = 0;
   for (const { contextGraphId, revision, candidate } of candidates) {
     if (
       !ports.isCurrent()
@@ -174,10 +199,26 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       ports.clearStatus(contextGraphId);
       continue;
     }
-    if (!candidate.subscribed && candidate.coreHosted !== true) continue;
+    if (!candidate.subscribed && candidate.coreHosted !== true) {
+      ports.clearStatus(contextGraphId);
+      continue;
+    }
+    const coldCandidate = !hasCanonicalDurableBinding(candidate);
+    if (
+      coldCandidate
+      && coldAttempts >= MAX_COLD_AUTHORITY_ATTEMPTS_PER_PASS
+    ) continue;
+    if (coldCandidate) coldAttempts += 1;
 
     const authority = await ports.resolveAuthority(candidate, signal);
     if (!ports.isCurrent()) return;
+    // One cold lookup may consume the full finalized-name discovery budget.
+    // Advance even when it remains unavailable so a stable prefix cannot
+    // starve later rows across recurring passes. Bound rows are attempted
+    // first and do not consume this per-pass cold budget.
+    if (coldCandidate && ports.coldCursor !== undefined) {
+      ports.coldCursor.afterContextGraphId = contextGraphId;
+    }
     if (
       ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
@@ -190,21 +231,30 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       continue;
     }
 
+    // Built-in stores expose indexed load(). A custom loadAll-only store must
+    // perform this fresh scan after each asynchronous authority decision: the
+    // scan is the only available fence against an external row replacement,
+    // and reusing the pre-read snapshot could resurrect stale intent.
     const currentRow = ports.store.load === undefined
       ? (await snapshotRows()).get(contextGraphId) ?? null
       : await ports.store.load(contextGraphId);
     if (!ports.isCurrent()) return;
+    if (currentRow === null) {
+      ports.clearStatus(contextGraphId);
+      continue;
+    }
+    if (!currentRow.subscribed && currentRow.coreHosted !== true) {
+      ports.clearStatus(contextGraphId);
+      continue;
+    }
     if (
-      currentRow === null
-      || ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
+      ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
       || ports.subscriptions.has(contextGraphId)
       || currentRow.id !== candidate.id
       || currentRow.onChainId !== candidate.onChainId
       || currentRow.onChainHash !== candidate.onChainHash
-      || (!currentRow.subscribed && currentRow.coreHosted !== true)
     ) {
-      if (currentRow === null) ports.clearStatus(contextGraphId);
       continue;
     }
 

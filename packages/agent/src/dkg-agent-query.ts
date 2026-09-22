@@ -806,6 +806,7 @@ export class QueryMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<{
         contextGraphId: string;
         onChainId?: string;
+        onChainHash?: string;
       }>;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
@@ -954,6 +955,7 @@ export class QueryMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<{
         contextGraphId: string;
         onChainId?: string;
+        onChainHash?: string;
       }>;
     },
     registrationTimeoutMs: number,

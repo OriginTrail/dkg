@@ -1572,6 +1572,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<{
         contextGraphId: string;
         onChainId?: string;
+        onChainHash?: string;
       }>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;

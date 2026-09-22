@@ -68,6 +68,14 @@ export function isCanonicalPositiveContextGraphId(value: unknown): value is stri
   return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
 }
 
+/** Canonical positive decimal that is representable by an EVM uint256 slot. */
+export function isCanonicalAuthoritativeContextGraphId(
+  value: unknown,
+): value is string {
+  return isCanonicalPositiveContextGraphId(value)
+    && BigInt(value) <= ethers.MaxUint256;
+}
+
 /** Shared cleartext-or-host-wire identity proof for one committed name hash. */
 export function localContextGraphIdMatchesCommittedNameHash(
   localCgId: string,
@@ -88,8 +96,8 @@ export function localContextGraphIdMatchesCommittedNameHash(
     && localCgId.toLowerCase() === normalizedCommitment;
 }
 
-function requireCanonicalPositiveContextGraphId(value: string): string {
-  if (!isCanonicalPositiveContextGraphId(value)) {
+function requireCanonicalAuthoritativeContextGraphId(value: string): string {
+  if (!isCanonicalAuthoritativeContextGraphId(value)) {
     throw new TypeError(`Invalid Context Graph on-chain id: ${JSON.stringify(value)}`);
   }
   return value;
@@ -136,7 +144,7 @@ export class ContextGraphBindingState {
     subscription: ContextGraphBindingSubscription | undefined,
   ): ContextGraphBinding | undefined {
     if (subscription?.onChainId !== undefined) {
-      if (!isCanonicalPositiveContextGraphId(subscription.onChainId)) return undefined;
+      if (!isCanonicalAuthoritativeContextGraphId(subscription.onChainId)) return undefined;
       return {
         bindingKind: 'authoritative',
         onChainId: subscription.onChainId,
@@ -164,7 +172,7 @@ export class ContextGraphBindingState {
   ): string | undefined {
     const current = this.currentBindingFor(localCgId, subscription);
     return current?.bindingKind === 'authoritative'
-      && BigInt(current.onChainId) <= ethers.MaxUint256
+      && isCanonicalAuthoritativeContextGraphId(current.onChainId)
       ? current.onChainId
       : undefined;
   }
@@ -213,7 +221,7 @@ export class ContextGraphBindingState {
     subscription: ContextGraphBindingSubscription,
     newOnChainId: string,
   ): ContextGraphBindingTransition {
-    const canonicalOnChainId = requireCanonicalPositiveContextGraphId(newOnChainId);
+    const canonicalOnChainId = requireCanonicalAuthoritativeContextGraphId(newOnChainId);
     const previous = this.currentBindingFor(localCgId, subscription);
     const previousOnChainId = subscription.onChainId ?? previous?.onChainId;
     const current: AuthoritativeContextGraphBinding = {
@@ -242,10 +250,10 @@ export class ContextGraphBindingState {
     newOnChainId: string,
     nameHash: string,
   ): ContextGraphBindingTransition {
-    const canonicalOnChainId = requireCanonicalPositiveContextGraphId(newOnChainId);
+    const canonicalOnChainId = requireCanonicalAuthoritativeContextGraphId(newOnChainId);
     const previous = this.currentBindingFor(localCgId, subscription);
     if (subscription.onChainId !== undefined) {
-      requireCanonicalPositiveContextGraphId(subscription.onChainId);
+      requireCanonicalAuthoritativeContextGraphId(subscription.onChainId);
       this.reverseCandidates.delete(localCgId);
       return {
         previous,

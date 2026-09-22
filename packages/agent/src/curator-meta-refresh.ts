@@ -36,6 +36,8 @@ import type {
 } from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
+import { isCanonicalAuthoritativeContextGraphId } from
+  './context-graph-binding-state.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -246,12 +248,11 @@ function applyCuratorRegistrationBinding(
   for (const quad of snapshot) {
     if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
     const value = stripLiteral(quad.object);
-    if (quad.predicate === onChainIdPredicate && /^\d+$/.test(value)) {
-      try {
-        if (BigInt(value) > 0n) onChainId = value;
-      } catch {
-        // Ignore malformed or out-of-domain curator metadata fail-closed.
-      }
+    if (
+      quad.predicate === onChainIdPredicate
+      && isCanonicalAuthoritativeContextGraphId(value)
+    ) {
+      onChainId = value;
     } else if (
       quad.predicate === onChainHashPredicate
       && /^0x[0-9a-fA-F]{64}$/.test(value)

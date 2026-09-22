@@ -257,29 +257,116 @@ describe('Context Graph registration resolution deadlines', () => {
     expect(fixture.query).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['different graph', { contextGraphId: `${LOCAL_ID}-other`, onChainId: '42' }],
-    ['non-canonical id', { contextGraphId: LOCAL_ID, onChainId: '042' }],
-    ['zero id', { contextGraphId: LOCAL_ID, onChainId: '0' }],
-    ['uint256 overflow', {
-      contextGraphId: LOCAL_ID,
-      onChainId: (1n << 256n).toString(10),
-    }],
-  ] as const)('fails closed for a malformed durable-row binding: %s', async (
-    _case,
-    durableSubscriptionBinding,
-  ) => {
+  it('fails closed when a durable-row binding belongs to a different graph', async () => {
     const fixture = selectedFixture();
     fixture.agent.subscribedContextGraphs.clear();
     fixture.agent.wireIdToLocalCgId.clear();
 
     await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
-      durableSubscriptionBinding,
+      durableSubscriptionBinding: {
+        contextGraphId: `${LOCAL_ID}-other`,
+        onChainId: '42',
+      },
     })).resolves.toMatchObject({
       kind: 'unavailable',
       reason: 'local-chain-binding-unavailable',
     });
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['non-canonical id', '042'],
+    ['zero id', '0'],
+    ['uint256 overflow', (1n << 256n).toString(10)],
+  ] as const)('repairs a malformed durable-row binding only through the finalized index: %s', async (
+    _case,
+    onChainId,
+  ) => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    const persistedNameHash = `0x${'cd'.repeat(32)}`;
+    const resolveFinalized = vi.fn(async () => 73n);
+    const whenIdle = vi.fn(async () => undefined);
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
+        whenIdle,
+      },
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding: {
+        contextGraphId: LOCAL_ID,
+        onChainId,
+        onChainHash: persistedNameHash,
+      },
+    })).resolves.toEqual({
+      kind: 'registered',
+      onChainId: 73n,
+      provenance: 'name-hash',
+    });
+    expect(resolveFinalized).toHaveBeenCalledWith(persistedNameHash, expect.any(Object));
+    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('does not repair an invalid durable binding through a legacy scalar resolver', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding: { contextGraphId: LOCAL_ID, onChainId: '042' },
+    })).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'chain-name-binding-unavailable',
+    });
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('does not turn invalid durable state into accepted finalized absence', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    const resolveFinalized = vi.fn(async () => null);
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding: { contextGraphId: LOCAL_ID, onChainId: '0' },
+      allowAcceptedRfc64FinalizedAbsence: true,
+    })).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    expect(resolveFinalized).toHaveBeenCalledOnce();
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('rejects uint256 overflow at authoritative and reverse binding write boundaries', () => {
+    const fixture = selectedFixture();
+    const overflow = (1n << 256n).toString(10);
+    const authoritative = {};
+    const reverse = {};
+
+    expect(() => fixture.agent.contextGraphBindingState.bindAuthoritative(
+      LOCAL_ID,
+      authoritative,
+      overflow,
+    )).toThrow('Invalid Context Graph on-chain id');
+    expect(() => fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      reverse,
+      overflow,
+      NAME_HASH,
+    )).toThrow('Invalid Context Graph on-chain id');
+    expect(authoritative).toEqual({});
+    expect(reverse).toEqual({});
   });
 
   it('keeps the hot deadline for an existing reverse binding candidate', async () => {
