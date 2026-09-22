@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphComputer } from '@origintrail-official/dkg-graph-computer';
 const { programs } = vi.hoisted(() => ({ programs: {
-  upload: vi.fn(), getSource: vi.fn(), getApproval: vi.fn(), approve: vi.fn(), updateApproval: vi.fn(), invoke: vi.fn(), prepareInvocation: vi.fn(),
+  upload: vi.fn(), getSource: vi.fn(), getApproval: vi.fn(), listApprovals: vi.fn(), approve: vi.fn(), updateApproval: vi.fn(), invoke: vi.fn(), prepareInvocation: vi.fn(),
 } }));
 vi.mock('../src/ui/components/Programs/client.js', () => ({ programClient: async () => ({ programs }), fetchProgramAgents: async () => ({ defaultAddress: address, agents: [ { address, name: 'Owner' }, { address: '0x0000000000000000000000000000000000000002', name: 'Second agent' } ] }) }));
 vi.mock('../src/ui/components/Wallet/WalletConnectControl.js', () => ({ WalletConnectControl: () => null }));
@@ -50,6 +50,7 @@ beforeEach(() => {
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   programs.upload.mockImplementation(async input => (uploaded = { ...input, programLayer: 'wm', sourceHash: 'a'.repeat(64), authorAgentAddress: address }));
   programs.getApproval.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
+  programs.listApprovals.mockResolvedValue([]);
   programs.approve.mockImplementation(async () => approval());
   programs.updateApproval.mockImplementation(async () => approval(uploaded, 4));
   const client = new GraphComputer({ nodeUrl: 'http://node', peerId: 'peer-test', signer: { getAddress: async () => address, signMessage: async () => '' } });
@@ -61,6 +62,59 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); window.confirm = originalConfirm; vi.restoreAllMocks(); });
 
 describe('TypeScript Program editor', () => {
+  const existing = { programIri: 'urn:existing', programLayer: 'wm' as const };
+  function storedProgram() {
+    const program = { ...existing, graphId: 'school', sourceHash: 'a'.repeat(64), authorAgentAddress: address };
+    programs.getSource.mockResolvedValue({ ...program, contextGraphId: 'school', layer: 'wm', language: 'typescript-v1',
+      source: 'export function run() { return 7; }', version: '1', permittedPrograms: [] });
+    return program;
+  }
+
+  it('loads a unique matching approval on reopen and invokes without creating a grant', async () => {
+    const program = storedProgram();
+    programs.listApprovals.mockResolvedValue([approval(program), approval({ ...program, graphId: 'other' })]);
+    await render({ existing }); await settle();
+    expect(button('Run Program').disabled).toBe(false);
+    expect(programs.approve).not.toHaveBeenCalled(); expect(programs.updateApproval).not.toHaveBeenCalled();
+    await fill('Arguments (JSON array)', '[]'); await click('Run Program');
+    expect(programs.invoke.mock.calls[0][0]).toMatchObject({ ...operation, inputs: [] });
+  });
+
+  it('requires a choice when multiple approved operations match', async () => {
+    const program = storedProgram();
+    programs.listApprovals.mockResolvedValue([approval(program), { ...approval(program), operationIri: 'urn:school:second' }]);
+    await render({ existing }); await settle();
+    expect(button('Run Program').disabled).toBe(true);
+    expect(container.textContent).toContain('Select an existing operation');
+    await act(async () => {
+      const select = [...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === 'Existing operation')!.querySelector('select')!;
+      select.value = operation.operationIri; select.dispatchEvent(new Event('change', { bubbles: true }));
+    }); await settle();
+    expect(button('Run Program').disabled).toBe(false);
+  });
+
+  it.each(['disabled', 'different caller', 'different version'])('does not enable a discovered approval with %s', async kind => {
+    const program = storedProgram(); const value = approval(program);
+    if (kind === 'disabled') value.binding.enabled = false;
+    if (kind === 'different caller') value.binding.allowedCallerAgentAddresses = ['0x0000000000000000000000000000000000000002'];
+    if (kind === 'different version') value.binding.program.sourceHash = 'c'.repeat(64);
+    programs.listApprovals.mockResolvedValue([value]);
+    await render({ existing }); await settle();
+    expect(button('Run Program').disabled).toBe(true);
+    expect(container.querySelector('#program-run-unavailable')?.textContent).toBeTruthy();
+    expect(programs.approve).not.toHaveBeenCalled();
+  });
+
+  it('ignores discovery for an operation graph that has changed', async () => {
+    const program = storedProgram(); let finish!: (value: any) => void;
+    programs.listApprovals.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await render({ existing });
+    await fill('Operation graph', 'different-graph');
+    await act(async () => finish([approval(program)])); await settle();
+    expect(button('Run Program').disabled).toBe(true);
+    expect(container.querySelector('#program-run-unavailable')?.textContent).toContain('Operation IRI');
+  });
+
   it('persists and displays requested tool permissions before owner approval', async () => {
     const permissions = {graphId: 'school', assetCreation: {toolIri: 'urn:school:write'}};
     await render(); await fill('Operation IRI', operation.operationIri);

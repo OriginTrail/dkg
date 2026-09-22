@@ -267,6 +267,11 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-prop-val { color: var(--text-secondary); word-break: break-all; }
 .v10-ka-prop-structured { flex-direction: column; gap: 4px; padding: 12px 0; min-width: 0; }
 .v10-ka-prop-structured > .v10-ka-prop-val { width: 100%; min-width: 0; }
+.v10-ka-program-source { word-break: normal; }
+.v10-ka-program-source .v10-md-pre { margin: 0; }
+.v10-ka-program-source .v10-md-pre-rendered,
+.v10-ka-program-source .v10-md-pre-fallback { max-height: 480px; overflow: auto; }
+.v10-ka-program-source pre { white-space: pre; }
 .v10-ka-conn {
   display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 5px 8px;
   border-radius: 4px; cursor: pointer; border: none; background: none; color: inherit;

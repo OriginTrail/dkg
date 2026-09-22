@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import JsonView from '@uiw/react-json-view';
+import { copyText } from './copyText.js';
 import './json-viewer.css';
 
 /** RDF property values are already decoded by useMemoryEntities. */
@@ -26,23 +27,7 @@ export function JsonViewer({ value, label = 'JSON' }: { value: object; label?: s
   const copy = async () => {
     const text = JSON.stringify(value, null, 2);
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        // Node dashboards are also served over HTTP, without the Clipboard API.
-        const active = document.activeElement;
-        const input = document.createElement('textarea');
-        input.value = text;
-        input.style.cssText = 'position:fixed;left:-9999px;top:0';
-        document.body.append(input);
-        try {
-          input.select();
-          if (!document.execCommand('copy')) throw new Error('Copy unavailable');
-        } finally {
-          input.remove();
-          if (active instanceof HTMLElement) active.focus({ preventScroll: true });
-        }
-      }
+      await copyText(text);
       setCopyStatus('Copied');
     } catch { setCopyStatus('Copy failed'); }
   };

@@ -49,10 +49,13 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const [maxCalls, setMaxCalls] = useState(64);
   const [maxConcurrency, setMaxConcurrency] = useState(4);
   const [timeoutMs, setTimeoutMs] = useState(30_000);
-  const [inputs, setInputs] = useState('[[1, 2, 3]]');
+  const [inputs, setInputs] = useState(existing ? '[]' : '[[1, 2, 3]]');
   const [saved, setSaved] = useState<Saved | null>(null);
   const [reviewed, setReviewed] = useState<{ key: string; value: Approval | null } | null>(null);
   const [approved, setApproved] = useState<Approval | null>(null);
+  const [availableApprovals, setAvailableApprovals] = useState<Approval[]>([]);
+  const [approvalToLoad, setApprovalToLoad] = useState<Approval | null>(null);
+  const [discoveryError, setDiscoveryError] = useState('');
   const [invocation, setInvocation] = useState<Recovery | null>(null);
   const [result, setResult] = useState<Execution | null>(null);
   const [busy, setBusy] = useState('');
@@ -61,11 +64,19 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const generation = useRef(0);
   const saveAttempt = useRef<{ fingerprint: string; programIri: string; name: string } | null>(null);
   const key = JSON.stringify([canonicalGraph(graphId), operationIri.trim()]);
+  const selection = useRef({ key, operationIri }); selection.current = { key, operationIri };
   const childIris = [...new Set(children.map(child => child.programIri.trim()))].sort();
   const toolIris = [...new Set(toolsText.split(/[\s,]+/).filter(Boolean))].sort();
   const dirty = (!existing && !saved) || (!!saved && (name !== saved.name || source !== saved.source || version !== saved.version || JSON.stringify(childIris) !== JSON.stringify(saved.children) || JSON.stringify(toolIris) !== JSON.stringify(saved.tools) || permissionsText !== saved.permissions));
   const canRun = !!approved?.binding.enabled && !dirty && approved.contextGraphId === canonicalGraph(graphId)
-    && approved.operationIri === operationIri.trim() && !!saved && matchesProgram(approved, saved.program);
+    && approved.operationIri === operationIri.trim() && !!saved && matchesProgram(approved, saved.program)
+    && approved.binding.allowedCallerAgentAddresses.some(caller => caller.toLowerCase() === address.toLowerCase());
+  const runUnavailable = busy || (!address ? 'Select a node agent to run this Program.'
+    : !saved ? 'Load or save the Program first.'
+    : dirty ? 'Save your changes, then check or approve the new version before running.'
+    : !operationIri.trim() ? (availableApprovals.length > 1 ? 'Select an existing operation to run this Program.' : 'Enter an Operation IRI and check its approval, or create an approval for this Program.')
+    : !approved ? 'Check the operation approval. It must be enabled and match this saved Program version.'
+    : !canRun ? 'The selected agent is not an allowed caller for this approval.' : '');
   const recoveryKey = `dkg-program-invocation:${location.origin}:${address?.toLowerCase()}:${key}`;
 
   useEffect(() => {
@@ -98,9 +109,35 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     try {
       const raw = sessionStorage.getItem(recoveryKey);
       const value = raw ? JSON.parse(raw) : null;
-      setInvocation(value && value.graphId === canonicalGraph(graphId) && value.operationIri === operationIri.trim() && typeof value.bindingDigest === 'string' ? value : null);
+      const restored = value && value.graphId === canonicalGraph(graphId) && value.operationIri === operationIri.trim() && typeof value.bindingDigest === 'string' ? value : null;
+      setInvocation(restored);
+      if (restored) setInputs(JSON.stringify(restored.inputs, null, 2));
     } catch { setInvocation(null); }
   }, [recoveryKey]);
+  // Approval discovery is read-only. Never create or widen a grant on opening the editor.
+  useEffect(() => {
+    let active = true;
+    setAvailableApprovals([]); setApprovalToLoad(null); setDiscoveryError('');
+    if (!address || !saved || !canonicalGraph(graphId)) return;
+    const program = saved.program;
+    void programClient(address).then(client => client.programs.listApprovals({ graphId: canonicalGraph(graphId) }))
+      .then(values => {
+        if (!active) return;
+        const matches = values.filter(value => matchesProgram(value, program) && value.binding.typescript);
+        setAvailableApprovals(matches);
+        const current = selection.current.operationIri.trim();
+        const selected = current ? matches.find(value => value.operationIri === current) : matches.length === 1 ? matches[0] : undefined;
+        if (selected) { setOperationIri(selected.operationIri); setApprovalToLoad(selected); }
+      }).catch(cause => { if (active) setDiscoveryError(`Could not find existing approvals: ${cause instanceof Error ? cause.message : String(cause)}. You can enter an operation and check it manually.`); });
+    return () => { active = false; };
+  }, [address, saved?.program, graphId]);
+  // Runs after the operation's recovery state is reset, so selecting an operation
+  // cannot erase the approval that was just loaded for it.
+  useEffect(() => {
+    if (approvalToLoad && saved && JSON.stringify([approvalToLoad.contextGraphId, approvalToLoad.operationIri]) === key) {
+      showApproval(approvalToLoad, saved.program);
+    }
+  }, [approvalToLoad, key, saved?.program]);
   const close = useCallback(() => {
     if (busy) return;
     if (source && dirty && !window.confirm('Discard the unsaved Program changes?')) return;
@@ -174,18 +211,24 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     onSaved();
   });
 
-  const inspect = () => action('Checking approval…', async (client, check) => {
-    let value: Approval | null;
-    try { value = await client.programs.getApproval(operation()); }
-    catch (cause) { if ((cause as { status?: number }).status === 404) value = null; else throw cause; }
-    check(); setReviewed({ key, value }); setApproved(null);
-    if (value?.binding.enabled && saved && matchesProgram(value, saved.program) && value.binding.typescript) {
+  function showApproval(value: Approval | null, program: ProgramReference) {
+    setReviewed({ key, value }); setApproved(null);
+    if (value?.binding.enabled && matchesProgram(value, program) && value.binding.typescript) {
       setApproved(value);
       setCallers(value.binding.allowedCallerAgentAddresses.join('\n'));
       setChildren(value.binding.typescript.children.map(child => ({ graphId: child.contextGraphId, operationIri: child.operationIri, programIri: child.programIri })));
       setMaxCalls(value.binding.typescript.maxCalls); setMaxConcurrency(value.binding.typescript.maxConcurrency); setTimeoutMs(value.binding.typescript.timeoutMs);
     }
-    setNotice(value ? 'Current approval loaded. Review it before replacing it.' : 'No approval exists for this operation.');
+    setNotice(value ? 'Existing approval loaded. Running uses its current permissions.' : 'No approval exists for this operation.');
+  }
+
+  const inspect = () => action('Checking approval…', async (client, check) => {
+    let value: Approval | null;
+    try { value = await client.programs.getApproval(operation()); }
+    catch (cause) { if ((cause as { status?: number }).status === 404) value = null; else throw cause; }
+    check();
+    if (selection.current.key !== key) return;
+    if (saved) showApproval(value, saved.program);
   });
 
   const approve = () => action('Compiling and approving…', async (client, check) => {
@@ -244,7 +287,12 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
           <h3>Execution permission</h3>
           <fieldset disabled={!!busy}>
             <label>Operation graph<input value={graphId} onChange={event => setGraphId(event.target.value)} /></label>
+            {availableApprovals.length > 0 && <label>Existing operation<select value={availableApprovals.some(value => value.operationIri === operationIri) ? operationIri : ''}
+              onChange={event => { setOperationIri(event.target.value); setApprovalToLoad(availableApprovals.find(value => value.operationIri === event.target.value) ?? null); }}>
+              <option value="">Select an operation</option>{availableApprovals.map(value => <option key={value.operationIri} value={value.operationIri}>{value.operationIri}{value.binding.enabled ? '' : ' (disabled)'}</option>)}
+            </select></label>}
             <label>Operation IRI<input value={operationIri} placeholder="urn:example:operation:total" onChange={event => setOperationIri(event.target.value)} /></label>
+            {discoveryError && <p className="program-editor-help">{discoveryError}</p>}
             <label>Allowed caller addresses<textarea rows={3} value={callers} onChange={event => { setCallers(event.target.value); invalidate(); }} /></label>
             <h4>Requested tools</h4>
             <p className="program-editor-help">Stored with the Program. These requests become usable only after the graph owner approves this operation.</p>
@@ -275,7 +323,9 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
           {reviewed?.value && <details><summary>Current approval · revision {reviewed.value.revision}</summary><JsonViewer value={reviewed.value.binding} label="Current approval" /></details>}
           <h3>Invoke</h3>
           <label>Arguments (JSON array)<textarea rows={4} value={inputs} disabled={!!busy} onChange={event => { setInputs(event.target.value); setResult(null); }} /></label>
-          <div className="program-editor-actions"><button type="button" onClick={run} disabled={!!busy || !address || !canRun}>{invocation ? 'Retry same invocation' : 'Run Program'}</button>
+          <p className="program-editor-help">Passed to run(...args). Use [] when the Program takes no arguments or provides defaults.</p>
+          {runUnavailable && <p className="program-editor-help" id="program-run-unavailable">{runUnavailable}</p>}
+          <div className="program-editor-actions"><button type="button" onClick={run} disabled={!!runUnavailable} aria-describedby={runUnavailable ? 'program-run-unavailable' : undefined}>{invocation ? 'Retry same invocation' : 'Run Program'}</button>
             {invocation && <button type="button" disabled={!!busy} onClick={() => { if (!result && !window.confirm('The previous invocation may have executed. Start a separate execution with a new ID?')) return;
               sessionStorage.removeItem(recoveryKey); setInvocation(null); setResult(null); }}>New execution</button>}</div>
           {invocation && <p className="program-editor-reference">Invocation: <code>{invocation.invocationId}</code></p>}

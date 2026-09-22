@@ -7,6 +7,7 @@ import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext, type AgentSummary } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { JsonViewer, parseJsonContainer } from '../../../components/common/JsonViewer.js';
+import { CodeBlock } from '../../../components/chat/CodeBlock.js';
 import { VerifiedIdentityBanner } from '../../../components/VerifiedIdentityBanner.js';
 import { GenUIEntityPanel } from '../../../genui/index.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
@@ -759,11 +760,14 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                 <div className="v10-ka-section">
                   <div className="v10-ka-section-title">Properties</div>
                   {[...entity.properties].map(([pred, vals]) => {
+                    const programSource = entity.types.includes(SR_PROGRAM) && pred === 'https://origintrail.io/semantic-runtime/v1#source';
                     const parsed = vals.map(parseJsonContainer);
-                    const structured = parsed.some(value => value !== undefined);
+                    const structured = programSource || parsed.some(value => value !== undefined);
                     return <div key={pred} className={`v10-ka-prop${structured ? ' v10-ka-prop-structured' : ''}`}>
                       <span className="v10-ka-prop-key">{shortPred(pred)}</span>
-                      <div className="v10-ka-prop-val">{structured
+                      <div className="v10-ka-prop-val">{programSource
+                        ? vals.map((code, index) => <div className="v10-ka-program-source" key={index} aria-label="Program source"><CodeBlock code={code} lang={isTypeScriptProgram ? 'typescript' : undefined} /></div>)
+                        : structured
                         ? vals.map((text, index) => parsed[index] === undefined
                           ? <div key={index}>{text}</div>
                           : <JsonViewer key={index} value={parsed[index]!} label={`${shortPred(pred)} JSON`} />)
