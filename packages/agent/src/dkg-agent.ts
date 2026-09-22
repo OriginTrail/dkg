@@ -1,6 +1,7 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
-import { createHash, randomUUID } from 'node:crypto';
-import { resolveAuthorityIndexConfig } from './authority-index-config.js';
+import { randomUUID } from 'node:crypto';
+import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
+import { planAuthorityIndexBootstrap } from './authority-index-config.js';
 import { createAuthorityIndexSnapshotTransport } from './authority-index-snapshot-transport.js';
 import {
   createAuthorityIndexSnapshotClient,
@@ -158,6 +159,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -444,6 +446,9 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
+import { resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+import { peekFinalizedAuthorityColdResolution } from
+  './finalized-authority-cold-resolution.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
 import { ContextGraphResolveMethods } from './dkg-agent-cg-resolve.js';
 import { CclPolicyMethods } from './dkg-agent-ccl.js';
@@ -1192,17 +1197,11 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    const authorityIndex = resolveAuthorityIndexConfig(
-      inputConfig.authorityIndex,
-      inputConfig.nodeRole ?? 'edge',
-    );
-    if (authorityIndex !== undefined && (
-      inputConfig.chainAdapter !== undefined
-      || !inputConfig.chainConfig?.operationalKeys?.length
-      || inputConfig.localContextGraphAuthorityIndexStore === undefined
-    )) {
-      throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
-    }
+    const log = new Logger('DKGAgent');
+    const ctx = createOperationContext('system');
+    // The daemon logs this same plan from this same config before calling here.
+    const authorityIndexPlan = planAuthorityIndexBootstrap(inputConfig);
+    const authorityIndex = authorityIndexPlan.config;
     let agentRef: DKGAgent | undefined;
     const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
       normalizedConfig: authorityIndex.snapshot,
@@ -1235,22 +1234,14 @@ export class DKGAgent extends DKGAgentBase {
     ) {
       throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
     }
-    const trustedPeerIds = authorityIndex === undefined ? undefined
-      : authorityIndex.snapshot.trustedCorePeers.map((peer) => peer.peerId).sort();
     const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(
       normalizedConfig,
-      snapshotClient === undefined || authorityIndex === undefined ? undefined : {
-        maxTailBlocks: authorityIndex.maxTailBlocks,
-        // Epoch zero preserves the original namespace. Increasing it lets an
-        // operator discard a suspect imported prefix without changing peers.
-        trustDomain: createHash('sha256').update(JSON.stringify(
-          (authorityIndex.cacheEpoch ?? 0) === 0 ? trustedPeerIds : {
-            trustedCorePeers: trustedPeerIds,
-            cacheEpoch: authorityIndex.cacheEpoch,
-          },
-        )).digest('hex'),
-        fetchSnapshot: (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
-      },
+      snapshotClient === undefined || authorityIndexPlan.source === 'local-history' ? undefined
+        : createAuthorityIndexBootstrap(
+          authorityIndexPlan,
+          (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
+          { info: (message) => log.info(ctx, message), warn: (message) => log.warn(ctx, message) },
+        ),
     );
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
     if (
@@ -1426,8 +1417,6 @@ export class DKGAgent extends DKGAgentBase {
     } else {
       wallet = await DKGAgentWallet.generate();
     }
-    const log = new Logger('DKGAgent');
-    const ctx = createOperationContext('system');
     let store: TripleStore;
     if (config.store) {
       store = config.store;
@@ -1500,6 +1489,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),
+      chainAuthorityReadBudgets: resolveChainAuthorityReadBudgets(config.chainConfig),
     };
 
     const port = config.listenPort ?? 0;
@@ -1944,14 +1934,22 @@ export class DKGAgent extends DKGAgentBase {
       participantAgents: metadata.participantAgents ?? existing?.participantAgents,
     };
 
-    if (metadata.onChainId) {
-      const bindingChanged = !!existing?.onChainId && existing.onChainId !== metadata.onChainId;
-      this.bindSubscriptionOnChainId(contextGraphId, next, metadata.onChainId);
+    const authoritativeOnChainId = isCanonicalAuthoritativeContextGraphId(metadata.onChainId)
+      ? metadata.onChainId
+      : undefined;
+    const invalidExplicitOnChainId = metadata.onChainId !== undefined
+      && authoritativeOnChainId === undefined;
+    if (authoritativeOnChainId !== undefined) {
+      const bindingChanged = !!existing?.onChainId
+        && existing.onChainId !== authoritativeOnChainId;
+      this.bindSubscriptionOnChainId(contextGraphId, next, authoritativeOnChainId);
       if (bindingChanged && metadata.onChainHash === undefined) {
         next.onChainHash = undefined;
       }
     }
-    if (metadata.onChainHash !== undefined) next.onChainHash = metadata.onChainHash;
+    if (!invalidExplicitOnChainId && metadata.onChainHash !== undefined) {
+      next.onChainHash = metadata.onChainHash;
+    }
 
     // Discovery-only rows stay in-memory. Metadata learned for an already
     // active member/host row is part of that durable state and must survive a
@@ -2030,7 +2028,12 @@ export class DKGAgent extends DKGAgentBase {
 
         const existing = discoveredEntries.get(id);
         const rowName = row['name'] ? stripLiteral(row['name']) : undefined;
-        const rowOnChainId = row['onChainId'] ? stripLiteral(row['onChainId']) : undefined;
+        const candidateOnChainId = row['onChainId']
+          ? stripLiteral(row['onChainId'])
+          : undefined;
+        const rowOnChainId = isCanonicalAuthoritativeContextGraphId(candidateOnChainId)
+          ? candidateOnChainId
+          : undefined;
         const ontologyWins = existing?.source === 'meta' && source === 'ontology';
         discoveredEntries.set(id, {
           id,
@@ -2524,9 +2527,13 @@ export class DKGAgent extends DKGAgentBase {
     if (!this.started) return;
     this.peerSyncSession.close();
     // Cancelling a waiter alone does not retire the shared physical scan.
+    // Detached cold authority flights are aborted here too: after stop() no
+    // request can consume their result, and the chain reader closes below.
+    peekFinalizedAuthorityColdResolution(this)?.close();
     const authorityIndexSnapshotDrain = Promise.all([
       this.authorityIndexSnapshotRuntime?.close(),
       this.chain.contextGraphAuthorityIndexSnapshots?.close(),
+      peekFinalizedAuthorityColdResolution(this)?.whenIdle(),
     ]);
     this.authorityIndexSnapshotRuntime = undefined;
     // Disconnect history survives sessions; transient freshness and cooldowns do not.

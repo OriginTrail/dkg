@@ -439,6 +439,10 @@ import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import { LocalContextGraphProvenance } from './local-context-graph-provenance.js';
+import {
+  resolveChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgets,
+} from './chain-authority-read-budgets.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -1227,6 +1231,18 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  /**
+   * Lazily resolved so partial test hosts built on the prototype (and any
+   * configuration that predates the resolved field) still receive the
+   * validated package defaults instead of `undefined` deadlines.
+   */
+  protected chainAuthorityReadBudgetsV1?: ChainAuthorityReadBudgets;
+  /** Every request-scoped chain authority read on this agent shares these deadlines. */
+  get chainAuthorityReadBudgets(): ChainAuthorityReadBudgets {
+    this.chainAuthorityReadBudgetsV1 ??= this.config?.chainAuthorityReadBudgets
+      ?? resolveChainAuthorityReadBudgets(this.config?.chainConfig);
+    return this.chainAuthorityReadBudgetsV1;
+  }
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
    * protected by it. Agents without dataDir remain deliberately dormant.

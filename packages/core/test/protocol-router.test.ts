@@ -2004,6 +2004,197 @@ describe('ProtocolRouter', () => {
     });
   });
 
+  // A resolver step can hold the whole send budget (kad-dht parks a
+  // findPeer until its signal aborts while the routing table is empty).
+  // A connection to the peer that opens meanwhile must end that wait and
+  // carry the send, instead of the send timing out beside a live
+  // connection. The real-libp2p reproduction lives in
+  // protocol-router-resolver.test.ts; these fakes pin the edges.
+  describe('send() resolver yields to a connection that opens mid-resolve', () => {
+    const FAKE_PEER_ID = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
+    const OTHER_PEER_ID = 'other-peer';
+
+    type FakeConnection = {
+      status: 'open';
+      remotePeer: { equals: (other: unknown) => boolean; toString: () => string };
+      newStream: () => Promise<unknown>;
+    };
+
+    function makeStubStream(response: Uint8Array) {
+      let returned = false;
+      return {
+        writeStatus: 'open' as const,
+        send: () => undefined,
+        close: async () => undefined,
+        abort: () => undefined,
+        async *[Symbol.asyncIterator]() {
+          if (!returned) {
+            returned = true;
+            yield response;
+          }
+        },
+      };
+    }
+
+    function connectionTo(peerId: string, newStream: () => Promise<unknown>): FakeConnection {
+      return {
+        status: 'open',
+        remotePeer: { equals: (other) => String(other) === peerId, toString: () => peerId },
+        newStream,
+      };
+    }
+
+    /** Resolver that holds until its signal aborts, like kad-dht's empty-table wait. */
+    function parkingResolver() {
+      const signals: AbortSignal[] = [];
+      let markEntered: () => void = () => {};
+      const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+      const resolve = async (_peerId: string, opts?: { signal?: AbortSignal }): Promise<string[]> => {
+        const signal = opts?.signal;
+        if (!signal) throw new Error('resolver needs a signal');
+        signals.push(signal);
+        markEntered();
+        await new Promise<void>((done) => {
+          if (signal.aborted) done();
+          else signal.addEventListener('abort', () => done(), { once: true });
+        });
+        return [];
+      };
+      return { signals, entered, resolve };
+    }
+
+    function makeWatchedRouter(opts: {
+      getConnections: () => ReadonlyArray<FakeConnection>;
+      resolve: (peerId: string, opts?: { signal?: AbortSignal }) => Promise<string[]>;
+      dialBehavior?: () => Promise<unknown>;
+    }) {
+      const events = new EventTarget();
+      let connectionOpenListeners = 0;
+      let dialCalls = 0;
+      const node = {
+        libp2p: {
+          getConnections: opts.getConnections,
+          dialProtocol: async () => {
+            dialCalls += 1;
+            if (!opts.dialBehavior) throw new Error('The dial request has no valid addresses for peer');
+            return opts.dialBehavior();
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+          addEventListener: (type: string, listener: EventListener) => {
+            if (type === 'connection:open') connectionOpenListeners += 1;
+            events.addEventListener(type, listener);
+          },
+          removeEventListener: (type: string, listener: EventListener) => {
+            if (type === 'connection:open') connectionOpenListeners -= 1;
+            events.removeEventListener(type, listener);
+          },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: opts.resolve } as unknown as PeerResolver;
+      return {
+        router: new ProtocolRouter(node, { peerResolver }),
+        emitConnectionOpen: (connection: FakeConnection) => {
+          events.dispatchEvent(new CustomEvent('connection:open', { detail: connection }));
+        },
+        connectionOpenListeners: () => connectionOpenListeners,
+        dialCalls: () => dialCalls,
+      };
+    }
+
+    it('ends the resolve when the peer connects and sends over that connection without dialing', async () => {
+      const connections: FakeConnection[] = [];
+      const resolver = parkingResolver();
+      const harness = makeWatchedRouter({ getConnections: () => connections, resolve: resolver.resolve });
+
+      const sent = harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 2_000);
+      await resolver.entered;
+      expect(harness.connectionOpenListeners()).toBe(1);
+
+      const inbound = connectionTo(FAKE_PEER_ID, async () => makeStubStream(new Uint8Array([0xA1])));
+      connections.push(inbound);
+      harness.emitConnectionOpen(inbound);
+
+      await expect(sent).resolves.toEqual(new Uint8Array([0xA1]));
+      expect(resolver.signals).toHaveLength(1);
+      expect(resolver.signals[0].aborted).toBe(true);
+      expect(harness.dialCalls()).toBe(0);
+      expect(harness.connectionOpenListeners()).toBe(0);
+    });
+
+    it('keeps resolving when a connection to a different peer opens', async () => {
+      const connections: FakeConnection[] = [];
+      const resolver = parkingResolver();
+      const harness = makeWatchedRouter({ getConnections: () => connections, resolve: resolver.resolve });
+      let otherPeerStreams = 0;
+
+      const sent = harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 300);
+      await resolver.entered;
+      const unrelated = connectionTo(OTHER_PEER_ID, async () => {
+        otherPeerStreams += 1;
+        return makeStubStream(new Uint8Array([0xEE]));
+      });
+      connections.push(unrelated);
+      harness.emitConnectionOpen(unrelated);
+      await Promise.resolve();
+      expect(resolver.signals[0].aborted).toBe(false);
+
+      // The resolver holds until the send budget ends; the dial fallback then
+      // finds no address, so the send fails as it did before the watch.
+      await expect(sent).rejects.toThrow(/no valid addresses/);
+      expect(otherPeerStreams).toBe(0);
+      expect(harness.dialCalls()).toBe(1);
+      expect(harness.connectionOpenListeners()).toBe(0);
+    });
+
+    it('sends over a connection that opened after the fast-path pass but before the watch attached', async () => {
+      // No `connection:open` reaches the watch: the connection is already in
+      // the table when it attaches, so only the attach-time check can see it.
+      let getConnectionsCalls = 0;
+      const lateConnection = connectionTo(FAKE_PEER_ID, async () => makeStubStream(new Uint8Array([0xB2])));
+      const resolver = parkingResolver();
+      const harness = makeWatchedRouter({
+        getConnections: () => (getConnectionsCalls++ === 0 ? [] : [lateConnection]),
+        resolve: resolver.resolve,
+      });
+
+      await expect(
+        harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 2_000),
+      ).resolves.toEqual(new Uint8Array([0xB2]));
+      expect(resolver.signals).toHaveLength(0);
+      expect(harness.dialCalls()).toBe(0);
+      expect(harness.connectionOpenListeners()).toBe(0);
+    });
+
+    it('still resolves before dialing when the only connection is one the fast path already failed on', async () => {
+      // That connection must not read as "the peer connected": skipping the
+      // resolver for it would drop the peerStore priming the dial relies on.
+      let newStreamCalls = 0;
+      let resolveCalls = 0;
+      const halfDead = connectionTo(FAKE_PEER_ID, async () => {
+        newStreamCalls += 1;
+        throw new Error('connection went away mid-newStream');
+      });
+      const harness = makeWatchedRouter({
+        getConnections: () => [halfDead],
+        resolve: async () => {
+          resolveCalls += 1;
+          return [];
+        },
+        dialBehavior: async () => makeStubStream(new Uint8Array([0xC3])),
+      });
+
+      await expect(
+        harness.router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1])),
+      ).resolves.toEqual(new Uint8Array([0xC3]));
+      expect(newStreamCalls).toBe(1);
+      expect(resolveCalls).toBe(1);
+      expect(harness.dialCalls()).toBe(1);
+      expect(harness.connectionOpenListeners()).toBe(0);
+    });
+  });
+
   // Codex review of PR #538: the fast path previously latched a
   // half-dead connection for the whole 3-attempt retry budget. If
   // `newStream()` opened a stream on a stale connection and the

@@ -1045,7 +1045,10 @@ export class SharedMemoryHandler {
         return declineNonAuthoritativeLegacyApply(encodedSubGraphName);
       }
 
-      const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
+      const agentGateAddresses = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.workspaceApply,
+        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      );
       const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
       const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(contextGraphId);
 
@@ -1955,7 +1958,10 @@ export class SharedMemoryHandler {
     if (!envelope) {
       return { accepted: false, reasonCode: 'UNSIGNED', reason: 'unsigned envelope (host mode requires agent-signed gossip)' };
     }
-    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
+    const agentGateAddresses = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.hostEnvelope,
+      () => this.getContextGraphAgentGateAddresses(contextGraphId),
+    );
     const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
 
     // GH #1124 — resolve "fully-open (self-publishable) CG" HERE rather than
