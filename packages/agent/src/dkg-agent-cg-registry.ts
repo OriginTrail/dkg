@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -523,12 +523,40 @@ interface FinalizedContextGraphPolicyDependencies {
 }
 
 /**
+ * Whether a finalized snapshot may answer the MUTABLE publish-policy bit for a
+ * caller that accepts a publish bit at most `maxAgeMs` old.
+ *
+ * `publishPolicy` changes on chain (`PublishPolicyUpdated`), so the projection
+ * behind the snapshot must be demonstrably fresh: the reader reported how it
+ * served it, did not serve it DESPITE a failed refresh (`stale-cache`, which
+ * can be up to `min(max(3T, 15s), 5m)` old), and the data is no older than the
+ * caller's bound. An unreported provenance proves nothing, and a negative age
+ * (a wall clock that stepped backwards) proves no age at all. The access bit
+ * is immutable on chain and never needs this check.
+ */
+function finalizedPublishPolicyIsFreshV1(
+  served: ContextGraphAuthorityProjectionServedEvidence | undefined,
+  maxAgeMs: number,
+): served is ContextGraphAuthorityProjectionServedEvidence {
+  return served !== undefined
+    && served.source !== 'stale-cache'
+    && served.ageMs >= 0
+    && served.ageMs <= maxAgeMs;
+}
+
+/**
  * Both policy bits of a registered graph from the finalized authority
  * index, bound to the caller's identity for that graph. `absent` and
  * `unsupported` are the only outcomes that permit the current-state RPC
- * fallback: an inactive or mis-bound snapshot is affirmative evidence
- * against the graph, and a timed-out read keeps its detached resolution
- * running so the next call is answered from the retained projection.
+ * fallback for both bits: an inactive or mis-bound snapshot is affirmative
+ * evidence against the graph, and a timed-out read keeps its detached
+ * resolution running so the next call is answered from the retained
+ * projection.
+ *
+ * `policies` carries how the reader served the projection (`served`), when it
+ * reported that: the access bit is immutable and answers at any provenance,
+ * while the caller consumes the mutable publish bit only from a fresh
+ * projection (see {@link finalizedPublishPolicyIsFreshV1}).
  *
  * A host without the finalized capability (an older adapter, or a
  * prototype-bound test host that never composed the resolver mixin) is
@@ -541,7 +569,12 @@ async function readFinalizedContextGraphPolicyV1(
   numericId: bigint,
   ctx: OperationContext,
 ): Promise<
-  | { kind: 'policies'; accessPolicy: 0 | 1; publishPolicy: 0 | 1 }
+  | {
+      kind: 'policies';
+      accessPolicy: 0 | 1;
+      publishPolicy: 0 | 1;
+      served?: ContextGraphAuthorityProjectionServedEvidence;
+    }
   | { kind: 'absent' }
   | { kind: 'unsupported' }
   | { kind: 'unknown' }
@@ -608,6 +641,7 @@ async function readFinalizedContextGraphPolicyV1(
     kind: 'policies',
     accessPolicy: snapshot.accessPolicy,
     publishPolicy: snapshot.publishPolicy,
+    served: read.served,
   };
 }
 
@@ -1590,7 +1624,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * per window per CG instead of an `eth_call` on every admitted envelope
      * (Branimir review #1239 follow-on). An RPC failure/timeout still leaves
      * `publishPolicy` undefined → the caller fails closed. (`accessPolicy` is
-     * immutable on-chain, so its cache read below is left un-TTL'd.)
+     * immutable on-chain, so its cache read below is left un-TTL'd.) The same
+     * bound caps the age of a publish bit taken from the finalized authority
+     * index, which is never taken from a projection served as `stale-cache`.
      */
     publishPolicyMaxCacheAgeMs?: number;
   }): Promise<{
@@ -1628,15 +1664,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // (lines ~1779, ~8403, ~10073) where stale-permissive cannot
     // escalate privilege (gossip decrypt is gated by sender-key
     // issuance) and stale-restrictive only causes a transient deny.
+    // A security-positive caller can shrink the accepted publish-bit age (e.g.
+    // the host-mode admission gate passes ~5s) so an open→curated downgrade is
+    // re-verified within seconds, while still rate-capping the chain RPC to ~1
+    // per window per CG. Default is the general 60s TTL. The same bound applies
+    // to a publish bit taken from the finalized authority index below.
+    const publishPolicyMaxAgeMs = options?.publishPolicyMaxCacheAgeMs
+      ?? ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS;
     const isPublishPolicyCacheFresh = (key: string): boolean => {
       const fetchedAt = this.onChainPublishPolicyCacheUpdatedAt.get(key);
       if (fetchedAt === undefined) return false;
-      // A security-positive caller can shrink the accepted cache age (e.g. the
-      // host-mode admission gate passes ~5s) so an open→curated downgrade is
-      // re-verified within seconds, while still rate-capping the chain RPC to
-      // ~1 per window per CG. Default is the general 60s TTL.
-      const maxAge = options?.publishPolicyMaxCacheAgeMs ?? ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS;
-      return Date.now() - fetchedAt <= maxAge;
+      return Date.now() - fetchedAt <= publishPolicyMaxAgeMs;
     };
     let publishPolicy = isPublishPolicyCacheFresh(contextGraphId)
       ? this.onChainPublishPolicyCache.get(contextGraphId)
@@ -1762,9 +1800,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         // slow public endpoint no longer turns every share/host decision
         // into a fail-closed timeout. Only a graph the finalized index has
         // no snapshot for (or an adapter without the capability) continues
-        // to the current-state RPC reads below; an inactive or mis-bound
-        // snapshot and a timed-out finalized read stay UNKNOWN (fail-closed)
-        // rather than paying a second deadline on the same endpoints.
+        // to the current-state RPC reads below for both bits; an inactive or
+        // mis-bound snapshot and a timed-out finalized read stay UNKNOWN
+        // (fail-closed) rather than paying a second deadline on the same
+        // endpoints. A valid snapshot always settles the immutable access
+        // bit, but its MUTABLE publish bit only when the projection was
+        // served fresh; otherwise that one bit takes the bounded
+        // current-state read.
         // A partial test host bound to this prototype may lack the resolver
         // mixin; treat it exactly like an adapter without the index reader.
         const readFinalizedSnapshot = this.chain.contextGraphAuthorityIndexRevisionReader
@@ -1786,18 +1828,40 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           rpcCtx,
         );
         if (finalizedPolicy.kind === 'policies') {
+          // Immutable on chain: the snapshot settles it at any provenance.
           if (accessPolicy === undefined) {
             accessPolicy = finalizedPolicy.accessPolicy;
             this.onChainAccessPolicyCache.set(onChainId!, accessPolicy);
           }
-          if (publishPolicy === undefined) {
+          // Mutable on chain: a projection the reader could not refresh
+          // (`stale-cache`) can be minutes old, and would keep an open→curated
+          // downgrade invisible to the host-mode gate for that whole window.
+          // Consume the bit only from a fresh projection no older than this
+          // caller accepts, and date the cache entry by when its data was
+          // observed so the local cache cannot extend that age. A bit that
+          // is not consumed is not cached either.
+          if (
+            publishPolicy === undefined
+            && finalizedPublishPolicyIsFreshV1(finalizedPolicy.served, publishPolicyMaxAgeMs)
+          ) {
             publishPolicy = finalizedPolicy.publishPolicy;
             this.onChainPublishPolicyCache.set(onChainId!, publishPolicy);
-            this.onChainPublishPolicyCacheUpdatedAt.set(onChainId!, Date.now());
+            this.onChainPublishPolicyCacheUpdatedAt.set(
+              onChainId!,
+              Date.now() - finalizedPolicy.served.ageMs,
+            );
           }
         }
-        const chainFallbackAllowed = finalizedPolicy.kind === 'absent'
+        // `absent` and `unsupported` carry no finalized evidence, so both
+        // current-state reads stay available. A `policies` answer settled the
+        // access bit above; a publish bit it could not answer fresh may still
+        // take the bounded current-state read. Every other outcome keeps both
+        // bits UNKNOWN.
+        const noFinalizedEvidence = finalizedPolicy.kind === 'absent'
           || finalizedPolicy.kind === 'unsupported';
+        const accessFallbackAllowed = noFinalizedEvidence;
+        const publishFallbackAllowed = noFinalizedEvidence
+          || finalizedPolicy.kind === 'policies';
         // Round-4 fix: bound each chain-RPC call so an unreachable
         // RPC stack (every endpoint returning 429 / hanging on
         // connect) cannot block the caller past the daemon-ready
@@ -1828,7 +1892,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             timeout,
           ]);
         };
-        if (chainFallbackAllowed && publishPolicy === undefined) {
+        if (publishFallbackAllowed && publishPolicy === undefined) {
           const getPublishPolicy = this.chain.getContextGraphPublishPolicy;
           if (typeof getPublishPolicy === 'function') {
             try {
@@ -1852,7 +1916,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             }
           }
         }
-        if (chainFallbackAllowed && accessPolicy === undefined) {
+        if (accessFallbackAllowed && accessPolicy === undefined) {
           const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
           if (typeof getAccessPolicy === 'function') {
             try {
