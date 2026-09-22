@@ -51,6 +51,21 @@ export interface EVMAdapterBaseConfig {
    */
   finalityConfirmations?: number;
   /**
+   * `chain.boundedAuthorityReads` — allow the node's own event index to answer
+   * Context Graph authority reads whose caller asked for bounded freshness.
+   *
+   * Defaults to `false`. Turning it on lets those reads be served locally when
+   * the index can prove coverage, lineage and freshness at its anchor, which
+   * removes the repeated `getContextGraph` call behind query, sync and
+   * reconciliation. It never applies to a read that asked to be live — key
+   * issuance, plaintext downgrade and roster mutation are unaffected — and a
+   * read the index declines falls through to the chain.
+   *
+   * It exists as a switch so that a suspect index can be taken out of the
+   * answer without a deploy.
+   */
+  boundedAuthorityReads?: boolean;
+  /**
    * `chain.indexTickMs` (T): how long one completed finalized Context Graph
    * authority projection answers reads before the next read refreshes it, in
    * milliseconds. After a FAILED refresh the previous projection keeps

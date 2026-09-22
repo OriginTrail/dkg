@@ -1019,6 +1019,15 @@ export class QueryMethods extends DKGAgentBase {
             allowAcceptedRfc64FinalizedAbsence:
               this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
             authorityReadMode,
+            // READ authorization, and therefore correctable by the next read.
+            // A roster this node has not caught up on denies a member who was
+            // just added — they retry and are let in — and admits one who was
+            // just removed for at most the index's freshness bound. Neither
+            // outcome hands out anything that outlives the bound, which is what
+            // separates this from key issuance and from the roster mutation
+            // itself. Inert unless the operator enables
+            // `chain.boundedAuthorityReads`.
+            freshness: 'bounded',
           },
         ),
       ),
