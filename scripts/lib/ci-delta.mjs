@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 // This module is part of the trusted CI controller: workflows run it from a
 // sparse checkout that contains ONLY the files in CONTROLLER_POLICY_FILES
 // (scripts/ci/trusted-controller-pins.mjs). It may import node: builtins and
@@ -367,14 +369,12 @@ function fullPlan({
   reasons,
   solidityRelevance,
   changedFiles = [],
-  auditSampled = false,
 }) {
   const lanes = Object.fromEntries(NODE_EVM_LANES.map((lane) => [lane, true]));
   lanes.contracts = solidityRelevance.contracts;
   return {
     mode: 'full',
     fullCi: true,
-    auditSampled,
     runNode: true,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
@@ -434,25 +434,172 @@ function isDocumentationOnlyPath(filePath) {
     || (filePath.startsWith('demo/docs/') && hasDocumentationExtension(filePath));
 }
 
+// Workflows whose jobs, conditions and gates define what "CI gate" means. Other
+// top-level workflows run (or are linted) on their own; see supportPathRoute.
+const CI_CONTROL_WORKFLOWS = new Set([
+  '.github/workflows/ci.yml',
+  '.github/workflows/evm-integration.yml',
+  '.github/workflows/rfc64-inventory-windows.yml',
+]);
+
 function isGlobalFullPath(filePath) {
   return GLOBAL_FULL_PATHS.has(filePath)
-    || filePath.startsWith('.github/workflows/')
+    || CI_CONTROL_WORKFLOWS.has(filePath)
+    // GitHub only runs top-level workflow files; anything nested is unknown.
+    || /^\.github\/workflows\/[^/]+\/./.test(filePath)
+    || filePath.startsWith('.github/actions/')
     || filePath.startsWith('patches/')
     || filePath.startsWith('scripts/')
+    // devnet suites are pnpm workspaces: their manifests are install inputs.
+    || /^devnet\/[^/]+\/package\.json$/.test(filePath)
     || /^tsconfig(?:\.[^/]+)?\.json$/.test(filePath);
+}
+
+// Repository areas outside the package workspaces, mapped to the lanes that
+// actually execute them in CI (ci.yml and its reusable workflows). An empty
+// lane list means the shared build job is the only CI consumer: its lint,
+// repository-script tests and test-inventory checks cover these files, while
+// the suites themselves are manual or have their own workflow.
+const SUPPORT_PATH_ROUTES = Object.freeze([
+  {
+    pattern: /^devnet\/rfc64-gate1-public-open\//,
+    lanes: ['tornado_agent', 'tornado_blazegraph'],
+    reason: 'RFC-64 Gate 1 harness runs in the agent and Blazegraph lanes',
+  },
+  {
+    // Gate 0 persistence evidence and the evidence bootstrap run in the
+    // Windows lifecycle job, which ci.yml selects through tornado_agent.
+    pattern: /^devnet\/(?:rfc64-persistence-lifecycle|_bootstrap)\//,
+    lanes: ['tornado_agent'],
+    reason: 'RFC-64 persistence harness runs in the agent lifecycle jobs',
+  },
+  {
+    // Root-level devnet modules (rfc64-runtime-*.mts, suites.json) are
+    // imported by agent tests and by the evidence bootstrap.
+    pattern: /^devnet\/[^/]+$/,
+    lanes: ['tornado_agent'],
+    reason: 'shared devnet runtime modules are imported by agent tests',
+  },
+  {
+    pattern: /^devnet\//,
+    lanes: [],
+    reason: 'manual devnet suites are checked by the shared build job only',
+  },
+  {
+    pattern: /^test-systems\//,
+    lanes: ['tornado_blazegraph'],
+    reason: 'storage conformance runs in the Blazegraph lane',
+  },
+  {
+    pattern: /^(?:bench|tools)\//,
+    lanes: [],
+    reason: 'benchmarks and operator tools are checked by the shared build job only',
+  },
+  {
+    // Remaining .github inputs: workflows outside the CI control plane,
+    // CODEOWNERS, templates and scanner configuration read by repository
+    // tooling tests. Control-plane workflows and actions are global above.
+    pattern: /^\.github\//,
+    lanes: [],
+    reason: 'repository automation config is checked by the shared build job only',
+  },
+]);
+
+function supportPathRoute(filePath) {
+  return SUPPORT_PATH_ROUTES.find(({ pattern }) => pattern.test(filePath));
+}
+
+// Top-level manifest fields whose change only affects the package itself and
+// the downstream consumers its WORKSPACE_RULES entry already selects. Every
+// other field, including unknown ones, can change what pnpm installs or how
+// the workspace resolves (dependency ranges, pnpm/overrides, engines, bin,
+// name, type), so it keeps the full profile.
+const PACKAGE_SCOPED_MANIFEST_FIELDS = new Set([
+  'author',
+  'browser',
+  'bugs',
+  'contributors',
+  'description',
+  'directories',
+  'exports',
+  'files',
+  'funding',
+  'homepage',
+  'imports',
+  'keywords',
+  'license',
+  'main',
+  'module',
+  'private',
+  'publishConfig',
+  'repository',
+  'scripts',
+  'sideEffects',
+  'types',
+  'typesVersions',
+  'typings',
+  'version',
+]);
+
+// pnpm runs these for every workspace project during `pnpm install`, which
+// every CI job performs, so they are install inputs rather than package code.
+const INSTALL_LIFECYCLE_SCRIPTS = Object.freeze([
+  'preinstall',
+  'install',
+  'postinstall',
+  'preprepare',
+  'prepare',
+  'postprepare',
+]);
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+// Compares the base and head copies of a modified workspace manifest. Any
+// missing reader, unreadable side or unparseable JSON fails closed.
+function classifyManifestChange(filePath, readManifest) {
+  if (typeof readManifest !== 'function') {
+    return { packageScoped: false, detail: `${filePath} contents are unavailable to the planner` };
+  }
+  let before;
+  let after;
+  try {
+    before = JSON.parse(readManifest('base', filePath));
+    after = JSON.parse(readManifest('head', filePath));
+  } catch {
+    return { packageScoped: false, detail: `${filePath} could not be read and compared` };
+  }
+  if (!isPlainObject(before) || !isPlainObject(after)) {
+    return { packageScoped: false, detail: `${filePath} is not a JSON object` };
+  }
+
+  const changedFields = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((field) => !isDeepStrictEqual(before[field], after[field]))
+    .sort();
+  const installFields = changedFields.filter((field) => !PACKAGE_SCOPED_MANIFEST_FIELDS.has(field));
+  if (installFields.length) {
+    return { packageScoped: false, detail: `${filePath} changed ${installFields.join(', ')}` };
+  }
+  const lifecycleScripts = INSTALL_LIFECYCLE_SCRIPTS.filter((name) => (
+    !isDeepStrictEqual(before.scripts?.[name], after.scripts?.[name])
+  ));
+  if (lifecycleScripts.length) {
+    return {
+      packageScoped: false,
+      detail: `${filePath} changed install lifecycle scripts ${lifecycleScripts.join(', ')}`,
+    };
+  }
+  return {
+    packageScoped: true,
+    detail: `${filePath} changed ${changedFields.join(', ') || 'formatting only'}`,
+  };
 }
 
 function workspaceForPath(filePath) {
   return Object.keys(WORKSPACE_RULES)
     .sort((left, right) => right.length - left.length)
     .find((workspace) => filePath === workspace || filePath.startsWith(`${workspace}/`));
-}
-
-function isAuditSample(sampleKey, percentage) {
-  if (!sampleKey || percentage <= 0) return false;
-  const prefix = sampleKey.match(/^[0-9a-f]{8}/i)?.[0];
-  if (!prefix) return false;
-  return Number.parseInt(prefix, 16) % 100 < percentage;
 }
 
 export function parseNameStatusZ(buffer) {
@@ -481,22 +628,29 @@ export function parseNameStatusZ(buffer) {
   return entries;
 }
 
+// Git name-status codes whose paths can be routed like ordinary edits: a
+// deleted, renamed or copied file affects exactly the areas that own its old
+// and new paths. Type changes (T), unmerged (U), unknown (X) and broken
+// pairings (B) - and anything git adds later - still fail closed.
+const ROUTABLE_CHANGE_STATUSES = new Set(['A', 'M', 'D', 'R', 'C']);
+
+// `readManifest(side, path)` returns the raw text of `path` at the diff base
+// ('base') or the merge candidate ('head'); plan-ci.mjs backs it with git.
+// Without it, every workspace manifest edit keeps the full profile.
 export function planCi({
   eventName,
   changeEntries = [],
   labels = [],
-  sampleKey = '',
-  auditPercentage = 5,
+  readManifest,
 } = {}) {
   const changedFiles = [...new Set(changeEntries.flatMap((entry) => entry.paths).map(normalizePath))];
   const isPullRequest = eventName === 'pull_request' || eventName === 'pull_request_delta_disabled';
   const diffKnown = !isPullRequest || (changeEntries.length > 0 && changedFiles.length > 0);
   const solidityRelevance = classifySolidityRelevance(eventName, changedFiles, diffKnown);
-  const fullForCurrentDiff = (reasons, auditSampled = false) => fullPlan({
+  const fullForCurrentDiff = (reasons) => fullPlan({
     reasons,
     solidityRelevance,
     changedFiles,
-    auditSampled,
   });
 
   if (!isPullRequest) {
@@ -504,9 +658,9 @@ export function planCi({
   }
 
   // Missing diff data is the highest-risk input and must win over every PR
-  // override. Labels, audit sampling, and the delta rollback switch may force
-  // a known diff to full CI, but they cannot infer that Solidity is irrelevant
-  // when GitHub reported no changed files at all.
+  // override. Labels and the delta rollback switch may force a known diff to
+  // full CI, but they cannot infer that Solidity is irrelevant when GitHub
+  // reported no changed files at all.
   if (!diffKnown) {
     return fullForCurrentDiff(['No changed files were reported; failing closed']);
   }
@@ -519,13 +673,9 @@ export function planCi({
     return fullForCurrentDiff(['PR has the ci:full override label']);
   }
 
-  if (isAuditSample(sampleKey, auditPercentage)) {
-    return fullForCurrentDiff([`${auditPercentage}% deterministic audit sample`], true);
-  }
-
-  const riskyChange = changeEntries.find(({ status }) => ['D', 'R', 'C', 'T', 'U', 'X', 'B'].includes(status[0]));
-  if (riskyChange) {
-    return fullForCurrentDiff([`Git change status ${riskyChange.status} cannot be narrowed safely`]);
+  const unroutableChange = changeEntries.find(({ status }) => !ROUTABLE_CHANGE_STATUSES.has(status[0]));
+  if (unroutableChange) {
+    return fullForCurrentDiff([`Git change status ${unroutableChange.status} cannot be narrowed safely`]);
   }
 
   const productionFiles = changedFiles.filter((filePath) => !isDocumentationOnlyPath(filePath));
@@ -533,7 +683,6 @@ export function planCi({
     return {
       mode: 'docs-only',
       fullCi: false,
-      auditSampled: false,
       runNode: false,
       abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
       lanes: emptyLanes(),
@@ -548,14 +697,20 @@ export function planCi({
     return fullForCurrentDiff([`Large PR (${productionFiles.length} non-documentation files)`]);
   }
 
-  const touchedWorkspaces = new Set(productionFiles.map(workspaceForPath).filter(Boolean));
-  if (touchedWorkspaces.size >= 4) {
-    return fullForCurrentDiff([`Cross-cutting PR (${touchedWorkspaces.size} production workspaces)`]);
-  }
+  // A manifest can only be compared field by field when it exists on both
+  // sides; added, deleted, renamed or copied manifests change the workspace
+  // graph itself.
+  const modifiedFiles = new Set(changeEntries
+    .filter(({ status }) => status[0] === 'M')
+    .flatMap((entry) => entry.paths.map(normalizePath)));
 
+  // Changes spanning many workspaces select the union of their rules; there is
+  // no workspace-count cut-off, because each rule already includes every
+  // downstream consumer and unknown paths still fail closed below.
   const lanes = emptyLanes();
   const evmScopes = new Set();
   const reasons = [];
+  let sharedBuildOnly = false;
   lanes.contracts = solidityRelevance.contracts;
 
   for (const filePath of productionFiles) {
@@ -573,16 +728,30 @@ export function planCi({
     const workspace = workspaceForPath(filePath);
     if (!workspace) {
       if (blazegraphProvisioningChange) continue;
-      return fullForCurrentDiff([`Unclassified path changed: ${filePath}`]);
-    }
-
-    if (filePath === `${workspace}/package.json`) {
-      return fullForCurrentDiff([`Workspace dependency manifest changed: ${filePath}`]);
+      const route = supportPathRoute(filePath);
+      if (!route) {
+        return fullForCurrentDiff([`Unclassified path changed: ${filePath}`]);
+      }
+      for (const lane of route.lanes) lanes[lane] = true;
+      if (route.lanes.length === 0) sharedBuildOnly = true;
+      reasons.push(route.reason);
+      continue;
     }
 
     const rule = WORKSPACE_RULES[workspace];
     if (rule.forceFull) {
       return fullForCurrentDiff([`Highest-risk workspace changed: ${workspace}`]);
+    }
+
+    if (filePath === `${workspace}/package.json`) {
+      if (!modifiedFiles.has(filePath)) {
+        return fullForCurrentDiff([`Workspace manifest added, removed or moved: ${filePath}`]);
+      }
+      const manifestChange = classifyManifestChange(filePath, readManifest);
+      if (!manifestChange.packageScoped) {
+        return fullForCurrentDiff([`Workspace manifest changed install inputs: ${manifestChange.detail}`]);
+      }
+      reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
     }
 
     for (const lane of rule.lanes) lanes[lane] = true;
@@ -595,7 +764,7 @@ export function planCi({
   }
 
   const deduplicatedReasons = [...new Set(reasons)];
-  const runNode = NODE_LANES.some((lane) => lanes[lane]);
+  const runNode = sharedBuildOnly || NODE_LANES.some((lane) => lanes[lane]);
   if (!runNode && !lanes.bura_blazegraph_arm64 && !lanes.contracts && evmScopes.size === 0) {
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
   }
@@ -603,7 +772,6 @@ export function planCi({
   return {
     mode: 'delta',
     fullCi: false,
-    auditSampled: false,
     runNode,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
@@ -639,12 +807,13 @@ export function renderPlanSummary(plan) {
   const skipped = CI_LANES.filter((lane) => !plan.lanes[lane]);
   const safe = (value) => value.replace(/[|`\r\n]/g, '_');
 
+  const noLaneSummary = plan.runNode ? '_none (shared build job only)_' : '_none_';
+
   return [
     '## CI delta plan',
     '',
     `- Mode: **${plan.mode}**`,
-    `- Full-CI audit sample: **${plan.auditSampled ? 'yes' : 'no'}**`,
-    `- Selected lanes: ${selected.length ? selected.map((lane) => `\`${lane}\``).join(', ') : '_none_'}`,
+    `- Selected lanes: ${selected.length ? selected.map((lane) => `\`${lane}\``).join(', ') : noLaneSummary}`,
     `- Skipped lanes: ${skipped.length ? skipped.map((lane) => `\`${lane}\``).join(', ') : '_none_'}`,
     `- EVM scopes: ${plan.evmScopes.length ? plan.evmScopes.map((scope) => `\`${scope}\``).join(', ') : '_none_'}`,
     `- Reason: ${plan.reasons.map(safe).join('; ')}`,

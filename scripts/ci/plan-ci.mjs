@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
@@ -14,6 +15,8 @@ const { values } = parseArgs({
     event: { type: 'string' },
     'changes-z': { type: 'string' },
     'labels-json': { type: 'string', default: '[]' },
+    // Retired PR audit sampling. Still accepted so workflow wiring from either
+    // side of a controller rotation keeps working with strict parsing.
     'sample-key': { type: 'string', default: '' },
     'github-output': { type: 'string' },
     summary: { type: 'string' },
@@ -31,11 +34,31 @@ if (!Array.isArray(labels) || labels.some((label) => typeof label !== 'string'))
   throw new TypeError('--labels-json must contain a JSON string array');
 }
 
+// The workflow exports the candidate checkout and the two diffed commits as
+// environment variables (not flags, which an older pinned controller would
+// reject). Reading blobs is data-only: `git cat-file blob` applies no
+// filters and runs nothing from the merge candidate. Without all three, the
+// planner receives no reader and every workspace manifest edit stays full.
+function manifestReaderFromEnvironment(environment) {
+  const repository = environment.CI_CANDIDATE_REPO;
+  const commits = {
+    base: environment.CI_DIFF_BASE_SHA,
+    head: environment.CI_DIFF_HEAD_SHA,
+  };
+  const isObjectId = (value) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value ?? '');
+  if (!repository || !isObjectId(commits.base) || !isObjectId(commits.head)) return undefined;
+  return (side, filePath) => execFileSync(
+    'git',
+    ['-C', repository, 'cat-file', 'blob', `${commits[side]}:${filePath}`],
+    { encoding: 'utf8', maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+}
+
 const plan = planCi({
   eventName: values.event,
   changeEntries,
   labels,
-  sampleKey: values['sample-key'],
+  readManifest: manifestReaderFromEnvironment(process.env),
 });
 
 if (values['github-output']) {

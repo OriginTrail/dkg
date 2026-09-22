@@ -1,6 +1,6 @@
 import { ciJobRow, COVERAGE_JOBS } from '../ci-lanes.mjs';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,7 +52,6 @@ function pullRequestPlan(changeEntries, overrides = {}) {
   return planCi({
     eventName: 'pull_request',
     changeEntries,
-    sampleKey: 'ffffffffffffffffffffffffffffffffffffffff',
     ...overrides,
   });
 }
@@ -97,7 +96,6 @@ test('unknown PR diffs fail closed with Solidity selected and enforced', () => {
 
   for (const [name, overridePlan] of [
     ['ci:full', pullRequestPlan([], { labels: ['ci:full'] })],
-    ['audit sample', pullRequestPlan([], { sampleKey: '00000000ffffffff' })],
     ['delta disabled', planCi({
       eventName: 'pull_request_delta_disabled',
       changeEntries: [],
@@ -131,14 +129,29 @@ test('unknown PR diffs fail closed with Solidity selected and enforced', () => {
   assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan, needs }), []);
 });
 
-test('five percent of PR SHAs are deterministic full-CI audit samples', () => {
-  const sampled = pullRequestPlan([change('CHANGELOG.md')], { sampleKey: '00000000ffffffff' });
-  const normal = pullRequestPlan([change('CHANGELOG.md')], { sampleKey: 'ffffffffffffffff' });
-  assert.equal(sampled.auditSampled, true);
-  assert.equal(sampled.fullCi, true);
-  assert.deepEqual(selectedLanes(sampled), NON_SOLIDITY_LANES);
-  assert.equal(normal.auditSampled, false);
-  assert.equal(normal.fullCi, false);
+test('retired audit sampling no longer promotes pull requests to full CI', (t) => {
+  // Head SHAs starting 00000000 used to fall in a 5% full-CI sample. Protected
+  // pushes, merge-queue candidates and the nightly run are the full-CI safety
+  // net; plan-ci.mjs still parses --sample-key so workflow wiring from either
+  // side of a controller rotation keeps working under strict parsing.
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-sample-'));
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+  const changesPath = path.join(temporaryDirectory, 'changes.z');
+  fs.writeFileSync(changesPath, Buffer.from('M\0packages/network-sim/src/index.ts\0'));
+  const planner = spawnSync(process.execPath, [
+    path.join(REPO_ROOT, 'scripts/ci/plan-ci.mjs'),
+    '--event',
+    'pull_request',
+    '--changes-z',
+    changesPath,
+    '--sample-key',
+    '00000000ffffffffffffffffffffffffffffffff',
+  ], { encoding: 'utf8' });
+  assert.equal(planner.status, 0, planner.stderr);
+  const plan = JSON.parse(planner.stdout);
+  assert.equal(plan.mode, 'delta');
+  assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
+  assert.equal('auditSampled' in plan, false);
 });
 
 test('full PR plans preserve legacy Solidity paths and cover Hardhat support code', () => {
@@ -290,15 +303,15 @@ test('highest-risk, global, unknown, manifest, large, and ambiguous changes fail
   const cases = [
     [change('packages/evm-module/contracts/KnowledgeAssets.sol')],
     [change('pnpm-lock.yaml')],
+    // Without a manifest reader the planner cannot tell metadata from deps.
     [change('packages/agent/package.json')],
+    [change('devnet/v10-stress/package.json')],
+    [change('.github/actions/upload-vitest-junit/action.yml')],
     [change('new-root-tool.ts')],
-    [change('packages/agent/src/removed.ts', 'D')],
-    [
-      change('packages/agent/src/a.ts'),
-      change('packages/cli/src/a.ts'),
-      change('packages/query/src/a.ts'),
-      change('packages/node-ui/src/a.ts'),
-    ],
+    [change('packages/agent/src/linked.ts', 'T')],
+    [change('packages/agent/src/conflicted.ts', 'U')],
+    [change('packages/agent/src/unknown.ts', 'X')],
+    [change('packages/agent/src/future.ts', 'Z')],
   ];
 
   for (const changeEntries of cases) {
@@ -314,6 +327,205 @@ test('highest-risk, global, unknown, manifest, large, and ambiguous changes fail
   const hugePlan = pullRequestPlan(huge);
   assert.equal(hugePlan.changedFileCount, 1000);
   assert.equal(hugePlan.changedFiles.length, 200, 'GitHub output must stay bounded');
+});
+
+test('deletions, renames and copies route every path they touch like edits', () => {
+  const deleted = pullRequestPlan([change('packages/network-sim/src/removed.ts', 'D')]);
+  assert.equal(deleted.mode, 'delta');
+  assert.deepEqual(selectedLanes(deleted), ['kosava_supporting']);
+
+  const from = 'packages/network-sim/src/moved.ts';
+  const to = 'packages/query/src/moved.ts';
+  const asEdits = pullRequestPlan([change(from), change(to)]);
+  for (const status of ['R087', 'C075']) {
+    const plan = pullRequestPlan([{ status, paths: [from, to] }]);
+    assert.equal(plan.mode, 'delta', status);
+    assert.deepEqual(selectedLanes(plan), selectedLanes(asEdits), status);
+    assert.deepEqual(plan.evmScopes, asEdits.evmScopes, status);
+  }
+
+  // The paths themselves still decide: control-plane files and manifests that
+  // appear, disappear or move keep the full profile.
+  for (const changeEntry of [
+    { status: 'R100', paths: ['.github/workflows/ci.yml', '.github/workflows/ci-old.yml'] },
+    { status: 'D', paths: ['scripts/ci/plan-ci.mjs'] },
+    { status: 'D', paths: ['packages/network-sim/package.json'] },
+    { status: 'A', paths: ['packages/network-sim/package.json'] },
+    { status: 'R100', paths: ['packages/network-sim/package.json', 'packages/network-sim/old.json'] },
+  ]) {
+    assert.equal(pullRequestPlan([changeEntry]).mode, 'full', JSON.stringify(changeEntry));
+  }
+});
+
+test('multi-workspace PRs select the union of their rules instead of full CI', () => {
+  const files = [
+    'packages/agent/src/a.ts',
+    'packages/cli/src/a.ts',
+    'packages/query/src/a.ts',
+    'packages/node-ui/src/a.ts',
+    'packages/network-sim/src/a.ts',
+  ];
+  const plan = pullRequestPlan(files.map((filePath) => change(filePath)));
+  assert.equal(plan.mode, 'delta');
+  const union = new Set(files.flatMap((filePath) => selectedLanes(pullRequestPlan([change(filePath)]))));
+  assert.deepEqual(selectedLanes(plan), CI_LANES.filter((lane) => union.has(lane)));
+  assert.equal(plan.lanes.tornado_core, false, 'none of these workspaces feeds the core lane');
+  assert.doesNotMatch(plan.reasons.join('\n'), /Cross-cutting/);
+});
+
+test('package-scoped manifest edits route to their workspace; install inputs stay full', () => {
+  const manifest = {
+    name: '@origintrail-official/dkg-agent',
+    version: '10.0.0',
+    type: 'module',
+    exports: { '.': './dist/index.js' },
+    scripts: { build: 'tsc', test: 'vitest run' },
+    dependencies: { ethers: '^6.13.0' },
+  };
+  const manifestPlan = (head, entries = [change('packages/agent/package.json')]) => pullRequestPlan(entries, {
+    readManifest: (side) => JSON.stringify(side === 'base' ? manifest : head),
+  });
+  const sourcePlan = pullRequestPlan([change('packages/agent/src/agent.ts')]);
+
+  for (const head of [
+    { ...manifest, exports: { ...manifest.exports, './sync': './dist/sync.js' } },
+    { ...manifest, scripts: { ...manifest.scripts, 'benchmark:x': 'node bench.mjs' } },
+    { ...manifest, version: '10.0.1', files: ['dist'] },
+    Object.fromEntries(Object.entries(manifest).reverse()),
+  ]) {
+    const plan = manifestPlan(head);
+    assert.equal(plan.mode, 'delta', JSON.stringify(head));
+    assert.deepEqual(selectedLanes(plan), selectedLanes(sourcePlan), JSON.stringify(head));
+    assert.deepEqual(plan.evmScopes, sourcePlan.evmScopes);
+    assert.match(plan.reasons.join('\n'), /Package-scoped manifest change/);
+  }
+
+  for (const [head, reason] of [
+    [{ ...manifest, dependencies: { ethers: '^6.14.0' } }, /changed dependencies$/],
+    [{ ...manifest, devDependencies: { tsx: '^4.0.0' } }, /changed devDependencies$/],
+    [{ ...manifest, type: 'commonjs' }, /changed type$/],
+    [{ ...manifest, bin: { dkg: './dist/cli.js' } }, /changed bin$/],
+    [{ ...manifest, pnpm: { overrides: {} } }, /changed pnpm$/],
+    [{ ...manifest, engines: { node: '>=22' } }, /changed engines$/],
+    [{ ...manifest, somethingNew: true }, /changed somethingNew$/],
+    [{ ...manifest, scripts: { ...manifest.scripts, postinstall: 'node setup.js' } }, /install lifecycle scripts postinstall$/],
+    [{ ...manifest, scripts: { ...manifest.scripts, prepare: 'node setup.js' } }, /install lifecycle scripts prepare$/],
+  ]) {
+    const plan = manifestPlan(head);
+    assert.equal(plan.mode, 'full', String(reason));
+    assert.match(plan.reasons[0], reason);
+  }
+
+  const agentManifest = [change('packages/agent/package.json')];
+  for (const readManifest of [
+    undefined,
+    () => { throw new Error('missing blob'); },
+    () => '{ not json',
+    () => '[]',
+  ]) {
+    assert.equal(pullRequestPlan(agentManifest, { readManifest }).mode, 'full', String(readManifest));
+  }
+  assert.equal(manifestPlan(manifest, [change('package.json')]).mode, 'full', 'root manifest');
+  assert.equal(manifestPlan(manifest, [change('devnet/v10-stress/package.json')]).mode, 'full', 'devnet workspace');
+});
+
+test('repository support paths route to the lanes that execute them', () => {
+  for (const [filePath, expected] of [
+    ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent']],
+    ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_agent']],
+    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_agent']],
+    ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent']],
+    ['devnet/suites.json', ['tornado_agent']],
+    ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
+    ['devnet/v10-stress/automated.test.ts', []],
+    ['bench/store-read-latency.bench.ts', []],
+    ['tools/observability/lib/w1.mjs', []],
+    ['.github/oxlint-baseline.json', []],
+    ['.github/CODEOWNERS', []],
+    ['.github/PULL_REQUEST_TEMPLATE.md', []],
+    ['.github/dependabot.yml', []],
+    ['.github/workflows/knip.yml', []],
+  ]) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'delta', filePath);
+    assert.equal(plan.runNode, true, `${filePath} still needs the shared build checks`);
+    assert.deepEqual(selectedLanes(plan), expected, filePath);
+    assert.deepEqual(plan.evmScopes, [], filePath);
+  }
+});
+
+test('a build-only plan requires the shared build and nothing else', () => {
+  const plan = pullRequestPlan([change('bench/store-read-latency.bench.ts')]);
+  const needs = {
+    changes: { result: 'success' },
+    build: { result: 'success' },
+    'evm-node-test-artifacts': { result: 'skipped' },
+    'evm-devnet-test-artifacts': { result: 'skipped' },
+    ...Object.fromEntries(Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'skipped' }])),
+    'abi-freshness': { result: 'skipped' },
+    solidity: { result: 'skipped' },
+    'solidity-coverage': { result: 'skipped' },
+    'tornado-static-analysis': { result: 'skipped' },
+  };
+  assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan, needs }), []);
+  assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan: JSON.parse(githubOutputsForPlan(plan).plan_json), needs }), []);
+
+  needs.build.result = 'skipped';
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan, needs }).join('\n'),
+    /build was selected but ended with skipped/,
+  );
+
+  const laneWithoutBuild = { ...pullRequestPlan([change('packages/network-sim/src/index.ts')]), runNode: false };
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan: laneWithoutBuild, needs }).join('\n'),
+    /runNode=false is inconsistent with selected Node lanes/,
+  );
+});
+
+test('plan-ci compares modified workspace manifests through git blobs', (t) => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-manifest-'));
+  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
+  const repository = path.join(temporaryDirectory, 'candidate');
+  const isolatedGit = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const git = (...args) => execFileSync('git', [
+    '-C', repository, '-c', 'user.name=ci', '-c', 'user.email=ci@example.invalid', ...args,
+  ], { encoding: 'utf8', env: isolatedGit }).trim();
+  const manifestPath = path.join(repository, 'packages/agent/package.json');
+  const commitManifest = (manifest, message) => {
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    git('add', '-A');
+    git('commit', '-q', '-m', message);
+    return git('rev-parse', 'HEAD');
+  };
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  execFileSync('git', ['init', '-q', repository], { env: isolatedGit });
+  const manifest = { name: '@origintrail-official/dkg-agent', exports: { '.': './dist/index.js' } };
+  const base = commitManifest(manifest, 'base');
+  const exportsHead = commitManifest({ ...manifest, exports: { ...manifest.exports, './sync': './dist/sync.js' } }, 'exports');
+  const dependencyHead = commitManifest({ ...manifest, dependencies: { ethers: '^6.13.0' } }, 'dependency');
+
+  const changesPath = path.join(temporaryDirectory, 'changes.z');
+  fs.writeFileSync(changesPath, Buffer.from('M\0packages/agent/package.json\0'));
+  const { CI_CANDIDATE_REPO, CI_DIFF_BASE_SHA, CI_DIFF_HEAD_SHA, ...environment } = process.env;
+  const mode = (overrides) => {
+    const planner = spawnSync(process.execPath, [
+      path.join(REPO_ROOT, 'scripts/ci/plan-ci.mjs'),
+      '--event',
+      'pull_request',
+      '--changes-z',
+      changesPath,
+    ], { encoding: 'utf8', env: { ...environment, ...overrides } });
+    assert.equal(planner.status, 0, planner.stderr);
+    return JSON.parse(planner.stdout).mode;
+  };
+  const diff = (head) => ({ CI_CANDIDATE_REPO: repository, CI_DIFF_BASE_SHA: base, CI_DIFF_HEAD_SHA: head });
+
+  assert.equal(mode(diff(exportsHead)), 'delta');
+  assert.equal(mode(diff(dependencyHead)), 'full');
+  assert.equal(mode({}), 'full', 'no reader without the workflow variables');
+  assert.equal(mode({ ...diff(exportsHead), CI_DIFF_BASE_SHA: 'HEAD~2' }), 'full', 'only object IDs are accepted');
+  assert.equal(mode({ ...diff(exportsHead), CI_DIFF_BASE_SHA: '0'.repeat(40) }), 'full', 'missing blobs fail closed');
 });
 
 test('control-plane changes force full Node/EVM CI without overriding the Solidity gate', () => {

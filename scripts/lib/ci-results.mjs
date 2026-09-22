@@ -106,10 +106,13 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
     errors,
   );
 
+  // Every Node lane consumes the shared build. The build may also run on its
+  // own: its lint, repository-script and inventory checks are the CI consumers
+  // of benchmarks, manual devnet suites and repository automation config.
   const selectedNodeLane = Object.keys(PRIMARY_LANE_JOBS)
     .filter((lane) => lane !== 'bura_blazegraph_arm64')
     .some((lane) => plan.lanes?.[lane]);
-  if (selectedNodeLane !== Boolean(plan.runNode)) {
+  if (selectedNodeLane && !plan.runNode) {
     errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes`);
   }
 
