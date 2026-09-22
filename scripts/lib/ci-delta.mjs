@@ -316,19 +316,13 @@ function isAbiFreshnessRelevantPath(filePath) {
     || /^packages\/evm-module\/abi\/.*\.json$/i.test(filePath);
 }
 
-const BLAZEGRAPH_ARM64_PATHS = new Set([
-  'blazegraph-image.json',
-  'packages/cli/blazegraph-image-metadata.cjs',
-  'packages/cli/src/daemon/blazegraph-docker.ts',
-  'packages/cli/test/blazegraph-docker.test.ts',
-  'packages/cli/test/blazegraph-image-metadata.test.ts',
-  'packages/cli/test/blazegraph-integration.test.ts',
-]);
-
-function isBlazegraphArm64Path(filePath) {
-  return BLAZEGRAPH_ARM64_PATHS.has(filePath)
-    || /^packages\/cli\/(?:src|test)\/.*blazegraph.*\.(?:[cm]?[jt]s|json)$/i.test(filePath);
-}
+// The provisioned Blazegraph image contract: the pinned image metadata, the
+// CLI code that provisions it and its tests. Verified natively on arm64.
+const BLAZEGRAPH_ARM64_PATTERNS = [
+  /^blazegraph-image\.json$/,
+  /^packages\/cli\/blazegraph-image-metadata\.cjs$/,
+  /^packages\/cli\/(?:src|test)\/.*blazegraph.*\.(?:[cm]?[jt]s|json)$/i,
+];
 
 const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
 const MAX_REPORTED_FILES = 200;
@@ -349,9 +343,6 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
 ];
 
-function isIdentityWalletEvmPath(filePath) {
-  return IDENTITY_WALLET_EVM_PATTERNS.some((pattern) => pattern.test(filePath));
-}
 
 // The Windows lifecycle job (rfc64-inventory-windows.yml) re-runs the agent's
 // SQLite and filesystem persistence suites on windows-latest. The same suites
@@ -371,8 +362,33 @@ const WINDOWS_LIFECYCLE_PATTERNS = [
   /^packages\/agent\/(?:package\.json|tsconfig\.json|vitest\.unit\.config\.ts|vitest\.rfc64-unit-tests\.ts)$/,
 ];
 
-function isWindowsLifecyclePath(filePath) {
-  return WINDOWS_LIFECYCLE_PATTERNS.some((pattern) => pattern.test(filePath));
+// File-level triggers: lanes or EVM scopes that specific paths select on top
+// of the rule for the area that owns them (a workspace or a support route). A
+// path outside every area is classified by its triggers alone. Per-file
+// refinements belong in this table, never as special cases inside planCi.
+const PATH_TRIGGERS = Object.freeze([
+  {
+    patterns: BLAZEGRAPH_ARM64_PATTERNS,
+    lanes: ['bura_cli', 'bura_blazegraph_arm64'],
+    evmScopes: [],
+    reason: 'Blazegraph provisioning contract changed',
+  },
+  {
+    patterns: IDENTITY_WALLET_EVM_PATTERNS,
+    lanes: [],
+    evmScopes: ['chain'],
+    reason: 'identity-wallet browser actions require real EVM coverage',
+  },
+  {
+    patterns: WINDOWS_LIFECYCLE_PATTERNS,
+    lanes: ['tornado_agent_windows'],
+    evmScopes: [],
+    reason: 'agent persistence changes re-run the Windows lifecycle suites',
+  },
+]);
+
+function pathTriggers(filePath) {
+  return PATH_TRIGGERS.filter(({ patterns }) => patterns.some((pattern) => pattern.test(filePath)));
 }
 
 function emptyLanes() {
@@ -744,23 +760,23 @@ export function planCi({
       return fullForCurrentDiff([`Global CI input changed: ${filePath}`]);
     }
 
-    const blazegraphProvisioningChange = isBlazegraphArm64Path(filePath);
-    if (blazegraphProvisioningChange) {
-      lanes.bura_cli = true;
-      lanes.bura_blazegraph_arm64 = true;
-      reasons.push(`Blazegraph provisioning contract changed: ${filePath}`);
+    const triggers = pathTriggers(filePath);
+    for (const trigger of triggers) {
+      for (const lane of trigger.lanes) lanes[lane] = true;
+      for (const scope of trigger.evmScopes) evmScopes.add(scope);
+      reasons.push(trigger.reason);
     }
 
     const workspace = workspaceForPath(filePath);
     if (!workspace) {
-      if (blazegraphProvisioningChange) continue;
       const route = supportPathRoute(filePath);
-      if (!route) {
+      if (route) {
+        for (const lane of route.lanes) lanes[lane] = true;
+        sharedBuild = true;
+        reasons.push(route.reason);
+      } else if (triggers.length === 0) {
         return fullForCurrentDiff([`Unclassified path changed: ${filePath}`]);
       }
-      for (const lane of route.lanes) lanes[lane] = true;
-      sharedBuild = true;
-      reasons.push(route.reason);
       continue;
     }
 
@@ -782,14 +798,6 @@ export function planCi({
 
     for (const lane of rule.lanes) lanes[lane] = true;
     for (const scope of rule.evmScopes) evmScopes.add(scope);
-    if (isIdentityWalletEvmPath(filePath)) {
-      evmScopes.add('chain');
-      reasons.push('identity-wallet browser actions require real EVM coverage');
-    }
-    if (isWindowsLifecyclePath(filePath)) {
-      lanes.tornado_agent_windows = true;
-      reasons.push('agent persistence changes re-run the Windows lifecycle suites');
-    }
     reasons.push(`${workspace} and its downstream consumers`);
   }
 

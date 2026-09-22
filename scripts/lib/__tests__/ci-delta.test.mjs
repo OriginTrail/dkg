@@ -654,7 +654,7 @@ test('ordinary network-sim changes remain a narrow delta after the trust hardeni
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
-  // Every shape isIdentityWalletEvmPath matches, including the extension
+  // Every shape IDENTITY_WALLET_EVM_PATTERNS matches, including the extension
   // alternation (the .tsx spelling is a shape probe, not an existing file).
   for (const filePath of [
     'packages/node-ui/src/ui/web3/identityWalletActions.ts',
