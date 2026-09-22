@@ -321,6 +321,7 @@ export type {
   ContextGraphReadAuthoritySource,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityReadMode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,

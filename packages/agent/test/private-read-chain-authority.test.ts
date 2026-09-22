@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   MockChainAdapter,
   type ContextGraphAuthoritySnapshot,
@@ -18,6 +18,12 @@ const registeredBinding = (onChainId: bigint) => ({
   kind: 'registered' as const,
   onChainId,
   provenance: 'numeric-id' as const,
+});
+
+const authoritativeBinding = (onChainId: bigint) => ({
+  kind: 'registered' as const,
+  onChainId,
+  provenance: 'authoritative' as const,
 });
 
 const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
@@ -52,15 +58,34 @@ function finalizedAuthoritySnapshot(
   };
 }
 
+type FinalizedAuthorityReaderMock = Mock<(
+  contextGraphIds: readonly string[],
+  options?: { signal?: AbortSignal },
+) => Promise<Map<string, ContextGraphAuthoritySnapshot>>>;
+
+/**
+ * The agent's finalized-evidence lane captures the adapter's reader once, so a
+ * later call swaps the projection behind the same mock instead of installing
+ * a second reader object the agent would never consult.
+ */
 function installFinalizedAuthorityReader(
   chain: MockChainAdapter,
   snapshot: ContextGraphAuthoritySnapshot | undefined,
-) {
-  const readContextGraphAuthorityIndexSnapshots = vi.fn(async (
+): FinalizedAuthorityReaderMock {
+  const projection = async (
     contextGraphIds: readonly string[],
   ) => new Map(snapshot !== undefined && contextGraphIds.includes(snapshot.contextGraphId)
     ? [[snapshot.contextGraphId, snapshot]]
-    : []));
+    : []);
+  const installed = Reflect.get(chain, 'contextGraphAuthorityIndexRevisionReader') as
+    { readContextGraphAuthorityIndexSnapshots?: FinalizedAuthorityReaderMock } | undefined;
+  const existing = installed?.readContextGraphAuthorityIndexSnapshots;
+  if (existing !== undefined && vi.isMockFunction(existing)) {
+    existing.mockReset();
+    existing.mockImplementation(projection);
+    return existing;
+  }
+  const readContextGraphAuthorityIndexSnapshots: FinalizedAuthorityReaderMock = vi.fn(projection);
   Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
     readContextGraphAuthorityIndexSnapshots,
     readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
@@ -101,7 +126,10 @@ describe('private read authorization uses the on-chain participant roster', () =
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toBeDefined();
-    expect(readIndex).toHaveBeenCalledWith(['8'], { signal: expect.any(AbortSignal) });
+    expect(readIndex).toHaveBeenCalledWith(
+      ['8'],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(live).not.toHaveBeenCalled();
   });
 
@@ -126,7 +154,10 @@ describe('private read authorization uses the on-chain participant roster', () =
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toBeDefined();
-    expect(readIndex).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
+    expect(readIndex).toHaveBeenCalledWith(
+      ['9'],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(live).toHaveBeenCalledTimes(1);
 
     // Finalized EVIDENCE never falls back: an absent snapshot fails closed.
@@ -182,6 +213,245 @@ describe('private read authorization uses the on-chain participant roster', () =
       source: 'registered-chain',
       reason: 'chain-access-policy-unknown',
     });
+    expect(live).not.toHaveBeenCalled();
+    expect(pointRoster).not.toHaveBeenCalled();
+  });
+
+  it('binds a wire-id-keyed placeholder row to its finalized snapshot instead of re-hashing the wire id', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedWireIdPlaceholderReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-wire-id', configurable: true });
+    // A cold Edge learns the commitment from `ContextGraphCreated` before any
+    // cleartext arrives: the row is keyed by the wire id, is not admitted, and
+    // carries the commitment itself as `onChainHash`.
+    const wireId = `0x${'ab'.repeat(32)}`;
+    expect(agent.stageOnChainContextGraphBindingFromNameHash(wireId, '7')).toBe(wireId);
+    const subscriptions = Reflect.get(agent, 'subscribedContextGraphs') as Map<string, {
+      subscribed: boolean;
+      pendingMeta?: boolean;
+      onChainHash?: string;
+    }>;
+    expect(subscriptions.get(wireId)).toMatchObject({
+      subscribed: false,
+      pendingMeta: true,
+      onChainHash: wireId,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    const readIndex = installFinalizedAuthorityReader(
+      chain,
+      finalizedAuthoritySnapshot(7n, wireId),
+    );
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+
+    await expect(agent.resolveContextGraphReadAuthority(wireId, {
+      authorityReadMode: 'finalized-index',
+    })).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'registered-chain',
+      reason: 'chain-public',
+      onChainId: 7n,
+    });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: wireId,
+    })).resolves.toBeDefined();
+    // The placeholder is an unscoped candidate as well; one such row must not
+    // turn every unscoped query on the node into an empty result.
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }')).resolves.toBeDefined();
+    expect(queryExecution).toHaveBeenCalledTimes(2);
+    expect(readIndex).toHaveBeenCalledWith(['7'], expect.anything());
+    expect(live).not.toHaveBeenCalled();
+  });
+
+  it('denies a non-member from the finalized private roster without a live roster read', async () => {
+    const contextGraphId = 'finalized-private-denied';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedPrivateReadDenied',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-private-denied', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    installFinalizedAuthorityReader(chain, finalizedAuthoritySnapshot(
+      7n,
+      agent.contextGraphNameCommitment(contextGraphId),
+      { accessPolicy: 1, participantAgents: [MEMBER] },
+    ));
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
+    const pointRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+
+    await expect(agent.resolveContextGraphReadAuthority(contextGraphId, {
+      callerAgentAddress: NON_MEMBER,
+      authorityReadMode: 'finalized-index',
+    })).resolves.toMatchObject({
+      outcome: 'denied',
+      source: 'registered-chain',
+      reason: 'agent-not-in-chain-roster',
+      onChainId: 7n,
+    });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: NON_MEMBER,
+    })).resolves.toMatchObject({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+    expect(live).not.toHaveBeenCalled();
+    expect(pointRoster).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on an inactive finalized snapshot without consulting current state', async () => {
+    const contextGraphId = 'finalized-inactive';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedInactiveReadAuthority',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    installFinalizedAuthorityReader(chain, finalizedAuthoritySnapshot(
+      7n,
+      agent.contextGraphNameCommitment(contextGraphId),
+      { active: false },
+    ));
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
+    const pointRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    })).rejects.toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      source: 'registered-chain',
+      reason: 'chain-access-policy-unknown',
+    });
+    expect(live).not.toHaveBeenCalled();
+    expect(pointRoster).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the bounded current-state read when the finalized lane outlives the policy deadline', async () => {
+    const contextGraphId = 'finalized-slow';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedSlowReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-slow', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    const readIndex = installFinalizedAuthorityReader(chain, undefined)
+      .mockImplementation((_contextGraphIds, options) => new Promise((resolve, reject) => {
+        const settle = setTimeout(() => resolve(new Map()), CHAIN_POLICY_READ_TIMEOUT_MS * 4);
+        options?.signal?.addEventListener('abort', () => {
+          clearTimeout(settle);
+          reject(options.signal?.reason ?? new Error('aborted'));
+        }, { once: true });
+      }));
+    const live = mockLivePolicy(agent, 0);
+    vi.useFakeTimers();
+
+    const read = agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId });
+    await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+
+    await expect(read).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledTimes(1);
+    expect(live).toHaveBeenCalledTimes(1);
+    // The deadline released the lane's permit: the reader saw the abort.
+    expect(readIndex.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+  });
+
+  it('observes the shared authority circuit instead of walking an exhausted pool', async () => {
+    const contextGraphId = 'finalized-circuit';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedCircuitReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-circuit', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    const readIndex = installFinalizedAuthorityReader(chain, undefined)
+      .mockRejectedValue(Object.assign(
+        new Error('readContextGraphAuthorityIndexSnapshots failed on all endpoints'),
+        { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      ));
+    const live = mockLivePolicy(agent, 0);
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledTimes(1);
+    expect(live).toHaveBeenCalledTimes(1);
+
+    // The exhaustion tripped the circuit: the next read is refused before it
+    // reaches the reader and still resolves from the bounded current state.
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledTimes(1);
+    expect(live).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps current-state reads when the adapter exposes no finalized authority index', async () => {
+    const contextGraphId = 'legacy-adapter-public';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'LegacyAdapterReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-adapter', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    const finalized = vi.spyOn(agent, 'resolveFinalizedRegisteredContextGraphAccessPolicyV1');
+    const live = mockLivePolicy(agent, 0);
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(finalized).toHaveBeenCalledTimes(1);
+    await expect(finalized.mock.results[0]?.value).resolves.toBeUndefined();
+    expect(live).toHaveBeenCalledTimes(1);
+  });
+
+  it('authorizes unscoped candidates from the finalized index without live policy or roster reads', async () => {
+    const contextGraphId = 'unscoped-finalized-private';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'UnscopedFinalizedReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-unscoped-finalized', configurable: true });
+    agent.setContextGraphSubscription(contextGraphId, {
+      syncMode: 'on-demand',
+      subscribed: true,
+      synced: true,
+    }, { persist: false });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockImplementation(
+      async (id) => (id === contextGraphId ? authoritativeBinding(9n) : { kind: 'unregistered' }),
+    );
+    const readIndex = installFinalizedAuthorityReader(chain, finalizedAuthoritySnapshot(
+      9n,
+      agent.contextGraphNameCommitment(contextGraphId),
+      { accessPolicy: 1, participantAgents: [MEMBER] },
+    ));
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
+    const pointRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      callerAgentAddress: MEMBER,
+    })).resolves.toBeDefined();
+    expect(queryExecution).toHaveBeenCalledTimes(1);
+    expect(readIndex).toHaveBeenCalledWith(['9'], expect.anything());
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      callerAgentAddress: NON_MEMBER,
+    })).resolves.toMatchObject({ bindings: [] });
+    expect(queryExecution).toHaveBeenCalledTimes(1);
     expect(live).not.toHaveBeenCalled();
     expect(pointRoster).not.toHaveBeenCalled();
   });

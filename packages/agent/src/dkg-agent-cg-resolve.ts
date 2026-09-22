@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityIndexId, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -263,6 +263,10 @@ type ContextGraphNameHashBindingTarget = {
   subscription: ContextGraphSub;
   nameHash?: string;
 };
+/** Policy evidence a scoped read bound from the finalized authority index. */
+type FinalizedRegisteredContextGraphAccessPolicyV1 =
+  | Extract<LiveOnChainAccessPolicyState, { kind: 'available' }>
+  | RegisteredContextGraphAuthorityUnavailable;
 class ListContextGraphsBudgetExceeded extends Error {
   constructor(label: string) {
     super(`${label} exceeded listContextGraphs budget`);
@@ -326,8 +330,15 @@ import {
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
-import type { RegisteredContextGraphAuthority } from
-  './registered-context-graph-authority.js';
+import type {
+  ContextGraphAuthorityReadMode,
+  RegisteredContextGraphAuthority,
+  RegisteredContextGraphAuthorityUnavailable,
+} from './registered-context-graph-authority.js';
+import {
+  resolveFinalizedContextGraphNameBindingV1,
+  type ContextGraphRegistrationBinding,
+} from './dkg-agent-cg-registry.js';
 import type { LiveOnChainAccessPolicyState } from
   './internal/context-graph-authority/context-graph-access-policy.js';
 import { parseRfc64AuthoritySnapshotV1 } from
@@ -1580,10 +1591,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
       /**
-       * Scoped reads may consume the complete finalized authority projection.
-       * Mutation, encryption, and admission callers retain current-state reads.
+       * Scoped reads may consume the complete finalized authority projection;
+       * every other caller keeps current-state reads. Defaults to `live-current`.
        */
-      authorityReadMode?: 'live-current' | 'finalized-index';
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
@@ -1602,103 +1613,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const { onChainId } = registration;
 
     let accessPolicyState: LiveOnChainAccessPolicyState | undefined;
-    // Only the finalized-index lane consults the adapter capability; current-
-    // state callers never touch it, so a receiver without a chain adapter (the
-    // access-policy boundary tests) keeps the live lane untouched.
-    const finalizedIndexReader = options.authorityReadMode === 'finalized-index'
-      ? this.chain.contextGraphAuthorityIndexRevisionReader
-      : undefined;
-    const readFinalizedSnapshots = finalizedIndexReader
-      ?.readContextGraphAuthorityIndexSnapshots;
-    if (
-      finalizedIndexReader !== undefined
-      && readFinalizedSnapshots !== undefined
-    ) {
-      const authorityIndexId = onChainId.toString();
-      let snapshots: Awaited<ReturnType<typeof readFinalizedSnapshots>> | undefined;
-      try {
-        assertContextGraphAuthorityIndexId(
-          authorityIndexId,
-          'scoped read finalized authority index id',
-        );
-        snapshots = await runBoundedOperation(
-          (signal) => readFinalizedSnapshots.call(
-            finalizedIndexReader,
-            [authorityIndexId as ContextGraphAuthorityIndexId],
-            { signal },
-          ),
-          {
-            label: `readFinalizedContextGraphAuthority(${onChainId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
-            signal: options.signal,
-          },
-        );
-      } catch {
-        // A reader fault or deadline yields no evidence about the graph: the
-        // projection may be rescanning behind the RPC governor for a graph that
-        // registered moments ago, or the index may be down. The canonical
-        // current-state read below still owns the answer, exactly as it does
-        // for every other consumer, and it is bounded and reports its own
-        // outage, so the outcome stays fail-closed. Only finalized EVIDENCE
-        // (absent, inactive, or mismatched below) never falls back.
-        snapshots = undefined;
-      }
-      if (snapshots !== undefined) {
-        const rawSnapshot = snapshots.get(authorityIndexId as ContextGraphAuthorityIndexId);
-        if (rawSnapshot === undefined) {
-          return {
-            kind: 'unavailable',
-            onChainId,
-            reason: 'chain-access-policy-unknown',
-            detail: 'finalized authority index has no snapshot for the registered Context Graph',
-          };
-        }
-        let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
-        try {
-          snapshot = parseRfc64AuthoritySnapshotV1(rawSnapshot, onChainId);
-        } catch (err) {
-          return {
-            kind: 'unavailable',
-            onChainId,
-            reason: 'chain-access-policy-unavailable',
-            detail: err instanceof Error ? err.message : String(err),
-          };
-        }
-        if (snapshot.active !== true) {
-          return {
-            kind: 'unavailable',
-            onChainId,
-            reason: 'chain-access-policy-unknown',
-            detail: 'finalized authority snapshot is inactive',
-          };
-        }
-        if (registration.provenance !== 'numeric-id') {
-          const bindingTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
-          const durableNameHash = options.durableSubscriptionBinding?.onChainHash;
-          const expectedNameHash = bindingTarget?.nameHash
-            ?? (durableNameHash === undefined
-              ? this.contextGraphNameCommitment(contextGraphId)
-              : this.contextGraphWireId(durableNameHash));
-          if (
-            this.contextGraphWireId(snapshot.nameHash)
-            !== this.contextGraphWireId(expectedNameHash)
-          ) {
-            return {
-              kind: 'unavailable',
-              onChainId,
-              reason: 'chain-access-policy-unknown',
-              detail: 'finalized authority snapshot name commitment does not match the registered Context Graph',
-            };
-          }
-        }
-        accessPolicyState = snapshot.accessPolicy === 0
-          ? { kind: 'available', accessPolicy: 0 }
-          : {
-              kind: 'available',
-              accessPolicy: 1,
-              participantAgents: snapshot.participantAgents,
-            };
-      }
+    if (options.authorityReadMode === 'finalized-index') {
+      const finalized = await this.resolveFinalizedRegisteredContextGraphAccessPolicyV1(
+        contextGraphId,
+        registration,
+        options,
+      );
+      if (finalized?.kind === 'unavailable') return finalized;
+      accessPolicyState = finalized;
     }
     if (accessPolicyState === undefined) {
       try {
@@ -2060,6 +1982,105 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         : this.contextGraphNameCommitment(localId)
       : undefined;
     return { localId, subscription, nameHash };
+  }
+
+
+  /**
+   * Scoped-read policy evidence from the complete finalized authority index.
+   *
+   * The read runs on the shared RFC-64 authority circuit's foreground lane: it
+   * observes an open circuit instead of walking an exhausted pool, a real
+   * provider read here counts as recovery evidence for every other consumer,
+   * and it never queues behind a cold whole-contract scan on the bulk lane.
+   * `undefined` sends the caller to the bounded current-state read — the
+   * adapter has no finalized capability, or the lane faulted, timed out, or is
+   * cooling down, none of which is evidence about the graph. Finalized
+   * EVIDENCE (an absent, inactive, malformed, or name-mismatched snapshot)
+   * fails closed and never falls back.
+   */
+  async resolveFinalizedRegisteredContextGraphAccessPolicyV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    registration: Extract<ContextGraphRegistrationBinding, { kind: 'registered' }>,
+    options: {
+      signal?: AbortSignal;
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
+    },
+  ): Promise<FinalizedRegisteredContextGraphAccessPolicyV1 | undefined> {
+    const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
+    const readSnapshots = indexReader?.readContextGraphAuthorityIndexSnapshots;
+    if (indexReader === undefined || readSnapshots === undefined) return undefined;
+    const { onChainId } = registration;
+    const unknown = (detail: string): RegisteredContextGraphAuthorityUnavailable => ({
+      kind: 'unavailable',
+      onChainId,
+      reason: 'chain-access-policy-unknown',
+      detail,
+    });
+
+    let rawSnapshot: ContextGraphAuthoritySnapshot | undefined;
+    try {
+      const authorityIndexId = onChainId.toString(10);
+      assertContextGraphAuthorityIndexId(
+        authorityIndexId,
+        'scoped read finalized authority index id',
+      );
+      rawSnapshot = await runBoundedOperation(
+        (signal) => this.rfc64AuthorityReadCoordinatorV1.runForeground(
+          signal,
+          async (readSignal, evidence) => (await readSnapshots.call(
+            indexReader,
+            [authorityIndexId],
+            evidence.chainReadOptions(readSignal),
+          )).get(authorityIndexId),
+        ),
+        {
+          label: `readFinalizedContextGraphAuthority(${onChainId})`,
+          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          signal: options.signal,
+        },
+      );
+    } catch {
+      return undefined;
+    }
+    if (rawSnapshot === undefined) {
+      return unknown('finalized authority index has no snapshot for the registered Context Graph');
+    }
+    let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
+    try {
+      snapshot = parseRfc64AuthoritySnapshotV1(rawSnapshot, onChainId);
+    } catch (err) {
+      return {
+        kind: 'unavailable',
+        onChainId,
+        reason: 'chain-access-policy-unavailable',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (snapshot.active !== true) {
+      return unknown('finalized authority snapshot is inactive');
+    }
+    if (registration.provenance !== 'numeric-id') {
+      const { expectedNameHash } = resolveFinalizedContextGraphNameBindingV1(
+        this,
+        contextGraphId,
+        options.durableSubscriptionBinding?.contextGraphId === contextGraphId
+          ? options.durableSubscriptionBinding
+          : undefined,
+      );
+      if (snapshot.nameHash !== this.contextGraphWireId(expectedNameHash)) {
+        return unknown(
+          'finalized authority snapshot name commitment does not match the registered Context Graph',
+        );
+      }
+    }
+    return snapshot.accessPolicy === 0
+      ? { kind: 'available', accessPolicy: 0 }
+      : {
+          kind: 'available',
+          accessPolicy: 1,
+          participantAgents: snapshot.participantAgents,
+        };
   }
 
   /**
