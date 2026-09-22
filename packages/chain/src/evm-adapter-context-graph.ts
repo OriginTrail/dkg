@@ -1605,7 +1605,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       'cgStorage.getNameHash',
       'getNameHash',
       [contextGraphId],
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        policy: 'securityGatePointRead',
+      },
     );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();
