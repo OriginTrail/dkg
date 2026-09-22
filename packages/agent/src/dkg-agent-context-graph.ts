@@ -2106,9 +2106,16 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: candidateChainAgents,
       chain: this.chain,
+      // This roster decides whether a transaction is sent, not merely when.
+      // `allowCachedRoster` is passed explicitly so a future default cannot
+      // quietly hand the idempotence filter a projection to read.
+      rosterFreshness: 'live',
       resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberAdd,
-        () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          { allowCachedRoster: false },
+        ),
       ),
     });
 
@@ -2336,9 +2343,17 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: [normalizedAgentAddress],
       chain: this.chain,
+      // A roster behind the chain here does not delay the revocation, it
+      // cancels it: the agent is filtered out as "not present", no transaction
+      // is sent, and it stays on the chain roster while local state records a
+      // removal. See `prepareRegisteredParticipantMutation`.
+      rosterFreshness: 'live',
       resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberRemove,
-        () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          { allowCachedRoster: false },
+        ),
       ),
     });
     await commitRegisteredParticipantMutation({
