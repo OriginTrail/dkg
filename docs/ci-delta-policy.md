@@ -27,7 +27,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
-| Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `name`, `type`, install lifecycle scripts or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
+| Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `name`, `type`, install-time scripts (npm install/prepare lifecycle, `prepublish`, `dependencies`, any `pnpm:` hook) or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
 | Deletion, rename or copy | Routed by every old and new path, like edits |
 | Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
 | Several workspaces | Union of their rules |
@@ -60,7 +60,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   opts a PR in before merging.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
-  selected job was accidentally skipped, failed, or was cancelled.
+  selected job was accidentally skipped, failed, or was cancelled. The primary
+  gate also requires the shared build to run exactly when a Node lane needs it
+  or the plan explicitly declares `buildChecks` (repository paths whose only CI
+  consumer is the build job's own checks), so a plan that forgot its lanes
+  cannot pass on the build alone.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
   present on protected `main` or `testnet-canary` history. Only a follow-up PR

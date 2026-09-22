@@ -272,6 +272,7 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
   const controlPlanePaths = [
     '.github/workflows/ci.yml',
     '.github/workflows/evm-integration.yml',
+    '.github/workflows/rfc64-inventory-windows.yml',
     '.github/workflows/nested/policy.yml',
     'scripts/ci/plan-ci.mjs',
     'scripts/ci/assert-ci-results.mjs',
@@ -291,6 +292,22 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
       filePath,
     );
     assert.deepEqual(plan.evmScopes, EVM_SCOPES, filePath);
+  }
+});
+
+test('every reusable workflow the gated workflows call is CI control plane', () => {
+  // A workflow that ci.yml or evm-integration.yml runs through `uses:` decides
+  // what their aggregate gates mean, so editing one must keep full CI.
+  const called = ['ci.yml', 'evm-integration.yml'].flatMap((name) => {
+    const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', name), 'utf8'));
+    return Object.values(jobs)
+      .map((job) => job.uses)
+      .filter((uses) => typeof uses === 'string' && uses.startsWith('./.github/workflows/'))
+      .map((uses) => uses.slice(2));
+  });
+  assert.ok(called.includes('.github/workflows/rfc64-inventory-windows.yml'));
+  for (const filePath of called) {
+    assert.equal(pullRequestPlan([change(filePath)]).mode, 'full', filePath);
   }
 });
 
@@ -404,6 +421,7 @@ test('GitHub outputs are booleans plus compact JSON matrices', () => {
   assert.equal(gatePlan.mode, 'delta');
   assert.equal(gatePlan.lanes.kosava_supporting, true);
   assert.equal(gatePlan.lanes.contracts, false);
+  assert.equal(gatePlan.buildChecks, false);
   assert.equal(gatePlan.abiFreshnessRelevant, false);
   assert.equal('solidityRelevant' in gatePlan, false);
   assert.equal('changedFiles' in gatePlan, false);

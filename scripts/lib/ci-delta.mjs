@@ -418,6 +418,7 @@ function fullPlan({
     mode: 'full',
     fullCi: true,
     runNode: true,
+    buildChecks: false,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
     evmScopes: [...EVM_SCOPES],
@@ -499,9 +500,10 @@ function isGlobalFullPath(filePath) {
 
 // Repository areas outside the package workspaces, mapped to the lanes that
 // actually execute them in CI (ci.yml and its reusable workflows). Every route
-// also selects the shared build job, whose lint, repository-script tests and
-// test-inventory checks cover these files; for routes with no lanes it is the
-// only CI consumer (the suites are manual or have their own workflow).
+// also selects the shared build job's own checks (`buildChecks`): its lint,
+// repository-script tests and test-inventory checks cover these files, and for
+// routes with no lanes they are the only CI consumer (the suites are manual or
+// have their own workflow).
 const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     pattern: /^devnet\/rfc64-gate1-public-open\//,
@@ -583,16 +585,26 @@ const PACKAGE_SCOPED_MANIFEST_FIELDS = new Set([
   'version',
 ]);
 
-// pnpm runs these for every workspace project during `pnpm install`, which
-// every CI job performs, so they are install inputs rather than package code.
-const INSTALL_LIFECYCLE_SCRIPTS = Object.freeze([
+// Scripts a package manager runs implicitly while installing, which every CI
+// job does: npm's install and prepare lifecycles (pnpm runs the same ones for
+// workspace projects), npm's legacy `prepublish` and its `dependencies` hook,
+// and every `pnpm:`-namespaced hook such as `pnpm:devPreinstall`. Any other
+// script runs only when invoked by name, so it is package code exercised by
+// the shared build and the package's own lanes.
+const INSTALL_LIFECYCLE_SCRIPTS = new Set([
   'preinstall',
   'install',
   'postinstall',
   'preprepare',
   'prepare',
   'postprepare',
+  'prepublish',
+  'dependencies',
 ]);
+
+function isInstallLifecycleScript(name) {
+  return INSTALL_LIFECYCLE_SCRIPTS.has(name) || name.startsWith('pnpm:');
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -623,9 +635,14 @@ function classifyManifestChange(filePath, readManifest) {
   if (installFields.length) {
     return { packageScoped: false, detail: `${filePath} changed ${installFields.join(', ')}` };
   }
-  const lifecycleScripts = INSTALL_LIFECYCLE_SCRIPTS.filter((name) => (
-    !isDeepStrictEqual(before.scripts?.[name], after.scripts?.[name])
-  ));
+  const scripts = { before: before.scripts ?? {}, after: after.scripts ?? {} };
+  if (!isPlainObject(scripts.before) || !isPlainObject(scripts.after)) {
+    return { packageScoped: false, detail: `${filePath} scripts is not a JSON object` };
+  }
+  const lifecycleScripts = [...new Set([...Object.keys(scripts.before), ...Object.keys(scripts.after)])]
+    .filter((name) => isInstallLifecycleScript(name))
+    .filter((name) => !isDeepStrictEqual(scripts.before[name], scripts.after[name]))
+    .sort();
   if (lifecycleScripts.length) {
     return {
       packageScoped: false,
@@ -726,6 +743,7 @@ export function planCi({
       mode: 'docs-only',
       fullCi: false,
       runNode: false,
+      buildChecks: false,
       abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
       lanes: emptyLanes(),
       evmScopes: [],
@@ -752,7 +770,7 @@ export function planCi({
   const lanes = emptyLanes();
   const evmScopes = new Set();
   const reasons = [];
-  let sharedBuild = false;
+  let buildChecks = false;
   lanes.contracts = solidityRelevance.contracts;
 
   for (const filePath of productionFiles) {
@@ -772,7 +790,7 @@ export function planCi({
       const route = supportPathRoute(filePath);
       if (route) {
         for (const lane of route.lanes) lanes[lane] = true;
-        sharedBuild = true;
+        buildChecks = true;
         reasons.push(route.reason);
       } else if (triggers.length === 0) {
         return fullForCurrentDiff([`Unclassified path changed: ${filePath}`]);
@@ -802,7 +820,7 @@ export function planCi({
   }
 
   const deduplicatedReasons = [...new Set(reasons)];
-  const runNode = sharedBuild || NODE_LANES.some((lane) => lanes[lane]);
+  const runNode = buildChecks || NODE_LANES.some((lane) => lanes[lane]);
   const selfBuildingLane = SELF_BUILDING_LANES.some((lane) => lanes[lane]);
   if (!runNode && !selfBuildingLane && !lanes.contracts && evmScopes.size === 0) {
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
@@ -812,6 +830,7 @@ export function planCi({
     mode: 'delta',
     fullCi: false,
     runNode,
+    buildChecks,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
     evmScopes: EVM_SCOPES.filter((scope) => evmScopes.has(scope)),
@@ -826,6 +845,7 @@ export function githubOutputsForPlan(plan) {
     mode: plan.mode,
     fullCi: plan.fullCi,
     runNode: plan.runNode,
+    buildChecks: plan.buildChecks,
     abiFreshnessRelevant: plan.abiFreshnessRelevant,
     lanes: plan.lanes,
     evmScopes: plan.evmScopes,
@@ -846,7 +866,7 @@ export function renderPlanSummary(plan) {
   const skipped = CI_LANES.filter((lane) => !plan.lanes[lane]);
   const safe = (value) => value.replace(/[|`\r\n]/g, '_');
 
-  const noLaneSummary = plan.runNode ? '_none (shared build job only)_' : '_none_';
+  const noLaneSummary = plan.buildChecks ? '_none (shared build checks only)_' : '_none_';
 
   return [
     '## CI delta plan',
