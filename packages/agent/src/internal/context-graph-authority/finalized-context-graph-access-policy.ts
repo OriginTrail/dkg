@@ -50,14 +50,22 @@ const SNAPSHOT_MISMATCH_DETAIL = Object.freeze({
  * Scoped-read policy evidence from the complete finalized authority index.
  *
  * The read runs on the shared RFC-64 authority circuit's foreground lane: it
- * observes an open circuit instead of walking an exhausted pool, a real
- * provider read here counts as recovery evidence for every other consumer,
- * and it never queues behind a cold whole-contract scan on the bulk lane.
+ * never queues behind a cold whole-contract scan on the bulk lane, and a real
+ * provider read here counts as recovery evidence for every other consumer.
+ * It is admitted while the circuit cools down, as one more probe behind that
+ * lane's single permit. Refused, it would defer nothing: its caller would go
+ * straight to the live read of the same pool, ungoverned and unserialized,
+ * and give up an answer the reader's projection can serve without reaching a
+ * provider. Its exhaustion joins the open round, and a log fold or a
+ * projection fetched before the trip is no recovery evidence. A graph whose
+ * registration itself needs the index (name-hash discovery) is still refused
+ * at registration during a cooldown and never reaches this lane.
+ *
  * `undefined` sends the caller to the bounded current-state read, which
  * fails closed on its own. That happens when the adapter has no finalized
- * capability; when the lane faulted, timed out, or is cooling down; when the
- * index holds no snapshot for a slot whose registration is already proven
- * (the projection's anchor has not reached the registration block — the
+ * capability; when the lane faulted (an exhaustion included) or timed out;
+ * when the index holds no snapshot for a slot whose registration is already
+ * proven (the projection's anchor has not reached the registration block — the
  * registration lane never treats finalized absence as evidence either); and
  * when a PRIVATE roster would come from a projection the reader served as
  * `stale-cache`, meaning a refresh failed and the projection is at least one
@@ -90,6 +98,13 @@ export async function resolveFinalizedOnChainAccessPolicyState(
       authorityIndexId,
       'scoped read finalized authority index id',
     );
+    // No `whenIdle()` drain here, unlike the bulk lanes. The reader's drain is
+    // global (the bulk catalog pass's scans included), so inside this budget
+    // it would hold a projection hit behind unrelated work and, past the
+    // budget, trade the hit for the live read. It could not bound a scan this
+    // read abandons either: `runBoundedOperation` settles at its deadline
+    // without awaiting the operation. That physical work belongs to the
+    // reader's lifecycle, which `agent.stop()` drains.
     read = await runBoundedOperation(
       (signal) => dependencies.authorityReads.runForeground(
         signal,
@@ -105,6 +120,7 @@ export async function resolveFinalizedOnChainAccessPolicyState(
           );
           return { snapshot: snapshots.get(authorityIndexId), served };
         },
+        { admitWhileOpen: true },
       ),
       {
         label: `readFinalizedContextGraphAuthority(${onChainId})`,
