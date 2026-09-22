@@ -25,17 +25,21 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching `node-ui`, `graph-viz` or `cli` (the daemon HTTP API it drives); every other PR relies on its own lanes plus the CLI daemon tests and gets the suite after merge |
 | Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane, plus the Gate 0 and evidence harness paths: besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
-| Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
+| Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
 | Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `name`, `type`, install-time scripts (npm install/prepare lifecycle, `prepublish`, `dependencies`, any `pnpm:` hook) or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
 | Deletion, rename or copy | Routed by every old and new path, like edits |
 | Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
 | Several workspaces | Union of their rules |
-| `devnet/`, `test-systems/`, `bench/`, `tools/`, other `.github/` files | Shared build checks plus the lanes that execute them (for example the Gate 1 harness runs in the agent and Blazegraph lanes) |
+| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that execute them: `devnet/` the agent lane (the Gate 1 harness also Blazegraph), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone |
 | More than 100 production files | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
 | Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
 | Protected-branch push or manual dispatch | Full CI, including Solidity coverage |
+
+Each changed path gets one routing decision, first match wins: global CI inputs
+(full CI), then its package workspace, then a repository support area, then a
+file-level trigger alone (such as `blazegraph-image.json`), otherwise full CI.
 
 The planner reads `git diff --name-status -z`, so spaces and other shell-hostile
 file names cannot alter the decision. For a modified workspace manifest it also

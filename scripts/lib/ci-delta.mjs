@@ -358,7 +358,6 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
 ];
 
-
 // File-level triggers: lanes or EVM scopes that specific paths select on top
 // of the rule for the area that owns them (a workspace or a support route). A
 // path outside every area is classified by its triggers alone. Per-file
@@ -502,23 +501,20 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'RFC-64 Gate 1 harness runs in the agent and Blazegraph lanes',
   },
   {
-    // Gate 0 persistence evidence and the evidence bootstrap run only in the
-    // Windows lifecycle job.
+    // Gate 0 persistence evidence and the evidence bootstrap run in the
+    // Windows lifecycle job, and agent code imports the Gate 0 evidence
+    // helpers (packages/agent/devnet/rfc64-private-catalog).
     pattern: /^devnet\/(?:rfc64-persistence-lifecycle|_bootstrap)\//,
-    lanes: ['tornado_agent_windows'],
-    reason: 'RFC-64 persistence harness runs in the Windows lifecycle job',
+    lanes: ['tornado_agent', 'tornado_agent_windows'],
+    reason: 'RFC-64 persistence harness runs in the agent and Windows lifecycle jobs',
   },
   {
-    // Root-level devnet modules (rfc64-runtime-*.mts, suites.json) are
-    // imported by agent tests and by the evidence bootstrap.
-    pattern: /^devnet\/[^/]+$/,
-    lanes: ['tornado_agent'],
-    reason: 'shared devnet runtime modules are imported by agent tests',
-  },
-  {
+    // Devnet harnesses are built on the agent, and agent tests, fixtures and
+    // packages/agent/devnet import several of them (shared rfc64-runtime-*
+    // modules, the Gate 0 evidence helpers, the Gate 2 runtime hooks).
     pattern: /^devnet\//,
-    lanes: [],
-    reason: 'manual devnet suites are checked by the shared build job only',
+    lanes: ['tornado_agent'],
+    reason: 'devnet harnesses are imported by agent tests and fixtures',
   },
   {
     pattern: /^test-systems\//,
@@ -526,9 +522,15 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'storage conformance runs in the Blazegraph lane',
   },
   {
-    pattern: /^(?:bench|tools)\//,
+    // The CLI benchmark tests import the esbench suites and their support.
+    pattern: /^bench\//,
+    lanes: ['bura_cli'],
+    reason: 'benchmarks are imported by the CLI benchmark tests',
+  },
+  {
+    pattern: /^tools\//,
     lanes: [],
-    reason: 'benchmarks and operator tools are checked by the shared build job only',
+    reason: 'operator tools are checked by the shared build job only',
   },
   {
     // Remaining .github inputs: workflows outside the CI control plane,
@@ -678,6 +680,59 @@ export function parseNameStatusZ(buffer) {
   return entries;
 }
 
+// The routing decision for one changed path. Precedence, first match wins:
+//   1. global CI inputs (control plane, lockfile, scripts/, ...) -> full CI
+//   2. a package workspace -> its WORKSPACE_RULES entry; the highest-risk
+//      workspace and install-affecting manifest edits -> full CI
+//   3. a repository support area -> SUPPORT_PATH_ROUTES plus the shared
+//      build job's own checks
+//   4. a path claimed only by PATH_TRIGGERS (blazegraph-image.json)
+//   5. anything else -> full CI
+// PATH_TRIGGERS add lanes and EVM scopes on top of whichever of 2-4 applies.
+// Returns { full: reason } or { lanes, evmScopes, buildChecks, reasons }.
+function routePath(filePath, { modifiedFiles, readManifest }) {
+  if (isGlobalFullPath(filePath)) return { full: `Global CI input changed: ${filePath}` };
+
+  const triggers = pathTriggers(filePath);
+  const route = {
+    lanes: triggers.flatMap((trigger) => trigger.lanes),
+    evmScopes: triggers.flatMap((trigger) => trigger.evmScopes),
+    buildChecks: false,
+    reasons: triggers.map((trigger) => trigger.reason),
+  };
+
+  const workspace = workspaceForPath(filePath);
+  if (workspace) {
+    const rule = WORKSPACE_RULES[workspace];
+    if (rule.forceFull) return { full: `Highest-risk workspace changed: ${workspace}` };
+    if (filePath === `${workspace}/package.json`) {
+      if (!modifiedFiles.has(filePath)) {
+        return { full: `Workspace manifest added, removed or moved: ${filePath}` };
+      }
+      const manifestChange = classifyManifestChange(filePath, readManifest);
+      if (!manifestChange.packageScoped) {
+        return { full: `Workspace manifest changed install inputs: ${manifestChange.detail}` };
+      }
+      route.reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
+    }
+    route.lanes.push(...rule.lanes);
+    route.evmScopes.push(...rule.evmScopes);
+    route.reasons.push(`${workspace} and its downstream consumers`);
+    return route;
+  }
+
+  const supportRoute = supportPathRoute(filePath);
+  if (supportRoute) {
+    route.lanes.push(...supportRoute.lanes);
+    route.buildChecks = true;
+    route.reasons.push(supportRoute.reason);
+    return route;
+  }
+
+  if (triggers.length) return route;
+  return { full: `Unclassified path changed: ${filePath}` };
+}
+
 // Git name-status codes whose paths can be routed like ordinary edits: a
 // deleted, renamed or copied file affects exactly the areas that own its old
 // and new paths. Type changes (T), unmerged (U), unknown (X) and broken
@@ -765,49 +820,12 @@ export function planCi({
   lanes.contracts = solidityRelevance.contracts;
 
   for (const filePath of productionFiles) {
-    if (isGlobalFullPath(filePath)) {
-      return fullForCurrentDiff([`Global CI input changed: ${filePath}`]);
-    }
-
-    const triggers = pathTriggers(filePath);
-    for (const trigger of triggers) {
-      for (const lane of trigger.lanes) lanes[lane] = true;
-      for (const scope of trigger.evmScopes) evmScopes.add(scope);
-      reasons.push(trigger.reason);
-    }
-
-    const workspace = workspaceForPath(filePath);
-    if (!workspace) {
-      const route = supportPathRoute(filePath);
-      if (route) {
-        for (const lane of route.lanes) lanes[lane] = true;
-        buildChecks = true;
-        reasons.push(route.reason);
-      } else if (triggers.length === 0) {
-        return fullForCurrentDiff([`Unclassified path changed: ${filePath}`]);
-      }
-      continue;
-    }
-
-    const rule = WORKSPACE_RULES[workspace];
-    if (rule.forceFull) {
-      return fullForCurrentDiff([`Highest-risk workspace changed: ${workspace}`]);
-    }
-
-    if (filePath === `${workspace}/package.json`) {
-      if (!modifiedFiles.has(filePath)) {
-        return fullForCurrentDiff([`Workspace manifest added, removed or moved: ${filePath}`]);
-      }
-      const manifestChange = classifyManifestChange(filePath, readManifest);
-      if (!manifestChange.packageScoped) {
-        return fullForCurrentDiff([`Workspace manifest changed install inputs: ${manifestChange.detail}`]);
-      }
-      reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
-    }
-
-    for (const lane of rule.lanes) lanes[lane] = true;
-    for (const scope of rule.evmScopes) evmScopes.add(scope);
-    reasons.push(`${workspace} and its downstream consumers`);
+    const route = routePath(filePath, { modifiedFiles, readManifest });
+    if (route.full) return fullForCurrentDiff([route.full]);
+    for (const lane of route.lanes) lanes[lane] = true;
+    for (const scope of route.evmScopes) evmScopes.add(scope);
+    buildChecks ||= route.buildChecks;
+    reasons.push(...route.reasons);
   }
 
   const deduplicatedReasons = [...new Set(reasons)];

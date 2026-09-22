@@ -15,9 +15,6 @@ const { values } = parseArgs({
     event: { type: 'string' },
     'changes-z': { type: 'string' },
     'labels-json': { type: 'string', default: '[]' },
-    // Retired PR audit sampling. Still accepted so workflow wiring from either
-    // side of a controller rotation keeps working with strict parsing.
-    'sample-key': { type: 'string', default: '' },
     'github-output': { type: 'string' },
     summary: { type: 'string' },
   },

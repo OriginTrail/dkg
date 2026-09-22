@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { CI_LANES, WORKSPACE_RULES, planCi } from '../ci-delta.mjs';
+import { CI_LANES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, planCi } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS, validatePrimaryResults } from '../ci-results.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 import {
@@ -128,13 +128,14 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
 test('repository support paths route to the lanes that execute them', () => {
   for (const [filePath, expected] of [
     ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent']],
-    ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_agent_windows']],
-    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_agent_windows']],
+    ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_agent', 'tornado_agent_windows']],
+    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_agent', 'tornado_agent_windows']],
     ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent']],
     ['devnet/suites.json', ['tornado_agent']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
-    ['devnet/v10-stress/automated.test.ts', []],
-    ['bench/store-read-latency.bench.ts', []],
+    ['devnet/v10-stress/automated.test.ts', ['tornado_agent']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent']],
+    ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
     ['.github/oxlint-baseline.json', []],
     ['.github/CODEOWNERS', []],
@@ -260,12 +261,76 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
     /inventory-windows was selected but ended with skipped/,
   );
 
-  // The Gate 0 harness itself selects only the self-building Windows job plus
-  // the shared build checks, and full plans always include the lane.
+  // The Gate 0 harness selects the Windows job that runs it and the agent
+  // lane whose code imports its evidence helpers, plus the shared build
+  // checks; full plans always include the lane.
   const harness = pullRequestPlan([change('devnet/rfc64-persistence-lifecycle/verify.ts')]);
-  assert.deepEqual(selectedLanes(harness), ['tornado_agent_windows']);
+  assert.deepEqual(selectedLanes(harness), ['tornado_agent', 'tornado_agent_windows']);
   assert.equal(harness.runNode, true);
   assert.equal(planCi({ eventName: 'push' }).lanes.tornado_agent_windows, true);
+});
+
+test('each changed path gets one routing decision with a fixed precedence', () => {
+  // 1. Global CI inputs win over the support area or trigger they sit in.
+  for (const filePath of [
+    '.github/actions/upload-vitest-junit/action.yml',
+    '.github/workflows/nested/policy.yml',
+    '.github/workflows/rfc64-inventory-windows.yml',
+    'scripts/ci/plan-ci.mjs',
+    'devnet/v10-stress/package.json',
+  ]) {
+    assert.equal(pullRequestPlan([change(filePath)]).mode, 'full', filePath);
+  }
+  // 2. A workspace wins over a support area with the same path shape.
+  const agentDevnet = pullRequestPlan([change('packages/agent/devnet/rfc64-private-catalog/run.mjs')]);
+  assert.deepEqual(selectedLanes(agentDevnet), selectedLanes(pullRequestPlan([change('packages/agent/src/agent.ts')])));
+  assert.equal(agentDevnet.buildChecks, false);
+  // 3. Support areas declare the shared build checks explicitly.
+  for (const filePath of ['.github/CODEOWNERS', 'tools/observability/lib/w1.mjs']) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'delta', filePath);
+    assert.equal(plan.buildChecks, true, filePath);
+    assert.deepEqual(selectedLanes(plan), [], filePath);
+  }
+  // 4. A path claimed only by a trigger is routed by it alone.
+  const imageContract = pullRequestPlan([change('blazegraph-image.json')]);
+  assert.deepEqual(selectedLanes(imageContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  assert.equal(imageContract.buildChecks, false);
+  // 5. Everything else fails closed.
+  assert.match(pullRequestPlan([change('new-root-tool.ts')]).reasons[0], /^Unclassified path changed/);
+});
+
+test('support routes include every package lane that imports from them', () => {
+  // A package file importing something outside the workspaces (bench/,
+  // devnet/, test-systems/, tools/) makes that package's lane a CI consumer
+  // of it, so a change there must select the lane; full CI covers the rest.
+  const importPattern = /(?:\bfrom\s*|\bimport\s*\(\s*)['"]((?:\.\.\/)+[^'"]+)['"]/g;
+  const skipped = new Set(['node_modules', 'dist', 'dist-ui', 'coverage']);
+  const sourceFiles = (directory) => fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true })
+    .flatMap((entry) => {
+      if (skipped.has(entry.name)) return [];
+      const relative = path.posix.join(directory, entry.name);
+      if (entry.isDirectory()) return sourceFiles(relative);
+      return /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
+    });
+  let checked = 0;
+  for (const [workspace, owningLanes] of Object.entries(WORKSPACE_OWNING_LANES)) {
+    if (!workspace.startsWith('packages/')) continue;
+    for (const file of sourceFiles(workspace)) {
+      const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+      for (const [, specifier] of source.matchAll(importPattern)) {
+        const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
+        if (target.startsWith('packages/') || target.startsWith('../')) continue;
+        const plan = pullRequestPlan([change(target)]);
+        checked++;
+        if (plan.mode === 'full') continue;
+        for (const lane of owningLanes) {
+          assert.ok(plan.lanes[lane], `${file} imports ${target}, so changing it must select ${lane}`);
+        }
+      }
+    }
+  }
+  assert.ok(checked > 0, 'packages import repository support files (bench/, devnet/)');
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
