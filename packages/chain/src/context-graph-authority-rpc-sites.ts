@@ -48,6 +48,13 @@ export const CONTEXT_GRAPH_AUTHORITY_RPC_SITES = Object.freeze({
   publicProbe: 'cgAuth.publicProbe',
   /** `resolveRfc64VerifiedPrivateRosterV1` — RFC-64 roster establishment. */
   rfc64Roster: 'cgAuth.rfc64Roster',
+  /**
+   * Host-mode gossip admission chain fallback inside the publisher's private
+   * agent-gate resolver. Currently always outranked — both callers label
+   * (workspace-handler.ts:1050 `workspaceApply`, :1963 `hostEnvelope`). Kept so
+   * a future unlabelled caller bills a site instead of the bare read.
+   */
+  hostAdmit: 'cgAuth.hostAdmit',
 
   // --- call sites, which win over the funnel entry they pass through ---
   /** Publish-inline curated probe — G2. */
@@ -70,8 +77,6 @@ export const CONTEXT_GRAPH_AUTHORITY_RPC_SITES = Object.freeze({
   chunkServe: 'cgAuth.chunkServe',
   /** Host-mode catch-up authorize. */
   hostCatchUp: 'cgAuth.hostCatchup',
-  /** Host-mode gossip admission on a core with no local `_meta` allowlist. */
-  hostAdmit: 'cgAuth.hostAdmit',
   /** SWM catch-up signer resolution. */
   catchUpSigner: 'cgAuth.catchupSigner',
   /** `resolveVmReconcileTarget` — every VM reconcile dispatch. */
