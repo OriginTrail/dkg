@@ -3,6 +3,7 @@ import {
   EVM_SCOPES,
   NODE_EVM_LANES,
   PRIMARY_LANE_JOBS,
+  SELF_BUILDING_LANES,
   needsNodeTestArtifacts,
 } from './ci-delta.mjs';
 
@@ -110,7 +111,7 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   // own: its lint, repository-script and inventory checks are the CI consumers
   // of benchmarks, manual devnet suites and repository automation config.
   const selectedNodeLane = Object.keys(PRIMARY_LANE_JOBS)
-    .filter((lane) => lane !== 'bura_blazegraph_arm64')
+    .filter((lane) => !SELF_BUILDING_LANES.includes(lane))
     .some((lane) => plan.lanes?.[lane]);
   if (selectedNodeLane && !plan.runNode) {
     errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes`);

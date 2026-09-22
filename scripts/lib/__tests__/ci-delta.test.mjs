@@ -265,7 +265,6 @@ test('leaf and shared package snapshots include conservative downstream consumer
   assert.deepEqual(selectedLanes(agent), [
     'tornado_agent',
     'bura_cli',
-    'kosava_node_ui_e2e',
     'kosava_supporting',
     'kosava_hardhat_plugins',
   ]);
@@ -292,7 +291,6 @@ test('leaf and shared package snapshots include conservative downstream consumer
     'bura_cli',
     'bura_query',
     'kosava_node_ui',
-    'kosava_node_ui_e2e',
     'kosava_supporting',
     'kosava_hardhat_plugins',
   ]);
@@ -375,17 +373,17 @@ test('multi-workspace PRs select the union of their rules instead of full CI', (
 
 test('package-scoped manifest edits route to their workspace; install inputs stay full', () => {
   const manifest = {
-    name: '@origintrail-official/dkg-agent',
+    name: '@origintrail-official/dkg-publisher',
     version: '10.0.0',
     type: 'module',
     exports: { '.': './dist/index.js' },
     scripts: { build: 'tsc', test: 'vitest run' },
     dependencies: { ethers: '^6.13.0' },
   };
-  const manifestPlan = (head, entries = [change('packages/agent/package.json')]) => pullRequestPlan(entries, {
+  const manifestPlan = (head, entries = [change('packages/publisher/package.json')]) => pullRequestPlan(entries, {
     readManifest: (side) => JSON.stringify(side === 'base' ? manifest : head),
   });
-  const sourcePlan = pullRequestPlan([change('packages/agent/src/agent.ts')]);
+  const sourcePlan = pullRequestPlan([change('packages/publisher/src/index.ts')]);
 
   for (const head of [
     { ...manifest, exports: { ...manifest.exports, './sync': './dist/sync.js' } },
@@ -416,14 +414,14 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     assert.match(plan.reasons[0], reason);
   }
 
-  const agentManifest = [change('packages/agent/package.json')];
+  const publisherManifest = [change('packages/publisher/package.json')];
   for (const readManifest of [
     undefined,
     () => { throw new Error('missing blob'); },
     () => '{ not json',
     () => '[]',
   ]) {
-    assert.equal(pullRequestPlan(agentManifest, { readManifest }).mode, 'full', String(readManifest));
+    assert.equal(pullRequestPlan(publisherManifest, { readManifest }).mode, 'full', String(readManifest));
   }
   assert.equal(manifestPlan(manifest, [change('package.json')]).mode, 'full', 'root manifest');
   assert.equal(manifestPlan(manifest, [change('devnet/v10-stress/package.json')]).mode, 'full', 'devnet workspace');
@@ -432,8 +430,8 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
 test('repository support paths route to the lanes that execute them', () => {
   for (const [filePath, expected] of [
     ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent']],
-    ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_agent']],
-    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_agent']],
+    ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_agent_windows']],
+    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_agent_windows']],
     ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent']],
     ['devnet/suites.json', ['tornado_agent']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
@@ -529,6 +527,96 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   assert.equal(mode({}), 'full', 'no reader without the workflow variables');
   assert.equal(mode({ ...diff(exportsHead), CI_DIFF_BASE_SHA: 'HEAD~2' }), 'full', 'only object IDs are accepted');
   assert.equal(mode({ ...diff(exportsHead), CI_DIFF_BASE_SHA: '0'.repeat(40) }), 'full', 'missing blobs fail closed');
+});
+
+test('the browser suite follows only the UI surface it drives on pull requests', () => {
+  const uiSurface = ['packages/cli', 'packages/graph-viz', 'packages/node-ui'];
+  for (const [workspace, rule] of Object.entries(WORKSPACE_RULES)) {
+    if (rule.forceFull) continue;
+    assert.equal(rule.lanes.includes('kosava_node_ui_e2e'), uiSurface.includes(workspace), workspace);
+  }
+  for (const filePath of ['packages/agent/src/agent.ts', 'packages/publisher/src/index.ts', 'packages/core/src/index.ts']) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.lanes.kosava_node_ui_e2e, false, filePath);
+  }
+  for (const filePath of ['packages/node-ui/src/ui/pages/Dashboard.tsx', 'packages/cli/src/daemon/routes/context.ts', 'packages/graph-viz/src/index.ts']) {
+    assert.equal(pullRequestPlan([change(filePath)]).lanes.kosava_node_ui_e2e, true, filePath);
+  }
+  // Protected pushes, merge-queue candidates, nightly runs and `ci:full` keep it.
+  for (const plan of [planCi({ eventName: 'push' }), pullRequestPlan([change('packages/agent/src/agent.ts')], { labels: ['ci:full'] })]) {
+    assert.equal(plan.lanes.kosava_node_ui_e2e, true);
+  }
+});
+
+test('the Windows lifecycle lane follows agent persistence code on pull requests', () => {
+  const plain = pullRequestPlan([change('packages/agent/src/sync/policy.ts')]);
+  assert.equal(plain.lanes.tornado_agent, true);
+  assert.equal(plain.lanes.tornado_agent_windows, false);
+
+  for (const filePath of [
+    'packages/agent/src/finalization-recovery-sqlite-store.ts',
+    'packages/agent/src/finalization-recovery-store.ts',
+    'packages/agent/src/sqlite/owned-sqlite-v1.ts',
+    'packages/agent/src/rfc64/control-object-store-v1-internal.ts',
+    'packages/agent/src/rfc64/durable-file-store-v1.ts',
+    'packages/agent/src/rfc64/persistence-root-ownership-v1-internal.ts',
+    'packages/agent/src/rfc64/secure-filesystem-policy-v1.ts',
+    'packages/agent/src/rfc64/author-catalog-producer.ts',
+    'packages/agent/src/rfc64/inventory-v1/sql.ts',
+    'packages/agent/test/rfc64-inventory-v1-candidates.test.ts',
+    'packages/agent/test/finalization-recovery-sqlite-test-helpers.ts',
+    'packages/agent/test/fixtures/rfc64-inventory-v1-child.ts',
+    'packages/agent/vitest.unit.config.ts',
+  ]) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'delta', filePath);
+    assert.equal(plan.lanes.tornado_agent_windows, true, filePath);
+    assert.deepEqual(
+      selectedLanes(plan).filter((lane) => lane !== 'tornado_agent_windows'),
+      selectedLanes(plain),
+      `${filePath} keeps the ordinary agent lanes`,
+    );
+  }
+
+  // Every selector the Windows job runs must still be a trigger here.
+  const windowsWorkflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/rfc64-inventory-windows.yml'), 'utf8'));
+  const selectors = windowsWorkflow.jobs['inventory-lifecycle'].strategy.matrix.include
+    .flatMap((group) => group.tests.trim().split(/\s+/));
+  const agentTests = fs.readdirSync(path.join(REPO_ROOT, 'packages/agent/test'));
+  for (const selector of selectors) {
+    const matches = agentTests.filter((file) => `test/${file}`.startsWith(selector));
+    assert.ok(matches.length > 0, `${selector} matches no agent test`);
+    for (const file of matches) {
+      assert.equal(pullRequestPlan([change(`packages/agent/test/${file}`)]).lanes.tornado_agent_windows, true, file);
+    }
+  }
+
+  const needs = {
+    changes: { result: 'success' },
+    build: { result: 'success' },
+    'evm-node-test-artifacts': { result: 'success' },
+    'evm-devnet-test-artifacts': { result: 'skipped' },
+    ...Object.fromEntries(Object.values(PRIMARY_LANE_JOBS).map((job) => [job, { result: 'skipped' }])),
+    'abi-freshness': { result: 'skipped' },
+    solidity: { result: 'skipped' },
+    'solidity-coverage': { result: 'skipped' },
+    'tornado-static-analysis': { result: 'skipped' },
+  };
+  const persistence = pullRequestPlan([change('packages/agent/src/sqlite/owned-sqlite-v1.ts')]);
+  for (const lane of selectedLanes(persistence)) needs[PRIMARY_LANE_JOBS[lane]] = { result: 'success' };
+  assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan: persistence, needs }), []);
+  needs['inventory-windows'].result = 'skipped';
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan: persistence, needs }).join('\n'),
+    /inventory-windows was selected but ended with skipped/,
+  );
+
+  // The Gate 0 harness selects only the self-building Windows job plus the
+  // shared build checks, and full plans always include the lane.
+  const harness = pullRequestPlan([change('devnet/rfc64-persistence-lifecycle/verify.ts')]);
+  assert.deepEqual(selectedLanes(harness), ['tornado_agent_windows']);
+  assert.equal(harness.runNode, true);
+  assert.equal(planCi({ eventName: 'push' }).lanes.tornado_agent_windows, true);
 });
 
 test('control-plane changes force full Node/EVM CI without overriding the Solidity gate', () => {

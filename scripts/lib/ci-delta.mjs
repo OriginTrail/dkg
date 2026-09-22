@@ -11,6 +11,7 @@ export const PRIMARY_LANE_JOBS = Object.freeze({
   tornado_blazegraph: 'tornado-blazegraph',
   tornado_publisher: 'tornado-publisher',
   tornado_agent: 'tornado-agent',
+  tornado_agent_windows: 'inventory-windows',
   bura_cli: 'bura-cli',
   bura_blazegraph_arm64: 'bura-blazegraph-arm64',
   bura_query: 'bura-supporting',
@@ -21,6 +22,11 @@ export const PRIMARY_LANE_JOBS = Object.freeze({
 });
 
 export const NODE_EVM_LANES = Object.freeze(Object.keys(PRIMARY_LANE_JOBS));
+
+// Lanes whose jobs build what they need on their own runner (the native arm64
+// image contract and the reusable Windows lifecycle workflow), so selecting
+// them alone never requires the shared Linux build.
+export const SELF_BUILDING_LANES = Object.freeze(['tornado_agent_windows', 'bura_blazegraph_arm64']);
 
 // `contracts` remains a workflow output for compatibility, but Solidity is an
 // independent relevance gate rather than part of the Node/EVM "full" profile.
@@ -38,6 +44,13 @@ export function needsNodeTestArtifacts(plan) {
 }
 
 
+// The Playwright suite boots four real daemons and drives node-ui against
+// them (7 shards, ~45 runner-minutes). On pull requests it follows only the
+// UI surface it exercises: node-ui, its graph-viz dependency and the daemon
+// HTTP API in cli. Changes deeper in the stack are covered on PRs by their own
+// lanes plus bura_cli's daemon tests; the browser suite still runs for them on
+// every protected push, merge-queue candidate and nightly run (full CI), and
+// `ci:full` opts a PR in before merging.
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
     lanes: [
@@ -48,7 +61,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -63,7 +75,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -78,7 +89,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -92,7 +102,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_agent',
       'bura_cli',
       'bura_query',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -104,7 +113,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -116,7 +124,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_agent',
       'bura_cli',
       'bura_query',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -127,7 +134,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -137,7 +143,6 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -147,7 +152,6 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -172,11 +176,11 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/epcis': {
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/mcp-dkg': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/local-llm': {
@@ -184,19 +188,19 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/okf': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-hermes': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-openclaw': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-prime-agent': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-elizaos': {
@@ -326,7 +330,7 @@ function isBlazegraphArm64Path(filePath) {
     || /^packages\/cli\/(?:src|test)\/.*blazegraph.*\.(?:[cm]?[jt]s|json)$/i.test(filePath);
 }
 
-const NODE_LANES = NODE_EVM_LANES.filter((lane) => lane !== 'bura_blazegraph_arm64');
+const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
 const MAX_REPORTED_FILES = 200;
 
 // Source of truth for WHAT this protects: EVM_TEST_SCOPES.chain.files in
@@ -347,6 +351,28 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
 
 function isIdentityWalletEvmPath(filePath) {
   return IDENTITY_WALLET_EVM_PATTERNS.some((pattern) => pattern.test(filePath));
+}
+
+// The Windows lifecycle job (rfc64-inventory-windows.yml) re-runs the agent's
+// SQLite and filesystem persistence suites on windows-latest. The same suites
+// run on Linux in tornado_agent for every agent change, so on pull requests
+// the Windows run follows the code only Windows can break: the stores those
+// suites are about, the suites themselves and the agent build/test config the
+// job uses. (Their transitive imports cover almost all of agent/src, so an
+// import closure would select Windows for every agent change.) Protected
+// pushes, merge-queue candidates and the nightly run still run it in full.
+const WINDOWS_LIFECYCLE_PATTERNS = [
+  /^packages\/agent\/src\/finalization-recovery-(?:sqlite-[a-z-]+|store)\.ts$/,
+  /^packages\/agent\/src\/sqlite\//,
+  /^packages\/agent\/src\/rfc64\/(?:author-catalog-producer|control-object-store-v1(?:-internal)?|durable-file-store-v1|persistence-[a-z0-9-]+|secure-filesystem-policy-v1)\.ts$/,
+  /^packages\/agent\/src\/rfc64\/inventory-v1\//,
+  /^packages\/agent\/test\/(?:finalization-recovery-sqlite-|rfc64-inventory-v1|rfc64-agent-inventory-lifecycle|rfc64-author-catalog-producer|rfc64-control-object-store|rfc64-durable-file-store|rfc64-secure-filesystem-policy)/,
+  /^packages\/agent\/test\/fixtures\/rfc64-inventory-v1-child\.ts$/,
+  /^packages\/agent\/(?:package\.json|tsconfig\.json|vitest\.unit\.config\.ts|vitest\.rfc64-unit-tests\.ts)$/,
+];
+
+function isWindowsLifecyclePath(filePath) {
+  return WINDOWS_LIFECYCLE_PATTERNS.some((pattern) => pattern.test(filePath));
 }
 
 function emptyLanes() {
@@ -456,10 +482,10 @@ function isGlobalFullPath(filePath) {
 }
 
 // Repository areas outside the package workspaces, mapped to the lanes that
-// actually execute them in CI (ci.yml and its reusable workflows). An empty
-// lane list means the shared build job is the only CI consumer: its lint,
-// repository-script tests and test-inventory checks cover these files, while
-// the suites themselves are manual or have their own workflow.
+// actually execute them in CI (ci.yml and its reusable workflows). Every route
+// also selects the shared build job, whose lint, repository-script tests and
+// test-inventory checks cover these files; for routes with no lanes it is the
+// only CI consumer (the suites are manual or have their own workflow).
 const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     pattern: /^devnet\/rfc64-gate1-public-open\//,
@@ -467,11 +493,11 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'RFC-64 Gate 1 harness runs in the agent and Blazegraph lanes',
   },
   {
-    // Gate 0 persistence evidence and the evidence bootstrap run in the
-    // Windows lifecycle job, which ci.yml selects through tornado_agent.
+    // Gate 0 persistence evidence and the evidence bootstrap run only in the
+    // Windows lifecycle job.
     pattern: /^devnet\/(?:rfc64-persistence-lifecycle|_bootstrap)\//,
-    lanes: ['tornado_agent'],
-    reason: 'RFC-64 persistence harness runs in the agent lifecycle jobs',
+    lanes: ['tornado_agent_windows'],
+    reason: 'RFC-64 persistence harness runs in the Windows lifecycle job',
   },
   {
     // Root-level devnet modules (rfc64-runtime-*.mts, suites.json) are
@@ -710,7 +736,7 @@ export function planCi({
   const lanes = emptyLanes();
   const evmScopes = new Set();
   const reasons = [];
-  let sharedBuildOnly = false;
+  let sharedBuild = false;
   lanes.contracts = solidityRelevance.contracts;
 
   for (const filePath of productionFiles) {
@@ -733,7 +759,7 @@ export function planCi({
         return fullForCurrentDiff([`Unclassified path changed: ${filePath}`]);
       }
       for (const lane of route.lanes) lanes[lane] = true;
-      if (route.lanes.length === 0) sharedBuildOnly = true;
+      sharedBuild = true;
       reasons.push(route.reason);
       continue;
     }
@@ -760,12 +786,17 @@ export function planCi({
       evmScopes.add('chain');
       reasons.push('identity-wallet browser actions require real EVM coverage');
     }
+    if (isWindowsLifecyclePath(filePath)) {
+      lanes.tornado_agent_windows = true;
+      reasons.push('agent persistence changes re-run the Windows lifecycle suites');
+    }
     reasons.push(`${workspace} and its downstream consumers`);
   }
 
   const deduplicatedReasons = [...new Set(reasons)];
-  const runNode = sharedBuildOnly || NODE_LANES.some((lane) => lanes[lane]);
-  if (!runNode && !lanes.bura_blazegraph_arm64 && !lanes.contracts && evmScopes.size === 0) {
+  const runNode = sharedBuild || NODE_LANES.some((lane) => lanes[lane]);
+  const selfBuildingLane = SELF_BUILDING_LANES.some((lane) => lanes[lane]);
+  if (!runNode && !selfBuildingLane && !lanes.contracts && evmScopes.size === 0) {
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
   }
 

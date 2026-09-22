@@ -68,6 +68,10 @@ jobs:
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
       tornado_agent: ${{ steps.plan.outputs.tornado_agent }}
+      # Older pinned controllers have no Windows lane and drove the lifecycle
+      # job from tornado_agent; keep that as the compatibility path until the
+      # controller rotation that introduces the output.
+      tornado_agent_windows: ${{ steps.plan.outputs.tornado_agent_windows || steps.plan.outputs.tornado_agent }}
       bura_cli: ${{ steps.plan.outputs.bura_cli }}
       bura_blazegraph_arm64: ${{ steps.plan.outputs.bura_blazegraph_arm64 }}
       bura_query: ${{ steps.plan.outputs.bura_query }}
@@ -1486,7 +1490,7 @@ jobs:
   # cannot silently turn a required test into a green skip.
   inventory-windows:
     needs: changes
-    if: needs.changes.outputs.tornado_agent == 'true'
+    if: needs.changes.outputs.tornado_agent_windows == 'true'
     uses: ./.github/workflows/rfc64-inventory-windows.yml
 
   coverage-results:
@@ -1581,7 +1585,7 @@ jobs:
           sparse-checkout-cone-mode: false
       - name: Require selected Windows lifecycle tests
         env:
-          SELECTED: ${{ needs.changes.outputs.tornado_agent }}
+          SELECTED: ${{ needs.changes.outputs.tornado_agent_windows }}
           RESULT: ${{ needs.inventory-windows.result }}
         run: |
           if [[ "$SELECTED" == true ]]; then test "$RESULT" = success; else test "$RESULT" = skipped; fi
