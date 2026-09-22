@@ -105,6 +105,41 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(live).not.toHaveBeenCalled();
   });
 
+  it('falls back to the bounded current-state read when the finalized lane faults', async () => {
+    const contextGraphId = 'finalized-faulted';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedFaultedReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-faulted', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockResolvedValue({
+      kind: 'registered',
+      onChainId: 9n,
+      provenance: 'authoritative',
+    });
+    const readIndex = installFinalizedAuthorityReader(chain, undefined)
+      .mockRejectedValue(new Error('authority index backend head probe timed out'));
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
+      .mockResolvedValue({ kind: 'available', accessPolicy: 0 });
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
+    expect(live).toHaveBeenCalledTimes(1);
+
+    // Finalized EVIDENCE never falls back: an absent snapshot fails closed.
+    installFinalizedAuthorityReader(chain, undefined);
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).rejects.toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      reason: 'chain-access-policy-unknown',
+    });
+    expect(live).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the atomic finalized private roster and rejects mismatched name evidence', async () => {
     const contextGraphId = 'finalized-private';
     const chain = new MockChainAdapter();
