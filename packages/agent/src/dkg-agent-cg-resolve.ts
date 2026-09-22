@@ -326,7 +326,6 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
-  FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
@@ -2001,12 +2000,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * (the projection's anchor has not reached the registration block — the
    * registration lane never treats finalized absence as evidence either); and
    * when a PRIVATE roster would come from a projection the reader served as
-   * `stale-cache` or older than {@link FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS},
-   * so a roster removal takes effect within finality depth plus that bound
-   * rather than whenever a retained projection ages out. Finalized EVIDENCE —
-   * an inactive, malformed, or name-mismatched snapshot — fails closed and
-   * never falls back. The public policy bit is immutable on chain, so a public
-   * snapshot is served at any age.
+   * `stale-cache`, meaning a refresh failed and the projection is at least one
+   * index tick old. The reader owns the age bound: it never serves a
+   * projection older than its stale window, `min(max(3T, 15s), 5m)` for
+   * `chain.indexTickMs` T (18s at the default 6s tick), so a roster removal
+   * takes effect within finality depth plus one tick while RPC is healthy and
+   * within that window at worst. A numeric bound here would only fight the
+   * configured tick. Finalized EVIDENCE — an inactive, malformed, or
+   * name-mismatched snapshot — fails closed and never falls back. The public
+   * policy bit is immutable on chain, so a public snapshot is served at any
+   * provenance.
    */
   async resolveFinalizedRegisteredContextGraphAccessPolicyV1(
     this: DKGAgent,
@@ -2041,8 +2044,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           signal,
           async (readSignal, evidence) => {
             // The circuit keeps its own view of this report (pool liveness);
-            // this lane additionally needs the projection's age to bound how
-            // stale a private roster decision may be.
+            // this lane additionally needs the served provenance to keep a
+            // private roster decision off a projection the reader could not
+            // refresh.
             const chainReadOptions = evidence.chainReadOptions(readSignal);
             const snapshots = await readSnapshots.call(indexReader, [authorityIndexId], {
               ...chainReadOptions,
@@ -2094,10 +2098,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     }
     if (snapshot.accessPolicy === 0) return { kind: 'available', accessPolicy: 0 };
     const served = projection.served;
-    const rosterIsFresh = served !== undefined
-      && served.source !== 'stale-cache'
-      && served.ageMs <= FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS;
-    if (!rosterIsFresh) return undefined;
+    if (served === undefined || served.source === 'stale-cache') return undefined;
     return {
       kind: 'available',
       accessPolicy: 1,

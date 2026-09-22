@@ -8,7 +8,6 @@ import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
 import {
   CHAIN_POLICY_READ_TIMEOUT_MS,
-  FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS,
 } from '../src/dkg-agent-constants.js';
 import {
   CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
@@ -501,7 +500,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   });
 
-  it('takes a private roster to the live read when the projection is not fresh, and keeps serving a public one', async () => {
+  it('takes a private roster to the live read only when the reader could not refresh the projection, and keeps serving a public one', async () => {
     const contextGraphId = 'finalized-stale-roster';
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -521,9 +520,10 @@ describe('private read authorization uses the on-chain participant roster', () =
     const liveRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([]);
     const queryExecution = vi.spyOn(agent.queryEngine, 'query');
 
+    // `stale-cache` is the reader saying a refresh failed and the projection
+    // is at least one tick old; an unreported provenance proves nothing.
     const notFresh: Array<ContextGraphAuthorityProjectionServedEvidence | null> = [
       { source: 'stale-cache', ageMs: 5_000 },
-      { source: 'log', ageMs: FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS + 1 },
       null,
     ];
     for (const [index, served] of notFresh.entries()) {
@@ -537,10 +537,12 @@ describe('private read authorization uses the on-chain participant roster', () =
     }
     expect(queryExecution).not.toHaveBeenCalled();
 
-    // Within the bound the finalized roster decides, with no live read.
+    // A fold the reader admitted decides at whatever age the reader reports:
+    // the age bound is the reader's stale window (min(max(3T, 15s), 5m)), and a
+    // 45s-old fold is a fresh answer on a 15s tick. No live read.
     installFinalizedAuthorityReader(chain, privateSnapshot, {
       source: 'log',
-      ageMs: FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS,
+      ageMs: 45_000,
     });
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
@@ -549,7 +551,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(queryExecution).toHaveBeenCalledTimes(1);
     expect(live).toHaveBeenCalledTimes(notFresh.length);
 
-    // The policy bit is immutable on chain: a public snapshot is served at any age.
+    // The policy bit is immutable on chain: a public snapshot is served at any provenance.
     installFinalizedAuthorityReader(
       chain,
       finalizedAuthoritySnapshot(7n, nameHash),

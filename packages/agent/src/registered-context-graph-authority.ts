@@ -53,7 +53,8 @@ export type RegisteredContextGraphAuthority =
  * default for mutation, encryption, subscription admission, and legacy
  * consumers. `finalized-index` consumes the complete deployment-scoped
  * finalized authority snapshot instead; query authorization opts in so a slow
- * live RPC cannot stall reads. Finalized evidence fails closed, while a lane
- * fault or deadline falls back to the bounded current-state read.
+ * live RPC cannot stall reads. Finalized evidence fails closed; a lane fault,
+ * deadline, or absent snapshot, or a private roster the reader could only
+ * serve stale, is no evidence and falls back to the bounded current-state read.
  */
 export type ContextGraphAuthorityReadMode = 'live-current' | 'finalized-index';
