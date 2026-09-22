@@ -120,6 +120,12 @@ const META_SUBJECT = `${NS}self`;
 /** On-disk marker schema version, so a future shape change is detectable. */
 export const CHANGELOG_SCHEMA_VERSION = 1;
 
+/**
+ * Marker entries fetched per direct-lookup query in {@link ChangelogStore.readChanges}
+ * (bounds the `VALUES` list, ~15 KiB of query text per batch).
+ */
+export const CHANGELOG_LOOKUP_BATCH = 500;
+
 export type ChangeOp = 'upsert' | 'drop';
 
 export interface ChangeRecord {
@@ -598,13 +604,72 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 
   /**
    * Change records with `seq > sinceSeq`, in ascending seq order, at most
-   * `limit`. This is the O(delta) read the whole RFC exists to enable. In PR1
-   * it is a range query over the (small) reserved changelog graph; PR2 serves
-   * it from an ordered SQLite projection for O(log L + delta).
+   * `limit`. This is the O(delta) read the whole RFC exists to enable.
+   *
+   * Seqs are dense (single writer, one contiguous seq per marker, advanced only
+   * after the marker commits) and every marker's entry IRI embeds its seq, so the
+   * page is exactly the entries `since+1 .. min(head, since+limit)`: it is read
+   * by direct entry lookup ({@link lookupChanges}) — O(limit · log L) — instead
+   * of the `FILTER(?seq > N) ORDER BY ?seq` range scan, which sorts the whole
+   * log (O(L log L); >30 s on a million-entry beacon log, tripping the managed
+   * store deadline and restarting Oxigraph on every sync poll). A caught-up
+   * cursor (`since >= head`) is answered from the in-memory head with no
+   * storage read at all, like {@link changelogHead}.
+   *
+   * The dense-seq invariant is verified per page: if the window is short (a
+   * marker went missing out-of-band), the exact range scan serves it instead —
+   * never a short page, because the responder reads `records < limit` as "log
+   * drained" and would advance the requester past unread changes.
    */
   async readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]> {
     const since = Number.isFinite(sinceSeq) ? Math.max(0, Math.floor(sinceSeq)) : 0;
     const cap = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1;
+    const readOptions: QueryOptions = { ...options, source: options?.source ?? 'changelog.readChanges' };
+    if (!this.enabled) return this.scanChanges(since, cap, readOptions);
+    const signal = options?.signal;
+    throwIfAborted(signal);
+    await this.ensureSeeded();
+    throwIfAborted(signal);
+    const head = this.seq;
+    if (since >= head) return [];
+    const end = Math.min(head, since + cap);
+    const page = await this.lookupChanges(since + 1, end, readOptions);
+    if (page.length === end - since) return page;
+    return this.scanChanges(since, cap, readOptions);
+  }
+
+  /** Entries `fromSeq..toSeq` (inclusive) by direct IRI lookup, in seq order. */
+  private async lookupChanges(
+    fromSeq: number,
+    toSeq: number,
+    options: QueryOptions,
+  ): Promise<ChangeRecord[]> {
+    const out: ChangeRecord[] = [];
+    for (let start = fromSeq; start <= toSeq; start += CHANGELOG_LOOKUP_BATCH) {
+      const stop = Math.min(toSeq, start + CHANGELOG_LOOKUP_BATCH - 1);
+      const entries: string[] = [];
+      for (let seq = start; seq <= stop; seq += 1) entries.push(`<${ENTRY_PREFIX}${seq}>`);
+      const res = await this.inner.query(
+        `SELECT ?seq ?graph ?op WHERE {
+  GRAPH <${CHANGELOG_GRAPH}> {
+    VALUES ?e { ${entries.join(' ')} }
+    ?e <${P_SEQ}> ?seq ; <${P_GRAPH}> ?graph ; <${P_OP}> ?op .
+  }
+} ORDER BY ?seq`,
+        options,
+      );
+      if (res.type !== 'bindings') return out;
+      collectChangeRecords(res.bindings, out);
+    }
+    return out;
+  }
+
+  /** The exact `seq > since` range scan — the fallback when a window has a hole. */
+  private async scanChanges(
+    since: number,
+    cap: number,
+    options: QueryOptions,
+  ): Promise<ChangeRecord[]> {
     const res = await this.inner.query(
       `SELECT ?seq ?graph ?op WHERE {
   GRAPH <${CHANGELOG_GRAPH}> {
@@ -612,17 +677,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     FILTER(?seq > ${since})
   }
 } ORDER BY ?seq LIMIT ${cap}`,
-      { ...options, source: options?.source ?? 'changelog.readChanges' },
+      options,
     );
     if (res.type !== 'bindings') return [];
     const out: ChangeRecord[] = [];
-    for (const b of res.bindings) {
-      const seq = parseIntTerm(b.seq);
-      const graph = stripIri(b.graph);
-      const op = stripLiteral(b.op);
-      if (seq == null || !graph || (op !== 'upsert' && op !== 'drop')) continue;
-      out.push({ seq, graph, op });
-    }
+    collectChangeRecords(res.bindings, out);
     return out;
   }
 
@@ -970,6 +1029,19 @@ export function changelogSchemaQuad(): Quad {
 }
 
 /** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */
+function collectChangeRecords(
+  bindings: ReadonlyArray<Record<string, string | undefined>>,
+  out: ChangeRecord[],
+): void {
+  for (const b of bindings) {
+    const seq = parseIntTerm(b.seq);
+    const graph = stripIri(b.graph);
+    const op = stripLiteral(b.op);
+    if (seq == null || !graph || (op !== 'upsert' && op !== 'drop')) continue;
+    out.push({ seq, graph, op });
+  }
+}
+
 function parseIntTerm(term: string | undefined): number | null {
   if (term == null) return null;
   const m = term.match(/-?\d+/);
