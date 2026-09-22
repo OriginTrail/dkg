@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  activeRpcRequestContext,
   ContextGraphLiveAuthorityUnsupportedError,
   MockChainAdapter,
   type ContextGraphLiveAuthority,
@@ -189,7 +190,10 @@ describe('registered authority resolution uses the roster from the single read',
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
     const live = vi.spyOn(chain, 'getContextGraphLiveAuthority')
-      .mockResolvedValue({ active: true, accessPolicy: 1, participantAgents: [MEMBER] });
+      .mockImplementation(async () => {
+        expect(activeRpcRequestContext().admissionPriority).toBe('authority');
+        return { active: true, accessPolicy: 1, participantAgents: [MEMBER] };
+      });
     const roster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
 
     await expect(agent.resolveRegisteredContextGraphAuthority('cg')).resolves.toEqual({
