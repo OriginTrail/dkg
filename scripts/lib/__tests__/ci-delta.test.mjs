@@ -977,6 +977,13 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(evmWorkflow.includes('"${BASE_SHA}" "${MERGE_SHA}" > "${CHANGES_FILE}"'));
   assert.ok(evmWorkflow.includes('BASE_SHA="$(git -C candidate rev-parse "${MERGE_SHA}^1")"'));
   assert.equal(evmWorkflow.includes('github.event.pull_request.base.sha'), false);
+  // Both planners must see the same manifest contents for the same diff, and
+  // no workflow may reintroduce SHA-sampled full runs.
+  const manifestReader = 'export CI_CANDIDATE_REPO=candidate CI_DIFF_BASE_SHA="${BASE_SHA}" CI_DIFF_HEAD_SHA="${MERGE_SHA}"';
+  for (const [name, source] of [['ci.yml', workflow], ['evm-integration.yml', evmWorkflow]]) {
+    assert.ok(source.includes(manifestReader), `${name} must expose the manifest reader inputs`);
+    assert.equal(source.includes('--sample-key'), false, `${name} must not request audit sampling`);
+  }
   assert.match(evmWorkflow, /^  evm-gate:/m);
 
   const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
