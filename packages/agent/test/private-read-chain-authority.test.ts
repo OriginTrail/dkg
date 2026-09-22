@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   MockChainAdapter,
+  type ContextGraphAuthorityProjectionServedEvidence,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
-import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
+import {
+  CHAIN_POLICY_READ_TIMEOUT_MS,
+  FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS,
+} from '../src/dkg-agent-constants.js';
 import {
   CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphReadAuthorityUnavailableError,
@@ -66,17 +70,28 @@ type FinalizedAuthorityReaderMock = Mock<(
 /**
  * The agent's finalized-evidence lane captures the adapter's reader once, so a
  * later call swaps the projection behind the same mock instead of installing
- * a second reader object the agent would never consult.
+ * a second reader object the agent would never consult. Like the EVM reader,
+ * the mock reports how the projection was served; a fresh cache hit unless the
+ * test says otherwise (`served: null` models an adapter that reports nothing).
  */
 function installFinalizedAuthorityReader(
   chain: MockChainAdapter,
   snapshot: ContextGraphAuthoritySnapshot | undefined,
+  served: ContextGraphAuthorityProjectionServedEvidence | null = { source: 'cache', ageMs: 0 },
 ): FinalizedAuthorityReaderMock {
   const projection = async (
     contextGraphIds: readonly string[],
-  ) => new Map(snapshot !== undefined && contextGraphIds.includes(snapshot.contextGraphId)
-    ? [[snapshot.contextGraphId, snapshot]]
-    : []);
+    options?: { signal?: AbortSignal } & {
+      onContextGraphAuthorityProjectionServed?: (
+        report: ContextGraphAuthorityProjectionServedEvidence,
+      ) => void;
+    },
+  ) => {
+    if (served !== null) options?.onContextGraphAuthorityProjectionServed?.(served);
+    return new Map(snapshot !== undefined && contextGraphIds.includes(snapshot.contextGraphId)
+      ? [[snapshot.contextGraphId, snapshot]]
+      : []);
+  };
   const installed = Reflect.get(chain, 'contextGraphAuthorityIndexRevisionReader') as
     { readContextGraphAuthorityIndexSnapshots?: FinalizedAuthorityReaderMock } | undefined;
   const existing = installed?.readContextGraphAuthorityIndexSnapshots;
@@ -160,15 +175,13 @@ describe('private read authorization uses the on-chain participant roster', () =
     );
     expect(live).toHaveBeenCalledTimes(1);
 
-    // Finalized EVIDENCE never falls back: an absent snapshot fails closed.
+    // An absent snapshot is no evidence either: the registration is already
+    // proven, so the projection has simply not reached its block yet.
     installFinalizedAuthorityReader(chain, undefined);
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
-    })).rejects.toMatchObject({
-      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
-      reason: 'chain-access-policy-unknown',
-    });
-    expect(live).toHaveBeenCalledTimes(1);
+    })).resolves.toBeDefined();
+    expect(live).toHaveBeenCalledTimes(2);
   });
 
   it('uses the atomic finalized private roster and rejects mismatched name evidence', async () => {
@@ -454,6 +467,127 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(queryExecution).toHaveBeenCalledTimes(1);
     expect(live).not.toHaveBeenCalled();
     expect(pointRoster).not.toHaveBeenCalled();
+  });
+
+  it('reads current chain state when the finalized index has no snapshot for a proven registration', async () => {
+    const contextGraphId = 'finalized-lagging';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedLaggingReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-lagging', configurable: true });
+    // A durable numeric binding proves the registration without the index; the
+    // projection's anchor has not reached the registration block yet.
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    const readIndex = installFinalizedAuthorityReader(chain, undefined);
+    const live = mockLivePolicy(agent, 0);
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledTimes(1);
+    expect(live).toHaveBeenCalledTimes(1);
+
+    // The live read still owns the fail-closed answer for that window.
+    live.mockResolvedValue({ kind: 'unavailable', reason: 'chain-access-policy-unknown' });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).rejects.toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      source: 'registered-chain',
+      reason: 'chain-access-policy-unknown',
+    });
+  });
+
+  it('takes a private roster to the live read when the projection is not fresh, and keeps serving a public one', async () => {
+    const contextGraphId = 'finalized-stale-roster';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedStaleRosterReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-stale-roster', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    const nameHash = agent.contextGraphNameCommitment(contextGraphId);
+    const privateSnapshot = finalizedAuthoritySnapshot(7n, nameHash, {
+      accessPolicy: 1,
+      participantAgents: [MEMBER],
+    });
+    // MEMBER was removed on chain after the retained projection was fetched.
+    const live = mockLivePolicy(agent, 1);
+    const liveRoster = vi.spyOn(chain, 'getContextGraphParticipantAgents').mockResolvedValue([]);
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+
+    const notFresh: Array<ContextGraphAuthorityProjectionServedEvidence | null> = [
+      { source: 'stale-cache', ageMs: 5_000 },
+      { source: 'log', ageMs: FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS + 1 },
+      null,
+    ];
+    for (const [index, served] of notFresh.entries()) {
+      installFinalizedAuthorityReader(chain, privateSnapshot, served);
+      await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+        contextGraphId,
+        callerAgentAddress: MEMBER,
+      })).resolves.toMatchObject({ bindings: [] });
+      expect(live).toHaveBeenCalledTimes(index + 1);
+      expect(liveRoster).toHaveBeenCalledTimes(index + 1);
+    }
+    expect(queryExecution).not.toHaveBeenCalled();
+
+    // Within the bound the finalized roster decides, with no live read.
+    installFinalizedAuthorityReader(chain, privateSnapshot, {
+      source: 'log',
+      ageMs: FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS,
+    });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    })).resolves.toBeDefined();
+    expect(queryExecution).toHaveBeenCalledTimes(1);
+    expect(live).toHaveBeenCalledTimes(notFresh.length);
+
+    // The policy bit is immutable on chain: a public snapshot is served at any age.
+    installFinalizedAuthorityReader(
+      chain,
+      finalizedAuthoritySnapshot(7n, nameHash),
+      { source: 'stale-cache', ageMs: 600_000 },
+    );
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: NON_MEMBER,
+    })).resolves.toBeDefined();
+    expect(queryExecution).toHaveBeenCalledTimes(2);
+    expect(live).toHaveBeenCalledTimes(notFresh.length);
+  });
+
+  it('fails closed on a malformed finalized snapshot without consulting current state', async () => {
+    const contextGraphId = 'finalized-malformed';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedMalformedReadAuthority',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    installFinalizedAuthorityReader(chain, finalizedAuthoritySnapshot(
+      7n,
+      agent.contextGraphNameCommitment(contextGraphId),
+      { accessPolicy: 2 as unknown as 0 },
+    ));
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    })).rejects.toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      source: 'registered-chain',
+      reason: 'chain-access-policy-unavailable',
+    });
+    expect(live).not.toHaveBeenCalled();
   });
 
   it('allows a chain participant and rejects a non-member without local metadata fallback', async () => {

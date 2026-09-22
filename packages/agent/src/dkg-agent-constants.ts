@@ -345,6 +345,19 @@ export const ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS = 60_000;
 export const CHAIN_POLICY_READ_TIMEOUT_MS = 2_500;
 
 /**
+ * Oldest finalized authority projection a scoped read may take a PRIVATE
+ * participant roster from, in wall-clock milliseconds of data age as the chain
+ * reader reports it. The projection is refreshed every `chain.indexTickMs` (6s
+ * by default) at the configured finality depth, so a roster removal normally
+ * reaches it within one tick plus finality; a projection older than this (a
+ * fold the tick has not advanced, or a cache the reader could not refresh)
+ * sends the private read decision to the bounded current-state roster read
+ * instead. The public/private policy bit is immutable on chain and needs no
+ * such bound.
+ */
+export const FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS = 30_000;
+
+/**
  * Cold Context Graph name-hash resolution may need to build the adapter's
  * bounded, provider-fenced reverse index before it can answer the first
  * lookup.  That work is deliberately heavier than one policy eth_call (up to

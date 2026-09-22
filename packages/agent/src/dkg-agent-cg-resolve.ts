@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -326,6 +326,7 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
+  FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
@@ -1575,9 +1576,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * legacy adapters retain current-state reads. Scoped query authorization may
    * instead consume the complete deployment-scoped finalized index snapshot;
    * it atomically binds liveness, policy, roster, numeric id, and name hash and
-   * fails closed on any missing or mismatched evidence. A finalized-lane fault
-   * or deadline is no evidence at all and falls back to the bounded
-   * current-state read rather than to local policy.
+   * fails closed on inactive or mismatched evidence. A finalized-lane fault,
+   * deadline, or absence, or a private roster the reader could only serve
+   * stale, is no evidence at all and falls back to the bounded current-state
+   * read rather than to local policy.
    */
   async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
@@ -1992,11 +1994,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * observes an open circuit instead of walking an exhausted pool, a real
    * provider read here counts as recovery evidence for every other consumer,
    * and it never queues behind a cold whole-contract scan on the bulk lane.
-   * `undefined` sends the caller to the bounded current-state read — the
-   * adapter has no finalized capability, or the lane faulted, timed out, or is
-   * cooling down, none of which is evidence about the graph. Finalized
-   * EVIDENCE (an absent, inactive, malformed, or name-mismatched snapshot)
-   * fails closed and never falls back.
+   * `undefined` sends the caller to the bounded current-state read, which
+   * fails closed on its own. That happens when the adapter has no finalized
+   * capability; when the lane faulted, timed out, or is cooling down; when the
+   * index holds no snapshot for a slot whose registration is already proven
+   * (the projection's anchor has not reached the registration block — the
+   * registration lane never treats finalized absence as evidence either); and
+   * when a PRIVATE roster would come from a projection the reader served as
+   * `stale-cache` or older than {@link FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS},
+   * so a roster removal takes effect within finality depth plus that bound
+   * rather than whenever a retained projection ages out. Finalized EVIDENCE —
+   * an inactive, malformed, or name-mismatched snapshot — fails closed and
+   * never falls back. The public policy bit is immutable on chain, so a public
+   * snapshot is served at any age.
    */
   async resolveFinalizedRegisteredContextGraphAccessPolicyV1(
     this: DKGAgent,
@@ -2019,6 +2029,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     });
 
     let rawSnapshot: ContextGraphAuthoritySnapshot | undefined;
+    const projection: { served?: ContextGraphAuthorityProjectionServedEvidence } = {};
     try {
       const authorityIndexId = onChainId.toString(10);
       assertContextGraphAuthorityIndexId(
@@ -2028,11 +2039,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       rawSnapshot = await runBoundedOperation(
         (signal) => this.rfc64AuthorityReadCoordinatorV1.runForeground(
           signal,
-          async (readSignal, evidence) => (await readSnapshots.call(
-            indexReader,
-            [authorityIndexId],
-            evidence.chainReadOptions(readSignal),
-          )).get(authorityIndexId),
+          async (readSignal, evidence) => {
+            // The circuit keeps its own view of this report (pool liveness);
+            // this lane additionally needs the projection's age to bound how
+            // stale a private roster decision may be.
+            const chainReadOptions = evidence.chainReadOptions(readSignal);
+            const snapshots = await readSnapshots.call(indexReader, [authorityIndexId], {
+              ...chainReadOptions,
+              onContextGraphAuthorityProjectionServed: (report) => {
+                chainReadOptions.onContextGraphAuthorityProjectionServed?.(report);
+                projection.served = report;
+              },
+            });
+            return snapshots.get(authorityIndexId);
+          },
         ),
         {
           label: `readFinalizedContextGraphAuthority(${onChainId})`,
@@ -2043,9 +2063,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     } catch {
       return undefined;
     }
-    if (rawSnapshot === undefined) {
-      return unknown('finalized authority index has no snapshot for the registered Context Graph');
-    }
+    if (rawSnapshot === undefined) return undefined;
     let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
     try {
       snapshot = parseRfc64AuthoritySnapshotV1(rawSnapshot, onChainId);
@@ -2074,13 +2092,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         );
       }
     }
-    return snapshot.accessPolicy === 0
-      ? { kind: 'available', accessPolicy: 0 }
-      : {
-          kind: 'available',
-          accessPolicy: 1,
-          participantAgents: snapshot.participantAgents,
-        };
+    if (snapshot.accessPolicy === 0) return { kind: 'available', accessPolicy: 0 };
+    const served = projection.served;
+    const rosterIsFresh = served !== undefined
+      && served.source !== 'stale-cache'
+      && served.ageMs <= FINALIZED_PRIVATE_ROSTER_MAX_AGE_MS;
+    if (!rosterIsFresh) return undefined;
+    return {
+      kind: 'available',
+      accessPolicy: 1,
+      participantAgents: snapshot.participantAgents,
+    };
   }
 
   /**

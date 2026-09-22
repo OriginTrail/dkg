@@ -2,7 +2,6 @@
 
 import {
   isRpcEndpointsExhaustedError,
-  type ChainReadOptions,
   type ContextGraphAuthorityReadOptions,
   type ContextGraphAuthorityProjectionServedEvidence,
   type RpcEndpointsExhaustedErrorLike,
@@ -63,8 +62,13 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
   agentResolverReadOptions(signal?: AbortSignal): Rfc64AgentAuthorityResolverReadOptionsV1;
-  /** Mark and build options for a direct finalized chain/index read. */
-  chainReadOptions(signal?: AbortSignal): ChainReadOptions;
+  /**
+   * Mark and build options for a direct finalized chain/index read. The
+   * options carry the projection-served callback, so a consumer that needs
+   * the served provenance itself (the scoped read's private-roster freshness
+   * bound) composes with it rather than replacing it.
+   */
+  chainReadOptions(signal?: AbortSignal): ContextGraphAuthorityReadOptions;
 }
 
 export interface Rfc64AuthorityReadRunOptionsV1 {
@@ -362,7 +366,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
         poolEvidence.value = 'unproven';
       }
     };
-    const chainReadOptions = (signal?: AbortSignal): ChainReadOptions => {
+    const chainReadOptions = (signal?: AbortSignal): ContextGraphAuthorityReadOptions => {
       markRpcAttempt();
       return Object.freeze({
         ...(signal === undefined ? {} : { signal }),

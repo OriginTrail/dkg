@@ -1000,8 +1000,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // by the strict finalized name index below (never local-first inference,
     // numeric routing, ontology state, or the legacy scalar reverse resolver).
     // A valid shortcut establishes only name -> numeric id;
-    // resolveRegisteredContextGraphAuthority() still owns a fresh live policy
-    // + roster read before admission.
+    // resolveRegisteredContextGraphAuthority() still owns the policy + roster
+    // read before admission: fresh current state, or, for scoped query reads,
+    // a finalized snapshot the reader served within its accepted age.
     const durableBinding = options.durableSubscriptionBinding;
     let strictFinalizedDurableBindingRepair = false;
     if (durableBinding !== undefined) {
