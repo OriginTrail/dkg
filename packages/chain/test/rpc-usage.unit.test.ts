@@ -299,6 +299,53 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     });
   });
 
+  it('gives canonical tracker attribution precedence over its legacy compatibility map', () => {
+    const tracker = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('token.balanceOf', () => tracker.record('eth_call'));
+
+    const dualFormatWindow = tracker.drainWindow();
+    expect(dualFormatWindow.ethCallByConsumer).toEqual({ 'token.balanceOf': 1 });
+    expect(dualFormatWindow.attributions).toEqual([
+      { method: 'eth_call', consumer: 'token.balanceOf', count: 1 },
+    ]);
+    const normalized = normalizeRpcUsageWindow(dualFormatWindow);
+    expect(normalized.ethCallByConsumer).toEqual({ 'token.balanceOf': 1 });
+    expect(normalized.attributions).toEqual([
+      { method: 'eth_call', consumer: 'token.balanceOf', count: 1 },
+    ]);
+
+    // A tracker-drained window carries both representations built from the
+    // SAME counters, so it can only ever show them agreeing. Precedence is
+    // only observable when they disagree — hand-build that case. Reverting
+    // normalizeRpcUsageWindow to the legacy branch yields
+    // { 'stale.legacy': 9 } here and drops the eth_getLogs attribution.
+    const contradictory = normalizeRpcUsageWindow({
+      byMethod: { eth_call: 3, eth_getLogs: 1 },
+      ethCallByConsumer: { 'stale.legacy': 9 },
+      ethGetLogsByConsumerAndEndpointSlot: { 'stale.legacy': { primary: 9 } },
+      attributions: [
+        { method: 'eth_call', consumer: 'token.balanceOf', count: 3 },
+        {
+          method: 'eth_getLogs',
+          consumer: 'cg.authority.history',
+          endpointSlot: 'fallback_1',
+          count: 1,
+        },
+      ],
+      lifetimeTotal: 4,
+    });
+    expect(contradictory.ethCallByConsumer).toEqual({ 'token.balanceOf': 3 });
+    expect(contradictory.attributions).toEqual([
+      { method: 'eth_call', consumer: 'token.balanceOf', count: 3 },
+      {
+        method: 'eth_getLogs',
+        consumer: 'cg.authority.history',
+        endpointSlot: 'fallback_1',
+        count: 1,
+      },
+    ]);
+  });
+
   it('returns a concrete empty RPC usage window from the mock adapter', () => {
     expect(new MockChainAdapter().drainRpcUsage()).toEqual({
       byMethod: {},
@@ -340,7 +387,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
     expect(beforeDrain).toEqual({
       schemaVersion: 1,
-      consumerVocabularyVersion: 1,
+      consumerVocabularyVersion: 2,
       processEpoch: 'epoch-fixed',
       capturedAtUtc: '2026-09-20T12:00:00.000Z',
       capturedAtMonotonicMs: 123,
@@ -451,9 +498,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   });
 
   it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
-    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(1);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(2);
     expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
-    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(163);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(177);
     expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
       [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
     );

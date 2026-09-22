@@ -31,6 +31,10 @@ import {
   writeContextGraphQueryCatalog,
 } from '../query-catalog-service.js';
 import { authenticatedAgentAddress } from '../../auth.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 const QUERY_CATALOG_RESULT_LIMIT = 5_000;
 const QUERY_CATALOG_RESPONSE_BYTES = 1024 * 1024;
@@ -159,7 +163,10 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
     if (
       !isNodeAdmin
-      && !(await agent.canReadContextGraph(contextGraphId, { callerAgentAddress }))
+      && !(await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.queryCatalog,
+        () => agent.canReadContextGraph(contextGraphId, { callerAgentAddress }),
+      ))
     ) {
       jsonResponse(res, 403, {
         error: `Not authorized to read query catalog for context graph "${contextGraphId}".`,

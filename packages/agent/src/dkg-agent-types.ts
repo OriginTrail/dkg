@@ -16,6 +16,7 @@
 
 import type { ethers } from 'ethers';
 import type { SharedMemorySyncDiagnostics } from './sync/shared-memory-diagnostics.js';
+import type { ChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 export type {
   SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
@@ -1734,6 +1735,22 @@ export interface DKGAgentConfig {
      * Defaults to 6000.
      */
     indexTickMs?: number;
+    /**
+     * `chain.authorityReadTimeoutMs`: request-scoped deadline (ms) for one
+     * on-chain Context Graph authority read (liveness, policy, roster, or the
+     * finalized-index snapshot behind a query/share/SWM decision). A read that
+     * misses it fails closed for that request. Env
+     * `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` wins. Defaults to 2500.
+     */
+    authorityReadTimeoutMs?: number;
+    /**
+     * `chain.authorityColdResolutionTimeoutMs`: budget (ms) for the detached
+     * cold finalized-authority resolution that keeps running after a request
+     * deadline trips so its result reaches the chain reader's projection
+     * cache. Never below `authorityReadTimeoutMs`. Env
+     * `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS` wins. Defaults to 20000.
+     */
+    authorityColdResolutionTimeoutMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint;
     /**
@@ -1935,6 +1952,8 @@ export type ResolvedDKGAgentConfig =
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
+    /** Resolved once per boot from `chainConfig` and the environment overrides. */
+    chainAuthorityReadBudgets: ChainAuthorityReadBudgets;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */

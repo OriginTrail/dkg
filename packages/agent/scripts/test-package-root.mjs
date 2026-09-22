@@ -20,6 +20,9 @@ const legacySharedMemorySync = await import(
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
+const chainAuthorityReadBudgets = await import(
+  '@origintrail-official/dkg-agent/chain-authority-read-budgets'
+);
 const registeredAuthorityContract = await import(
   '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
 );
@@ -212,6 +215,12 @@ if (
 }
 if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !== 'function') {
   throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
+}
+if (
+  typeof chainAuthorityReadBudgets.resolveChainAuthorityTimeoutMs !== 'function'
+  || typeof chainAuthorityReadBudgets.resolveChainAuthorityReadBudgets !== 'function'
+) {
+  throw new Error('chain authority read budgets subpath did not expose its resolvers');
 }
 if (
   typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationChainIdentityV1

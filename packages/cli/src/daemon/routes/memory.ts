@@ -55,7 +55,12 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  enrichEvmError,
+  MockChainAdapter,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
   classifySwmCatchupPeerOutcome,
@@ -1818,9 +1823,12 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const callerAgentAddress = authenticatedAgentAddress(authentication);
     const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
     if (!isNodeAdmin) {
-      const authority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
-        callerAgentAddress,
-      });
+      const authority = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.memorySearch,
+        () => agent.resolveContextGraphReadAuthority(contextGraphId, {
+          callerAgentAddress,
+        }),
+      );
 
       // `unavailable` means the authority itself could not be established
       // (chain RPC failed, metadata not yet synced) — NOT that the caller is

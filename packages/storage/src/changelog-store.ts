@@ -115,6 +115,12 @@ const P_OP = `${NS}op`;
 const P_SCHEMA_VERSION = `${NS}schemaVersion`;
 const P_ERA = `${NS}era`;
 const ENTRY_PREFIX = 'urn:dkg:changelog:e:';
+/**
+ * The marker entry IRI for one seq. The writer mints it and the reader looks it
+ * up directly, so the two must never drift: a page read is valid only because
+ * every marker's IRI embeds its seq.
+ */
+const entryIri = (seq: number): string => `${ENTRY_PREFIX}${seq}`;
 const META_SUBJECT = `${NS}self`;
 
 /** On-disk marker schema version, so a future shape change is detectable. */
@@ -165,7 +171,10 @@ export interface ChangelogReader {
    * {@link headSeq} for an explicitly durable storage read with query metadata.
    */
   changelogHead(options?: QueryOptions): Promise<ChangelogHead>;
-  /** Change records with `seq > sinceSeq`, ascending, at most `limit`. */
+  /**
+   * Change records with `seq > sinceSeq`, ascending, covering at most `limit`
+   * distinct seqs (a seq carried by two markers yields both rows).
+   */
   readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]>;
   /** Highest seq durably present in the log (0 if empty). */
   headSeq(options?: QueryOptions): Promise<number>;
@@ -289,7 +298,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       }
       // Data + markers in ONE insert() → one backend transaction → atomic.
       await this.inner.insert([...safe, ...markers], options);
-      this.seq = candidate; // advance only after durable success (gapless)
+      this.adoptDurableSeq(candidate); // advance only after durable success (gapless)
       await this.noteHighWater();
       this.fire(records);
     });
@@ -603,28 +612,31 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   /**
-   * Change records with `seq > sinceSeq`, in ascending seq order, at most
-   * `limit`. This is the O(delta) read the whole RFC exists to enable.
+   * Change records with `seq > sinceSeq`, in ascending seq order, covering at
+   * most `limit` distinct seqs. This is the O(delta) read the whole RFC exists
+   * to enable.
    *
-   * Seqs are dense (single writer, one contiguous seq per marker, advanced only
-   * after the marker commits) and every marker's entry IRI embeds its seq, so the
-   * page is exactly the entries `since+1 .. min(head, since+limit)`: it is read
-   * by direct entry lookup ({@link lookupChanges}) — O(limit · log L) — instead
-   * of the `FILTER(?seq > N) ORDER BY ?seq` range scan, which sorts the whole
-   * log (O(L log L); >30 s on a million-entry beacon log, tripping the managed
-   * store deadline and restarting Oxigraph on every sync poll). A caught-up
-   * cursor (`since >= head`) is answered from the in-memory head with no
-   * storage read at all, like {@link changelogHead}.
+   * Every marker's entry IRI embeds its seq, so a page is read by direct entry
+   * lookup ({@link lookupChanges}) — O(limit · log L) — and never by the
+   * `FILTER(?seq > N) ORDER BY ?seq` range scan, which sorts the whole log
+   * (O(L log L); >30 s on a million-entry beacon log, tripping the managed
+   * store deadline and restarting Oxigraph on every sync poll).
    *
-   * The dense-seq invariant is verified per page as distinct-seq coverage: every
-   * seq in the window must be present. A seq carried by two markers (two writer
-   * processes overlapping across an A/B release swap, each with its own
-   * in-memory counter) is served as-is — the responder folds per graph, and the
-   * range scan would return both rows too. If a seq is missing (a marker went
-   * out-of-band), the exact range scan serves the page instead — never a short
-   * page, because the responder reads `records < limit` as "log drained" and
-   * would advance the requester past unread changes. The fallback is tagged
-   * `<source>.holeFallback` so it is attributable in the slow-query log.
+   * The page is assembled window by window until it covers `limit` distinct
+   * seqs or the log is exhausted. A seq missing from a window (a marker removed
+   * out-of-band) only widens the next window, so a hole costs a few extra entry
+   * lookups rather than the range scan, and never a short page: the responder
+   * reads `records < limit` as "log drained" and would advance the requester
+   * past unread changes. A seq carried by two markers (two writer processes
+   * overlapping across an A/B release swap, each with its own counter) is
+   * served as both rows; the responder folds per graph.
+   *
+   * The in-memory counter is this writer's head, not necessarily the log's:
+   * an overlapping writer appends above it. Once a window reaches the counter,
+   * one entry probe past it detects such markers; they are adopted as the head
+   * ({@link adoptDurableSeq}) and served. A caught-up cursor therefore costs
+   * one O(log L) probe instead of a `MAX(?seq)` scan, and a durable marker is
+   * never reported as drained.
    */
   async readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]> {
     const since = Number.isFinite(sinceSeq) ? Math.max(0, Math.floor(sinceSeq)) : 0;
@@ -634,16 +646,39 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     const signal = options?.signal;
     throwIfAborted(signal);
     await this.ensureSeeded();
-    throwIfAborted(signal);
-    const head = this.seq;
-    if (since >= head) return [];
-    const end = Math.min(head, since + cap);
-    const page = await this.lookupChanges(since + 1, end, readOptions);
-    if (new Set(page.map((record) => record.seq)).size === end - since) return page;
-    return this.scanChanges(since, cap, {
-      ...readOptions,
-      source: `${readOptions.source}.holeFallback`,
-    });
+    const out: ChangeRecord[] = [];
+    let from = since + 1;
+    let need = cap;
+    while (need > 0) {
+      throwIfAborted(signal);
+      let to = Math.min(this.seq, from + need - 1);
+      if (to < from) {
+        // The window starts past this writer's counter. One entry probe tells
+        // a caught-up cursor from markers another writer appended above it.
+        const probe = await this.lookupChanges(from, from, readOptions);
+        if (probe.length === 0) break;
+        to = from + need - 1;
+      }
+      const page = await this.lookupChanges(from, to, readOptions);
+      if (page.length > 0) {
+        out.push(...page);
+        need -= distinctSeqCoverage(page);
+        this.adoptDurableSeq(page[page.length - 1].seq);
+      }
+      from = to + 1;
+    }
+    return out;
+  }
+
+  /**
+   * Advance the in-memory head to a seq proven durable, never backwards. The
+   * writer proves its own markers; the reader proves markers another writer
+   * appended (two workers overlap across a release swap, each with its own
+   * counter). The head reported to sync peers thus never lags a served record,
+   * and this writer's next marker lands above everything already in the log.
+   */
+  private adoptDurableSeq(seq: number): void {
+    if (seq > this.seq) this.seq = seq;
   }
 
   /** Entries `fromSeq..toSeq` (inclusive) by direct IRI lookup, in seq order. */
@@ -656,7 +691,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     for (let start = fromSeq; start <= toSeq; start += CHANGELOG_LOOKUP_BATCH) {
       const stop = Math.min(toSeq, start + CHANGELOG_LOOKUP_BATCH - 1);
       const entries: string[] = [];
-      for (let seq = start; seq <= stop; seq += 1) entries.push(`<${ENTRY_PREFIX}${seq}>`);
+      for (let seq = start; seq <= stop; seq += 1) entries.push(`<${entryIri(seq)}>`);
       const res = await this.inner.query(
         `SELECT ?seq ?graph ?op WHERE {
   GRAPH <${CHANGELOG_GRAPH}> {
@@ -672,7 +707,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     return out;
   }
 
-  /** The exact `seq > since` range scan — the fallback when a window has a hole. */
+  /** The exact `seq > since` range scan; only a disabled decorator's passthrough uses it. */
   private async scanChanges(
     since: number,
     cap: number,
@@ -924,7 +959,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
         quads.push(...markerQuads(candidate, spec.graph, spec.op));
       }
       await this.inner.insert(quads, options);
-      this.seq = candidate;
+      this.adoptDurableSeq(candidate);
       await this.noteHighWater();
       this.fire(records);
     } catch (err) {
@@ -1018,7 +1053,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 // ====================================================================
 
 function markerQuads(seq: number, graph: string, op: ChangeOp): Quad[] {
-  const entry = `${ENTRY_PREFIX}${seq}`;
+  const entry = entryIri(seq);
   return [
     { subject: entry, predicate: P_SEQ, object: `"${seq}"^^<${XSD_INTEGER}>`, graph: CHANGELOG_GRAPH },
     { subject: entry, predicate: P_GRAPH, object: graph, graph: CHANGELOG_GRAPH },
@@ -1036,7 +1071,20 @@ export function changelogSchemaQuad(): Quad {
   };
 }
 
-/** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */
+/**
+ * Distinct seqs one page covers — the load-bearing count behind
+ * {@link ChangelogStore.readChanges}. A page keeps widening until it covers
+ * `limit` distinct seqs or the log is drained, because the responder reads a
+ * page shorter than `limit` as "log drained" and advances the requester past
+ * everything it did not receive. Duplicate rows for one seq (two writers across
+ * a release swap) count once; a missing seq (a hole) is what the next window
+ * makes up for. Never relax this to the row count.
+ */
+function distinctSeqCoverage(page: readonly ChangeRecord[]): number {
+  return new Set(page.map((record) => record.seq)).size;
+}
+
+/** Append well-formed `{ seq, graph, op }` rows from a SELECT binding set, skipping malformed rows. */
 function collectChangeRecords(
   bindings: ReadonlyArray<Record<string, string | undefined>>,
   out: ChangeRecord[],
@@ -1050,6 +1098,7 @@ function collectChangeRecords(
   }
 }
 
+/** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */
 function parseIntTerm(term: string | undefined): number | null {
   if (term == null) return null;
   const m = term.match(/-?\d+/);

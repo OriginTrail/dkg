@@ -4,7 +4,7 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-## [10.0.17] - 2026-09-20
+## [10.0.17] - 2026-09-22
 
 An RPC-bounded RFC-64 operational-hardening release. RFC-64 remains active by
 default for persistent nodes and keeps its 10.0.16 responsibility model, while
@@ -180,6 +180,66 @@ registry changes are required.**
 - Provider credits may weight RPC methods and response sizes differently from
   raw daemon request counts. Validate both consumer-attributed DKG calls and
   provider-side billed usage before declaring provider-quota pressure resolved.
+
+### Final canary fixes (2026-09-20 to 2026-09-22)
+
+Landed on the canary after the section above was written; all are included in
+the 10.0.17 release commit.
+
+#### Fixed
+
+- **Beacon storage stability** (#2712): the OT-RFC-59 changelog page read
+  scanned and sorted the whole node-global log on every sync poll (2.4 million
+  entries on a testnet beacon), tripped the 30 s managed-store deadline and made
+  the node restart Oxigraph hundreds of times per day. Pages are now read by
+  direct entry lookup; duplicate seqs from A/B release-swap writer overlap are
+  tolerated and holes fall back to the exact scan.
+- **Scoped query authority from the finalized index** (#2711): query
+  authorization reads the deployment-scoped finalized authority snapshot instead
+  of a live chain RPC on every request; a finalized-lane fault or deadline falls
+  back to the bounded live read, while absent, inactive or mismatched snapshots
+  still fail closed.
+- **RFC-64 authority and recovery hardening** (#2695, #2696, #2697, #2698,
+  #2707, #2708, #2709, #2710): responsibility retries after finality lag,
+  catalog recovery after late authority finalization, atomic pre-catalog root
+  boundaries, graph-backed SWM recovery transport, safe retry of live authority
+  timeouts, bounded live authority successor flights, deterministic recovery of
+  persisted authority bindings, and reserved RPC capacity for Context Graph
+  authority gates.
+- **Chain index and Hub resilience** (#2683, #2685, #2699, #2700, #2701,
+  #2705): Hub rotation target identity retained, fallback when Hub log reads
+  fail, and index period/idle-headroom handling that keeps capped RPC budgets
+  from starving the scan.
+- **Storage ACK admission** (#2693, #2694): ACK peer admission is preflighted
+  and hardened.
+- **Registration discovery governance** (#2661): discovery is governed and the
+  half-open circuit status documentation corrected.
+
+#### Performance
+
+- **Chain RPC demand reductions** (#2675, #2676, #2677, #2681, #2682): fewer
+  chain calls on the publish, receipt and random-sampling paths; finalized
+  Context Graph authority reads served from the index projection cache; every
+  `getContextGraph` caller attributed and simultaneous live authority reads
+  shared.
+
+#### Security and hygiene
+
+- Wallet-action integration errors are no longer exposed and the secure wallet
+  bridge error handling is documented (#2687, #2688); remaining high-severity
+  CodeQL findings removed (#2689); one-log scope isolation is enforced by test
+  (#2686); publisher lane cursor flags replaced by typed strategies (#2612).
+
+#### Known issues (tracked in #2713)
+
+- Author/host and share paths still depend on a live on-chain authority read
+  with a hard-coded 2.5 s fail-closed deadline; under slow RPC providers or a
+  CPU-saturated publisher this can stall an author's catalog for its own graph
+  and slow receiver convergence. A non-member node querying a private graph can
+  answer 503 instead of 403 when authority cannot be resolved in time (no data
+  is exposed). A store timeout inside a promote's post-dispatch settle step is
+  classified fatal and needs `recover-share-job`. Fixes are in #2714 and #2715,
+  targeted at 10.0.18.
 
 ## [10.0.16] - 2026-09-03
 
