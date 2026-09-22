@@ -132,6 +132,10 @@ import {
 } from '@origintrail-official/dkg-query';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   './rfc64/authority-rpc-circuit-breaker-v1.js';
+import {
+  finalizedContextGraphSnapshotMismatchV1,
+  resolveFinalizedContextGraphNameBindingV1,
+} from './internal/context-graph-authority/finalized-context-graph-binding.js';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -847,19 +851,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const { onRpcRead, durableBindingHints, ...chainReadOptions } = options;
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
-      const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
-      const localId = canonicalTarget?.localId ?? contextGraphId;
-      const subscription = canonicalTarget?.subscription
-        ?? this.subscribedContextGraphs.get(localId);
       const hintedBinding = durableBindingHints?.get(contextGraphId);
       const durableHint = hintedBinding?.contextGraphId === contextGraphId
         ? hintedBinding
         : undefined;
-      const persistedNameHash = subscription?.onChainHash ?? durableHint?.onChainHash;
-      const expectedNameHash = canonicalTarget?.nameHash
-        ?? (persistedNameHash === undefined
-          ? this.contextGraphNameCommitment(localId)
-          : this.contextGraphWireId(persistedNameHash));
+      const { localId, subscription, expectedNameHash } =
+        resolveFinalizedContextGraphNameBindingV1(this, contextGraphId, durableHint);
       const authoritativeOnChainId = this.contextGraphBindingState
         .authorityIndexOnChainIdFor(localId, subscription ?? durableHint);
       return {
@@ -1080,8 +1077,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // by the strict finalized name index below (never local-first inference,
     // numeric routing, ontology state, or the legacy scalar reverse resolver).
     // A valid shortcut establishes only name -> numeric id;
-    // resolveRegisteredContextGraphAuthority() still owns a fresh live policy
-    // + roster read before admission.
+    // resolveRegisteredContextGraphAuthority() still owns the policy + roster
+    // read before admission: fresh current state, or, for scoped query reads,
+    // a finalized snapshot the reader served within its accepted age.
     const durableBinding = options.durableSubscriptionBinding;
     let strictFinalizedDurableBindingRepair = false;
     if (durableBinding !== undefined) {
@@ -1340,16 +1338,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           ) {
             throw new Error('finalized Context Graph id is outside uint256');
           }
-          if (target.kind === 'resolved-snapshot') {
-            const snapshot = target.finalizedSnapshot;
-            if (
-              snapshot.active !== true
-              || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
-              || this.contextGraphWireId(snapshot.nameHash)
-                !== this.contextGraphWireId(target.expectedNameHash)
-            ) {
-              throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
-            }
+          if (
+            target.kind === 'resolved-snapshot'
+            && finalizedContextGraphSnapshotMismatchV1(target.finalizedSnapshot, {
+              onChainId: target.expectedOnChainId,
+              nameHash: target.expectedNameHash,
+            }) !== undefined
+          ) {
+            throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
           }
           return {
             kind: 'registered',

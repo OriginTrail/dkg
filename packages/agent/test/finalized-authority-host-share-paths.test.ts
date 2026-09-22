@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MockChainAdapter,
+  type ContextGraphAuthorityProjectionServedEvidence,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
@@ -46,16 +47,31 @@ function finalizedAuthoritySnapshot(
   };
 }
 
-/** A finalized index that holds exactly `snapshots`; every other id is absent. */
+/**
+ * A finalized index that holds exactly `snapshots`; every other id is absent.
+ * Like the EVM reader, it reports how the projection was served: a fresh cache
+ * hit unless the test says otherwise (`served: null` models an adapter that
+ * reports nothing). A private roster is consumed only on fresh provenance.
+ */
 function installFinalizedAuthorityReader(
   chain: MockChainAdapter,
   snapshots: readonly ContextGraphAuthoritySnapshot[],
+  served: ContextGraphAuthorityProjectionServedEvidence | null = { source: 'cache', ageMs: 0 },
 ) {
   const readContextGraphAuthorityIndexSnapshots = vi.fn(async (
     contextGraphIds: readonly string[],
-  ) => new Map(snapshots
-    .filter((snapshot) => contextGraphIds.includes(snapshot.contextGraphId))
-    .map((snapshot) => [snapshot.contextGraphId, snapshot] as const)));
+    options?: {
+      signal?: AbortSignal;
+      onContextGraphAuthorityProjectionServed?: (
+        report: ContextGraphAuthorityProjectionServedEvidence,
+      ) => void;
+    },
+  ) => {
+    if (served !== null) options?.onContextGraphAuthorityProjectionServed?.(served);
+    return new Map(snapshots
+      .filter((snapshot) => contextGraphIds.includes(snapshot.contextGraphId))
+      .map((snapshot) => [snapshot.contextGraphId, snapshot] as const));
+  });
   Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
     readContextGraphAuthorityIndexSnapshots,
     readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
@@ -81,6 +97,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
+    // Served fresh (a cache hit inside the tick), so the private roster decides.
     const readIndex = installFinalizedAuthorityReader(chain, [
       finalizedAuthoritySnapshot(7n, agent.contextGraphNameCommitment(contextGraphId), {
         accessPolicy: 1,
@@ -104,7 +121,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     expect(pointRoster).not.toHaveBeenCalled();
   });
 
-  it('reaches the current-state read only when the index has no snapshot, never on mismatched evidence', async () => {
+  it('reaches the current-state read when the index has no snapshot, never on mismatched evidence', async () => {
     const contextGraphId = 'finalized-swm-sync-fallback';
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'FinalizedSwmSyncFallback', chainAdapter: chain });
@@ -229,7 +246,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     installFinalizedAuthorityReader(chain, [
       finalizedAuthoritySnapshot(11n, agent.contextGraphNameCommitment(publicGraph)),
       // A PRIVATE snapshot proves the policy bit only; its roster is a decoy
-      // that the encryption path must never consume.
+      // that the encryption path must never consume, even served fresh.
       finalizedAuthoritySnapshot(12n, agent.contextGraphNameCommitment(privateGraph), {
         accessPolicy: 1,
         participantAgents: [NON_MEMBER],
@@ -265,6 +282,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     agent = await DKGAgent.create({ name: 'FinalizedHostGossipRoster', chainAdapter: chain });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(13n));
+    // Served fresh (a cache hit inside the tick), so the private roster decides.
     installFinalizedAuthorityReader(chain, [
       finalizedAuthoritySnapshot(13n, agent.contextGraphNameCommitment(contextGraphId), {
         accessPolicy: 1,
@@ -278,5 +296,70 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     await expect(agent.resolveOnChainParticipantAgents(contextGraphId)).resolves.toEqual([MEMBER]);
     expect(live).not.toHaveBeenCalled();
     expect(pointRoster).not.toHaveBeenCalled();
+  });
+
+  it('takes a private roster the reader could not serve fresh to the live roster read on the read-only gates', async () => {
+    const contextGraphId = 'finalized-stale-roster-gates';
+    const REMAINING_MEMBER = '0x0000000000000000000000000000000000000002';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'FinalizedStaleRosterGates', chainAdapter: chain });
+    vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
+    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(14n));
+    const nameHash = agent.contextGraphNameCommitment(contextGraphId);
+    const privateSnapshot = finalizedAuthoritySnapshot(14n, nameHash, {
+      accessPolicy: 1,
+      participantAgents: [MEMBER],
+    });
+    // MEMBER was removed on chain after the retained projection was fetched.
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
+      kind: 'available',
+      accessPolicy: 1,
+      participantAgents: [REMAINING_MEMBER],
+    });
+
+    // `stale-cache` is the reader saying a refresh failed and the projection
+    // is at least one tick old; an unreported provenance proves nothing.
+    // Neither the SWM host/sync gate nor the host-mode gossip oracle may admit
+    // from that roster: both take the current one from the live read.
+    const notFresh: Array<ContextGraphAuthorityProjectionServedEvidence | null> = [
+      { source: 'stale-cache', ageMs: 5_000 },
+      null,
+    ];
+    for (const [index, served] of notFresh.entries()) {
+      const readIndex = installFinalizedAuthorityReader(chain, [privateSnapshot], served);
+      await expect(agent.canUseSharedMemoryForContextGraph(contextGraphId, {
+        callerAgentAddress: MEMBER,
+      })).resolves.toBe(false);
+      await expect(agent.resolveOnChainParticipantAgents(contextGraphId))
+        .resolves.toEqual([REMAINING_MEMBER]);
+      expect(readIndex).toHaveBeenCalledTimes(2);
+      expect(live).toHaveBeenCalledTimes((index + 1) * 2);
+    }
+
+    // The same projection served fresh decides without the live read.
+    const freshRead = installFinalizedAuthorityReader(chain, [privateSnapshot], {
+      source: 'scan',
+      ageMs: 0,
+    });
+    await expect(agent.canUseSharedMemoryForContextGraph(contextGraphId, {
+      callerAgentAddress: MEMBER,
+    })).resolves.toBe(true);
+    await expect(agent.resolveOnChainParticipantAgents(contextGraphId)).resolves.toEqual([MEMBER]);
+    expect(freshRead).toHaveBeenCalledTimes(2);
+    expect(live).toHaveBeenCalledTimes(notFresh.length * 2);
+
+    // The policy bit is immutable on chain: a public snapshot answers the gate
+    // at any provenance.
+    installFinalizedAuthorityReader(
+      chain,
+      [finalizedAuthoritySnapshot(14n, nameHash)],
+      { source: 'stale-cache', ageMs: 600_000 },
+    );
+    await expect(agent.canUseSharedMemoryForContextGraph(contextGraphId, {
+      callerAgentAddress: NON_MEMBER,
+    })).resolves.toBe(true);
+    expect(live).toHaveBeenCalledTimes(notFresh.length * 2);
   });
 });

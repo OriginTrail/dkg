@@ -11163,8 +11163,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Whether to host, sync, or serve SWM for a selected graph is a read-only
     // authorization decision: the finalized, name-bound snapshot answers it
     // whenever the index has one, and only a graph the index has no snapshot
-    // for reaches the current-state read. Encryption and roster mutations keep
-    // their live reads elsewhere.
+    // for, or a private roster the reader could not serve fresh, reaches the
+    // current-state read. Encryption and roster mutations keep their live
+    // reads elsewhere.
     return opts.readAuthority !== undefined
       ? opts.readAuthority.outcome === 'allowed'
       : withRpcUsageSite(

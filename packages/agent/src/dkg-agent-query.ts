@@ -309,7 +309,6 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
-import type { ContextGraphAuthorityReadMode } from './dkg-agent-cg-resolve.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -383,6 +382,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphAuthorityReadMode } from './registered-context-graph-authority.js';
 import {
   ContextGraphReadAuthorityUnavailableError,
   resolveContextGraphReadAuthorityDecision,
@@ -396,6 +396,18 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
+
+/**
+ * Request-local plan for one canonical read-authority resolution. Every internal
+ * caller states its lane explicitly, so a new call site cannot silently land in
+ * a different authority view than it intends.
+ */
+interface ContextGraphReadAuthorityPlan {
+  registrationTimeoutMs: number;
+  authorityReadMode: ContextGraphAuthorityReadMode;
+  /** Subscription bootstrap proves the accepted public policy itself. */
+  hasAcceptedRfc64PublicPolicy?: boolean;
+}
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -765,9 +777,10 @@ export class QueryMethods extends DKGAgentBase {
           this,
           id,
           { callerAgentAddress: opts.callerAgentAddress, signal },
-          chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
-          undefined,
-          'finalized-index',
+          {
+            registrationTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+            authorityReadMode: 'finalized-index',
+          },
         )
       ),
       prepareRegistrationReadPlan: (candidateIds, readSignal) => (
@@ -791,23 +804,25 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
       /**
-       * Scoped query reads consume the finalized authority projection and the
-       * read-only host/sync/share gates may fall back to current state when
-       * the index has no snapshot; every other caller (admission, the default
-       * `canReadContextGraph`) keeps current state.
+       * Scoped query reads and the read-only host/sync/share gates consume the
+       * finalized authority projection and fall back to current state when the
+       * index holds no evidence (e.g. no snapshot); every other caller
+       * (admission, the default `canReadContextGraph`) keeps current state.
        */
       authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    const { authorityReadMode, ...readOpts } = opts;
+    const { authorityReadMode = 'live-current', ...readOpts } = opts;
     return withRpcUsageSite(
       CG_AUTH_RPC_SITES.readAuthority,
       () => QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
         this,
         contextGraphId,
         readOpts,
-        chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
-        authorityReadMode,
+        {
+          registrationTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+          authorityReadMode,
+        },
       ),
     );
   }
@@ -836,10 +851,14 @@ export class QueryMethods extends DKGAgentBase {
               this,
               contextGraphId,
               boundedOpts,
-              CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-              this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-                ? true
-                : undefined,
+              {
+                registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+                authorityReadMode: 'live-current',
+                hasAcceptedRfc64PublicPolicy:
+                  this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                    ? true
+                    : undefined,
+              },
             ),
           );
           const initial = await resolve();
@@ -954,17 +973,14 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
     },
-    registrationTimeoutMs: number,
-    authorityReadMode: ContextGraphAuthorityReadMode = 'live-current',
+    plan: ContextGraphReadAuthorityPlan,
   ): Promise<ContextGraphReadAuthorityDecision> {
     return resolveContextGraphReadAuthorityDecision(
       QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
         this,
         contextGraphId,
         opts,
-        registrationTimeoutMs,
-        undefined,
-        authorityReadMode,
+        plan,
       ),
     );
   }
@@ -977,10 +993,9 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
     },
-    registrationTimeoutMs: number,
-    hasAcceptedRfc64PublicPolicy?: boolean,
-    authorityReadMode: ContextGraphAuthorityReadMode = 'live-current',
+    plan: ContextGraphReadAuthorityPlan,
   ): ContextGraphReadAuthorityInput {
+    const { registrationTimeoutMs, authorityReadMode, hasAcceptedRfc64PublicPolicy } = plan;
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];

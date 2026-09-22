@@ -2,7 +2,6 @@
 
 import {
   isRpcEndpointsExhaustedError,
-  type ChainReadOptions,
   type ContextGraphAuthorityReadOptions,
   type ContextGraphAuthorityProjectionServedEvidence,
   type RpcEndpointsExhaustedErrorLike,
@@ -63,8 +62,17 @@ export interface Rfc64AuthorityRpcProbeEvidenceV1 {
    *    about the pool, and it voids this operation's `markRpcAttempt`.
    */
   agentResolverReadOptions(signal?: AbortSignal): Rfc64AgentAuthorityResolverReadOptionsV1;
-  /** Mark and build options for a direct finalized chain/index read. */
-  chainReadOptions(signal?: AbortSignal): ChainReadOptions;
+  /**
+   * Mark and build options for a direct finalized chain/index read. A consumer
+   * that needs the served provenance itself (the scoped read's private-roster
+   * freshness gate) passes `onProjectionServed`: the options report to the
+   * circuit's own observer first and then to it, so a consumer can observe
+   * the report but never replace the evidence recovery depends on.
+   */
+  chainReadOptions(
+    signal?: AbortSignal,
+    onProjectionServed?: (served: ContextGraphAuthorityProjectionServedEvidence) => void,
+  ): ContextGraphAuthorityReadOptions;
 }
 
 export interface Rfc64AuthorityReadRunOptionsV1 {
@@ -80,8 +88,12 @@ export interface Rfc64AuthorityReadRunOptionsV1 {
    * rather than as a bypass.
    *
    * It still queues behind its lane's permit, so at most one of them reaches
-   * the pool per lane at a time. Both lanes accept the option; only pass it
-   * for a read that is genuinely rare.
+   * the pool per lane at a time. Both lanes accept the option. Pass it only
+   * for a read that is genuinely rare, or for one whose refusal would not
+   * spare the pool: a caller that answers a refusal with an ungoverned read
+   * of the same pool (the scoped read's finalized policy lane falls back to
+   * the live read) gains nothing from it, and loses an answer a projection
+   * could give without reaching a provider.
    */
   readonly admitWhileOpen?: boolean;
 }
@@ -241,7 +253,9 @@ export class Rfc64AuthorityReadCoordinatorV1 {
    * exhausted pool before any of them reported back. One permit bounds that to
    * a single probe: the gate is re-evaluated after the permit is acquired, so
    * once the first read of a batch trips the circuit its siblings are refused
-   * without reaching a provider.
+   * without reaching a provider. Siblings admitted while open
+   * (`admitWhileOpen`) are not refused, but they still take the permit one at
+   * a time.
    *
    * The two lanes still overlap each other, so circuit transitions stay keyed
    * to a trip generation: a result cannot close a trip that happened after it
@@ -362,11 +376,19 @@ export class Rfc64AuthorityReadCoordinatorV1 {
         poolEvidence.value = 'unproven';
       }
     };
-    const chainReadOptions = (signal?: AbortSignal): ChainReadOptions => {
+    const chainReadOptions = (
+      signal?: AbortSignal,
+      onProjectionServed?: (served: ContextGraphAuthorityProjectionServedEvidence) => void,
+    ): ContextGraphAuthorityReadOptions => {
       markRpcAttempt();
       return Object.freeze({
         ...(signal === undefined ? {} : { signal }),
-        onContextGraphAuthorityProjectionServed: observeProjectionServed,
+        onContextGraphAuthorityProjectionServed: onProjectionServed === undefined
+          ? observeProjectionServed
+          : (served: ContextGraphAuthorityProjectionServedEvidence) => {
+              observeProjectionServed(served);
+              onProjectionServed(served);
+            },
       });
     };
     const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({

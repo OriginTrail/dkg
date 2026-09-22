@@ -336,6 +336,7 @@ export type {
   ContextGraphReadAuthoritySource,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityReadMode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,
@@ -343,10 +344,7 @@ export type {
   RegisteredContextGraphAuthorityUnavailableReason,
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
-export type {
-  ContextGraphAuthorityReadMode,
-  FinalizedContextGraphAuthoritySnapshotReadV1,
-} from './dkg-agent-cg-resolve.js';
+export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-cg-resolve.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,
