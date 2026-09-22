@@ -50,6 +50,8 @@ type AssertionPromotePreCommitResult = {
 const CONTEXT_GRAPH_AUTHORITY_PROMOTE_RETRY = {
   'finalized-name-absence-unaccepted': true,
   'chain-name-binding-unavailable': true,
+  // A cooldown ends on its own; the promote is worth retrying.
+  'authority-circuit-open': true,
   'local-chain-binding-unavailable': true,
   'local-existence-unavailable': true,
   'chain-access-policy-unavailable': true,

@@ -1965,9 +1965,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * one-shot join decision: the substrate outbox replays the payload bytes it
    * was given, so a deferral there does not postpone the send, it ships a
    * decision permanently missing its binding. Repeatable callers — notably the
-   * per-message catalog admission hook — leave it off, because admitting one
-   * probe per inbound message for the length of an outage is the stampede the
-   * circuit exists to prevent.
+   * per-message catalog admission hook — leave it off: refused, they defer
+   * without reaching a provider, and admitting one probe per inbound message
+   * for the length of an outage is the stampede the circuit exists to prevent.
    */
   async readRfc64CurrentCuratorAuthorityBindingV1(
     this: DKGAgent,

@@ -17,17 +17,32 @@ const MAX_TICK_BACKOFF_MULTIPLIER = 16;
 const IDLE_TICKS_BEFORE_BACKOFF = 3;
 
 /**
- * The fraction of the readers' freshness budget the idle period may consume.
+ * Successful pass durations retained as evidence for the next-pass reserve.
+ *
+ * This intentionally matches the three-pass quiet gate today: a slow pass is
+ * displaced only after the same amount of fresh evidence that permits idle
+ * widening. Keep the concepts separately named so either policy cannot change
+ * without making that coupling explicit.
+ */
+const PASS_DURATION_EVIDENCE_WINDOW = 3;
+
+/**
+ * The fraction of the readers' freshness budget held as static headroom.
  *
  * The widened period is what decides how old `cursor.head` can be when a
  * reader arrives, and a head past the budget is REFUSED — the reader falls
  * back to the live chain read this loop exists to replace. Backing off past
- * the budget would therefore RAISE physical demand. The completed pass is
- * debited explicitly, and the ceiling keeps a final third in hand for the
- * following pass and scheduler skew.
+ * the budget would therefore RAISE physical demand. This is only the STATIC
+ * reserve: the longest of the latest successful passes is reserved separately,
+ * because the old stored head remains visible until the FOLLOWING pass commits.
+ * Keeping both reserves leaves one third of the available freshness budget
+ * for scheduler skew and an unseen latency increase beyond that recent
+ * duration high-water mark. A still-larger spike may make readers fail closed
+ * to the live chain until the next pass commits; reserving a whole baseline
+ * interval here would eliminate useful backoff when T approaches the capped
+ * reader budget.
  */
-const IDLE_BACKOFF_BUDGET_NUMERATOR = 2;
-const IDLE_BACKOFF_BUDGET_DENOMINATOR = 3;
+const IDLE_STATIC_HEADROOM_BUDGET_DENOMINATOR = 3;
 
 /**
  * Ticks between backfill pages when nothing says otherwise.
@@ -100,6 +115,8 @@ export class ChainIndexRunner {
   #consecutiveFailures = 0;
   #ticksSinceBackfill = 0;
   #consecutiveQuietTicks = 0;
+  /** Bounded history aligned with the quiet-pass gate, excluding failures. */
+  readonly #recentSuccessfulPassElapsedMs: number[] = [];
 
   constructor(
     private readonly tick: ChainIndexTick,
@@ -123,6 +140,7 @@ export class ChainIndexRunner {
     this.#abort = new AbortController();
     this.#consecutiveFailures = 0;
     this.#consecutiveQuietTicks = 0;
+    this.#recentSuccessfulPassElapsedMs.length = 0;
     this.#schedule(0);
   }
 
@@ -166,25 +184,51 @@ export class ChainIndexRunner {
    * live read — which costs MORE than the pass this was trying to skip.
    *
    * `fetchedAtMs` is stamped before the pass's RPC work, while this delay starts
-   * after that work. The completed pass has therefore already spent part of
-   * the budget. Subtracting its whole runner-observed duration is conservative
-   * (the runner starts slightly before the head stamp) and leaves the final
-   * third for the following pass plus scheduler skew.
+   * after that work. More importantly, that stored stamp remains visible until
+   * the FOLLOWING pass commits. Its reader-visible age is therefore:
+   *
+   *     completed pass + delay + following pass
+   *
+   * Subtract the completed pass and reserve the longest of the latest three
+   * successful passes for the following one. Three is the same evidence window
+   * as the quiet-pass gate: one slow pass remains reserved until three later
+   * successes displace it, then a stable fast scope may widen again. A separate
+   * static reserve of one third of the available budget absorbs scheduler skew
+   * and some unseen latency growth beyond that recent maximum. This is a
+   * bounded recent-history assumption, not a lifetime guarantee: a larger
+   * unseen spike may make readers fail closed to the live chain until the next
+   * pass commits. Reserving a whole T would make idle backoff a no-op for large
+   * configured intervals whose reader budget is capped. If these terms leave
+   * less than T, keep the baseline period so idleness adds no extra delay.
    */
-  #idleBackoffDelayMs(successfulPassElapsedMs: number): number {
+  #idleBackoffDelayMs(): number {
     const baselineMs = this.#options.intervalMs;
     const budgetMs = this.#options.idleHeadAgeBudgetMs;
     if (budgetMs === undefined
       || !Number.isSafeInteger(budgetMs)
       || budgetMs < 1) return baselineMs;
     if (this.#consecutiveQuietTicks < IDLE_TICKS_BEFORE_BACKOFF) return baselineMs;
-    const spendableMs = Math.floor(
-      (budgetMs * IDLE_BACKOFF_BUDGET_NUMERATOR) / IDLE_BACKOFF_BUDGET_DENOMINATOR,
+    const staticHeadroomMs = Math.ceil(
+      budgetMs / IDLE_STATIC_HEADROOM_BUDGET_DENOMINATOR,
     );
-    const elapsedMs = Number.isFinite(successfulPassElapsedMs)
-      ? Math.max(0, successfulPassElapsedMs)
+    const successfulPassElapsedMs = this.#recentSuccessfulPassElapsedMs.at(-1) ?? 0;
+    const recentPassHighWaterMs = Math.max(0, ...this.#recentSuccessfulPassElapsedMs);
+    const followingPassReserveMs = staticHeadroomMs + recentPassHighWaterMs;
+    return Math.max(
+      baselineMs,
+      Math.floor(budgetMs - successfulPassElapsedMs - followingPassReserveMs),
+    );
+  }
+
+  #recordSuccessfulPassElapsedMs(passStartedAtMs: number): void {
+    const measuredElapsedMs = this.#now() - passStartedAtMs;
+    const elapsedMs = Number.isFinite(measuredElapsedMs)
+      ? Math.max(0, measuredElapsedMs)
       : 0;
-    return Math.max(baselineMs, Math.floor(spendableMs - elapsedMs));
+    this.#recentSuccessfulPassElapsedMs.push(elapsedMs);
+    if (this.#recentSuccessfulPassElapsedMs.length > PASS_DURATION_EVIDENCE_WINDOW) {
+      this.#recentSuccessfulPassElapsedMs.shift();
+    }
   }
 
   #schedule(delayMs: number): void {
@@ -201,7 +245,6 @@ export class ChainIndexRunner {
     const abort = this.#abort;
     if (abort === undefined) return;
     const passStartedAtMs = this.#now();
-    let successfulPassElapsedMs = 0;
     try {
       const result = await this.tick.runOnce(abort.signal);
       this.#options.onResult?.(result);
@@ -230,7 +273,7 @@ export class ChainIndexRunner {
       }
       // Captured only after every successful head/backfill callback. A failure
       // has its own independent backoff and must not borrow an idle allowance.
-      successfulPassElapsedMs = Math.max(0, this.#now() - passStartedAtMs);
+      this.#recordSuccessfulPassElapsedMs(passStartedAtMs);
     } catch (error) {
       if (abort.signal.aborted) return;
       this.#consecutiveFailures += 1;
@@ -250,7 +293,7 @@ export class ChainIndexRunner {
       // budget its readers hold it to. `max` because a failing scope must keep
       // the wider of the two: idleness never shortens a failure's backoff.
       const failureDelayMs = this.#options.intervalMs * failureMultiplier;
-      const idleDelayMs = this.#idleBackoffDelayMs(successfulPassElapsedMs);
+      const idleDelayMs = this.#idleBackoffDelayMs();
       this.#schedule(Math.max(failureDelayMs, idleDelayMs));
     }
   }

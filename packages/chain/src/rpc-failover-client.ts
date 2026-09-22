@@ -67,6 +67,7 @@ import {
 } from './rpc-request-transport.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
+  RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
@@ -100,6 +101,8 @@ export interface RpcEndpoint {
  *     one-RPC node.
  *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
  *     stall selection (capped on EVERY attempt, including single-RPC).
+ *   - `securityGatePointRead` — a live authorization read whose multi-RPC
+ *     attempts must fail over inside the caller's 2.5s fail-closed deadline.
  */
 export type ReadPolicy =
   | 'pointRead'
@@ -107,7 +110,8 @@ export type ReadPolicy =
   | 'durablePagedLogScan'
   | 'watchdogPointRead'
   | 'watchdogWideLogScan'
-  | 'failOpenFundingRead';
+  | 'failOpenFundingRead'
+  | 'securityGatePointRead';
 
 /**
  * The human-facing label and the low-cardinality telemetry owner for one RPC
@@ -282,6 +286,7 @@ export function isContractViewRetryable(err: unknown): boolean {
  *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
  *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
+ *   | securityGatePointRead | SECURITY_GATE (1s)     | uncapped                |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
  * to; #894). The watchdog policies are for background reads that must clear
@@ -295,6 +300,7 @@ export function resolveCapMs(policy: ReadPolicy, providerCount: number): number 
   }
   if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
   if (providerCount <= 1) return undefined;
+  if (policy === 'securityGatePointRead') return RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
 

@@ -2921,6 +2921,141 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).not.toHaveBeenCalled();
   });
 
+  it('defers registration binding discovery while the circuit is open', async () => {
+    const resolveSnapshots = vi.fn(async () => {
+      throw new Error('registration discovery must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'registration-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    // Registration discovery reads the same finalized index as the refresh
+    // pass, so it defers with every other governed reader instead of walking
+    // an exhausted pool on its own. The boundary is already fail-closed, and
+    // the caller retries.
+    await expect(edge.resolveContextGraphRegistrationBinding(
+      `${AUTHOR}/registration-binding-open-circuit`,
+    )).resolves.toMatchObject({
+      kind: 'unavailable',
+      // A cooldown is a deferral, not a failed chain read: the pool was never
+      // asked, and the caller may retry on the circuit's own cadence.
+      reason: 'authority-circuit-open',
+    });
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+  });
+
+  it('resolves a registration binding while a slow authority read holds the serializer', async () => {
+    // Registration discovery backs query, crypto and Context Graph operations
+    // under a policy-read budget, so it takes the circuit without the queue:
+    // behind a cold whole-contract scan it would spend that budget waiting and
+    // deny a policy decision on a node whose pool is healthy.
+    const contextGraphId = `${AUTHOR}/registration-binding-unqueued`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async () => new Map([[expectedNameHash, snapshot]]));
+    const edge = await startAgent({
+      name: 'registration-binding-unqueued',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    let serializerReleased = false;
+    const held = (edge as unknown as {
+      rfc64AuthorityReadCoordinatorV1: {
+        run: (
+          signal: AbortSignal | undefined,
+          operation: () => Promise<string>,
+        ) => Promise<string>;
+      };
+    }).rfc64AuthorityReadCoordinatorV1.run(undefined, async () => {
+      entered.resolve();
+      await release.promise;
+      serializerReleased = true;
+      return 'held';
+    });
+    await entered.promise;
+
+    await expect(edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      registrationTimeoutMs: 1_000,
+    })).resolves.toMatchObject({ kind: 'registered', onChainId: 9n });
+    expect(serializerReleased).toBe(false);
+
+    release.resolve();
+    await expect(held).resolves.toBe('held');
+  });
+
+  it('closes the shared circuit when registration discovery reaches the pool', async () => {
+    // Only move forward, so unrelated agent timers keep a monotonic clock.
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const contextGraphId = `${AUTHOR}/registration-binding-evidence`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async () => new Map([[expectedNameHash, snapshot]]));
+    const edge = await startAgent({
+      name: 'registration-binding-evidence',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+
+    await expect(edge.resolveContextGraphRegistrationBinding(contextGraphId))
+      .resolves.toMatchObject({ kind: 'registered', onChainId: 9n });
+
+    // This lane proves provider recovery for every other governed reader too.
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+      retryAtMs: null,
+    });
+  });
+
   it('still resolves a curator binding while the shared circuit is open', async () => {
     const curatorSnapshot = Object.freeze({
       ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
@@ -6989,10 +7124,17 @@ describe('RFC-64 rollout authority integration', () => {
             policyEnvelope: policyEnvelope(),
             targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
           }],
+          retryIntervalMs: 1_000,
         },
       },
+      config: { syncContextGraphs: [] },
     });
+    // Subscribe only after the provider connection exists. Otherwise the first
+    // pass probes a provider it can only find through mDNS; where multicast is
+    // unavailable (e.g. macOS without Local Network access) that probe times
+    // out and admission backs the provider off for 15s.
     await connectBothWays(author, shadow);
+    shadow.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await vi.waitFor(() => {
       expect(shadow.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
         mode: 'shadow',

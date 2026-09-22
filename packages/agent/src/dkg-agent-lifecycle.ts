@@ -601,9 +601,11 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { peekFinalizedAuthorityColdResolution } from
+  './finalized-authority-cold-resolution.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -661,6 +663,8 @@ import {
   type SyncPeerResolution,
 } from './dkg-agent-cg-resolve.js';
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
+import { isCanonicalAuthoritativeContextGraphId } from
+  './context-graph-binding-state.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -711,6 +715,7 @@ import {
 import {
   activatePersistedContextGraphSubscription as activatePersistedContextGraphSubscriptionTransaction,
   recoverDeferredContextGraphSubscriptionAuthorities,
+  type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
 } from './context-graph-subscription-authority-recovery.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
@@ -2117,6 +2122,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
+    // stop() aborts detached cold authority flights; a restarted agent admits
+    // new ones (the runtime is created lazily on first use otherwise).
+    peekFinalizedAuthorityColdResolution(this)?.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
@@ -2469,7 +2477,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // error, so private/curated/unregistered CGs remain denied.
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig, {
       isContextGraphPublic: (contextGraphId: string) =>
-        this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        withRpcUsageSite(
+          CG_AUTH_RPC_SITES.remoteQuery,
+          () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        ),
     });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
@@ -4281,6 +4292,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
       this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
     }
+    // Fairness state belongs to this exact recurring owner. Recreating the
+    // runtime resets it; no scheduler cursor leaks into durable subscription
+    // state or across lifecycle generations.
+    const authorityRecoveryColdCursor: DeferredContextGraphSubscriptionAuthorityRecoveryCursor = {};
     const authorityRecovery = new CoalescingRecurringTask({
         retryIntervalMs: 30_000,
         requestWhileRunning: 'drop',
@@ -4288,7 +4303,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await withOwnedRpcRequestContext({
             requestClass: 'background',
             signal,
-          }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(signal));
+          }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(
+            signal,
+            authorityRecoveryColdCursor,
+          ));
           return this.getContextGraphSubscriptionRehydrationStatus()
             ?.dormantReasons.authorityUnavailable.length
             ? 'rearm'
@@ -8889,9 +8907,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
 
-    const authority = await this.resolveContextGraphReadAuthority(contextGraphId, {
-      allowSubscriptionFallback: false,
-    }).catch(() => ({ outcome: 'unavailable' as const }));
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.joinResume,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, {
+        allowSubscriptionFallback: false,
+      }),
+    ).catch(() => ({ outcome: 'unavailable' as const }));
     if (authority.outcome !== 'allowed') {
       this.log.warn(
         ctx,
@@ -9028,15 +9049,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         let confirmedOnChainId: string | undefined;
         let confirmedOnChainHash: string | undefined;
+        let invalidOnChainId = false;
         if (registrationResult.type === 'bindings') {
           for (const row of registrationResult.bindings) {
             const predicate = row['predicate'];
             const value = stripLiteral(row['value'] ?? '');
-            if (predicate === onChainIdPredicate && /^\d+$/.test(value)) {
-              try {
-                if (BigInt(value) > 0n) confirmedOnChainId = value;
-              } catch {
-                // Ignore malformed or out-of-domain metadata fail-closed.
+            if (predicate === onChainIdPredicate) {
+              if (isCanonicalAuthoritativeContextGraphId(value)) {
+                confirmedOnChainId = value;
+              } else {
+                invalidOnChainId = true;
               }
             } else if (
               predicate === onChainHashPredicate
@@ -9045,6 +9067,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               confirmedOnChainHash = value.toLowerCase();
             }
           }
+        }
+        if (invalidOnChainId) {
+          confirmedOnChainId = undefined;
+          confirmedOnChainHash = undefined;
         }
 
         let current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
@@ -10223,6 +10249,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async retryUnavailableContextGraphSubscriptionAuthorities(
     this: DKGAgent,
     signal: AbortSignal,
+    coldCursor: DeferredContextGraphSubscriptionAuthorityRecoveryCursor = {},
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     const isCurrentRetry = (): boolean => (
@@ -10236,6 +10263,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dormancyById: this.contextGraphSubscriptionDormancyById,
       persistRevisions: this.contextGraphSubscriptionPersistRevisions,
       subscriptions: this.subscribedContextGraphs,
+      coldCursor,
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
       isCurrent: isCurrentRetry,
       touchStatus: () => {
@@ -10250,10 +10278,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       clearStatus: (contextGraphId) => {
         this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
       },
-      resolveAuthority: (contextGraphId, retrySignal) => (
-        this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+      resolveAuthority: (row, retrySignal) => (
+        this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
           signal: retrySignal,
+          durableSubscriptionBinding: {
+            contextGraphId: row.id,
+            onChainId: row.onChainId,
+            onChainHash: row.onChainHash,
+          },
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,
@@ -10388,9 +10421,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         continue;
       }
 
+      const candidateRevision = this.contextGraphSubscriptionPersistRevisions
+        .get(contextGraphId) ?? 0;
+      const candidateBinding = {
+        id: row.id,
+        onChainId: row.onChainId,
+        onChainHash: row.onChainHash,
+      };
+
       const authority = await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
         allowSubscriptionFallback: false,
         signal,
+        durableSubscriptionBinding: {
+          contextGraphId: row.id,
+          onChainId: row.onChainId,
+          onChainHash: row.onChainHash,
+        },
       }).catch(() => ({
         outcome: 'unavailable' as const,
         source: 'legacy-local' as const,
@@ -10431,11 +10477,67 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
         continue;
       }
+      if (
+        !this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        || this.contextGraphSubscriptionDormancyById.get(contextGraphId) !== 'activationCap'
+      ) {
+        continue;
+      }
+      if (this.subscribedContextGraphs.has(contextGraphId)) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        continue;
+      }
+      if (
+        (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          !== candidateRevision
+        || freshRow.id !== candidateBinding.id
+        || freshRow.onChainId !== candidateBinding.onChainId
+        || freshRow.onChainHash !== candidateBinding.onChainHash
+      ) {
+        // Authority belongs to the exact row snapshot that preceded the chain
+        // read. Keep the candidate pending and retry its new generation rather
+        // than activating a replacement under stale authority.
+        touchStatus();
+        continue;
+      }
       row = freshRow;
+      const healedOnChainId = authority.onChainId?.toString();
+      const isCurrentPromotion = (subscription: ContextGraphSub): boolean => (
+        this.started
+        && runtime.owns(signal)
+        && this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        && this.contextGraphSubscriptionDormancyById.get(contextGraphId) === 'activationCap'
+        && (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          === candidateRevision
+        && this.subscribedContextGraphs.get(contextGraphId) === subscription
+      );
 
       try {
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
+          onChainId: healedOnChainId,
           updateRehydrationStatus: false,
+          prepare: async (subscription) => {
+            if (!isCurrentPromotion(subscription)) {
+              throw new Error('Persisted subscription promotion became stale');
+            }
+            if (healedOnChainId !== undefined && healedOnChainId !== row.onChainId) {
+              // A cold or strict finalized-index read repaired the binding.
+              // Commit it before responsibility, sync, or gossip effects can
+              // become visible so a crash cannot restore the stale value.
+              await this.persistContextGraphSubscriptionStrict(
+                row.id,
+                subscription,
+                row.syncScoped,
+                () => isCurrentPromotion(subscription),
+              );
+            }
+            if (!isCurrentPromotion(subscription)) {
+              throw new Error('Persisted subscription promotion became stale');
+            }
+            await this.reconcileRfc64CatalogResponsibilityV1(row.id);
+          },
+          isCurrent: isCurrentPromotion,
         });
       } catch (error) {
         // Keep the durable row pending and retain its activation-cap dormancy;
@@ -10700,7 +10802,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // resolver subsequently returns `allowed`.
         const readAuthority = await this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
-          signal: AbortSignal.timeout(CHAIN_POLICY_READ_TIMEOUT_MS),
+          signal: AbortSignal.timeout(chainAuthorityReadBudgetsOf(this).requestTimeoutMs),
+          durableSubscriptionBinding: {
+            contextGraphId: row.id,
+            onChainId: row.onChainId,
+            onChainHash: row.onChainHash,
+          },
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,
@@ -10731,8 +10838,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         activatedRows.push(row);
         if (!row.coreHosted) activatedUserRows += 1;
         const restorePendingMeta = restrictedApprovalBootstrap;
+        const healedOnChainId = readAuthority.outcome === 'allowed'
+          ? readAuthority.onChainId?.toString()
+          : undefined;
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           restorePendingMeta,
+          onChainId: healedOnChainId,
+          ...(healedOnChainId !== undefined && healedOnChainId !== row.onChainId
+            ? {
+                // Persist a strict finalized-index repair before restoring any
+                // sync or gossip side effect. A crash can therefore never
+                // reactivate the same malformed/unbound durable id.
+                prepare: async (subscription) => {
+                  await this.persistContextGraphSubscriptionStrict(
+                    row.id,
+                    subscription,
+                    row.syncScoped,
+                  );
+                },
+              }
+            : {}),
         });
         if (
           !row.coreHosted
@@ -11035,12 +11160,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }
+    // Whether to host, sync, or serve SWM for a selected graph is a read-only
+    // authorization decision: the finalized, name-bound snapshot answers it
+    // whenever the index has one, and only a graph the index has no snapshot
+    // for, or a private roster the reader could not serve fresh, reaches the
+    // current-state read. Encryption and roster mutations keep their live
+    // reads elsewhere.
     return opts.readAuthority !== undefined
       ? opts.readAuthority.outcome === 'allowed'
-      : this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: opts.callerAgentAddress,
-          allowSubscriptionFallback: false,
-        });
+      : withRpcUsageSite(
+          CG_AUTH_RPC_SITES.sharedMemoryRead,
+          () => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: opts.callerAgentAddress,
+            allowSubscriptionFallback: false,
+            authorityReadMode: 'finalized-index-or-live',
+          }),
+        );
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,

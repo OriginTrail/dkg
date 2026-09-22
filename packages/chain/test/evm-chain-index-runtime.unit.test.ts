@@ -228,8 +228,9 @@ function harness(options?: {
 describe('createEvmChainIndexRuntime', () => {
   it('wires the production idle budget to the anchor ceiling at large T', async () => {
     // T=150s: Hub liveness accepts 450s, while the authority anchor caps at
-    // 300s. Two thirds of the binding 300s bound is a 200s idle delay. A
-    // deleted budget would stay at 150s; min->max would widen to 300s.
+    // 300s. One third of the binding 300s bound is held as static headroom,
+    // leaving a useful 200s idle delay even though T is half the capped budget.
+    // A deleted budget stays at 150s; using the Hub bound widens to 300s.
     const h = harness({
       intervalMs: 150_000,
       deploymentBlockNumber: 1_000,

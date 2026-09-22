@@ -91,6 +91,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('preserves every registered-authority reason without adding caller retry policy', async () => {
     const cases = [
       'chain-name-binding-unavailable',
+      'authority-circuit-open',
       'local-chain-binding-unavailable',
       'local-existence-unavailable',
       'chain-access-policy-unavailable',
