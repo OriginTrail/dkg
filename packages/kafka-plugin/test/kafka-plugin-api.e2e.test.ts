@@ -704,7 +704,12 @@ describe('kafka-plugin live daemon E2E — extension', () => {
     expect(['finalized', 'completed']).toContain(final.state);
     expect(final.ual).toBeTruthy();
     const get = await authed(daemon!, 'GET', `/api/kafka/streams/${encodeURIComponent(final.ual!)}`);
-    expect(get.status).toBe(200);
+    if (get.status !== 200) {
+      throw new Error(
+        `GET extension stream: ${get.status} ${await get.text()}\n` +
+        await topologyLogTails(daemon!, core!),
+      );
+    }
     const ka = await get.json();
     expect(ka['@type']).toBe('dkg-streams:KafkaStream');
     expect(ka['@context']).toMatchObject({

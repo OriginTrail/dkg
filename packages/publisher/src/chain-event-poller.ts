@@ -274,12 +274,18 @@ export class ChainEventPoller {
         name: 'publish',
         enabled: () => this.publishHandler.hasPendingPublishes,
         eventTypes: () => ['KCCreated'],
-        requiresFullHistory: () => this.publishHandler.hasRestoredPendingPublishes,
-        canUseLegacyAggregateCursor: () => this.publishHandler.hasRestoredPendingPublishes,
-        // A live publish can be activated after its KCCreated event is already
-        // beyond the generic live-tail window on fast chains. Scan one full RPC
-        // page on activation without falling back to a genesis backfill.
-        liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
+        cursorStrategy: () => this.publishHandler.hasRestoredPendingPublishes
+          ? { kind: 'full-history', legacyAggregateCursor: true }
+          : {
+            kind: 'live-tail',
+            // A live publish has no pre-restart history to recover, so it must
+            // stay out of the shared legacy cursor.
+            legacyAggregateCursor: false,
+            // A live publish can be activated after its KCCreated event is
+            // beyond the generic live-tail window on fast chains. Scan one
+            // full RPC page on activation without a genesis backfill.
+            liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
+          },
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleBatchCreated(event, ctx, signal),
       },
@@ -287,14 +293,18 @@ export class ChainEventPoller {
         name: 'allocatorReconcile',
         enabled: () => !!this.onKnowledgeAssetCreated,
         eventTypes: () => ['KCCreated'],
-        requiresFullHistory: () => true,
-        canUseLegacyAggregateCursor: () => false,
+        cursorStrategy: () => ({
+          kind: 'full-history',
+          // A shared cursor that other live-tail lanes advanced near head would
+          // skip the genesis backfill this lane exists to perform.
+          legacyAggregateCursor: false,
+          onBackfillFromGenesis: (ctx) => {
+            if (!this.onKnowledgeAssetCreated) return;
+            this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');
+          },
+        }),
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleKACreated(event, ctx, signal),
-        onBackfillFromGenesis: (ctx) => {
-          if (!this.onKnowledgeAssetCreated) return;
-          this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');
-        },
       },
       {
         name: 'contextGraphDiscovery',
@@ -303,8 +313,7 @@ export class ChainEventPoller {
         // This poller is the low-latency live tail for new context graphs.
         // Historical recovery is handled by the daemon's
         // discoverContextGraphsFromChain scan and incremental watermark.
-        requiresFullHistory: () => false,
-        canUseLegacyAggregateCursor: () => true,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleContextGraphCreated(event, ctx, signal),
       },
@@ -312,7 +321,7 @@ export class ChainEventPoller {
         name: 'vmReconcile',
         enabled: () => !!this.onKARegisteredToContextGraph,
         eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleKARegistered(event, ctx, signal),
       },
@@ -320,7 +329,7 @@ export class ChainEventPoller {
         name: 'collectionUpdates',
         enabled: () => !!this.onCollectionUpdated,
         eventTypes: () => ['KnowledgeAssetUpdated'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleCollectionUpdated(event, ctx, signal),
       },
@@ -328,7 +337,7 @@ export class ChainEventPoller {
         name: 'allowListUpdates',
         enabled: () => !!this.onAllowListUpdated,
         eventTypes: () => ['AllowListUpdated'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleAllowListUpdated(event, ctx, signal),
       },
@@ -336,7 +345,7 @@ export class ChainEventPoller {
         name: 'profileEvents',
         enabled: () => !!this.onProfileEvent,
         eventTypes: () => ['ProfileCreated', 'ProfileUpdated'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleProfileEvent(event, ctx, signal),
       },
