@@ -13,7 +13,7 @@ import { LANE_JOBS, change, gateNeeds, pullRequestPlan, succeeded } from './ci-p
 // The aggregate gates: which job results each plan shape accepts or rejects.
 
 test('a build-only plan requires the shared build and nothing else', () => {
-  const plan = pullRequestPlan([change('bench/store-read-latency.bench.ts')]);
+  const plan = pullRequestPlan([change('tools/observability/lib/w1.mjs')]);
   const needs = gateNeeds(succeeded('build'));
   assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan, needs }), []);
   assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan: JSON.parse(githubOutputsForPlan(plan).plan_json), needs }), []);

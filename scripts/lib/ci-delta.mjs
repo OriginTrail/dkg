@@ -476,16 +476,12 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'RFC-64 persistence harness runs in the agent lifecycle jobs',
   },
   {
-    // Root-level devnet modules (rfc64-runtime-*.mts, suites.json) are
-    // imported by agent tests and by the evidence bootstrap.
-    pattern: /^devnet\/[^/]+$/,
-    lanes: ['tornado_agent'],
-    reason: 'shared devnet runtime modules are imported by agent tests',
-  },
-  {
+    // Devnet harnesses are built on the agent, and agent tests, fixtures and
+    // packages/agent/devnet import several of them (shared rfc64-runtime-*
+    // modules, the Gate 0 evidence helpers, the Gate 2 runtime hooks).
     pattern: /^devnet\//,
-    lanes: [],
-    reason: 'manual devnet suites are checked by the shared build job only',
+    lanes: ['tornado_agent'],
+    reason: 'devnet harnesses are imported by agent tests and fixtures',
   },
   {
     pattern: /^test-systems\//,
@@ -493,9 +489,15 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'storage conformance runs in the Blazegraph lane',
   },
   {
-    pattern: /^(?:bench|tools)\//,
+    // The CLI benchmark tests import the esbench suites and their support.
+    pattern: /^bench\//,
+    lanes: ['bura_cli'],
+    reason: 'benchmarks are imported by the CLI benchmark tests',
+  },
+  {
+    pattern: /^tools\//,
     lanes: [],
-    reason: 'benchmarks and operator tools are checked by the shared build job only',
+    reason: 'operator tools are checked by the shared build job only',
   },
   {
     // Remaining .github inputs: workflows outside the CI control plane,

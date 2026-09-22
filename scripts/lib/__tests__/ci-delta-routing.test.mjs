@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
-import { CI_LANES } from '../ci-delta.mjs';
+import { CI_LANES, WORKSPACE_OWNING_LANES } from '../ci-delta.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
-import { change, pullRequestPlan, selectedLanes } from './ci-plan-fixtures.mjs';
+import { REPO_ROOT, change, pullRequestPlan, selectedLanes } from './ci-plan-fixtures.mjs';
 
 // Path routing: what individual changed paths select on pull requests -
 // git statuses, workspace manifests, repository support areas and the
@@ -121,8 +123,9 @@ test('repository support paths route to the lanes that execute them', () => {
     ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent']],
     ['devnet/suites.json', ['tornado_agent']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
-    ['devnet/v10-stress/automated.test.ts', []],
-    ['bench/store-read-latency.bench.ts', []],
+    ['devnet/v10-stress/automated.test.ts', ['tornado_agent']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent']],
+    ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
     ['.github/oxlint-baseline.json', []],
     ['.github/CODEOWNERS', []],
@@ -136,6 +139,39 @@ test('repository support paths route to the lanes that execute them', () => {
     assert.deepEqual(selectedLanes(plan), expected, filePath);
     assert.deepEqual(plan.evmScopes, [], filePath);
   }
+});
+
+test('support routes include every package lane that imports from them', () => {
+  // A package file importing something outside the workspaces (bench/,
+  // devnet/, test-systems/, tools/) makes that package's lane a CI consumer
+  // of it, so a change there must select the lane; full CI covers the rest.
+  const importPattern = /(?:\bfrom\s*|\bimport\s*\(\s*)['"]((?:\.\.\/)+[^'"]+)['"]/g;
+  const skipped = new Set(['node_modules', 'dist', 'dist-ui', 'coverage']);
+  const sourceFiles = (directory) => fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true })
+    .flatMap((entry) => {
+      if (skipped.has(entry.name)) return [];
+      const relative = path.posix.join(directory, entry.name);
+      if (entry.isDirectory()) return sourceFiles(relative);
+      return /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
+    });
+  let checked = 0;
+  for (const [workspace, owningLanes] of Object.entries(WORKSPACE_OWNING_LANES)) {
+    if (!workspace.startsWith('packages/')) continue;
+    for (const file of sourceFiles(workspace)) {
+      const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+      for (const [, specifier] of source.matchAll(importPattern)) {
+        const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
+        if (target.startsWith('packages/') || target.startsWith('../')) continue;
+        const plan = pullRequestPlan([change(target)]);
+        checked++;
+        if (plan.mode === 'full') continue;
+        for (const lane of owningLanes) {
+          assert.ok(plan.lanes[lane], `${file} imports ${target}, so changing it must select ${lane}`);
+        }
+      }
+    }
+  }
+  assert.ok(checked > 0, 'packages import repository support files (bench/, devnet/)');
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
