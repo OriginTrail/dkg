@@ -338,7 +338,7 @@ const MAX_REPORTED_FILES = 200;
 // so a fifth entry hard-fails every workflow that runs the planner. The
 // manifest names the test files the chain scope RUNS; the patterns below name
 // the SOURCE changes that must trigger it. Drift between the two copies is
-// guarded from the test side in scripts/lib/__tests__/ci-delta.test.mjs.
+// guarded from the test side in scripts/lib/__tests__/ci-delta-routing.test.mjs.
 const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/src\/ui\/web3\/(?:identityWalletActions|browserWalletTransaction)\.[cm]?[jt]sx?/,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,

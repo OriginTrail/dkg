@@ -39,9 +39,11 @@ The planner reads `git diff --name-status -z`, so spaces and other shell-hostile
 file names cannot alter the decision. For a modified workspace manifest it also
 reads both versions with `git cat-file blob` from the candidate checkout (data
 only; nothing from the candidate is executed); any read or parse failure keeps
-full CI. Its routing table lives in
-`scripts/lib/ci-delta.mjs` and is covered by table/snapshot-style tests in
-`scripts/lib/__tests__/ci-delta.test.mjs`.
+full CI. Its routing tables live in
+`scripts/lib/ci-delta.mjs` and are covered by table/snapshot-style tests in
+`scripts/lib/__tests__/`: `ci-delta.test.mjs` (planner policy),
+`ci-delta-routing.test.mjs` (path routing), `ci-controller.test.mjs` (trusted
+controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
 
 ## Reliability controls
 
@@ -182,6 +184,7 @@ and test variance still affect elapsed time.
 ## Local verification
 
 ```sh
-node --test scripts/lib/__tests__/ci-delta.test.mjs
+node --test scripts/lib/__tests__/ci-delta.test.mjs scripts/lib/__tests__/ci-delta-routing.test.mjs \
+  scripts/lib/__tests__/ci-controller.test.mjs scripts/lib/__tests__/ci-results.test.mjs
 actionlint .github/workflows/ci.yml .github/workflows/evm-integration.yml
 ```
