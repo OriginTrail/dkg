@@ -662,7 +662,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       const page = await this.lookupChanges(from, to, readOptions);
       if (page.length > 0) {
         out.push(...page);
-        need -= new Set(page.map((record) => record.seq)).size;
+        need -= distinctSeqCoverage(page);
         this.adoptDurableSeq(page[page.length - 1].seq);
       }
       from = to + 1;
@@ -1069,6 +1069,19 @@ export function changelogSchemaQuad(): Quad {
     object: `"${CHANGELOG_SCHEMA_VERSION}"^^<${XSD_INTEGER}>`,
     graph: CHANGELOG_GRAPH,
   };
+}
+
+/**
+ * Distinct seqs one page covers — the load-bearing count behind
+ * {@link ChangelogStore.readChanges}. A page keeps widening until it covers
+ * `limit` distinct seqs or the log is drained, because the responder reads a
+ * page shorter than `limit` as "log drained" and advances the requester past
+ * everything it did not receive. Duplicate rows for one seq (two writers across
+ * a release swap) count once; a missing seq (a hole) is what the next window
+ * makes up for. Never relax this to the row count.
+ */
+function distinctSeqCoverage(page: readonly ChangeRecord[]): number {
+  return new Set(page.map((record) => record.seq)).size;
 }
 
 /** Append well-formed `{ seq, graph, op }` rows from a SELECT binding set, skipping malformed rows. */
