@@ -9038,15 +9038,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         let confirmedOnChainId: string | undefined;
         let confirmedOnChainHash: string | undefined;
+        let invalidOnChainId = false;
         if (registrationResult.type === 'bindings') {
           for (const row of registrationResult.bindings) {
             const predicate = row['predicate'];
             const value = stripLiteral(row['value'] ?? '');
-            if (
-              predicate === onChainIdPredicate
-              && isCanonicalAuthoritativeContextGraphId(value)
-            ) {
-              confirmedOnChainId = value;
+            if (predicate === onChainIdPredicate) {
+              if (isCanonicalAuthoritativeContextGraphId(value)) {
+                confirmedOnChainId = value;
+              } else {
+                invalidOnChainId = true;
+              }
             } else if (
               predicate === onChainHashPredicate
               && /^0x[0-9a-fA-F]{64}$/.test(value)
@@ -9054,6 +9056,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               confirmedOnChainHash = value.toLowerCase();
             }
           }
+        }
+        if (invalidOnChainId) {
+          confirmedOnChainId = undefined;
+          confirmedOnChainHash = undefined;
         }
 
         let current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
@@ -10232,7 +10238,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async retryUnavailableContextGraphSubscriptionAuthorities(
     this: DKGAgent,
     signal: AbortSignal,
-    coldCursor: DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
+    coldCursor: DeferredContextGraphSubscriptionAuthorityRecoveryCursor = {},
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     const isCurrentRetry = (): boolean => (

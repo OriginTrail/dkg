@@ -1209,16 +1209,20 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           metadataBootstrap: 'not-needed',
           onChainId: 8n,
         });
+      const staleDuringRepairNetworkEffects = vi.fn();
       staleDuringRepair.agent.persistContextGraphSubscriptionStrict
         .mockImplementation(async (contextGraphId: string) => {
-          staleDuringRepair.agent.contextGraphSubscriptionDormancyById
-            .set(contextGraphId, 'authorityUnavailable');
+          await Promise.resolve();
+          staleDuringRepair.agent.contextGraphSubscriptionPersistRevisions
+            .set(contextGraphId, 1);
         });
       staleDuringRepair.agent.activatePersistedContextGraphSubscriptionRecord
         .mockImplementation(async (row: any, options: any) => {
           const subscription = { subscribed: true, onChainId: options.onChainId };
           staleDuringRepair.agent.subscribedContextGraphs.set(row.id, subscription);
           await options.prepare(subscription);
+          if (!options.isCurrent(subscription)) throw new Error('stale activation');
+          staleDuringRepairNetworkEffects();
           return subscription;
         });
       await expect(
@@ -1231,6 +1235,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         .toHaveBeenCalledOnce();
       expect(staleDuringRepair.agent.reconcileRfc64CatalogResponsibilityV1)
         .not.toHaveBeenCalled();
+      expect(staleDuringRepairNetworkEffects).not.toHaveBeenCalled();
+      expect(staleDuringRepair.agent.contextGraphSubscriptionRehydrationPendingIds)
+        .toContain('stale-during-repair');
       expect(staleDuringRepair.agent.log.warn).toHaveBeenCalledWith(
         expect.anything(),
         expect.stringContaining('became stale'),

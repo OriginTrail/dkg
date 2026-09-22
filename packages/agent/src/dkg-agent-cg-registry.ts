@@ -380,6 +380,7 @@ import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  isCanonicalAuthoritativeContextGraphId,
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -723,10 +724,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: ContextGraphAuthorityReadOptions & Readonly<{
       onRpcRead?: () => void;
       /** Fresh durable identities used only by restart repair before install. */
-      durableBindingHints?: ReadonlyMap<string, Readonly<{
-        onChainId?: string;
-        onChainHash?: string;
-      }>>;
+      durableBindingHints?: ReadonlyMap<
+        string,
+        Readonly<DurableContextGraphSubscriptionBinding>
+      >;
     }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
     const { onRpcRead, durableBindingHints, ...chainReadOptions } = options;
@@ -736,7 +737,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       const localId = canonicalTarget?.localId ?? contextGraphId;
       const subscription = canonicalTarget?.subscription
         ?? this.subscribedContextGraphs.get(localId);
-      const durableHint = durableBindingHints?.get(contextGraphId);
+      const hintedBinding = durableBindingHints?.get(contextGraphId);
+      const durableHint = hintedBinding?.contextGraphId === contextGraphId
+        ? hintedBinding
+        : undefined;
       const persistedNameHash = subscription?.onChainHash ?? durableHint?.onChainHash;
       const expectedNameHash = canonicalTarget?.nameHash
         ?? (persistedNameHash === undefined
@@ -1135,6 +1139,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
                 ...(strictFinalizedDurableBindingRepair && durableBinding !== undefined
                   ? {
                       durableBindingHints: new Map([[contextGraphId, {
+                        contextGraphId,
                         onChainId: durableBinding.onChainId,
                         onChainHash: durableBinding.onChainHash,
                       }]]),
@@ -1301,7 +1306,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const value = result.bindings[0]?.['id'];
     if (typeof value !== 'string') return null;
     const onChainId = value.replace(/^"|"$/g, '');
-    return isCanonicalPositiveContextGraphId(onChainId)
+    return isCanonicalAuthoritativeContextGraphId(onChainId)
       ? { onChainId, provenance: 'ontology' }
       : null;
   }

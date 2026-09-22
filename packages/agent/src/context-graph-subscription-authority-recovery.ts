@@ -12,12 +12,28 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
-const MAX_COLD_AUTHORITY_ATTEMPTS_PER_PASS = 1;
 
 function hasCanonicalDurableBinding(
   row: ContextGraphSubscriptionRecord | null,
 ): boolean {
   return isCanonicalAuthoritativeContextGraphId(row?.onChainId);
+}
+
+function selectNextColdCandidate<T extends Readonly<{ contextGraphId: string }>>(
+  candidates: readonly T[],
+  afterContextGraphId: string | undefined,
+): T | undefined {
+  if (candidates.length === 0) return undefined;
+  if (afterContextGraphId === undefined) return candidates[0];
+  return candidates.find(({ contextGraphId }) => contextGraphId > afterContextGraphId)
+    ?? candidates[0];
+}
+
+function advanceColdCursor(
+  _previous: string | undefined,
+  attemptedContextGraphId: string,
+): string {
+  return attemptedContextGraphId;
 }
 
 export interface DeferredContextGraphSubscriptionAuthorityRecoveryCursor {
@@ -168,20 +184,16 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   const coldCandidates = candidateSnapshots
     .filter(({ candidate }) => !hasCanonicalDurableBinding(candidate))
     .sort(byId);
-  const afterContextGraphId = ports.coldCursor?.afterContextGraphId;
-  const coldStartIndex = afterContextGraphId === undefined
-    ? 0
-    : Math.max(
-      0,
-      coldCandidates.findIndex(({ contextGraphId }) => contextGraphId > afterContextGraphId),
-    );
-  const roundRobinColdCandidates = coldCandidates.length === 0
-    ? []
-    : [
-        ...coldCandidates.slice(coldStartIndex),
-        ...coldCandidates.slice(0, coldStartIndex),
-      ];
-  const candidates = [...boundCandidates, ...roundRobinColdCandidates];
+  const coldCandidate = selectNextColdCandidate(
+    coldCandidates,
+    ports.coldCursor?.afterContextGraphId,
+  );
+  // Bound work is deterministic and immediately committable. At most one cold
+  // lookup follows per pass; the owner-held cursor chooses a different row on
+  // later passes without building an inert rotated tail.
+  const candidates = coldCandidate === undefined
+    ? boundCandidates
+    : [...boundCandidates, coldCandidate];
   if (!ports.isCurrent()) return;
 
   // Every discovery performs a fail-closed live-authority read whose 1s
@@ -189,7 +201,6 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
   // and commit one candidate at a time: distinct graphs cannot share a flight,
   // and collecting every result before activation would make a ready bound row
   // wait behind later cold rows for up to 120s each.
-  let coldAttempts = 0;
   for (const { contextGraphId, revision, candidate } of candidates) {
     if (
       !ports.isCurrent()
@@ -204,11 +215,6 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       continue;
     }
     const coldCandidate = !hasCanonicalDurableBinding(candidate);
-    if (
-      coldCandidate
-      && coldAttempts >= MAX_COLD_AUTHORITY_ATTEMPTS_PER_PASS
-    ) continue;
-    if (coldCandidate) coldAttempts += 1;
 
     const authority = await ports.resolveAuthority(candidate, signal);
     if (!ports.isCurrent()) return;
@@ -217,7 +223,10 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
     // starve later rows across recurring passes. Bound rows are attempted
     // first and do not consume this per-pass cold budget.
     if (coldCandidate && ports.coldCursor !== undefined) {
-      ports.coldCursor.afterContextGraphId = contextGraphId;
+      ports.coldCursor.afterContextGraphId = advanceColdCursor(
+        ports.coldCursor.afterContextGraphId,
+        contextGraphId,
+      );
     }
     if (
       ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'

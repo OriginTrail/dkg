@@ -414,6 +414,23 @@ describe('Context Graph registration resolution deadlines', () => {
     expect(alreadyInvalid).toEqual({ onChainId: overflow });
   });
 
+  it.each([
+    ['out-of-uint256', (1n << 256n).toString(10)],
+    ['oversized decimal', '9'.repeat(100_000)],
+  ] as const)('ignores an %s ontology binding without throwing', async (_case, invalidId) => {
+    const fixture = selectedFixture();
+    vi.spyOn(fixture.agent, 'resolveCurrentNameHashContextGraphBinding')
+      .mockResolvedValue(undefined);
+    fixture.query.mockResolvedValueOnce({
+      type: 'bindings',
+      bindings: [{ id: `"${invalidId}"` }],
+    });
+
+    await expect(fixture.agent.resolveContextGraphOnChainIdBinding(LOCAL_ID))
+      .resolves.toBeNull();
+    expect(fixture.subscription.onChainId).toBeUndefined();
+  });
+
   it('keeps the hot deadline for an existing reverse binding candidate', async () => {
     vi.useFakeTimers();
     try {

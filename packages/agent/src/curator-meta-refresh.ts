@@ -244,15 +244,17 @@ function applyCuratorRegistrationBinding(
   const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
   let onChainId: string | undefined;
   let onChainHash: string | undefined;
+  let invalidOnChainId = false;
 
   for (const quad of snapshot) {
     if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
     const value = stripLiteral(quad.object);
-    if (
-      quad.predicate === onChainIdPredicate
-      && isCanonicalAuthoritativeContextGraphId(value)
-    ) {
-      onChainId = value;
+    if (quad.predicate === onChainIdPredicate) {
+      if (isCanonicalAuthoritativeContextGraphId(value)) {
+        onChainId = value;
+      } else {
+        invalidOnChainId = true;
+      }
     } else if (
       quad.predicate === onChainHashPredicate
       && /^0x[0-9a-fA-F]{64}$/.test(value)
@@ -260,6 +262,11 @@ function applyCuratorRegistrationBinding(
       onChainHash = value.toLowerCase();
     }
   }
+
+  // Treat the numeric slot and commitment as one registration claim. A
+  // malformed or out-of-uint256 slot must not leave behind a hash-only durable
+  // binding or turn untrusted metadata into a strict-writer exception.
+  if (invalidOnChainId) return;
 
   let changed = false;
   if (onChainId && sub.onChainId !== onChainId) {

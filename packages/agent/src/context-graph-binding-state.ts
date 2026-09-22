@@ -73,6 +73,10 @@ export function isCanonicalAuthoritativeContextGraphId(
   value: unknown,
 ): value is string {
   return isCanonicalPositiveContextGraphId(value)
+    // MaxUint256 has 78 decimal digits. Bound untrusted metadata before
+    // constructing a BigInt so an enormous all-digit value cannot monopolize
+    // the event loop or allocate proportionally to attacker-controlled input.
+    && value.length <= 78
     && BigInt(value) <= ethers.MaxUint256;
 }
 

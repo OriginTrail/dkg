@@ -1208,6 +1208,60 @@ describe('Context Graph subscription authority retry', () => {
     expect(retry).toHaveBeenCalledTimes(2);
   });
 
+  it('retains one cold fairness cursor across real recurring-owner passes', async () => {
+    const ids = ['a-recurring-cold', 'b-recurring-cold'];
+    const rows = new Map<string, any>(ids.map((id) => [id, {
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]));
+    agent = await DKGAgent.create({
+      name: 'RecurringAuthorityFairCursor',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      syncReconcilerEnabled: false,
+    });
+    const attempts: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (ids.includes(contextGraphId)) attempts.push(contextGraphId);
+        return {
+          outcome: 'unavailable',
+          source: 'registered-chain',
+          reason: 'temporary-authority-outage',
+          metadataBootstrap: 'eligible',
+        } as const;
+      });
+    const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
+    vi.useFakeTimers();
+
+    await agent.start();
+    expect(attempts).toEqual(ids);
+    attempts.length = 0;
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toEqual([ids[0]]);
+    expect(retry).toHaveBeenCalledOnce();
+    const firstCursor = retry.mock.calls[0]?.[1];
+    expect(firstCursor).toEqual({ afterContextGraphId: ids[0] });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toEqual(ids);
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(retry.mock.calls[1]?.[1]).toBe(firstCursor);
+    expect(firstCursor).toEqual({ afterContextGraphId: ids[1] });
+  });
+
   it('retires recurring recovery when unavailable authority becomes denied', async () => {
     const contextGraphId = 'persisted-authority-retry-denied';
     const rows = new Map<string, any>([[contextGraphId, {
