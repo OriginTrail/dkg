@@ -135,6 +135,55 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   );
 });
 
+test('workflow controller invocations stay within the current and pinned parsers', (t) => {
+  // Until a rotation lands, workflows run the pinned controller with this
+  // branch's wiring; afterwards they run the current one. Both strict parsers
+  // must accept every flag, and the manifest reader inputs must be exported
+  // before planning.
+  const parserOptions = (source) => new Set(
+    [...source.matchAll(/^\s+'?([a-z][a-z-]*)'?: \{ type:/gm)].map(([, option]) => option),
+  );
+  const scripts = ['plan-ci', 'assert-ci-results'];
+  const current = Object.fromEntries(scripts.map((script) => [
+    script,
+    parserOptions(fs.readFileSync(path.join(REPO_ROOT, `scripts/ci/${script}.mjs`), 'utf8')),
+  ]));
+  let pinned;
+  try {
+    pinned = Object.fromEntries(scripts.map((script) => [script, parserOptions(execFileSync('git', [
+      '-C', REPO_ROOT, 'cat-file', 'blob', `${TRUSTED_CI_CONTROLLER_SHA}:scripts/ci/${script}.mjs`,
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }))]));
+  } catch {
+    t.diagnostic('pinned controller revision is not in this checkout; checked the current parsers only');
+  }
+
+  let invocations = 0;
+  for (const name of ['ci.yml', 'evm-integration.yml']) {
+    const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', name), 'utf8'));
+    for (const { run = '' } of Object.values(jobs).flatMap((job) => job.steps ?? [])) {
+      for (const script of scripts) {
+        const at = run.indexOf(`node trusted-ci/scripts/ci/${script}.mjs`);
+        if (at === -1) continue;
+        invocations++;
+        const command = [];
+        for (const line of run.slice(at).split('\n')) {
+          command.push(line);
+          if (!line.trimEnd().endsWith('\\')) break;
+        }
+        for (const [, flag] of command.join('\n').matchAll(/(?:^|\s)--([a-z][a-z-]*)/g)) {
+          assert.ok(current[script].has(flag), `${name} passes --${flag}, which the current ${script}.mjs rejects`);
+          if (pinned) assert.ok(pinned[script].has(flag), `${name} passes --${flag}, which the pinned ${script}.mjs rejects`);
+        }
+        if (script === 'plan-ci') {
+          const exported = run.indexOf('export CI_CANDIDATE_REPO=candidate');
+          assert.ok(exported !== -1 && exported < at, `${name} must export the manifest reader inputs before planning`);
+        }
+      }
+    }
+  }
+  assert.equal(invocations, 4, 'one planner and one aggregate gate per workflow');
+});
+
 test('trusted planner and gates reject the all-skipped candidate-control attack', (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-trust-'));
   t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));

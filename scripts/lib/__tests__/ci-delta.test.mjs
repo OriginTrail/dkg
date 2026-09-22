@@ -13,6 +13,7 @@ import {
   githubOutputsForPlan,
   parseNameStatusZ,
   planCi,
+  renderPlanSummary,
 } from '../ci-delta.mjs';
 import { validatePrimaryResults } from '../ci-results.mjs';
 import {
@@ -434,6 +435,20 @@ test('GitHub outputs are booleans plus compact JSON matrices', () => {
   ]));
   assert.equal(abiOnlyOutputs.abi_freshness, 'true');
   assert.equal(abiOnlyOutputs.contracts, 'false');
+});
+
+test('the plan summary names build-only, docs-only and delta plans', () => {
+  const buildOnly = renderPlanSummary(pullRequestPlan([change('tools/observability/lib/w1.mjs')]));
+  assert.match(buildOnly, /^- Selected lanes: _none \(shared build checks only\)_$/m);
+  const docs = renderPlanSummary(pullRequestPlan([change('CHANGELOG.md')]));
+  assert.match(docs, /^- Selected lanes: _none_$/m);
+  assert.doesNotMatch(docs, /shared build checks/);
+  const delta = renderPlanSummary(pullRequestPlan([change('packages/network-sim/src/index.ts')]));
+  assert.match(delta, /^- Selected lanes: `kosava_supporting`$/m);
+  for (const summary of [buildOnly, docs, delta]) {
+    assert.match(summary, /^- Mode: \*\*(?:delta|docs-only)\*\*$/m);
+    assert.doesNotMatch(summary, /audit sample/i);
+  }
 });
 
 test('EPCIS capture/query edits require the live Blazegraph lane', () => {
