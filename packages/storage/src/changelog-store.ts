@@ -616,10 +616,15 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
    * cursor (`since >= head`) is answered from the in-memory head with no
    * storage read at all, like {@link changelogHead}.
    *
-   * The dense-seq invariant is verified per page: if the window is short (a
-   * marker went missing out-of-band), the exact range scan serves it instead —
-   * never a short page, because the responder reads `records < limit` as "log
-   * drained" and would advance the requester past unread changes.
+   * The dense-seq invariant is verified per page as distinct-seq coverage: every
+   * seq in the window must be present. A seq carried by two markers (two writer
+   * processes overlapping across an A/B release swap, each with its own
+   * in-memory counter) is served as-is — the responder folds per graph, and the
+   * range scan would return both rows too. If a seq is missing (a marker went
+   * out-of-band), the exact range scan serves the page instead — never a short
+   * page, because the responder reads `records < limit` as "log drained" and
+   * would advance the requester past unread changes. The fallback is tagged
+   * `<source>.holeFallback` so it is attributable in the slow-query log.
    */
   async readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]> {
     const since = Number.isFinite(sinceSeq) ? Math.max(0, Math.floor(sinceSeq)) : 0;
@@ -634,8 +639,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     if (since >= head) return [];
     const end = Math.min(head, since + cap);
     const page = await this.lookupChanges(since + 1, end, readOptions);
-    if (page.length === end - since) return page;
-    return this.scanChanges(since, cap, readOptions);
+    if (new Set(page.map((record) => record.seq)).size === end - since) return page;
+    return this.scanChanges(since, cap, {
+      ...readOptions,
+      source: `${readOptions.source}.holeFallback`,
+    });
   }
 
   /** Entries `fromSeq..toSeq` (inclusive) by direct IRI lookup, in seq order. */

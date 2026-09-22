@@ -399,6 +399,37 @@ describe('ChangelogStore — page reads are direct entry lookups (O(delta), neve
     expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
   });
 
+  it('a seq carried by two markers (writer overlap across a release swap) stays on the lookup path', async () => {
+    for (const g of [G1, G2, G3]) await log.insert([q(`${g}/s`, g)]);
+    // A second writer process seeded at head=2 appended its own seq 3 for another graph.
+    await base.insert([
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#seq', object: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: CHANGELOG_GRAPH },
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#graph', object: 'http://ex.org/twin', graph: CHANGELOG_GRAPH },
+      { subject: 'urn:dkg:changelog:e:3', predicate: 'urn:dkg:changelog#op', object: '"upsert"', graph: CHANGELOG_GRAPH },
+    ]);
+    spy.queryCalls.length = 0;
+    const page = await log.readChanges(0, 100);
+    expect(page.map((c) => c.seq)).toEqual([1, 2, 3, 3]);
+    expect(new Set(page.filter((c) => c.seq === 3).map((c) => c.graph))).toEqual(new Set([G3, 'http://ex.org/twin']));
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('tags the hole fallback scan so it is attributable in the slow-query log', async () => {
+    const sources: Array<string | undefined> = [];
+    const tap = new (class extends SpyStore {
+      override query(sparql: string, options?: QueryOptions) {
+        sources.push(options?.source);
+        return super.query(sparql, options);
+      }
+    })(base);
+    const tapped = new ChangelogStore(tap);
+    for (const g of [G1, G2, G3]) await tapped.insert([q(`${g}/s`, g)]);
+    await base.deleteByPattern({ subject: 'urn:dkg:changelog:e:2', graph: CHANGELOG_GRAPH });
+    sources.length = 0;
+    expect((await tapped.readChanges(0, 100, { source: 'sync.responder.readChanges' })).map((c) => c.seq)).toEqual([1, 3]);
+    expect(sources).toEqual(['sync.responder.readChanges', 'sync.responder.readChanges.holeFallback']);
+  });
+
   it('a disabled decorator keeps the passthrough scan semantics', async () => {
     const off = new ChangelogStore(spy, { enabled: false });
     await off.insert([q('http://ex.org/a', G1)]);
