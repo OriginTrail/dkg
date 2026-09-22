@@ -325,6 +325,43 @@ describe('Context Graph registration resolution deadlines', () => {
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
+  it('rejects invalid durable repair when an index reader has no finalized capability', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    const whenIdle = vi.fn(async () => undefined);
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: { whenIdle },
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+      durableSubscriptionBinding: { contextGraphId: LOCAL_ID, onChainId: '042' },
+    })).resolves.toMatchObject({
+      kind: 'unavailable',
+      reason: 'chain-name-binding-unavailable',
+      detail: expect.stringContaining('requires the finalized Context Graph authority index'),
+    });
+    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('retains compatibility lookup for a valid row on a capability-less index reader', async () => {
+    const fixture = selectedFixture();
+    const whenIdle = vi.fn(async () => undefined);
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: { whenIdle },
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({
+        kind: 'registered',
+        onChainId: 42n,
+        provenance: 'reverse-name-hash',
+      });
+    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
+  });
+
   it('does not turn invalid durable state into accepted finalized absence', async () => {
     const fixture = selectedFixture();
     fixture.agent.subscribedContextGraphs.clear();
@@ -353,6 +390,7 @@ describe('Context Graph registration resolution deadlines', () => {
     const overflow = (1n << 256n).toString(10);
     const authoritative = {};
     const reverse = {};
+    const alreadyInvalid = { onChainId: overflow };
 
     expect(() => fixture.agent.contextGraphBindingState.bindAuthoritative(
       LOCAL_ID,
@@ -365,8 +403,15 @@ describe('Context Graph registration resolution deadlines', () => {
       overflow,
       NAME_HASH,
     )).toThrow('Invalid Context Graph on-chain id');
+    expect(() => fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      alreadyInvalid,
+      '42',
+      NAME_HASH,
+    )).toThrow('Invalid Context Graph on-chain id');
     expect(authoritative).toEqual({});
     expect(reverse).toEqual({});
+    expect(alreadyInvalid).toEqual({ onChainId: overflow });
   });
 
   it('keeps the hot deadline for an existing reverse binding candidate', async () => {

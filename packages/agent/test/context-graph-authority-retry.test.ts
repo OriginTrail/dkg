@@ -387,6 +387,81 @@ describe('Context Graph subscription authority retry', () => {
     expect(coldCursor).toEqual({});
   });
 
+  it('skips a reclassified candidate and clears a durable row whose intent was removed', async () => {
+    const reclassified = {
+      id: 'reclassified-before-authority',
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      onChainId: '7',
+    };
+    const noIntent = {
+      id: 'intent-removed-before-authority',
+      subscribed: false,
+      coreHosted: false,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      onChainId: '8',
+    };
+    const rows = new Map([[reclassified.id, reclassified], [noIntent.id, noIntent]]);
+    const dormancyById = new Map<string, any>([
+      [reclassified.id, 'authorityUnavailable'],
+      [noIntent.id, 'authorityUnavailable'],
+    ]);
+    const clearStatus = vi.fn((contextGraphId: string) => {
+      dormancyById.delete(contextGraphId);
+    });
+    const resolveAuthority = vi.fn();
+
+    await recoverDeferredContextGraphSubscriptionAuthorities(
+      new AbortController().signal,
+      {
+        store: {
+          loadAll: async () => [...rows.values()],
+          load: async (contextGraphId) => {
+            if (contextGraphId === reclassified.id) {
+              dormancyById.set(contextGraphId, 'activationCap');
+            }
+            return rows.get(contextGraphId) ?? null;
+          },
+          save: async () => undefined,
+          delete: async () => undefined,
+        },
+        dormancyById,
+        persistRevisions: new Map(),
+        subscriptions: new Map(),
+        getStatus: () => ({
+          rehydrationEnabled: true,
+          persistedTotal: 2,
+          systemExcluded: 0,
+          hostedActivated: 0,
+          hostedActivatedIds: [],
+          activated: 0,
+          activationCap: 0,
+          capDisabled: true,
+          completedAt: 1,
+          updatedAt: 1,
+        }),
+        isCurrent: () => true,
+        touchStatus: () => undefined,
+        clearStatus,
+        resolveAuthority,
+        activate: vi.fn(),
+        warn: vi.fn(),
+        activated: vi.fn(),
+      },
+    );
+
+    expect(resolveAuthority).not.toHaveBeenCalled();
+    expect(dormancyById.get(reclassified.id)).toBe('activationCap');
+    expect(clearStatus).toHaveBeenCalledWith(noIntent.id);
+    expect(dormancyById.has(noIntent.id)).toBe(false);
+  });
+
   it('activates a bound row before advancing to a later cold authority read', async () => {
     const bound = {
       id: 'z-bound',

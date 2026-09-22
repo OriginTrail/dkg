@@ -1122,6 +1122,121 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(batch.agent.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
     });
 
+    it('fences capped promotion after authority and across strict binding repair', async () => {
+      const reclassified = createPromotionHarness([
+        { id: 'reclassified-after-authority', subscribed: true, onChainId: '7' },
+      ]);
+      reclassified.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockImplementation(async (contextGraphId: string) => {
+          reclassified.agent.contextGraphSubscriptionDormancyById
+            .set(contextGraphId, 'authorityUnavailable');
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+            onChainId: 7n,
+          };
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          reclassified.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('rearm');
+      expect(reclassified.agent.activatePersistedContextGraphSubscriptionRecord)
+        .not.toHaveBeenCalled();
+
+      const concurrentlyActive = createPromotionHarness([
+        { id: 'active-after-authority', subscribed: true, onChainId: '7' },
+      ]);
+      concurrentlyActive.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockImplementation(async (contextGraphId: string) => {
+          concurrentlyActive.agent.subscribedContextGraphs.set(contextGraphId, {
+            subscribed: true,
+          });
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+            onChainId: 7n,
+          };
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          concurrentlyActive.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('idle');
+      expect(concurrentlyActive.agent.activatePersistedContextGraphSubscriptionRecord)
+        .not.toHaveBeenCalled();
+      expect(concurrentlyActive.agent.contextGraphSubscriptionRehydrationPendingIds.size)
+        .toBe(0);
+      expect(concurrentlyActive.agent.contextGraphSubscriptionDormancyById.size).toBe(0);
+
+      const staleBeforePrepare = createPromotionHarness([
+        { id: 'stale-before-prepare', subscribed: true, onChainId: '7' },
+      ]);
+      staleBeforePrepare.agent.activatePersistedContextGraphSubscriptionRecord
+        .mockImplementation(async (row: any, options: any) => {
+          const subscription = { subscribed: true, onChainId: row.onChainId };
+          staleBeforePrepare.agent.subscribedContextGraphs.set(row.id, subscription);
+          staleBeforePrepare.agent.contextGraphSubscriptionDormancyById
+            .set(row.id, 'authorityUnavailable');
+          await options.prepare(subscription);
+          return subscription;
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          staleBeforePrepare.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('rearm');
+      expect(staleBeforePrepare.agent.log.warn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('became stale'),
+      );
+
+      const staleDuringRepair = createPromotionHarness([
+        { id: 'stale-during-repair', subscribed: true, onChainId: '042' },
+      ]);
+      staleDuringRepair.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockResolvedValue({
+          outcome: 'allowed',
+          source: 'registered-chain',
+          reason: 'open-context-graph',
+          metadataBootstrap: 'not-needed',
+          onChainId: 8n,
+        });
+      staleDuringRepair.agent.persistContextGraphSubscriptionStrict
+        .mockImplementation(async (contextGraphId: string) => {
+          staleDuringRepair.agent.contextGraphSubscriptionDormancyById
+            .set(contextGraphId, 'authorityUnavailable');
+        });
+      staleDuringRepair.agent.activatePersistedContextGraphSubscriptionRecord
+        .mockImplementation(async (row: any, options: any) => {
+          const subscription = { subscribed: true, onChainId: options.onChainId };
+          staleDuringRepair.agent.subscribedContextGraphs.set(row.id, subscription);
+          await options.prepare(subscription);
+          return subscription;
+        });
+      await expect(
+        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+          staleDuringRepair.agent,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('rearm');
+      expect(staleDuringRepair.agent.persistContextGraphSubscriptionStrict)
+        .toHaveBeenCalledOnce();
+      expect(staleDuringRepair.agent.reconcileRfc64CatalogResponsibilityV1)
+        .not.toHaveBeenCalled();
+      expect(staleDuringRepair.agent.log.warn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('became stale'),
+      );
+    });
+
     it('keeps rehydration diagnostics when a persisted subscription delete fails', async () => {
       const rows = Array.from({ length: 65 }, (_, i) => ({
         id: `failed-delete-cg-${String(i).padStart(3, '0')}`,
