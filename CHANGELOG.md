@@ -15,8 +15,8 @@ index is unresolved an edge denies public-graph subscriptions and skips their
 SWM sync. 10.0.18 bootstraps edge indexes from snapshots served by the
 network's relay cores by default and keeps the 10.0.17 scan as the fallback,
 so no node starts slower than it did on 10.0.17. It also carries the
-authority-read, sync and publisher fixes from the same validation round
-(#2714 to #2717). **No smart-contract, ABI,
+authority-read, sync, publisher and peer-connection fixes from the same
+validation round (#2714 to #2717, #2724 to #2726). **No smart-contract, ABI,
 wire-protocol, or deployment registry changes are required.**
 
 ### Upgrading from 10.0.17
@@ -45,7 +45,12 @@ wire-protocol, or deployment registry changes are required.**
   `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS`, default 20000 ms), so the
   retry is answered from the retained projection instead of starting over.
   Read-only host, sync and serve gates and author share/publish decisions
-  consult the finalized authority index before a live RPC read.
+  consult the finalized authority index before a live RPC read. The mutable
+  publish-policy bit is taken from the index only when the projection was
+  served fresh and no older than the caller accepts (about 5 s for host-mode
+  admission, 60 s otherwise); otherwise that bit comes from the bounded live
+  read, and the gate refuses if that read fails, so a graph switched from open
+  to curated publishing stops admitting open writes within seconds (#2726).
 - **Finalized query authority** (#2716): a scoped read of a graph whose local
   row is keyed by its wire id now binds the chain's name hash through one
   shared derivation. The read runs on the RFC-64 authority circuit, reports how
@@ -55,14 +60,19 @@ wire-protocol, or deployment registry changes are required.**
   removed member cannot keep reading from a stale cache, and a graph registered
   inside the finality window falls back to the bounded live read instead of
   failing closed.
-- **Changelog delta pages** (#2717): every durable marker is served by lookup,
-  so holes and duplicate sequence numbers written by two workers during an A/B
-  release swap no longer push a page back to the full scan.
+- **Changelog delta pages** (#2717, #2725): every durable marker is served by
+  lookup, so holes and duplicate sequence numbers written by two workers during
+  an A/B release swap no longer push a page back to the full scan.
 - **Promote settle failures** (#2714): a store timeout inside a promote's
   settle step that provably never started is retried instead of classified as
   a fatal post-commit failure, and a share job that did fail after its commit
   is recovered automatically through the idempotent recovery path, without the
   manual `recover-share-job` command.
+- **Cold one-shot protocol sends** (#2724): a send that starts before any
+  connection to its target exists, such as the network-identity probe on
+  connect, no longer spends its whole budget resolving the peer when the target
+  connects a few milliseconds later. A healthy, connected peer is no longer kept
+  out by a failed probe's backoff (about 18 s at first, growing to 120 s).
 
 ### Changed
 
