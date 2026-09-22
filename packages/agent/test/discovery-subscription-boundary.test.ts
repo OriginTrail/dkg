@@ -478,10 +478,16 @@ describe('Context Graph discovery/subscription boundary', () => {
       await agentA.stop().catch(() => {});
     }
 
+    const restartChain = new MockChainAdapter();
+    vi.spyOn(restartChain, 'getContextGraphLiveAuthority').mockResolvedValue({
+      active: true,
+      accessPolicy: 0,
+      participantAgents: [],
+    });
     const agentB = await DKGAgent.create({
       name: 'DiscoveryBoundaryB',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: restartChain,
       contextGraphSubscriptionStore: subscriptionStore,
       contextGraphMembershipStore: membershipStore,
       nodeRole: 'edge',
