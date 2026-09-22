@@ -17,7 +17,7 @@ const SR = 'https://origintrail.io/semantic-runtime/v1#';
 const BINDINGS = '/api/programs/bindings';
 const ROUTES = '/api/programs/routes';
 
-/** Browser/Node.js SDK. Keys stay in the supplied signer; the node receives public proofs only. */
+/** Browser/Node.js SDK. Use an external signer or explicitly select an agent held by the authenticated node. */
 export class GraphComputer {
   readonly programs: Programs;
   readonly routes: Routes;
@@ -37,6 +37,7 @@ class Programs {
     const value = await this.transport.request('/api/programs/source?' + params, { ...options, retry: true });
     if (!isRecord(value) || value.contextGraphId !== graph(input.graphId) || value.programIri !== input.programIri || value.layer !== input.programLayer
       || typeof value.source !== 'string' || typeof value.authorAgentAddress !== 'string'
+      || (value.label !== undefined && typeof value.label !== 'string')
       || typeof value.version !== 'string' || !['sexpr-v1', 'typescript-v1'].includes(String(value.language))
       || !Array.isArray(value.requiredTools) || !value.requiredTools.every(v => typeof v === 'string')
       || !Array.isArray(value.permittedPrograms) || !value.permittedPrograms.every(v => typeof v === 'string')) invalidResponse();
@@ -62,6 +63,7 @@ class Programs {
       contextGraphId: graphId, name, finalize: true, alsoShareSwm: false, alsoPublishVm: false,
       quads: [
         quad('http://www.w3.org/1999/02/22-rdf-syntax-ns#type', `${SR}Program`),
+        quad('http://www.w3.org/2000/01/rdf-schema#label', JSON.stringify(input.label ?? name)),
         quad(`${SR}language`, JSON.stringify(language)),
         quad(`${SR}version`, JSON.stringify(version)),
         quad(`${SR}source`, JSON.stringify(input.source)),
@@ -72,7 +74,7 @@ class Programs {
     };
     let authorAgentAddress = '';
     const asset = await this.transport.request('/api/knowledge-assets', {
-      ...options, method: 'POST', body: address => { authorAgentAddress = address; return payload; },
+      ...options, method: 'POST', body: address => { authorAgentAddress = address; return this.transport.options.localAgent ? { ...payload, authorAgentAddress: address } : payload; },
     });
     if (!isRecord(asset) || asset.status !== 'wm-sealed' || typeof asset.assertionUri !== 'string'
       || typeof asset.authorAddress !== 'string' || asset.authorAddress.toLowerCase() !== authorAgentAddress.toLowerCase()) {
@@ -121,7 +123,11 @@ class Programs {
       throw new TypeError('invocationId must be a UUID');
     }
     value.invocationId = value.invocationId.toLowerCase();
-    if (value.executorPeerId !== undefined) assertPeer(value.executorPeerId);
+    if (value.executorPeerId !== undefined) {
+      assertPeer(value.executorPeerId);
+      if (this.transport.options.localAgent && value.executorPeerId !== this.transport.options.peerId)
+        throw new TypeError('Local-agent remote execution uses the node configured route; omit executorPeerId');
+    }
     return value;
   }
 
@@ -133,7 +139,7 @@ class Programs {
         ...operation(invocation), invocationId: invocation.invocationId,
         ...(invocation.inputs !== undefined ? { inputs: invocation.inputs } : {}),
         ...(invocation.executorPeerId && invocation.executorPeerId !== this.transport.options.peerId
-          ? { authorization: await signInvocation(this.transport.options.signer, address, this.transport.options.peerId, invocation) }
+          ? { authorization: await signInvocation(this.transport.options.signer!, address, this.transport.options.peerId, invocation) }
           : {}),
       }),
     });

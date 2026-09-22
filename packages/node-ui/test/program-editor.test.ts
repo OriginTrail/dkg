@@ -6,12 +6,11 @@ import { GraphComputer } from '@origintrail-official/dkg-graph-computer';
 const { programs } = vi.hoisted(() => ({ programs: {
   upload: vi.fn(), getSource: vi.fn(), getApproval: vi.fn(), approve: vi.fn(), updateApproval: vi.fn(), invoke: vi.fn(), prepareInvocation: vi.fn(),
 } }));
-vi.mock('../src/ui/components/Programs/client.js', () => ({ programClient: async () => ({ programs }) }));
+vi.mock('../src/ui/components/Programs/client.js', () => ({ programClient: async () => ({ programs }), fetchProgramAgents: async () => ({ defaultAddress: address, agents: [ { address, name: 'Owner' }, { address: '0x0000000000000000000000000000000000000002', name: 'Second agent' } ] }) }));
 vi.mock('../src/ui/components/Wallet/WalletConnectControl.js', () => ({ WalletConnectControl: () => null }));
 vi.mock('../src/ui/components/Programs/TypeScriptEditor.js', () => ({ default: ({ value, onChange, disabled }: any) =>
   React.createElement('textarea', { 'aria-label': 'source', value, disabled, onChange: (event: any) => onChange(event.target.value) }) }));
 import ProgramEditor, { type ProgramEditorProps } from '../src/ui/components/Programs/ProgramEditor.js';
-import { useWalletStore } from '../src/ui/stores/wallet.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 const address = '0x0000000000000000000000000000000000000001';
@@ -48,7 +47,6 @@ async function ready() {
 }
 beforeEach(() => {
   vi.clearAllMocks(); sessionStorage.clear();
-  useWalletStore.setState({ address, provider: { request: async () => null } });
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   programs.upload.mockImplementation(async input => (uploaded = { ...input, programLayer: 'wm', sourceHash: 'a'.repeat(64), authorAgentAddress: address }));
   programs.getApproval.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
@@ -108,27 +106,39 @@ describe('TypeScript Program editor', () => {
     expect(button('Run Program').disabled).toBe(true);
   });
 
-  it('keeps stored source unchanged until the user explicitly loads it', async () => {
+  it('automatically loads stored source with the node agent, without a browser wallet', async () => {
     const existing = { programIri: 'urn:existing', programLayer: 'wm' as const };
     programs.getSource.mockResolvedValue({ contextGraphId: 'school', programIri: existing.programIri, layer: 'wm',
       language: 'typescript-v1', source: 'export function run() { return 7; }', sourceHash: 'a'.repeat(64),
       authorAgentAddress: address, version: '2', permittedPrograms: [] });
-    await render({ existing }); expect(programs.getSource).not.toHaveBeenCalled();
-    await click('Load stored source');
+    await render({ existing }); expect(programs.getSource).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain('Connect wallet');
     expect((container.querySelector('[aria-label="source"]') as HTMLTextAreaElement).value).toContain('return 7');
     expect(button('Save new version').disabled).toBe(true);
     await fill('source', 'export function run() { return 8; }'); await click('Save new version');
     expect(uploaded.derivedFrom).toBe(existing.programIri);
   });
 
-  it('does not restore approval from an action completed after the wallet changes', async () => {
+  it('does not restore approval from an action completed after the selected node agent changes', async () => {
     await render(); await fill('Operation IRI', operation.operationIri); await click('Save new version'); await click('Check approval');
     let finish!: (value: any) => void;
     programs.approve.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     await click('Approve Program');
-    await act(async () => useWalletStore.setState({ address: '0x0000000000000000000000000000000000000002' }));
+    await act(async () => { const select = container.querySelector('select')!; select.disabled = false; select.value = '0x0000000000000000000000000000000000000002'; select.dispatchEvent(new Event('change', { bubbles: true })); });
     await act(async () => finish(approval())); await settle();
     expect(button('Run Program').disabled).toBe(true);
+  });
+
+  it('shows source-load failures and permits an explicit retry without allowing a blank save', async () => {
+    programs.getSource.mockRejectedValueOnce(new Error('Source access denied'));
+    programs.getSource.mockResolvedValue({ contextGraphId: 'school', programIri: 'urn:existing', layer: 'wm',
+      language: 'typescript-v1', source: 'export function run() { return 7; }', sourceHash: 'a'.repeat(64),
+      authorAgentAddress: address, version: '2', permittedPrograms: [] });
+    await render({ existing: { programIri: 'urn:existing', programLayer: 'wm' } });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Source access denied');
+    expect(button('Save new version').disabled).toBe(true);
+    await click('Reload stored source');
+    expect((container.querySelector('[aria-label="source"]') as HTMLTextAreaElement).value).toContain('return 7');
   });
 
   it('does not treat the same Program IRI in a different graph as the saved Program', async () => {
@@ -146,7 +156,7 @@ describe('TypeScript Program editor', () => {
     programs.getSource.mockResolvedValue({ ...previous, contextGraphId: 'school', layer: 'wm',
       language: 'typescript-v1', source: previous.source, permittedPrograms: [] });
     await render({ existing: { programIri: previous.programIri, programLayer: 'wm' } });
-    await click('Load stored source'); await fill('Operation IRI', operation.operationIri);
+    await fill('Operation IRI', operation.operationIri);
     programs.getApproval.mockResolvedValue(approval(previous)); await click('Check approval');
     await click('Retry same invocation'); expect(programs.invoke.mock.calls[1][0].invocationId).toBe(id);
     programs.getApproval.mockResolvedValue({ ...approval(previous, 2), bindingDigest: 'c'.repeat(64) });

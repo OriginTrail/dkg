@@ -16,6 +16,11 @@ export class Transport {
   private identity?: string;
 
   constructor(readonly options: GraphComputerOptions) {
+    if (!!options.signer === !!options.localAgent) throw new TypeError('Choose a signer or an authenticated local agent');
+    if (options.localAgent) {
+      if (typeof options.localAgent.authToken !== 'string' || !options.localAgent.authToken.trim()) throw new TypeError('Local agent requires the node session credential');
+      getAddress(options.localAgent.address);
+    }
     this.origin = new URL(options.nodeUrl);
     if (!['http:', 'https:'].includes(this.origin.protocol) || this.origin.username || this.origin.password
       || this.origin.pathname !== '/' || this.origin.search || this.origin.hash) {
@@ -31,7 +36,7 @@ export class Transport {
   }
 
   async address(): Promise<string> {
-    const address = getAddress(await this.options.signer.getAddress());
+    const address = getAddress(this.options.localAgent?.address ?? await this.options.signer!.getAddress());
     if (this.identity !== undefined && address !== this.identity) throw new Error('Signer changed identity; create a new client');
     this.identity = address;
     return address;
@@ -61,7 +66,9 @@ export class Transport {
             const address = await this.address();
             body = request.body ? JSON.stringify(await request.body(address)) : undefined;
             controller.signal.throwIfAborted();
-            headers = await signHttpRequest(this.options.signer, address, this.options.peerId, method, path, body);
+            headers = this.options.localAgent
+              ? { Authorization: `Bearer ${this.options.localAgent.authToken}`, 'Content-Type': 'application/json', 'X-DKG-Program-Agent': address }
+              : await signHttpRequest(this.options.signer!, address, this.options.peerId, method, path, body);
           } catch (cause) {
             controller.signal.throwIfAborted();
             throw new GraphComputerError('SIGNING_FAILED', 'Could not sign the request', { cause });

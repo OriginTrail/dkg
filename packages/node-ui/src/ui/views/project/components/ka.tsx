@@ -739,7 +739,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                   <button className="v10-ka-back" onClick={() => setShowProgramEditor(true)}>Edit TypeScript Program</button>
                   {showProgramEditor && <Suspense fallback={<p>Loading Program editor…</p>}>
                     <ProgramEditor contextGraphId={contextGraphId}
-                      existing={{ programIri: entity.uri, programLayer: entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm' }}
+                      existing={{ label: entity.label, programIri: entity.uri, programLayer: entity.trustLevel === 'verified' ? 'vm' : entity.trustLevel === 'shared' ? 'swm' : 'wm' }}
                       onClose={() => setShowProgramEditor(false)} onSaved={onRefresh}
                       onExecution={(iri, layer) => { setShowProgramEditor(false); onNavigate(iri, undefined, layer); }} />
                   </Suspense>}

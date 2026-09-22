@@ -47,6 +47,17 @@ async function flush() {
 }
 
 describe('useMemoryEntities readable labels', () => {
+  it('distinguishes unlabelled Programs with the same version suffix and prefers their saved name', () => {
+    const ids = ['urn:example:workflow:v1', 'urn:example:scale:v1'];
+    const entities = buildMemoryEntities(ids.map(subject => ({ subject, predicate: RDF_TYPE, object: 'https://origintrail.io/semantic-runtime/v1#Program', layer: 'working' as const })));
+    expect(ids.map(id => entities.get(id)?.label)).toEqual(ids);
+    const named = buildMemoryEntities([
+      { subject: ids[0], predicate: RDF_TYPE, object: 'https://origintrail.io/semantic-runtime/v1#Program', layer: 'working' },
+      { subject: ids[0], predicate: 'http://www.w3.org/2000/01/rdf-schema#label', object: 'My workflow', layer: 'working' },
+    ]);
+    expect(named.get(ids[0])?.label).toBe('My workflow');
+  });
+
   let container: HTMLDivElement;
   let root: Root;
 

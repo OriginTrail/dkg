@@ -174,6 +174,10 @@ function deriveEntityLabel(entity: MemoryEntity): string {
     if (name) return name;
   }
 
+  // Unlabelled Programs often end in the same version token (e.g. :v1).
+  // Keep their complete identity visible instead of collapsing them to "Program v1".
+  if (entity.types.includes('https://origintrail.io/semantic-runtime/v1#Program')) return entity.uri;
+
   const defaultUriLabel = shortLabel(entity.uri);
   if (
     entity.label &&

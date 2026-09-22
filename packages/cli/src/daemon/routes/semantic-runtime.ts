@@ -1,3 +1,4 @@
+import { availableProgramAgents, programCaller } from './program-agent.js';
 import { canonicalProgramInputs } from '../../semantic-runtime-bound-invocation.js';
 import {
   forkStoredSemanticProgram,
@@ -13,6 +14,17 @@ import type { RequestContext } from './context.js';
 import { canonicalProgramGraphId, handleSemanticRuntimeConfigurationRoutes } from './semantic-runtime-configuration.js';
 
 export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<void> {
+  const programPath = ctx.path.startsWith('/api/programs/') || ctx.path.startsWith('/api/semantic-runtime/');
+  if (!programPath) return;
+  let authenticatedCaller: string | undefined;
+  try {
+    if (ctx.req.method === 'GET' && ctx.path === '/api/programs/agents')
+      return jsonResponse(ctx.res, 200, availableProgramAgents(ctx));
+    authenticatedCaller = programCaller(ctx);
+  } catch (error) {
+    if (error instanceof SemanticProgramError) return jsonResponse(ctx.res, error.status, { code: error.code, error: error.message });
+    throw error;
+  }
   if (await handleSemanticRuntimeConfigurationRoutes(ctx)) return;
   const { req, res, path, url, agent, config, semanticRuntimeHost } = ctx;
   const isResolve = req.method === 'GET' && path === '/api/semantic-runtime/resolve';
@@ -27,7 +39,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       error: 'Semantic runtime is not enabled',
     });
   }
-  const callerAgentAddress = ctx.actor.effectiveAgentAddress;
+  const callerAgentAddress = authenticatedCaller ?? ctx.actor.effectiveAgentAddress;
   if (isResolve || isSource) {
     const contextGraphId = url.searchParams.get('contextGraphId');
     const programIri = url.searchParams.get('programIri');
@@ -39,9 +51,9 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
     }
     try {
       if (isSource) {
-        if (!ctx.actor.authenticatedAgentAddress) throw new SemanticProgramError('PROGRAM_SOURCE_ACCESS_DENIED', 'Reading Program source requires an authenticated agent', 403);
+        if (!authenticatedCaller) throw new SemanticProgramError('PROGRAM_SOURCE_ACCESS_DENIED', 'Reading Program source requires an authenticated agent', 403);
         return jsonResponse(res, 200, await loadStoredSemanticProgram(agent, canonicalProgramGraphId(contextGraphId),
-          programIri, programLayer, ctx.actor.authenticatedAgentAddress));
+          programIri, programLayer, authenticatedCaller));
       }
       return jsonResponse(res, 200, await resolveStoredSemanticProgram(
         agent,
@@ -110,8 +122,8 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
         throw new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'Forwarded authorization requires an exact outbound route', 403);
       }
       const result = route
-        ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, ctx.actor.authenticatedAgentAddress, body.authorization, body.inputs)
-        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, ctx.actor.authenticatedAgentAddress, body.inputs);
+        ? await invokeBoundSemanticProgramOnPeer(agent, config.semanticRuntime, graph, body.operationIri, body.invocationId, authenticatedCaller, body.authorization, body.inputs)
+        : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, authenticatedCaller, body.inputs);
       return jsonResponse(res, 200, result);
     } catch (error) {
       if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message });
@@ -136,12 +148,12 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       if (route) {
         return jsonResponse(res, 200, await invokeBoundSemanticProgramOnPeer(
           agent, config.semanticRuntime, body.contextGraphId, body.programIri,
-          body.invocationId, ctx.actor.authenticatedAgentAddress,
+          body.invocationId, authenticatedCaller,
         ));
       }
       return jsonResponse(res, 200, await invokeBoundSemanticProgram(
         agent, semanticRuntimeHost, body.contextGraphId, body.programIri, body.invocationId,
-        config.semanticRuntime, ctx.actor.authenticatedAgentAddress,
+        config.semanticRuntime, authenticatedCaller,
       ));
     } catch (error) {
       if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message });

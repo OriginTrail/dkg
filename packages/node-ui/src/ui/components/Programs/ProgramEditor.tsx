@@ -1,9 +1,7 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer } from '@origintrail-official/dkg-graph-computer';
 import { createUuid } from '@origintrail-official/dkg-graph-computer';
-import { programClient } from './client.js';
-import { WalletConnectControl } from '../Wallet/WalletConnectControl.js';
-import { useWalletStore } from '../../stores/wallet.js';
+import { programClient, fetchProgramAgents, type ProgramAgent } from './client.js';
 import { useModalDismiss } from '../Modals/useModalDismiss.js';
 import './program-editor.css';
 
@@ -26,18 +24,19 @@ function matchesProgram(approval: Approval, program: ProgramReference) {
     && pin.authorAgentAddress.toLowerCase() === program.authorAgentAddress.toLowerCase();
 }
 type Child = { graphId: string; operationIri: string; programIri: string };
-type Saved = { program: ProgramReference; source: string; version: string; children: string[] };
+type Saved = { name: string; program: ProgramReference; source: string; version: string; children: string[] };
 export interface ProgramEditorProps {
   contextGraphId: string;
-  existing?: { programIri: string; programLayer: MemoryLayer };
+  existing?: { programIri: string; programLayer: MemoryLayer; label?: string };
   onClose(): void;
   onSaved(): void;
   onExecution?(iri: string, layer: MemoryLayer): void;
 }
 
 export default function ProgramEditor({ contextGraphId, existing, onClose, onSaved, onExecution }: ProgramEditorProps) {
-  const address = useWalletStore(s => s.address);
-  const provider = useWalletStore(s => s.provider);
+  const [agents, setAgents] = useState<ProgramAgent[]>([]);
+  const [address, setAddress] = useState('');
+  const [name, setName] = useState(existing?.label ?? 'Untitled Program');
   const [source, setSource] = useState(existing ? '' : TEMPLATE);
   const [version, setVersion] = useState('1.0.0');
   const [graphId, setGraphId] = useState(contextGraphId);
@@ -60,17 +59,36 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const saveAttempt = useRef<{ fingerprint: string; programIri: string; name: string } | null>(null);
   const key = JSON.stringify([canonicalGraph(graphId), operationIri.trim()]);
   const childIris = [...new Set(children.map(child => child.programIri.trim()))].sort();
-  const dirty = !saved || source !== saved.source || version !== saved.version || JSON.stringify(childIris) !== JSON.stringify(saved.children);
+  const dirty = (!existing && !saved) || (!!saved && (name !== saved.name || source !== saved.source || version !== saved.version || JSON.stringify(childIris) !== JSON.stringify(saved.children)));
   const canRun = !!approved?.binding.enabled && !dirty && approved.contextGraphId === canonicalGraph(graphId)
     && approved.operationIri === operationIri.trim() && !!saved && matchesProgram(approved, saved.program);
   const recoveryKey = `dkg-program-invocation:${location.origin}:${address?.toLowerCase()}:${key}`;
 
   useEffect(() => {
     generation.current++;
-    setCallers(value => value || address || '');
+    setCallers(address);
+    setSaved(null);
+    setSource(existing ? '' : TEMPLATE);
+    setName(existing?.label ?? 'Untitled Program');
+    setVersion('1.0.0'); setChildren([]);
+    saveAttempt.current = null;
     setApproved(null); setReviewed(null); setResult(null); setBusy('');
     return () => { generation.current++; };
-  }, [address, provider]);
+  }, [address, contextGraphId, existing?.programIri, existing?.programLayer]);
+  useEffect(() => {
+    let active = true;
+    fetchProgramAgents().then(value => {
+      if (!active) return;
+      setAgents(value.agents);
+      const selected = value.agents.find(a => a.address.toLowerCase() === value.defaultAddress.toLowerCase());
+      setAddress(selected?.address ?? '');
+      if (!value.agents.length) setError('No agent key is available to this node session.');
+    }).catch(cause => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (address && existing) void loadSource(false);
+  }, [address, contextGraphId, existing?.programIri, existing?.programLayer]);
   useEffect(() => {
     setApproved(null); setReviewed(null); setResult(null);
     try {
@@ -93,23 +111,24 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
 
   async function action(label: string, work: (client: GraphComputer, check: () => void) => Promise<void>) {
     const epoch = generation.current;
-    const check = () => { if (generation.current !== epoch) throw new Error('Wallet changed or editor closed.'); };
+    const check = () => { if (generation.current !== epoch) throw new Error('Agent changed or editor closed.'); };
     setBusy(label); setError(''); setNotice('');
-    try { const client = await programClient(); check(); await work(client, check); }
+    try { const client = await programClient(address); check(); await work(client, check); }
     catch (cause) { if (generation.current === epoch) setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { if (generation.current === epoch) setBusy(''); }
   }
   const invalidate = () => { setApproved(null); setResult(null); };
   const operation = () => ({ graphId: canonicalGraph(graphId), operationIri: operationIri.trim() });
 
-  const loadSource = () => {
-    if (source && dirty && !window.confirm('Discard the unsaved Program changes and reload stored source?')) return;
+  const loadSource = (confirm = true) => {
+    if (confirm && source && dirty && !window.confirm('Discard the unsaved Program changes and reload stored source?')) return;
     return action('Loading source…', async (client, check) => {
     const value = await client.programs.getSource({ graphId: contextGraphId, ...existing! }); check();
     if (value.language !== 'typescript-v1') throw new Error('This editor supports TypeScript Programs.');
-    setSource(value.source); setVersion(value.version);
+    const loadedName = value.label ?? existing?.label ?? value.programIri;
+    setName(loadedName); setSource(value.source); setVersion(value.version);
     setChildren(value.permittedPrograms.map(programIri => ({ graphId, operationIri: '', programIri })));
-    setSaved({ source: value.source, version: value.version, children: [...value.permittedPrograms].sort(),
+    setSaved({ name: loadedName, source: value.source, version: value.version, children: [...value.permittedPrograms].sort(),
       program: { graphId: value.contextGraphId, programIri: value.programIri, programLayer: value.layer,
         sourceHash: value.sourceHash, authorAgentAddress: value.authorAgentAddress } });
     invalidate(); setNotice('Source loaded. Saving creates a new Program version.');
@@ -117,19 +136,20 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   };
 
   const save = () => action('Saving new version…', async (client, check) => {
+    if (!name.trim()) throw new Error('Give the Program a name.');
     if (!source.trim()) throw new Error('Write a Program first.');
     if (new TextEncoder().encode(source).length > 262144) throw new Error('Source exceeds 256 KiB.');
     if (childIris.some(iri => !iri) || childIris.length !== children.length) throw new Error('Each child needs a distinct Program IRI.');
-    const fingerprint = JSON.stringify([source, version, childIris]);
+    const fingerprint = JSON.stringify([name.trim(), source, version, childIris]);
     if (saveAttempt.current?.fingerprint !== fingerprint) {
       const id = createUuid();
-      saveAttempt.current = { fingerprint, programIri: `urn:dkg:program:${id}`, name: `program-${id}` };
+      saveAttempt.current = { fingerprint, programIri: `urn:dkg:program:${id}`, name: `${name.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 100) || 'program'}-${id}` };
     }
     const attempt = saveAttempt.current!;
     const value = await client.programs.upload({ graphId: contextGraphId, source, version, language: 'typescript-v1',
-      requiredTools: [], permittedPrograms: childIris, programIri: attempt.programIri, name: attempt.name,
+      requiredTools: [], permittedPrograms: childIris, programIri: attempt.programIri, name: attempt.name, label: name.trim(),
       derivedFrom: saved?.program.programIri ?? existing?.programIri }); check();
-    setSaved({ program: value, source, version, children: childIris }); invalidate();
+    setSaved({ name, program: value, source, version, children: childIris }); invalidate();
     setNotice('Saved in Working Memory. Execution permission has not changed.');
     onSaved();
   });
@@ -184,13 +204,17 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
         <button type="button" onClick={close} disabled={!!busy} aria-label="Close Program editor">×</button></header>
       <div className="program-editor-body">
         <div className="program-editor-code">
-          <WalletConnectControl purpose="message" />
-          <p className="program-editor-help">Use the agent wallet that owns the operation graph to approve. The executor must already hold that agent identity. Running uses the connected caller’s permissions.</p>
-          {existing && <button type="button" onClick={loadSource} disabled={!!busy || !address}>Load stored source</button>}
+          <label>Agent<select value={address} disabled={!!busy || !agents.length} onChange={event => {
+            if (source && dirty && !window.confirm('Discard unsaved changes and switch agent?')) return;
+            setAddress(event.target.value);
+          }}>{!address && <option value="">{agents.length ? 'Select a node agent' : 'No node agent selected'}</option>}{agents.map(agent => <option key={agent.address} value={agent.address}>{agent.name} · {agent.address}</option>)}</select></label>
+          <p className="program-editor-help">Uses this agent’s key on the node. Graph access and execution permissions still apply.</p>
+          {existing && <button type="button" onClick={() => loadSource()} disabled={!!busy || !address}>Reload stored source</button>}
+          <label>Program name<input value={name} disabled={!!busy} onChange={event => setName(event.target.value)} /></label>
           <label>Version<input value={version} disabled={!!busy} onChange={event => { setVersion(event.target.value); invalidate(); }} /></label>
           <Suspense fallback={<p>Loading TypeScript editor…</p>}><Editor value={source} disabled={!!busy || (!!existing && !saved)} onChange={value => { setSource(value); invalidate(); }} /></Suspense>
           <div className="program-editor-actions"><button type="button" onClick={save} disabled={!!busy || !address || !source.trim() || !dirty}>Save new version</button>
-            <span>{dirty ? 'Unsaved changes' : 'Source saved'}</span></div>
+            <span>{saved ? (dirty ? 'Unsaved changes' : 'Source saved') : existing ? (busy ? 'Loading stored Program' : 'Source not loaded') : 'Unsaved changes'}</span></div>
           {saved && <p className="program-editor-reference">Saved Program: <code>{saved.program.programIri}</code></p>}
           {error && saveAttempt.current && !saved && <p className="program-editor-reference">Last save attempt: <code>{saveAttempt.current.programIri}</code>. Verify this Program before retrying a failed save.</p>}
         </div>

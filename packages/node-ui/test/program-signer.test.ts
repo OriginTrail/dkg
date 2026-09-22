@@ -1,31 +1,24 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { programSigner } from '../src/ui/components/Programs/client.js';
-import { useWalletStore } from '../src/ui/stores/wallet.js';
-
+import { programClient } from '../src/ui/components/Programs/client.js';
+vi.mock('../src/ui/api.js', () => ({ fetchStatus: async () => ({ peerId: 'peer-node' }) }));
 const address = '0x0000000000000000000000000000000000000001';
-afterEach(() => useWalletStore.setState({ address: null, provider: null }));
-
-describe('Program editor wallet signer', () => {
-  it('requires the connected agent wallet', () => {
-    useWalletStore.setState({ address: null, provider: null });
-    expect(programSigner).toThrow('Connect the agent wallet');
+afterEach(() => { delete window.__DKG_TOKEN__; vi.restoreAllMocks(); });
+describe('Program editor node agent', () => {
+  it('requires an authenticated node session', async () => {
+    await expect(programClient(address)).rejects.toThrow('authenticated node session');
   });
-  it('signs message bytes with personal_sign and never passes a private key', async () => {
-    const request = vi.fn().mockResolvedValue('0xsigned');
-    useWalletStore.setState({ address, provider: { request } });
-    const signer = programSigner();
-    await signer.signMessage('abc');
-    expect(request).toHaveBeenLastCalledWith({ method: 'personal_sign', params: ['0x616263', address] });
-    await signer.signMessage(new Uint8Array([1, 2, 255]));
-    expect(request).toHaveBeenLastCalledWith({ method: 'personal_sign', params: ['0x0102ff', address] });
-  });
-  it('rejects a signature when the wallet changes while its prompt is open', async () => {
-    let finish!: (signature: string) => void;
-    useWalletStore.setState({ address, provider: { request: () => new Promise(resolve => { finish = resolve; }) } });
-    const pending = programSigner().signMessage('abc');
-    useWalletStore.setState({ address: '0x0000000000000000000000000000000000000002' });
-    finish('0xsigned');
-    await expect(pending).rejects.toThrow('Wallet changed');
+  it('uses the existing node session and selected agent without fetching a private key or browser signing', async () => {
+    window.__DKG_TOKEN__ = 'test-operator-session';
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      contextGraphId: 'school', programIri: 'urn:existing', layer: 'wm', source: 'export function run() { return 7; }',
+      language: 'typescript-v1', version: '1', authorAgentAddress: address, requiredTools: [], permittedPrograms: [],
+    }), { status: 200 }));
+    const client = await programClient(address);
+    await client.programs.getSource({ graphId: 'school', programIri: 'urn:existing', programLayer: 'wm' });
+    expect(fetch).toHaveBeenCalledOnce();
+    const headers = new Headers(fetch.mock.calls[0][1]!.headers);
+    expect(headers.get('authorization')).toBe('Bearer test-operator-session');
+    expect(headers.get('x-dkg-program-agent')).toBe(address);
   });
 });

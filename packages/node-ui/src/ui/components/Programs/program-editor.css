@@ -8,11 +8,11 @@
 .program-editor-code, .program-editor-controls { padding: 20px 24px; min-width: 0; }
 .program-editor-controls { border-left: 1px solid var(--border-default, #334155); }
 .program-editor-dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; margin-bottom: 12px; }
-.program-editor-dialog label input, .program-editor-dialog label textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border-default, #475569); border-radius: 5px; padding: 8px 10px; color: inherit; background: var(--bg-surface, #17212d); font: inherit; }
+.program-editor-dialog label input, .program-editor-dialog label select, .program-editor-dialog label textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--border-default, #475569); border-radius: 5px; padding: 8px 10px; color: inherit; background: var(--bg-surface, #17212d); font: inherit; }
 .program-editor-dialog label textarea { resize: vertical; font-family: monospace; }
 .program-editor-dialog button { background: var(--bg-elevated, #233348); border: 1px solid var(--border-default, #475569); color: inherit; padding: 7px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
 .program-editor-dialog button:disabled { opacity: .45; cursor: not-allowed; }
-.program-editor-dialog button:focus-visible, .program-editor-dialog input:focus-visible, .program-editor-dialog textarea:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+.program-editor-dialog button:focus-visible, .program-editor-dialog input:focus-visible, .program-editor-dialog select:focus-visible, .program-editor-dialog textarea:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
 .program-editor-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .program-source-editor { height: 380px; border: 1px solid var(--border-default, #334155); border-radius: 5px; overflow: hidden; }
 .program-editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; font-size: 12px; }

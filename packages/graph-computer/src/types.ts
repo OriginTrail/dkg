@@ -7,11 +7,15 @@ export interface AgentSigner {
 export type MemoryLayer = 'wm' | 'swm' | 'vm';
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-export interface GraphComputerOptions {
+export type GraphComputerOptions = GraphComputerConnection & (
+  | { signer: AgentSigner; localAgent?: never }
+  | { signer?: never; localAgent: { address: string; authToken: string } }
+);
+
+interface GraphComputerConnection {
   nodeUrl: string;
   /** Receiving node's physical peer ID, obtained through trusted configuration. */
   peerId: string;
-  signer: AgentSigner;
   /** Set for remote execution through this node. May be overridden per invocation. */
   executorPeerId?: string;
   /** Per-attempt deadline, including signing and reading the response. Default 60 seconds. */
@@ -50,12 +54,15 @@ export interface UploadProgram {
   programIri?: string;
   /** Knowledge Asset name; defaults to a fresh program-<UUID>. */
   name?: string;
+  /** Human-readable RDF label, defaulting to the asset name. */
+  label?: string;
   version?: string;
   /** Tool IRIs declared by the Program. This does not grant permission to use them. */
   requiredTools: string[];
 }
 
 export interface StoredProgram {
+  label?: string;
   contextGraphId: string;
   programIri: string;
   layer: MemoryLayer;

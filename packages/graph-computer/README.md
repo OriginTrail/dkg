@@ -44,16 +44,16 @@ Use the receiving node's physical peer ID from trusted configuration. `nodeUrl` 
 
 ## Edit TypeScript Programs in the node UI
 
-Open a Context Graph and select **Program** in its action bar. To edit an existing TypeScript Program, open its Knowledge Asset and select **Edit TypeScript Program**, then **Load stored source**.
+Open a Context Graph and select **Program** in its action bar. To edit an existing TypeScript Program, open its Knowledge Asset and select **Edit TypeScript Program**. The source loads automatically.
 
-1. Connect the agent wallet. Source reads, uploads, approvals and invocations use its EIP-191 signatures. The browser never sends a private key. The existing UI session is used only for node discovery/status.
+1. Select an existing **Agent** on the node. The editor defaults to the current agent and uses the existing authenticated node session. The key stays on the node; no browser-wallet connection is needed. A node operator may select any local custodial agent; an agent-scoped session may select only its own identity. Source reads and execution still enforce that agent’s graph access and operation grants.
 2. Write an exported `run(...args)` function in the Monaco editor. It provides TypeScript diagnostics and completion for `pipe`, `map`, `reduce` and `invoke_program`. The executor remains authoritative about which code it can compile.
 3. If the Program calls other Programs, add each child Program IRI, operation graph and operation IRI. These must be existing approved operations on this node. Approval pins their binding digests.
 4. Select **Save new version**. This creates a new sealed source asset in private Working Memory. Editing an existing Program records `prov:wasDerivedFrom`; it leaves the previous source intact. Saving does not approve or share a Program.
-5. Enter the operation graph, operation IRI, allowed caller addresses and execution limits. Select **Check approval**, review the current policy, then **Approve Program** or **Replace approval**. The connected agent must own the operation graph; the executor must already hold its execution identity. An update uses the reviewed revision and reports conflicts without silently overwriting them. Approval compiles the source and displays compilation errors.
+5. Enter the operation graph, operation IRI, allowed caller addresses and execution limits. Select **Check approval**, review the current policy, then **Approve Program** or **Replace approval**. Approval requires the graph owner or node operator; the executor must hold the selected execution identity. An update uses the reviewed revision and reports conflicts without silently overwriting them. Approval compiles the source and displays compilation errors.
 6. Enter positional arguments as a JSON array and select **Run Program**. For the initial example, `[[1, 2, 3]]` returns `12`. The panel displays the decoded result and execution reference.
 
-After an uncertain response, **Retry same invocation** keeps the same ID and inputs with fresh signatures. The recovery handle is retained in this browser tab's session storage, including the submitted arguments. **New execution** deliberately allocates another ID. Changing the approval or inputs requires a new execution.
+After an uncertain response, **Retry same invocation** keeps the same ID and inputs. The node signs any forwarded invocation with the selected agent key. The recovery handle is retained in this browser tab's session storage, including the submitted arguments. **New execution** deliberately allocates another ID. Changing the approval or inputs requires a new execution.
 
 The editor loads code, language workers and styles from the node, without a CDN. It does not run uploaded Programs in the browser. The same runtime limits and child-operation permissions apply as for SDK calls.
 
@@ -68,7 +68,20 @@ const stored = await owner.programs.getSource({
 // stored.source, stored.sourceHash, stored.version, stored.permittedPrograms
 ```
 
-This calls `GET /api/programs/source`. Reading private source requires the connected agent's graph/Working Memory access; operator credentials do not substitute for that identity.
+This calls `GET /api/programs/source`. Reading private source requires the selected agent's graph/Working Memory access. A node session must explicitly select a custodial identity; an operator token alone is not treated as an agent signature.
+
+### Using an existing node session
+
+For a node-integrated client, use this alternative to an external signer:
+
+```ts
+const local = new GraphComputer({
+  nodeUrl: 'https://node.example', peerId: 'NODE_PEER_ID',
+  localAgent: { address: 'LOCAL_AGENT_ADDRESS', authToken: existingNodeSessionToken },
+});
+```
+
+This mode sends the existing bearer credential plus an explicit `X-DKG-Program-Agent` selection. It does not mint credentials or expose keys. `GET /api/programs/agents` lists only identities available to that session. Uploads name the selected author; Program source and execution routes check custody and authorization. Remote invocation uses the node's configured route and signs on the node, so omit `executorPeerId`. Use the external-signer mode above when the key is held by your application.
 
 ## Upload, approve and invoke
 

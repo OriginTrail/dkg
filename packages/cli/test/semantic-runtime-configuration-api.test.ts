@@ -69,13 +69,13 @@ function node(agent: any, configured: SemanticRuntimeConfig = {}): Node {
     } };
   return n;
 }
-async function request(n: Node, identity: Identity, method: string, path: string, body?: unknown, signing?: { wallet: ethers.Wallet; operator?: boolean; headers?: Record<string, string> }) {
+async function request(n: Node, identity: Identity, method: string, path: string, body?: unknown, signing?: { wallet: ethers.Wallet; operator?: boolean; headers?: Record<string, string> }, localAgent?: string) {
   let auth = identity === 'anonymous' || identity === 'disabled-anonymous'
     ? requestAuthentication({ kind: 'anonymous', mode: identity === 'anonymous' ? 'public' : 'disabled' })
     : identity === 'operator' ? requestAuthentication({ kind: 'nodeOperator' })
       : requestAuthentication({ kind: 'agent', agentAddress: { owner, member, caller }[identity] });
   const url = new URL(path, 'http://local.test');
-  let req: any = Object.assign(new EventEmitter(), { method, aborted: false, __dkgPrebufferedBody: Buffer.from(JSON.stringify(body ?? {})) });
+  let req: any = Object.assign(new EventEmitter(), { method, headers: localAgent ? { 'x-dkg-program-agent': localAgent } : {}, aborted: false, __dkgPrebufferedBody: Buffer.from(JSON.stringify(body ?? {})) });
   const res: any = new EventEmitter();
   res.writeHead = (status: number) => { res.statusCode = status; return res; };
   res.end = (data: string) => { res.body = JSON.parse(data); res.writableEnded = true; };
@@ -89,6 +89,7 @@ async function request(n: Node, identity: Identity, method: string, path: string
     if (!result.allowed) return { status: res.statusCode as number, body: res.body as any };
     auth = result;
   }
+  if (localAgent) req.headers = { ...req.headers, 'x-dkg-program-agent': localAgent };
   const handler = url.pathname === '/api/query' ? handleQueryRoutes
     : url.pathname === '/api/knowledge-assets' ? handleKnowledgeAssetsRoutes : handleSemanticRuntimeRoutes;
   await handler({ req, res, path: url.pathname, url, agent: n.agent, config: n.config,
@@ -164,6 +165,39 @@ async function fixture() {
 }
 
 describe('durable Program management API', () => {
+  it('lets the node session use a selected custodial agent while preserving source access and live invocation grants', async () => {
+    const f = await fixture();
+    const binding = bindingInput(); binding.allowedCallerAgentAddresses = [owner];
+    expect((await request(f.target, 'operator', 'POST', '/api/programs/bindings', { binding }, undefined, owner)).status).toBe(201);
+    const path = '/api/programs/source?' + new URLSearchParams({ contextGraphId: sourceGraph, programIri, programLayer: 'swm' });
+    expect((await request(f.target, 'operator', 'GET', path, undefined, undefined, owner)).body.source).toBe(source);
+    // An operator credential without explicit agent selection is not an agent signature.
+    expect((await request(f.target, 'operator', 'GET', path)).status).toBe(403);
+    for (const identity of ['anonymous', 'disabled-anonymous', 'member'] as const) {
+      expect((await request(f.target, identity, 'GET', path, undefined, undefined, owner)).status).toBe(403);
+    }
+    expect((await request(f.target, 'operator', 'GET', path, undefined, undefined, caller)).status).toBe(409);
+    expect((await request(f.target, 'owner', 'GET', path, undefined, { wallet: ownerWallet, operator: true }, foreignExecutor)).status).toBe(403);
+    f.agent.getCustodialAgentPrivateKey = (address: string) => [owner, caller].includes(address) ? callerKey : undefined;
+    expect((await request(f.target, 'operator', 'GET', path, undefined, undefined, caller)).body).toMatchObject({ code: 'PROGRAM_NOT_FOUND' });
+    const body = { contextGraphId: graph, operationIri: operation, invocationId: randomUUID() };
+    const executed = await request(f.target, 'operator', 'POST', '/api/programs/execute', body, undefined, owner);
+    expect(executed.status).toBe(200); expect(executed.body.persisted).toBe(true);
+    expect((await request(f.target, 'operator', 'POST', '/api/programs/execute', { ...body, invocationId: randomUUID() }, undefined, caller)).status).toBe(403);
+    expect((await request(f.target, 'operator', 'DELETE', '/api/programs/bindings', remove(1))).status).toBe(200);
+    expect((await request(f.target, 'operator', 'POST', '/api/programs/execute', body, undefined, owner)).status).toBe(403);
+  });
+
+  it('lists only authorized custodial identities and never returns key or token material', async () => {
+    const f = await fixture();
+    f.agent.listLocalAgents = () => [owner, foreignExecutor, member].map(agentAddress => ({ agentAddress, name: 'Agent', privateKey: 'secret', authToken: 'secret' }));
+    const list = await request(f.target, 'operator', 'GET', '/api/programs/agents');
+    expect(list.body.agents).toEqual([owner, foreignExecutor].map(address => ({ address, name: 'Agent' })));
+    expect((await request(f.target, 'owner', 'GET', '/api/programs/agents')).body.agents).toEqual([{ address: owner, name: 'Agent' }]);
+    for (const identity of ['anonymous', 'disabled-anonymous'] as const)
+      expect((await request(f.target, identity, 'GET', '/api/programs/agents')).status).toBe(403);
+  });
+
   it('uploads, approves and remotely invokes TypeScript composition with signed inputs and live child grants', async () => {
     const f = await fixture();
     const callerWallet = new ethers.Wallet(callerKey);

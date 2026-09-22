@@ -45,6 +45,30 @@ function verifyHttp(url: URL, init: RequestInit) {
 }
 
 describe('Program client', () => {
+  it('uploads and invokes as the explicitly selected node agent without client-held signing keys', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      const headers = new Headers(init!.headers);
+      expect(headers.get('authorization')).toBe('Bearer operator-session');
+      expect(headers.get('x-dkg-program-agent')).toBe(wallet.address);
+      const body = JSON.parse(String(init!.body));
+      if (String(url).endsWith('/knowledge-assets')) {
+        expect(body.authorAgentAddress).toBe(wallet.address);
+        expect(body.quads).toContainEqual({ subject: body.quads[0].subject, predicate: 'http://www.w3.org/2000/01/rdf-schema#label', object: '"Device summary"' });
+        return json({ status: 'wm-sealed', assertionUri: 'urn:assertion:1', authorAddress: wallet.address });
+      }
+      expect(body.authorization).toBeUndefined();
+      return json(receipt(body.invocationId));
+    });
+    const c = new GraphComputer({ nodeUrl: 'http://node.test', peerId, localAgent: { address: wallet.address, authToken: 'operator-session' }, fetch });
+    await c.programs.upload({ graphId: 'programs', source: 'export function run() { return 1; }', label: 'Device summary', requiredTools: [] });
+    await c.programs.invoke(operation);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(() => c.programs.prepareInvocation({ ...operation, executorPeerId })).toThrow('configured route');
+  });
+  it('never silently falls back between local custody and an external signer', () => {
+    for (const options of [ {}, { signer, localAgent: { address: wallet.address, authToken: 'session' } }, { localAgent: { address: wallet.address, authToken: '' } } ])
+      expect(() => new GraphComputer({ nodeUrl: 'http://node.test', peerId, ...options } as any)).toThrow();
+  });
   it('creates Program and invocation IDs without the secure-context-only native UUID API', () => {
     vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => { throw new Error('Unavailable on HTTP'); });
     const id = createUuid();
