@@ -359,6 +359,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
   type ContextGraphWritePreflightProbe,
   type ContextGraphMemberPrincipalType,
@@ -1569,11 +1570,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
       /** Trusted only when supplied from the freshly loaded durable row. */
-      durableSubscriptionBinding?: Readonly<{
-        contextGraphId: string;
-        onChainId?: string;
-        onChainHash?: string;
-      }>;
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},

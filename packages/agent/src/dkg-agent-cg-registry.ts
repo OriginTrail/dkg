@@ -330,6 +330,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -933,11 +934,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
        * This may establish only the immutable numeric binding; current policy
        * and roster are still read after this method returns.
        */
-      durableSubscriptionBinding?: Readonly<{
-        contextGraphId: string;
-        onChainId?: string;
-        onChainHash?: string;
-      }>;
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Read-authority-only proof that exact RFC-64 absence was accepted. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},

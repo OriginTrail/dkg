@@ -60,7 +60,7 @@ function createPromotionHarness(
     cap?: number;
     authority?: 'allowed' | 'denied' | 'unavailable';
     load?: (id: string) => Promise<Record<string, unknown> | null>;
-    activate?: (row: Record<string, unknown>) => Promise<void>;
+    activate?: (row: Record<string, unknown>, activationOptions?: unknown) => Promise<void>;
   } = {},
 ) {
   const byId = new Map(rows.map((row) => [String(row.id), row]));
@@ -76,11 +76,14 @@ function createPromotionHarness(
     contextGraphSubscriptionRehydrationPendingIds: new Set<string>(),
     contextGraphSubscriptionRehydrationSlotIds: new Set<string>(),
     contextGraphSubscriptionDormancyById: new Map<string, string>(),
+    contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
     subscribedContextGraphs: new Map<string, any>(),
     started: true,
     log: { warn: vi.fn(), info: vi.fn() },
     updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn(),
     updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
+    persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
+    reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => ({
       outcome: options.authority ?? 'allowed',
       source: 'test',
@@ -1042,6 +1045,57 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       );
       expect(stale.agent.updateContextGraphSubscriptionRehydrationStatusAfterClear)
         .toHaveBeenCalledWith(['stale']);
+
+      let currentBinding = {
+        id: 'binding-race',
+        subscribed: true,
+        onChainId: '7',
+        onChainHash: `0x${'aa'.repeat(32)}`,
+      };
+      const laterEligible = {
+        id: 'later-eligible',
+        subscribed: true,
+        onChainId: '8',
+      };
+      let enterAuthority!: () => void;
+      let releaseAuthority!: () => void;
+      const authorityEntered = new Promise<void>((resolve) => { enterAuthority = resolve; });
+      const authorityGate = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+      const bindingRace = createPromotionHarness([currentBinding, laterEligible], {
+        load: async (id) => ({ ...(id === currentBinding.id ? currentBinding : laterEligible) }),
+      });
+      bindingRace.agent.resolveContextGraphSubscriptionBootstrapAuthority
+        .mockImplementation(async (id: string) => {
+          if (id === currentBinding.id) {
+            enterAuthority();
+            await authorityGate;
+          }
+          return {
+            outcome: 'allowed',
+            source: 'registered-chain',
+            reason: 'open-context-graph',
+            metadataBootstrap: 'not-needed',
+            onChainId: 7n,
+          } as const;
+        });
+      const racedPromotion = LifecycleSyncMethods.prototype
+        .promoteDormantContextGraphSubscriptions.call(
+          bindingRace.agent,
+          new AbortController().signal,
+        );
+      await authorityEntered;
+      currentBinding = {
+        ...currentBinding,
+        onChainHash: `0x${'bb'.repeat(32)}`,
+      };
+      releaseAuthority();
+      await expect(racedPromotion).resolves.toBe('rearm');
+      expect(bindingRace.agent.activatePersistedContextGraphSubscriptionRecord)
+        .toHaveBeenCalledOnce();
+      expect(bindingRace.agent.activatePersistedContextGraphSubscriptionRecord)
+        .toHaveBeenCalledWith(laterEligible, expect.any(Object));
+      expect(bindingRace.agent.contextGraphSubscriptionRehydrationPendingIds)
+        .toContain('binding-race');
 
       const activationFailure = createPromotionHarness([{ id: 'activation-failure', subscribed: true }], {
         activate: async () => { throw new Error('activation failed'); },

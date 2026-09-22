@@ -335,6 +335,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -803,11 +804,7 @@ export class QueryMethods extends DKGAgentBase {
        * canonical numeric id may skip name discovery, but never the fresh
        * policy/roster authority gate below.
        */
-      durableSubscriptionBinding?: Readonly<{
-        contextGraphId: string;
-        onChainId?: string;
-        onChainHash?: string;
-      }>;
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
     try {
@@ -952,11 +949,7 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
-      durableSubscriptionBinding?: Readonly<{
-        contextGraphId: string;
-        onChainId?: string;
-        onChainHash?: string;
-      }>;
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
     },
     registrationTimeoutMs: number,
     hasAcceptedRfc64PublicPolicy?: boolean,

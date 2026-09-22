@@ -710,6 +710,152 @@ describe('Context Graph subscription authority retry', () => {
     });
   });
 
+  it('promotes a capped durable binding without reverse name discovery', async () => {
+    const liveContextGraphId = '00-promotion-live-owner';
+    const cappedContextGraphId = 'zz-promotion-bound-target';
+    const chain = new MockChainAdapter();
+    const rows = new Map<string, any>([
+      [liveContextGraphId, {
+        id: liveContextGraphId,
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        syncScoped: true,
+        onChainId: '7',
+      }],
+      [cappedContextGraphId, {
+        id: cappedContextGraphId,
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncScoped: true,
+        onChainId: '8',
+      }],
+    ]);
+    agent = await DKGAgent.create({
+      name: 'PersistedBoundPromotion',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      maxRehydratedContextGraphSubscriptions: 1,
+      syncReconcilerEnabled: false,
+    });
+    mockLivePolicy(agent, 0);
+    const targetNameHash = agent.contextGraphNameCommitment(cappedContextGraphId);
+    const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+      .mockImplementation(async (nameHash) => {
+        if (nameHash === targetNameHash) {
+          throw new Error('capped durable binding must bypass reverse discovery');
+        }
+        return null;
+      });
+
+    await agent.start();
+    expect(agent.getSubscribedContextGraphs().has(cappedContextGraphId)).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: { activationCap: [cappedContextGraphId] },
+    });
+
+    agent.setContextGraphSubscription(liveContextGraphId, {
+      ...agent.getSubscribedContextGraphs().get(liveContextGraphId)!,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    });
+
+    await vi.waitFor(
+      () => expect(agent!.getSubscribedContextGraphs().get(cappedContextGraphId))
+        .toMatchObject({ subscribed: true, onChainId: '8' }),
+      { timeout: 10_000, interval: 10 },
+    );
+    expect(reverse.mock.calls.some(([nameHash]) => nameHash === targetNameHash)).toBe(false);
+  }, 15_000);
+
+  it('strictly heals a malformed capped binding before promotion side effects', async () => {
+    const liveContextGraphId = '00-promotion-heal-live-owner';
+    const targetNameHash = `0x${'a3'.repeat(32)}`;
+    const cappedContextGraphId = targetNameHash;
+    const chain = new MockChainAdapter();
+    const rows = new Map<string, any>([
+      [liveContextGraphId, {
+        id: liveContextGraphId,
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        syncScoped: true,
+        onChainId: '7',
+      }],
+      [cappedContextGraphId, {
+        id: cappedContextGraphId,
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncScoped: true,
+        onChainId: '042',
+        onChainHash: targetNameHash,
+      }],
+    ]);
+    const resolveFinalized = vi.fn(async (nameHash: string) => (
+      nameHash === targetNameHash ? 8n : null
+    ));
+    Object.assign(chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    agent = await DKGAgent.create({
+      name: 'PersistedMalformedPromotion',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      maxRehydratedContextGraphSubscriptions: 1,
+      syncReconcilerEnabled: false,
+    });
+    mockLivePolicy(agent, 0);
+    const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+      .mockImplementation(async (nameHash) => {
+        if (nameHash === targetNameHash) {
+          throw new Error('capped repair must stay on the finalized index');
+        }
+        return null;
+      });
+
+    await agent.start();
+    expect(agent.getSubscribedContextGraphs().has(cappedContextGraphId)).toBe(false);
+
+    agent.setContextGraphSubscription(liveContextGraphId, {
+      ...agent.getSubscribedContextGraphs().get(liveContextGraphId)!,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    });
+
+    await vi.waitFor(
+      () => expect(agent!.getSubscribedContextGraphs().get(cappedContextGraphId))
+        .toMatchObject({ subscribed: true, onChainId: '8' }),
+      { timeout: 10_000, interval: 10 },
+    );
+    expect(rows.get(cappedContextGraphId)).toMatchObject({ onChainId: '8' });
+    expect(resolveFinalized).toHaveBeenCalledWith(targetNameHash, expect.any(Object));
+    expect(reverse.mock.calls.some(([nameHash]) => nameHash === targetNameHash)).toBe(false);
+  }, 15_000);
+
   it.each([
     ['non-canonical', '042'],
     ['zero', '0'],
