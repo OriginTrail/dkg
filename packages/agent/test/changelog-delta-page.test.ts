@@ -217,6 +217,45 @@ describe('readChangelogDeltaPage — delta serving', () => {
     await store.close();
   });
 
+  it('never advances nextSeq past a marker committed after the read of a drained page', async () => {
+    const store = await storeWith([['urn:s', 'urn:p', '"v"', G1], ['urn:s2', 'urn:p', '"v"', G2]]);
+    // The head is 2 when the page starts and the read drains through 2; a
+    // local write then commits seq 3 while the page is being serialized.
+    class LateWriteReader extends FakeReader {
+      head = { era: 'E1', seq: 2 };
+      visibleThrough = 2;
+      override async changelogHead() { return this.head; }
+      override async readChanges(sinceSeq: number, limit: number) {
+        const page = (await super.readChanges(sinceSeq, limit))
+          .filter((change) => change.seq <= this.visibleThrough);
+        this.visibleThrough = 3;
+        this.head = { era: 'E1', seq: 3 };
+        return page;
+      }
+    }
+    const reader = new LateWriteReader({ era: 'E1', seq: 2 }, [
+      rec(1, G1, 'upsert'), rec(2, G2, 'upsert'), rec(3, G1, 'upsert'),
+    ]);
+    const first = await readChangelogDeltaPage({
+      reader, store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
+    });
+    expect(first.kind).toBe('delta');
+    if (first.kind !== 'delta') return;
+    expect(first.records.map((r) => r.seq)).toEqual([1, 2]);
+    expect(first.headSeq).toBe(3);             // the head after the read covers every record
+    expect(first.nextSeq).toBe(2);             // scanned through 2, not the late marker
+    expect(decodeChangelogResponse(encodeChangelogResponse(first))).toEqual(first);
+    // The requester continues from nextSeq and receives the late marker.
+    const second = await readChangelogDeltaPage({
+      reader, store, contextGraphId: CG, sinceSeq: first.nextSeq, requesterEra: 'E1', limit: 100,
+    });
+    expect(second.kind).toBe('delta');
+    if (second.kind !== 'delta') return;
+    expect(second.records.map((r) => r.seq)).toEqual([3]);
+    expect(second.nextSeq).toBe(3);
+    await store.close();
+  });
+
   it('hands the requester a resync when the era rotates underneath the read', async () => {
     const store = await storeWith([['urn:s', 'urn:p', '"v"', G1]]);
     class RotatingReader extends FakeReader {
