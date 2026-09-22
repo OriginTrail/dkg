@@ -159,6 +159,15 @@ RFC-64 rollout configuration is snapshotted during daemon startup. Changes to
 provider bindings require a daemon restart. Finalized public VM reconciliation
 remains chain-inventoried in every per-CG mode.
 
+Release-native chain authority retains the exact event block number and hash in
+the policy object as auditable provenance. When an operator-selected authority
+anchor can include a non-consensus-final event, a reorg can therefore give the
+same logical authority generation a different `policyDigest`. Peers fail closed
+while their accepted digests differ. The recurring authoritative refresh may
+replace the orphaned source coordinates at the same policy era/version only
+when every other policy field and the complete roster generation are unchanged;
+any semantic change still requires the ordinary monotonic high-water advance.
+
 The example shows structure only. Do not invent or copy placeholder control
 values. The complete `policyEnvelope` must be the output of an independent
 finality/policy verifier. The daemon validates the canonical policy before the

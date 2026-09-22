@@ -100,17 +100,22 @@ describe('RFC-64 replay worklist lifecycle', () => {
         heads: Object.freeze([]),
       }));
     let idleCalls = 0;
-    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
-      idleCalls += 1;
-      if (idleCalls === 1) {
-        edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
-      }
-    });
+    const whenIdle = vi.spyOn(service, 'whenReceiverIdleForContextGraph')
+      .mockImplementation(async () => {
+        idleCalls += 1;
+        if (idleCalls === 1) {
+          edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
+        }
+      });
 
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 2, failed: 0 });
     expect(requestReplay).toHaveBeenCalledTimes(2);
+    // The replay parks on ITS OWN graph: a wait keyed by any other string reads
+    // idle at once, so the id is pinned through runtime -> adapter -> service.
+    expect(whenIdle.mock.calls.map(([contextGraphId]) => contextGraphId))
+      .toEqual([CONTEXT_GRAPH_ID, CONTEXT_GRAPH_ID]);
   });
 
   it('does not let an older same-peer fence release a newer replay demand', async () => {
@@ -198,14 +203,18 @@ describe('RFC-64 replay worklist lifecycle', () => {
           heads: Object.freeze([]),
         });
       });
-    vi.spyOn(service, 'whenReceiverIdle').mockImplementation(async () => {
-      edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
-    });
+    const whenIdle = vi.spyOn(service, 'whenReceiverIdleForContextGraph')
+      .mockImplementation(async () => {
+        edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peer);
+      });
 
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 64, failed: 1 });
     expect(requestReplay).toHaveBeenCalledTimes(64);
+    expect(whenIdle).toHaveBeenCalledTimes(64);
+    expect(new Set(whenIdle.mock.calls.map(([contextGraphId]) => contextGraphId)))
+      .toEqual(new Set([CONTEXT_GRAPH_ID]));
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,

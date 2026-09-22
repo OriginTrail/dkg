@@ -10,6 +10,28 @@ import {
 } from './context-graph-registration-binding.fixture.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it('marks only a positive cold reverse-name-hash RPC result as pool evidence', async () => {
+    const positive = selectedFixture();
+    const markPositive = vi.fn();
+    await expect(positive.agent.resolveCurrentNameHashContextGraphBinding(
+      LOCAL_ID,
+      { onRpcRead: markPositive },
+    )).resolves.toMatchObject({
+      onChainId: '42',
+      provenance: 'reverse-name-hash',
+    });
+    expect(markPositive).toHaveBeenCalledOnce();
+
+    const negative = selectedFixture();
+    negative.resolveContextGraphIdByNameHash.mockResolvedValueOnce(null);
+    const markNegative = vi.fn();
+    await expect(negative.agent.resolveCurrentNameHashContextGraphBinding(
+      LOCAL_ID,
+      { onRpcRead: markNegative },
+    )).resolves.toBeUndefined();
+    expect(markNegative).not.toHaveBeenCalled();
+  });
+
   it('suspends current and finalized authority discovery while registration is in flight', async () => {
     const fixture = selectedFixture();
     Reflect.set(fixture.agent, 'contextGraphRegistrationsInFlight', new Set([LOCAL_ID]));

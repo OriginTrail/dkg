@@ -416,6 +416,10 @@ import {
   enrichContextGraphListAuthorityV1,
   type ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 function syncAuthAbortError(reason: unknown): Error {
   return createAbortError(reason);
@@ -1602,46 +1606,59 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (accessPolicy === 0) return { kind: 'public', onChainId };
 
     const cacheKey = onChainId.toString();
-    if (options.allowCachedRoster) {
+    // A roster observed in the SAME storage read as liveness and policy is
+    // fresher than any cache and makes the third chain call unnecessary.
+    const snapshotRoster = accessPolicyState.participantAgents;
+    if (snapshotRoster === undefined && options.allowCachedRoster) {
       const cached = this.onChainParticipantAgentsCache.get(cacheKey);
       if (cached !== undefined) {
         return { kind: 'private', onChainId, participantAgents: [...cached] };
       }
     }
-    const getParticipantAgents = this.chain.getContextGraphParticipantAgents;
-    if (typeof getParticipantAgents !== 'function') {
-      return {
-        kind: 'unavailable',
-        onChainId,
-        reason: 'chain-participant-authority-unsupported',
-      };
-    }
-
     let rawAgents: string[];
-    try {
-      const result = await runBoundedOperation(
-        () => getParticipantAgents.call(this.chain, onChainId),
-        {
-          label: `getContextGraphParticipantAgents(${onChainId})`,
-          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
-          signal: options.signal,
-        },
-      );
-      if (!Array.isArray(result)) {
+    if (snapshotRoster !== undefined) {
+      if (!Array.isArray(snapshotRoster)) {
         return {
           kind: 'unavailable',
           onChainId,
           reason: 'chain-participant-authority-invalid',
         };
       }
-      rawAgents = result;
-    } catch (err) {
-      return {
-        kind: 'unavailable',
-        onChainId,
-        reason: 'chain-participant-authority-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-      };
+      rawAgents = [...snapshotRoster];
+    } else {
+      const getParticipantAgents = this.chain.getContextGraphParticipantAgents;
+      if (typeof getParticipantAgents !== 'function') {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-unsupported',
+        };
+      }
+      try {
+        const result = await runBoundedOperation(
+          () => getParticipantAgents.call(this.chain, onChainId),
+          {
+            label: `getContextGraphParticipantAgents(${onChainId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
+        if (!Array.isArray(result)) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-participant-authority-invalid',
+          };
+        }
+        rawAgents = result;
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-participant-authority-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
     }
 
     const seen = new Set<string>();
@@ -1672,9 +1689,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * projects to `null`, which the caller treats as fail-closed.
    */
   async resolveOnChainParticipantAgents(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
-    const authority = await this.resolveRegisteredContextGraphAuthority(
-      contextGraphId,
-      { allowCachedRoster: true },
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.participants,
+      () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        { allowCachedRoster: true },
+      ),
     );
     if (authority.kind === 'unavailable') {
       this.log.warn(
@@ -2772,7 +2792,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           signal,
           (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
             contextGraphIds,
-            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            evidence.agentResolverReadOptions(readSignal),
           ),
         ),
         'batched finalized on-chain id enrichment',

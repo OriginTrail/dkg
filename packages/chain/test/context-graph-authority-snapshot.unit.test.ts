@@ -439,6 +439,38 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     );
   });
 
+  it('a repeated cold load reuses the immutable deploy block without another head probe', async () => {
+    // The legacy (index-less) cold path keeps only `fromBlock`. With the REAL resolver wired,
+    // the second cold load — forced by a replaced anchor — must not re-probe `eth_blockNumber`.
+    const { adapter, evidence, provider, advanceAuthorityHead, replaceCachedAnchor } =
+      makeEvmAuthorityAdapter();
+    const raw = adapter as any;
+    delete raw.resolveContractDeployBlock;
+    raw.ensureConfiguredStaticChainIdValidated = async () => 31337n;
+    let headProbes = 0;
+    raw.providers = [{
+      ...provider,
+      getBlockNumber: async () => { headProbes += 1; return 30; },
+      getCode: async (_address: string, block?: number) => (
+        block === undefined || block >= 7 ? '0x6000' : '0x'
+      ),
+    }];
+
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(headProbes).toBe(1);
+    expect(evidence.ranges).toEqual(expect.arrayContaining([[7, 16]]));
+
+    advanceAuthorityHead();
+    replaceCachedAnchor();
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    // A second full cold scan from the deploy block ran...
+    expect(evidence.ranges.slice(18)).toEqual(
+      Array.from({ length: 6 }, () => [[7, 16], [17, 26], [27, 35]]).flat(),
+    );
+    // ...anchored by the cached deploy block: no second probe.
+    expect(headProbes).toBe(1);
+  });
+
   it('clears cached generations when ContextGraphStorage rotates', async () => {
     const { adapter, evidence, rotateContextGraphStorage } = makeEvmAuthorityAdapter();
     await adapter.getContextGraphAuthoritySnapshot(9n);

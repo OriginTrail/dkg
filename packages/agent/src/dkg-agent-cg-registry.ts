@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -722,11 +722,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetsV1(
     this: DKGAgent,
     contextGraphIds: readonly string[],
-    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
+    options: ContextGraphAuthorityReadOptions & Readonly<{
+      onRpcRead?: () => void;
+    }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
-    const chainReadOptions = options.signal === undefined
-      ? {}
-      : { signal: options.signal };
+    const { onRpcRead, ...chainReadOptions } = options;
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
       const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
@@ -774,7 +774,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
-      options.onRpcRead?.();
+      onRpcRead?.();
       const snapshotsByNameHash = await resolveSnapshots.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
@@ -802,7 +802,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         .resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
       if (resolveSnapshot !== undefined) {
         const [{ contextGraphId, expectedNameHash }] = reverseBindingTargets;
-        options.onRpcRead?.();
+        onRpcRead?.();
         const finalizedSnapshot = await resolveSnapshot.call(
           indexReader,
           expectedNameHash,
@@ -823,7 +823,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
     if (resolveMany !== undefined) {
       options.signal?.throwIfAborted();
-      options.onRpcRead?.();
+      onRpcRead?.();
       const resolvedByNameHash = await resolveMany.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
@@ -848,7 +848,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveOne = indexReader.resolveFinalizedContextGraphIdByNameHash;
     if (resolveOne === undefined) return { kind: 'legacy-current' };
     for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
-      options.onRpcRead?.();
+      onRpcRead?.();
       const expectedOnChainId = await resolveOne.call(
         indexReader,
         expectedNameHash,
@@ -873,7 +873,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetV1(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
+    options: ContextGraphAuthorityReadOptions & Readonly<{
+      onRpcRead?: () => void;
+    }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
     if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
       throw new Error(
@@ -1084,7 +1086,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             try {
               const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
                 [contextGraphId],
-                { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+                evidence.agentResolverReadOptions(readSignal),
               );
               // An older reader object without any finalized name capability is
               // an explicitly legacy adapter and may use the compatibility path.

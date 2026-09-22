@@ -1,4 +1,9 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexConfig,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
@@ -85,6 +90,7 @@ export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
 export type {
+  Rfc64AgentAuthorityResolverReadOptionsV1,
   Rfc64AuthorityReadCoordinatorSnapshotV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 export * from './rfc64/policy-cell-v1.js';

@@ -120,8 +120,9 @@ describe('POST /api/memory/search — SPARQL injection regression (PR #849)', ()
 
     expect(res.statusCode).toBe(200);
 
-    // What the legacy buggy path would have produced.
-    const legacyBuggyOutput = breakoutPayload.toLowerCase().replace(/"/g, '\\"');
+    // Exact output from the removed quote-only sanitizer. Keep this as a fixed
+    // regression fixture instead of executing the known-incomplete sanitizer.
+    const legacyBuggyOutput = String.raw`safe\\"; drop graph <urn:victim> ; #`;
     // What the current safe path produces.
     const safeOutput = escapeSparqlLiteral(breakoutPayload.toLowerCase());
 

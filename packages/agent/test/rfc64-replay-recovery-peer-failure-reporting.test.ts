@@ -47,7 +47,7 @@ function createRuntime(overrides: {
   readonly requestPeer?: (contextGraphId: string, peerId: string) => Promise<
     Rfc64CatalogReplayPeerResultV1<Target>
   >;
-  readonly whenReceiverIdle?: () => Promise<void>;
+  readonly whenReceiverIdleForContextGraph?: (contextGraphId: string) => Promise<void>;
   readonly parityFailed?: () => Promise<boolean>;
 } = {}) {
   const requestPeer = vi.fn(overrides.requestPeer ?? (async (_cg: string, peerId: string) => {
@@ -56,7 +56,8 @@ function createRuntime(overrides: {
   }));
   const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
     requestPeer,
-    whenReceiverIdle: overrides.whenReceiverIdle ?? (async () => undefined),
+    whenReceiverIdleForContextGraph:
+      overrides.whenReceiverIdleForContextGraph ?? (async () => undefined),
     targetIdentity: (target) => target.id,
     parityFailed: overrides.parityFailed ?? (async () => false),
   });
@@ -138,7 +139,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     let runtime!: Rfc64CatalogReplayRecoveryRuntimeV1<Target>;
     const created = createRuntime({
       requestPeer: async () => completed(),
-      whenReceiverIdle: async () => {
+      whenReceiverIdleForContextGraph: async () => {
         runtime.markPeerPending(CG, POLICY, churnPeer);
       },
     });

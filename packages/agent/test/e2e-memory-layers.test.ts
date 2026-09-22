@@ -2421,6 +2421,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const cgRegistrationWrite = vi.spyOn(chain, 'createContextGraph');
     const cgNameBindingRead = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
     const cgAccessPolicyRead = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+    // The folded authority read is the agent's default seam now and does not go
+    // through the point reads above, so it needs its own guard.
+    const cgLiveAuthorityRead = vi.spyOn(chain, 'getContextGraphLiveAuthority');
     const cgPublishPolicyRead = vi.spyOn(chain, 'getContextGraphPublishPolicy');
     const cgParticipantRosterRead = vi.spyOn(chain, 'getContextGraphParticipantAgents');
     const kaNumberFloorRead = vi.spyOn(chain, 'getMaxKaNumberForAuthor');
@@ -2445,6 +2448,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(cgRegistrationWrite).not.toHaveBeenCalled();
     expect(cgNameBindingRead).not.toHaveBeenCalled();
     expect(cgAccessPolicyRead).not.toHaveBeenCalled();
+    expect(cgLiveAuthorityRead).not.toHaveBeenCalled();
     expect(cgPublishPolicyRead).not.toHaveBeenCalled();
     expect(cgParticipantRosterRead).not.toHaveBeenCalled();
     // Incidental identity allocation, not CG registration: one cold-author
@@ -3262,23 +3266,27 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
 
 describe('Query views', () => {
   it('includeSharedMemory merges SWM data into query results', async () => {
+    // Keep this local-only query fixture distinct from the on-chain fixtures in
+    // this file: repeated registrations of CG_ID intentionally create an
+    // ambiguous name hash, which is unrelated to the query-view behavior.
+    const contextGraphId = 'memory-layers-query-views';
     const agent = await createAgent('ViewBot');
-    await agent.createContextGraph({ id: CG_ID, name: 'View E2E' });
+    await agent.createContextGraph({ id: contextGraphId, name: 'View E2E' });
 
     // Put data in canonical graph via publish
-    await agent.publish(CG_ID, [
+    await agent.publish(contextGraphId, [
       { subject: `${ENTITY_BASE}:canonical`, predicate: 'http://schema.org/name', object: '"Canonical"', graph: '' },
     ]);
 
     // Put data in SWM
-    await agent.share(CG_ID, [
+    await agent.share(contextGraphId, [
       { subject: `${ENTITY_BASE}:shared`, predicate: 'http://schema.org/name', object: '"Shared"', graph: '' },
     ], { localOnly: true });
 
     // Default query (data graph only) — should see canonical
     const defaultResult = await agent.query(
       `SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }`,
-      CG_ID,
+      contextGraphId,
     );
     const defaultSubjects = defaultResult.bindings.map((b: any) => b['s']);
     expect(defaultSubjects.some((s: string) => s.includes('canonical'))).toBe(true);
@@ -3286,7 +3294,7 @@ describe('Query views', () => {
     // includeSharedMemory — should see both
     const mergedResult = await agent.query(
       `SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }`,
-      { contextGraphId: CG_ID, includeSharedMemory: true },
+      { contextGraphId, includeSharedMemory: true },
     );
     const mergedSubjects = mergedResult.bindings.map((b: any) => b['s']);
     expect(mergedSubjects.some((s: string) => s.includes('canonical'))).toBe(true);

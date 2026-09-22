@@ -572,6 +572,19 @@ export class RpcFailoverClient {
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
           } catch (estErr) {
+            // A CALL_EXCEPTION is the contract's deterministic answer to THIS exact call. Running
+            // `signer.populateTransaction(populated)` after that answer asks for the same gas
+            // estimate again (and fetches a nonce that can never be used) before surfacing the
+            // same revert. RandomSampling's expected NoEligibleContextGraph result is the dominant
+            // idle-path example. Preserve the original error for the feature boundary to translate;
+            // no nonce is allocated, nothing is signed, and nothing is broadcast.
+            //
+            // Keep every other estimate failure on the established policy below: local governor
+            // pressure retries later, endpoint failures fail over where possible, and the final
+            // endpoint may still use ethers' unbuffered population fallback.
+            if (errorCode(estErr) === 'CALL_EXCEPTION') {
+              throw estErr;
+            }
             // Local governor pressure is caller-level backpressure, not an
             // endpoint defect and not permission to drop the requested OOG
             // headroom. Preserve the original retry-later error unchanged:

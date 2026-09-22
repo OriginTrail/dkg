@@ -74,8 +74,10 @@ import {
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type CompareAndSwapAppliedCatalogHeadInputV1,
+  type CompareAndSwapMergeSwmAuthorInventoryInputV1,
   type DeleteAppliedCatalogHeadInputV1,
   type CompareAndSwapSwmAuthorInventoryInputV1,
+  type DeleteSwmAuthorInventoryInputV1,
   type Rfc64InventoryV1CandidateApi,
   type SwmAuthorInventoryCasResultV1,
   type VerifiedCandidateBucketLoadV1,
@@ -532,11 +534,23 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     );
   }
 
+  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void {
+    this.requireOpen();
+    this.#candidate.deleteSwmAuthorInventoryV1(input);
+  }
+
   compareAndSwapSwmAuthorInventoryV1(
     input: CompareAndSwapSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1 {
     this.requireOpen();
     return this.#candidate.compareAndSwapSwmAuthorInventoryV1(input);
+  }
+
+  compareAndSwapMergeSwmAuthorInventoryV1(
+    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1 {
+    this.requireOpen();
+    return this.#candidate.compareAndSwapMergeSwmAuthorInventoryV1(input);
   }
 
   listFinalizedPrivatePlacementRepairs() {

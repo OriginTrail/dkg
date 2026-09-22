@@ -2,6 +2,9 @@
 
 import {
   isRpcEndpointsExhaustedError,
+  type ChainReadOptions,
+  type ContextGraphAuthorityReadOptions,
+  type ContextGraphAuthorityProjectionServedEvidence,
   type RpcEndpointsExhaustedErrorLike,
 } from '@origintrail-official/dkg-chain';
 
@@ -34,9 +37,34 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
   readonly retryAtMs: number | null;
 }
 
+/** Options whose `onRpcRead` marker is owned and invoked by an agent resolver. */
+export type Rfc64AgentAuthorityResolverReadOptionsV1 = ContextGraphAuthorityReadOptions & Readonly<{
+  onRpcRead: () => void;
+}>;
+
 export interface Rfc64AuthorityRpcProbeEvidenceV1 {
-  /** Record that this operation actually exercised the governed RPC pool. */
-  markRpcAttempt(): void;
+  /**
+   * Build options for an agent authority resolver. The callbacks are the only
+   * public evidence surface: the resolver reports when it starts an RPC read,
+   * while the chain adapter refines that claim when a projection answers.
+   *
+   * Callers mark an attempt BEFORE they read, because until the projection
+   * cache existed every such read reached the pool. That is no longer true, so
+   * the adapter's own account refines the mark:
+   *  - `scan` reached the pool now: health.
+   *  - `cache`: the projection owner has already proved it is inside the
+   *    configured tick, and it counts as health provided that scan started AFTER the
+   *    outstanding exhaustion. Without this, a node served entirely from the
+   *    cache would keep being judged by a failure it has long recovered from.
+   *  - anything else — `log` (folded from the node-local chain event log,
+   *    which contacted no endpoint), `stale-cache` (the refresh FAILED and an
+   *    older projection answered instead) or a cache hit that predates the
+   *    exhaustion: the operation succeeds for its caller but proves nothing
+   *    about the pool, and it voids this operation's `markRpcAttempt`.
+   */
+  agentResolverReadOptions(signal?: AbortSignal): Rfc64AgentAuthorityResolverReadOptionsV1;
+  /** Mark and build options for a direct finalized chain/index read. */
+  chainReadOptions(signal?: AbortSignal): ChainReadOptions;
 }
 
 export interface Rfc64AuthorityReadRunOptionsV1 {
@@ -128,9 +156,10 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  *
  * Recovery needs evidence, not merely a fulfilled callback. A read that was
  * answered from local or cached state says nothing about the pool it never
- * contacted, so only an operation that calls `markRpcAttempt` can clear an
- * outstanding exhaustion. Until then the circuit stays half-open, which is a
- * statement about eligibility to probe rather than about a probe in flight.
+ * contacted, so only an operation that invokes the `onRpcRead` callback from
+ * `agentResolverReadOptions`, or uses `chainReadOptions`, can clear an outstanding
+ * exhaustion. Until then the circuit stays half-open, which is a statement
+ * about eligibility to probe rather than about a probe in flight.
  *
  * Only a typed `RPC_ENDPOINTS_EXHAUSTED` result trips the circuit. Contract
  * reverts and graph-specific validation failures retain their normal behavior.
@@ -149,6 +178,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
    * pool state that trip established.
    */
   #tripGeneration = 0;
+  #exhaustedAtMs = 0;
   #tail: Promise<void> = Promise.resolve();
   /** In-flight reads admitted without the serializer, retired by `whenIdle`. */
   readonly #unqueued = new Set<Promise<unknown>>();
@@ -205,13 +235,50 @@ export class Rfc64AuthorityReadCoordinatorV1 {
         }
 
         const admittedGeneration = this.#tripGeneration;
-        let rpcAttempted = false;
+        const poolEvidence: {
+          value: 'none' | 'attempt' | 'proven' | 'unproven';
+        } = { value: 'none' };
+        const markRpcAttempt = () => {
+          if (poolEvidence.value !== 'proven') poolEvidence.value = 'attempt';
+        };
+        const observeProjectionServed = (
+          served: ContextGraphAuthorityProjectionServedEvidence,
+        ) => {
+          if (served.source === 'scan') {
+            // A completed scan is definitive pool evidence and must outrank an
+            // earlier stale-cache answer from another subread in this operation.
+            poolEvidence.value = 'proven';
+          } else if (
+            served.source === 'cache'
+            && this.#now() - served.ageMs > this.#exhaustedAtMs
+          ) {
+            poolEvidence.value = 'proven';
+          } else if (poolEvidence.value !== 'proven') {
+            // A stale/old cache or a node-local log fold voids a preceding
+            // attempt marker, but cannot erase a completed scan proven by
+            // another subread. A log fold contacted no endpoint in this read,
+            // so its tick timestamp is never evidence that this pool recovered.
+            poolEvidence.value = 'unproven';
+          }
+        };
+        const chainReadOptions = (signal?: AbortSignal): ChainReadOptions => {
+          markRpcAttempt();
+          return Object.freeze({
+            ...(signal === undefined ? {} : { signal }),
+            onContextGraphAuthorityProjectionServed: observeProjectionServed,
+          });
+        };
         const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
-          markRpcAttempt: () => { rpcAttempted = true; },
+          agentResolverReadOptions: (signal?: AbortSignal) => Object.freeze({
+            ...(signal === undefined ? {} : { signal }),
+            onRpcRead: markRpcAttempt,
+            onContextGraphAuthorityProjectionServed: observeProjectionServed,
+          }),
+          chainReadOptions,
         });
         try {
           const result = await operation(runSignal, evidence);
-          this.#recordSuccess(rpcAttempted, admittedGeneration);
+          this.#recordSuccess(poolEvidence.value, admittedGeneration);
           return result;
         } catch (error) {
           if (isRpcEndpointsExhaustedError(error)) this.#open(error);
@@ -278,14 +345,45 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     }
 
     const admittedGeneration = this.#tripGeneration;
-    let rpcAttempted = false;
+    const poolEvidence: {
+      value: 'none' | 'attempt' | 'proven' | 'unproven';
+    } = { value: 'none' };
+    const markRpcAttempt = () => {
+      if (poolEvidence.value !== 'proven') poolEvidence.value = 'attempt';
+    };
+    const observeProjectionServed = (
+      served: ContextGraphAuthorityProjectionServedEvidence,
+    ) => {
+      if (served.source === 'scan') {
+        poolEvidence.value = 'proven';
+      } else if (
+        served.source === 'cache'
+        && this.#now() - served.ageMs > this.#exhaustedAtMs
+      ) {
+        poolEvidence.value = 'proven';
+      } else if (poolEvidence.value !== 'proven') {
+        poolEvidence.value = 'unproven';
+      }
+    };
+    const chainReadOptions = (signal?: AbortSignal): ChainReadOptions => {
+      markRpcAttempt();
+      return Object.freeze({
+        ...(signal === undefined ? {} : { signal }),
+        onContextGraphAuthorityProjectionServed: observeProjectionServed,
+      });
+    };
     const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
-      markRpcAttempt: () => { rpcAttempted = true; },
+      agentResolverReadOptions: (signal?: AbortSignal) => Object.freeze({
+        ...(signal === undefined ? {} : { signal }),
+        onRpcRead: markRpcAttempt,
+        onContextGraphAuthorityProjectionServed: observeProjectionServed,
+      }),
+      chainReadOptions,
     });
     const active = (async () => {
       try {
         const result = await operation(runSignal, evidence);
-        this.#recordSuccess(rpcAttempted, admittedGeneration);
+        this.#recordSuccess(poolEvidence.value, admittedGeneration);
         return result;
       } catch (error) {
         if (isRpcEndpointsExhaustedError(error)) this.#open(error);
@@ -344,13 +442,20 @@ export class Rfc64AuthorityReadCoordinatorV1 {
    * and honoring that as evidence would discard a live cooldown and restart the
    * backoff ladder. Only evidence gathered under the current generation counts.
    */
-  #recordSuccess(rpcAttempted: boolean, admittedGeneration: number): void {
+  #recordSuccess(
+    poolEvidence: 'none' | 'attempt' | 'proven' | 'unproven',
+    admittedGeneration: number,
+  ): void {
     if (
-      this.#consecutiveExhaustions !== 0
-      && !(rpcAttempted && this.#tripGeneration === admittedGeneration)
-    ) return;
-    this.#consecutiveExhaustions = 0;
-    this.#retryAtMs = 0;
+      this.#consecutiveExhaustions === 0
+      || (
+        (poolEvidence === 'attempt' || poolEvidence === 'proven')
+        && this.#tripGeneration === admittedGeneration
+      )
+    ) {
+      this.#consecutiveExhaustions = 0;
+      this.#retryAtMs = 0;
+    }
   }
 
   #open(error: RpcEndpointsExhaustedErrorLike): void {
@@ -379,6 +484,7 @@ export class Rfc64AuthorityReadCoordinatorV1 {
     }
     this.#tripGeneration += 1;
     this.#consecutiveExhaustions += 1;
+    this.#exhaustedAtMs = this.#now();
     const exponent = Math.min(this.#consecutiveExhaustions - 1, 30);
     const exponential = Math.min(
       this.#maxBackoffMs,

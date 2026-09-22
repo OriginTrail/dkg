@@ -382,6 +382,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  ContextGraphReadAuthorityUnavailableError,
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -389,6 +390,10 @@ import {
 import { runBoundedOperation } from './bounded-operation.js';
 import { isRfc64UnregisteredOwnerUnresolvedErrorV1 } from './dkg-agent-rfc64-catalog.js';
 import type { Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 } from './dkg-agent-rfc64-seed-fetch.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -525,24 +530,41 @@ export class QueryMethods extends DKGAgentBase {
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
 
+    let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
+    if (opts.contextGraphId) {
+      const scopedContextGraphId = opts.contextGraphId;
+      scopedReadAuthority = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.query,
+        () => this.resolveContextGraphReadAuthority(scopedContextGraphId, {
+          callerAgentAddress: callerAgentAddressStr,
+          allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
+          signal: opts.signal,
+        }),
+      );
+      if (scopedReadAuthority.outcome === 'unavailable') {
+        throw new ContextGraphReadAuthorityUnavailableError(
+          opts.contextGraphId,
+          scopedReadAuthority,
+        );
+      }
+      if (scopedReadAuthority.outcome === 'denied') {
+        this.log.info(ctx, `Query denied for context graph "${opts.contextGraphId}"`);
+        // A-1 follow-up review: synthetic deny must match the SPARQL form
+        // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
+        // instead of a SELECT-shaped `{ bindings: [] }`.
+        return emptyQueryResultForKind(sparql);
+      }
+    }
+
     if (
       opts.contextGraphId
       && targetsSharedMemory
       && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
         callerAgentAddress: callerAgentAddressStr,
+        readAuthority: scopedReadAuthority,
       }))
     ) {
       this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
-      return emptyQueryResultForKind(sparql);
-    }
-
-    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId, {
-      callerAgentAddress: callerAgentAddressStr,
-    }))) {
-      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      // A-1 follow-up review: synthetic deny must match the SPARQL form
-      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
-      // instead of a SELECT-shaped `{ bindings: [] }`.
       return emptyQueryResultForKind(sparql);
     }
 
@@ -706,7 +728,10 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
-    return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
+    return (await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.canRead,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, opts),
+    )).outcome === 'allowed';
   }
 
   /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
@@ -755,11 +780,14 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
-      this,
-      contextGraphId,
-      opts,
-      CHAIN_POLICY_READ_TIMEOUT_MS,
+    return withRpcUsageSite(
+      CG_AUTH_RPC_SITES.readAuthority,
+      () => QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+        this,
+        contextGraphId,
+        opts,
+        CHAIN_POLICY_READ_TIMEOUT_MS,
+      ),
     );
   }
 

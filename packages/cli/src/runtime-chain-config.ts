@@ -12,7 +12,7 @@ export type RuntimeEvmChainConfig = Pick<
   EVMAdapterConfig,
   | 'rpcUrl' | 'rpcUrls' | 'walletRpcUrls' | 'hubAddress' | 'tokenAddress'
   | 'chainId' | 'receiptTimeoutMs' | 'approvalPolicy' | 'cgRegistryScanPageSize'
-  | 'finalityConfirmations'
+  | 'finalityConfirmations' | 'indexTickMs'
   | 'maxFeePerGasWei'
   | 'minPublisherNativeWei' | 'minPublisherTracWei'
   | 'rpcRequestAdmission'
@@ -46,6 +46,7 @@ export function projectRuntimeEvmChainConfig(
     chainId: chain.chainId,
     receiptTimeoutMs: chain.receiptTimeoutMs,
     finalityConfirmations: chain.finalityConfirmations,
+    indexTickMs: chain.indexTickMs,
     maxFeePerGasWei: chain.maxFeePerGasWei,
     approvalPolicy: resolveApprovalPolicy(chain.approvalPolicy),
     cgRegistryScanPageSize: chain.cgRegistryScanPageSize,

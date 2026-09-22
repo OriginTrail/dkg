@@ -62,6 +62,7 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
+  ChainEventLogStore,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
@@ -89,6 +90,7 @@ import type {
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+import type { AuthorityIndexConfig } from './authority-index-config.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1714,6 +1716,13 @@ export interface DKGAgentConfig {
      * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /**
+     * `chain.indexTickMs`: how long one completed finalized Context Graph
+     * authority projection answers reads before it is refreshed. Cache service
+     * is always capped at the five-minute RFC-64 accepted-authority interval.
+     * Defaults to 6000.
+     */
+    indexTickMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint;
     /**
@@ -1825,6 +1834,15 @@ export interface DKGAgentConfig {
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
+  /**
+   * Durable backing for the node's ONE chain log. Giving it to the agent is
+   * what starts the single background tick: the agent's own chain adapter owns
+   * it, and every other adapter in the process reads the same log rather than
+   * opening a scanner of its own.
+   */
+  chainEventLogStore?: ChainEventLogStore;
+  /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
+  authorityIndex?: AuthorityIndexConfig;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.

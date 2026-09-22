@@ -1,5 +1,6 @@
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
+import { startAuthorityIndexSnapshotRuntime } from './authority-index-snapshot-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -701,6 +702,7 @@ import {
 } from
   './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
@@ -722,13 +724,20 @@ import {
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
+import {
   rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
-import { initializeRfc64LegacySwmBoundaryV1 } from
+import {
+  initializeRfc64LegacySwmBoundaryV1,
+  prepareRfc64LateLegacySwmBoundaryV1,
+} from
   './rfc64/legacy-swm-boundary-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
@@ -2091,6 +2100,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.
     const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
@@ -2823,6 +2833,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
               workspaceWriteLocks: this.writeLocks,
+              resolveDurableRootAtomicCompanion: (input) => {
+                if (this.config.dataDir === undefined) return;
+                return prepareRfc64LateLegacySwmBoundaryV1(
+                  this,
+                  input.contextGraphId,
+                  input.kaUal,
+                  input.shareOperationId,
+                  input.assertionVersion,
+                );
+              },
               ackHandlerDeadlineMs: this.config.storageAckTiming.handlerDeadlineMs,
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
@@ -3099,6 +3119,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else {
       this.log.info(ctx, `Node role is '${effectiveRole}' — skipping StorageACK handler registration (core-only)`);
     }
+
+    // Deliberately AFTER StorageACK registration, not beside the other protocol
+    // handlers above. The first refresh is a finalized-anchor resolution plus a
+    // registry `eth_getLogs` walk; started earlier it competed with the boot
+    // `getIdentityId()` this block awaits, timing it out at 20s. That makes the
+    // registration above return 'retryable', so the core advertises no
+    // `/dkg/10.0.2/storage-ack` for STORAGE_ACK_REGISTRATION_RETRY_MS and every
+    // publish that needs its ACK fails. Nothing here depends on the index.
+    this.authorityIndexSnapshotRuntime = startAuthorityIndexSnapshotRuntime({
+      nodeRole: this.config.nodeRole ?? 'edge',
+      snapshots: this.chain.contextGraphAuthorityIndexSnapshots,
+      register: (protocol, handler, options) => this.router.register(protocol, handler, options),
+      warn: (message) => this.log.warn(ctx, message),
+    });
 
     // Register VERIFY proposal handler — responds to incoming M-of-N proposals.
     // Agents on the allowList sign the verify digest when they agree with the data.
@@ -4326,10 +4360,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // malformed envelope must fail CLOSED (deny), never escape as a handler error.
     let authorized = false;
     try {
-      authorized = await this.authorizeSyncRequest(
-        request as unknown as SyncRequestEnvelope,
-        peerId,
-        { signal: options?.signal },
+      authorized = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.changelogAuthorize,
+        () => this.authorizeSyncRequest(
+          request as unknown as SyncRequestEnvelope,
+          peerId,
+          { signal: options?.signal },
+        ),
       );
     } catch {
       return encodeChangelogResponse({ kind: 'denied' });
@@ -10982,7 +11019,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async canUseSharedMemoryForContextGraph(this: DKGAgent,
     contextGraphId: string,
-    opts: { callerAgentAddress?: string } = {},
+    opts: {
+      callerAgentAddress?: string;
+      readAuthority?: ContextGraphReadAuthorityDecision;
+    } = {},
   ): Promise<boolean> {
     const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
       contextGraphId,
@@ -10995,10 +11035,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }
-    return this.canReadContextGraph(contextGraphId, {
-      callerAgentAddress: opts.callerAgentAddress,
-      allowSubscriptionFallback: false,
-    });
+    return opts.readAuthority !== undefined
+      ? opts.readAuthority.outcome === 'allowed'
+      : this.canReadContextGraph(contextGraphId, {
+          callerAgentAddress: opts.callerAgentAddress,
+          allowSubscriptionFallback: false,
+        });
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,

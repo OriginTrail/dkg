@@ -3,6 +3,10 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
+import {
+  CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+  ContextGraphReadAuthorityUnavailableError,
+} from '../src/context-graph-read-authority.js';
 
 const MEMBER = '0x0000000000000000000000000000000000000001';
 const NON_MEMBER = '0x00000000000000000000000000000000000000ff';
@@ -243,6 +247,39 @@ describe('private read authorization uses the on-chain participant roster', () =
       reason: 'peer-authority-unavailable',
       onChainId: 7n,
     });
+  });
+
+  it('surfaces unavailable scoped query authority instead of returning an empty result', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'ScopedQueryAuthorityUnavailable',
+      chainAdapter: chain,
+    });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(8n));
+    vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
+      kind: 'unavailable',
+      reason: 'chain-access-policy-timeout',
+    });
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+
+    const error = await agent.query(
+      'SELECT ?s WHERE { ?s ?p ?o }',
+      {
+        contextGraphId: 'registered-public',
+        callerAgentAddress: MEMBER,
+      },
+    ).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ContextGraphReadAuthorityUnavailableError);
+    expect(error).toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      retryable: true,
+      contextGraphId: 'registered-public',
+      source: 'registered-chain',
+      reason: 'chain-access-policy-timeout',
+    });
+    expect(queryExecution).not.toHaveBeenCalled();
   });
 
   it('uses cold name-hash discovery for recovery and sender-key agent gates', async () => {
