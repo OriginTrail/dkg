@@ -790,18 +790,6 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   /**
-   * Every finalized READ of this capability. It is answered from the index's
-   * last completed projection while that is younger than `chain.indexTickMs`;
-   * otherwise `rescanFinalizedProjection` above runs exactly as it always has
-   * (head, cursor admission, scan, stabilize) and its result is kept. The
-   * projection is handed over only AFTER the stabilization fence, so a scan
-   * whose anchor moved is never retained.
-   *
-   * `snapshots.refresh` is NOT routed through here: the core's background loop
-   * must advance the durable cursor every pass and feeds only the servable
-   * durable snapshot.
-   */
-  /**
    * The same retained-projection read, minus the escalation.
    *
    * {@link readFinalizedProjection} answers at any cost: a miss ends in
@@ -875,6 +863,18 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     });
   };
 
+  /**
+   * Every finalized READ of this capability. It is answered from the index's
+   * last completed projection while that is younger than `chain.indexTickMs`;
+   * otherwise `rescanFinalizedProjection` above runs exactly as it always has
+   * (head, cursor admission, scan, stabilize) and its result is kept. The
+   * projection is handed over only AFTER the stabilization fence, so a scan
+   * whose anchor moved is never retained.
+   *
+   * `snapshots.refresh` is NOT routed through here: the core's background loop
+   * must advance the durable cursor every pass and feeds only the servable
+   * durable snapshot.
+   */
   const readFinalizedProjection = async <T>(
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,

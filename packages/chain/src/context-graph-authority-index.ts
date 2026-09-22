@@ -273,12 +273,6 @@ export class ContextGraphAuthorityIndex {
   }
 
   /**
-   * Answer from the last completed projection of `input.scope` while it is
-   * younger than `chain.indexTickMs`, otherwise through `input.refresh` — the
-   * caller's complete read, which ends in {@link view}. See
-   * `ContextGraphAuthorityIndexProjectionCache` for the staleness contract.
-   */
-  /**
    * Answer ONLY from the last completed projection, or report a miss.
    *
    * The counterpart to {@link projection} for a caller that prefers a local
@@ -293,6 +287,12 @@ export class ContextGraphAuthorityIndex {
     return this.#projections.peek(input);
   }
 
+  /**
+   * Answer from the last completed projection of `input.scope` while it is
+   * younger than `chain.indexTickMs`, otherwise through `input.refresh` — the
+   * caller's complete read, which ends in {@link view}. See
+   * `ContextGraphAuthorityIndexProjectionCache` for the staleness contract.
+   */
   async projection<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
     if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
     return this.#projections.read(input);
