@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityIndexId, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -330,6 +330,8 @@ import type { RegisteredContextGraphAuthority } from
   './registered-context-graph-authority.js';
 import type { LiveOnChainAccessPolicyState } from
   './internal/context-graph-authority/context-graph-access-policy.js';
+import { parseRfc64AuthoritySnapshotV1 } from
+  './rfc64/release-native-catalog-authority-v1.js';
 // Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
 // the same stable public contract as the package root.
 export type { RegisteredContextGraphAuthority } from
@@ -1554,13 +1556,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical live authority for a registered context graph.
+   * Canonical authority for a registered context graph.
    *
-   * All security-sensitive consumers use this discriminant so a failed chain
-   * read cannot be confused with an unregistered graph and fall through to
-   * local/RFC-64 policy. Roster caching is deliberately opt-in and is only
-   * suitable for host-mode gossip admission; read, encryption, and mutation
-   * callers require a fresh chain view.
+   * All security-sensitive consumers use this discriminant so an authority
+   * outage cannot be confused with an unregistered graph and fall through to
+   * local/RFC-64 policy. Mutation, encryption, subscription admission, and
+   * legacy adapters retain current-state reads. Scoped query authorization may
+   * instead consume the complete deployment-scoped finalized index snapshot;
+   * it atomically binds liveness, policy, roster, numeric id, and name hash and
+   * fails closed on any missing or mismatched evidence. A finalized-lane fault
+   * or deadline is no evidence at all and falls back to the bounded
+   * current-state read rather than to local policy.
    */
   async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
@@ -1573,6 +1579,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
+      /**
+       * Scoped reads may consume the complete finalized authority projection.
+       * Mutation, encryption, and admission callers retain current-state reads.
+       */
+      authorityReadMode?: 'live-current' | 'finalized-index';
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
@@ -1590,20 +1601,120 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 
-    let accessPolicyState: LiveOnChainAccessPolicyState;
-    try {
-      accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
-        onChainId.toString(),
-        createOperationContext('system'),
-        { signal: options.signal },
-      );
-    } catch (err) {
-      return {
-        kind: 'unavailable',
-        onChainId,
-        reason: 'chain-access-policy-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-      };
+    let accessPolicyState: LiveOnChainAccessPolicyState | undefined;
+    // Only the finalized-index lane consults the adapter capability; current-
+    // state callers never touch it, so a receiver without a chain adapter (the
+    // access-policy boundary tests) keeps the live lane untouched.
+    const finalizedIndexReader = options.authorityReadMode === 'finalized-index'
+      ? this.chain.contextGraphAuthorityIndexRevisionReader
+      : undefined;
+    const readFinalizedSnapshots = finalizedIndexReader
+      ?.readContextGraphAuthorityIndexSnapshots;
+    if (
+      finalizedIndexReader !== undefined
+      && readFinalizedSnapshots !== undefined
+    ) {
+      const authorityIndexId = onChainId.toString();
+      let snapshots: Awaited<ReturnType<typeof readFinalizedSnapshots>> | undefined;
+      try {
+        assertContextGraphAuthorityIndexId(
+          authorityIndexId,
+          'scoped read finalized authority index id',
+        );
+        snapshots = await runBoundedOperation(
+          (signal) => readFinalizedSnapshots.call(
+            finalizedIndexReader,
+            [authorityIndexId as ContextGraphAuthorityIndexId],
+            { signal },
+          ),
+          {
+            label: `readFinalizedContextGraphAuthority(${onChainId})`,
+            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            signal: options.signal,
+          },
+        );
+      } catch {
+        // A reader fault or deadline yields no evidence about the graph: the
+        // projection may be rescanning behind the RPC governor for a graph that
+        // registered moments ago, or the index may be down. The canonical
+        // current-state read below still owns the answer, exactly as it does
+        // for every other consumer, and it is bounded and reports its own
+        // outage, so the outcome stays fail-closed. Only finalized EVIDENCE
+        // (absent, inactive, or mismatched below) never falls back.
+        snapshots = undefined;
+      }
+      if (snapshots !== undefined) {
+        const rawSnapshot = snapshots.get(authorityIndexId as ContextGraphAuthorityIndexId);
+        if (rawSnapshot === undefined) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-access-policy-unknown',
+            detail: 'finalized authority index has no snapshot for the registered Context Graph',
+          };
+        }
+        let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
+        try {
+          snapshot = parseRfc64AuthoritySnapshotV1(rawSnapshot, onChainId);
+        } catch (err) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-access-policy-unavailable',
+            detail: err instanceof Error ? err.message : String(err),
+          };
+        }
+        if (snapshot.active !== true) {
+          return {
+            kind: 'unavailable',
+            onChainId,
+            reason: 'chain-access-policy-unknown',
+            detail: 'finalized authority snapshot is inactive',
+          };
+        }
+        if (registration.provenance !== 'numeric-id') {
+          const bindingTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+          const durableNameHash = options.durableSubscriptionBinding?.onChainHash;
+          const expectedNameHash = bindingTarget?.nameHash
+            ?? (durableNameHash === undefined
+              ? this.contextGraphNameCommitment(contextGraphId)
+              : this.contextGraphWireId(durableNameHash));
+          if (
+            this.contextGraphWireId(snapshot.nameHash)
+            !== this.contextGraphWireId(expectedNameHash)
+          ) {
+            return {
+              kind: 'unavailable',
+              onChainId,
+              reason: 'chain-access-policy-unknown',
+              detail: 'finalized authority snapshot name commitment does not match the registered Context Graph',
+            };
+          }
+        }
+        accessPolicyState = snapshot.accessPolicy === 0
+          ? { kind: 'available', accessPolicy: 0 }
+          : {
+              kind: 'available',
+              accessPolicy: 1,
+              participantAgents: snapshot.participantAgents,
+            };
+      }
+    }
+    if (accessPolicyState === undefined) {
+      try {
+        accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
+          onChainId.toString(),
+          createOperationContext('system'),
+          { signal: options.signal },
+        );
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          onChainId,
+          reason: 'chain-access-policy-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
     }
     if (accessPolicyState.kind === 'unavailable') {
       return { ...accessPolicyState, onChainId };
