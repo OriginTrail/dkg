@@ -507,7 +507,10 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
 
   const changesPath = path.join(temporaryDirectory, 'changes.z');
   fs.writeFileSync(changesPath, Buffer.from('M\0packages/agent/package.json\0'));
-  const { CI_CANDIDATE_REPO, CI_DIFF_BASE_SHA, CI_DIFF_HEAD_SHA, ...environment } = process.env;
+  const readerVariables = new Set(['CI_CANDIDATE_REPO', 'CI_DIFF_BASE_SHA', 'CI_DIFF_HEAD_SHA']);
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !readerVariables.has(name)),
+  );
   const mode = (overrides) => {
     const planner = spawnSync(process.execPath, [
       path.join(REPO_ROOT, 'scripts/ci/plan-ci.mjs'),
