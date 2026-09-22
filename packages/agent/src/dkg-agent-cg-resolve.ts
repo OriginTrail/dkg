@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -263,10 +263,6 @@ type ContextGraphNameHashBindingTarget = {
   subscription: ContextGraphSub;
   nameHash?: string;
 };
-/** Policy evidence a finalized read mode bound from the finalized authority index. */
-type FinalizedRegisteredContextGraphAccessPolicyV1 =
-  | Extract<LiveOnChainAccessPolicyState, { kind: 'available' }>
-  | RegisteredContextGraphAuthorityUnavailable;
 class ListContextGraphsBudgetExceeded extends Error {
   constructor(label: string) {
     super(`${label} exceeded listContextGraphs budget`);
@@ -335,16 +331,13 @@ import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type {
   ContextGraphAuthorityReadMode,
   RegisteredContextGraphAuthority,
-  RegisteredContextGraphAuthorityUnavailable,
 } from './registered-context-graph-authority.js';
-import {
-  resolveFinalizedContextGraphNameBindingV1,
-  type ContextGraphRegistrationBinding,
-} from './dkg-agent-cg-registry.js';
 import type { LiveOnChainAccessPolicyState } from
   './internal/context-graph-authority/context-graph-access-policy.js';
-import { parseRfc64AuthoritySnapshotV1 } from
-  './rfc64/release-native-catalog-authority-v1.js';
+import { resolveFinalizedOnChainAccessPolicyState } from
+  './internal/context-graph-authority/finalized-context-graph-access-policy.js';
+import { resolveFinalizedContextGraphNameBindingV1 } from
+  './internal/context-graph-authority/finalized-context-graph-binding.js';
 /** Outcome of one bounded finalized authority snapshot read for a numeric id. */
 export type FinalizedContextGraphAuthoritySnapshotReadV1 =
   | { kind: 'unsupported' }
@@ -1651,13 +1644,27 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // access-policy boundary tests) keeps the live lane untouched.
     const readMode = options.authorityReadMode ?? 'live-current';
     if (readMode !== 'live-current') {
-      const finalized = await this.resolveFinalizedRegisteredContextGraphAccessPolicyV1(
-        contextGraphId,
-        registration,
+      const durableBinding = options.durableSubscriptionBinding?.contextGraphId === contextGraphId
+        ? options.durableSubscriptionBinding
+        : undefined;
+      const finalized = await resolveFinalizedOnChainAccessPolicyState(
         {
-          signal: options.signal,
-          durableSubscriptionBinding: options.durableSubscriptionBinding,
+          indexReader: this.chain.contextGraphAuthorityIndexRevisionReader,
+          authorityReads: this.rfc64AuthorityReadCoordinatorV1,
+          readSnapshot: (id, readOptions) => this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions),
+          requestTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+          expectedNameHash: () => (registration.provenance === 'numeric-id'
+            ? undefined
+            : resolveFinalizedContextGraphNameBindingV1(
+              this,
+              contextGraphId,
+              durableBinding,
+            ).expectedNameHash),
+        },
+        onChainId,
+        {
           readMode,
+          signal: options.signal,
           requireLiveRosterForPrivate: options.requireLiveRosterForPrivate,
         },
       );
@@ -2089,148 +2096,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         : this.contextGraphNameCommitment(localId)
       : undefined;
     return { localId, subscription, nameHash };
-  }
-
-
-  /**
-   * Registered-authority policy evidence from the complete finalized authority
-   * index, shared by both finalized read modes (see
-   * {@link ContextGraphAuthorityReadMode}).
-   *
-   * The modes differ only in the lane. `finalized-index` (scoped query
-   * authorization) waits on the shared RFC-64 authority circuit's foreground
-   * lane: it observes an open circuit instead of walking an exhausted pool,
-   * the served provenance of the answer it consumes is recovery evidence for
-   * every other consumer, and it never queues behind a cold whole-contract
-   * scan on the bulk lane. `finalized-index-or-live` (read-only host/sync/share
-   * gates and the encryption policy bit) reads without the circuit, so the
-   * retained projection answers even while the pool is exhausted. Both wait on
-   * the one detached snapshot read under the configured request deadline.
-   *
-   * `undefined` sends the caller to the bounded current-state read, which
-   * fails closed on its own. That happens when the adapter has no finalized
-   * capability; when the lane faulted, timed out, or is cooling down (the
-   * detached resolution keeps running, so a retry is answered from the
-   * retained projection); when the index holds no snapshot for a slot whose
-   * registration is already proven (the projection's anchor has not reached
-   * the registration block — the registration lane never treats finalized
-   * absence as evidence either); when the caller needs the current PRIVATE
-   * roster (`requireLiveRosterForPrivate`); and when a PRIVATE roster would
-   * come from a projection whose provenance the reader did not report, or that
-   * it served as `stale-cache`, meaning a refresh failed and the projection is
-   * at least one index tick old. The reader owns the age bound: it never
-   * serves a projection older than its stale window, `min(max(3T, 15s), 5m)`
-   * for `chain.indexTickMs` T (18s at the default 6s tick), so a roster
-   * removal takes effect within finality depth plus one tick while RPC is
-   * healthy and within that window at worst. A numeric bound here would only
-   * fight the configured tick. Finalized EVIDENCE — an inactive, malformed, or
-   * name-mismatched snapshot — fails closed and never falls back. The public
-   * policy bit is immutable on chain, so a public snapshot is served at any
-   * provenance.
-   */
-  async resolveFinalizedRegisteredContextGraphAccessPolicyV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    registration: Extract<ContextGraphRegistrationBinding, { kind: 'registered' }>,
-    options: {
-      readMode: 'finalized-index' | 'finalized-index-or-live';
-      signal?: AbortSignal;
-      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
-      requireLiveRosterForPrivate?: boolean;
-    },
-  ): Promise<FinalizedRegisteredContextGraphAccessPolicyV1 | undefined> {
-    // Checked before the lane, so a host without the capability never marks
-    // an RPC attempt on the shared circuit.
-    if (
-      this.chain.contextGraphAuthorityIndexRevisionReader
-        ?.readContextGraphAuthorityIndexSnapshots === undefined
-    ) {
-      return undefined;
-    }
-    const { onChainId } = registration;
-    const unknown = (detail: string): RegisteredContextGraphAuthorityUnavailable => ({
-      kind: 'unavailable',
-      onChainId,
-      reason: 'chain-access-policy-unknown',
-      detail,
-    });
-
-    const label = `readFinalizedContextGraphAuthority(${onChainId})`;
-    let read: FinalizedContextGraphAuthoritySnapshotReadV1;
-    try {
-      read = options.readMode === 'finalized-index'
-        ? await runBoundedOperation(
-            (signal) => this.rfc64AuthorityReadCoordinatorV1.runForeground(
-              signal,
-              async (readSignal, evidence) => {
-                // The shared flight never sees a caller's evidence hooks, so
-                // the circuit is told how the consumed answer was served here.
-                const chainReadOptions = evidence.chainReadOptions(readSignal);
-                const snapshotRead = await this.readFinalizedContextGraphAuthoritySnapshotV1(
-                  onChainId,
-                  { signal: readSignal, label },
-                );
-                // An absent row is an answer too: its provenance decides whether
-                // this read proves the pool, exactly as for a snapshot.
-                if (snapshotRead.kind !== 'unsupported' && snapshotRead.served !== undefined) {
-                  chainReadOptions.onContextGraphAuthorityProjectionServed?.(snapshotRead.served);
-                }
-                return snapshotRead;
-              },
-            ),
-            {
-              label,
-              timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
-              signal: options.signal,
-            },
-          )
-        : await this.readFinalizedContextGraphAuthoritySnapshotV1(
-            onChainId,
-            { signal: options.signal, label },
-          );
-    } catch {
-      return undefined;
-    }
-    if (read.kind !== 'snapshot') return undefined;
-    let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
-    try {
-      snapshot = parseRfc64AuthoritySnapshotV1(read.snapshot, onChainId);
-    } catch (err) {
-      return {
-        kind: 'unavailable',
-        onChainId,
-        reason: 'chain-access-policy-unavailable',
-        detail: err instanceof Error ? err.message : String(err),
-      };
-    }
-    if (snapshot.active !== true) {
-      return unknown('finalized authority snapshot is inactive');
-    }
-    if (registration.provenance !== 'numeric-id') {
-      const { expectedNameHash } = resolveFinalizedContextGraphNameBindingV1(
-        this,
-        contextGraphId,
-        options.durableSubscriptionBinding?.contextGraphId === contextGraphId
-          ? options.durableSubscriptionBinding
-          : undefined,
-      );
-      if (snapshot.nameHash !== this.contextGraphWireId(expectedNameHash)) {
-        return unknown(
-          'finalized authority snapshot name commitment does not match the registered Context Graph',
-        );
-      }
-    }
-    if (snapshot.accessPolicy === 0) return { kind: 'available', accessPolicy: 0 };
-    // The immutable policy bit proved PRIVATE; a caller that needs the
-    // CURRENT roster takes it from the live read.
-    if (options.requireLiveRosterForPrivate === true) return undefined;
-    const { served } = read;
-    if (served === undefined || served.source === 'stale-cache') return undefined;
-    return {
-      kind: 'available',
-      accessPolicy: 1,
-      participantAgents: snapshot.participantAgents,
-    };
   }
 
   /**

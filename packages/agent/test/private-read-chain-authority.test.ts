@@ -40,6 +40,12 @@ const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
     accessPolicy,
   });
 
+/** What the reader rejects with when every provider failed: it trips the shared circuit. */
+const exhaustedAuthorityPool = () => Object.assign(
+  new Error('readContextGraphAuthorityIndexSnapshots failed on all endpoints'),
+  { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+);
+
 function finalizedAuthoritySnapshot(
   contextGraphId: bigint,
   nameHash: string,
@@ -384,7 +390,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       .toEqual(['finalized-authority-snapshot:7']);
   });
 
-  it('observes the shared authority circuit instead of walking an exhausted pool', async () => {
+  it('keeps a projection answering scoped reads while the shared circuit cools down', async () => {
     const contextGraphId = 'finalized-circuit';
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -395,25 +401,122 @@ describe('private read authorization uses the on-chain participant roster', () =
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(authoritativeBinding(7n));
     const readIndex = installFinalizedAuthorityReader(chain, undefined)
-      .mockRejectedValue(Object.assign(
-        new Error('readContextGraphAuthorityIndexSnapshots failed on all endpoints'),
-        { code: 'RPC_ENDPOINTS_EXHAUSTED' },
-      ));
+      .mockRejectedValue(exhaustedAuthorityPool());
     const live = mockLivePolicy(agent, 0);
 
+    // The exhaustion trips the shared circuit; the live read answers.
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toBeDefined();
     expect(readIndex).toHaveBeenCalledTimes(1);
     expect(live).toHaveBeenCalledTimes(1);
+    expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1())
+      .toMatchObject({ state: 'open', consecutiveExhaustions: 1 });
 
-    // The exhaustion tripped the circuit: the next read is refused before it
-    // reaches the reader and still resolves from the bounded current state.
+    // Refusing the next read would only send it to the live read of the same
+    // pool, so it is admitted as a probe. Its exhaustion joins the open round.
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toBeDefined();
-    expect(readIndex).toHaveBeenCalledTimes(1);
+    expect(readIndex).toHaveBeenCalledTimes(2);
     expect(live).toHaveBeenCalledTimes(2);
+    expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1())
+      .toMatchObject({ state: 'open', consecutiveExhaustions: 1 });
+
+    // A projection fetched before the trip still answers without a live read,
+    // and it is no evidence that the pool recovered.
+    installFinalizedAuthorityReader(
+      chain,
+      finalizedAuthoritySnapshot(7n, agent.contextGraphNameCommitment(contextGraphId)),
+      { source: 'cache', ageMs: 5_000 },
+    );
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(live).toHaveBeenCalledTimes(2);
+    expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1())
+      .toMatchObject({ state: 'open', consecutiveExhaustions: 1 });
+  });
+
+  it('reports the scoped read\'s projection evidence to both the circuit and the roster gate', async () => {
+    const contextGraphId = 'finalized-circuit-evidence';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedCircuitEvidenceReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-circuit-evidence', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    const privateSnapshot = finalizedAuthoritySnapshot(
+      7n,
+      agent.contextGraphNameCommitment(contextGraphId),
+      { accessPolicy: 1, participantAgents: [MEMBER] },
+    );
+    installFinalizedAuthorityReader(chain, undefined).mockRejectedValue(exhaustedAuthorityPool());
+    const live = mockLivePolicy(agent, 0);
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1())
+      .toMatchObject({ state: 'open', consecutiveExhaustions: 1 });
+
+    // Building the read's options marks an RPC attempt, and only the circuit's
+    // own observer can void it: a log fold reached no endpoint. Were the lane
+    // to take the report for itself, this answer would close the circuit over
+    // an exhausted pool. The roster gate must see the same report, or the
+    // private roster would go to the live read.
+    installFinalizedAuthorityReader(chain, privateSnapshot, { source: 'log', ageMs: 0 });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    })).resolves.toBeDefined();
+    expect(queryExecution).toHaveBeenCalledTimes(2);
+    expect(live).toHaveBeenCalledTimes(1);
+    expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1())
+      .toMatchObject({ state: 'open', consecutiveExhaustions: 1 });
+
+    // A completed scan reached the pool: it closes the circuit.
+    installFinalizedAuthorityReader(chain, privateSnapshot, { source: 'scan', ageMs: 0 });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    })).resolves.toBeDefined();
+    expect(queryExecution).toHaveBeenCalledTimes(3);
+    expect(live).toHaveBeenCalledTimes(1);
+    expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1())
+      .toMatchObject({ state: 'closed', consecutiveExhaustions: 0 });
+  });
+
+  it('does not hold a projection hit behind unrelated authority-index activity', async () => {
+    const contextGraphId = 'finalized-busy-index';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedBusyIndexReadAuthority',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-busy-index', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(authoritativeBinding(7n));
+    installFinalizedAuthorityReader(
+      chain,
+      finalizedAuthoritySnapshot(7n, agent.contextGraphNameCommitment(contextGraphId)),
+    );
+    // A bulk catalog scan, or one a timed-out read left behind, is still
+    // running, so the reader's global drain never settles. That work belongs
+    // to the reader's lifecycle, not to this read's policy budget.
+    const reader = Reflect.get(chain, 'contextGraphAuthorityIndexRevisionReader') as {
+      whenIdle: Mock<() => Promise<void>>;
+    };
+    reader.whenIdle.mockImplementation(() => new Promise<void>(() => undefined));
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+    })).resolves.toBeDefined();
+    expect(live).not.toHaveBeenCalled();
+    reader.whenIdle.mockResolvedValue(undefined);
   });
 
   it('reports the scoped lane\'s served provenance to the shared circuit: a stale answer keeps it half-open, a scan closes it', async () => {
@@ -492,7 +595,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   });
 
-  it('answers a finalized-index-or-live gate from the snapshot while the open circuit refuses the scoped lane', async () => {
+  it('answers both finalized lanes from the retained snapshot while the circuit cools down', async () => {
     const contextGraphId = 'finalized-or-live-open-circuit';
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -535,13 +638,14 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(pointRoster).not.toHaveBeenCalled();
     expect(agent.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({ state: 'open' });
 
-    // The scoped lane still observes the open circuit: it is refused before
-    // the reader and resolves from the bounded current state.
+    // The scoped lane is admitted during the cooldown too, as one probe behind
+    // the foreground permit: it answers from the same retained projection
+    // instead of walking the exhausted pool through the live read.
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toBeDefined();
-    expect(readIndex).toHaveBeenCalledTimes(1);
-    expect(live).toHaveBeenCalledTimes(2);
+    expect(readIndex).toHaveBeenCalledTimes(2);
+    expect(live).toHaveBeenCalledTimes(1);
   });
 
   it('keeps current-state reads when the adapter exposes no finalized authority index', async () => {
@@ -554,14 +658,19 @@ describe('private read authorization uses the on-chain participant roster', () =
     Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-adapter', configurable: true });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(authoritativeBinding(7n));
-    const finalized = vi.spyOn(agent, 'resolveFinalizedRegisteredContextGraphAccessPolicyV1');
+    // A legacy adapter binds no finalized index, so the finalized lane has
+    // nothing to read and must not take the circuit's foreground permit.
+    expect(Reflect.get(chain, 'contextGraphAuthorityIndexRevisionReader')).toBeUndefined();
+    const foreground = vi.spyOn(
+      Reflect.get(agent, 'rfc64AuthorityReadCoordinatorV1') as Rfc64AuthorityReadCoordinatorV1,
+      'runForeground',
+    );
     const live = mockLivePolicy(agent, 0);
 
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toBeDefined();
-    expect(finalized).toHaveBeenCalledTimes(1);
-    await expect(finalized.mock.results[0]?.value).resolves.toBeUndefined();
+    expect(foreground).not.toHaveBeenCalled();
     expect(live).toHaveBeenCalledTimes(1);
   });
 

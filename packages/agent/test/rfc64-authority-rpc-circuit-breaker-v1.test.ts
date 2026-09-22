@@ -255,6 +255,28 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       expect(breaker.snapshot()).toMatchObject({ state: 'closed', consecutiveExhaustions: 0 });
     });
 
+    it('still classifies a direct read\'s report when a consumer observes it too', async () => {
+      const { breaker } = await halfOpenBreaker();
+      const observed: string[] = [];
+      await breaker.run(undefined, async (_signal, evidence) => {
+        // Building the options is the eager attempt mark. Only the circuit's
+        // own observer can void it, so the consumer's must not displace it.
+        evidence.chainReadOptions(undefined, (served) => observed.push(served.source))
+          .onContextGraphAuthorityProjectionServed?.({ source: 'log', ageMs: 0 });
+        return 'folded';
+      });
+      expect(observed).toEqual(['log']);
+      expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
+
+      await breaker.run(undefined, async (_signal, evidence) => {
+        evidence.chainReadOptions(undefined, (served) => observed.push(served.source))
+          .onContextGraphAuthorityProjectionServed?.({ source: 'scan', ageMs: 0 });
+        return 'scanned';
+      });
+      expect(observed).toEqual(['log', 'scan']);
+      expect(breaker.snapshot().state).toBe('closed');
+    });
+
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
