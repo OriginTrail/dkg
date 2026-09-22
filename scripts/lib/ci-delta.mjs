@@ -541,16 +541,26 @@ const PACKAGE_SCOPED_MANIFEST_FIELDS = new Set([
   'version',
 ]);
 
-// pnpm runs these for every workspace project during `pnpm install`, which
-// every CI job performs, so they are install inputs rather than package code.
-const INSTALL_LIFECYCLE_SCRIPTS = Object.freeze([
+// Scripts a package manager runs implicitly while installing, which every CI
+// job does: npm's install and prepare lifecycles (pnpm runs the same ones for
+// workspace projects), npm's legacy `prepublish` and its `dependencies` hook,
+// and every `pnpm:`-namespaced hook such as `pnpm:devPreinstall`. Any other
+// script runs only when invoked by name, so it is package code exercised by
+// the shared build and the package's own lanes.
+const INSTALL_LIFECYCLE_SCRIPTS = new Set([
   'preinstall',
   'install',
   'postinstall',
   'preprepare',
   'prepare',
   'postprepare',
+  'prepublish',
+  'dependencies',
 ]);
+
+function isInstallLifecycleScript(name) {
+  return INSTALL_LIFECYCLE_SCRIPTS.has(name) || name.startsWith('pnpm:');
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -581,9 +591,14 @@ function classifyManifestChange(filePath, readManifest) {
   if (installFields.length) {
     return { packageScoped: false, detail: `${filePath} changed ${installFields.join(', ')}` };
   }
-  const lifecycleScripts = INSTALL_LIFECYCLE_SCRIPTS.filter((name) => (
-    !isDeepStrictEqual(before.scripts?.[name], after.scripts?.[name])
-  ));
+  const scripts = { before: before.scripts ?? {}, after: after.scripts ?? {} };
+  if (!isPlainObject(scripts.before) || !isPlainObject(scripts.after)) {
+    return { packageScoped: false, detail: `${filePath} scripts is not a JSON object` };
+  }
+  const lifecycleScripts = [...new Set([...Object.keys(scripts.before), ...Object.keys(scripts.after)])]
+    .filter((name) => isInstallLifecycleScript(name))
+    .filter((name) => !isDeepStrictEqual(scripts.before[name], scripts.after[name]))
+    .sort();
   if (lifecycleScripts.length) {
     return {
       packageScoped: false,

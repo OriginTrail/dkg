@@ -69,6 +69,8 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
   for (const head of [
     { ...manifest, exports: { ...manifest.exports, './sync': './dist/sync.js' } },
     { ...manifest, scripts: { ...manifest.scripts, 'benchmark:x': 'node bench.mjs' } },
+    // Packing hooks run only when packing, which the shared build verifies.
+    { ...manifest, scripts: { ...manifest.scripts, prepack: 'pnpm run build' } },
     { ...manifest, version: '10.0.1', files: ['dist'] },
     Object.fromEntries(Object.entries(manifest).reverse()),
   ]) {
@@ -89,6 +91,9 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     [{ ...manifest, somethingNew: true }, /changed somethingNew$/],
     [{ ...manifest, scripts: { ...manifest.scripts, postinstall: 'node setup.js' } }, /install lifecycle scripts postinstall$/],
     [{ ...manifest, scripts: { ...manifest.scripts, prepare: 'node setup.js' } }, /install lifecycle scripts prepare$/],
+    [{ ...manifest, scripts: { ...manifest.scripts, dependencies: 'node setup.js' } }, /install lifecycle scripts dependencies$/],
+    [{ ...manifest, scripts: { ...manifest.scripts, 'pnpm:devPreinstall': 'node setup.js' } }, /install lifecycle scripts pnpm:devPreinstall$/],
+    [{ ...manifest, scripts: 'node setup.js' }, /scripts is not a JSON object$/],
   ]) {
     const plan = manifestPlan(head);
     assert.equal(plan.mode, 'full', String(reason));
