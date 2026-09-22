@@ -1,5 +1,24 @@
-import { NODE_EVM_LANES } from './ci-lanes.mjs';
-export { NODE_EVM_LANES } from './ci-lanes.mjs';
+// This module is part of the trusted CI controller: workflows run it from a
+// sparse checkout that contains ONLY the files in CONTROLLER_POLICY_FILES
+// (scripts/ci/trusted-controller-pins.mjs). It may import node: builtins and
+// the other controller files, nothing else, or every planner run fails with
+// ERR_MODULE_NOT_FOUND and the pin can never be rotated. The executable lane
+// topology in ci-lanes.mjs is checked against this map instead.
+export const PRIMARY_LANE_JOBS = Object.freeze({
+  tornado_core: 'tornado-core',
+  tornado_blazegraph: 'tornado-blazegraph',
+  tornado_publisher: 'tornado-publisher',
+  tornado_agent: 'tornado-agent',
+  bura_cli: 'bura-cli',
+  bura_blazegraph_arm64: 'bura-blazegraph-arm64',
+  bura_query: 'bura-supporting',
+  kosava_node_ui: 'kosava-node-ui',
+  kosava_node_ui_e2e: 'kosava-node-ui-e2e',
+  kosava_supporting: 'kosava-supporting',
+  kosava_hardhat_plugins: 'kosava-hardhat-plugins',
+});
+
+export const NODE_EVM_LANES = Object.freeze(Object.keys(PRIMARY_LANE_JOBS));
 
 // `contracts` remains a workflow output for compatibility, but Solidity is an
 // independent relevance gate rather than part of the Node/EVM "full" profile.

@@ -25,7 +25,7 @@ import {
   validateEvmResults,
   validatePrimaryResults,
 } from '../ci-results.mjs';
-import { validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
+import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -621,6 +621,73 @@ test('trusted planner and gates reject the all-skipped candidate-control attack'
   });
   assert.equal(evmGate.status, 1);
   assert.match(evmGate.stderr, /selected but ended with skipped/);
+});
+
+test('the trusted controller runs from a checkout of exactly its policy files', (t) => {
+  // Workflows sparse-check out ONLY CONTROLLER_POLICY_FILES at the pinned SHA.
+  // A controller file that imports anything else (ci-delta.mjs once imported
+  // ci-lanes.mjs) makes the pin impossible to rotate: every planner run would
+  // fail with ERR_MODULE_NOT_FOUND. Run the real scripts from such a copy,
+  // outside the repository so no node_modules can resolve.
+  const controllerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-controller-'));
+  t.after(() => fs.rmSync(controllerRoot, { recursive: true, force: true }));
+  for (const file of CONTROLLER_POLICY_FILES) {
+    fs.mkdirSync(path.dirname(path.join(controllerRoot, file)), { recursive: true });
+    fs.copyFileSync(path.join(REPO_ROOT, file), path.join(controllerRoot, file));
+
+    const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+    for (const [, specifier] of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)['"]([^'"]+)['"]/g)) {
+      if (specifier.startsWith('node:')) continue;
+      const resolved = path.posix.join(path.posix.dirname(file), specifier);
+      assert.ok(
+        CONTROLLER_POLICY_FILES.includes(resolved),
+        `${file} imports ${specifier}, which the trusted sparse checkout does not contain`,
+      );
+    }
+  }
+
+  const changesPath = path.join(controllerRoot, 'changes.z');
+  fs.writeFileSync(changesPath, Buffer.from('M\0packages/network-sim/src/index.ts\0'));
+  const planner = spawnSync(process.execPath, [
+    path.join(controllerRoot, 'scripts/ci/plan-ci.mjs'),
+    '--event',
+    'pull_request',
+    '--changes-z',
+    changesPath,
+  ], { cwd: controllerRoot, encoding: 'utf8' });
+  assert.equal(planner.status, 0, planner.stderr);
+  const plan = JSON.parse(planner.stdout);
+  assert.equal(plan.mode, 'delta');
+  assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
+
+  const gate = spawnSync(process.execPath, [
+    path.join(controllerRoot, 'scripts/ci/assert-ci-results.mjs'),
+    '--workflow',
+    'primary',
+  ], {
+    cwd: controllerRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EVENT_NAME: 'pull_request',
+      PLAN_JSON: githubOutputsForPlan(plan).plan_json,
+      NEEDS_JSON: JSON.stringify({
+        changes: { result: 'success' },
+        build: { result: 'success' },
+        'evm-node-test-artifacts': { result: 'skipped' },
+        'evm-devnet-test-artifacts': { result: 'skipped' },
+        ...Object.fromEntries(Object.values(PRIMARY_LANE_JOBS).map((job) => [
+          job,
+          { result: job === 'kosava-supporting' ? 'success' : 'skipped' },
+        ])),
+        'abi-freshness': { result: 'skipped' },
+        solidity: { result: 'skipped' },
+        'solidity-coverage': { result: 'skipped' },
+        'tornado-static-analysis': { result: 'skipped' },
+      }),
+    },
+  });
+  assert.equal(gate.status, 0, gate.stderr);
 });
 
 test('every planner output is wired to a real workflow job and omitted tests stay covered', () => {

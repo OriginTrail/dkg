@@ -1,4 +1,5 @@
 import { AGENT_SHARD_POLICY } from '../ci/agent-shard-policy.mjs';
+import { PRIMARY_LANE_JOBS } from './ci-delta.mjs';
 
 const UNIT_PREREQUISITES = ['pnpm frozen install', 'built workspace dependencies'];
 const SYSTEM_PREREQUISITES = ['built runtime packages', 'isolated local devnet'];
@@ -85,8 +86,13 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
   return { jobs, matrices, packageCounts };
 }
 
-export const NODE_EVM_LANES = Object.freeze(Object.keys(CI_LANE_TOPOLOGY));
-export const PRIMARY_LANE_JOBS = Object.freeze(Object.fromEntries(Object.entries(CI_LANE_TOPOLOGY).map(([lane, { job }]) => [lane, job])));
+// The trusted controller owns the lane -> job map and cannot import this module
+// (it must stay loadable from its four-file sparse checkout), so the executable
+// topology is held to the controller's map here, before anything consumes it.
+const topologyJobs = Object.entries(CI_LANE_TOPOLOGY).map(([lane, { job }]) => [lane, job]);
+if (JSON.stringify(topologyJobs) !== JSON.stringify(Object.entries(PRIMARY_LANE_JOBS))) {
+  throw new Error('CI_LANE_TOPOLOGY must list exactly the controller lanes and jobs of PRIMARY_LANE_JOBS, in order');
+}
 const compiled = compileCiTopology();
 export const COVERAGE_JOBS = compiled.jobs;
 export const CI_MATRICES = compiled.matrices;

@@ -1,7 +1,12 @@
-import { CI_LANES, EVM_SCOPES, NODE_EVM_LANES, needsNodeTestArtifacts } from './ci-delta.mjs';
+import {
+  CI_LANES,
+  EVM_SCOPES,
+  NODE_EVM_LANES,
+  PRIMARY_LANE_JOBS,
+  needsNodeTestArtifacts,
+} from './ci-delta.mjs';
 
-import { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
-export { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
+export { PRIMARY_LANE_JOBS } from './ci-delta.mjs';
 
 function checkNoFailedJobs(needs, errors) {
   for (const [job, state] of Object.entries(needs)) {
