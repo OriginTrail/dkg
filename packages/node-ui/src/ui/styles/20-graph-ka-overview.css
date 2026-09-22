@@ -265,6 +265,8 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-prop:last-child { border-bottom: none; }
 .v10-ka-prop-key { color: var(--text-tertiary); font-weight: 600; min-width: 120px; flex-shrink: 0; font-family: var(--font-mono); font-size: 10px; }
 .v10-ka-prop-val { color: var(--text-secondary); word-break: break-all; }
+.v10-ka-prop-structured { flex-direction: column; gap: 4px; padding: 12px 0; min-width: 0; }
+.v10-ka-prop-structured > .v10-ka-prop-val { width: 100%; min-width: 0; }
 .v10-ka-conn {
   display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 5px 8px;
   border-radius: 4px; cursor: pointer; border: none; background: none; color: inherit;

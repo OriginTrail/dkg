@@ -6,6 +6,7 @@ import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext, type AgentSummary } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
+import { JsonViewer, parseJsonContainer } from '../../../components/common/JsonViewer.js';
 import { VerifiedIdentityBanner } from '../../../components/VerifiedIdentityBanner.js';
 import { GenUIEntityPanel } from '../../../genui/index.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
@@ -757,12 +758,18 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
               {entity.properties.size > 0 && (
                 <div className="v10-ka-section">
                   <div className="v10-ka-section-title">Properties</div>
-                  {[...entity.properties].map(([pred, vals]) => (
-                    <div key={pred} className="v10-ka-prop">
+                  {[...entity.properties].map(([pred, vals]) => {
+                    const parsed = vals.map(parseJsonContainer);
+                    const structured = parsed.some(value => value !== undefined);
+                    return <div key={pred} className={`v10-ka-prop${structured ? ' v10-ka-prop-structured' : ''}`}>
                       <span className="v10-ka-prop-key">{shortPred(pred)}</span>
-                      <span className="v10-ka-prop-val">{vals.join(', ')}</span>
-                    </div>
-                  ))}
+                      <div className="v10-ka-prop-val">{structured
+                        ? vals.map((text, index) => parsed[index] === undefined
+                          ? <div key={index}>{text}</div>
+                          : <JsonViewer key={index} value={parsed[index]!} label={`${shortPred(pred)} JSON`} />)
+                        : vals.join(', ')}</div>
+                    </div>;
+                  })}
                 </div>
               )}
 

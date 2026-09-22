@@ -3,6 +3,7 @@ import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Exe
 import { createUuid } from '@origintrail-official/dkg-graph-computer';
 import { programClient, fetchProgramAgents, type ProgramAgent } from './client.js';
 import { useModalDismiss } from '../Modals/useModalDismiss.js';
+import { JsonText, JsonViewer } from '../common/JsonViewer.js';
 import './program-editor.css';
 
 const Editor = lazy(() => import('./TypeScriptEditor.js'));
@@ -253,7 +254,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
             <p className="program-editor-help">Use query for a fixed catalog query, sparqlRead for bounded reads, or assetCreation for writes. The data graph, memory layer, output contract and read limits are part of the saved request.</p>
             {saved?.tools.length ? <section aria-label="Permissions to approve"><strong>Tools requested by this saved Program</strong>
               <ul>{saved.tools.map(tool => <li key={tool}><code>{tool}</code></li>)}</ul>
-              <pre>{saved.permissions}</pre>
+              {saved.permissions && <JsonText text={saved.permissions} label="Saved tool permissions" />}
             </section> : null}
             <h4>Approved child Programs</h4>
             <p className="program-editor-help">Each child must already have an approved operation on this node. Call it using its Program IRI.</p>
@@ -271,14 +272,14 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
           </fieldset>
           <div className="program-editor-actions"><button type="button" disabled={!!busy || !address || !operationIri.trim()} onClick={inspect}>Check approval</button>
             <button type="button" disabled={!!busy || !address || dirty || reviewed?.key !== key} onClick={approve}>{reviewed?.value ? 'Replace approval' : 'Approve Program'}</button></div>
-          {reviewed?.value && <details><summary>Current approval · revision {reviewed.value.revision}</summary><pre>{JSON.stringify(reviewed.value.binding, null, 2)}</pre></details>}
+          {reviewed?.value && <details><summary>Current approval · revision {reviewed.value.revision}</summary><JsonViewer value={reviewed.value.binding} label="Current approval" /></details>}
           <h3>Invoke</h3>
           <label>Arguments (JSON array)<textarea rows={4} value={inputs} disabled={!!busy} onChange={event => { setInputs(event.target.value); setResult(null); }} /></label>
           <div className="program-editor-actions"><button type="button" onClick={run} disabled={!!busy || !address || !canRun}>{invocation ? 'Retry same invocation' : 'Run Program'}</button>
             {invocation && <button type="button" disabled={!!busy} onClick={() => { if (!result && !window.confirm('The previous invocation may have executed. Start a separate execution with a new ID?')) return;
               sessionStorage.removeItem(recoveryKey); setInvocation(null); setResult(null); }}>New execution</button>}</div>
           {invocation && <p className="program-editor-reference">Invocation: <code>{invocation.invocationId}</code></p>}
-          {result && <section aria-label="Execution result"><pre>{JSON.stringify(result.outputs, null, 2)}</pre>
+          {result && <section aria-label="Execution result"><JsonViewer value={result.outputs} label="Program output" />
             <p className="program-editor-reference">Execution: <code>{result.executionIri}</code></p>
             {onExecution && <button type="button" onClick={() => onExecution(result.executionIri, result.executionLayer)}>Open execution</button>}</section>}
         </aside>

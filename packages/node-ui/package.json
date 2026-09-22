@@ -34,6 +34,7 @@
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-graph-computer": "workspace:*",
     "@origintrail-official/dkg-graph-viz": "workspace:*",
+    "@uiw/react-json-view": "2.0.0-alpha.43",
     "better-sqlite3": "12.11.1",
     "lucide-react": "^1.14.0",
     "monaco-editor": "0.56.0",
