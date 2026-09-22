@@ -21,7 +21,9 @@ CI whenever it cannot prove that a smaller plan is safe.
 | --- | --- |
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
 | Documentation only | Planner and aggregate gates only |
-| `core` / `rdf-utils` | All downstream Node and real-EVM lanes |
+| `core` / `rdf-utils` | All downstream Node and real-EVM lanes (the browser E2E suite runs after merge) |
+| Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching `node-ui`, `graph-viz` or `cli` (the daemon HTTP API it drives); every other PR relies on its own lanes plus the CLI daemon tests and gets the suite after merge |
+| Windows lifecycle job (`rfc64-inventory-windows.yml`) | PRs touching agent persistence code (SQLite and filesystem stores, RFC-64 inventory/persistence), the suites it runs, the agent config it uses or the Gate 0 harness; the same suites run on Linux in the agent lane for every agent change |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
@@ -49,8 +51,11 @@ full CI. Its routing table lives in
   catching cross-package type and build failures even when a test lane is
   skipped.
 - Shared packages run conservative reverse consumers and explicit integrations;
-  this includes undeclared edges such as committed EVM ABIs consumed by `chain`
-  and the real devnet used by node-UI E2E.
+  this includes undeclared edges such as committed EVM ABIs consumed by `chain`.
+  The two most expensive system lanes, real-node browser E2E and the Windows
+  lifecycle job, follow only the code they exercise on PRs and run in full on
+  every protected-branch push, merge-queue candidate and nightly run; `ci:full`
+  opts a PR in before merging.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
   selected job was accidentally skipped, failed, or was cancelled.
@@ -149,8 +154,8 @@ for about 86% of compute.
 - A leaf supporting-package change should take roughly 3 minutes instead of 14
   (shared build plus the supporting lane).
 - A Hardhat-plugin-only change should take roughly 5 minutes.
-- UI and shared protocol changes still run the real-node E2E suite, but its 326
-  tests now run in seven isolated devnet shards instead of one serial lane.
+- UI and daemon-API changes still run the real-node E2E suite on the PR, in
+  seven isolated devnet shards; deeper protocol changes run it after merge.
 
 The full PR path was also measured independently of delta selection. On the
 same PR, the original full workflow took
