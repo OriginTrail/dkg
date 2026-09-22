@@ -20,7 +20,10 @@ import {
   ContextGraphLiveAuthorityCoalescer,
 } from '../src/context-graph-live-authority-coalescer.js';
 import { ContextGraphLiveAuthorityUnsupportedError } from '../src/chain-adapter.js';
-import { withRpcRequestContext } from '../src/rpc-request-transport.js';
+import {
+  activeRpcRequestContext,
+  withRpcRequestContext,
+} from '../src/rpc-request-transport.js';
 
 type Authority = { readonly id: string } | null;
 
@@ -390,6 +393,26 @@ describe('ContextGraphLiveAuthorityCoalescer', () => {
     calls[1]!.resolve({ id: 'fg' });
     expect(await ambientBackground).toEqual({ id: 'bg' });
     expect(await ambientForeground).toEqual({ id: 'fg' });
+  });
+
+  it('carries authority admission priority into the deferred physical read', async () => {
+    const scheduler = manualScheduler();
+    const flight = coalescer(scheduler);
+    let physicalPriority: string | undefined;
+    const result = withRpcRequestContext(
+      { admissionPriority: 'authority' },
+      () => flight.run(KEY, async () => {
+        physicalPriority = activeRpcRequestContext().admissionPriority;
+        return { id: 'authority' };
+      }),
+    );
+
+    // The manual scheduler deliberately dispatches outside the initiating
+    // AsyncLocalStorage turn, so this pins explicit flight propagation rather
+    // than relying on Node timer-context behavior.
+    await scheduler.flush();
+    expect(await result).toEqual({ id: 'authority' });
+    expect(physicalPriority).toBe('authority');
   });
 
   it('settles a flight whose classifier THROWS, instead of wedging its waiters', async () => {

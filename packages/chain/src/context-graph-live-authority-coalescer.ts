@@ -3,6 +3,7 @@
 import {
   activeRpcRequestContext,
   withOwnedRpcRequestContext,
+  type RpcRequestAdmissionPriority,
   type RpcRequestClass,
 } from './rpc-request-transport.js';
 import { abortError, waitForSignal } from './wait-for-signal.js';
@@ -363,7 +364,10 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
     options: ContextGraphLiveAuthorityRunOptions = {},
   ): Promise<V> {
     options.signal?.throwIfAborted();
-    const requestClass = options.requestClass ?? activeRpcRequestContext().requestClass;
+    const callerContext = activeRpcRequestContext();
+    const requestClass = options.requestClass ?? callerContext.requestClass;
+    const admissionPriority: RpcRequestAdmissionPriority | undefined =
+      callerContext.admissionPriority;
     const partition = this.#partitions[requestClass];
     for (let retries = 0; ; retries += 1) {
       const { initiated, value: outcome } = await partition.run(
@@ -371,7 +375,11 @@ export class ContextGraphLiveAuthorityCoalescer<V> {
         async (flightSignal) => {
           try {
             const value = await withOwnedRpcRequestContext(
-              { signal: flightSignal, requestClass },
+              {
+                signal: flightSignal,
+                requestClass,
+                ...(admissionPriority === undefined ? {} : { admissionPriority }),
+              },
               () => load(flightSignal),
             );
             return { kind: 'value', value };
