@@ -1595,10 +1595,10 @@ export async function readChangelogDeltaPage(params: {
 
   // (5) The page may reach past the head captured in (1): this node's own
   // writes landed meanwhile, or readChanges adopted markers another writer
-  // appended above this instance's counter. The wire requires `headSeq` and
-  // `nextSeq` to cover every emitted record, so both come from the head AFTER
-  // the read. An era that rotated underneath the read is a restore in
-  // progress: hand the requester a resync rather than records from two eras.
+  // appended above this instance's counter. The wire requires `headSeq` to
+  // cover every emitted record, so it comes from the head AFTER the read. An
+  // era that rotated underneath the read is a restore in progress: hand the
+  // requester a resync rather than records from two eras.
   const headAfter = await params.reader.changelogHead(
     syncResponderStoreOptions(params.signal, 'sync.responder.changelogHead'),
   );
@@ -1606,14 +1606,19 @@ export async function readChangelogDeltaPage(params: {
     return { kind: 'resync', era: headAfter.era, headSeq: headAfter.seq };
   }
 
-  // (6) nextSeq: on a budget-truncated page, the last emitted record's seq; else
-  // the scanned-through high-water — the head if the scan drained the log,
-  // otherwise the max raw seq scanned (more remains beyond this window).
-  const scannedTo = raw.length > 0 ? raw[raw.length - 1].seq : headAfter.seq;
+  // (6) nextSeq: on a budget-truncated page, the last emitted record's seq;
+  // else the scanned-through high-water. A full window stops at the last raw
+  // seq (more remains beyond it). A drained scan read everything up to at
+  // least the head captured in (1) — readChanges skips holes and stops only at
+  // the head — so it advances to the higher of that head and the last raw seq.
+  // Never the head AFTER the read: a marker committed while this page was
+  // serialized was not scanned, and counting it would make the requester skip
+  // it for good.
+  const lastRawSeq = raw.length > 0 ? raw[raw.length - 1].seq : head.seq;
   const drained = raw.length < params.limit;
   const nextSeq = budgetStopped
     ? records[records.length - 1].seq
-    : drained ? headAfter.seq : scannedTo;
+    : drained ? Math.max(lastRawSeq, head.seq) : lastRawSeq;
 
   return { kind: 'delta', era: headAfter.era, headSeq: headAfter.seq, nextSeq, records };
 }
