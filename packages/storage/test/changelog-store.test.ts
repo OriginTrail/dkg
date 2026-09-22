@@ -346,21 +346,31 @@ describe('ChangelogStore — page reads are direct entry lookups (O(delta), neve
       { seq: 3, graph: G3, op: 'upsert' },
     ]);
     const reads = changelogReads();
-    expect(reads).toHaveLength(1);
+    expect(reads).toHaveLength(2);
     expect(reads[0]).toContain('VALUES ?e');
     expect(reads[0]).toContain('<urn:dkg:changelog:e:2>');
     expect(reads[0]).toContain('<urn:dkg:changelog:e:3>');
     expect(reads[0]).not.toContain('<urn:dkg:changelog:e:1>');
     expect(reads[0]).not.toContain('<urn:dkg:changelog:e:4>');
-    expect(reads[0]).not.toContain('FILTER(');
+    // The window reached this writer's head: one entry probe past it confirms
+    // that no other writer appended above.
+    expect(reads[1]).toContain('<urn:dkg:changelog:e:4>');
+    expect(reads[1]).not.toContain('<urn:dkg:changelog:e:5>');
+    expect(reads.some((sparql) => sparql.includes('FILTER('))).toBe(false);
   });
 
-  it('a caught-up (or ahead) cursor is answered from the in-memory head with no storage read', async () => {
+  it('a caught-up (or ahead) cursor costs one entry probe past the head, never a log scan', async () => {
     await log.insert([q('http://ex.org/a', G1)]);
     spy.queryCalls.length = 0;
     expect(await log.readChanges(1, 100)).toEqual([]);
     expect(await log.readChanges(50, 100)).toEqual([]);
-    expect(spy.queryCalls).toHaveLength(0);
+    const reads = changelogReads();
+    expect(reads).toHaveLength(2);
+    expect(reads[0]).toContain('<urn:dkg:changelog:e:2>');
+    expect(reads[0]).not.toContain('<urn:dkg:changelog:e:3>');
+    expect(reads[1]).toContain('<urn:dkg:changelog:e:51>');
+    expect(reads[1]).not.toContain('<urn:dkg:changelog:e:52>');
+    expect(reads.some((sparql) => sparql.includes('FILTER('))).toBe(false);
   });
 
   it('caps the window at the head and at the limit', async () => {
@@ -383,20 +393,21 @@ describe('ChangelogStore — page reads are direct entry lookups (O(delta), neve
     expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
   });
 
-  it('a hole in the log (marker removed out-of-band) falls back to the exact range scan, never a short page', async () => {
+  it('a hole in the log (marker removed out-of-band) widens the window instead of running the range scan, never a short page', async () => {
     const graphs = [G1, G2, G3, 'http://ex.org/g4', 'http://ex.org/g5'];
     for (const g of graphs) await log.insert([q(`${g}/s`, g)]);
     // Remove seq 3's marker behind the decorator's back (a reconcile-owed shape).
     await base.deleteByPattern({ subject: 'urn:dkg:changelog:e:3', graph: CHANGELOG_GRAPH });
     spy.queryCalls.length = 0;
+    // Three distinct seqs were asked for: the hole at 3 is covered by widening to 4.
     expect((await log.readChanges(0, 3)).map((c) => c.seq)).toEqual([1, 2, 4]);
-    expect(changelogReads().some((sparql) => sparql.includes('FILTER(?seq > 0)'))).toBe(true);
     expect((await log.readChanges(2, 100)).map((c) => c.seq)).toEqual([4, 5]);
     expect((await log.readChanges(0, 100)).map((c) => c.seq)).toEqual([1, 2, 4, 5]);
-    // Windows without the hole still take the lookup path.
-    spy.queryCalls.length = 0;
     expect((await log.readChanges(3, 100)).map((c) => c.seq)).toEqual([4, 5]);
-    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+    const reads = changelogReads();
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((sparql) => sparql.includes('VALUES ?e'))).toBe(true);
+    expect(reads.some((sparql) => sparql.includes('FILTER('))).toBe(false);
   });
 
   it('a seq carried by two markers (writer overlap across a release swap) stays on the lookup path', async () => {
@@ -414,7 +425,7 @@ describe('ChangelogStore — page reads are direct entry lookups (O(delta), neve
     expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
   });
 
-  it('tags the hole fallback scan so it is attributable in the slow-query log', async () => {
+  it('forwards the caller\'s query source to every entry lookup, holes included', async () => {
     const sources: Array<string | undefined> = [];
     const tap = new (class extends SpyStore {
       override query(sparql: string, options?: QueryOptions) {
@@ -427,13 +438,52 @@ describe('ChangelogStore — page reads are direct entry lookups (O(delta), neve
     await base.deleteByPattern({ subject: 'urn:dkg:changelog:e:2', graph: CHANGELOG_GRAPH });
     sources.length = 0;
     expect((await tapped.readChanges(0, 100, { source: 'sync.responder.readChanges' })).map((c) => c.seq)).toEqual([1, 3]);
-    expect(sources).toEqual(['sync.responder.readChanges', 'sync.responder.readChanges.holeFallback']);
+    expect(sources.length).toBeGreaterThan(1);
+    expect(new Set(sources)).toEqual(new Set(['sync.responder.readChanges']));
   });
 
-  it('a disabled decorator keeps the passthrough scan semantics', async () => {
+  it('serves markers another writer appended above this instance\'s counter', async () => {
+    // Two decorators over one store: b seeds its counter while the log is empty,
+    // then a (an overlapping worker across a release swap) appends seq 1.
+    const a = new ChangelogStore(spy);
+    const b = new ChangelogStore(spy);
+    await b.changelogHead();
+    await a.insert([q('http://ex.org/s', G1)]);
+    spy.queryCalls.length = 0;
+    expect(await b.readChanges(0, 100)).toEqual([{ seq: 1, graph: G1, op: 'upsert' }]);
+    // b adopted the durable head, so the head it reports to peers covers the
+    // record it just served.
+    expect((await b.changelogHead()).seq).toBe(1);
+    expect(changelogReads().some((sparql) => sparql.includes('FILTER('))).toBe(false);
+  });
+
+  it('never reports a page as drained while durable markers remain above this instance\'s counter', async () => {
+    const a = new ChangelogStore(spy);
+    const b = new ChangelogStore(spy);
+    for (const g of [G1, G2, G3]) await a.insert([q(`${g}/s`, g)]);
+    await b.changelogHead();                                             // b seeds at 3
+    await a.insert([q('http://ex.org/g4/s', 'http://ex.org/g4')]);      // seq 4
+    await a.insert([q('http://ex.org/g5/s', 'http://ex.org/g5')]);      // seq 5
+    expect((await b.readChanges(0, 100)).map((c) => c.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect((await b.changelogHead()).seq).toBe(5);
+    // b's next marker lands above everything already in the log, and a sees it.
+    await b.insert([q('http://ex.org/g6/s', 'http://ex.org/g6')]);
+    expect((await b.changelogHead()).seq).toBe(6);
+    expect((await a.readChanges(5, 100)).map((c) => c.seq)).toEqual([6]);
+    expect((await a.changelogHead()).seq).toBe(6);
+  });
+
+  it('a disabled decorator keeps the passthrough range-scan semantics', async () => {
+    const on = new ChangelogStore(spy);
+    for (const g of [G1, G2]) await on.insert([q(`${g}/s`, g)]);
     const off = new ChangelogStore(spy, { enabled: false });
-    await off.insert([q('http://ex.org/a', G1)]);
-    expect(await off.readChanges(0, 100)).toEqual([]);
+    await off.insert([q('http://ex.org/a', G3)]);          // writes no marker
+    spy.queryCalls.length = 0;
+    expect((await off.readChanges(0, 100)).map((c) => c.seq)).toEqual([1, 2]);
+    const reads = changelogReads();
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain('FILTER(?seq > 0)');
+    expect(reads[0]).not.toContain('VALUES ?e');
   });
 });
 
