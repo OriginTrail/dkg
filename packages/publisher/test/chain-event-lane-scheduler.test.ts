@@ -538,6 +538,85 @@ describe('ChainEventPoller scheduler', () => {
     expect(saved).toEqual(['vmReconcile']);
   });
 
+  describe('legacy aggregate cursor opt-out', () => {
+    // A LEGACY store: `load`/`save` only. Handing these fixtures
+    // `loadLane`/`saveLane` would make `createLaneCursorStore` return
+    // `kind: 'lane'`, and every assertion below would pass without the
+    // `legacyAggregateCursor` marker ever being read.
+    const legacyStore = () => ({
+      loadCalls: 0,
+      saved: [] as number[],
+      async load(): Promise<number | undefined> {
+        this.loadCalls += 1;
+        return undefined;
+      },
+      async save(block: number): Promise<void> { this.saved.push(block); },
+    });
+
+    const liveTailLane = (
+      name: ChainEventPollerLane,
+      eventType: string,
+      legacyAggregateCursor: boolean,
+    ): ChainEventPollerLaneSpec => ({
+      name,
+      enabled: () => true,
+      eventTypes: () => [eventType],
+      cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor }),
+      cadenceMs: 20,
+      dispatch: async () => { /* sink */ },
+    });
+
+    const runWith = async (lanes: ChainEventPollerLaneSpec[]) => {
+      // No `eventScanLease`: two leased results would hit the
+      // `leasedResults.length > 1` retire branch and refuse the aggregate for
+      // lease reasons, leaving the marker untested.
+      const { adapter } = makeChain({ head: 1_000 });
+      const cursor = legacyStore();
+      const runner = new ChainEventLaneRunner({
+        chain: adapter,
+        lanes,
+        maxRange: 9_000,
+        clock: () => 0,
+        log: { info() {}, warn() {}, error() {} } as any,
+        cursorPersistence: cursor,
+      });
+      await runner.poll();
+      return cursor;
+    };
+
+    it('saves the shared cursor when every active lane opts in', async () => {
+      const cursor = await runWith([
+        liveTailLane('contextGraphDiscovery', 'ContextGraphCreated', true),
+        liveTailLane('vmReconcile', 'KnowledgeAssetRegisteredToContextGraph', true),
+      ]);
+
+      expect(cursor.loadCalls).toBe(1);
+      expect(cursor.saved).toEqual([1_000]);
+    });
+
+    it('refuses the shared cursor for every lane when one active lane opts out', async () => {
+      const cursor = await runWith([
+        liveTailLane('contextGraphDiscovery', 'ContextGraphCreated', true),
+        liveTailLane('vmReconcile', 'KnowledgeAssetRegisteredToContextGraph', false),
+      ]);
+
+      // The opt-in lane still scanned and still advanced its in-memory cursor,
+      // but `legacyAggregateCursorToSave` is an `every(...)`: one opted-out lane
+      // zeroes the aggregate save for all of them.
+      expect(cursor.loadCalls).toBe(1);
+      expect(cursor.saved).toEqual([]);
+    });
+
+    it('never reads the shared cursor for a sole opted-out lane', async () => {
+      const cursor = await runWith([
+        liveTailLane('vmReconcile', 'KnowledgeAssetRegisteredToContextGraph', false),
+      ]);
+
+      expect(cursor.loadCalls).toBe(0);
+      expect(cursor.saved).toEqual([]);
+    });
+  });
+
   it('rechecks a lease at the legacy aggregate save boundary', async () => {
     let holds = 0;
     const saved: number[] = [];
@@ -693,7 +772,7 @@ describe('ChainEventPoller scheduler', () => {
       name: 'contextGraphDiscovery',
       enabled: () => true,
       eventTypes: () => ['ContextGraphCreated'],
-      cursorStrategy: () => ({ kind: 'live-tail' }),
+      cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
       cadenceMs: 20,
       dispatch: async () => { /* sink */ },
     };

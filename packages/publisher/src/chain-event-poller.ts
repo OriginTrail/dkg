@@ -278,6 +278,9 @@ export class ChainEventPoller {
           ? { kind: 'full-history', legacyAggregateCursor: true }
           : {
             kind: 'live-tail',
+            // A live publish has no pre-restart history to recover, so it must
+            // stay out of the shared legacy cursor.
+            legacyAggregateCursor: false,
             // A live publish can be activated after its KCCreated event is
             // beyond the generic live-tail window on fast chains. Scan one
             // full RPC page on activation without a genesis backfill.
@@ -292,6 +295,9 @@ export class ChainEventPoller {
         eventTypes: () => ['KCCreated'],
         cursorStrategy: () => ({
           kind: 'full-history',
+          // A shared cursor that other live-tail lanes advanced near head would
+          // skip the genesis backfill this lane exists to perform.
+          legacyAggregateCursor: false,
           onBackfillFromGenesis: (ctx) => {
             if (!this.onKnowledgeAssetCreated) return;
             this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');

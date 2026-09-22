@@ -31,20 +31,24 @@ interface ChainEventPollerLaneState {
 /**
  * Describes the cursor lifecycle for a lane as one explicit strategy.
  *
- * The legacy aggregate marker is deliberately a literal opt-in.  A lane that
- * does not declare it cannot accidentally participate in aggregate-cursor
- * migration, while full-history lanes can still preserve the publish-lane
- * compatibility path during restored-publish recovery.
+ * `legacyAggregateCursor` is required on both variants, and deliberately so.
+ * It is not derivable from `kind`: the restored-publish lane is `full-history`
+ * yet must keep reading the shared legacy cursor, while the live publish lane
+ * is `live-tail` yet must stay out of it. It is also not safely omissible - an
+ * omitted marker reads as opt-out in `loadPersistedLaneCursor`, and via the
+ * `every(...)` in `legacyAggregateCursorToSave` a single opted-out lane zeroes
+ * the aggregate save for every other active lane. Stating it per lane is what
+ * makes that combination impossible to reach by accident.
  */
 export type ChainEventPollerLaneCursorStrategy =
   | {
     kind: 'full-history';
-    legacyAggregateCursor?: true;
+    legacyAggregateCursor: boolean;
     onBackfillFromGenesis?(ctx: OperationContext): void;
   }
   | {
     kind: 'live-tail';
-    legacyAggregateCursor?: true;
+    legacyAggregateCursor: boolean;
     liveSeedLookbackBlocks?: number;
   };
 
