@@ -2016,6 +2016,12 @@ export class TripleStoreAsyncLiftPublisher
       switch (structuredReason) {
         case 'finalized-name-absence-unaccepted':
         case 'chain-name-binding-unavailable':
+        // An RFC-64 authority read cooldown ends on its own without anything
+        // being asked of the pool, so it is transient in exactly the sense
+        // this group means. The agent's own promote policy classifies it the
+        // same way; left to the terminal default it would turn one unrelated
+        // graph's RPC exhaustion into a permanent failure for this publish.
+        case 'authority-circuit-open':
         case 'local-chain-binding-unavailable':
         case 'local-existence-unavailable':
         case 'chain-access-policy-unavailable':
