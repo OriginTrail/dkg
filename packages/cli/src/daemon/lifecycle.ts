@@ -2430,6 +2430,7 @@ async function runDaemonInnerWithStartupOwnership(
         pollIntervalMs: promoteWorkerConfig?.pollIntervalMs,
         heartbeatIntervalMs: promoteWorkerConfig?.heartbeatIntervalMs,
         shutdownTimeoutMs: promoteWorkerConfig?.shutdownTimeoutMs,
+        postCommitRecoveryIntervalMs: promoteWorkerConfig?.postCommitRecoveryIntervalMs,
       },
     });
 

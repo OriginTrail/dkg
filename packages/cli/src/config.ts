@@ -971,6 +971,12 @@ export interface DkgConfig {
     heartbeatIntervalMs?: number;
     /** Default 30_000ms. Max time `stop()` waits for in-flight promotes to drain on shutdown. */
     shutdownTimeoutMs?: number;
+    /**
+     * Default 30_000ms. Interval of the sweep that requeues terminal
+     * post-commit share failures for the publisher's idempotent replay
+     * (bounded by each job's retry budget). `0` keeps only the startup sweep.
+     */
+    postCommitRecoveryIntervalMs?: number;
   };
   /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
   corsOrigins?: string | string[];
