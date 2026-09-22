@@ -309,6 +309,7 @@ import {
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import type { ContextGraphAuthorityReadMode } from './dkg-agent-cg-resolve.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -730,6 +731,8 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /** Read-only gates may consume the finalized snapshot; defaults to `live-current`. */
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<boolean> {
     return (await withRpcUsageSite(
@@ -788,10 +791,12 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
       /**
-       * Scoped query reads consume the finalized authority projection; every
-       * other caller (admission, `canReadContextGraph`) keeps current state.
+       * Scoped query reads consume the finalized authority projection and the
+       * read-only host/sync/share gates may fall back to current state when
+       * the index has no snapshot; every other caller (admission, the default
+       * `canReadContextGraph`) keeps current state.
        */
-      authorityReadMode?: 'live-current' | 'finalized-index';
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
     const { authorityReadMode, ...readOpts } = opts;
@@ -950,7 +955,7 @@ export class QueryMethods extends DKGAgentBase {
       signal?: AbortSignal;
     },
     registrationTimeoutMs: number,
-    authorityReadMode: 'live-current' | 'finalized-index' = 'live-current',
+    authorityReadMode: ContextGraphAuthorityReadMode = 'live-current',
   ): Promise<ContextGraphReadAuthorityDecision> {
     return resolveContextGraphReadAuthorityDecision(
       QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
@@ -974,7 +979,7 @@ export class QueryMethods extends DKGAgentBase {
     },
     registrationTimeoutMs: number,
     hasAcceptedRfc64PublicPolicy?: boolean,
-    authorityReadMode: 'live-current' | 'finalized-index' = 'live-current',
+    authorityReadMode: ContextGraphAuthorityReadMode = 'live-current',
   ): ContextGraphReadAuthorityInput {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies

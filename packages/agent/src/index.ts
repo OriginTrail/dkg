@@ -343,6 +343,10 @@ export type {
   RegisteredContextGraphAuthorityUnavailableReason,
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
+export type {
+  ContextGraphAuthorityReadMode,
+  FinalizedContextGraphAuthoritySnapshotReadV1,
+} from './dkg-agent-cg-resolve.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,

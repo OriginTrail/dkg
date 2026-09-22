@@ -1389,7 +1389,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
-   * Resolve encryption recipients from live registered-chain authority. The
+   * Resolve encryption recipients from registered-chain authority. The
    * local store remains the source of authenticated encryption keys and peer
    * routing, but only the chain roster selects which agents are resolved. When
    * the graph also has a peer allowlist, recipient routing must satisfy that
@@ -1397,13 +1397,22 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * at least one usable recipient key on an allowed peer before publishing can
    * proceed, otherwise either an unauthorized peer receives the sender key or
    * an authorized member cannot read the resulting write.
+   *
+   * "Whether the author may share plaintext" follows from the immutable
+   * on-chain access policy alone (the contract has no access-policy update),
+   * so a finalized, name-bound PUBLIC snapshot answers it without a live RPC.
+   * The PRIVATE roster is an encryption-key decision and is always read from
+   * current chain state (`requireLiveRosterForPrivate`), never from the index.
    */
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
     const registeredAuthority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.recipients,
-      () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId),
+      () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId, {
+        authorityReadMode: 'finalized-index-or-live',
+        requireLiveRosterForPrivate: true,
+      }),
     );
     if (registeredAuthority.kind === 'unregistered') {
       return resolveWorkspaceAgentRecipients(this.store, input);

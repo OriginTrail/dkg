@@ -307,7 +307,11 @@ import {
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { finalizedAuthorityColdResolutionOf } from
   './finalized-authority-cold-resolution.js';
-import { runBoundedOperation } from './bounded-operation.js';
+import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
+import { parseRfc64AuthoritySnapshotV1 } from
+  './rfc64/release-native-catalog-authority-v1.js';
+import type { FinalizedContextGraphAuthoritySnapshotReadV1 } from
+  './dkg-agent-cg-resolve.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -499,6 +503,108 @@ function selectContextGraphRegistrationRoute(
   if (target !== null) return { kind: 'local', target };
   if (isCanonicalPositiveContextGraphId(contextGraphId)) return { kind: 'numeric' };
   return { kind: 'name-hash' };
+}
+
+/** Explicit dependencies of one finalized policy read; prototype-bound test hosts may lack them. */
+interface FinalizedContextGraphPolicyDependencies {
+  /** Absent when the adapter (or a partial test host) has no finalized capability. */
+  readonly readSnapshot:
+    | ((
+        numericId: bigint,
+        options: { label: string },
+      ) => Promise<FinalizedContextGraphAuthoritySnapshotReadV1>)
+    | undefined;
+  readonly isWireIdKeyedSubscription: (localId: string) => boolean;
+  readonly warn: (ctx: OperationContext, message: string) => void;
+}
+
+/**
+ * Both policy bits of a registered graph from the finalized authority
+ * index, bound to the caller's identity for that graph. `absent` and
+ * `unsupported` are the only outcomes that permit the current-state RPC
+ * fallback: an inactive or mis-bound snapshot is affirmative evidence
+ * against the graph, and a timed-out read keeps its detached resolution
+ * running so the next call is answered from the retained projection.
+ *
+ * A host without the finalized capability (an older adapter, or a
+ * prototype-bound test host that never composed the resolver mixin) is
+ * `unsupported`, exactly as an adapter without the index reader is.
+ */
+async function readFinalizedContextGraphPolicyV1(
+  dependencies: FinalizedContextGraphPolicyDependencies,
+  contextGraphId: string,
+  onChainId: string,
+  numericId: bigint,
+  ctx: OperationContext,
+): Promise<
+  | { kind: 'policies'; accessPolicy: 0 | 1; publishPolicy: 0 | 1 }
+  | { kind: 'absent' }
+  | { kind: 'unsupported' }
+  | { kind: 'unknown' }
+  | { kind: 'unavailable' }
+> {
+  const { readSnapshot, warn } = dependencies;
+  if (readSnapshot === undefined) return { kind: 'unsupported' };
+  let read: FinalizedContextGraphAuthoritySnapshotReadV1;
+  try {
+    read = await readSnapshot(numericId, {
+      label: `getContextGraphOnChainPolicy finalized(${onChainId})`,
+    });
+  } catch (err) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority read for ${onChainId} `
+      + `${isBoundedOperationTimeoutError(err) ? 'timed out' : 'failed'} — treating as UNKNOWN `
+      + `(fail-closed; the finalized resolution continues in the background): `
+      + `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { kind: 'unavailable' };
+  }
+  if (read.kind !== 'snapshot') return read;
+  let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
+  try {
+    snapshot = parseRfc64AuthoritySnapshotV1(read.snapshot, numericId);
+  } catch (err) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority snapshot for ${onChainId} is invalid — `
+      + `treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { kind: 'unknown' };
+  }
+  if (snapshot.active !== true) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority snapshot for ${onChainId} is inactive — `
+      + 'treating as UNKNOWN (fail-closed)',
+    );
+    return { kind: 'unknown' };
+  }
+  // A locally mapped id must still be THIS graph on the current chain: the
+  // persisted mapping survives a devnet reset and can point at a reused
+  // slot. A caller that addressed the numeric slot directly has no local
+  // identity to bind.
+  if (
+    onChainId !== contextGraphId.trim()
+    && !localContextGraphIdMatchesCommittedNameHash(
+      contextGraphId,
+      snapshot.nameHash,
+      (localId) => dependencies.isWireIdKeyedSubscription(localId),
+    )
+  ) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority snapshot for ${onChainId} commits `
+      + `name-hash ${snapshot.nameHash} that does not match Context Graph "${contextGraphId}" — `
+      + 'local mapping is STALE; treating as UNKNOWN (fail-closed)',
+    );
+    return { kind: 'unknown' };
+  }
+  return {
+    kind: 'policies',
+    accessPolicy: snapshot.accessPolicy,
+    publishPolicy: snapshot.publishPolicy,
+  };
 }
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
@@ -1654,6 +1760,48 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
       if (numericId !== undefined) {
         const rpcCtx = createOperationContext('resolve');
+        // Finalized authority index FIRST. The snapshot carries both policy
+        // bits, is name-hash bound to this graph, and is answered from the
+        // reader's retained projection without RPC in the steady state, so a
+        // slow public endpoint no longer turns every share/host decision
+        // into a fail-closed timeout. Only a graph the finalized index has
+        // no snapshot for (or an adapter without the capability) continues
+        // to the current-state RPC reads below; an inactive or mis-bound
+        // snapshot and a timed-out finalized read stay UNKNOWN (fail-closed)
+        // rather than paying a second deadline on the same endpoints.
+        // A partial test host bound to this prototype may lack the resolver
+        // mixin; treat it exactly like an adapter without the index reader.
+        const readFinalizedSnapshot = this.chain.contextGraphAuthorityIndexRevisionReader
+          ?.readContextGraphAuthorityIndexSnapshots !== undefined
+          && typeof this.readFinalizedContextGraphAuthoritySnapshotV1 === 'function'
+          ? (id: bigint, readOptions: { label: string }) => (
+              this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions)
+            )
+          : undefined;
+        const finalizedPolicy = await readFinalizedContextGraphPolicyV1(
+          {
+            readSnapshot: readFinalizedSnapshot,
+            isWireIdKeyedSubscription: (localId) => this.isWireIdKeyedSubscription(localId),
+            warn: (warnCtx, message) => this.log.warn(warnCtx, message),
+          },
+          contextGraphId,
+          onChainId!,
+          numericId,
+          rpcCtx,
+        );
+        if (finalizedPolicy.kind === 'policies') {
+          if (accessPolicy === undefined) {
+            accessPolicy = finalizedPolicy.accessPolicy;
+            this.onChainAccessPolicyCache.set(onChainId!, accessPolicy);
+          }
+          if (publishPolicy === undefined) {
+            publishPolicy = finalizedPolicy.publishPolicy;
+            this.onChainPublishPolicyCache.set(onChainId!, publishPolicy);
+            this.onChainPublishPolicyCacheUpdatedAt.set(onChainId!, Date.now());
+          }
+        }
+        const chainFallbackAllowed = finalizedPolicy.kind === 'absent'
+          || finalizedPolicy.kind === 'unsupported';
         // Round-4 fix: bound each chain-RPC call so an unreachable
         // RPC stack (every endpoint returning 429 / hanging on
         // connect) cannot block the caller past the daemon-ready
@@ -1684,7 +1832,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             timeout,
           ]);
         };
-        if (publishPolicy === undefined) {
+        if (chainFallbackAllowed && publishPolicy === undefined) {
           const getPublishPolicy = this.chain.getContextGraphPublishPolicy;
           if (typeof getPublishPolicy === 'function') {
             try {
@@ -1708,7 +1856,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             }
           }
         }
-        if (accessPolicy === undefined) {
+        if (chainFallbackAllowed && accessPolicy === undefined) {
           const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
           if (typeof getAccessPolicy === 'function') {
             try {
