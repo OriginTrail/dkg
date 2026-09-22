@@ -23,17 +23,23 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Documentation only | Planner and aggregate gates only |
 | `core` / `rdf-utils` | All downstream Node and real-EVM lanes |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
-| Root dependency/build config, workflow, planner, or generic scripts | Full Node/EVM CI; Solidity only when its independent path filter matches |
-| Any workspace `package.json` | Full CI because the base and head dependency graphs may differ |
-| Rename, copy, deletion, unknown path, or no diff | Full CI |
-| More than 100 production files or at least 4 workspaces | Full CI |
+| Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
+| Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
+| Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `name`, `type`, install lifecycle scripts or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
+| Deletion, rename or copy | Routed by every old and new path, like edits |
+| Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
+| Several workspaces | Union of their rules |
+| `devnet/`, `test-systems/`, `bench/`, `tools/`, other `.github/` files | Shared build checks plus the lanes that execute them (for example the Gate 1 harness runs in the agent and Blazegraph lanes) |
+| More than 100 production files | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
-| Deterministic 5% PR audit sample | Full Node/EVM CI; Solidity remains path-gated |
 | Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
 | Protected-branch push or manual dispatch | Full CI, including Solidity coverage |
 
 The planner reads `git diff --name-status -z`, so spaces and other shell-hostile
-file names cannot alter the decision. Its routing table lives in
+file names cannot alter the decision. For a modified workspace manifest it also
+reads both versions with `git cat-file blob` from the candidate checkout (data
+only; nothing from the candidate is executed); any read or parse failure keeps
+full CI. Its routing table lives in
 `scripts/lib/ci-delta.mjs` and is covered by table/snapshot-style tests in
 `scripts/lib/__tests__/ci-delta.test.mjs`.
 
@@ -77,8 +83,13 @@ file names cannot alter the decision. Its routing table lives in
 - The merge queue tests every Node/EVM lane and the sharded Solidity suite
   against the exact combined commit before it lands. Protected-branch Solidity
   coverage remains the post-merge safety net.
-- Five percent of PR commits run full CI even when delta would be possible. This
-  continuously audits the routing model and exposes a missing dependency edge.
+- The controller must stay loadable from its sparse checkout: its files may
+  import only `node:` builtins and each other. A test runs `plan-ci.mjs` and
+  `assert-ci-results.mjs` from a copy of exactly `CONTROLLER_POLICY_FILES`,
+  because an import outside that list makes the pin impossible to rotate.
+- PR plans depend only on the diff and labels. The former 5% SHA-sampled full
+  runs were retired; protected-branch pushes, merge-queue candidates and the
+  nightly schedule run full CI and are where a missing dependency edge surfaces.
 - The routing tests enumerate all package/demo workspaces with a `test` script.
   They also close three existing coverage holes: `rdf-utils`, `okf`, and `demo`
   are now included in explicit CI lanes.
@@ -119,8 +130,9 @@ same protections.
   reviewer asks for the complete suite. Adding/removing the label reruns CI.
 - Use **Run workflow** for an unconditional full run on any branch.
 - If a new package, dependency edge, or integration consumer is introduced,
-  update `WORKSPACE_RULES` and its routing snapshot in the same PR. A package
-  manifest change already forces full CI for that PR.
+  update `WORKSPACE_RULES` and its routing snapshot in the same PR. A dependency
+  change in a package manifest (and its lockfile update) already forces full CI
+  for that PR.
 
 ## Measured baseline and expected effect
 
