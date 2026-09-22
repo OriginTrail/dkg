@@ -3,6 +3,7 @@ import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { cp, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -42,10 +43,24 @@ interface Daemon {
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
 }
-const API_PORT_BASE = 22000;
-const LISTEN_PORT_BASE = 23000;
-function uniquePort(base: number): number {
-  return base + Math.floor(Math.random() * 1000);
+// A probed port is free again once the probe closes, so the OS can offer it
+// twice. Remembering every port handed out keeps all daemons' ports distinct.
+const allocatedPorts = new Set<number>();
+async function allocatePort(): Promise<number> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const probe = createServer();
+    // libp2p binds 0.0.0.0; a port free there is also free for the API on 127.0.0.1.
+    const port = await new Promise<number>((resolve, reject) => {
+      probe.once('error', reject);
+      probe.listen(0, '0.0.0.0', () => resolve((probe.address() as AddressInfo).port));
+    });
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    if (!allocatedPorts.has(port)) {
+      allocatedPorts.add(port);
+      return port;
+    }
+  }
+  throw new Error('Could not allocate a port that no other daemon in this file uses');
 }
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -153,6 +168,7 @@ async function writeDaemonConfig(
   await writeFile(join(home, 'wallets.json'), walletEntry, { mode: 0o600 });
   await writeFile(join(home, 'publisher-wallets.json'), walletEntry, { mode: 0o600 });
 }
+class DaemonExitedEarly extends Error {}
 async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
   if (opts.pluginPath) await ensureKafkaPluginFixtures();
   if (!existsSync(CLI_ENTRY)) {
@@ -163,9 +179,19 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
   if (opts.pluginPath) {
     await ensureFixtureEntrypoint(dirname(dirname(opts.pluginPath)), opts.pluginPath);
   }
+  try {
+    return await launchDaemon(opts);
+  } catch (err) {
+    // Each port was free when probed, but another process can bind it before
+    // the daemon does. That race ends in EADDRINUSE; retry it once on new ports.
+    if (!(err instanceof DaemonExitedEarly) || !err.message.includes('EADDRINUSE')) throw err;
+    return launchDaemon(opts);
+  }
+}
+async function launchDaemon(opts: DaemonOpts): Promise<Daemon> {
   const home = await mkdtemp(join(tmpdir(), 'dkg-kafka-plugin-e2e-'));
-  const apiPort = uniquePort(API_PORT_BASE);
-  const listenPort = uniquePort(LISTEN_PORT_BASE);
+  const apiPort = await allocatePort();
+  const listenPort = await allocatePort();
   await writeDaemonConfig(home, apiPort, listenPort, opts);
   const stdioLog = join(home, 'daemon-stdio.log');
   const logHandle = await open(stdioLog, 'a');
@@ -187,6 +213,16 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
       return '<could not read daemon stdio log>';
     }
   };
+  const exited = (): boolean => child.exitCode !== null || child.signalCode !== null;
+  // An API port conflict is logged only to daemon.log, a libp2p one only to stdio.
+  const exitedEarly = async (): Promise<DaemonExitedEarly> => {
+    const daemonLog = await readFile(join(home, 'daemon.log'), 'utf-8').catch(() => '<could not read daemon.log>');
+    return new DaemonExitedEarly(
+      `Daemon exited early (code=${child.exitCode}, signal=${child.signalCode}).\n` +
+      `--- daemon stdio tail ---\n${await tail()}\n` +
+      `--- daemon.log tail ---\n${daemonLog.split('\n').slice(-40).join('\n').trim()}`,
+    );
+  };
   const daemon: Daemon = { home, apiPort, listenPort, child, token: '' };
   child.once('exit', (code, signal) => {
     daemon.exitCode = code;
@@ -194,15 +230,18 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
   });
   try {
     for (let i = 0; i < 90; i++) {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(
-          `Daemon exited early (code=${child.exitCode}, signal=${child.signalCode}).\n--- daemon stdio tail ---\n${await tail()}`,
-        );
-      }
+      if (exited()) throw await exitedEarly();
+      let ok = false;
       try {
-        const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
-        if (res.ok) break;
+        ok = (await fetch(`http://127.0.0.1:${apiPort}/api/status`)).ok;
       } catch { /* not ready yet */ }
+      // /api/status needs no token, so a daemon already on this port answers it
+      // too. auth.token appears before this daemon listens and api.port only
+      // after it has bound the port; with a live child they prove the 200 is ours.
+      if (ok) {
+        if (exited()) throw await exitedEarly();
+        if (existsSync(join(home, 'auth.token')) && existsSync(join(home, 'api.port'))) break;
+      }
       await sleep(500);
       if (i === 89) {
         throw new Error(
