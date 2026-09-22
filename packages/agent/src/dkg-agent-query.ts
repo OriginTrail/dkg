@@ -305,10 +305,10 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -400,7 +400,7 @@ import {
 /**
  * Request-local plan for one canonical read-authority resolution. Every internal
  * caller states its lane explicitly, so a new call site cannot silently land in
- * the other authority view than it intends.
+ * a different authority view than it intends.
  */
 interface ContextGraphReadAuthorityPlan {
   registrationTimeoutMs: number;
@@ -743,6 +743,8 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /** Read-only gates may consume the finalized snapshot; defaults to `live-current`. */
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<boolean> {
     return (await withRpcUsageSite(
@@ -776,7 +778,7 @@ export class QueryMethods extends DKGAgentBase {
           id,
           { callerAgentAddress: opts.callerAgentAddress, signal },
           {
-            registrationTimeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            registrationTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
             authorityReadMode: 'finalized-index',
           },
         )
@@ -802,8 +804,10 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
       /**
-       * Scoped query reads consume the finalized authority projection; every
-       * other caller (admission, `canReadContextGraph`) keeps current state.
+       * Scoped query reads and the read-only host/sync/share gates consume the
+       * finalized authority projection and fall back to current state when the
+       * index holds no evidence (e.g. no snapshot); every other caller
+       * (admission, the default `canReadContextGraph`) keeps current state.
        */
       authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
@@ -815,7 +819,10 @@ export class QueryMethods extends DKGAgentBase {
         this,
         contextGraphId,
         readOpts,
-        { registrationTimeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS, authorityReadMode },
+        {
+          registrationTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+          authorityReadMode,
+        },
       ),
     );
   }
@@ -868,7 +875,7 @@ export class QueryMethods extends DKGAgentBase {
           // reopen legacy scalar RPC discovery. A forged/missing seed preserves
           // the initial denial. Local state runs FIRST so a replica that
           // already holds the seed never spends its caller's budget (restart
-          // rehydration passes CHAIN_POLICY_READ_TIMEOUT_MS) on the network.
+          // rehydration passes the request-scoped authority deadline) on the network.
           const finalizedAbsence = Object.freeze({ kind: 'finalized-absence' as const });
           try {
             await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);
