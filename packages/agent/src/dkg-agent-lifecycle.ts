@@ -601,9 +601,9 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -2120,6 +2120,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
+    // stop() aborts detached cold authority flights; a restarted agent admits
+    // new ones (the runtime is created lazily on first use otherwise).
+    this.finalizedAuthorityColdResolutionRuntimeV1?.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
@@ -10791,7 +10794,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // resolver subsequently returns `allowed`.
         const readAuthority = await this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
-          signal: AbortSignal.timeout(CHAIN_POLICY_READ_TIMEOUT_MS),
+          signal: AbortSignal.timeout(chainAuthorityReadBudgetsOf(this).requestTimeoutMs),
           durableSubscriptionBinding: {
             contextGraphId: row.id,
             onChainId: row.onChainId,

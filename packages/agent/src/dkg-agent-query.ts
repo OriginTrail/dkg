@@ -305,10 +305,10 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -544,7 +544,7 @@ export class QueryMethods extends DKGAgentBase {
             allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
             signal: opts.signal,
           },
-          CHAIN_POLICY_READ_TIMEOUT_MS,
+          chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
           'finalized-index',
         ),
       );
@@ -765,7 +765,7 @@ export class QueryMethods extends DKGAgentBase {
           this,
           id,
           { callerAgentAddress: opts.callerAgentAddress, signal },
-          CHAIN_POLICY_READ_TIMEOUT_MS,
+          chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
           undefined,
           'finalized-index',
         )
@@ -798,7 +798,7 @@ export class QueryMethods extends DKGAgentBase {
         this,
         contextGraphId,
         opts,
-        CHAIN_POLICY_READ_TIMEOUT_MS,
+        chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
       ),
     );
   }
@@ -847,7 +847,7 @@ export class QueryMethods extends DKGAgentBase {
           // reopen legacy scalar RPC discovery. A forged/missing seed preserves
           // the initial denial. Local state runs FIRST so a replica that
           // already holds the seed never spends its caller's budget (restart
-          // rehydration passes CHAIN_POLICY_READ_TIMEOUT_MS) on the network.
+          // rehydration passes the request-scoped authority deadline) on the network.
           const finalizedAbsence = Object.freeze({ kind: 'finalized-absence' as const });
           try {
             await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);

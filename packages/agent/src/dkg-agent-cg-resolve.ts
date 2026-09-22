@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityIndexId, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, assertContextGraphAuthorityIndexId, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityIndexId, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -321,9 +321,9 @@ import {
   BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
 import {
   createAbortError,
@@ -336,6 +336,11 @@ import type { LiveOnChainAccessPolicyState } from
   './internal/context-graph-authority/context-graph-access-policy.js';
 import { parseRfc64AuthoritySnapshotV1 } from
   './rfc64/release-native-catalog-authority-v1.js';
+/** Outcome of one bounded finalized authority snapshot read for a numeric id. */
+export type FinalizedContextGraphAuthoritySnapshotReadV1 =
+  | { kind: 'unsupported' }
+  | { kind: 'absent' }
+  | { kind: 'snapshot'; snapshot: ContextGraphAuthoritySnapshot };
 // Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
 // the same stable public contract as the package root.
 export type { RegisteredContextGraphAuthority } from
@@ -1604,34 +1609,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const { onChainId } = registration;
 
     let accessPolicyState: LiveOnChainAccessPolicyState;
-    const finalizedIndexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
-    const readFinalizedSnapshots = finalizedIndexReader
-      ?.readContextGraphAuthorityIndexSnapshots;
     if (
       options.authorityReadMode === 'finalized-index'
-      && finalizedIndexReader !== undefined
-      && readFinalizedSnapshots !== undefined
+      && this.chain.contextGraphAuthorityIndexRevisionReader
+        ?.readContextGraphAuthorityIndexSnapshots !== undefined
     ) {
       try {
-        const authorityIndexId = onChainId.toString();
-        assertContextGraphAuthorityIndexId(
-          authorityIndexId,
-          'scoped read finalized authority index id',
-        );
-        const snapshots = await runBoundedOperation(
-          (signal) => readFinalizedSnapshots.call(
-            finalizedIndexReader,
-            [authorityIndexId as ContextGraphAuthorityIndexId],
-            { signal },
-          ),
+        const finalizedRead = await this.readFinalizedContextGraphAuthoritySnapshotV1(
+          onChainId,
           {
-            label: `readFinalizedContextGraphAuthority(${onChainId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
             signal: options.signal,
+            label: `readFinalizedContextGraphAuthority(${onChainId})`,
           },
         );
-        const rawSnapshot = snapshots.get(authorityIndexId as ContextGraphAuthorityIndexId);
-        if (rawSnapshot === undefined) {
+        if (finalizedRead.kind !== 'snapshot') {
           return {
             kind: 'unavailable',
             onChainId,
@@ -1639,7 +1630,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             detail: 'finalized authority index has no snapshot for the registered Context Graph',
           };
         }
-        const snapshot = parseRfc64AuthoritySnapshotV1(rawSnapshot, onChainId);
+        const snapshot = parseRfc64AuthoritySnapshotV1(finalizedRead.snapshot, onChainId);
         if (snapshot.active !== true) {
           return {
             kind: 'unavailable',
@@ -1740,7 +1731,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           () => getParticipantAgents.call(this.chain, onChainId),
           {
             label: `getContextGraphParticipantAgents(${onChainId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
             signal: options.signal,
           },
         );
@@ -1780,6 +1771,51 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     }
     this.onChainParticipantAgentsCache.set(cacheKey, participantAgents);
     return { kind: 'private', onChainId, participantAgents };
+  }
+
+  /**
+   * One finalized authority snapshot for a registered numeric id, shared by
+   * every read-only policy consumer on this agent.
+   *
+   * Only THIS caller's wait is bounded by the request deadline. The index
+   * resolution itself runs as a detached single flight per graph id under the
+   * cold budget (`chainAuthorityReadBudgets.coldResolutionTimeoutMs`): a
+   * request that times out fails closed and leaves the resolution running,
+   * and once it completes without an abort the chain reader retains its
+   * projection, so the next request is answered from the snapshot without
+   * RPC. Concurrent and retrying callers for the same graph attach to the one
+   * flight instead of each starting a cold event-log walk.
+   *
+   * `absent` is the index's finalized answer that no such graph exists at the
+   * anchor; a timeout or transport failure throws so callers keep their
+   * fail-closed retryable disposition and never confuse it with absence.
+   */
+  async readFinalizedContextGraphAuthoritySnapshotV1(
+    this: DKGAgent,
+    onChainId: bigint,
+    options: { signal?: AbortSignal; label?: string } = {},
+  ): Promise<FinalizedContextGraphAuthoritySnapshotReadV1> {
+    const reader = this.chain.contextGraphAuthorityIndexRevisionReader;
+    const readSnapshots = reader?.readContextGraphAuthorityIndexSnapshots;
+    if (reader === undefined || readSnapshots === undefined) return { kind: 'unsupported' };
+    const authorityIndexId = onChainId.toString(10);
+    assertContextGraphAuthorityIndexId(
+      authorityIndexId,
+      'finalized authority snapshot index id',
+    );
+    const targetId = authorityIndexId as ContextGraphAuthorityIndexId;
+    const snapshot = await this.finalizedAuthorityColdResolutionV1.read(
+      `finalized-authority-snapshot:${targetId}`,
+      async (flightSignal) => (
+        await readSnapshots.call(reader, [targetId], { signal: flightSignal })
+      ).get(targetId),
+      {
+        label: options.label ?? `readFinalizedContextGraphAuthority(${onChainId})`,
+        requestTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+        signal: options.signal,
+      },
+    );
+    return snapshot === undefined ? { kind: 'absent' } : { kind: 'snapshot', snapshot };
   }
 
   /**

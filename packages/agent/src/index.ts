@@ -113,6 +113,16 @@ export {
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
 export {
+  CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_ENV,
+  CHAIN_AUTHORITY_READ_TIMEOUT_ENV,
+  DEFAULT_CHAIN_AUTHORITY_READ_BUDGETS,
+  chainAuthorityReadBudgetsOf,
+  resolveChainAuthorityReadBudgets,
+  resolveChainAuthorityTimeoutMs,
+  type ChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgetsConfig,
+} from './chain-authority-read-budgets.js';
+export {
   classifySharedMemoryFreshness,
   type SelectedSharedMemorySyncResult,
   type SharedMemoryFreshnessSummary,

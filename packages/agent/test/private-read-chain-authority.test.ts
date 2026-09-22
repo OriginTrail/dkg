@@ -5,7 +5,10 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
-import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
+import {
+  CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS,
+  CHAIN_POLICY_READ_TIMEOUT_MS,
+} from '../src/dkg-agent-constants.js';
 import {
   CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
   ContextGraphReadAuthorityUnavailableError,
@@ -1273,5 +1276,290 @@ describe('private read authorization uses the on-chain participant roster', () =
       callerAgentAddress: member,
       allowSubscriptionFallback: false,
     })).resolves.toBe(true);
+  });
+
+  it('completes a cold finalized authority resolution after the request deadline and answers the retry from the retained projection', async () => {
+    const contextGraphId = 'finalized-cold-snapshot';
+    const COLD_SCAN_MS = 10_000;
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedColdSnapshotResolution',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-cold', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockResolvedValue({
+      kind: 'registered',
+      onChainId: 9n,
+      provenance: 'authoritative',
+    });
+    const snapshot = finalizedAuthoritySnapshot(
+      9n,
+      agent.contextGraphNameCommitment(contextGraphId),
+      { accessPolicy: 1, participantAgents: [MEMBER] },
+    );
+    // Model the chain reader: the first read of this graph walks the event
+    // log (one slow, abortable scan). Once that scan completes WITHOUT an
+    // abort the projection is retained and later reads cost no RPC.
+    let projection: ContextGraphAuthoritySnapshot | undefined;
+    let scans = 0;
+    const scanSignals: AbortSignal[] = [];
+    const readIndex = vi.fn(async (
+      ids: readonly string[],
+      options?: { signal?: AbortSignal },
+    ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>> => {
+      if (projection !== undefined) {
+        return new Map(ids.includes(projection.contextGraphId) ? [[projection.contextGraphId, projection]] : []);
+      }
+      scans += 1;
+      const signal = options?.signal;
+      if (signal !== undefined) scanSignals.push(signal);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, COLD_SCAN_MS);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(signal.reason ?? new Error('scan aborted'));
+        }, { once: true });
+      });
+      projection = snapshot;
+      return new Map([[snapshot.contextGraphId, snapshot]]);
+    });
+    Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
+      readContextGraphAuthorityIndexSnapshots: readIndex,
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      whenIdle: vi.fn(async () => undefined),
+    });
+    const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState');
+    const coldResolution = Reflect.get(agent, 'finalizedAuthorityColdResolutionV1') as
+      { inFlightKeys: readonly string[] };
+    vi.useFakeTimers();
+
+    // 1. The request fails closed at its own deadline...
+    const first = agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    }).catch((cause: unknown) => cause);
+    await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+    const error = await first;
+    expect(error).toBeInstanceOf(ContextGraphReadAuthorityUnavailableError);
+    expect(error).toMatchObject({
+      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      retryable: true,
+      reason: 'chain-access-policy-timeout',
+    });
+    // ...while the resolution it started keeps running, unaborted.
+    expect(scans).toBe(1);
+    expect(scanSignals[0]?.aborted).toBe(false);
+    expect(coldResolution.inFlightKeys).toEqual(['finalized-authority-snapshot:9']);
+
+    // 2. A retry inside the flight window attaches to the same flight.
+    await vi.advanceTimersByTimeAsync(COLD_SCAN_MS - CHAIN_POLICY_READ_TIMEOUT_MS - 2_000);
+    const retry = agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(retry).resolves.toBeDefined();
+    expect(scans).toBe(1);
+    expect(scanSignals[0]?.aborted).toBe(false);
+    expect(coldResolution.inFlightKeys).toEqual([]);
+
+    // 3. After the flight, the reader answers from its projection: no scan.
+    // The retry above never reached the reader at all (it shared the flight),
+    // so this is only the second read the reader has ever seen.
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: MEMBER,
+    })).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledTimes(2);
+    expect(scans).toBe(1);
+    expect(live).not.toHaveBeenCalled();
+
+    // The finalized roster still denies a non-member without any RPC: the
+    // scoped query is refused before execution and answered empty.
+    const queryExecution = vi.spyOn(agent.queryEngine, 'query');
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId,
+      callerAgentAddress: NON_MEMBER,
+    })).resolves.toMatchObject({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+    expect(scans).toBe(1);
+  });
+
+  it('bounds a never-settling cold finalized resolution at the cold budget and restarts it afresh', async () => {
+    const contextGraphId = 'finalized-cold-hung';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedColdHungResolution',
+      chainAdapter: chain,
+    });
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-hung', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockResolvedValue({
+      kind: 'registered',
+      onChainId: 10n,
+      provenance: 'authoritative',
+    });
+    const scanSignals: AbortSignal[] = [];
+    const readIndex = vi.fn((
+      _ids: readonly string[],
+      options?: { signal?: AbortSignal },
+    ) => new Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>((_resolve, reject) => {
+      const signal = options?.signal;
+      if (signal !== undefined) {
+        scanSignals.push(signal);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }
+    }));
+    Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
+      readContextGraphAuthorityIndexSnapshots: readIndex,
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      whenIdle: vi.fn(async () => undefined),
+    });
+    vi.useFakeTimers();
+
+    const first = agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId }).catch((cause: unknown) => cause);
+    await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+    expect(await first).toMatchObject({ reason: 'chain-access-policy-timeout' });
+    expect(scanSignals[0]?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(
+      CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS - CHAIN_POLICY_READ_TIMEOUT_MS - 1,
+    );
+    expect(scanSignals[0]?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scanSignals[0]?.aborted).toBe(true);
+    expect(scanSignals[0]?.reason).toMatchObject({
+      message: `readFinalizedContextGraphAuthority(10) cold resolution timed out after ${CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS}ms`,
+    });
+
+    // The retired flight does not pin the graph: the next request starts anew.
+    const second = agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId }).catch((cause: unknown) => cause);
+    await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+    expect(await second).toMatchObject({ reason: 'chain-access-policy-timeout' });
+    expect(readIndex).toHaveBeenCalledTimes(2);
+    expect(scanSignals[1]?.aborted).toBe(false);
+  });
+
+  it('completes a cold finalized name-binding resolution after the request deadline and answers the retry without a new scan', async () => {
+    const contextGraphId = 'finalized-cold-name-binding';
+    const COLD_SCAN_MS = 10_000;
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'FinalizedColdNameBindingResolution',
+      chainAdapter: chain,
+    });
+    const nameHash = agent.contextGraphNameCommitment(contextGraphId);
+    const snapshot = finalizedAuthoritySnapshot(11n, nameHash);
+    let projection: ContextGraphAuthoritySnapshot | undefined;
+    let scans = 0;
+    const scanSignals: AbortSignal[] = [];
+    const resolveByNameHashes = vi.fn(async (
+      nameHashes: readonly string[],
+      options?: { signal?: AbortSignal },
+    ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>> => {
+      if (projection !== undefined) {
+        return new Map(nameHashes.includes(projection.nameHash) ? [[projection.nameHash, projection]] : []);
+      }
+      scans += 1;
+      const signal = options?.signal;
+      if (signal !== undefined) scanSignals.push(signal);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, COLD_SCAN_MS);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(signal.reason ?? new Error('scan aborted'));
+        }, { once: true });
+      });
+      projection = snapshot;
+      return new Map([[snapshot.nameHash, snapshot]]);
+    });
+    const whenIdle = vi.fn(async () => undefined);
+    Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveByNameHashes,
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      whenIdle,
+    });
+    const legacyResolve = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    mockLivePolicy(agent, 0);
+    vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(false);
+    vi.useFakeTimers();
+
+    const first = agent.resolveContextGraphReadAuthority(contextGraphId, {
+      callerAgentAddress: NON_MEMBER,
+      allowSubscriptionFallback: false,
+    });
+    await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+    await expect(first).resolves.toMatchObject({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'chain-name-binding-unavailable',
+    });
+    expect(resolveByNameHashes).toHaveBeenCalledWith([nameHash], { signal: expect.any(AbortSignal) });
+    expect(scans).toBe(1);
+    expect(scanSignals[0]?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(COLD_SCAN_MS - CHAIN_POLICY_READ_TIMEOUT_MS - 2_000);
+    const retry = agent.resolveContextGraphReadAuthority(contextGraphId, {
+      callerAgentAddress: NON_MEMBER,
+      allowSubscriptionFallback: false,
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(retry).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'registered-chain',
+      reason: 'chain-public',
+      onChainId: 11n,
+    });
+    expect(scans).toBe(1);
+    expect(scanSignals[0]?.aborted).toBe(false);
+    // The physical index fence ran for the completed flight exactly once.
+    expect(whenIdle).toHaveBeenCalledTimes(1);
+
+    await expect(agent.resolveContextGraphReadAuthority(contextGraphId, {
+      callerAgentAddress: NON_MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({ outcome: 'allowed', onChainId: 11n });
+    expect(scans).toBe(1);
+    expect(legacyResolve).not.toHaveBeenCalled();
+  });
+
+  it('honors a configured request deadline for the finalized authority read', async () => {
+    const contextGraphId = 'finalized-configured-deadline';
+    const previous = process.env.DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS;
+    process.env.DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS = '7000';
+    const chain = new MockChainAdapter();
+    try {
+      agent = await DKGAgent.create({
+        name: 'FinalizedConfiguredDeadline',
+        chainAdapter: chain,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS;
+      else process.env.DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS = previous;
+    }
+    Object.defineProperty(agent, 'peerId', { value: 'peer-finalized-configured', configurable: true });
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockResolvedValue({
+      kind: 'registered',
+      onChainId: 12n,
+      provenance: 'authoritative',
+    });
+    const snapshot = finalizedAuthoritySnapshot(12n, agent.contextGraphNameCommitment(contextGraphId));
+    const readIndex = vi.fn((ids: readonly string[]) => new Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>(
+      (resolve) => {
+        setTimeout(() => resolve(new Map(ids.includes('12') ? [['12', snapshot]] : [])), 5_000);
+      },
+    ));
+    Reflect.set(chain, 'contextGraphAuthorityIndexRevisionReader', {
+      readContextGraphAuthorityIndexSnapshots: readIndex,
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      whenIdle: vi.fn(async () => undefined),
+    });
+    vi.useFakeTimers();
+
+    const read = agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId });
+    // The package default (2.5s) would have failed this read closed.
+    await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(5_000 - CHAIN_POLICY_READ_TIMEOUT_MS);
+    await expect(read).resolves.toBeDefined();
+    expect(readIndex).toHaveBeenCalledTimes(1);
   });
 });

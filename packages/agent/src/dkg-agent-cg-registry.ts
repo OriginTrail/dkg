@@ -299,10 +299,10 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
@@ -1033,7 +1033,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // without being unhealthy.
     const registrationResolutionTimeoutMs = options.registrationTimeoutMs
       ?? (hasBindingCandidate
-        ? CHAIN_POLICY_READ_TIMEOUT_MS
+        ? chainAuthorityReadBudgetsOf(this).requestTimeoutMs
         : CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS);
 
     // A durable numeric binding is already authoritative and must stay on the
@@ -1099,7 +1099,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           (signal) => this.contextGraphExists(contextGraphId, { signal }),
           {
             label: `contextGraphExists(${contextGraphId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
             signal: options.signal,
           },
         );
@@ -1130,74 +1130,86 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader !== undefined) {
       try {
-        const finalizedBinding = await runBoundedOperation(async (ownerSignal) => {
-          try {
-            const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
-              [contextGraphId],
-              {
-                signal: ownerSignal,
-                ...(strictFinalizedDurableBindingRepair && durableBinding !== undefined
-                  ? {
-                      durableBindingHints: new Map([[contextGraphId, {
-                        contextGraphId,
-                        onChainId: durableBinding.onChainId,
-                        onChainHash: durableBinding.onChainHash,
-                      }]]),
-                    }
-                  : {}),
-              },
-            );
-            // An older reader object without any finalized name capability is
-            // an explicitly legacy adapter and may use the compatibility path.
-            if (resolution.kind === 'legacy-current') {
-              if (strictFinalizedDurableBindingRepair) {
-                throw new Error(
-                  'invalid durable binding requires the finalized Context Graph authority index',
-                );
-              }
-              return null;
+        // The index resolution is a detached single flight per graph: this
+        // caller's registration deadline bounds only its own wait. A cold
+        // name walk that outlives the deadline keeps running under the cold
+        // budget and is retained by the chain reader, so the retry that
+        // follows the fail-closed answer is served from the projection.
+        const repairHints = strictFinalizedDurableBindingRepair && durableBinding !== undefined
+          ? {
+              durableBindingHints: new Map([[contextGraphId, {
+                contextGraphId,
+                onChainId: durableBinding.onChainId,
+                onChainHash: durableBinding.onChainHash,
+              }]]),
             }
-            const target = resolution.targets.get(contextGraphId);
-            if (target === undefined) {
-              return !strictFinalizedDurableBindingRepair
-                && options.allowAcceptedRfc64FinalizedAbsence === true
-                ? { kind: 'unregistered' } as const
-                : {
-                    kind: 'unavailable' as const,
-                    reason: 'finalized-name-absence-unaccepted' as const,
-                    detail: 'finalized name absence has no accepted owner-signed unregistered authority',
-                  };
+          : undefined;
+        const flightKey = repairHints === undefined
+          ? `registration-binding:${contextGraphId}`
+          : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
+        const resolution = await this.finalizedAuthorityColdResolutionV1.read(
+          flightKey,
+          async (flightSignal) => {
+            try {
+              return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
+                [contextGraphId],
+                { signal: flightSignal, ...(repairHints ?? {}) },
+              );
+            } finally {
+              await indexReader.whenIdle();
             }
-            if (
-              target.expectedOnChainId <= 0n
-              || target.expectedOnChainId >= (1n << 256n)
-            ) {
-              throw new Error('finalized Context Graph id is outside uint256');
+          },
+          {
+            label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
+            requestTimeoutMs: registrationResolutionTimeoutMs,
+            signal: options.signal,
+          },
+        );
+        const finalizedBinding = ((): ContextGraphRegistrationBinding | null => {
+          // An older reader object without any finalized name capability is
+          // an explicitly legacy adapter and may use the compatibility path.
+          if (resolution.kind === 'legacy-current') {
+            if (strictFinalizedDurableBindingRepair) {
+              throw new Error(
+                'invalid durable binding requires the finalized Context Graph authority index',
+              );
             }
-            if (target.kind === 'resolved-snapshot') {
-              const snapshot = target.finalizedSnapshot;
-              if (
-                snapshot.active !== true
-                || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
-                || this.contextGraphWireId(snapshot.nameHash)
-                  !== this.contextGraphWireId(target.expectedNameHash)
-              ) {
-                throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
-              }
-            }
-            return {
-              kind: 'registered',
-              onChainId: target.expectedOnChainId,
-              provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
-            } as const;
-          } finally {
-            await indexReader.whenIdle();
+            return null;
           }
-        }, {
-          label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
-          timeoutMs: registrationResolutionTimeoutMs,
-          signal: options.signal,
-        });
+          const target = resolution.targets.get(contextGraphId);
+          if (target === undefined) {
+            return !strictFinalizedDurableBindingRepair
+              && options.allowAcceptedRfc64FinalizedAbsence === true
+              ? { kind: 'unregistered' } as const
+              : {
+                  kind: 'unavailable' as const,
+                  reason: 'finalized-name-absence-unaccepted' as const,
+                  detail: 'finalized name absence has no accepted owner-signed unregistered authority',
+                };
+          }
+          if (
+            target.expectedOnChainId <= 0n
+            || target.expectedOnChainId >= (1n << 256n)
+          ) {
+            throw new Error('finalized Context Graph id is outside uint256');
+          }
+          if (target.kind === 'resolved-snapshot') {
+            const snapshot = target.finalizedSnapshot;
+            if (
+              snapshot.active !== true
+              || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
+              || this.contextGraphWireId(snapshot.nameHash)
+                !== this.contextGraphWireId(target.expectedNameHash)
+            ) {
+              throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
+            }
+          }
+          return {
+            kind: 'registered',
+            onChainId: target.expectedOnChainId,
+            provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
+          } as const;
+        })();
         if (finalizedBinding !== null) return finalizedBinding;
       } catch (err) {
         return {
@@ -1600,11 +1612,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         // connect) cannot block the caller past the daemon-ready
         // budget. The fallback is an optimisation — failing fast
         // and returning undefined is correct (fail-closed via the
-        // strict guard at the route layer). 2.5s is tight enough
-        // to stay well under the 45s daemon-ready budget even when
+        // strict guard at the route layer). The default 2.5s is tight
+        // enough to stay well under the 45s daemon-ready budget even when
         // both fallbacks fire back-to-back, while still allowing a
-        // single slow eth_call hop to succeed under normal load.
-        const CHAIN_RPC_FALLBACK_TIMEOUT_MS = 2_500;
+        // single slow eth_call hop to succeed under normal load; operators
+        // on slow public endpoints raise it via `chain.authorityReadTimeoutMs`.
+        const CHAIN_RPC_FALLBACK_TIMEOUT_MS = chainAuthorityReadBudgetsOf(this).requestTimeoutMs;
         const withTimeout = <T,>(p: Promise<T>, label: string): Promise<T | typeof TIMEOUT_SENTINEL> => {
           let timer: ReturnType<typeof setTimeout> | undefined;
           const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {

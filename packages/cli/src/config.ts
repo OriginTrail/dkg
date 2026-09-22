@@ -5,11 +5,12 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import type {
-  DKGAgentConfig,
-  SyncAdmissionConfig,
-  SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
+import {
+  resolveChainAuthorityTimeoutMs,
+  type DKGAgentConfig,
+  type SyncAdmissionConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 import {
   resolveRfc64CatalogActivationsV1,
@@ -232,6 +233,10 @@ export interface NetworkConfig {
     finalityConfirmations?: number;
     /** See `ChainConfig.indexTickMs`. */
     indexTickMs?: number;
+    /** See `ChainConfig.authorityReadTimeoutMs`. */
+    authorityReadTimeoutMs?: number;
+    /** See `ChainConfig.authorityColdResolutionTimeoutMs`. */
+    authorityColdResolutionTimeoutMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint | string | number;
     /**
@@ -401,6 +406,29 @@ export interface ChainConfig {
    * listener goes back to scanning the chain for itself.
    */
   indexTickMs?: number;
+  /**
+   * Request-scoped deadline (ms) for one on-chain Context Graph authority
+   * read: liveness, access/publish policy, participant roster, or the
+   * finalized-index snapshot behind a query, share, or SWM sync decision. A
+   * read that misses it fails CLOSED for that request (HTTP 503 with a
+   * retryable `chain-access-policy-timeout` reason on the query path). Raise
+   * it on slow public RPC endpoints. The environment variable
+   * `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` wins over this value. A positive
+   * integer; defaults to 2500.
+   */
+  authorityReadTimeoutMs?: number;
+  /**
+   * Budget (ms) for the detached cold finalized-authority resolution. The
+   * first authority read of a graph the local finalized index has never
+   * projected walks the contract event log (many `eth_getLogs` calls) and
+   * routinely outlives `authorityReadTimeoutMs`. That request still fails
+   * closed on time, but the resolution keeps running under this budget as one
+   * flight per graph and populates the index, so the retry is answered from
+   * the snapshot without RPC. Never applied below `authorityReadTimeoutMs`.
+   * The environment variable `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS`
+   * wins over this value. A positive integer; defaults to 20000.
+   */
+  authorityColdResolutionTimeoutMs?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */
   maxFeePerGasWei?: bigint | string | number;
 }
@@ -1785,6 +1813,16 @@ export function resolveChainConfig(
   const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
   if (operatorHasIndexTickMs || indexTickMs !== undefined) {
     merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
+  }
+  // Presence matters for both authority deadlines: an explicit null/zero is an
+  // operator error, not a request to fall back to the network or agent default.
+  for (const key of ['authorityReadTimeoutMs', 'authorityColdResolutionTimeoutMs'] as const) {
+    const operatorHasValue = cfg !== undefined && cfg !== null
+      && Object.prototype.hasOwnProperty.call(cfg, key);
+    const value: unknown = operatorHasValue ? cfg[key] : net?.[key];
+    if (operatorHasValue || value !== undefined) {
+      merged[key] = resolveChainAuthorityTimeoutMs(value, `chain.${key}`);
+    }
   }
   const maxFeePerGasWei = parseWeiFloor(
     cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,

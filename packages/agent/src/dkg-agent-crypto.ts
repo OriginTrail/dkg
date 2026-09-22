@@ -321,6 +321,7 @@ import {
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import {
   isBoundedOperationTimeoutError,
@@ -530,6 +531,8 @@ async function evaluateContextGraphSlotBinding(
     label: string,
     readSignal?: AbortSignal,
   ) => Promise<T | typeof TIMEOUT_SENTINEL>,
+  /** The deadline `raceRead` applies; quoted in the fail-closed diagnostic. */
+  readTimeoutMs: number = CHAIN_POLICY_READ_TIMEOUT_MS,
 ): Promise<ContextGraphSlotBindingOutcome> {
   let numericId: bigint;
   try {
@@ -572,13 +575,13 @@ async function evaluateContextGraphSlotBinding(
     warn(
       opCtx ?? createOperationContext('share'),
       `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after `
-      + `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — cannot verify local-mapping identity, `
+      + `${readTimeoutMs}ms — cannot verify local-mapping identity, `
       + 'treating CG as NOT public (fail-closed)',
     );
     return {
       kind: 'transportFailure',
       error: createRpcTimeoutError(
-        `getContextGraphNameHash(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+        `getContextGraphNameHash(${onChainId}) timed out after ${readTimeoutMs}ms`,
       ),
     };
   }
@@ -850,8 +853,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   /**
    * #884 review — bound a single chain policy/liveness read on the hot path.
    * Mirrors the `withTimeout` race in {@link getContextGraphOnChainPolicy}:
-   * resolves to {@link TIMEOUT_SENTINEL} if the underlying RPC HANGS past
-   * {@link CHAIN_POLICY_READ_TIMEOUT_MS}, so callers fail closed instead of
+   * resolves to {@link TIMEOUT_SENTINEL} if the underlying RPC HANGS past the
+   * request-scoped authority deadline (`chainAuthorityReadBudgets`, default
+   * {@link CHAIN_POLICY_READ_TIMEOUT_MS}), so callers fail closed instead of
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
    *
@@ -872,7 +876,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return await withRpcRequestContext({ admissionPriority: 'authority' }, () => (
         runBoundedOperation(start, {
           label,
-          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
           signal,
         })
       ));
@@ -912,6 +916,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const readLiveAuthority = this.chain.getContextGraphLiveAuthority;
     return resolveLiveAccessPolicyState(
       {
+        readTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
         readLiveAuthority: bindOptionalChainRead(this.chain, readLiveAuthority),
         isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
         getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
@@ -1315,6 +1320,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (start, label, signal) => this.raceChainPolicyRead(start, label, signal),
+      chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
     );
     return mapContextGraphSlotBindingOutcome(outcome, bindingMode);
   }
