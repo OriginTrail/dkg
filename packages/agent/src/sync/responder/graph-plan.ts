@@ -1593,16 +1593,29 @@ export async function readChangelogDeltaPage(params: {
     records.push({ seq, graph, op: 'upsert', quads });
   }
 
-  // (5) nextSeq: on a budget-truncated page, the last emitted record's seq; else
-  // the scanned-through high-water — head.seq if the scan drained the log,
+  // (5) The page may reach past the head captured in (1): this node's own
+  // writes landed meanwhile, or readChanges adopted markers another writer
+  // appended above this instance's counter. The wire requires `headSeq` and
+  // `nextSeq` to cover every emitted record, so both come from the head AFTER
+  // the read. An era that rotated underneath the read is a restore in
+  // progress: hand the requester a resync rather than records from two eras.
+  const headAfter = await params.reader.changelogHead(
+    syncResponderStoreOptions(params.signal, 'sync.responder.changelogHead'),
+  );
+  if (headAfter.era !== head.era) {
+    return { kind: 'resync', era: headAfter.era, headSeq: headAfter.seq };
+  }
+
+  // (6) nextSeq: on a budget-truncated page, the last emitted record's seq; else
+  // the scanned-through high-water — the head if the scan drained the log,
   // otherwise the max raw seq scanned (more remains beyond this window).
-  const scannedTo = raw.length > 0 ? raw[raw.length - 1].seq : head.seq;
+  const scannedTo = raw.length > 0 ? raw[raw.length - 1].seq : headAfter.seq;
   const drained = raw.length < params.limit;
   const nextSeq = budgetStopped
     ? records[records.length - 1].seq
-    : drained ? head.seq : scannedTo;
+    : drained ? headAfter.seq : scannedTo;
 
-  return { kind: 'delta', era: head.era, headSeq: head.seq, nextSeq, records };
+  return { kind: 'delta', era: headAfter.era, headSeq: headAfter.seq, nextSeq, records };
 }
 
 export async function readDurableDataPage(params: {
