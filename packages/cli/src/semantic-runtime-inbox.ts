@@ -41,6 +41,7 @@ export { SEMANTIC_RUNTIME_INBOX_SKILL_IRI };
 const INVOCATION_TIMEOUT_MS = 10 * 60_000;
 
 interface SemanticInboxError {
+  trace?: SemanticInvocationResult['trace'];
   code: string;
   status: number;
   error: string;
@@ -227,7 +228,7 @@ export async function invokeBoundSemanticProgramOnPeer(
   if (!response.success) {
     const failure = decodeFailure(response.outputData);
     throw new SemanticProgramError(failure?.code ?? 'REMOTE_INVOCATION_FAILED',
-      failure?.error ?? response.error ?? 'Tenant node rejected the invocation', failure?.status ?? 502);
+      failure?.error ?? response.error ?? 'Tenant node rejected the invocation', failure?.status ?? 502, failure?.trace);
   }
   let returned: Partial<SemanticInvocationResult> | null;
   try { returned = response.outputData ? decodeJson(response.outputData) as Partial<SemanticInvocationResult> : null; }
@@ -505,7 +506,7 @@ function decodeFailure(value: Uint8Array | undefined): SemanticInboxError | null
 
 function semanticFailure(error: unknown): SemanticInboxError {
   return error instanceof SemanticProgramError
-    ? { code: error.code, status: error.status, error: error.message }
+    ? { code: error.code, status: error.status, error: error.message, ...(error.trace ? { trace: error.trace } : {}) }
     : { code: 'REMOTE_INVOCATION_FAILED', status: 500, error: safeMessage(error) };
 }
 

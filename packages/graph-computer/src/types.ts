@@ -173,7 +173,20 @@ export interface InvokeProgram extends Operation {
 /** Persist this before sending when recovery across application restarts matters. */
 export interface PreparedInvocation extends InvokeProgram { invocationId: string }
 
+export interface ProgramCallTrace {
+  id: string; kind: 'tool' | 'program'; target: string;
+  startedAt: string; durationMs?: number; status: 'running' | 'succeeded' | 'failed' | 'interrupted';
+  result?: JsonValue; resultTruncated?: boolean; error?: string; executionIri?: string;
+}
+/** Detailed intermediate results are returned only to the operation's executor agent. */
+export interface ProgramExecutionTrace {
+  version: 1; executionIri: string; startedAt: string; durationMs?: number;
+  status: 'running' | 'succeeded' | 'failed' | 'interrupted'; calls: ProgramCallTrace[];
+  failure?: { location: string; message: string };
+}
+
 export interface Execution {
+  trace?: ProgramExecutionTrace;
   invocationId: string;
   executionIri: string;
   executionLayer: MemoryLayer;

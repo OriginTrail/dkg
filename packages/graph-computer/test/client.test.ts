@@ -333,3 +333,29 @@ describe('Program client', () => {
     expect(requests).toBe(2); expect(effects).toBe(1); expect(nonces.size).toBe(2);
   });
 });
+
+
+describe('execution trace receipts', () => {
+  const trace = (id: string) => ({ version: 1, executionIri: `urn:sr:execution:${id}`, startedAt: new Date().toISOString(), status: 'succeeded', durationMs: 10,
+    calls: [{ id: '1', kind: 'tool', target: 'urn:dkg:tool:sparql-read', startedAt: new Date().toISOString(), status: 'succeeded', durationMs: 5, result: { bindings: [] } }] });
+  it('retains a validated trace alongside final output', async () => {
+    const id = randomUUID(), events = trace(id);
+    const result = await client(async () => json({ ...receipt(id), trace: events })).programs.invoke({ ...operation, invocationId: id });
+    expect(result.trace).toEqual(events); expect(result.outputs).toHaveLength(2);
+  });
+  it('retains failed traces on errors and suppresses mismatched diagnostics', async () => {
+    const id = randomUUID(), events = { ...trace(id), status: 'failed' };
+    const fail = await client(async () => json({ code: 'TYPESCRIPT_EXECUTION_FAILED', error: 'Failed', trace: events }, 422))
+      .programs.invoke({ ...operation, invocationId: id }).catch(e => e);
+    expect(fail.trace).toEqual(events); expect(fail.invocationId).toBe(id);
+    const wrong = new GraphComputerError('failed', 'Failed', { invocationId: randomUUID(), details: { trace: events } });
+    expect(wrong.trace).toBeUndefined();
+  });
+  it('rejects malformed timing and traces from another invocation', async () => {
+    const id = randomUUID();
+    for (const events of [{ ...trace(id), durationMs: -1 }, trace(randomUUID())]) {
+      await expect(client(async () => json({ ...receipt(id), trace: events })).programs.invoke({ ...operation, invocationId: id }))
+        .rejects.toMatchObject({ code: 'INVALID_RESPONSE', invocationId: id });
+    }
+  });
+});

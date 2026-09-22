@@ -1,5 +1,5 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer } from '@origintrail-official/dkg-graph-computer';
+import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer, ProgramExecutionTrace } from '@origintrail-official/dkg-graph-computer';
 import { createUuid } from '@origintrail-official/dkg-graph-computer';
 import { programClient, fetchProgramAgents, fetchProgramGraphs, type ProgramAgent, type ProgramGraph } from './client.js';
 import { useModalDismiss } from '../Modals/useModalDismiss.js';
@@ -7,6 +7,9 @@ import { JsonText, JsonViewer } from '../common/JsonViewer.js';
 import ToolPicker from './ToolPicker.js';
 import ChildProgramPicker from './ChildProgramPicker.js';
 import { readPermissions } from './tool-permissions.js';
+import ExecutionTrace from './ExecutionTrace.js';
+import PermissionSummary, { approvalMatchesScope } from './PermissionSummary.js';
+import { programDraftKey, readProgramDraft, writeProgramDraft, type ProgramDraft } from './program-drafts.js';
 import './program-editor.css';
 
 const Editor = lazy(() => import('./TypeScriptEditor.js'));
@@ -46,7 +49,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const [graphId, setGraphId] = useState(contextGraphId);
   const [graphs, setGraphs] = useState<ProgramGraph[]>([]);
   const [graphError, setGraphError] = useState('');
-  const [operationIri, setOperationIri] = useState('');
+  const [operationIri, setOperationIri] = useState(() => existing ? '' : `urn:dkg:operation:${createUuid()}`);
   const [callers, setCallers] = useState(address ?? '');
   const [toolsText, setToolsText] = useState('');
   const [permissionsText, setPermissionsText] = useState('');
@@ -63,9 +66,17 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const [discoveryError, setDiscoveryError] = useState('');
   const [invocation, setInvocation] = useState<Recovery | null>(null);
   const [result, setResult] = useState<Execution | null>(null);
+  const [failedTrace, setFailedTrace] = useState<ProgramExecutionTrace | null>(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [draftRevision, setDraftRevision] = useState(0);
+  const [draftReady, setDraftReady] = useState('');
+  const [draftStatus, setDraftStatus] = useState('');
+  const [draftError, setDraftError] = useState('');
+  const draftKey = programDraftKey(location.origin, address, contextGraphId, existing);
+  const draftWrite = useRef<(() => boolean) | null>(null);
+  const permissionEdits = useRef(false);
   const generation = useRef(0);
   const saveAttempt = useRef<{ fingerprint: string; programIri: string; name: string } | null>(null);
   const key = JSON.stringify([canonicalGraph(graphId), operationIri.trim()]);
@@ -73,28 +84,46 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
   const childIris = [...new Set(children.map(child => child.programIri.trim()))].sort();
   const toolIris = [...new Set(toolsText.split(/[\s,]+/).filter(Boolean))].sort();
   const dirty = (!existing && !saved) || (!!saved && (name !== saved.name || source !== saved.source || version !== saved.version || JSON.stringify(childIris) !== JSON.stringify(saved.children) || JSON.stringify(toolIris) !== JSON.stringify(saved.tools) || permissionsText !== saved.permissions));
-  const canRun = !!approved?.binding.enabled && !dirty && approved.contextGraphId === canonicalGraph(graphId)
+  let permissionSummary, permissionError = '';
+  try { permissionSummary = readPermissions(permissionsText); } catch { permissionError = 'Fix the requested permission JSON before approving.'; }
+  const requestedScope = { graphId: canonicalGraph(graphId), permissions: permissionSummary, callers: callers.split(/[\s,]+/).filter(Boolean),
+    children, maxCalls, maxConcurrency, timeoutMs, program: saved?.program, tools: toolIris };
+  const settingsMatch = !!approved && !permissionError && approvalMatchesScope(requestedScope, approved);
+  const canRun = !!approved?.binding.enabled && settingsMatch && !dirty && approved.contextGraphId === canonicalGraph(graphId)
     && approved.operationIri === operationIri.trim() && !!saved && matchesProgram(approved, saved.program)
     && approved.binding.allowedCallerAgentAddresses.some(caller => caller.toLowerCase() === address.toLowerCase());
   const runUnavailable = busy || (!address ? 'Select a node agent to run this Program.'
     : !saved ? 'Load or save the Program first.'
     : dirty ? 'Save your changes, then check or approve the new version before running.'
-    : !operationIri.trim() ? (availableApprovals.length > 1 ? 'Select an existing operation to run this Program.' : 'Enter an Operation IRI and check its approval, or create an approval for this Program.')
+    : !operationIri.trim() ? (availableApprovals.length > 1 ? 'Select an existing operation to run this Program.' : 'Waiting for an operation to be assigned.')
     : !approved ? 'Check the operation approval. It must be enabled and match this saved Program version.'
+    : !settingsMatch ? 'Review and approve the changed execution permissions before running.'
     : !canRun ? 'The selected agent is not an allowed caller for this approval.' : '');
+  const draftNeedsProtection = useRef(false); draftNeedsProtection.current = dirty && !!source;
   const recoveryKey = `dkg-program-invocation:${location.origin}:${address?.toLowerCase()}:${key}`;
 
   useEffect(() => {
     generation.current++;
-    setCallers(address);
-    setSaved(null);
-    setSource(existing ? '' : TEMPLATE);
-    setName(existing?.label ?? 'Untitled Program');
+    setDraftReady(''); setDraftError(''); setDraftStatus(''); draftWrite.current = null;
+    permissionEdits.current = false;
+    setCallers(address); setSaved(null); setGraphId(contextGraphId);
+    setOperationIri(existing ? '' : `urn:dkg:operation:${createUuid()}`);
+    setSource(existing ? '' : TEMPLATE); setName(existing?.label ?? 'Untitled Program');
     setVersion('1.0.0'); setChildren([]); setToolsText(''); setPermissionsText('');
+    setMaxCalls(64); setMaxConcurrency(4); setTimeoutMs(30000); setInputs(existing ? '[]' : '[[1, 2, 3]]');
     saveAttempt.current = null;
-    setApproved(null); setReviewed(null); setResult(null); setBusy('');
+    setApproved(null); setReviewed(null); setResult(null); setFailedTrace(null); setBusy(''); setError(''); setNotice('');
+    if (address) {
+      let draft: ProgramDraft | null = null, readable = true;
+      try { draft = readProgramDraft(draftKey); }
+      catch { readable = false; setDraftError('Browser draft could not be read. It has been kept; autosave is paused.'); }
+      if (draft) { restoreDraft(draft); permissionEdits.current = true; }
+      const reference = draft?.savedProgram ?? (existing ? { graphId: contextGraphId, ...existing } : null);
+      if (reference) void loadSource(false, draft, reference, readable);
+      else if (readable) setDraftReady(draftKey);
+    }
     return () => { generation.current++; };
-  }, [address, contextGraphId, existing?.programIri, existing?.programLayer]);
+  }, [address, contextGraphId, existing?.programIri, existing?.programLayer, draftRevision]);
   useEffect(() => {
     let active = true;
     fetchProgramAgents().then(value => {
@@ -113,10 +142,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     return () => { active = false; };
   }, []);
   useEffect(() => {
-    if (address && existing) void loadSource(false);
-  }, [address, contextGraphId, existing?.programIri, existing?.programLayer]);
-  useEffect(() => {
-    setApproved(null); setReviewed(null); setResult(null);
+    setApproved(null); setReviewed(null); setResult(null); setFailedTrace(null);
     try {
       const raw = sessionStorage.getItem(recoveryKey);
       const value = raw ? JSON.parse(raw) : null;
@@ -139,6 +165,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
         const current = selection.current.operationIri.trim();
         const selected = current ? matches.find(value => value.operationIri === current) : matches.length === 1 ? matches[0] : undefined;
         if (selected) { setOperationIri(selected.operationIri); setApprovalToLoad(selected); }
+        else if (!current && matches.length === 0) setOperationIri(`urn:dkg:operation:${createUuid()}`);
       }).catch(cause => { if (active) setDiscoveryError(`Could not find existing approvals: ${cause instanceof Error ? cause.message : String(cause)}. You can enter an operation and check it manually.`); });
     return () => { active = false; };
   }, [address, saved?.program, graphId]);
@@ -149,17 +176,42 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
       showApproval(approvalToLoad, saved.program);
     }
   }, [approvalToLoad, key, saved?.program]);
+  // Keep the latest draft in a ref so close/pagehide flush even within the debounce window.
+  const draftValue = JSON.stringify({ schema: 1, name, source, version, graphId, operationIri, callers, toolsText, permissionsText,
+    children, maxCalls, maxConcurrency, timeoutMs, inputs, ...(saved ? { savedProgram: saved.program } : {}) });
+  if (address && draftReady === draftKey) draftWrite.current = () => {
+    try {
+      writeProgramDraft(draftKey, { ...JSON.parse(draftValue), updatedAt: new Date().toISOString() });
+      setDraftError(''); setDraftStatus('Draft saved in this browser'); return true;
+    } catch { setDraftError('Draft could not be saved in this browser. Keep the editor open or copy your source.'); return false; }
+  };
+  useEffect(() => {
+    if (!address || draftReady !== draftKey) return;
+    setDraftStatus('Saving draft…');
+    const timer = window.setTimeout(() => draftWrite.current?.(), 300);
+    return () => window.clearTimeout(timer);
+  }, [draftValue, draftReady, draftKey]);
   const close = useCallback(() => {
     if (busy) return;
-    if (source && dirty && !window.confirm('Discard the unsaved Program changes?')) return;
+    const persisted = draftWrite.current?.() ?? !dirty;
+    if (!persisted && source && dirty && !window.confirm('Your draft could not be saved. Close and lose these changes?')) return;
     onClose();
   }, [busy, dirty, source, onClose]);
   const { dialogRef, onBackdropClick } = useModalDismiss(true, close);
   useEffect(() => {
-    const leave = (event: BeforeUnloadEvent) => { if (dirty && source) { event.preventDefault(); event.returnValue = ''; } };
-    window.addEventListener('beforeunload', leave);
-    return () => window.removeEventListener('beforeunload', leave);
-  }, [dirty, source]);
+    const flush = () => draftWrite.current ? draftWrite.current() : !draftNeedsProtection.current;
+    const leave = (event: BeforeUnloadEvent) => { if (flush() === false && draftNeedsProtection.current) { event.preventDefault(); event.returnValue = ''; } };
+    const hide = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('beforeunload', leave); window.addEventListener('pagehide', flush); document.addEventListener('visibilitychange', hide);
+    return () => { flush(); window.removeEventListener('beforeunload', leave); window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', hide); };
+  }, []);
+
+  function restoreDraft(draft: ProgramDraft) {
+    setName(draft.name); setSource(draft.source); setVersion(draft.version); setGraphId(draft.graphId); setOperationIri(draft.operationIri);
+    setCallers(draft.callers); setToolsText(draft.toolsText); setPermissionsText(draft.permissionsText); setChildren(draft.children);
+    setMaxCalls(draft.maxCalls); setMaxConcurrency(draft.maxConcurrency); setTimeoutMs(draft.timeoutMs); setInputs(draft.inputs);
+    setDraftStatus('Draft restored from this browser');
+  }
 
   async function action(label: string, work: (client: GraphComputer, check: () => void) => Promise<void>) {
     const epoch = generation.current;
@@ -169,13 +221,13 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     catch (cause) { if (generation.current === epoch) setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { if (generation.current === epoch) setBusy(''); }
   }
-  const invalidate = () => { setApproved(null); setResult(null); };
+  const invalidate = (edited = true) => { if (edited) permissionEdits.current = true; setApproved(null); setResult(null); };
   const operation = () => ({ graphId: canonicalGraph(graphId), operationIri: operationIri.trim() });
 
-  const loadSource = (confirm = true) => {
+  const loadSource = (confirm = true, draft: ProgramDraft | null = null, reference = { graphId: contextGraphId, ...existing! }, readable = true) => {
     if (confirm && source && dirty && !window.confirm('Discard the unsaved Program changes and reload stored source?')) return;
     return action('Loading source…', async (client, check) => {
-    const value = await client.programs.getSource({ graphId: contextGraphId, ...existing! }); check();
+    const value = await client.programs.getSource(reference); check();
     if (value.language !== 'typescript-v1') throw new Error('This editor supports TypeScript Programs.');
     const loadedName = value.label ?? existing?.label ?? value.programIri;
     const permissions = value.requestedPermissions ? JSON.stringify(value.requestedPermissions, null, 2) : '';
@@ -186,7 +238,10 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     setSaved({ tools: [...(value.requiredTools ?? [])].sort(), permissions, name: loadedName, source: value.source, version: value.version, children: [...value.permittedPrograms].sort(),
       program: { graphId: value.contextGraphId, programIri: value.programIri, programLayer: value.layer,
         sourceHash: value.sourceHash, authorAgentAddress: value.authorAgentAddress } });
-    invalidate(); setNotice('Source loaded. Saving creates a new Program version.');
+    invalidate(false);
+    if (draft) restoreDraft(draft);
+    if (readable) setDraftReady(draftKey);
+    setNotice(draft ? 'Draft restored. Stored source and approvals are checked on the node.' : 'Source loaded. Saving creates a new Program version.');
     });
   };
 
@@ -232,9 +287,11 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     setReviewed({ key, value }); setApproved(null);
     if (value?.binding.enabled && matchesProgram(value, program) && value.binding.typescript) {
       setApproved(value);
+      if (!permissionEdits.current) {
       setCallers(value.binding.allowedCallerAgentAddresses.join('\n'));
       setChildren(value.binding.typescript.children.map(child => ({ graphId: child.contextGraphId, operationIri: child.operationIri, programIri: child.programIri })));
       setMaxCalls(value.binding.typescript.maxCalls); setMaxConcurrency(value.binding.typescript.maxConcurrency); setTimeoutMs(value.binding.typescript.timeoutMs);
+      }
     }
     setNotice(value ? 'Existing approval loaded. Running uses its current permissions.' : 'No approval exists for this operation.');
   }
@@ -248,6 +305,18 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     if (saved) showApproval(value, saved.program);
   });
 
+  useEffect(() => {
+    if (!address || !saved || !operationIri.trim()) return;
+    if (approvalToLoad && JSON.stringify([approvalToLoad.contextGraphId, approvalToLoad.operationIri]) === key) return;
+    let active = true;
+    void programClient(address).then(async client => {
+      try { return await client.programs.getApproval(operation()); }
+      catch (cause) { if ((cause as { status?: number }).status === 404) return null; throw cause; }
+    }).then(value => { if (active && selection.current.key === key) showApproval(value, saved.program); })
+      .catch(cause => { if (active) setDiscoveryError(`Approval check failed: ${cause instanceof Error ? cause.message : String(cause)}`); });
+    return () => { active = false; };
+  }, [address, key, saved?.program, approvalToLoad]);
+
   const approve = () => action('Compiling and approving…', async (client, check) => {
     if (!saved || dirty || reviewed?.key !== key) throw new Error('Save the source and check the current approval first.');
     const pins = [];
@@ -260,8 +329,8 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     if (permissions && canonicalGraph(permissions.graphId) !== canonicalGraph(graphId)) throw new Error('Operation graph must match the stored requested data graph.');
     const request = { ...permissions, ...operation(), program: saved.program, allowedCallers: callers.split(/[\s,]+/).filter(Boolean),
       typescript: { children: pins, requiredTools: saved.tools, maxCalls, maxConcurrency, timeoutMs } };
-    const value = reviewed.value
-      ? await client.programs.updateApproval({ ...request, expectedRevision: reviewed.value.revision })
+    const value = reviewed!.value
+      ? await client.programs.updateApproval({ ...request, expectedRevision: reviewed!.value!.revision })
       : await client.programs.approve(request);
     check(); setReviewed({ key, value }); setApproved(value); setNotice('Compilation succeeded and the operation is approved.');
   });
@@ -276,18 +345,22 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
     const recovery = { ...prepared, bindingDigest: approved!.bindingDigest };
     sessionStorage.setItem(recoveryKey, JSON.stringify(recovery));
     setInvocation(recovery);
-    const value = await client.programs.invoke(prepared); check();
+    setResult(null); setFailedTrace(null);
+    let value: Execution;
+    try { value = await client.programs.invoke(prepared); }
+    catch (cause) { check(); const trace = (cause as { trace?: ProgramExecutionTrace }).trace; if (trace?.executionIri === `urn:sr:execution:${prepared.invocationId}`) setFailedTrace(trace); throw cause; }
+    check();
     setResult(value); setNotice('Execution completed and its result was stored.'); onSaved();
   });
 
   return <div className="program-editor-backdrop" onClick={onBackdropClick}>
     <div className="program-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="program-editor-title" ref={dialogRef} tabIndex={-1}>
-      <header><div><h2 id="program-editor-title">TypeScript Program</h2><p>{contextGraphId}</p></div>
+      <header><div><h2 id="program-editor-title">TypeScript Program</h2><p>{name}</p></div>
         <button type="button" onClick={close} disabled={!!busy} aria-label="Close Program editor">×</button></header>
       <div className="program-editor-body">
         <div className="program-editor-code">
           <label>Agent<select value={address} disabled={!!busy || !agents.length} onChange={event => {
-            if (source && dirty && !window.confirm('Discard unsaved changes and switch agent?')) return;
+            if (draftWrite.current?.() === false && source && dirty && !window.confirm('Draft could not be saved. Switch agent and lose these changes?')) return;
             setAddress(event.target.value);
           }}>{!address && <option value="">{agents.length ? 'Select a node agent' : 'No node agent selected'}</option>}{agents.map(agent => <option key={agent.address} value={agent.address}>{agent.name} · {agent.address}</option>)}</select></label>
           <p className="program-editor-help">Uses this agent’s key on the node. Graph access and execution permissions still apply.</p>
@@ -297,7 +370,14 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
           <Suspense fallback={<p>Loading TypeScript editor…</p>}><Editor value={source} disabled={!!busy || (!!existing && !saved)} onChange={value => { setSource(value); invalidate(); }} /></Suspense>
           <div className="program-editor-actions"><button type="button" onClick={save} disabled={!!busy || !address || !source.trim() || !dirty}>Save new version</button>
             <span>{saved ? (dirty ? 'Unsaved changes' : 'Source saved') : existing ? (busy ? 'Loading stored Program' : 'Source not loaded') : 'Unsaved changes'}</span></div>
-          {saved && <p className="program-editor-reference">Saved Program: <code>{saved.program.programIri}</code></p>}
+          <p className="program-editor-help" role="status">{draftStatus || 'Preparing draft'}. Drafts stay on this browser; saving a version stores the Program on the node.</p>
+          {draftError && <p role="alert">{draftError}</p>}
+          <button type="button" disabled={!!busy || !address} onClick={() => {
+            if (!window.confirm('Discard this browser draft? Saved Program versions on the node are kept.')) return;
+            try { window.localStorage.removeItem(draftKey); draftWrite.current = null; setDraftRevision(value => value + 1); }
+            catch { setDraftError('The browser draft could not be removed.'); }
+          }}>Discard draft</button>
+          <details><summary>Advanced · Program identifiers</summary><p className="program-editor-reference">Source graph: <code>{contextGraphId}</code></p>{saved && <p className="program-editor-reference">Saved Program: <code>{saved.program.programIri}</code></p>}</details>
           {error && saveAttempt.current && !saved && <p className="program-editor-reference">Last save attempt: <code>{saveAttempt.current.programIri}</code>. Verify this Program before retrying a failed save.</p>}
         </div>
         <aside className="program-editor-controls">
@@ -311,10 +391,10 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
             {graphError && <p className="program-editor-help">{graphError}</p>}
             <details><summary>Advanced · operation graph ID</summary><label>Operation graph ID<input value={graphId} onChange={event => changeGraph(event.target.value)} /></label></details>
             {availableApprovals.length > 0 && <label>Existing operation<select value={availableApprovals.some(value => value.operationIri === operationIri) ? operationIri : ''}
-              onChange={event => { setOperationIri(event.target.value); setApprovalToLoad(availableApprovals.find(value => value.operationIri === event.target.value) ?? null); }}>
-              <option value="">Select an operation</option>{availableApprovals.map(value => <option key={value.operationIri} value={value.operationIri}>{value.operationIri}{value.binding.enabled ? '' : ' (disabled)'}</option>)}
+              onChange={event => { permissionEdits.current = false; setOperationIri(event.target.value); setApprovalToLoad(availableApprovals.find(value => value.operationIri === event.target.value) ?? null); }}>
+              <option value="">Select an operation</option>{availableApprovals.map(value => <option key={value.operationIri} value={value.operationIri}>{`Approval ${availableApprovals.indexOf(value) + 1} · revision ${value.revision}`}{value.binding.enabled ? '' : ' (disabled)'}</option>)}
             </select></label>}
-            <label>Operation IRI<input value={operationIri} placeholder="urn:example:operation:total" onChange={event => setOperationIri(event.target.value)} /></label>
+            <details><summary>Advanced · operation identifier</summary><label>Operation IRI<input value={operationIri} placeholder="Assigned automatically" onChange={event => setOperationIri(event.target.value)} /></label><p className="program-editor-help">Generated automatically for new approvals. Keep it to update the same operation.</p></details>
             {discoveryError && <p className="program-editor-help">{discoveryError}</p>}
             <label>Allowed caller addresses<textarea rows={3} value={callers} onChange={event => { setCallers(event.target.value); invalidate(); }} /></label>
             <h4>Requested tools</h4>
@@ -333,19 +413,23 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
               <label>Timeout (ms)<input type="number" min={100} max={120000} value={timeoutMs} onChange={e => { setTimeoutMs(Number(e.target.value)); invalidate(); }} /></label>
             </div>
           </fieldset>
+          <PermissionSummary scope={requestedScope}
+            previous={reviewed?.key === key ? reviewed.value : undefined} checked={reviewed?.key === key} graphs={graphs} agents={agents} invalid={permissionError} />
           <div className="program-editor-actions"><button type="button" disabled={!!busy || !address || !operationIri.trim()} onClick={inspect}>Check approval</button>
             <button type="button" disabled={!!busy || !address || dirty || reviewed?.key !== key} onClick={approve}>{reviewed?.value ? 'Replace approval' : 'Approve Program'}</button></div>
-          {reviewed?.value && <details><summary>Current approval · revision {reviewed.value.revision}</summary><JsonViewer value={reviewed.value.binding} label="Current approval" /></details>}
+          {reviewed?.value && <details><summary>Advanced · current approval · revision {reviewed.value.revision}</summary><JsonViewer value={reviewed.value.binding} label="Current approval" /></details>}
           <h3>Invoke</h3>
           <label>Arguments (JSON array)<textarea rows={4} value={inputs} disabled={!!busy} onChange={event => { setInputs(event.target.value); setResult(null); }} /></label>
           <p className="program-editor-help">Passed to run(...args). Use [] when the Program takes no arguments or provides defaults.</p>
           {runUnavailable && <p className="program-editor-help" id="program-run-unavailable">{runUnavailable}</p>}
           <div className="program-editor-actions"><button type="button" onClick={run} disabled={!!runUnavailable} aria-describedby={runUnavailable ? 'program-run-unavailable' : undefined}>{invocation ? 'Retry same invocation' : 'Run Program'}</button>
             {invocation && <button type="button" disabled={!!busy} onClick={() => { if (!result && !window.confirm('The previous invocation may have executed. Start a separate execution with a new ID?')) return;
-              sessionStorage.removeItem(recoveryKey); setInvocation(null); setResult(null); }}>New execution</button>}</div>
-          {invocation && <p className="program-editor-reference">Invocation: <code>{invocation.invocationId}</code></p>}
+              sessionStorage.removeItem(recoveryKey); setInvocation(null); setResult(null); setFailedTrace(null); }}>New execution</button>}</div>
+          {invocation && <details><summary>Advanced · invocation ID</summary><p className="program-editor-reference">Invocation: <code>{invocation.invocationId}</code></p></details>}
+          {(result?.trace || failedTrace) && <ExecutionTrace trace={(result?.trace ?? failedTrace)!} layer={result?.executionLayer ?? approved?.binding.executionLayer ?? 'wm'} onExecution={onExecution} />}
+          {result && !result.trace && <p className="program-editor-help">Detailed trace is unavailable for this receipt. Intermediate results are visible only to the executor agent.</p>}
           {result && <section aria-label="Execution result"><JsonViewer value={result.outputs} label="Program output" />
-            <p className="program-editor-reference">Execution: <code>{result.executionIri}</code></p>
+            <details><summary>Advanced · execution ID</summary><p className="program-editor-reference">Execution: <code>{result.executionIri}</code></p></details>
             {onExecution && <button type="button" onClick={() => onExecution(result.executionIri, result.executionLayer)}>Open execution</button>}</section>}
         </aside>
       </div>

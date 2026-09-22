@@ -1,3 +1,5 @@
+import { executionTrace } from './trace.js';
+import type { ProgramExecutionTrace } from './types.js';
 export interface GraphComputerErrorDetails {
   status?: number;
   details?: unknown;
@@ -7,6 +9,7 @@ export interface GraphComputerErrorDetails {
 }
 
 export class GraphComputerError extends Error {
+  readonly trace?: ProgramExecutionTrace;
   readonly status?: number;
   readonly details?: unknown;
   readonly invocationId?: string;
@@ -17,5 +20,7 @@ export class GraphComputerError extends Error {
     this.status = options.status;
     this.details = options.details;
     this.invocationId = options.invocationId;
+    try { this.trace = options.invocationId ? executionTrace((options.details as any)?.trace, `urn:sr:execution:${options.invocationId}`) : undefined; }
+    catch { /* Malformed remote diagnostics never replace the original invocation error. */ }
   }
 }

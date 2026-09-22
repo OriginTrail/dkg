@@ -31,7 +31,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
         tools: enabled ? PROGRAM_TOOL_CATALOG : [] });
     }
   } catch (error) {
-    if (error instanceof SemanticProgramError) return jsonResponse(ctx.res, error.status, { code: error.code, error: error.message });
+    if (error instanceof SemanticProgramError) return jsonResponse(ctx.res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });
     throw error;
   }
   if (await handleSemanticRuntimeConfigurationRoutes(ctx)) return;
@@ -75,7 +75,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       ));
     } catch (error) {
       if (error instanceof SemanticProgramError) {
-        return jsonResponse(res, error.status, { code: error.code, error: error.message });
+        return jsonResponse(res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });
       }
       throw error;
     }
@@ -107,7 +107,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
       ));
     } catch (error) {
       if (error instanceof SemanticProgramError) {
-        return jsonResponse(res, error.status, { code: error.code, error: error.message });
+        return jsonResponse(res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });
       }
       throw error;
     }
@@ -135,7 +135,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
         : await invokeBoundSemanticProgram(agent, semanticRuntimeHost, graph, body.operationIri, body.invocationId, config.semanticRuntime, authenticatedCaller, body.inputs);
       return jsonResponse(res, 200, result);
     } catch (error) {
-      if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message });
+      if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });
       throw error;
     }
   }
@@ -165,7 +165,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
         config.semanticRuntime, authenticatedCaller,
       ));
     } catch (error) {
-      if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message });
+      if (error instanceof SemanticProgramError) return jsonResponse(res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });
       throw error;
     }
   }
@@ -196,7 +196,7 @@ export async function handleSemanticRuntimeRoutes(ctx: RequestContext): Promise<
     ));
   } catch (error) {
     if (error instanceof SemanticProgramError) {
-      return jsonResponse(res, error.status, { code: error.code, error: error.message });
+      return jsonResponse(res, error.status, { code: error.code, error: error.message, ...(error.trace ? { trace: error.trace } : {}) });
     }
     throw error;
   }

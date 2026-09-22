@@ -16,6 +16,7 @@ import { ethers } from 'ethers';
 import {
   ComponentWorkerClient,
   TypeScriptProgramHost,
+  ProgramTraceRecorder, readProgramTrace, type ProgramExecutionTrace,
   defaultExecutionCapability,
   RuntimeAdapterRegistry,
   RuntimeEffectBroker,
@@ -102,6 +103,8 @@ export interface SemanticProgramResolution {
 }
 
 export interface SemanticInvocationResult {
+  /** Intermediate results are only returned to the executor agent, never ordinary callers. */
+  trace?: ProgramExecutionTrace;
   invocationId: string;
   executionIri: string;
   executionLayer: SemanticMemoryLayer;
@@ -133,6 +136,7 @@ export class SemanticProgramError extends Error {
     public readonly code: string,
     message: string,
     public readonly status: number,
+    public trace?: ProgramExecutionTrace,
   ) {
     super(message);
   }
@@ -725,6 +729,8 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
     throw new SemanticProgramError('INVALID_INVOCATION_ID', 'invocationId must be a UUID', 400);
   invocationId = invocationId.toLowerCase();
   const grant = binding.typescript!, graph = binding.contextGraphId;
+  // An invocation grant may expose only an aggregate. It must not reveal private intermediate rows.
+  const mayReadTrace = caller.toLowerCase() === binding.executorAgentAddress.toLowerCase();
   const operationKey = `${graph}\0${binding.operationIri}`;
   if (parent && (parent.ancestors.length >= 8 || parent.ancestors.includes(operationKey)))
     throw new SemanticProgramError('PROGRAM_COMPOSITION_LIMIT', 'Program composition is cyclic or exceeds eight levels', 403);
@@ -774,12 +780,14 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
         // JavaScript continuations are not durable. Never replay partially run
         // workflows and accidentally repeat an external effect after a crash.
         if (previous.status === 'active') runtime.store.setExecutionStatus(executionIri, 'failed');
-        throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted or failed TypeScript execution requires a new invocation ID', 409);
+        throw new SemanticProgramError('INVOCATION_NOT_RETRYABLE', 'Interrupted or failed TypeScript execution requires a new invocation ID', 409,
+          mayReadTrace ? readProgramTrace(runtime.store, executionIri) : undefined);
       }
       if (!history || !historyIsAtLayer(history, layer)) throw new SemanticProgramError('EXECUTION_PERSISTENCE_INCONSISTENT', 'Completed receipt is missing', 500);
       const outputs = await loadExecutionOutputs(agent, graph, executionIri, layer, executor.agentAddress);
       await check();
-      return { invocationId, executionIri, executionLayer: layer, ...(layer === 'vm' ? { executionUal: history.publishedUal } : {}), outputs, persisted: true };
+      return { invocationId, executionIri, executionLayer: layer, ...(layer === 'vm' ? { executionUal: history.publishedUal } : {}), outputs, persisted: true,
+        ...(mayReadTrace ? { trace: readProgramTrace(runtime.store, executionIri) } : {}) };
     }
     const resolved = await resolveTypeScriptTools(agent, runtime, binding, program, config, check);
     const artifact = await runtime.typescript!.compile(program.source);
@@ -795,9 +803,10 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
     const dispatchTool = createProgramToolDispatcher(runtime, resolved, authority, executionIri, invocationId, check,
       { binding, digest, assertAuthorized: check });
     const childExecutions: string[] = [], startedAt = new Date();
+    const trace = new ProgramTraceRecorder(runtime.store, executionIri);
     try {
       const output = await runtime.typescript!.execute(artifact, inputJson,
-        { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => {
+        { ...grant, timeoutMs: Math.max(1, Math.min(grant.timeoutMs, budget.deadline - Date.now())) }, async effect => trace.call(String(effect.id), effect.kind, effect.kind === 'tool' ? effect.tool : effect.program, async call => {
           await check();
           if (++budget.calls > budget.maximum) throw new SemanticProgramError('PROGRAM_CALL_BUDGET_EXCEEDED', 'Program tree exceeds its call budget', 403);
           if (effect.kind === 'tool') {
@@ -819,10 +828,11 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
           const result = await invokeBoundSemanticProgram(agent, runtime, pin.contextGraphId, pin.operationIri, childId,
             config, caller, effect.args, { ancestors: [...(parent?.ancestors ?? []), operationKey], budget, assertParent: check });
           await check();
+          call.executionIri = result.executionIri;
           childExecutions.push(result.executionIri);
           const values = (result.outputs ?? []).map(value => { try { return JSON.parse(value); } catch { return value; } });
           return values.length === 1 ? values[0] : values;
-        });
+        }));
       await check();
       const quads = buildExecutionQuads({ bound: { binding, digest, assertAuthorized: check }, executionIri, invocationId,
         programIri: program.programIri, operatorIri: `did:dkg:agent:${executor.agentAddress}`, callerIri: `did:dkg:agent:${caller}`,
@@ -832,13 +842,19 @@ async function invokeTypeScriptProgram(agent: DKGAgent, runtime: ConfiguredSeman
       quads.push(literalQuad(executionIri, `${SR}inputHash`, createHash('sha256').update(inputJson).digest('hex')));
       const persistence = await persistExecutionKnowledgeAsset(agent, graph, name, executor.agentAddress, quads, history, layer);
       await check();
+      trace.finish();
       runtime.store.setExecutionStatus(executionIri, 'completed');
-      return { invocationId, executionIri, executionLayer: layer, ...(persistence.ual ? { executionUal: persistence.ual } : {}), outputs: [output], persisted: true };
+      return { ...(mayReadTrace ? { trace: trace.trace } : {}), invocationId, executionIri, executionLayer: layer, ...(persistence.ual ? { executionUal: persistence.ual } : {}), outputs: [output], persisted: true };
     } catch (error) {
+      trace.finish(error);
       runtime.store.setExecutionStatus(executionIri, 'failed');
-      if (error instanceof SemanticProgramError) throw error;
-      if (budget.uncertainEffect) throw budget.uncertainEffect;
-      throw new SemanticProgramError('TYPESCRIPT_EXECUTION_FAILED', safeMessage(error), 422);
+      const failure = error instanceof SemanticProgramError ? error : budget.uncertainEffect
+        ?? new SemanticProgramError('TYPESCRIPT_EXECUTION_FAILED', safeMessage(error), 422);
+      // A revoked grant must not leak earlier successful reads through diagnostics.
+      failure.trace = undefined;
+      try { await authorized(); if (mayReadTrace) failure.trace = trace.trace; }
+      catch { failure.trace = undefined; }
+      throw failure;
     }
   };
   const promise = work();

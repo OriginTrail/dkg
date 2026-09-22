@@ -129,3 +129,4 @@ export {
 
 export type { SemanticTypeScriptGrant, SemanticSparqlReadGrant, SemanticProgramBinding, SemanticProgramPolicy, SemanticProgramPin, SemanticDisclosurePolicy, SemanticQueryPin, SemanticQueryOutputSchema } from './program-policy.js';
 export { TypeScriptProgramHost, type CompiledTypeScriptProgram } from './typescript-programs.js';
+export { ProgramTraceRecorder, readProgramTrace, type ProgramExecutionTrace, type ProgramCallTrace } from './program-trace.js';

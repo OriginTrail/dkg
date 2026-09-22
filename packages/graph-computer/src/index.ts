@@ -1,3 +1,4 @@
+import { executionTrace } from './trace.js';
 import { getAddress } from 'ethers';
 import { GraphComputerError } from './errors.js';
 import { canonicalInputs } from './inputs.js';
@@ -157,11 +158,15 @@ class Programs {
         invocationId: invocation.invocationId, details: value,
       });
     }
+    let trace;
+    try { trace = executionTrace(value.trace, value.executionIri as string); }
+    catch { throw new GraphComputerError('INVALID_RESPONSE', 'Execution trace does not match this invocation', { invocationId: invocation.invocationId }); }
     const rawOutputs = (value.outputs ?? []) as string[];
     return {
       invocationId: invocation.invocationId, executionIri: value.executionIri as string,
       executionLayer: value.executionLayer as Execution['executionLayer'], persisted: true,
       ...(value.executionUal ? { executionUal: value.executionUal as string } : {}),
+      ...(trace ? { trace } : {}),
       rawOutputs,
       outputs: rawOutputs.map(output => { try { return JSON.parse(output) as JsonValue; } catch { return output; } }),
     };

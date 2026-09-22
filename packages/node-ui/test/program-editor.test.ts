@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import React, { act } from 'react';
+import { Storage as BrowserStorage } from 'happy-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphComputer } from '@origintrail-official/dkg-graph-computer';
@@ -64,6 +65,7 @@ async function ready() {
 }
 beforeEach(() => {
   vi.clearAllMocks(); sessionStorage.clear();
+  Object.defineProperty(window, 'localStorage', { value: new BrowserStorage(), configurable: true });
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   programs.upload.mockImplementation(async input => (uploaded = { ...input, programLayer: 'wm', sourceHash: 'a'.repeat(64), authorAgentAddress: address }));
   programs.getApproval.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
@@ -220,7 +222,7 @@ describe('TypeScript Program editor', () => {
     await fill('Operation graph ID', 'different-graph');
     await act(async () => finish([approval(program)])); await settle();
     expect(button('Run Program').disabled).toBe(true);
-    expect(container.querySelector('#program-run-unavailable')?.textContent).toContain('Operation IRI');
+    expect(container.querySelector('#program-run-unavailable')?.textContent).toContain('approval');
   });
 
   it('persists and displays requested tool permissions before owner approval', async () => {
@@ -342,4 +344,86 @@ describe('TypeScript Program editor', () => {
     expect(programs.invoke).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain('approval changed');
   });
+  it('assigns a stable operation automatically and reviews before explicit approval', async () => {
+    await render();
+    const op = [...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === 'Operation IRI')!.querySelector('input')!;
+    expect(op.value).toMatch(/^urn:dkg:operation:/); const id = op.value;
+    expect(op.closest('details')?.open).toBe(false);
+    await click('Save new version'); await settle();
+    expect(button('Approve Program').disabled).toBe(false);
+    expect(programs.getApproval).toHaveBeenCalledWith({ graphId: 'school', operationIri: id });
+    expect(programs.approve).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('New approval');
+    await fill('source', 'export function run() { return 4; }'); await click('Save new version');
+    expect(op.value).toBe(id);
+  });
+
+  it('shows readable changes and retains approval form edits during a fresh check', async () => {
+    await ready(); programs.getApproval.mockResolvedValue(approval());
+    await fill('Max calls', '8'); await click('Check approval');
+    expect(container.textContent).toContain('Call limit: 64 → 8');
+    expect(button('Run Program').disabled).toBe(true);
+    await click('Replace approval');
+    expect(programs.updateApproval.mock.calls[0][0].typescript.maxCalls).toBe(8);
+  });
+
+  it('flushes and restores an unfinished draft on close with isolated agent drafts', async () => {
+    const onClose = vi.fn(); await render({ onClose });
+    await fill('source', 'export function run() { return "draft"; }');
+    await fill('Program name', 'Unfinished'); await fill('Max calls', '7');
+    await pickTool('SPARQL read'); await fill('Row limit', '23');
+    const op = [...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === 'Operation IRI')!.querySelector('input')!.value;
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close Program editor"]')!.click());
+    expect(onClose).toHaveBeenCalled(); expect(window.confirm).not.toHaveBeenCalled();
+    await act(async () => root.unmount()); root = createRoot(container); await render();
+    expect((container.querySelector('[aria-label="source"]') as HTMLTextAreaElement).value).toContain('"draft"');
+    expect(container.textContent).toContain('23 results');
+    expect([...container.querySelectorAll('label')].find(l => l.firstChild?.textContent === 'Operation IRI')!.querySelector('input')!.value).toBe(op);
+    expect(programs.approve).not.toHaveBeenCalled(); expect(button('Run Program').disabled).toBe(true);
+    await select('Agent', '0x0000000000000000000000000000000000000002');
+    expect((container.querySelector('[aria-label="source"]') as HTMLTextAreaElement).value).not.toContain('"draft"');
+    await select('Agent', address);
+    expect((container.querySelector('[aria-label="source"]') as HTMLTextAreaElement).value).toContain('"draft"');
+  });
+
+  it('keeps invalid drafts and warns if browser storage fails', async () => {
+    await render(); await fill('source', 'unfinished code');
+    const original = window.localStorage;
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: { setItem() { throw new Error('Quota exceeded'); } } });
+    await act(async () => window.dispatchEvent(new Event('pagehide')));
+    expect(container.textContent).toContain('Draft could not be saved');
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: original });
+  });
+
+  it('restores draft edits over freshly fetched source without restoring cached approvals', async () => {
+    const program = storedProgram(); programs.listApprovals.mockResolvedValue([approval(program)]);
+    await render({ existing }); await fill('source', 'export function run() { return 8; }');
+    await fill('Max calls', '9');
+    await act(async () => window.dispatchEvent(new Event('pagehide')));
+    await act(async () => root.unmount()); root = createRoot(container);
+    programs.listApprovals.mockResolvedValue([]); programs.getApproval.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
+    await render({ existing });
+    expect(programs.getSource).toHaveBeenCalledTimes(2);
+    expect((container.querySelector('[aria-label="source"]') as HTMLTextAreaElement).value).toContain('return 8');
+    expect(button('Run Program').disabled).toBe(true);
+    expect(button('Save new version').disabled).toBe(false);
+    expect(container.textContent).toContain('Up to 9 calls');
+  });
+
+  it('shows call results, timing and failure location without losing invocation recovery', async () => {
+    await ready();
+    programs.invoke.mockImplementation(async input => { throw Object.assign(new Error('Program failed'), { trace: {
+      version: 1, executionIri: `urn:sr:execution:${input.invocationId}`, status: 'failed', startedAt: '2026-09-22T12:00:00Z', durationMs: 42,
+      calls: [{ id: '1', kind: 'tool', target: 'urn:dkg:tool:sparql-read', status: 'succeeded', durationMs: 12, result: { bindings: [] } },
+        { id: '2', kind: 'program', target: 'urn:child', status: 'failed', durationMs: 20, error: 'Child was revoked' }],
+      failure: { location: 'Program execution', message: 'Child was revoked' },
+    } }); });
+    await click('Run Program');
+    expect(container.textContent).toContain('failed · 42 ms');
+    expect(container.textContent).toContain('succeeded · 12 ms');
+    expect(container.textContent).toContain('Failure at program call #2: Child was revoked');
+    expect(button('Retry same invocation')).toBeDefined();
+    expect(programs.invoke).toHaveBeenCalledTimes(1);
+  });
+
 });

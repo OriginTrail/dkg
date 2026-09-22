@@ -193,6 +193,53 @@ async function toolFixture(text: string, permissions: any = { graphId: graph, sp
 }
 
 describe('TypeScript direct tools through shared authorization and effects', () => {
+  it('returns durable tool traces only to the executor and rechecks authority on replay', async () => {
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export async function run() { const rows = await invoke_tool('${tool}', { sparql: ${JSON.stringify(readQuery)} }); return { count: rows.result.bindings.length }; }`);
+    const approval = await f.approve({ allowedCallers: [caller, owner] });
+    const input = { ...f.operation, invocationId: randomUUID() };
+    const result = await f.manager.programs.invoke(input);
+    expect(result.outputs).toEqual([{ count: 1 }]);
+    expect(result.trace).toMatchObject({ status: 'succeeded', executionIri: result.executionIri, calls: [
+      { id: '1', kind: 'tool', target: tool, status: 'succeeded', durationMs: expect.any(Number), result: { result: { bindings: [{ value: '"42"' }] } } },
+    ] });
+    f.target.runtime!.store.verifyRuntimeEventChain(result.executionIri);
+    const before = f.agent.query.mock.calls.filter((c: any[]) => c[1]?.source === 'semantic-runtime-sparql-read').length;
+    expect((await f.manager.programs.invoke(input)).trace).toEqual(result.trace);
+    expect(f.agent.query.mock.calls.filter((c: any[]) => c[1]?.source === 'semantic-runtime-sparql-read')).toHaveLength(before);
+    await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
+    const remote = await f.client.programs.invoke({ ...f.operation, invocationId: randomUUID() });
+    expect(remote.outputs).toEqual([{ count: 1 }]); expect(remote.trace).toBeUndefined();
+    await f.manager.programs.revoke({ ...f.operation, expectedRevision: approval.revision });
+    const denied = await f.manager.programs.invoke(input).catch(e => e);
+    expect(denied.status).toBe(403); expect(denied.trace).toBeUndefined();
+  });
+
+  it('returns a failed call location on first failure and retry without repeating effects', async () => {
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export function run() { return invoke_tool('${tool}', { sparql: 'DELETE WHERE { ?s ?p ?o }' }); }`);
+    await f.approve({ allowedCallers: [owner] });
+    const input = { ...f.operation, invocationId: randomUUID() };
+    const failure = await f.manager.programs.invoke(input).catch(e => e);
+    expect(failure.trace).toMatchObject({ status: 'failed', calls: [{ kind: 'tool', target: tool, status: 'failed', error: expect.any(String) }] });
+    const retry = await f.manager.programs.invoke(input).catch(e => e);
+    expect(retry.code).toBe('INVOCATION_NOT_RETRYABLE'); expect(retry.trace).toEqual(failure.trace);
+    expect(f.target.runtime!.store.effectsForExecution(`urn:sr:execution:${input.invocationId}`)).toHaveLength(0);
+  });
+
+  it('traces child Programs with their execution reference', async () => {
+    const f = await toolFixture('export function run(value) { return value * 2; }', { graphId: graph }, []);
+    await f.approve({ allowedCallers: [owner] });
+    const parent = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
+      permittedPrograms: [f.program.programIri], source: `import { invoke_program } from '${toolApi}';
+        export function run() { return invoke_program('${f.program.programIri}', [3]); }` });
+    const operation = { graphId: graph, operationIri: 'urn:test:trace-parent' };
+    await f.manager.programs.approve({ ...operation, program: parent, allowedCallers: [owner], typescript: { children: [f.operation] } });
+    const result = await f.manager.programs.invoke(operation);
+    expect(result.outputs).toEqual([6]); expect(result.trace?.calls).toEqual([expect.objectContaining({ kind: 'program', target: f.program.programIri,
+      status: 'succeeded', result: 6, durationMs: expect.any(Number), executionIri: expect.stringMatching(/^urn:sr:execution:/) })]);
+  });
+
   it('stores requests, approves and executes signed remote reads without data graph membership', async () => {
     const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
       export async function run(sparql: string) { return invoke_tool('${tool}', { sparql }); }`);
@@ -322,13 +369,13 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     expect(result.body.outputs).toBeUndefined();
   });
 
-  it('enforces revocation between calls and suppresses the result of an in-flight read', async () => {
+  it.each(['caller', 'owner'] as const)('withholds outputs and trace after revocation during a read for %s', async identity => {
     const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
       export async function run() {
         await invoke_tool('${tool}', { sparql: ${JSON.stringify(readQuery)} });
         return invoke_tool('${tool}', { sparql: ${JSON.stringify(readQuery)} });
       }`);
-    await f.approve();
+    await f.approve({ allowedCallers: [caller, owner] });
     let reads = 0;
     const query = f.agent.query.getMockImplementation();
     f.agent.query.mockImplementation(async (...args: any[]) => {
@@ -339,10 +386,10 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       }
       return result;
     });
-    const result = await request(f.target, 'caller', 'POST', '/api/programs/execute', {
+    const result = await request(f.target, identity, 'POST', '/api/programs/execute', {
       contextGraphId: graph, operationIri: f.operation.operationIri, invocationId: randomUUID(),
     });
-    expect(result.status).not.toBe(200); expect(result.body.outputs).toBeUndefined(); expect(reads).toBe(1);
+    expect(result.status).not.toBe(200); expect(result.body.outputs).toBeUndefined(); expect(reads).toBe(1); expect(result.body.trace).toBeUndefined();
   });
 
   it('rejects writes disguised as reads and enforces the declared output contract', async () => {

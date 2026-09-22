@@ -109,7 +109,7 @@ export default function ToolPicker({ graphId, toolsText, permissionsText, onChan
             const next = { ...permissions }; delete next[tool.kind]; write(next, iris.filter(value => value !== iri));
           }}>Remove</button></div>
           <p className="program-editor-help">{tool.description}</p>
-          <code className="program-editor-reference">{iri ?? 'Missing tool IRI — edit Advanced'}</code>
+          <details><summary>Advanced · tool identifier</summary><code className="program-editor-reference">{iri ?? 'Missing tool IRI — edit Advanced'}</code></details>
           {tool.kind === 'sparqlRead' && permissions.sparqlRead && <>
             <label>Read from<select value={permissions.sparqlRead.layer} onChange={event => write({ ...permissions, sparqlRead: { ...permissions.sparqlRead!, layer: event.target.value as 'wm' | 'swm' | 'vm' } })}>
               <option value="wm">Working Memory</option><option value="swm">Shared Working Memory</option><option value="vm">Verifiable Memory</option></select></label>
