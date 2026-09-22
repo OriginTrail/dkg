@@ -406,6 +406,7 @@ test('GitHub outputs are booleans plus compact JSON matrices', () => {
   assert.equal(gatePlan.mode, 'delta');
   assert.equal(gatePlan.lanes.kosava_supporting, true);
   assert.equal(gatePlan.lanes.contracts, false);
+  assert.equal(gatePlan.buildChecks, false);
   assert.equal(gatePlan.abiFreshnessRelevant, false);
   assert.equal('solidityRelevant' in gatePlan, false);
   assert.equal('changedFiles' in gatePlan, false);

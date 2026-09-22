@@ -376,6 +376,7 @@ function fullPlan({
     mode: 'full',
     fullCi: true,
     runNode: true,
+    buildChecks: false,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
     evmScopes: [...EVM_SCOPES],
@@ -456,10 +457,11 @@ function isGlobalFullPath(filePath) {
 }
 
 // Repository areas outside the package workspaces, mapped to the lanes that
-// actually execute them in CI (ci.yml and its reusable workflows). An empty
-// lane list means the shared build job is the only CI consumer: its lint,
-// repository-script tests and test-inventory checks cover these files, while
-// the suites themselves are manual or have their own workflow.
+// actually execute them in CI (ci.yml and its reusable workflows). Every route
+// also selects the shared build job's own checks (`buildChecks`): its lint,
+// repository-script tests and test-inventory checks cover these files, and for
+// routes with no lanes they are the only CI consumer (the suites are manual or
+// have their own workflow).
 const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     pattern: /^devnet\/rfc64-gate1-public-open\//,
@@ -699,6 +701,7 @@ export function planCi({
       mode: 'docs-only',
       fullCi: false,
       runNode: false,
+      buildChecks: false,
       abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
       lanes: emptyLanes(),
       evmScopes: [],
@@ -725,7 +728,7 @@ export function planCi({
   const lanes = emptyLanes();
   const evmScopes = new Set();
   const reasons = [];
-  let sharedBuildOnly = false;
+  let buildChecks = false;
   lanes.contracts = solidityRelevance.contracts;
 
   for (const filePath of productionFiles) {
@@ -748,7 +751,7 @@ export function planCi({
         return fullForCurrentDiff([`Unclassified path changed: ${filePath}`]);
       }
       for (const lane of route.lanes) lanes[lane] = true;
-      if (route.lanes.length === 0) sharedBuildOnly = true;
+      buildChecks = true;
       reasons.push(route.reason);
       continue;
     }
@@ -779,7 +782,7 @@ export function planCi({
   }
 
   const deduplicatedReasons = [...new Set(reasons)];
-  const runNode = sharedBuildOnly || NODE_LANES.some((lane) => lanes[lane]);
+  const runNode = buildChecks || NODE_LANES.some((lane) => lanes[lane]);
   if (!runNode && !lanes.bura_blazegraph_arm64 && !lanes.contracts && evmScopes.size === 0) {
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
   }
@@ -788,6 +791,7 @@ export function planCi({
     mode: 'delta',
     fullCi: false,
     runNode,
+    buildChecks,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
     evmScopes: EVM_SCOPES.filter((scope) => evmScopes.has(scope)),
@@ -802,6 +806,7 @@ export function githubOutputsForPlan(plan) {
     mode: plan.mode,
     fullCi: plan.fullCi,
     runNode: plan.runNode,
+    buildChecks: plan.buildChecks,
     abiFreshnessRelevant: plan.abiFreshnessRelevant,
     lanes: plan.lanes,
     evmScopes: plan.evmScopes,
@@ -822,7 +827,7 @@ export function renderPlanSummary(plan) {
   const skipped = CI_LANES.filter((lane) => !plan.lanes[lane]);
   const safe = (value) => value.replace(/[|`\r\n]/g, '_');
 
-  const noLaneSummary = plan.runNode ? '_none (shared build job only)_' : '_none_';
+  const noLaneSummary = plan.buildChecks ? '_none (shared build checks only)_' : '_none_';
 
   return [
     '## CI delta plan',

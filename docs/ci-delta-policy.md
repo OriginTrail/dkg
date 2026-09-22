@@ -55,7 +55,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   and the real devnet used by node-UI E2E.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
-  selected job was accidentally skipped, failed, or was cancelled.
+  selected job was accidentally skipped, failed, or was cancelled. The primary
+  gate also requires the shared build to run exactly when a Node lane needs it
+  or the plan explicitly declares `buildChecks` (repository paths whose only CI
+  consumer is the build job's own checks), so a plan that forgot its lanes
+  cannot pass on the build alone.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
   present on protected `main` or `testnet-canary` history. Only a follow-up PR

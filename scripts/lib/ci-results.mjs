@@ -36,9 +36,10 @@ function checkPlanShape(plan, eventName, errors) {
   if (
     typeof plan.fullCi !== 'boolean'
     || typeof plan.runNode !== 'boolean'
+    || typeof plan.buildChecks !== 'boolean'
     || typeof plan.abiFreshnessRelevant !== 'boolean'
   ) {
-    errors.push('CI plan fullCi/runNode/abiFreshnessRelevant flags must be booleans');
+    errors.push('CI plan fullCi/runNode/buildChecks/abiFreshnessRelevant flags must be booleans');
   }
   if (plan.lanes?.contracts && !plan.abiFreshnessRelevant) {
     errors.push('CI plan cannot select Solidity without ABI freshness');
@@ -106,14 +107,15 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
     errors,
   );
 
-  // Every Node lane consumes the shared build. The build may also run on its
-  // own: its lint, repository-script and inventory checks are the CI consumers
-  // of benchmarks, manual devnet suites and repository automation config.
+  // The shared build runs exactly when a Node lane consumes it or the planner
+  // explicitly selected its own checks (lint, repository-script tests, test
+  // inventory) for repository paths outside the workspaces. A build without
+  // either is a plan that forgot its lanes.
   const selectedNodeLane = Object.keys(PRIMARY_LANE_JOBS)
     .filter((lane) => lane !== 'bura_blazegraph_arm64')
     .some((lane) => plan.lanes?.[lane]);
-  if (selectedNodeLane && !plan.runNode) {
-    errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes`);
+  if (Boolean(plan.runNode) !== (selectedNodeLane || plan.buildChecks === true)) {
+    errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes (buildChecks=${plan.buildChecks})`);
   }
 
   return errors;

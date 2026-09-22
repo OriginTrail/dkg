@@ -29,6 +29,23 @@ test('a build-only plan requires the shared build and nothing else', () => {
     validatePrimaryResults({ eventName: 'pull_request', plan: laneWithoutBuild, needs }).join('\n'),
     /runNode=false is inconsistent with selected Node lanes/,
   );
+
+  // Running the build without any lane is accepted only when the planner
+  // declared the shared build checks; otherwise the plan forgot its lanes.
+  assert.equal(plan.buildChecks, true);
+  assert.equal(JSON.parse(githubOutputsForPlan(plan).plan_json).buildChecks, true);
+  needs.build.result = 'success';
+  for (const [shape, inconsistent] of [
+    [{ ...plan, buildChecks: false }, /runNode=true is inconsistent with selected Node lanes \(buildChecks=false\)/],
+    [{ ...plan, runNode: false }, /runNode=false is inconsistent with selected Node lanes \(buildChecks=true\)/],
+  ]) {
+    assert.match(validatePrimaryResults({ eventName: 'pull_request', plan: shape, needs }).join('\n'), inconsistent);
+  }
+  const { buildChecks: _omitted, ...unmarked } = plan;
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan: unmarked, needs }).join('\n'),
+    /flags must be booleans/,
+  );
 });
 
 test('aggregate gates reject failed or accidentally skipped selected jobs', () => {
