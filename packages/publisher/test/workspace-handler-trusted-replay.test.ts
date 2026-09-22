@@ -17,6 +17,7 @@ import {
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { SharedMemoryHandler } from '../src/index.js';
 import { encodeRootlessWorkspaceRequest } from './_helpers/rootless-workspace.js';
 
@@ -132,10 +133,14 @@ async function encryptForCg(
 function makeHandler(opts: {
   allowedAgentAddress: string;
   recipientKey?: WorkspaceRecipientEncryptionKey;
+  chainAgentGateOracle?: (contextGraphId: string) => Promise<string[] | null>;
 }): SharedMemoryHandler {
   return new SharedMemoryHandler(store, new TypedEventBus(), {
     sharedMemoryOwnedEntities: workspaceOwned,
     localAgentAddresses: () => [opts.allowedAgentAddress],
+    ...(opts.chainAgentGateOracle
+      ? { chainAgentGateOracle: opts.chainAgentGateOracle }
+      : {}),
     ...(opts.recipientKey
       ? { workspaceRecipientPrivateKeys: () => [opts.recipientKey!] }
       : {}),
@@ -227,6 +232,35 @@ describe('SharedMemoryHandler trustedReplay (LU-6 host-catchup)', () => {
       expect(outcome.publisherPeerId).toBe(PUBLISHER_PEER_ID);
     }
     await expectStoredName('Trusted Replay Valid');
+  });
+
+  it('attributes a chain-backed SWM apply gate to the workspace-apply caller', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    const tracker = new RpcUsageTracker(() => '31337');
+    const handler = makeHandler({
+      allowedAgentAddress: allowed.address,
+      recipientKey,
+      chainAgentGateOracle: async () => withRpcUsageConsumer(
+        'cgStorage.getContextGraph',
+        () => {
+          tracker.record('eth_call');
+          return [allowed.address];
+        },
+      ),
+    });
+    await insertPrivateAccessPolicy();
+
+    const raw = workspaceMessage('Attributed Apply', 'ws-attributed-apply');
+    const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+    const wire = await signWorkspaceMessage(allowed, encrypted);
+
+    const outcome = await handler.handle(wire, PUBLISHER_PEER_ID);
+
+    expect(outcome.applied).toBe(true);
+    expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.workspaceApply': 1,
+    });
   });
 
   it('replays canonical Markdown section entities during host catch-up', async () => {

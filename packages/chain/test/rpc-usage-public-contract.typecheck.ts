@@ -44,7 +44,7 @@ const snapshotV1: RpcUsageCumulativeSnapshot = {
 
 void snapshotV1;
 
-const consumerVocabularyVersion: 1 = RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION;
+const consumerVocabularyVersion: 2 = RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION;
 const consumerVocabulary: readonly string[] = RPC_USAGE_SNAPSHOT_CONSUMERS;
 void consumerVocabularyVersion;
 void consumerVocabulary;
