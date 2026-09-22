@@ -1291,7 +1291,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
                   [contextGraphId],
                   {
                     ...evidence.agentResolverReadOptions(readSignal),
-                    ...(repairHints ?? {}),
+                    ...repairHints,
                   },
                 ),
               );
