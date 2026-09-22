@@ -18,6 +18,11 @@
       "import": "./dist/rfc64/public-catalog-activation-config-v1.js",
       "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
     },
+    "./chain-authority-read-budgets": {
+      "types": "./dist/chain-authority-read-budgets.d.ts",
+      "import": "./dist/chain-authority-read-budgets.js",
+      "default": "./dist/chain-authority-read-budgets.js"
+    },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
     "./dist/random-sampling-runtime.js": null,

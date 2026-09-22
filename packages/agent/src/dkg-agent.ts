@@ -446,6 +446,9 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
+import { resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+import { peekFinalizedAuthorityColdResolution } from
+  './finalized-authority-cold-resolution.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
 import { ContextGraphResolveMethods } from './dkg-agent-cg-resolve.js';
 import { CclPolicyMethods } from './dkg-agent-ccl.js';
@@ -1545,6 +1548,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),
+      chainAuthorityReadBudgets: resolveChainAuthorityReadBudgets(config.chainConfig),
     };
 
     const port = config.listenPort ?? 0;
@@ -2582,9 +2586,13 @@ export class DKGAgent extends DKGAgentBase {
     if (!this.started) return;
     this.peerSyncSession.close();
     // Cancelling a waiter alone does not retire the shared physical scan.
+    // Detached cold authority flights are aborted here too: after stop() no
+    // request can consume their result, and the chain reader closes below.
+    peekFinalizedAuthorityColdResolution(this)?.close();
     const authorityIndexSnapshotDrain = Promise.all([
       this.authorityIndexSnapshotRuntime?.close(),
       this.chain.contextGraphAuthorityIndexSnapshots?.close(),
+      peekFinalizedAuthorityColdResolution(this)?.whenIdle(),
     ]);
     this.authorityIndexSnapshotRuntime = undefined;
     // Disconnect history survives sessions; transient freshness and cooldowns do not.
