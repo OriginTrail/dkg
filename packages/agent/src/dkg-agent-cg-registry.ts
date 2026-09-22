@@ -330,6 +330,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -379,6 +380,7 @@ import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  isCanonicalAuthoritativeContextGraphId,
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -721,21 +723,31 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     options: ContextGraphAuthorityReadOptions & Readonly<{
       onRpcRead?: () => void;
+      /** Fresh durable identities used only by restart repair before install. */
+      durableBindingHints?: ReadonlyMap<
+        string,
+        Readonly<DurableContextGraphSubscriptionBinding>
+      >;
     }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
-    const { onRpcRead, ...chainReadOptions } = options;
+    const { onRpcRead, durableBindingHints, ...chainReadOptions } = options;
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
       const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
       const localId = canonicalTarget?.localId ?? contextGraphId;
       const subscription = canonicalTarget?.subscription
         ?? this.subscribedContextGraphs.get(localId);
+      const hintedBinding = durableBindingHints?.get(contextGraphId);
+      const durableHint = hintedBinding?.contextGraphId === contextGraphId
+        ? hintedBinding
+        : undefined;
+      const persistedNameHash = subscription?.onChainHash ?? durableHint?.onChainHash;
       const expectedNameHash = canonicalTarget?.nameHash
-        ?? (subscription?.onChainHash === undefined
+        ?? (persistedNameHash === undefined
           ? this.contextGraphNameCommitment(localId)
-          : this.contextGraphWireId(subscription.onChainHash));
+          : this.contextGraphWireId(persistedNameHash));
       const authoritativeOnChainId = this.contextGraphBindingState
-        .authorityIndexOnChainIdFor(localId, subscription);
+        .authorityIndexOnChainIdFor(localId, subscription ?? durableHint);
       return {
         contextGraphId,
         expectedNameHash,
@@ -921,6 +933,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /**
+       * Freshly loaded durable subscription row for this exact candidate.
+       * This may establish only the immutable numeric binding; current policy
+       * and roster are still read after this method returns.
+       */
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Read-authority-only proof that exact RFC-64 absence was accepted. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},
@@ -938,13 +956,55 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       };
     }
 
+    // Rehydration deliberately resolves authority before installing the
+    // subscription. Without this explicit same-row hint, the authoritative
+    // on-chain id persisted by the prior process is invisible here and the
+    // node unnecessarily starts cold name discovery. The durable row is a
+    // trusted binding owner, exactly as it is after installation; validate it
+    // through the canonical binding state. A graph-id mismatch fails closed.
+    // A malformed or out-of-range id is not trusted, but may be repaired only
+    // by the strict finalized name index below (never local-first inference,
+    // numeric routing, ontology state, or the legacy scalar reverse resolver).
+    // A valid shortcut establishes only name -> numeric id;
+    // resolveRegisteredContextGraphAuthority() still owns a fresh live policy
+    // + roster read before admission.
+    const durableBinding = options.durableSubscriptionBinding;
+    let strictFinalizedDurableBindingRepair = false;
+    if (durableBinding !== undefined) {
+      if (durableBinding.contextGraphId !== contextGraphId) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-chain-binding-unavailable',
+          detail: 'durable subscription binding belongs to a different Context Graph',
+        };
+      }
+      if (durableBinding.onChainId !== undefined) {
+        const authoritativeOnChainId = this.contextGraphBindingState
+          .authorityIndexOnChainIdFor(contextGraphId, {
+            onChainId: durableBinding.onChainId,
+          });
+        if (authoritativeOnChainId === undefined) {
+          strictFinalizedDurableBindingRepair = true;
+        } else {
+          return {
+            kind: 'registered',
+            onChainId: BigInt(authoritativeOnChainId),
+            provenance: 'authoritative',
+          };
+        }
+      }
+    }
+
     // A graph created by this node is explicitly local-first until its own
     // registration transaction commits. Do not turn SWM signing/gossip into a
     // chain availability dependency during that phase. The provenance set is
     // populated only by the local create boundary (and its durable graph-level
     // origin journal), while the RDF status is the transactionally updated register
     // boundary; neither fact is inferred from remote discovery.
-    if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
+    if (
+      !strictFinalizedDurableBindingRepair
+      && this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
+    ) {
       try {
         if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
           return { kind: 'unregistered' };
@@ -959,7 +1019,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
 
     const localTarget = route.kind === 'local' ? route.target : null;
-    const hasBindingCandidate = localTarget !== null
+    const hasBindingCandidate = !strictFinalizedDurableBindingRepair
+      && localTarget !== null
       && this.contextGraphBindingState.hasBindingCandidate(
         localTarget.localId,
         localTarget.subscription,
@@ -976,9 +1037,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         : CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS);
 
     // A durable numeric binding is already authoritative and must stay on the
-    // zero-RPC fast path. Invalid durable values retain the strict ontology
-    // fallback below; they must never be replaced by reverse discovery.
-    if (localTarget !== null) {
+    // zero-RPC fast path. Invalid durable values may be repaired only by the
+    // finalized name index below; they bypass every local/ontology/legacy
+    // fallback and remain unavailable when that strict index cannot prove one
+    // active numeric binding.
+    if (!strictFinalizedDurableBindingRepair && localTarget !== null) {
       const currentBinding = this.contextGraphBindingState.currentBindingFor(
         localTarget.localId,
         localTarget.subscription,
@@ -1026,7 +1089,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // with that exact (numeric-looking) name already exists. Apply this before
     // local-subscription routing so HTTP admission followed by subscribe keeps
     // the same numeric identity on its first policy/VM read.
-    if (isCanonicalPositiveContextGraphId(contextGraphId)) {
+    if (
+      !strictFinalizedDurableBindingRepair
+      && isCanonicalPositiveContextGraphId(contextGraphId)
+    ) {
       let localGraphExists: boolean;
       try {
         localGraphExists = await runBoundedOperation(
@@ -1068,14 +1134,33 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           try {
             const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
               [contextGraphId],
-              { signal: ownerSignal },
+              {
+                signal: ownerSignal,
+                ...(strictFinalizedDurableBindingRepair && durableBinding !== undefined
+                  ? {
+                      durableBindingHints: new Map([[contextGraphId, {
+                        contextGraphId,
+                        onChainId: durableBinding.onChainId,
+                        onChainHash: durableBinding.onChainHash,
+                      }]]),
+                    }
+                  : {}),
+              },
             );
             // An older reader object without any finalized name capability is
             // an explicitly legacy adapter and may use the compatibility path.
-            if (resolution.kind === 'legacy-current') return null;
+            if (resolution.kind === 'legacy-current') {
+              if (strictFinalizedDurableBindingRepair) {
+                throw new Error(
+                  'invalid durable binding requires the finalized Context Graph authority index',
+                );
+              }
+              return null;
+            }
             const target = resolution.targets.get(contextGraphId);
             if (target === undefined) {
-              return options.allowAcceptedRfc64FinalizedAbsence === true
+              return !strictFinalizedDurableBindingRepair
+                && options.allowAcceptedRfc64FinalizedAbsence === true
                 ? { kind: 'unregistered' } as const
                 : {
                     kind: 'unavailable' as const,
@@ -1121,6 +1206,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           detail: err instanceof Error ? err.message : String(err),
         };
       }
+    }
+
+    if (strictFinalizedDurableBindingRepair) {
+      return {
+        kind: 'unavailable',
+        reason: 'chain-name-binding-unavailable',
+        detail: 'invalid durable binding could not be repaired by the finalized Context Graph authority index',
+      };
     }
 
     // Compatibility-only path for adapters with no finalized name index.
@@ -1213,7 +1306,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const value = result.bindings[0]?.['id'];
     if (typeof value !== 'string') return null;
     const onChainId = value.replace(/^"|"$/g, '');
-    return isCanonicalPositiveContextGraphId(onChainId)
+    return isCanonicalAuthoritativeContextGraphId(onChainId)
       ? { onChainId, provenance: 'ontology' }
       : null;
   }

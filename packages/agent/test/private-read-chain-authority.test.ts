@@ -658,6 +658,10 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
       signal: expect.any(AbortSignal),
+      durableSubscriptionBinding: {
+        contextGraphId,
+        onChainId: '7',
+      },
     });
     expect(subscribe).not.toHaveBeenCalled();
     expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);

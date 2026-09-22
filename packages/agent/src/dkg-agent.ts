@@ -158,6 +158,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -1944,14 +1945,22 @@ export class DKGAgent extends DKGAgentBase {
       participantAgents: metadata.participantAgents ?? existing?.participantAgents,
     };
 
-    if (metadata.onChainId) {
-      const bindingChanged = !!existing?.onChainId && existing.onChainId !== metadata.onChainId;
-      this.bindSubscriptionOnChainId(contextGraphId, next, metadata.onChainId);
+    const authoritativeOnChainId = isCanonicalAuthoritativeContextGraphId(metadata.onChainId)
+      ? metadata.onChainId
+      : undefined;
+    const invalidExplicitOnChainId = metadata.onChainId !== undefined
+      && authoritativeOnChainId === undefined;
+    if (authoritativeOnChainId !== undefined) {
+      const bindingChanged = !!existing?.onChainId
+        && existing.onChainId !== authoritativeOnChainId;
+      this.bindSubscriptionOnChainId(contextGraphId, next, authoritativeOnChainId);
       if (bindingChanged && metadata.onChainHash === undefined) {
         next.onChainHash = undefined;
       }
     }
-    if (metadata.onChainHash !== undefined) next.onChainHash = metadata.onChainHash;
+    if (!invalidExplicitOnChainId && metadata.onChainHash !== undefined) {
+      next.onChainHash = metadata.onChainHash;
+    }
 
     // Discovery-only rows stay in-memory. Metadata learned for an already
     // active member/host row is part of that durable state and must survive a
@@ -2030,7 +2039,12 @@ export class DKGAgent extends DKGAgentBase {
 
         const existing = discoveredEntries.get(id);
         const rowName = row['name'] ? stripLiteral(row['name']) : undefined;
-        const rowOnChainId = row['onChainId'] ? stripLiteral(row['onChainId']) : undefined;
+        const candidateOnChainId = row['onChainId']
+          ? stripLiteral(row['onChainId'])
+          : undefined;
+        const rowOnChainId = isCanonicalAuthoritativeContextGraphId(candidateOnChainId)
+          ? candidateOnChainId
+          : undefined;
         const ontologyWins = existing?.source === 'meta' && source === 'ontology';
         discoveredEntries.set(id, {
           id,

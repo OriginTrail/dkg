@@ -66,6 +66,47 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
+/** Canonical positive decimal that is representable by an EVM uint256 slot. */
+function isCanonicalAuthoritativeContextGraphId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= 78
+    && /^[1-9][0-9]*$/.test(value)
+    && BigInt(value) <= ethers.MaxUint256;
+}
+
+function requireCanonicalAuthoritativeContextGraphId(
+  value: unknown,
+  operation: 'StorageACK' | 'UpdateStorageACK',
+): asserts value is string {
+  if (!isCanonicalAuthoritativeContextGraphId(value)) {
+    throw new Error(
+      `${operation}: V10 request requires a canonical positive uint256 context graph id; `
+      + `got ${JSON.stringify(value)}.`,
+    );
+  }
+}
+
+function parseCanonicalUint256Decimal(value: unknown, field: string): bigint {
+  if (
+    typeof value !== 'string'
+    || value.length > 78
+    || !/^(?:0|[1-9][0-9]*)$/.test(value)
+  ) {
+    throw new Error(`${field} must be a canonical uint256 decimal string; got ${JSON.stringify(value)}.`);
+  }
+  const parsed = BigInt(value);
+  if (parsed > ethers.MaxUint256) {
+    throw new Error(`${field} must fit in uint256; got ${value}.`);
+  }
+  return parsed;
+}
+
+function parseOptionalCanonicalUint256Decimal(value: unknown, field: string): bigint {
+  return value === undefined || value === ''
+    ? 0n
+    : parseCanonicalUint256Decimal(value, field);
+}
+
 type GraphScopedPublishIntent = {
   scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
   publicTripleCount: number;
@@ -1176,6 +1217,11 @@ export class StorageACKHandler {
     }
 
     const intent = decodePublishIntent(data);
+    requireCanonicalAuthoritativeContextGraphId(intent.contextGraphId, 'StorageACK');
+    const intentTokenAmount = parseOptionalCanonicalUint256Decimal(
+      intent.tokenAmountStr,
+      'PublishIntent.tokenAmountStr',
+    );
     const graphPublish = resolveGraphScopedPublishIntent(intent);
     // `cgId` is the TARGET on-chain numeric id used by the ACK digest and
     // the publishDirect tx. `swmGraphId` (optional, from the remap flow)
@@ -1368,7 +1414,6 @@ export class StorageACKHandler {
       }
 
       const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;
-      const intentTokenAmount = intent.tokenAmountStr ? BigInt(intent.tokenAmountStr) : 0n;
       let contextGraphIdBigInt: bigint;
       try {
         contextGraphIdBigInt = BigInt(cgId);
@@ -1707,10 +1752,6 @@ export class StorageACKHandler {
       );
     }
     const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;
-    const intentTokenAmount = intent.tokenAmountStr
-      ? BigInt(intent.tokenAmountStr)
-      : 0n;
-
     const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, contentPrivateRoots);
     if (verifiedLeafCount === 0 && !graphPublish?.privateMerkleRoot) {
       throw new Error(
@@ -1830,6 +1871,15 @@ export class StorageACKHandler {
     }
 
     const intent = decodeUpdateIntent(data);
+    requireCanonicalAuthoritativeContextGraphId(intent.contextGraphId, 'UpdateStorageACK');
+    const kaIdBigInt = parseCanonicalUint256Decimal(intent.kaId, 'UpdateIntent.kaId');
+    const newTokenAmount = parseOptionalCanonicalUint256Decimal(
+      intent.newTokenAmount,
+      'UpdateIntent.newTokenAmount',
+    );
+    const burnTokenIds = (intent.burnTokenIds ?? []).map((id, index) => (
+      parseCanonicalUint256Decimal(id, `UpdateIntent.burnTokenIds[${index}]`)
+    ));
     const graphUpdate = resolveGraphScopedUpdateIntent(intent);
     // `cgId` is the TARGET on-chain numeric id used by the UPDATE ACK
     // digest and the update tx. `swmGraphId` (optional) is the SOURCE
@@ -2170,12 +2220,6 @@ export class StorageACKHandler {
         `UpdateStorageACK: V10 update requires a positive on-chain context graph id; got ${contextGraphIdBigInt}.`,
       );
     }
-    let kaIdBigInt: bigint;
-    try {
-      kaIdBigInt = BigInt(intent.kaId);
-    } catch {
-      throw new Error(`UpdateStorageACK: kaId must be a numeric decimal string; got '${intent.kaId}'.`);
-    }
     const preUpdateMerkleRootCount = updateIntentUint64(intent.preUpdateMerkleRootCount);
     const newByteSize = typeof intent.newByteSize === 'number'
       ? BigInt(intent.newByteSize)
@@ -2196,15 +2240,11 @@ export class StorageACKHandler {
         `(${publicUpdateFloorBasis}). Refusing to sign an under-priced footprint.`,
       );
     }
-    const newTokenAmount = intent.newTokenAmount && intent.newTokenAmount.length > 0
-      ? BigInt(intent.newTokenAmount)
-      : 0n;
     const mintAmount = intent.mintAmount == null
       ? 0n
       : (typeof intent.mintAmount === 'number'
           ? BigInt(intent.mintAmount)
           : BigInt(intent.mintAmount.low >>> 0) | (BigInt(intent.mintAmount.high >>> 0) << 32n));
-    const burnTokenIds = (intent.burnTokenIds ?? []).map((id) => BigInt(id));
     const newMerkleLeafCount = intent.newMerkleLeafCount == null ? 0 : Number(intent.newMerkleLeafCount);
     // The encrypted branch above has already proven this is a curated CG and,
     // when supplied, independently verified its public catalog commitment.
