@@ -21,6 +21,8 @@ export default defineConfig({
       "test/authority-index-snapshot-runtime.test.ts",
       "test/authority-index-snapshot-service.test.ts",
       "test/authority-index-snapshot-wiring.test.ts",
+      "test/authority-index-config.test.ts",
+      "test/warm-core-sharding-gate.test.ts",
       "test/context-graph-discovery-options.test.ts",
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",

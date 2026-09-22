@@ -1473,6 +1473,15 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /**
+   * The relay multiaddrs from the network file. An edge without
+   * `authorityIndex` seeds its authority index from these relays, each pinned
+   * by the PeerID in its multiaddr, and falls back to local history. Distinct
+   * from `relayPeers`, the connectivity set, which may carry operator relays
+   * the network never vouched for. Empty or absent keeps the edge on local
+   * history; the daemon passes none for `relay: "none"`.
+   */
+  networkRelays?: readonly string[];
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**

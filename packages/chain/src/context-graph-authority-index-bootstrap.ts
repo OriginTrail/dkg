@@ -55,7 +55,12 @@ export class ContextGraphAuthorityIndexBootstrapCoordinator {
       || config.maxTailBlocks > CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TAIL_BLOCKS
       || typeof config.trustDomain !== 'string' || config.trustDomain.trim().length === 0
       || config.trustDomain.length > 256
-      || typeof config.fetchSnapshot !== 'function') {
+      || typeof config.fetchSnapshot !== 'function'
+      || (config.localHistoryFallback !== undefined
+        && typeof config.localHistoryFallback !== 'boolean')
+      || (config.onLocalHistoryFallback !== undefined
+        && typeof config.onLocalHistoryFallback !== 'function')
+      || (config.onScanProgress !== undefined && typeof config.onScanProgress !== 'function')) {
       throw new TypeError('Context Graph authority index bootstrap configuration is invalid');
     }
   }

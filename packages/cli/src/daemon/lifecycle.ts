@@ -44,6 +44,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
+import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
@@ -72,8 +73,10 @@ import {
   DKGAgent,
   loadOpWallets,
   KaNumberAllocator,
+  planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
   resolveSyncAgentsMeta,
+  type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -1135,7 +1138,9 @@ async function runDaemonInnerWithStartupOwnership(
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   // Snapshot peers supply authority-bearing state. Validate explicit operator
-  // trust before allocating startup resources, never infer it from relays.
+  // trust before allocating startup resources; it always wins. Without it an
+  // edge seeds from the network file's relays, planned below from the
+  // finished agent config.
   assertAuthorityIndexConfigPlacement(config);
   const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
@@ -1303,12 +1308,6 @@ async function runDaemonInnerWithStartupOwnership(
     ? `v${nodeVersion}, ${nodeCommit}`
     : `v${nodeVersion}`;
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
-  log(
-    `[info] [authority-index] mode=${authorityIndex?.mode ?? 'local-history'} `
-    + `trustedCoreCount=${authorityIndex?.trustedCorePeers.length ?? 0} `
-    + `maxTailBlocks=${authorityIndex?.maxTailBlocks ?? 'unbounded'} `
-    + `cacheEpoch=${authorityIndex?.cacheEpoch ?? 0}`,
-  );
 
   // RFC-41 §4.9 / §4.3: structured startup log lines for telemetry.
   // The doctor's state summary correlates these with /api/status —
@@ -1825,7 +1824,7 @@ async function runDaemonInnerWithStartupOwnership(
     changelogEraGuard,
   });
 
-  const agent = await DKGAgent.create({
+  const agentConfig: DKGAgentConfig = {
     kaNumberAllocator,
     name: config.name,
     genesisId: network?.genesisId,
@@ -1840,6 +1839,10 @@ async function runDaemonInnerWithStartupOwnership(
     dataDir: dkgDir(),
     bootstrapPeers: config.bootstrapPeers,
     relayPeers,
+    // Only the network file's relays seed an edge without `authorityIndex`:
+    // `relayPeers` may carry operator transport relays, which never become
+    // snapshot trust, and `relay: "none"` means no relay is contacted at all.
+    networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
@@ -2131,7 +2134,18 @@ async function runDaemonInnerWithStartupOwnership(
         detail: event.detail ?? null,
       });
     },
-  });
+  };
+  // The agent plans again from this same config, so the startup line always
+  // describes the authority-index policy the node runs.
+  const authorityIndexPlan = planAuthorityIndexBootstrap(agentConfig);
+  if (authorityIndexPlan.source === 'local-history' && authorityIndexPlan.skipReason !== undefined) {
+    log(
+      `[info] [authority-index] network-relay default skipped: ${authorityIndexPlan.skipReason}; `
+      + 'using local history',
+    );
+  }
+  log(formatAuthorityIndexStartupLine(authorityIndexPlan));
+  const agent = await DKGAgent.create(agentConfig);
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the

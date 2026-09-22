@@ -1,6 +1,7 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
-import { createHash, randomUUID } from 'node:crypto';
-import { resolveAuthorityIndexConfig } from './authority-index-config.js';
+import { randomUUID } from 'node:crypto';
+import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
+import { planAuthorityIndexBootstrap } from './authority-index-config.js';
 import { createAuthorityIndexSnapshotTransport } from './authority-index-snapshot-transport.js';
 import {
   createAuthorityIndexSnapshotClient,
@@ -1196,17 +1197,11 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    const authorityIndex = resolveAuthorityIndexConfig(
-      inputConfig.authorityIndex,
-      inputConfig.nodeRole ?? 'edge',
-    );
-    if (authorityIndex !== undefined && (
-      inputConfig.chainAdapter !== undefined
-      || !inputConfig.chainConfig?.operationalKeys?.length
-      || inputConfig.localContextGraphAuthorityIndexStore === undefined
-    )) {
-      throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
-    }
+    const log = new Logger('DKGAgent');
+    const ctx = createOperationContext('system');
+    // The daemon logs this same plan from this same config before calling here.
+    const authorityIndexPlan = planAuthorityIndexBootstrap(inputConfig);
+    const authorityIndex = authorityIndexPlan.config;
     let agentRef: DKGAgent | undefined;
     const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
       normalizedConfig: authorityIndex.snapshot,
@@ -1239,22 +1234,14 @@ export class DKGAgent extends DKGAgentBase {
     ) {
       throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
     }
-    const trustedPeerIds = authorityIndex === undefined ? undefined
-      : authorityIndex.snapshot.trustedCorePeers.map((peer) => peer.peerId).sort();
     const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(
       normalizedConfig,
-      snapshotClient === undefined || authorityIndex === undefined ? undefined : {
-        maxTailBlocks: authorityIndex.maxTailBlocks,
-        // Epoch zero preserves the original namespace. Increasing it lets an
-        // operator discard a suspect imported prefix without changing peers.
-        trustDomain: createHash('sha256').update(JSON.stringify(
-          (authorityIndex.cacheEpoch ?? 0) === 0 ? trustedPeerIds : {
-            trustedCorePeers: trustedPeerIds,
-            cacheEpoch: authorityIndex.cacheEpoch,
-          },
-        )).digest('hex'),
-        fetchSnapshot: (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
-      },
+      snapshotClient === undefined || authorityIndexPlan.source === 'local-history' ? undefined
+        : createAuthorityIndexBootstrap(
+          authorityIndexPlan,
+          (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
+          { info: (message) => log.info(ctx, message), warn: (message) => log.warn(ctx, message) },
+        ),
     );
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
     if (
@@ -1430,8 +1417,6 @@ export class DKGAgent extends DKGAgentBase {
     } else {
       wallet = await DKGAgentWallet.generate();
     }
-    const log = new Logger('DKGAgent');
-    const ctx = createOperationContext('system');
     let store: TripleStore;
     if (config.store) {
       store = config.store;

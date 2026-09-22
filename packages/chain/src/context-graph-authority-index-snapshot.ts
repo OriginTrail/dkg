@@ -68,6 +68,29 @@ export interface ContextGraphAuthorityIndexBootstrap {
     signal: AbortSignal,
     validateSnapshot: (snapshot: unknown, signal?: AbortSignal) => Promise<void>,
   ) => Promise<unknown>;
+  /**
+   * Opt in: when no trusted core supplies a snapshot, continue exactly like an
+   * index without bootstrap — on that index's own plain-scope checkpoint (or
+   * from the deployment block), with no tail budget — instead of failing the
+   * scan. The fallback neither reads nor writes the trust-domain key, so an
+   * imported prefix never becomes part of the independently scanned index.
+   * Unset (or false) keeps the caller-retryable unavailable error.
+   */
+  readonly localHistoryFallback?: boolean;
+  /** Observes the fallback engaging, at most once per scan; a throw is ignored. */
+  readonly onLocalHistoryFallback?: (
+    info: { readonly scope: string; readonly reason: string },
+  ) => void;
+  /** Observes every reduced page, seeded or fallen back; a throw is ignored. */
+  readonly onScanProgress?: (
+    progress: {
+      readonly scope: string;
+      readonly fromBlockNumber: number;
+      readonly throughBlockNumber: number;
+      readonly finalizedNumber: number;
+      readonly scannedBlocks: number;
+    },
+  ) => void;
 }
 
 export interface ContextGraphAuthorityIndexSnapshots {
