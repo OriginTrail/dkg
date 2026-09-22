@@ -18,6 +18,17 @@ function callException(overrides: Record<string, unknown>): Error {
 }
 
 describe('EVM adapter: one-read live context graph authority', () => {
+  it('runs the identity-binding name-hash read under the bounded security-gate policy', async () => {
+    const { adapter, readContractWithOptions } = fixture();
+
+    await expect(adapter.getContextGraphNameHash(1n)).resolves.toBeTruthy();
+    const [, label, method, args, options] = readContractWithOptions.mock.calls[0];
+    expect(label).toBe('cgStorage.getNameHash');
+    expect(method).toBe('getNameHash');
+    expect(args).toEqual([1n]);
+    expect(options.policy).toBe('securityGatePointRead');
+  });
+
   it('issues exactly one getContextGraph read and decodes the named tuple', async () => {
     const { adapter, readContractWithOptions } = fixture();
     readContractWithOptions.mockImplementation(async (_c: unknown, _l: string, method: string) => {
@@ -44,6 +55,7 @@ describe('EVM adapter: one-read live context graph authority', () => {
     expect(label).toBe(CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER);
     expect(method).toBe('getContextGraph');
     expect(args).toEqual([7n]);
+    expect(options.policy).toBe('securityGatePointRead');
     // The read is shared, so it belongs to the flight: one caller abandoning
     // its wait must not cancel it for the others. The caller's own signal only
     // detaches that caller (see the abandonment case below).

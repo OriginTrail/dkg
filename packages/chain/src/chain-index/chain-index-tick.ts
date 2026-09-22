@@ -145,7 +145,7 @@ export interface ChainIndexTickResult {
    * An empty page with this flag is not an idle scope: slowing it down would
    * delay convergence and prolong the readers' live-chain fallback.
    */
-  readonly pendingWork?: boolean;
+  readonly pendingWork: boolean;
   /** Physical `eth_getLogs` calls this tick issued. The one-log budget check. */
   readonly logRequests: number;
   readonly blockRequests: number;
@@ -280,6 +280,7 @@ export class ChainIndexTick {
       }
       return this.#result(verification.outcome, {
         head: observedHead,
+        pendingWork: false,
         blockRequests,
         logRequests: 0,
       });
@@ -295,7 +296,12 @@ export class ChainIndexTick {
     // above holding rows that no later pass re-fetches — while coverage, which
     // never shrinks, went on claiming them.
     if (observedHead.number < Math.max(cursor.settledBlockNumber, cursor.head.number)) {
-      return this.#result('endpoint-lagging', { head: observedHead, blockRequests, logRequests: 0 });
+      return this.#result('endpoint-lagging', {
+        head: observedHead,
+        pendingWork: false,
+        blockRequests,
+        logRequests: 0,
+      });
     }
 
     const topicSetVersion = chainEventLogTopicSetVersion(registry.topicSet());
@@ -317,7 +323,7 @@ export class ChainIndexTick {
       return this.#result(revision === undefined ? 'cas-lost' : 'idle', {
         head: observedHead,
         settledBlockNumber: cursor.settledBlockNumber,
-        pendingWork: state.coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
+        pendingWork: this.#hasIncompleteCoverage(state.coverage),
         blockRequests,
         logRequests: 0,
       });
@@ -366,7 +372,7 @@ export class ChainIndexTick {
       settledBlockNumber: settled.number,
       fetchedRows: fetch.rows.length,
       pendingWork: fetchThrough < observedHead.number
-        || coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
+        || this.#hasIncompleteCoverage(coverage),
       blockRequests,
       logRequests: fetch.logRequests,
     });
@@ -390,7 +396,7 @@ export class ChainIndexTick {
     }
     const incomplete = state.coverage.find((entry) => !chainEventLogCoverageIsComplete(entry));
     if (incomplete === undefined) {
-      return this.#result('idle', { blockRequests: 0, logRequests: 0 });
+      return this.#result('idle', { pendingWork: false, blockRequests: 0, logRequests: 0 });
     }
     // Clamped at the settled cursor so a page can never reach into the tail.
     // History is settled history; if a coverage row ever started above the
@@ -426,16 +432,21 @@ export class ChainIndexTick {
       rows: this.#flagRows(fetch.rows, throughBlock),
       coverage: [nextCoverage],
     });
+    const resultingCoverage = state.coverage.map((entry) => (
+      entry === incomplete ? nextCoverage : entry
+    ));
     return this.#result(revision === undefined ? 'cas-lost' : 'advanced', {
       settledBlockNumber: state.cursor.settledBlockNumber,
       fetchedRows: fetch.rows.length,
-      pendingWork: !chainEventLogCoverageIsComplete(nextCoverage)
-        || state.coverage.some((entry) => (
-          entry !== incomplete && !chainEventLogCoverageIsComplete(entry)
-        )),
+      pendingWork: this.#hasIncompleteCoverage(resultingCoverage),
       blockRequests: 0,
       logRequests: fetch.logRequests,
     });
+  }
+
+  /** One definition of whether any durable history lane still owes work. */
+  #hasIncompleteCoverage(coverage: readonly ChainEventLogCoverage[]): boolean {
+    return coverage.some((entry) => !chainEventLogCoverageIsComplete(entry));
   }
 
   /** Highest block one pass may fetch through, so catch-up stays bounded. */
@@ -500,7 +511,12 @@ export class ChainIndexTick {
       // No lineage, no scope. Without it a redeployed chain with deterministic
       // addresses is indistinguishable from the old one, and `node-ui.db`
       // outlives a chain reset (`chain-reset-wipe.ts:56-58`).
-      return this.#result('endpoint-lagging', { head, blockRequests, logRequests: 0 });
+      return this.#result('endpoint-lagging', {
+        head,
+        pendingWork: false,
+        blockRequests,
+        logRequests: 0,
+      });
     }
 
     const fetchThrough = this.#catchUpThrough(liveFrom - 1, head.number);
@@ -540,7 +556,7 @@ export class ChainIndexTick {
       settledBlockNumber: settled.number,
       fetchedRows: fetch.rows.length,
       pendingWork: fetchThrough < head.number
-        || coverage.some((entry) => !chainEventLogCoverageIsComplete(entry)),
+        || this.#hasIncompleteCoverage(coverage),
       blockRequests,
       logRequests: fetch.logRequests,
     });
@@ -889,7 +905,7 @@ export class ChainIndexTick {
     outcome: ChainIndexTickOutcome,
     detail: Omit<ChainIndexTickResult, 'outcome'>,
   ): ChainIndexTickResult {
-    return Object.freeze({ outcome, pendingWork: false, ...detail });
+    return Object.freeze({ outcome, ...detail });
   }
 }
 

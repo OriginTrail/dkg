@@ -756,7 +756,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
             'getContextGraph',
             [contextGraphId],
-            { signal: flightSignal },
+            {
+              signal: flightSignal,
+              // The agent's live authority gate fails closed after 2.5s. A
+              // normal point read gives one endpoint 4s, so its caller abort
+              // would pre-empt transport failover. This named policy lets a
+              // stalled endpoint yield to a configured fallback while keeping
+              // the outer security deadline unchanged.
+              policy: 'securityGatePointRead',
+            },
           );
         } catch (err) {
           if (flightSignal.aborted) throw err;
@@ -1597,7 +1605,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       'cgStorage.getNameHash',
       'getNameHash',
       [contextGraphId],
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        policy: 'securityGatePointRead',
+      },
     );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();

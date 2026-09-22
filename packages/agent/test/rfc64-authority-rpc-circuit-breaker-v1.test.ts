@@ -255,6 +255,28 @@ describe('RFC-64 authority RPC circuit breaker', () => {
       expect(breaker.snapshot()).toMatchObject({ state: 'closed', consecutiveExhaustions: 0 });
     });
 
+    it('still classifies a direct read\'s report when a consumer observes it too', async () => {
+      const { breaker } = await halfOpenBreaker();
+      const observed: string[] = [];
+      await breaker.run(undefined, async (_signal, evidence) => {
+        // Building the options is the eager attempt mark. Only the circuit's
+        // own observer can void it, so the consumer's must not displace it.
+        evidence.chainReadOptions(undefined, (served) => observed.push(served.source))
+          .onContextGraphAuthorityProjectionServed?.({ source: 'log', ageMs: 0 });
+        return 'folded';
+      });
+      expect(observed).toEqual(['log']);
+      expect(breaker.snapshot()).toMatchObject({ state: 'half-open', consecutiveExhaustions: 1 });
+
+      await breaker.run(undefined, async (_signal, evidence) => {
+        evidence.chainReadOptions(undefined, (served) => observed.push(served.source))
+          .onContextGraphAuthorityProjectionServed?.({ source: 'scan', ageMs: 0 });
+        return 'scanned';
+      });
+      expect(observed).toEqual(['log', 'scan']);
+      expect(breaker.snapshot().state).toBe('closed');
+    });
+
     it('does not let a cache hit that predates the exhaustion close the circuit', async () => {
       const { breaker } = await halfOpenBreaker();
       await breaker.run(undefined, async (_signal, evidence) => {
@@ -649,6 +671,367 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     await expect(first).resolves.toBe('first');
     await expect(third).resolves.toBe('third');
     expect(cancelledCalls).toBe(0);
+  });
+
+  it('admits a foreground read while the bulk serializer is busy', async () => {
+    // The bulk queue is the anti-stampede mechanism for per-graph passes. A
+    // latency-bounded foreground read must not inherit it, or it spends its
+    // whole budget waiting behind a cold scan.
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+    });
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    let queuedReleased = false;
+    const queued = breaker.run(undefined, async () => {
+      entered.resolve();
+      await release.promise;
+      queuedReleased = true;
+      return 'queued';
+    });
+    await entered.promise;
+
+    await expect(breaker.runForeground(undefined, async () => 'foreground'))
+      .resolves.toBe('foreground');
+    expect(queuedReleased).toBe(false);
+
+    release.resolve();
+    await expect(queued).resolves.toBe('queued');
+  });
+
+  it('applies circuit state and evidence to a foreground read', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+
+    // Skipping the BULK queue does not skip the circuit: exhaustion still
+    // trips it.
+    await expect(breaker.runForeground(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toMatchObject({ state: 'open', consecutiveExhaustions: 1 });
+    await expect(breaker.runForeground(undefined, async () => 'must-not-run'))
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+
+    now = 100;
+    await expect(breaker.runForeground(undefined, async () => 'local-only'))
+      .resolves.toBe('local-only');
+    expect(breaker.snapshot().state).toBe('half-open');
+
+    await expect(breaker.runForeground(undefined, async (_signal, evidence) => {
+      evidence.agentResolverReadOptions().onRpcRead();
+      return 'provider-recovered';
+    })).resolves.toBe('provider-recovered');
+    expect(breaker.snapshot()).toEqual({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+      retryAtMs: null,
+    });
+  });
+
+  it('does not let a read admitted before a trip erase the fresh exhaustion', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    // Admitted against a healthy pool and still in flight when the pool fails:
+    // it reached the providers, but says nothing about the state they are in
+    // now, so it must not count as recovery from the newer exhaustion.
+    const stale = breaker.runForeground(undefined, async (_signal, evidence) => {
+      evidence.agentResolverReadOptions().onRpcRead();
+      entered.resolve();
+      await release.promise;
+      return 'stale-success';
+    });
+    await entered.promise;
+
+    await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    release.resolve();
+    await expect(stale).resolves.toBe('stale-success');
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+  });
+
+  it('bounds a foreground fan-out to one probe against an exhausted pool', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const release = Promise.withResolvers<void>();
+    let providerReads = 0;
+    // Registration discovery is fanned out once per candidate graph, so the
+    // foreground lane admits one at a time and re-evaluates the gate after the
+    // permit: once the first read trips the circuit its siblings are refused
+    // instead of walking the same exhausted pool.
+    const fanOut = Array.from({ length: 8 }, () => breaker.runForeground(
+      undefined,
+      async () => {
+        providerReads += 1;
+        await release.promise;
+        throw exhausted();
+      },
+    ));
+    release.resolve();
+
+    await expect(fanOut[0]).rejects.toBeInstanceOf(ChainRpcTransportError);
+    for (const refused of fanOut.slice(1)) {
+      await expect(refused).rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+    }
+    // Counted in the operation body: the rejection types alone cannot show how
+    // many reads actually reached a provider.
+    expect(providerReads).toBe(1);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+  });
+
+  it('counts one backoff step per outage round across the two lanes', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const release = Promise.withResolvers<void>();
+    const enteredBulk = Promise.withResolvers<void>();
+    const enteredForeground = Promise.withResolvers<void>();
+    // Each lane has its own permit, so both of these are already past the gate
+    // when the first of them exhausts. One outage must stay one step.
+    const bulk = breaker.run(undefined, async () => {
+      enteredBulk.resolve();
+      await release.promise;
+      throw exhausted();
+    });
+    const foreground = breaker.runForeground(undefined, async () => {
+      enteredForeground.resolve();
+      await release.promise;
+      throw exhausted();
+    });
+    await Promise.all([enteredBulk.promise, enteredForeground.promise]);
+    release.resolve();
+
+    // Both reject with the PROVIDER's error rather than the circuit-open
+    // deferral, which is what shows the second failure reached `#open`'s
+    // coalescing branch instead of being turned away at the admission gate.
+    await expect(bulk).rejects.toBeInstanceOf(ChainRpcTransportError);
+    await expect(foreground).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    // Escalation still belongs to the read that fails past the deadline.
+    now = 100;
+    await expect(breaker.runForeground(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 2,
+      retryAtMs: 300,
+    });
+  });
+
+  it('keeps a mid-round cache answer from closing a coalesced outage', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+
+    await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    // A sibling of the SAME round fails again inside the window. The ladder is
+    // coalesced, but the pool was observed failing at t=50, so the freshness
+    // watermark must move with it.
+    now = 50;
+    await expect(breaker.run(
+      undefined,
+      async () => { throw exhausted(); },
+      { admitWhileOpen: true },
+    )).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    // Fetched at t=40: after the round's first failure but before its second,
+    // so it is not proof that the pool recovered.
+    now = 60;
+    await breaker.run(undefined, async (_signal, evidence) => {
+      evidence.agentResolverReadOptions().onContextGraphAuthorityProjectionServed?.({
+        source: 'cache', ageMs: 20,
+      });
+      return 'served-from-mid-round-cache';
+    }, { admitWhileOpen: true });
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+  });
+
+  it('extends the shared deadline for an in-window provider hint without escalating', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+
+    await expect(breaker.run(undefined, async () => { throw exhausted(); }))
+      .rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 100,
+    });
+
+    // A rare caller-initiated read is admitted mid-cooldown and is told by the
+    // provider to back off far longer than the round's own step. Coalescing
+    // owns the ladder, not the provider's instruction.
+    now = 50;
+    await expect(breaker.run(
+      undefined,
+      async () => { throw exhausted(600); },
+      { admitWhileOpen: true },
+    )).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 650,
+    });
+
+    // A later in-window sibling without a hint must not pull the deadline back.
+    now = 60;
+    await expect(breaker.run(
+      undefined,
+      async () => { throw exhausted(); },
+      { admitWhileOpen: true },
+    )).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 650,
+    });
+
+    // Nor may a shorter hint shorten it.
+    now = 70;
+    await expect(breaker.run(
+      undefined,
+      async () => { throw exhausted(10); },
+      { admitWhileOpen: true },
+    )).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot().retryAtMs).toBe(650);
+  });
+
+  it('keeps a cross-lane sibling\'s provider hint on the shared deadline', async () => {
+    let now = 0;
+    const breaker = new Rfc64AuthorityReadCoordinatorV1({
+      baseBackoffMs: 100,
+      maxBackoffMs: 800,
+      jitterRatio: 0,
+      now: () => now,
+    });
+    const releaseFirst = Promise.withResolvers<void>();
+    const releaseSecond = Promise.withResolvers<void>();
+    const enteredSecond = Promise.withResolvers<void>();
+
+    // One sibling per lane, both admitted while the pool was healthy: the bulk
+    // read trips the circuit, the foreground read then learns the provider's
+    // own backoff.
+    const first = breaker.run(undefined, async () => {
+      await releaseFirst.promise;
+      throw exhausted();
+    });
+    const second = breaker.runForeground(undefined, async () => {
+      enteredSecond.resolve();
+      await releaseSecond.promise;
+      throw exhausted(600);
+    });
+    await enteredSecond.promise;
+
+    releaseFirst.resolve();
+    await expect(first).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot().retryAtMs).toBe(100);
+
+    now = 50;
+    releaseSecond.resolve();
+    // It reaches the provider and rejects with the provider's error, so the
+    // deadline moved through `#open`'s coalescing branch, not the gate.
+    await expect(second).rejects.toBeInstanceOf(ChainRpcTransportError);
+    expect(breaker.snapshot()).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: 650,
+    });
+  });
+
+  it('retires a foreground read before close settles', async () => {
+    const breaker = new Rfc64AuthorityReadCoordinatorV1();
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<AbortSignal>();
+    let operationFinished = false;
+    const read = breaker.runForeground(undefined, async (signal) => {
+      entered.resolve(signal);
+      await release.promise;
+      operationFinished = true;
+      return 'done';
+    });
+    const signal = await entered.promise;
+
+    let settled = false;
+    const closing = breaker.close().then(() => { settled = true; });
+    expect(signal.aborted).toBe(true);
+    // Both lanes settle their caller on its own abort rather than leaving it
+    // waiting on a read the coordinator has already given up on.
+    await expect(read).rejects.toThrow(/coordinator is closing/u);
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+    // Retirement is the separate guarantee: the physical read is still running,
+    // so shutdown must not report itself complete yet.
+    expect(settled).toBe(false);
+    expect(operationFinished).toBe(false);
+
+    release.resolve();
+    await closing;
+    expect(settled).toBe(true);
+    expect(operationFinished).toBe(true);
   });
 
   it('rejects unsafe timing configuration', () => {
