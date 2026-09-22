@@ -4,7 +4,63 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.18] - 2026-09-22
+
+A hotfix for the 10.0.17 authority-index cold start; **10.0.17 is withdrawn**.
+On first start after updating to 10.0.17, every node rebuilds the new RFC-64
+authority index from chain history in `local-history` mode. On mainnet over a
+public RPC endpoint that rebuild took 24 minutes for a freshly registered graph
+and did not finish within 50 minutes for two-week-old graphs, and while the
+index is unresolved an edge denies public-graph subscriptions and skips their
+SWM sync. 10.0.18 bootstraps edge indexes from core snapshots by default and
+keeps the 10.0.17 scan as the fallback, so no node starts slower than it did
+on 10.0.17. **No smart-contract, ABI, wire-protocol, or deployment registry
+changes are required.**
+
+### Upgrading from 10.0.17
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Edge nodes bootstrap the authority index from discovered cores by default | An edge with no `authorityIndex` block discovers cores verified on chain at startup and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s) | No configuration change is required; update directly from 10.0.16 or 10.0.17. An explicit `authorityIndex` block keeps its pinned trust |
+| Local history remains the fallback | If no discovered core supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and runs the 10.0.17 local-history scan, which now logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
+
+### Fixed
+
+- **Authority-index cold start on public RPC**: 10.0.17 rebuilt the
+  contract-wide authority index from chain logs on every node's first start
+  (`local-history` mode). On mainnet with public RPC this took 24 minutes for
+  a freshly registered graph and had not finished after 50 minutes for
+  two-week-old graphs; until the index resolves, an edge denies public-graph
+  subscriptions and skips their SWM sync. Edge nodes now bootstrap the index
+  from a core snapshot by default: a two-week-old graph bound in 3 s, versus
+  still unresolved after 40 minutes on 10.0.17.
+
+### Changed
+
+- **Runtime core discovery for snapshot bootstrap**: an edge with no explicit
+  `authorityIndex` block discovers core nodes verified on chain
+  (sharding-table members from the agent registry, plus the network file's
+  relays) and requests a snapshot over `/dkg/10.0.0/authority-index-snapshot/1`.
+  The startup line reports `mode=core-snapshot trustedCoreCount=discovered
+  discovery=on-chain-cores fallback=local-history` together with the tail and
+  cache-epoch values.
+- **Local-history fallback**: when no core supplies a usable snapshot within
+  the 30 s bootstrap budget, the node logs it and falls back to the
+  local-history scan, so it is never worse than 10.0.17.
+- An explicit `authorityIndex` block still wins over the discovered default and
+  keeps its pinned trusted-core semantics and its existing startup line. Cores
+  receive no default and keep building the index from chain history.
+- Authority-index scans now log their progress.
+
+### Deployment and validation
+
+- Deploy through the normal package path; no contract, ABI, or deployment
+  registry change is required.
+- All workspace package manifests are aligned at `10.0.18`.
+
 ## [10.0.17] - 2026-09-22
+
+**Withdrawn.** Superseded by 10.0.18; see above.
 
 An RPC-bounded RFC-64 operational-hardening release. RFC-64 remains active by
 default for persistent nodes and keeps its 10.0.16 responsibility model, while

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  AUTHORITY_INDEX_SNAPSHOT_DEFAULT_MAX_TAIL_BLOCKS,
   normalizeAuthorityIndexSnapshotConfig,
   type NormalizedAuthorityIndexSnapshotConfig,
 } from './authority-index-snapshot-service.js';
@@ -19,8 +20,40 @@ export interface AuthorityIndexConfig {
 export interface ResolvedAuthorityIndexConfig extends AuthorityIndexConfig {
   readonly maxTailBlocks: number;
   readonly cacheEpoch: number;
+  /**
+   * Trust set discovered at runtime from cores the chain vouches for. Only the
+   * role default sets it; config.json cannot name a discovery mode.
+   */
+  readonly discovery?: 'on-chain-cores';
   /** Canonical identities retained for transport and persistence namespacing. */
   readonly snapshot: NormalizedAuthorityIndexSnapshotConfig;
+}
+
+/**
+ * The role default when config.json names no authorityIndex: an edge seeds
+ * from cores it can verify on chain and falls back to its own history when
+ * none answers; a core always indexes its own chain log.
+ */
+export function resolveDefaultAuthorityIndexConfig(
+  nodeRole: 'core' | 'edge',
+): ResolvedAuthorityIndexConfig | undefined {
+  if (nodeRole !== 'edge') return undefined;
+  const snapshot: NormalizedAuthorityIndexSnapshotConfig = Object.freeze({
+    trustedCorePeers: Object.freeze([]),
+    maxTailBlocks: AUTHORITY_INDEX_SNAPSHOT_DEFAULT_MAX_TAIL_BLOCKS,
+  });
+  const resolved = {
+    mode: 'core-snapshot' as const,
+    discovery: 'on-chain-cores' as const,
+    trustedCorePeers: Object.freeze([] as string[]),
+    maxTailBlocks: AUTHORITY_INDEX_SNAPSHOT_DEFAULT_MAX_TAIL_BLOCKS,
+    cacheEpoch: 0,
+    snapshot,
+  };
+  Object.defineProperty(resolved, 'snapshot', { enumerable: false });
+  Object.freeze(resolved);
+  resolvedConfigs.add(resolved);
+  return resolved;
 }
 
 /**
@@ -36,7 +69,9 @@ export function resolveAuthorityIndexConfig(
     throw new TypeError('authorityIndex must be an object');
   }
   const allowedKeys = new Set(['mode', 'trustedCorePeers', 'maxTailBlocks', 'cacheEpoch']);
-  const unknownKeys = Object.keys(config).filter((key) => !allowedKeys.has(key));
+  // Our own resolved objects may carry runtime-only fields such as discovery.
+  const unknownKeys = resolvedConfigs.has(config) ? []
+    : Object.keys(config).filter((key) => !allowedKeys.has(key));
   if (unknownKeys.length > 0) {
     throw new TypeError(
       `Unknown authorityIndex option(s): ${unknownKeys.join(', ')}. `

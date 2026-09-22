@@ -1,6 +1,7 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
   resolveAuthorityIndexConfig,
+  resolveDefaultAuthorityIndexConfig,
   type AuthorityIndexConfig,
   type ResolvedAuthorityIndexConfig,
 } from './authority-index-config.js';

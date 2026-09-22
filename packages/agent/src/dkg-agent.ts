@@ -1,6 +1,11 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { peerIdFromString } from '@libp2p/peer-id';
 import { resolveAuthorityIndexConfig } from './authority-index-config.js';
+import {
+  createOnChainCorePeerResolver,
+  type OnChainCorePeerResolver,
+} from './authority-index-core-discovery.js';
 import { createAuthorityIndexSnapshotTransport } from './authority-index-snapshot-transport.js';
 import {
   createAuthorityIndexSnapshotClient,
@@ -109,7 +114,7 @@ import {
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphAuthorityIndexBootstrap, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -690,6 +695,23 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalized
   };
 }
 
+const AUTHORITY_INDEX_SCAN_PROGRESS_LOG_INTERVAL_MS = 30_000;
+
+/** One line per scope per 30 s: a mainnet history scan pages for many minutes. */
+function createAuthorityIndexScanProgressLogger(
+  info: (message: string) => void,
+): NonNullable<ContextGraphAuthorityIndexBootstrap['onScanProgress']> {
+  const lastLoggedAt = new Map<string, number>();
+  return (progress) => {
+    const at = Date.now();
+    const last = lastLoggedAt.get(progress.scope);
+    if (last !== undefined && at - last < AUTHORITY_INDEX_SCAN_PROGRESS_LOG_INTERVAL_MS) return;
+    lastLoggedAt.set(progress.scope, at);
+    info(`[authority-index] scope=${progress.scope} scanned=${progress.scannedBlocks} `
+      + `through=${progress.throughBlockNumber} behind=${progress.finalizedNumber - progress.throughBlockNumber}`);
+  };
+}
+
 function constructConfiguredChainAdapter(
   config: StorageAckNormalizedDKGAgentConfig,
   contextGraphAuthorityIndexBootstrap?: EVMAdapterConfig['contextGraphAuthorityIndexBootstrap'],
@@ -1193,7 +1215,9 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    const authorityIndex = resolveAuthorityIndexConfig(
+    const log = new Logger('DKGAgent');
+    const ctx = createOperationContext('system');
+    let authorityIndex = resolveAuthorityIndexConfig(
       inputConfig.authorityIndex,
       inputConfig.nodeRole ?? 'edge',
     );
@@ -1202,9 +1226,16 @@ export class DKGAgent extends DKGAgentBase {
       || !inputConfig.chainConfig?.operationalKeys?.length
       || inputConfig.localContextGraphAuthorityIndexStore === undefined
     )) {
-      throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
+      if (authorityIndex.discovery === undefined) {
+        throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
+      }
+      // The role default asked nothing of the operator, so a node without an
+      // EVM chain or durable index store simply keeps indexing its own history.
+      log.warn(ctx, '[authority-index] core-snapshot bootstrap requires a configured EVM chain and a local authority index store; using local history');
+      authorityIndex = undefined;
     }
     let agentRef: DKGAgent | undefined;
+    let corePeerResolver: OnChainCorePeerResolver | undefined;
     const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
       normalizedConfig: authorityIndex.snapshot,
       request: createAuthorityIndexSnapshotTransport(() => agentRef === undefined ? undefined : {
@@ -1212,6 +1243,32 @@ export class DKGAgent extends DKGAgentBase {
         node: agentRef.node,
         router: agentRef.router,
       }),
+      resolvePeers: authorityIndex.discovery !== 'on-chain-cores' ? undefined : async (signal) => {
+        // Chain, libp2p identity and the phonebook exist only once the agent runs.
+        const agent = agentRef;
+        if (agent === undefined || !agent.started) return [];
+        corePeerResolver ??= createOnChainCorePeerResolver({
+          selfPeerId: agent.node.libp2p.peerId.toString(),
+          findAgents: async () => (await agent.discovery.findAgents()).map((a) => ({
+            peerId: a.peerId,
+            nodeRole: a.nodeRole,
+            agentAddress: a.agentAddress,
+            lastSeen: a.lastSeen,
+          })),
+          networkRelays: agent.config.relayPeers ?? [],
+          isConnected: (peerId) => {
+            try {
+              return agent.node.libp2p.getConnections(peerIdFromString(peerId)).length > 0;
+            } catch {
+              return false;
+            }
+          },
+          getIdentityIdForAddress: agent.chain.getIdentityIdForAddress?.bind(agent.chain),
+          isShardingTableMember: agent.chain.isShardingTableMember?.bind(agent.chain),
+          staleThresholdMs: AGENT_PROFILE_STALE_THRESHOLD_MS,
+        });
+        return corePeerResolver.resolve(signal);
+      },
     });
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
@@ -1244,13 +1301,26 @@ export class DKGAgent extends DKGAgentBase {
         maxTailBlocks: authorityIndex.maxTailBlocks,
         // Epoch zero preserves the original namespace. Increasing it lets an
         // operator discard a suspect imported prefix without changing peers.
+        // A discovered trust set has no peer list to key on: its namespace is
+        // the discovery mode itself.
         trustDomain: createHash('sha256').update(JSON.stringify(
-          (authorityIndex.cacheEpoch ?? 0) === 0 ? trustedPeerIds : {
-            trustedCorePeers: trustedPeerIds,
-            cacheEpoch: authorityIndex.cacheEpoch,
-          },
+          authorityIndex.discovery !== undefined
+            ? { discovery: authorityIndex.discovery, cacheEpoch: authorityIndex.cacheEpoch }
+            : (authorityIndex.cacheEpoch ?? 0) === 0 ? trustedPeerIds : {
+              trustedCorePeers: trustedPeerIds,
+              cacheEpoch: authorityIndex.cacheEpoch,
+            },
         )).digest('hex'),
         fetchSnapshot: (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
+        ...(authorityIndex.discovery === undefined ? {} : {
+          // Discovery may find no core at all; the edge must still bind graphs.
+          localHistoryFallback: true,
+          onLocalHistoryFallback: ({ scope, reason }: { scope: string; reason: string }) => log.warn(
+            ctx,
+            `[authority-index] no on-chain core supplied a snapshot for ${scope}; falling back to local history: ${reason}`,
+          ),
+          onScanProgress: createAuthorityIndexScanProgressLogger((message) => log.info(ctx, message)),
+        }),
       },
     );
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
@@ -1427,8 +1497,6 @@ export class DKGAgent extends DKGAgentBase {
     } else {
       wallet = await DKGAgentWallet.generate();
     }
-    const log = new Logger('DKGAgent');
-    const ctx = createOperationContext('system');
     let store: TripleStore;
     if (config.store) {
       store = config.store;

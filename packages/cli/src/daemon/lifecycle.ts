@@ -44,6 +44,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
+import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
@@ -73,6 +74,7 @@ import {
   loadOpWallets,
   KaNumberAllocator,
   resolveAuthorityIndexConfig,
+  resolveDefaultAuthorityIndexConfig,
   resolveSyncAgentsMeta,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -1134,10 +1136,14 @@ async function runDaemonInnerWithStartupOwnership(
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
-  // Snapshot peers supply authority-bearing state. Validate explicit operator
-  // trust before allocating startup resources, never infer it from relays.
+  // Snapshot peers supply authority-bearing state, so explicit operator config
+  // is validated before allocating startup resources and always wins. Without
+  // an `authorityIndex` block, edge nodes discover on-chain core nodes at
+  // runtime for snapshot bootstrap and fall back to local history; cores keep
+  // building the index from chain history (no default).
   assertAuthorityIndexConfigPlacement(config);
-  const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
+  const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge')
+    ?? resolveDefaultAuthorityIndexConfig(config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1303,12 +1309,7 @@ async function runDaemonInnerWithStartupOwnership(
     ? `v${nodeVersion}, ${nodeCommit}`
     : `v${nodeVersion}`;
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
-  log(
-    `[info] [authority-index] mode=${authorityIndex?.mode ?? 'local-history'} `
-    + `trustedCoreCount=${authorityIndex?.trustedCorePeers.length ?? 0} `
-    + `maxTailBlocks=${authorityIndex?.maxTailBlocks ?? 'unbounded'} `
-    + `cacheEpoch=${authorityIndex?.cacheEpoch ?? 0}`,
-  );
+  log(formatAuthorityIndexStartupLine(authorityIndex));
 
   // RFC-41 §4.9 / §4.3: structured startup log lines for telemetry.
   // The doctor's state summary correlates these with /api/status —

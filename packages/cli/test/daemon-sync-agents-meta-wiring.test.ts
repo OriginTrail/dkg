@@ -162,7 +162,7 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     expect(logs).toContain('mode=core-snapshot trustedCoreCount=1 maxTailBlocks=2000 cacheEpoch=3');
   });
 
-  it('does not derive snapshot trust from network configuration or discovered relays', async () => {
+  it('defaults an unconfigured edge to runtime core discovery without pinning relays or network-config peers', async () => {
     mocks.loadNetworkConfig.mockResolvedValue({
       networkName: 'DKG V10 Gnosis Mainnet',
       genesisId: 'gnosis-mainnet',
@@ -171,6 +171,24 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
       authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [trustedCorePeer] },
     });
     const createArg = await captureCreateArg({ nodeRole: 'edge' });
+    // 10.0.18: an edge with no explicit `authorityIndex` block bootstraps from
+    // cores discovered on chain at runtime and falls back to local history.
+    // The network file's block and its relays still never become pinned trust.
+    expect(createArg.authorityIndex).toMatchObject({
+      mode: 'core-snapshot',
+      discovery: 'on-chain-cores',
+      trustedCorePeers: [],
+      maxTailBlocks: 2_000,
+      cacheEpoch: 0,
+    });
+    const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+    expect(logs).toContain(
+      '[info] [authority-index] mode=core-snapshot trustedCoreCount=discovered discovery=on-chain-cores fallback=local-history maxTailBlocks=2000 cacheEpoch=0',
+    );
+  });
+
+  it('keeps an unconfigured core on its local-history index build', async () => {
+    const createArg = await captureCreateArg();
     expect(createArg.authorityIndex).toBeUndefined();
     const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
     expect(logs).toContain('[info] [authority-index] mode=local-history trustedCoreCount=0 maxTailBlocks=unbounded cacheEpoch=0');

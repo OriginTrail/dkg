@@ -412,3 +412,105 @@ describe('cache-only snapshot serving', () => {
     expect(exportSnapshot).toHaveBeenCalledTimes(5);
   });
 });
+
+describe('discovered authority-index snapshot trust', () => {
+  const normalizedConfig = { trustedCorePeers: [], maxTailBlocks: 2_000 };
+  const relay = { peerId: FIRST, multiaddr: address(FIRST) };
+
+  it('walks the resolved peers in order instead of a configured set, once per fetch', async () => {
+    const send = vi.fn()
+      .mockRejectedValueOnce(new Error('relay does not serve snapshots'))
+      .mockResolvedValue(response());
+    const resolvePeers = vi.fn(async () => [relay, { peerId: SECOND }]);
+    const client = createAuthorityIndexSnapshotClient({ normalizedConfig, request: send, resolvePeers });
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    expect(resolvePeers).toHaveBeenCalledOnce();
+    expect(send.mock.calls.map(([peer]) => peer)).toEqual([relay, { peerId: SECOND }]);
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    expect(resolvePeers).toHaveBeenCalledTimes(2);
+  });
+
+  it('validates the request before asking for peers', async () => {
+    const resolvePeers = vi.fn(async () => [relay]);
+    const send = vi.fn();
+    const client = createAuthorityIndexSnapshotClient({ normalizedConfig, request: send, resolvePeers });
+    await expect(client.fetchSnapshot({ ...request, maxThroughBlockNumber: 2_501 })).rejects.toThrow(/request/);
+    expect(resolvePeers).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('de-duplicates identities and caps the walk at eight resolved peers', async () => {
+    const send = vi.fn().mockRejectedValue(new Error('connection refused'));
+    const resolvePeers = vi.fn(async () => [
+      relay, { peerId: FIRST }, ...Array.from({ length: 9 }, (_, index) => ({ peerId: `core-${index}` })),
+    ]);
+    const client = createAuthorityIndexSnapshotClient({ normalizedConfig, request: send, resolvePeers });
+    await expect(client.fetchSnapshot(request)).rejects.toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
+    expect(send.mock.calls.map(([peer]) => peer.peerId)).toEqual([
+      FIRST, 'core-0', 'core-1', 'core-2', 'core-3', 'core-4', 'core-5', 'core-6',
+    ]);
+    expect(send.mock.calls[0][0]).toBe(relay);
+  });
+
+  it('reports an empty discovery as unavailable without sending', async () => {
+    const send = vi.fn();
+    const client = createAuthorityIndexSnapshotClient({ normalizedConfig, request: send, resolvePeers: async () => [] });
+    const failure = await client.fetchSnapshot(request).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
+    expect((failure as AggregateError).errors).toHaveLength(1);
+    expect((failure as AggregateError).errors[0]).toMatchObject({ message: 'no on-chain core peers are available' });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('wraps a failed discovery as unavailable but propagates caller cancellation', async () => {
+    const send = vi.fn();
+    const cause = new Error('phonebook unavailable');
+    const failing = createAuthorityIndexSnapshotClient({
+      normalizedConfig, request: send, resolvePeers: async () => { throw cause; },
+    });
+    const failure = await failing.fetchSnapshot(request).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
+    expect((failure as AggregateError).errors).toEqual([cause]);
+
+    const controller = new AbortController();
+    const cancelled = createAuthorityIndexSnapshotClient({
+      normalizedConfig, request: send,
+      resolvePeers: (signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }),
+    });
+    const result = cancelled.fetchSnapshot(request, controller.signal);
+    controller.abort(new Error('node stopped'));
+    await expect(result).rejects.toThrow('node stopped');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('keeps discovery inside the total seed deadline', async () => {
+    vi.useFakeTimers();
+    const send = vi.fn();
+    let discoverySignal: AbortSignal | undefined;
+    const client = createAuthorityIndexSnapshotClient({
+      normalizedConfig, request: send, overallTimeoutMs: 150,
+      resolvePeers: (signal) => {
+        discoverySignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+    const result = client.fetchSnapshot(request);
+    const rejected = expect(result).rejects.toBeInstanceOf(AuthorityIndexSnapshotUnavailableError);
+    await vi.advanceTimersByTimeAsync(150);
+    await rejected;
+    expect(discoverySignal?.aborted).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('leaves the configured walk untouched when no resolver is supplied', async () => {
+    const send = vi.fn().mockResolvedValue(response());
+    const client = createAuthorityIndexSnapshotClient({ config, request: send });
+    await expect(client.fetchSnapshot(request)).resolves.toEqual(snapshot);
+    expect(send.mock.calls[0][0]).toEqual({ peerId: FIRST, multiaddr: address(FIRST) });
+  });
+});

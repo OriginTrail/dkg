@@ -19,11 +19,13 @@ export interface AuthorityIndexSnapshotConfig {
 
 export interface AuthorityIndexSnapshotPeer {
   readonly peerId: string;
-  readonly multiaddr: string;
+  /** Dial address; absent for a discovered core reached over its live connection. */
+  readonly multiaddr?: string;
 }
 
 export interface NormalizedAuthorityIndexSnapshotConfig {
-  readonly trustedCorePeers: readonly AuthorityIndexSnapshotPeer[];
+  /** Explicit configuration always pins a dial address per identity. */
+  readonly trustedCorePeers: readonly Required<AuthorityIndexSnapshotPeer>[];
   readonly maxTailBlocks: number;
 }
 

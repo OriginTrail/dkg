@@ -43,6 +43,23 @@ import {
 
 const MAX_SERVABLE_CHECKPOINTS = 8;
 
+/** Bootstrap observers only watch the scan: a throwing one must never fail it. */
+function notify<T>(observer: ((info: T) => void) | undefined, info: T): void {
+  if (observer === undefined) return;
+  try {
+    observer(info);
+  } catch {
+    // Observability only.
+  }
+}
+
+/** The coordinator's own error, or the same failure raised by another copy of this package. */
+function isBootstrapUnavailable(error: unknown): boolean {
+  return error instanceof ContextGraphAuthorityIndexBootstrapUnavailableError
+    || (typeof error === 'object' && error !== null
+      && (error as { code?: unknown }).code === 'AUTHORITY_INDEX_BOOTSTRAP_UNAVAILABLE');
+}
+
 type ServableCheckpoint = Readonly<{
   deploymentBlockNumber: number;
   throughBlockNumber: number;
@@ -356,6 +373,9 @@ export class ContextGraphAuthorityIndex {
     let scannedBlocks = 0;
     // Set once the scan passes the horizon; from then on nothing is committed.
     let tail: ContextGraphAuthorityIndexCheckpoint | undefined;
+    // Set once no trusted core could seed this scan and the operator opted in;
+    // from then on this is the local-history scan: never reseeded, never budgeted.
+    let fallback = false;
     const seedSession = this.#bootstrapCoordinator?.start({
       request: Object.freeze({
         scope, deploymentBlockNumber,
@@ -372,8 +392,22 @@ export class ContextGraphAuthorityIndex {
     try {
       for (;;) {
         lifecycleSignal.throwIfAborted();
-        if (seedSession !== undefined && tail === undefined && seedSession.needsSeed(durable)) {
-          durable = await seedSession.seed(durable);
+        if (seedSession !== undefined && !fallback && tail === undefined
+          && seedSession.needsSeed(durable)) {
+          try {
+            durable = await seedSession.seed(durable);
+          } catch (error) {
+            if (bootstrap === undefined || bootstrap.localHistoryFallback !== true
+              || !isBootstrapUnavailable(error)) {
+              throw error;
+            }
+            fallback = true;
+            seedSession.close();
+            notify(bootstrap.onLocalHistoryFallback, {
+              scope,
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          }
           continue;
         }
         const checkpoint = tail ?? (durable.kind === 'checkpoint'
@@ -402,7 +436,7 @@ export class ContextGraphAuthorityIndex {
         const throughBlockNumber = committing
           ? Math.min(pageThroughBlockNumber, persistThroughBlockNumber)
           : pageThroughBlockNumber;
-        if (bootstrap !== undefined
+        if (bootstrap !== undefined && !fallback
           && scannedBlocks + throughBlockNumber - fromBlockNumber + 1 > bootstrap.maxTailBlocks) {
           throw new ContextGraphAuthorityIndexBootstrapUnavailableError(new Error(
             'Context Graph authority index local tail scan budget exhausted',
@@ -432,6 +466,9 @@ export class ContextGraphAuthorityIndex {
           events,
         });
         const next = reduction.checkpoint;
+        notify(bootstrap?.onScanProgress, {
+          scope, fromBlockNumber, throughBlockNumber, finalizedNumber, scannedBlocks,
+        });
 
         if (!committing) {
           // Above the reorg horizon: project, do not persist.

@@ -6,6 +6,7 @@ import {
   type ContextGraphAuthorityIndexSnapshotRequest,
 } from '@origintrail-official/dkg-chain';
 import {
+  AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS,
   normalizeAuthorityIndexSnapshotConfig,
   type AuthorityIndexSnapshotConfig,
   type AuthorityIndexSnapshotPeer,
@@ -49,6 +50,13 @@ export type AuthorityIndexSnapshotClientOptions = (
     bytes: Uint8Array,
     options: AuthorityIndexSnapshotTransportOptions,
   ) => Promise<Uint8Array>;
+  /**
+   * Runtime trust set, resolved once per fetch, walked instead of the
+   * configured peers: cores the chain vouches for plus the network relays.
+   * Bounded exactly like configuration (unique identities, at most 8) and
+   * under the same per-peer and overall deadlines, validation and failover.
+   */
+  readonly resolvePeers?: (signal: AbortSignal) => Promise<readonly AuthorityIndexSnapshotPeer[]>;
   readonly timeoutMs?: number;
   /** One peer walk, including chain admission, never gets more than 30 seconds. */
   readonly overallTimeoutMs?: number;
@@ -70,7 +78,34 @@ export class AuthorityIndexSnapshotPeerStatusError extends Error {
   }
 }
 
-/** Ordered, bounded failover; no discovery, multicast, or durable message outbox. */
+async function resolveTrustedPeers(
+  resolvePeers: NonNullable<AuthorityIndexSnapshotClientOptions['resolvePeers']>,
+  signal: AbortSignal | undefined,
+  overall: AbortSignal,
+): Promise<readonly AuthorityIndexSnapshotPeer[]> {
+  let resolved: readonly AuthorityIndexSnapshotPeer[];
+  try {
+    resolved = await resolvePeers(overall);
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw new AuthorityIndexSnapshotUnavailableError([error]);
+  }
+  signal?.throwIfAborted();
+  const peers: AuthorityIndexSnapshotPeer[] = [];
+  const seen = new Set<string>();
+  for (const peer of resolved) {
+    if (seen.has(peer.peerId)) continue;
+    seen.add(peer.peerId);
+    peers.push(peer);
+    if (peers.length === AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS) break;
+  }
+  if (peers.length === 0) {
+    throw new AuthorityIndexSnapshotUnavailableError([new Error('no on-chain core peers are available')]);
+  }
+  return peers;
+}
+
+/** Ordered, bounded failover; no multicast or durable message outbox. */
 export function createAuthorityIndexSnapshotClient(options: AuthorityIndexSnapshotClientOptions): {
   fetchSnapshot(
     request: ContextGraphAuthorityIndexSnapshotRequest,
@@ -109,7 +144,10 @@ export function createAuthorityIndexSnapshotClient(options: AuthorityIndexSnapsh
         new Error('Authority index snapshot total seed deadline exceeded'),
       ), overallTimeoutMs);
       try {
-        for (const peer of config.trustedCorePeers) {
+        const peers = options.resolvePeers === undefined
+          ? config.trustedCorePeers
+          : await resolveTrustedPeers(options.resolvePeers, signal, overall.signal);
+        for (const peer of peers) {
           signal?.throwIfAborted();
           if (overall.signal.aborted) break;
           const attempt = new AbortController();

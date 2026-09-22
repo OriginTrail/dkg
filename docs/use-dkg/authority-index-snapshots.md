@@ -16,6 +16,29 @@ The table includes owners, participants, permission state, and historical versio
 counters. It is authority-bearing data. Enable snapshots only for core operators
 you trust to supply the complete, correct table.
 
+## Authority index bootstrap
+
+Since 10.0.18 an edge needs no configuration to use snapshots:
+
+- **Default (no `authorityIndex` block):** the edge discovers core nodes that
+  are verified on chain (sharding-table members from the agent registry, plus
+  the relays in the network file), requests a snapshot from them over the
+  protocol described below within one 30-second bootstrap budget, and then
+  reads the bounded recent tail from chain. If no discovered core supplies a
+  usable snapshot inside that budget, the edge logs it and falls back to the
+  local-history scan from the contract's deployment block, so it is never
+  slower than an edge without snapshots. Cores do not use snapshots; they build
+  the index from chain history. The startup log reports
+  `mode=core-snapshot trustedCoreCount=discovered discovery=on-chain-cores fallback=local-history`
+  with the tail budget and cache epoch.
+- **Explicit override:** an `authorityIndex` block in the edge's `config.json`
+  wins over discovery and pins the cores the edge trusts. Its keys are `mode`
+  (must be `core-snapshot`), `trustedCorePeers` (one to eight multiaddrs with
+  distinct pinned PeerIDs), `maxTailBlocks` (`200` to `10000`, default `2000`),
+  and `cacheEpoch` (nonnegative integer, default `0`). The startup log reports
+  the mode, trusted-core count, and tail budget. The rest of this page
+  describes the explicit block.
+
 ## Configure the cores first
 
 Use ordinary core configuration on the same network as the edges:
@@ -74,9 +97,10 @@ dkg start
 ```
 
 `trustedCorePeers` must contain one to eight valid multiaddrs with distinct pinned
-PeerIDs. The list comes only from the operator's local config. Being a relay,
-bootstrap peer, discovered core, or entry in a bundled network config does not
-grant snapshot trust.
+PeerIDs. The explicit list comes only from the operator's local config: relays,
+bootstrap peers, discovered cores, and entries in a bundled network config are
+never added to it. Without the block, the edge uses the discovered default
+described in [Authority index bootstrap](#authority-index-bootstrap).
 
 `maxTailBlocks` defaults to `2000` and must be an integer from `200` to `10000`.
 The minimum leaves room beyond the 50-block durable reorg holdback for refresh
@@ -106,7 +130,8 @@ invalid, or farther behind than `maxTailBlocks`. A recent valid local checkpoint
 resumes directly from chain without another download. No separate fetch command
 or HTTP snapshot endpoint is added by this feature.
 
-The edge connects to a configured core multiaddr and sends a JSON request over
+The edge connects to a core multiaddr (pinned by config, or discovered by
+default) and sends a JSON request over
 the authenticated libp2p protocol:
 
 ```text
@@ -229,8 +254,9 @@ normal authority reads or caller retries try again after a five-second bootstrap
 cooldown owned by the chain index; there is no separate transport cooldown or
 edge snapshot refresh timer. Reads recover when a
 suitable snapshot is available.
-There is no automatic fallback to a scan from contract deployment in
-`core-snapshot` mode. An edge whose persisted index is already within the tail
+With an explicit `authorityIndex` block there is no automatic fallback to a
+scan from contract deployment; only the discovered default falls back to
+local history. An edge whose persisted index is already within the tail
 limit can continue by reading that small tail from chain.
 
 For recovery, check the core's index-build progress and RPC access, then peer
@@ -240,15 +266,15 @@ do not increase the edge tail limit to cover the registry's full lifetime.
 ## Rollout and compatibility
 
 Upgrade cores first and let their indexes become ready, then enable this setting
-on edges. Omitting `authorityIndex` preserves the existing independent historical
-scan behavior, so updating the binary alone does not change an existing edge's
-trust policy. Removing the block and restarting returns to that behavior.
+on edges. Since 10.0.18, omitting `authorityIndex` selects the discovered-core
+default with local-history fallback instead of an unconditional historical
+scan. Removing the block and restarting returns to that default.
 
 The persisted index is separated by trust policy. Changing the set of trusted
 PeerIDs requires a snapshot under the new policy. Removing `authorityIndex`
-returns to the independently built local index, rebuilding from chain if it does
-not exist; it never promotes a core-supplied table to independently verified
-history. Changing only a core's address while retaining its PeerID does not change
+returns to the discovered default; it never promotes a core-supplied table to
+independently verified history. Changing only a core's address while retaining
+its PeerID does not change
 the trusted identity.
 
 To discard an imported index while keeping the same trusted peers, increase

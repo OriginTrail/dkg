@@ -97,6 +97,9 @@ describe('trusted core authority index bootstrap', () => {
     { trustDomain: 'x'.repeat(257) },
     { trustDomain: 1 as unknown as string },
     { fetchSnapshot: undefined as unknown as ContextGraphAuthorityIndexBootstrap['fetchSnapshot'] },
+    { localHistoryFallback: 'yes' as unknown as boolean },
+    { onLocalHistoryFallback: 'log' as unknown as ContextGraphAuthorityIndexBootstrap['onLocalHistoryFallback'] },
+    { onScanProgress: 1 as unknown as ContextGraphAuthorityIndexBootstrap['onScanProgress'] },
   ])('rejects invalid bootstrap construction before store or transport activity: %j', (invalid) => {
     const store = new ScopedStore();
     const source = bootstrap(invalid);
