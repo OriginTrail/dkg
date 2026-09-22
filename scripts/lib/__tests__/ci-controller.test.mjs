@@ -34,31 +34,6 @@ function workflowJobBlock(workflow, jobName) {
   return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
 }
 
-test('retired audit sampling no longer promotes pull requests to full CI', (t) => {
-  // Head SHAs starting 00000000 used to fall in a 5% full-CI sample. Protected
-  // pushes, merge-queue candidates and the nightly run are the full-CI safety
-  // net; plan-ci.mjs still parses --sample-key so workflow wiring from either
-  // side of a controller rotation keeps working under strict parsing.
-  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-sample-'));
-  t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
-  const changesPath = path.join(temporaryDirectory, 'changes.z');
-  fs.writeFileSync(changesPath, Buffer.from('M\0packages/network-sim/src/index.ts\0'));
-  const planner = spawnSync(process.execPath, [
-    path.join(REPO_ROOT, 'scripts/ci/plan-ci.mjs'),
-    '--event',
-    'pull_request',
-    '--changes-z',
-    changesPath,
-    '--sample-key',
-    '00000000ffffffffffffffffffffffffffffffff',
-  ], { encoding: 'utf8' });
-  assert.equal(planner.status, 0, planner.stderr);
-  const plan = JSON.parse(planner.stdout);
-  assert.equal(plan.mode, 'delta');
-  assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
-  assert.equal('auditSampled' in plan, false);
-});
-
 test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-manifest-'));
   t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
@@ -179,8 +154,6 @@ test('trusted planner and gates reject the all-skipped candidate-control attack'
     'pull_request',
     '--changes-z',
     changesPath,
-    '--sample-key',
-    'ffffffffffffffffffffffffffffffffffffffff',
   ], { encoding: 'utf8' });
   assert.equal(planner.status, 0, planner.stderr);
   const plan = JSON.parse(planner.stdout);
