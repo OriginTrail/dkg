@@ -22,7 +22,7 @@ import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
-  createPromotePostCommitFailure,
+  classifyPromoteCompanionSettlementFailure,
 } from './promote-replay-safety.js';
 import { finalizeCommittedAssertionPromote } from './assertion-promote-finalization.js';
 import {
@@ -9128,8 +9128,11 @@ export class DKGPublisher implements Publisher {
     try {
       resolvedRootCompanion?.settle?.(companionCommitted);
     } catch (error) {
-      // A companion settlement must never certify a retry after dispatch.
-      throw companionCommitted === false ? error : createPromotePostCommitFailure(error);
+      // A proven non-commit propagates the settlement failure as-is. After
+      // dispatch, only a storage-certified never-started settlement with an
+      // unknown compound outcome earns a bounded queue retry; a known commit
+      // or an indeterminate settlement failure stays post-commit fatal.
+      throw classifyPromoteCompanionSettlementFailure(error, companionCommitted);
     }
     if (promotionFailure !== undefined) throw promotionFailure.error;
     await finalizeCommittedAssertionPromote({
