@@ -12,13 +12,14 @@ describe('authority index role defaults', () => {
     const resolved = resolveDefaultAuthorityIndexConfig('edge')!;
     expect(resolved).toMatchObject({
       mode: 'core-snapshot',
-      discovery: 'on-chain-cores',
       trustedCorePeers: [],
       maxTailBlocks: 2_000,
       cacheEpoch: 0,
     });
+    expect(resolved.discovery).toBe('on-chain-cores');
     expect(resolved.snapshot).toEqual({ trustedCorePeers: [], maxTailBlocks: 2_000 });
-    expect(Object.keys(resolved)).not.toContain('snapshot');
+    // Runtime-only metadata never reaches the public wire shape.
+    expect(Object.keys(resolved)).toEqual(['mode', 'trustedCorePeers', 'maxTailBlocks', 'cacheEpoch']);
     expect(Object.isFrozen(resolved)).toBe(true);
     expect(Object.isFrozen(resolved.trustedCorePeers)).toBe(true);
     expect(Object.isFrozen(resolved.snapshot)).toBe(true);
@@ -39,12 +40,22 @@ describe('authority index role defaults', () => {
     expect(() => resolveAuthorityIndexConfig({
       mode: 'core-snapshot', discovery: 'on-chain-cores', trustedCorePeers: [pinnedAddress],
     }, 'edge')).toThrow('Unknown authorityIndex option(s): discovery');
-    // A serialized default is a runtime decision, not a config.json shape.
+    // A serialized default is a runtime decision, not a config.json shape: it
+    // carries no discovery key, and what it does carry names no peers, which
+    // explicit configuration may not do.
     const persisted = JSON.parse(JSON.stringify(resolveDefaultAuthorityIndexConfig('edge')));
-    expect(persisted).toEqual({
-      mode: 'core-snapshot', discovery: 'on-chain-cores', trustedCorePeers: [], maxTailBlocks: 2_000, cacheEpoch: 0,
-    });
-    expect(() => resolveAuthorityIndexConfig(persisted, 'edge')).toThrow('Unknown authorityIndex option(s): discovery');
+    expect(persisted).toEqual({ mode: 'core-snapshot', trustedCorePeers: [], maxTailBlocks: 2_000, cacheEpoch: 0 });
+    expect(() => resolveAuthorityIndexConfig(persisted, 'edge'))
+      .toThrow('authorityIndex: Authority index trustedCorePeers must contain at least 1');
+  });
+
+  it('scans every input for unknown keys, our own resolved objects included', () => {
+    const resolved = resolveDefaultAuthorityIndexConfig('edge')!;
+    expect(() => resolveAuthorityIndexConfig({ ...resolved, discovery: 'on-chain-cores' }, 'edge'))
+      .toThrow('Unknown authorityIndex option(s): discovery');
+    const explicit = resolveAuthorityIndexConfig({ mode: 'core-snapshot', trustedCorePeers: [pinnedAddress] }, 'edge')!;
+    expect(() => resolveAuthorityIndexConfig({ ...explicit, unexpected: 1 }, 'edge'))
+      .toThrow('Unknown authorityIndex option(s): unexpected');
   });
 
   it('resolves explicit trust without a discovery mode', () => {

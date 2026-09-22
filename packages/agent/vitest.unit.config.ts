@@ -24,6 +24,7 @@ export default defineConfig({
       "test/authority-index-config.test.ts",
       "test/authority-index-core-discovery.test.ts",
       "test/authority-index-snapshot-transport.test.ts",
+      "test/sharding-table-gate.test.ts",
       "test/context-graph-discovery-options.test.ts",
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",

@@ -1,11 +1,7 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { peerIdFromString } from '@libp2p/peer-id';
 import { resolveAuthorityIndexConfig } from './authority-index-config.js';
-import {
-  createOnChainCorePeerResolver,
-  type OnChainCorePeerResolver,
-} from './authority-index-core-discovery.js';
+import { createAgentCorePeerResolver } from './authority-index-core-discovery.js';
 import { createAuthorityIndexSnapshotTransport } from './authority-index-snapshot-transport.js';
 import {
   createAuthorityIndexSnapshotClient,
@@ -1217,25 +1213,21 @@ export class DKGAgent extends DKGAgentBase {
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
     const log = new Logger('DKGAgent');
     const ctx = createOperationContext('system');
-    let authorityIndex = resolveAuthorityIndexConfig(
+    const authorityIndex = resolveAuthorityIndexConfig(
       inputConfig.authorityIndex,
       inputConfig.nodeRole ?? 'edge',
     );
+    // One invariant for explicit configuration and the role default alike: the
+    // daemon applies the default only where these hold, so reaching here
+    // without them is a wiring error, never a reason to downgrade silently.
     if (authorityIndex !== undefined && (
       inputConfig.chainAdapter !== undefined
       || !inputConfig.chainConfig?.operationalKeys?.length
       || inputConfig.localContextGraphAuthorityIndexStore === undefined
     )) {
-      if (authorityIndex.discovery === undefined) {
-        throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
-      }
-      // The role default asked nothing of the operator, so a node without an
-      // EVM chain or durable index store simply keeps indexing its own history.
-      log.warn(ctx, '[authority-index] core-snapshot bootstrap requires a configured EVM chain and a local authority index store; using local history');
-      authorityIndex = undefined;
+      throw new TypeError('authorityIndex core-snapshot mode requires a configured EVM chain and a local authority index store');
     }
     let agentRef: DKGAgent | undefined;
-    let corePeerResolver: OnChainCorePeerResolver | undefined;
     const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
       normalizedConfig: authorityIndex.snapshot,
       request: createAuthorityIndexSnapshotTransport(() => agentRef === undefined ? undefined : {
@@ -1243,32 +1235,16 @@ export class DKGAgent extends DKGAgentBase {
         node: agentRef.node,
         router: agentRef.router,
       }),
-      resolvePeers: authorityIndex.discovery !== 'on-chain-cores' ? undefined : async (signal) => {
-        // Chain, libp2p identity and the phonebook exist only once the agent runs.
-        const agent = agentRef;
-        if (agent === undefined || !agent.started) return [];
-        corePeerResolver ??= createOnChainCorePeerResolver({
-          selfPeerId: agent.node.libp2p.peerId.toString(),
-          findAgents: async () => (await agent.discovery.findAgents()).map((a) => ({
-            peerId: a.peerId,
-            nodeRole: a.nodeRole,
-            agentAddress: a.agentAddress,
-            lastSeen: a.lastSeen,
-          })),
-          networkRelays: agent.config.relayPeers ?? [],
-          isConnected: (peerId) => {
-            try {
-              return agent.node.libp2p.getConnections(peerIdFromString(peerId)).length > 0;
-            } catch {
-              return false;
-            }
-          },
-          getIdentityIdForAddress: agent.chain.getIdentityIdForAddress?.bind(agent.chain),
-          isShardingTableMember: agent.chain.isShardingTableMember?.bind(agent.chain),
-          staleThresholdMs: AGENT_PROFILE_STALE_THRESHOLD_MS,
-        });
-        return corePeerResolver.resolve(signal);
-      },
+      // Only the network file's relays are trusted without a chain verdict;
+      // `relayPeers` is the connectivity set and may carry operator relays.
+      resolvePeers: authorityIndex.discovery !== 'on-chain-cores' ? undefined
+        : createAgentCorePeerResolver(() => agentRef === undefined ? undefined : {
+          started: agentRef.started,
+          node: agentRef.node,
+          discovery: agentRef.discovery,
+          chain: agentRef.chain,
+          networkRelays: agentRef.config.networkRelays ?? [],
+        }),
     });
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined

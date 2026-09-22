@@ -32,7 +32,10 @@ export interface ResolvedAuthorityIndexConfig extends AuthorityIndexConfig {
 /**
  * The role default when config.json names no authorityIndex: an edge seeds
  * from cores it can verify on chain and falls back to its own history when
- * none answers; a core always indexes its own chain log.
+ * none answers; a core always indexes its own chain log. Like any
+ * core-snapshot config it needs a configured EVM chain and a local index
+ * store, so the caller applies it only where those hold; `DKGAgent.create`
+ * enforces that invariant for the default and explicit config alike.
  */
 export function resolveDefaultAuthorityIndexConfig(
   nodeRole: 'core' | 'edge',
@@ -50,7 +53,11 @@ export function resolveDefaultAuthorityIndexConfig(
     cacheEpoch: 0,
     snapshot,
   };
+  // Runtime-only metadata stays off the public wire shape: a serialized
+  // default carries no discovery key, and the unknown-key scan below stays
+  // uniform for every input instead of exempting our own objects.
   Object.defineProperty(resolved, 'snapshot', { enumerable: false });
+  Object.defineProperty(resolved, 'discovery', { enumerable: false });
   Object.freeze(resolved);
   resolvedConfigs.add(resolved);
   return resolved;
@@ -69,9 +76,7 @@ export function resolveAuthorityIndexConfig(
     throw new TypeError('authorityIndex must be an object');
   }
   const allowedKeys = new Set(['mode', 'trustedCorePeers', 'maxTailBlocks', 'cacheEpoch']);
-  // Our own resolved objects may carry runtime-only fields such as discovery.
-  const unknownKeys = resolvedConfigs.has(config) ? []
-    : Object.keys(config).filter((key) => !allowedKeys.has(key));
+  const unknownKeys = Object.keys(config).filter((key) => !allowedKeys.has(key));
   if (unknownKeys.length > 0) {
     throw new TypeError(
       `Unknown authorityIndex option(s): ${unknownKeys.join(', ')}. `
@@ -90,7 +95,9 @@ export function resolveAuthorityIndexConfig(
     throw new TypeError('authorityIndex core-snapshot mode is only supported on edge nodes');
   }
   // The daemon validates before allocating resources, then passes this same
-  // immutable value to DKGAgent.create. Only our own objects bypass re-parsing.
+  // immutable value to DKGAgent.create. Only our own objects bypass
+  // re-normalization: the role default names no peers, which explicit
+  // configuration may not do.
   if (resolvedConfigs.has(config)) return config as ResolvedAuthorityIndexConfig;
   try {
     const normalized = normalizeAuthorityIndexSnapshotConfig(value);

@@ -20,17 +20,28 @@ you trust to supply the complete, correct table.
 
 Since 10.0.18 an edge needs no configuration to use snapshots:
 
-- **Default (no `authorityIndex` block):** the edge discovers core nodes that
-  are verified on chain (sharding-table members from the agent registry, plus
-  the relays in the network file), requests a snapshot from them over the
-  protocol described below within one 30-second bootstrap budget, and then
-  reads the bounded recent tail from chain. If no discovered core supplies a
-  usable snapshot inside that budget, the edge logs it and falls back to the
-  local-history scan from the contract's deployment block, so it is never
-  slower than an edge without snapshots. Cores do not use snapshots; they build
-  the index from chain history. The startup log reports
+- **Default (no `authorityIndex` block):** an edge with a configured EVM chain
+  (`chain.rpcUrl` and `chain.hubAddress`) and operational keys builds its
+  trust set at runtime from the relays listed in the network file plus
+  agent-registry (phonebook) cores. Phonebook cores must verify on chain: a
+  core is asked only after its operational address resolves to a
+  sharding-table member. Network-file relays are additionally checked on
+  chain when their registry profile has an address. Operator-configured
+  `relay` and `preferredRelays` entries never enter the trust set. The edge
+  requests a snapshot from that set over the protocol described below within
+  one 30-second bootstrap budget, and then reads the bounded recent tail from
+  chain. If no discovered core supplies a usable snapshot inside that budget,
+  the edge logs it and continues with the local-history scan, resuming from
+  any checkpoint it already scanned locally instead of rescanning from the
+  contract's deployment block, so it is never slower than an edge without
+  snapshots. The startup log reports
   `mode=core-snapshot trustedCoreCount=discovered discovery=on-chain-cores fallback=local-history`
-  with the tail budget and cache epoch.
+  with the tail budget and cache epoch. An edge that cannot run the default
+  (mock chain adapter, no chain configuration, or no operational wallets)
+  keeps the local-history scan; its startup log reports `mode=local-history`,
+  preceded by
+  `[authority-index] discovered core-snapshot default skipped: <reason>; using local history`.
+  Cores do not use snapshots; they build the index from chain history.
 - **Explicit override:** an `authorityIndex` block in the edge's `config.json`
   wins over discovery and pins the cores the edge trusts. Its keys are `mode`
   (must be `core-snapshot`), `trustedCorePeers` (one to eight multiaddrs with
@@ -122,6 +133,9 @@ The standard daemon supplies the local durable index store. SDK callers must
 provide that store and a configured EVM chain with operational keys. This mode
 does not accept an injected `chainAdapter`: the agent must construct the EVM
 adapter so it can install the snapshot transport and its trust namespace together.
+`DKGAgent.create` rejects any core-snapshot configuration, explicit or
+discovered, without them; the daemon therefore selects the discovered default
+only when they are present and otherwise logs why it runs local history.
 
 ## How the node fetches the table
 
@@ -256,8 +270,10 @@ edge snapshot refresh timer. Reads recover when a
 suitable snapshot is available.
 With an explicit `authorityIndex` block there is no automatic fallback to a
 scan from contract deployment; only the discovered default falls back to
-local history. An edge whose persisted index is already within the tail
-limit can continue by reading that small tail from chain.
+local history, and that fallback resumes from any checkpoint the edge already
+scanned locally instead of rescanning. An edge whose persisted index is
+already within the tail limit can continue by reading that small tail from
+chain.
 
 For recovery, check the core's index-build progress and RPC access, then peer
 reachability and the pinned PeerIDs. Allow cold cores to finish their first build;
@@ -266,9 +282,10 @@ do not increase the edge tail limit to cover the registry's full lifetime.
 ## Rollout and compatibility
 
 Upgrade cores first and let their indexes become ready, then enable this setting
-on edges. Since 10.0.18, omitting `authorityIndex` selects the discovered-core
-default with local-history fallback instead of an unconditional historical
-scan. Removing the block and restarting returns to that default.
+on edges. Since 10.0.18, omitting `authorityIndex` on an edge with a configured
+EVM chain and operational keys selects the discovered-core default with
+local-history fallback instead of an unconditional historical scan. Removing
+the block and restarting returns to that default.
 
 The persisted index is separated by trust policy. Changing the set of trusted
 PeerIDs requires a snapshot under the new policy. Removing `authorityIndex`

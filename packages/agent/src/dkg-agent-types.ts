@@ -1472,6 +1472,14 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /**
+   * The relay multiaddrs from the network file, used as trusted
+   * authority-snapshot providers when the edge default discovers its trust
+   * set at runtime. Distinct from `relayPeers`, which is the connectivity set
+   * and may include operator-added relays the network never vouched for; only
+   * entries listed here are trusted without a chain verdict.
+   */
+  networkRelays?: readonly string[];
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**

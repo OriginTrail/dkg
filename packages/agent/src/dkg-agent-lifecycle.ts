@@ -281,6 +281,7 @@ import {
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
+import { evaluateShardingTableGate } from './p2p/sharding-table-gate.js';
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
@@ -5630,26 +5631,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * Trust gate for warm-core pinning: only pin Cores that are members of the
    * on-chain ShardingTable (staked nodes). Best-effort — when the chain
    * adapter can't answer (no chain bound, optional reads absent) the gate
-   * passes so the phonebook `nodeRole='core'` alone decides. A transient
-   * RPC failure denies (we don't pin on an unverifiable gate).
+   * passes so the phonebook `nodeRole='core'` alone decides. A legacy or
+   * mixed-version core profile may not carry an operational wallet either;
+   * discovery elsewhere supports profiles without `agentAddress`, so its
+   * absence is "gate unavailable" too rather than a hard denial — otherwise
+   * the warm set can collapse to zero in a network with healthy but
+   * pre-agentAddress cores. A transient RPC failure denies (we don't pin on
+   * an unverifiable gate).
    */
   async isShardingTableCore(this: DKGAgent, agentAddress: string | undefined): Promise<boolean> {
-    const getIdentityIdForAddress = this.chain.getIdentityIdForAddress?.bind(this.chain);
-    const isShardingTableMember = this.chain.isShardingTableMember?.bind(this.chain);
-    if (!getIdentityIdForAddress || !isShardingTableMember) return true; // gate unavailable
-    // A legacy/mixed-version core profile may not carry an operational wallet.
-    // Discovery elsewhere supports profiles without `agentAddress`, so treat
-    // its absence as "gate unavailable" (fall back to phonebook nodeRole)
-    // rather than a hard denial — otherwise the warm set can collapse to zero
-    // in a network with healthy but pre-agentAddress cores.
-    if (!agentAddress) return true; // gate unavailable for this profile
-    try {
-      const identityId = await getIdentityIdForAddress(agentAddress);
-      if (identityId === 0n) return false;
-      return await isShardingTableMember(identityId);
-    } catch {
-      return false;
-    }
+    return evaluateShardingTableGate({
+      getIdentityIdForAddress: this.chain.getIdentityIdForAddress?.bind(this.chain),
+      isShardingTableMember: this.chain.isShardingTableMember?.bind(this.chain),
+      agentAddress,
+      unavailable: 'allow',
+    });
   }
 
   /**

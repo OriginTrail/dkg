@@ -44,6 +44,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
+import { decideAuthorityIndexBootstrap } from './authority-index-bootstrap-decision.js';
 import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
@@ -1138,12 +1139,14 @@ async function runDaemonInnerWithStartupOwnership(
 ): Promise<void> {
   // Snapshot peers supply authority-bearing state, so explicit operator config
   // is validated before allocating startup resources and always wins. Without
-  // an `authorityIndex` block, edge nodes discover on-chain core nodes at
-  // runtime for snapshot bootstrap and fall back to local history; cores keep
-  // building the index from chain history (no default).
+  // an `authorityIndex` block an edge defaults to discovering on-chain cores
+  // for snapshot bootstrap (falling back to local history), but that default
+  // is decided only once the agent's chain wiring is known, below: the agent
+  // rejects core-snapshot mode without a real EVM chain, operational keys and
+  // a local index store, and the startup line must never announce a mode the
+  // node will not run. Cores keep building the index from chain history.
   assertAuthorityIndexConfigPlacement(config);
-  const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge')
-    ?? resolveDefaultAuthorityIndexConfig(config.nodeRole ?? 'edge');
+  const explicitAuthorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1309,7 +1312,6 @@ async function runDaemonInnerWithStartupOwnership(
     ? `v${nodeVersion}, ${nodeCommit}`
     : `v${nodeVersion}`;
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
-  log(formatAuthorityIndexStartupLine(authorityIndex));
 
   // RFC-41 §4.9 / §4.3: structured startup log lines for telemetry.
   // The doctor's state summary correlates these with /api/status —
@@ -1816,6 +1818,32 @@ async function runDaemonInnerWithStartupOwnership(
   const kaNumberStore = new SqliteKaNumberStore(dashDb);
   const kaNumberAllocator = new KaNumberAllocator(kaNumberStore);
 
+  // The discovered edge default is decided here, from the same facts the agent
+  // checks in `DKGAgent.create`: the projected EVM chain config (`chainConfig`
+  // below), no injected mock adapter, the operational keys, and the daemon's
+  // durable index store. When they do not hold the node runs local history and
+  // the log says why, so the `[authority-index]` line never announces on-chain
+  // discovery for a mock-chain or chain-less edge. Explicit config still wins
+  // unconditionally; the agent enforces its own preconditions for it.
+  const authorityIndexDecision = decideAuthorityIndexBootstrap({
+    explicitAuthorityIndex,
+    nodeRole: role,
+    hasEvmChainConfig: runtimeEvmChainConfig !== undefined,
+    usesMockChainAdapter: mockChainAdapter !== undefined,
+    operationalWalletCount: opWallets.wallets.length,
+    // Always constructed by the daemon; only SDK embedders can omit the store.
+    hasLocalAuthorityIndexStore: localContextGraphAuthorityIndexStore !== undefined,
+    resolveDefault: resolveDefaultAuthorityIndexConfig,
+  });
+  const effectiveAuthorityIndex = authorityIndexDecision.authorityIndex;
+  if (authorityIndexDecision.reason !== undefined) {
+    log(
+      `[info] [authority-index] discovered core-snapshot default skipped: `
+      + `${authorityIndexDecision.reason}; using local history`,
+    );
+  }
+  log(formatAuthorityIndexStartupLine(effectiveAuthorityIndex));
+
   // Mint managed authority only after the complete agent config has been
   // assembled. Passing the start-up result through an ordinary object literal
   // would intentionally strip its non-enumerable runtime authority.
@@ -1841,10 +1869,15 @@ async function runDaemonInnerWithStartupOwnership(
     dataDir: dkgDir(),
     bootstrapPeers: config.bootstrapPeers,
     relayPeers,
+    // The relays listed in the network file are the relay part of the
+    // discovered authority-index trust set. `relayPeers` above may instead
+    // carry the operator's `relay` / `preferredRelays` transport preferences,
+    // which never become snapshot trust.
+    networkRelays: network?.relays ?? [],
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
-    authorityIndex,
+    authorityIndex: effectiveAuthorityIndex,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
     logging: config.logging,

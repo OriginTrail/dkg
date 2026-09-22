@@ -41,6 +41,8 @@ const SECOND_PINNED_PEER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M
 const secondPinnedAddress = `/dns4/core.example.com/tcp/9090/p2p/${SECOND_PINNED_PEER}`;
 const DISCOVERED_CORE_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 const DISCOVERED_CORE_ADDRESS = '0x00000000000000000000000000000000000000c0';
+const OPERATOR_RELAY_ADDRESS = '0x00000000000000000000000000000000000000a0';
+const NETWORK_RELAY_ADDRESS = '0x00000000000000000000000000000000000000b0';
 const SELF_PEER = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const evmChainConfig = {
   rpcUrl: 'http://127.0.0.1:59998',
@@ -453,7 +455,10 @@ describe('authority index snapshot production wiring', () => {
       store,
       nodeRole: 'edge',
       authorityIndex: resolveDefaultAuthorityIndexConfig('edge'),
-      relayPeers: [pinnedAddress],
+      // The connectivity relays may carry an operator entry the network file
+      // never vouched for; only the network file's relays are trusted.
+      relayPeers: [secondPinnedAddress, pinnedAddress],
+      networkRelays: [pinnedAddress],
       localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
       chainConfig: evmChainConfig,
     });
@@ -545,34 +550,94 @@ describe('authority index snapshot production wiring', () => {
     }
   }, 20_000);
 
-  it('falls back to local history with one warning when the discovered default has no EVM chain or index store', async () => {
-    const logs: LogRecord[] = [];
-    Logger.setSink((record) => { logs.push(record); });
-    const store = new OxigraphStore();
-    let agent: DKGAgent | undefined;
-    try {
-      agent = await DKGAgent.create({
-        name: 'SnapshotDiscoveredFallback',
-        listenHost: '127.0.0.1',
-        listenPort: 0,
-        store,
-        nodeRole: 'edge',
-        authorityIndex: resolveDefaultAuthorityIndexConfig('edge'),
-        chainAdapter: new MockChainAdapter(),
-      });
-      expect((agent as any).config.authorityIndex).toBeUndefined();
-      expect(logs.filter((record) => record.message.startsWith('[authority-index]'))).toEqual([
-        expect.objectContaining({
-          level: 'warn',
-          message: '[authority-index] core-snapshot bootstrap requires a configured EVM chain and a local authority index store; using local history',
-        }),
-      ]);
-    } finally {
-      Logger.setSink(null);
-      await agent?.node.stop();
-      await store.close();
-    }
+  it.each([
+    ['an injected chain adapter', { chainAdapter: new MockChainAdapter() }],
+    ['no EVM configuration', { chainConfig: undefined }],
+    ['no operational keys', { chainConfig: { ...evmChainConfig, operationalKeys: [] } }],
+    ['no local index store', { localContextGraphAuthorityIndexStore: undefined }],
+  ])('rejects the discovered default with %s: the daemon owns that precondition', async (_label, overrides) => {
+    // The daemon applies the default only where a real EVM chain with
+    // operational keys and the local index store are configured, so the
+    // agent keeps one invariant for the default and explicit config alike.
+    const failure = DKGAgent.create({
+      name: 'InvalidDiscoveredConstruction',
+      nodeRole: 'edge',
+      authorityIndex: resolveDefaultAuthorityIndexConfig('edge'),
+      chainConfig: evmChainConfig,
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      ...overrides,
+    });
+    await expect(failure).rejects.toBeInstanceOf(TypeError);
+    await expect(failure).rejects.toThrow('requires a configured EVM chain and a local authority index store');
   });
+
+  it.each([
+    ['ignores an operator relay the phonebook lists as an edge, whatever the chain says of its address', {
+      profile: { peerId: SECOND_PINNED_PEER, nodeRole: 'edge', agentAddress: OPERATOR_RELAY_ADDRESS },
+      members: [OPERATOR_RELAY_ADDRESS],
+      walk: [PINNED_PEER],
+    }],
+    ['admits an operator relay only as a chain-verified phonebook core over its live connection', {
+      profile: { peerId: SECOND_PINNED_PEER, nodeRole: 'core', agentAddress: OPERATOR_RELAY_ADDRESS },
+      members: [OPERATOR_RELAY_ADDRESS],
+      walk: [PINNED_PEER, SECOND_PINNED_PEER],
+    }],
+    ['drops a network relay the chain denies for the address the phonebook attributes to it', {
+      profile: { peerId: PINNED_PEER, nodeRole: 'core', agentAddress: NETWORK_RELAY_ADDRESS },
+      members: [],
+      walk: [],
+    }],
+  ])('%s', async (_label, { profile, members, walk }) => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'SnapshotRelayTrust',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      store,
+      nodeRole: 'edge',
+      authorityIndex: resolveDefaultAuthorityIndexConfig('edge'),
+      relayPeers: [secondPinnedAddress, pinnedAddress],
+      networkRelays: [pinnedAddress],
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      chainConfig: evmChainConfig,
+    });
+    const chain = (agent as any).chain;
+    const bootstrap = chain.contextGraphAuthorityIndex.bootstrap as ContextGraphAuthorityIndexBootstrap;
+    const libp2p = {
+      peerId: peerIdFromString(SELF_PEER),
+      getConnections: vi.fn((peerId?: { toString(): string }) => (
+        peerId?.toString() === SECOND_PINNED_PEER ? [{}] : []
+      )),
+      peerStore: { merge: vi.fn(async () => {}) },
+      dial: vi.fn(async () => ({})),
+    };
+    vi.spyOn(agent.node, 'libp2p', 'get').mockReturnValue(libp2p as any);
+    vi.spyOn(agent.discovery, 'findAgents').mockResolvedValue([
+      { agentUri: `did:dkg:${profile.nodeRole}`, name: profile.nodeRole, lastSeen: new Date().toISOString(), ...profile },
+    ]);
+    vi.spyOn(chain, 'getIdentityIdForAddress').mockImplementation(async (address: string) => (
+      members.includes(address) ? 7n : 0n
+    ));
+    vi.spyOn(chain, 'isShardingTableMember').mockImplementation(async (identityId: bigint) => identityId === 7n);
+    const send = vi.fn(async () => { throw new Error('no snapshot here'); });
+    (agent as any).router = { send };
+    (agent as any).started = true;
+    try {
+      await expect(bootstrap.fetchSnapshot(request, new AbortController().signal, vi.fn())).rejects.toMatchObject({
+        code: 'AUTHORITY_INDEX_SNAPSHOT_UNAVAILABLE',
+      });
+      expect(send.mock.calls.map(([peerId]) => peerId)).toEqual(walk);
+      // Only a network relay is ever dialed by address; a discovered core is
+      // reached over the connection that already exists.
+      expect(libp2p.dial.mock.calls.map(([address]) => String(address)))
+        .toEqual(walk.includes(PINNED_PEER) ? [pinnedAddress] : []);
+    } finally {
+      (agent as any).started = false;
+      await agent.node.stop();
+      await store.close();
+      chain.destroy();
+    }
+  }, 20_000);
 
   it('keeps explicit trust on the configured walk without fallback hooks', async () => {
     const store = new OxigraphStore();

@@ -21,8 +21,8 @@ changes are required.**
 
 | Change | Impact | Action |
 | --- | --- | --- |
-| Edge nodes bootstrap the authority index from discovered cores by default | An edge with no `authorityIndex` block discovers cores verified on chain at startup and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s) | No configuration change is required; update directly from 10.0.16 or 10.0.17. An explicit `authorityIndex` block keeps its pinned trust |
-| Local history remains the fallback | If no discovered core supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and runs the 10.0.17 local-history scan, which now logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
+| Edge nodes bootstrap the authority index from discovered cores by default | An edge with no `authorityIndex` block and a configured EVM chain with operational keys builds its trust set from the relays listed in the network file plus agent-registry cores verified on chain, and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s). An edge without that chain wiring (mock chain adapter, no chain configuration, or no operational wallets) keeps the local-history scan and logs why | No configuration change is required; update directly from 10.0.16 or 10.0.17. An explicit `authorityIndex` block keeps its pinned trust |
+| Local history remains the fallback | If no discovered core supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and continues with the 10.0.17 local-history scan, resuming from any checkpoint it already scanned locally instead of rescanning; the scan now logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
 
 ### Fixed
 
@@ -38,15 +38,28 @@ changes are required.**
 ### Changed
 
 - **Runtime core discovery for snapshot bootstrap**: an edge with no explicit
-  `authorityIndex` block discovers core nodes verified on chain
-  (sharding-table members from the agent registry, plus the network file's
-  relays) and requests a snapshot over `/dkg/10.0.0/authority-index-snapshot/1`.
-  The startup line reports `mode=core-snapshot trustedCoreCount=discovered
-  discovery=on-chain-cores fallback=local-history` together with the tail and
-  cache-epoch values.
-- **Local-history fallback**: when no core supplies a usable snapshot within
-  the 30 s bootstrap budget, the node logs it and falls back to the
-  local-history scan, so it is never worse than 10.0.17.
+  `authorityIndex` block builds its trust set at runtime from the relays
+  listed in the network file plus agent-registry (phonebook) cores, and
+  requests a snapshot over `/dkg/10.0.0/authority-index-snapshot/1`.
+  Phonebook cores must verify on chain: a core is asked only after its
+  operational address resolves to a sharding-table member. Network-file
+  relays are additionally checked on chain when their registry profile has an
+  address. Operator-configured `relay` and `preferredRelays` entries never
+  enter the trust set. The startup line reports `mode=core-snapshot
+  trustedCoreCount=discovered discovery=on-chain-cores fallback=local-history`
+  together with the tail and cache-epoch values.
+- **The default applies only where it can run**: the discovered default needs
+  a configured EVM chain (`chain.rpcUrl` and `chain.hubAddress`) with
+  operational keys, which the agent requires for any core-snapshot
+  configuration. An edge on the mock chain adapter, without a chain
+  configuration, or without operational wallets keeps the local-history scan:
+  its startup line reports `mode=local-history`, preceded by
+  `[authority-index] discovered core-snapshot default skipped: <reason>; using local history`.
+- **Local-history fallback**: when no discovered core supplies a usable
+  snapshot within the 30 s bootstrap budget, the node logs it and continues
+  with the local-history scan, resuming from any checkpoint it already
+  scanned locally instead of rescanning from the deployment block, so it is
+  never worse than 10.0.17.
 - An explicit `authorityIndex` block still wins over the discovered default and
   keeps its pinned trusted-core semantics and its existing startup line. Cores
   receive no default and keep building the index from chain history.

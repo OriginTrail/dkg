@@ -50,7 +50,7 @@ describe('on-chain core peer discovery', () => {
     expect(deps.isShardingTableMember).toHaveBeenCalledExactlyOnceWith(7n);
   });
 
-  it('keeps a relay that the phonebook also lists once, with its configured address', async () => {
+  it('keeps a relay that the phonebook also lists once, with its configured address, after the chain vouches for its address', async () => {
     const { resolve, deps } = resolver({
       networkRelays: [relayAddress(RELAY_A)],
       findAgents: vi.fn(async () => [core(RELAY_A), core(CORE)]),
@@ -59,7 +59,71 @@ describe('on-chain core peer discovery', () => {
       { peerId: RELAY_A, multiaddr: relayAddress(RELAY_A) },
       { peerId: CORE },
     ]);
-    expect(deps.getIdentityIdForAddress).toHaveBeenCalledOnce();
+    expect(deps.getIdentityIdForAddress.mock.calls.map(([address]) => address))
+      .toEqual([core(RELAY_A).agentAddress, core(CORE).agentAddress]);
+  });
+
+  const DENIED = '0x00000000000000000000000000000000000000de';
+
+  it.each([
+    ['has no on-chain identity', {
+      getIdentityIdForAddress: vi.fn(async (address: string) => address === DENIED ? 0n : 7n),
+    }],
+    ['is not a ShardingTable member', {
+      getIdentityIdForAddress: vi.fn(async (address: string) => address === DENIED ? 9n : 7n),
+      isShardingTableMember: vi.fn(async (identityId: bigint) => identityId !== 9n),
+    }],
+  ])('drops a network relay whose phonebook address %s, and never re-admits it as a core', async (_label, overrides) => {
+    const { resolve, deps } = resolver({
+      networkRelays: [relayAddress(RELAY_A), relayAddress(RELAY_B)],
+      findAgents: vi.fn(async () => [core(RELAY_A, DENIED), core(RELAY_B), core(CORE)]),
+      ...overrides,
+    });
+    await expect(resolve.resolve(signal())).resolves.toEqual([
+      { peerId: RELAY_B, multiaddr: relayAddress(RELAY_B) },
+      { peerId: CORE },
+    ]);
+    // One chain verdict per address serves the relay pass and the core pass.
+    expect(deps.getIdentityIdForAddress.mock.calls.filter(([address]) => address === DENIED)).toHaveLength(1);
+  });
+
+  it.each([
+    ['without a phonebook profile', {}, [CORE]],
+    ['whose profile carries no operational address', {
+      findAgents: vi.fn(async () => [core(RELAY_A, undefined), { ...core(RELAY_A, ''), nodeRole: 'edge' }, core(CORE)]),
+    }, [CORE]],
+    // The same conditions fail closed for a phonebook core.
+    ['when the identity lookup is unavailable', {
+      findAgents: vi.fn(async () => [core(RELAY_A), core(CORE)]), getIdentityIdForAddress: undefined,
+    }, []],
+    ['when the membership lookup is unavailable', {
+      findAgents: vi.fn(async () => [core(RELAY_A), core(CORE)]), isShardingTableMember: undefined,
+    }, []],
+    ['when the membership lookup throws', {
+      findAgents: vi.fn(async () => [core(RELAY_A), core(CORE)]),
+      isShardingTableMember: vi.fn(async () => { throw new Error('rpc down'); }),
+    }, []],
+  ])('keeps a network relay %s on the network file\'s trust', async (_label, overrides, cores) => {
+    const { resolve } = resolver({ networkRelays: [relayAddress(RELAY_A)], ...overrides });
+    await expect(resolve.resolve(signal())).resolves.toEqual([
+      { peerId: RELAY_A, multiaddr: relayAddress(RELAY_A) },
+      ...cores.map((peerId) => ({ peerId })),
+    ]);
+  });
+
+  it('asks the chain again for a relay after a failed lookup, then remembers its denial', async () => {
+    const { resolve, deps } = resolver({
+      networkRelays: [relayAddress(RELAY_A)],
+      findAgents: vi.fn(async () => [core(RELAY_A)]),
+      isShardingTableMember: vi.fn(async () => { throw new Error('rpc down'); }),
+    });
+    await expect(resolve.resolve(signal())).resolves.toEqual([
+      { peerId: RELAY_A, multiaddr: relayAddress(RELAY_A) },
+    ]);
+    deps.isShardingTableMember.mockResolvedValue(false);
+    await expect(resolve.resolve(signal())).resolves.toEqual([]);
+    await expect(resolve.resolve(signal())).resolves.toEqual([]);
+    expect(deps.isShardingTableMember).toHaveBeenCalledTimes(2);
   });
 
   it('canonicalizes relay identities and skips relay entries without a final /p2p component', async () => {
