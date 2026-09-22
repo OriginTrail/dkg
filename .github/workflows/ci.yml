@@ -97,6 +97,12 @@ jobs:
       # This immutable controller is the authority for test selection. A
       # policy update intentionally uses a new reviewed commit SHA; never use
       # the merge candidate or a mutable branch here.
+      #
+      # Rotation shims: compatibility paths for older pinned controllers, to
+      # delete once this pin rotates to a controller that provides them:
+      #   - jobs.changes.outputs.node_test_artifacts fallback
+      #   - jobs.changes.outputs.tornado_agent_windows fallback
+      #   - ci-gate step "Require selected Windows lifecycle tests"
       - name: Checkout trusted CI controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
