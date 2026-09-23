@@ -524,6 +524,12 @@ function rehydratedSubscriptionReachedSafeState(
 // scan and then waiting for an unrelated periodic reconciler. The cap is a
 // hard safety bound; the no-progress guard below is the normal termination.
 const MAX_POST_APPROVAL_CURATOR_SYNC_ROUNDS = 64;
+/**
+ * Identity probes in flight while filtering connected catch-up peers. Matches
+ * the coordinator's preflight bound, so catch-up cannot fan out more identity
+ * streams than an ACK round does.
+ */
+const CONNECTED_PEER_ADMISSION_CONCURRENCY = 4;
 /** A recovery owner stops starting new assets after this scheduling quantum. */
 const DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS = 120_000;
 /** Hard fault ceiling: maximum-size transfer plus local settlement headroom. */
@@ -8002,6 +8008,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
+   * The live connections' remote peers (one per peer id, in connection order)
+   * that pass network admission: the catch-up candidate set. A still-open
+   * connection to a peer that failed the network-identity proof (another DKG
+   * network's relay, say) must never become a sync peer. Both catch-up runners
+   * (in-process and the CLI worker bridge) select from this one predicate.
+   * Uncached peers are probed with bounded concurrency; a failed probe drops
+   * the peer from this round.
+   */
+  async listAdmittedConnectedPeers(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Promise<Array<{ toString(): string }>> {
+    const connectedPeers = [...new Map<string, { toString(): string }>(
+      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+    ).values()];
+    const admitted = await mapWithConcurrency(
+      connectedPeers,
+      CONNECTED_PEER_ADMISSION_CONCURRENCY,
+      (peer) => this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer'),
+    );
+    return connectedPeers.filter((_peer, index) => admitted[index]);
+  }
+
+  /**
    * Catch up a single context graph from currently connected peers that advertise
    * the sync protocol. Useful after runtime subscribe so historical data is
    * backfilled immediately (not only future gossip messages).
@@ -8048,15 +8078,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       await this.primeCatchupConnections();
 
-      const connectedPeers = [...new Map(
-        this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
-      ).values()];
-      const admittedConnectedPeers: Array<{ toString(): string }> = [];
-      for (const peer of connectedPeers) {
-        if (await this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
-          admittedConnectedPeers.push(peer);
-        }
-      }
+      const admittedConnectedPeers = await this.listAdmittedConnectedPeers(ctx);
       const orderedPeers = this.selectCatchupPeers(
         admittedConnectedPeers,
         preferredPeerId,

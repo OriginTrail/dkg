@@ -413,10 +413,13 @@ describe('WorkerCatchupRunner agent bridge', () => {
   it('selects catch-up peers only from network-admitted connections', async () => {
     // 2026-09-23 Base mainnet: a subscribe fanned shared-memory sync out to
     // every live connection, including testnet relays that had failed the
-    // network-identity proof. Same predicate as the in-process catch-up.
+    // network-identity proof. The bridge runs the agent's own predicate — the
+    // real method, not a copy — which the in-process catch-up also selects from.
+    const { DKGAgent: RealDKGAgent } = await import('@origintrail-official/dkg-agent');
     const admissionChecks: string[] = [];
     const selectCalls: unknown[][] = [];
     const { agent } = bridgeAgent({
+      listAdmittedConnectedPeers: RealDKGAgent.prototype.listAdmittedConnectedPeers,
       resolveSyncPeerWithProvenance: async () => ({
         peerId: 'peer-curator',
         provenance: 'metadata',
@@ -425,7 +428,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-other-network'],
       node: {
         libp2p: {
-          getConnections: () => ['peer-curator', 'peer-other-network', 'peer-a'].map(
+          getConnections: () => ['peer-curator', 'peer-other-network', 'peer-a', 'peer-curator'].map(
             (id) => ({ remotePeer: { toString: () => id } }),
           ),
         },
