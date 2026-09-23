@@ -9,7 +9,7 @@
  * edge learns and verifies the cleartext id it adopts it and the same exact VM
  * fetch returns the data.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   DKG_ONTOLOGY,
@@ -309,6 +309,9 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
     const edge = await startAgent('PrivateEdge33', edgeChain);
     await seedHolder(holder, holderChain);
     await connect(edge, holder);
+    // A null answer alone would also pass if the request never reached the
+    // holder; watch the holder's reveal gate refuse this very graph.
+    const revealGate = vi.spyOn(holder, 'isContextGraphPublicForNameReveal');
 
     const answer = await edge.askPeerForContextGraphName(
       holder.peerId,
@@ -316,5 +319,50 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
       new AbortController().signal,
     );
     expect(answer).toBeNull();
+    expect(revealGate).toHaveBeenCalledTimes(1);
+    expect(revealGate.mock.calls[0]?.[0]).toBe(CLEARTEXT_ID);
+    await expect(revealGate.mock.results[0]?.value).resolves.toBe(false);
+  }, 120_000);
+
+  it('resolves from its own store first, reading the access policy from the chain', async () => {
+    const edgeChain = await chainWithContextGraph33('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const edge = await startAgent('Edge33LocalStore', edgeChain);
+    seedEdge(edge);
+    // Nothing cached: the resolver must prove the policy public itself.
+    edge.onChainAccessPolicyCache.delete(ON_CHAIN_ID);
+    // The creator's public definition, already in this node's own ontology
+    // graph (cores re-sync it to each other), next to another graph's.
+    await edge.store.insert([
+      {
+        subject: contextGraphDataGraphUri('acme-other'),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      },
+      {
+        subject: contextGraphDataGraphUri(CLEARTEXT_ID),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      },
+    ]);
+    const asked = vi.spyOn(edge, 'askPeerForContextGraphName');
+    const pulled = vi.spyOn(edge, 'pullPeerOntologyForContextGraphNames');
+
+    expect(await edge.resolveContextGraphNameHashNow(NAME_HASH)).toBe(CLEARTEXT_ID);
+    expect(edge.getContextGraphNameResolutionStatus()).toContainEqual(expect.objectContaining({
+      state: 'resolved',
+      nameHash: NAME_HASH,
+      contextGraphId: CLEARTEXT_ID,
+      source: 'local-store',
+    }));
+    expect(edge.onChainAccessPolicyCache.get(ON_CHAIN_ID)).toBe(0);
+    expect(edge.getSubscribedContextGraphs().get(CLEARTEXT_ID)).toMatchObject({
+      subscribed: true,
+      onChainId: ON_CHAIN_ID,
+      onChainHash: NAME_HASH,
+    });
+    expect(asked).not.toHaveBeenCalled();
+    expect(pulled).not.toHaveBeenCalled();
   }, 120_000);
 });
