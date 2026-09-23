@@ -130,7 +130,8 @@ export class EventsMethods extends EVMChainAdapterBase {
           return query(fromBlock, toBlock);
         }
         return readAdaptiveEvmLogRange({
-          provider: c.runner ?? undefined,
+          // The provider this attempt rebound `c` to: its span cap's key.
+          provider: c.runner ?? c,
           fromBlock,
           toBlock,
           read: query,

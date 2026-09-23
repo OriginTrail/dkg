@@ -317,6 +317,7 @@ describe('readAdaptiveEvmLogRange', () => {
     });
     expect(isRpcEndpointFailoverEligible(pruned)).toBe(false);
     const err = await readAdaptiveEvmLogRange({
+      provider: {},
       read: async () => { throw pruned; },
       fromBlock: 1,
       toBlock: 2_000,
@@ -470,6 +471,7 @@ describe('readAdaptiveEvmLogRange', () => {
 
   it('refuses a range that even a single block cannot satisfy', async () => {
     const err = await readAdaptiveEvmLogRange({
+      provider: {},
       read: async () => { throw new Error('block range too large'); },
       fromBlock: 7,
       toBlock: 7,
@@ -478,48 +480,18 @@ describe('readAdaptiveEvmLogRange', () => {
     expect((err as Error).message).toContain('refused even as a single block');
   });
 
-  it('returns rows in chain order and drops a log a provider returned twice', async () => {
-    const log = (blockNumber: number, index: number, blockHash = `0x${blockNumber.toString(16).padStart(64, '0')}`) => ({
-      blockNumber,
-      blockHash,
-      index,
-    });
-    const { read } = cappedReader({
+  it('returns rows in chain order, exactly as each request returned them', async () => {
+    const log = (blockNumber: number, index: number) => ({ blockNumber, index });
+    const { calls, read } = cappedReader({
       cap: 100,
-      // The provider leaks the last log of each chunk into the next chunk.
-      rows: (from, to) => [
-        ...(from > 1 ? [log(from - 1, 0)] : []),
-        log(from, 0),
-        log(to, 0),
-        log(to, 1),
-        { note: 'a row without log identity is kept' },
-      ],
+      rows: (from, to) => [log(from, 0), log(to, 0), log(to, 1)],
     });
-    const rows = await readAdaptiveEvmLogRange({ read, fromBlock: 1, toBlock: 200 });
+    const rows = await readAdaptiveEvmLogRange({ provider: {}, read, fromBlock: 1, toBlock: 200 });
+    expect(calls).toEqual([[1, 200], [1, 100], [101, 200]]);
+    // The refused request contributes nothing; the two that fit, in order.
     expect(rows).toEqual([
-      log(1, 0), log(100, 0), log(100, 1), { note: 'a row without log identity is kept' },
-      log(101, 0), log(200, 0), log(200, 1), { note: 'a row without log identity is kept' },
-    ]);
-    // Legacy `logIndex` rows and hash-less rows dedupe too.
-    const legacy = await readAdaptiveEvmLogRange({
-      read: async () => [
-        { blockNumber: 5, logIndex: 2 },
-        { blockNumber: 5, logIndex: 2 },
-        { blockHash: 7, logIndex: 1 },
-      ],
-      fromBlock: 1,
-      toBlock: 10,
-    });
-    expect(legacy).toEqual([{ blockNumber: 5, logIndex: 2 }, { blockHash: 7, logIndex: 1 }]);
-  });
-
-  it('keeps a cap learned without a provider to the one read', async () => {
-    const { calls, read } = cappedReader({ cap: 50 });
-    await readAdaptiveEvmLogRange({ read, fromBlock: 1, toBlock: 100 });
-    await readAdaptiveEvmLogRange({ read, fromBlock: 101, toBlock: 200 });
-    expect(calls).toEqual([
-      [1, 100], [1, 50], [51, 100],
-      [101, 200], [101, 150], [151, 200],
+      log(1, 0), log(100, 0), log(100, 1),
+      log(101, 0), log(200, 0), log(200, 1),
     ]);
   });
 
@@ -538,6 +510,7 @@ describe('readAdaptiveEvmLogRange', () => {
   it('rethrows an error that is not a range limit unchanged', async () => {
     const outage = Object.assign(new Error('RPC fetch failed: fetch failed'), { code: 'NETWORK_ERROR' });
     await expect(readAdaptiveEvmLogRange({
+      provider: {},
       read: async () => { throw outage; },
       fromBlock: 1,
       toBlock: 10,
@@ -553,6 +526,7 @@ describe('readAdaptiveEvmLogRange', () => {
       return rows;
     };
     await expect(readAdaptiveEvmLogRange({
+      provider: {},
       read: aborting,
       fromBlock: 1,
       toBlock: 100,

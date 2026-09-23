@@ -220,10 +220,10 @@ export function learnedEvmLogSpanCap(provider: object): number | undefined {
   return liveSpanCap(provider);
 }
 
-function providerHost(provider: object | undefined): string {
+function providerHost(provider: object): string {
   try {
-    const connection = (provider as { _getConnection?: () => { url?: unknown } } | undefined)
-      ?._getConnection?.();
+    const connection = (provider as { _getConnection?: () => { url?: unknown } })
+      ._getConnection?.();
     return typeof connection?.url === 'string' ? rpcHost(connection.url) : 'the provider';
   } catch {
     return 'the provider';
@@ -259,31 +259,6 @@ function providerMessage(err: unknown): string {
   return found.length > 300 ? `${found.slice(0, 300)}…` : found;
 }
 
-/**
- * Identity of a log row, when the row carries one: every positional field it
- * has, so only a row that is the same log twice ever collides.
- */
-function logIdentity(row: unknown): string | undefined {
-  if (row === null || typeof row !== 'object') return undefined;
-  const log = row as {
-    blockHash?: unknown;
-    blockNumber?: unknown;
-    transactionHash?: unknown;
-    index?: unknown;
-    logIndex?: unknown;
-  };
-  const index = typeof log.index === 'number'
-    ? log.index
-    : typeof log.logIndex === 'number' ? log.logIndex : undefined;
-  const blockNumber = typeof log.blockNumber === 'number' ? log.blockNumber : undefined;
-  const blockHash = typeof log.blockHash === 'string' ? log.blockHash.toLowerCase() : undefined;
-  if (index === undefined || (blockNumber === undefined && blockHash === undefined)) return undefined;
-  const transactionHash = typeof log.transactionHash === 'string'
-    ? log.transactionHash.toLowerCase()
-    : '';
-  return `${blockNumber ?? ''}:${blockHash ?? ''}:${transactionHash}:${index}`;
-}
-
 export interface AdaptiveEvmLogRangeParams<T> {
   /** One physical eth_getLogs over an inclusive range. Give it its own deadline. */
   read: (fromBlock: number, toBlock: number) => Promise<readonly T[]>;
@@ -291,13 +266,11 @@ export interface AdaptiveEvmLogRangeParams<T> {
   toBlock: number;
   signal?: AbortSignal;
   /**
-   * The provider `read` goes to. Its learned span cap is shared with every
-   * other reader of the same provider, so a cap learned by one scanner is
-   * where the next one starts. Without it, a cap lasts for this call only.
+   * The provider `read` goes to: the key its learned span cap is kept under.
+   * The cap is shared with every other reader of the same provider, so a cap
+   * learned by one scanner is where the next one starts.
    */
-  provider?: object;
-  /** Defaults to {@link EVM_LOG_RANGE_MAX_REQUESTS_PER_READ}. */
-  maxRequests?: number;
+  provider: object;
 }
 
 /**
@@ -312,27 +285,20 @@ export interface AdaptiveEvmLogRangeParams<T> {
  * - Anything else propagates unchanged.
  *
  * Requests are sequential, so a compatibility retry never becomes a burst, and
- * bounded by `maxRequests`: a range the cap cannot cover inside that budget is
- * refused up front rather than fetched one tiny span at a time. Rows come back
- * in chain order (ranges are read in ascending order), with any row a provider
- * returned twice dropped.
+ * bounded by {@link EVM_LOG_RANGE_MAX_REQUESTS_PER_READ}: a range the cap
+ * cannot cover inside that budget is refused up front rather than fetched one
+ * tiny span at a time. Rows come back in chain order, exactly as each request
+ * returned them: the ranges read are disjoint and ascending, and a refused
+ * range returns nothing before it is read again.
  */
 export async function readAdaptiveEvmLogRange<T>(
   params: Readonly<AdaptiveEvmLogRangeParams<T>>,
 ): Promise<T[]> {
   const { read, fromBlock, toBlock, signal, provider } = params;
-  const maxRequests = params.maxRequests ?? EVM_LOG_RANGE_MAX_REQUESTS_PER_READ;
-  let localCap: number | undefined;
-  const currentCap = (): number | undefined => (
-    provider === undefined ? localCap : liveSpanCap(provider)
-  );
+  const maxRequests = EVM_LOG_RANGE_MAX_REQUESTS_PER_READ;
   const learn = (maxBlocks: number, stated: boolean): void => {
-    const previous = currentCap();
+    const previous = liveSpanCap(provider);
     if (previous !== undefined && previous <= maxBlocks) return;
-    if (provider === undefined) {
-      localCap = maxBlocks;
-      return;
-    }
     const before = learnedSpanCaps.get(provider);
     learnedSpanCaps.set(provider, { maxBlocks, learnedAtMs: Date.now() });
     // An expired cap relearned at the same span is not news.
@@ -361,7 +327,7 @@ export async function readAdaptiveEvmLogRange<T>(
   let lastSpanRefusal: unknown;
   while (pending.length > 0) {
     signal?.throwIfAborted();
-    const cap = currentCap();
+    const cap = liveSpanCap(provider);
     // What the rest of the range costs at the current cap, checked BEFORE any
     // chunk list is built: a tiny cap over a wide range is refused, not
     // materialised.
@@ -400,13 +366,5 @@ export async function readAdaptiveEvmLogRange<T>(
       pending.unshift([lo, hi]);
     }
   }
-
-  const seen = new Set<string>();
-  return rows.filter((row) => {
-    const identity = logIdentity(row);
-    if (identity === undefined) return true;
-    if (seen.has(identity)) return false;
-    seen.add(identity);
-    return true;
-  });
+  return rows;
 }
