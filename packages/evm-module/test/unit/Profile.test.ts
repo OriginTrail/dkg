@@ -105,8 +105,8 @@ describe('@unit Profile contract', function () {
     expect(await Profile.name()).to.equal('Profile');
   });
 
-  it('The contract is version "10.0.2"', async () => {
-    expect(await Profile.version()).to.equal('10.0.2');
+  it('The contract is version "10.1.0"', async () => {
+    expect(await Profile.version()).to.equal('10.1.0');
   });
 
   it('Create a profile with valid inputs, expect to pass', async () => {

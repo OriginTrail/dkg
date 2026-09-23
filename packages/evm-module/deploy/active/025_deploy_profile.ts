@@ -20,6 +20,9 @@ func.dependencies = [
   // ShardingTableStorage to keep the recovered nodeId consistent with any
   // surviving sharding-table entry for the same identityId.
   'ShardingTableStorage',
+  // Profile 10.1.0 — initialize() resolves ShardingTable: updateNodeId
+  // removes and re-inserts a ring member around the nodeId write.
+  'ShardingTable',
   'Ask',
   // D13 — Profile.initialize() reads `isOperatorFeeClaimedForEpoch` via CSS
   // after the DelegatorsInfo redirect. V6/V8 DelegatorsInfo migrators
