@@ -4,6 +4,7 @@ import {
   NODE_EVM_LANES,
   PRIMARY_LANE_JOBS,
   needsNodeTestArtifacts,
+  needsSharedBuild,
 } from './ci-delta.mjs';
 
 export { PRIMARY_LANE_JOBS } from './ci-delta.mjs';
@@ -107,14 +108,11 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
     errors,
   );
 
-  // The shared build runs exactly when a Node lane consumes it or the planner
-  // explicitly selected its own checks (lint, repository-script tests, test
-  // inventory) for repository paths outside the workspaces. A build without
-  // either is a plan that forgot its lanes.
-  const selectedNodeLane = Object.keys(PRIMARY_LANE_JOBS)
-    .filter((lane) => lane !== 'bura_blazegraph_arm64')
-    .some((lane) => plan.lanes?.[lane]);
-  if (Boolean(plan.runNode) !== (selectedNodeLane || plan.buildChecks === true)) {
+  // runNode must match the planner's shared-build rule: a lane that consumes
+  // the build, or the build job's declared repository checks (lint,
+  // repository-script tests, test inventory). A build without either is a
+  // plan that forgot its lanes.
+  if (Boolean(plan.runNode) !== needsSharedBuild(plan)) {
     errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes (buildChecks=${plan.buildChecks})`);
   }
 
