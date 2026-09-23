@@ -429,7 +429,9 @@ const PATH_TRIGGERS = Object.freeze([
   },
   {
     patterns: [/^packages\/cli\/src\/(?:auth|config|oxigraph-memory-limits|runtime-assets)\.ts$/],
-    lanes: ['tornado_blazegraph', 'kosava_supporting'],
+    // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
+    // selects Blazegraph.
+    lanes: ['kosava_supporting'],
     evmScopes: [],
     reason: 'the EPCIS API tests import the CLI auth and config modules',
   },
@@ -473,6 +475,22 @@ function classifySolidityRelevance(eventName, changedFiles, diffKnown) {
   };
 }
 
+// Every plan the planner returns has this one shape, declared here once.
+function planOf({ mode, lanes, evmScopes, buildChecks = false, solidityRelevance, changedFiles, reasons }) {
+  return {
+    mode,
+    fullCi: mode === 'full',
+    runNode: needsSharedBuild({ lanes, buildChecks }),
+    buildChecks,
+    abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
+    lanes,
+    evmScopes,
+    changedFileCount: changedFiles.length,
+    changedFiles: changedFiles.slice(0, MAX_REPORTED_FILES),
+    reasons,
+  };
+}
+
 function fullPlan({
   reasons,
   solidityRelevance,
@@ -480,18 +498,7 @@ function fullPlan({
 }) {
   const lanes = Object.fromEntries(NODE_EVM_LANES.map((lane) => [lane, true]));
   lanes.contracts = solidityRelevance.contracts;
-  return {
-    mode: 'full',
-    fullCi: true,
-    runNode: true,
-    buildChecks: false,
-    abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
-    lanes,
-    evmScopes: [...EVM_SCOPES],
-    changedFileCount: changedFiles.length,
-    changedFiles: changedFiles.slice(0, MAX_REPORTED_FILES),
-    reasons,
-  };
+  return planOf({ mode: 'full', lanes, evmScopes: [...EVM_SCOPES], solidityRelevance, changedFiles, reasons });
 }
 
 function normalizePath(filePath) {
@@ -946,30 +953,25 @@ export function planCi({
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
   }
 
-  return {
+  return planOf({
     mode: 'delta',
-    fullCi: false,
-    runNode,
-    buildChecks,
-    abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
     evmScopes: EVM_SCOPES.filter((scope) => evmScopes.has(scope)),
-    changedFileCount: changedFiles.length,
-    changedFiles: changedFiles.slice(0, MAX_REPORTED_FILES),
+    buildChecks,
+    solidityRelevance,
+    changedFiles,
     reasons: deduplicatedReasons,
-  };
+  });
 }
 
+// Plan fields only the summary reports; the gate reads every other field, so
+// a new plan field reaches it without another list to update.
+const REPORT_ONLY_PLAN_FIELDS = new Set(['changedFileCount', 'changedFiles', 'reasons']);
+
 export function githubOutputsForPlan(plan) {
-  const gatePlan = {
-    mode: plan.mode,
-    fullCi: plan.fullCi,
-    runNode: plan.runNode,
-    buildChecks: plan.buildChecks,
-    abiFreshnessRelevant: plan.abiFreshnessRelevant,
-    lanes: plan.lanes,
-    evmScopes: plan.evmScopes,
-  };
+  const gatePlan = Object.fromEntries(
+    Object.entries(plan).filter(([field]) => !REPORT_ONLY_PLAN_FIELDS.has(field)),
+  );
   return {
     full_ci: String(plan.fullCi),
     run_node: String(plan.runNode),
