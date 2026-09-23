@@ -77,7 +77,7 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
       for (let index = 0; index < group.shards; index++) rows.push({
         row: rows.length, suite: group.id, shard: group.shards === 1 ? 0 : index + 1, shards: group.shards,
         label: group.shards === 1 ? group.label ?? group.id : `${group.id} [${index + 1}/${group.shards}]`,
-        rfc64Sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
+        sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
       });
     }
     jobs[job] = packages;

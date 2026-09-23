@@ -83,9 +83,9 @@ test('agent executable rejects invalid arguments and matches workflow dispatch',
   const rows = CI_MATRICES['tornado-agent'].include;
   assert.deepEqual(rows.map(({ shard }) => shard), Array.from({ length: AGENT_SHARD_COUNT }, (_, index) => agentShardDescriptor(index + 1).index));
   for (const step of job.steps.filter((step) => step.name?.startsWith('RFC-64'))) {
-    assert.equal(step.if, 'matrix.rfc64Sidecars', 'evidence sidecars must use the policy reservation');
+    assert.equal(step.if, 'matrix.sidecars', 'evidence sidecars must use the policy reservation');
   }
-  assert.deepEqual(rows.filter(({ rfc64Sidecars }) => rfc64Sidecars).map(({ shard }) => shard),
+  assert.deepEqual(rows.filter(({ sidecars }) => sidecars).map(({ shard }) => shard),
     rows.filter(({ shard }) => agentShardDescriptor(shard).reservedOverheadMs > 0).map(({ shard }) => shard));
 
 });

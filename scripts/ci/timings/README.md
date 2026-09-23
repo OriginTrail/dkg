@@ -8,7 +8,9 @@ per-file hooks; the planner adds 1.1 seconds per file for collection/import
 overhead observed in that run. Global Hardhat setup is shared only by the four
 integration shards. Six shards use the existing hermetic unit configuration.
 Shard 10 reserves another 40 seconds for the RFC-64 evidence sidecar steps
-(`matrix.rfc64Sidecars`).
+(`matrix.sidecars`). In September 2026 CI runs they took about 31 seconds
+together: the rollout certificate about 20 s, Gate 1 live evidence about 10 s,
+and the Gate 0 unit tests about 1 s.
 
 The planner discovers eligible files using both actual Vitest configurations,
 then partitions the full suite into disjoint integration and unit sets. The

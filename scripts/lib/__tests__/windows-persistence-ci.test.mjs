@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { isTestSurface, routeFor } from '../test-inventory-surface.mjs';
 
@@ -42,7 +44,11 @@ test('Windows groups retain every original test selector exactly once', () => {
 
 const scripts = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).scripts;
 const prefix = 'test:gate0:rfc64-persistence-lifecycle';
-const unitFiles = ['evidence', 'process-lifecycle', 'verifier'].map((name) => `devnet/rfc64-persistence-lifecycle/${name}.test.ts`);
+const harnessDir = 'devnet/rfc64-persistence-lifecycle';
+const unitNames = ['evidence', 'process-lifecycle', 'verifier'];
+const unitFiles = unitNames.map((name) => `${harnessDir}/${name}.test.ts`);
+const routes = JSON.parse(readFileSync(new URL('../../../test-policy/test-routes.json', import.meta.url), 'utf8'));
+const unitRoute = routes.find((entry) => entry.command === `pnpm ${prefix}:unit`);
 
 test('canonical scripts retain developer build/generate/verify composition', () => {
   assert.equal(scripts[prefix], `pnpm run ${prefix}:generate && pnpm run ${prefix}:verify`);
@@ -53,22 +59,33 @@ test('canonical scripts retain developer build/generate/verify composition', () 
   assert.equal(scripts[`${prefix}:unit`], `node --import tsx --test ${unitFiles.join(' ')}`);
 });
 
-test('the required unit route owns every Gate 0 harness test and also runs on Linux', () => {
-  const routes = JSON.parse(readFileSync(new URL('../../../test-policy/test-routes.json', import.meta.url), 'utf8'));
-  const route = routes.find((entry) => entry.command === `pnpm ${prefix}:unit`);
-  assert.ok(route, `expected a test route for pnpm ${prefix}:unit`);
-  assert.equal(route.lane, 'inventory-windows');
-  assert.equal(route.cadence, 'required');
-  // Every harness test must be a unit file; this also catches a missing one,
-  // which `node --test` silently skips while any other listed path exists.
-  const harnessTests = readdirSync(new URL('../../../devnet/rfc64-persistence-lifecycle/', import.meta.url))
-    .map((name) => `devnet/rfc64-persistence-lifecycle/${name}`).filter(isTestSurface);
-  assert.deepEqual(harnessTests.sort(), [...unitFiles].sort());
-  // The first matching route wins, so no earlier route (such as devnet/**) may shadow them.
-  for (const file of unitFiles) assert.equal(routeFor(file, routes), route, file);
-  // Windows skips the POSIX-only cases; the Linux RFC-64 sidecar shard runs them.
+// Discover test files like the inventory: tracked or unignored, and present on disk.
+function listTests(...paths) {
+  const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
+  return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...paths], { cwd: repoRoot, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    .split('\0').filter((file) => isTestSurface(file) && existsSync(new URL(`../../../${file}`, import.meta.url)));
+}
+
+test('the required unit route owns exactly the unit files across the repository', () => {
+  assert.ok(unitRoute, `expected a test route for pnpm ${prefix}:unit`);
+  assert.equal(unitRoute.lane, 'inventory-windows');
+  assert.equal(unitRoute.cadence, 'required');
+  // First match wins over the full route list: no earlier route (such as devnet/**)
+  // may shadow a unit file, and a widened pattern may not claim any other test.
+  const owned = listTests().filter((file) => routeFor(file, routes) === unitRoute);
+  assert.deepEqual(owned.sort(), [...unitFiles].sort());
+});
+
+test('every Gate 0 harness test, including subdirectories, is a unit file', () => {
+  // This also catches a missing unit file, which `node --test` silently skips
+  // while any other listed path exists.
+  assert.deepEqual(listTests(harnessDir).sort(), [...unitFiles].sort());
+});
+
+test('the Gate 0 unit tests also run on the Linux agent sidecar shard', () => {
+  // Windows skips the POSIX-only cases; the sidecar shard runs every case.
   const posix = ciWorkflow.jobs['tornado-agent'].steps.find((step) => step.run === `pnpm ${prefix}:unit`);
-  assert.equal(posix?.if, 'matrix.rfc64Sidecars');
+  assert.equal(posix?.if, 'matrix.sidecars');
 });
 
 test('each matrix leg builds once and only inventory runs named evidence steps', () => {
