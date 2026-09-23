@@ -278,7 +278,7 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { throwIfProtocolReadinessAborted, waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
@@ -9007,13 +9007,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * durable recovery and the CLI catch-up fallback pass a string-backed
    * `{ toString }` wrapper, which the libp2p peer store rejects outright, so
    * canonicalize to a real PeerId first. A value that is not a peer ID can
-   * never advertise the protocol.
+   * never advertise the protocol. An aborted caller gets the AbortError on
+   * every path, whether or not the value parses.
    */
   async waitForSyncProtocol(
     this: DKGAgent,
     pid: { toString(): string },
     signal?: AbortSignal,
   ): Promise<boolean> {
+    throwIfProtocolReadinessAborted(signal);
     const peer = toLibp2pPeerId(pid);
     if (peer === undefined) return false;
     return waitForPeerProtocol(

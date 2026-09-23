@@ -54,10 +54,12 @@ function spyOnRealPeerStore(): { get: ReturnType<typeof vi.fn<PeerStoreGet>> } {
 function waitForSyncProtocol(
   peer: { toString(): string },
   peerStore: { get: PeerStoreGet } = node.libp2p.peerStore,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   return LifecycleSyncMethods.prototype.waitForSyncProtocol.call(
     { node: { libp2p: { peerStore } } } as never,
     peer,
+    signal,
   );
 }
 
@@ -96,6 +98,21 @@ describe('waitForSyncProtocol on the real libp2p peer store', () => {
       await expect(
         waitForSyncProtocol({ toString: () => invalid }, peerStore),
       ).resolves.toBe(false);
+    }
+    expect(peerStore.get).not.toHaveBeenCalled();
+  });
+
+  it('rejects an aborted caller with AbortError whether or not the value is a peer ID', async () => {
+    const peerStore = spyOnRealPeerStore();
+
+    for (const peer of [
+      { toString: () => 'not-a-peer-id' },
+      { toString: () => SYNC_PEER_ID },
+      peerIdFromString(SYNC_PEER_ID),
+    ]) {
+      await expect(
+        waitForSyncProtocol(peer, peerStore, AbortSignal.abort()),
+      ).rejects.toMatchObject({ name: 'AbortError' });
     }
     expect(peerStore.get).not.toHaveBeenCalled();
   });

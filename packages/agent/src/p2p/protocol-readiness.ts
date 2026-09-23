@@ -1,3 +1,12 @@
+function protocolReadinessAbortError(): DOMException {
+  return new DOMException('Protocol readiness wait aborted', 'AbortError');
+}
+
+/** The AbortError every protocol-readiness wait rejects with once aborted. */
+export function throwIfProtocolReadinessAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw protocolReadinessAbortError();
+}
+
 export async function waitForPeerProtocol(
   peerStore: { get(peer: unknown): Promise<{ protocols: string[] }> },
   peer: { toString(): string },
@@ -7,9 +16,7 @@ export async function waitForPeerProtocol(
   signal?: AbortSignal,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (signal?.aborted) {
-      throw new DOMException('Protocol readiness wait aborted', 'AbortError');
-    }
+    throwIfProtocolReadinessAborted(signal);
     try {
       const peerInfo = await peerStore.get(peer as any);
       if (peerInfo.protocols.includes(protocol)) {
@@ -28,7 +35,7 @@ export async function waitForPeerProtocol(
         };
         const onAbort = () => {
           cleanup();
-          reject(new DOMException('Protocol readiness wait aborted', 'AbortError'));
+          reject(protocolReadinessAbortError());
         };
         timer = setTimeout(() => {
           cleanup();
