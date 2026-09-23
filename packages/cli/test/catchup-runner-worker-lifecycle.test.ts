@@ -456,6 +456,68 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result.connectedPeers).toBe(2);
   });
 
+  it('keeps filtering by admission for an agent build without the shared predicate', async () => {
+    // Version skew: an agent that predates `listAdmittedConnectedPeers` but has
+    // `ensurePeerAdmittedForRecovery` must not fall back to every connection.
+    const admissionChecks: string[] = [];
+    const selectCalls: unknown[][] = [];
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-other-network'],
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-curator', 'peer-other-network', 'peer-a', 'peer-curator'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      ensurePeerAdmittedForRecovery: async (peerId: string, _ctx: unknown, label: string) => {
+        admissionChecks.push(`${label}:${peerId}`);
+        return peerId !== 'peer-other-network';
+      },
+      selectCatchupPeers: (...args: unknown[]) => {
+        selectCalls.push(args);
+        return args[0] as Array<{ toString(): string }>;
+      },
+    });
+    expect((agent as any).listAdmittedConnectedPeers).toBeUndefined();
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-admission-skew', true]);
+
+    expect(admissionChecks).toEqual([
+      'Connected catchup peer:peer-curator',
+      'Connected catchup peer:peer-other-network',
+      'Connected catchup peer:peer-a',
+    ]);
+    expect((selectCalls[0]![0] as Array<{ toString(): string }>).map(String))
+      .toEqual(['peer-curator', 'peer-a']);
+    expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a']);
+  });
+
+  it('takes every live connection only for an agent with no admission check at all', async () => {
+    const selectCalls: unknown[][] = [];
+    const { agent } = bridgeAgent({
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-a', 'peer-b', 'peer-a'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (...args: unknown[]) => {
+        selectCalls.push(args);
+        return args[0] as Array<{ toString(): string }>;
+      },
+    });
+
+    await invokeThroughBridge(agent, 'prepareCatchup', ['cg-no-admission', false]);
+
+    expect((selectCalls[0]![0] as Array<{ toString(): string }>).map(String)).toEqual(['peer-a', 'peer-b']);
+  });
+
   it('forwards the admission source into both detailed sync calls', async () => {
     const { agent, calls } = bridgeAgent();
 
