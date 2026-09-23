@@ -137,7 +137,7 @@ import {
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -281,6 +281,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import {
   reconcileContextGraph,
+  RecentReconcileEvidenceMap,
   RecentUalSet,
   type VmReconcileSchedulingRuntime,
   type ChainReconcilerDeps,
@@ -438,6 +439,10 @@ import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import { LocalContextGraphProvenance } from './local-context-graph-provenance.js';
+import {
+  resolveChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgets,
+} from './chain-authority-read-budgets.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -1120,8 +1125,14 @@ export class DKGAgentBase {
     bindingGeneration: number;
   }>();
   protected selectedVmReconcileBindingGeneration = 0;
-  /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
+  /** Bounded root bookkeeping for sibling cleanup only; never currentness authority. */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /** Bounded same-finalized-block leases; never durable across a stagnant head. */
+  protected readonly vmReconcileFinalizedSlotEvidence =
+    new RecentReconcileEvidenceMap<{
+      kaId: bigint;
+      snapshot: KnowledgeAssetVersionSnapshot;
+    }>();
   /**
    * In-flight core-hosted recordings launched from the synchronous StorageACK
    * pre-sign hook. Tracked so rejections are logged and graceful stop() can
@@ -1220,6 +1231,18 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  /**
+   * Lazily resolved so partial test hosts built on the prototype (and any
+   * configuration that predates the resolved field) still receive the
+   * validated package defaults instead of `undefined` deadlines.
+   */
+  protected chainAuthorityReadBudgetsV1?: ChainAuthorityReadBudgets;
+  /** Every request-scoped chain authority read on this agent shares these deadlines. */
+  get chainAuthorityReadBudgets(): ChainAuthorityReadBudgets {
+    this.chainAuthorityReadBudgetsV1 ??= this.config?.chainAuthorityReadBudgets
+      ?? resolveChainAuthorityReadBudgets(this.config?.chainConfig);
+    return this.chainAuthorityReadBudgetsV1;
+  }
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
    * protected by it. Agents without dataDir remain deliberately dormant.
@@ -1519,6 +1542,8 @@ export class DKGAgentBase {
    * kept on the encrypted path for this adapter.
    */
   protected warnedMissingCgLivenessProbe = false;
+  /** Epoch ms of the last single-read authority fallback warning; see its claim. */
+  protected lastLiveAuthorityFallbackWarnAt = Number.NEGATIVE_INFINITY;
   /**
    * Issue #872 — companion cache for the per-CG `publishPolicy` enum
    * (`0` = curators-only, `1` = open). Populated lazily by the
@@ -1723,6 +1748,7 @@ export class DKGAgentBase {
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;
+  protected authorityIndexSnapshotRuntime?: { close(): Promise<void> };
   /** Cores keep-alive-pinned on the last warm-core pass, so the next pass can
    *  unpin Cores that fell out of the selection (stale-pin / cap-drift guard). */
   protected warmedCores: Set<string> = new Set();

@@ -425,12 +425,10 @@ export interface VmPublisherControl
     AsyncLiftRetryStateReader {}
 
 /**
- * PR #2300 r2 (🟡 3809616683) — the canonical facts UPDATE recognition established for the
- * `recovered` verdict, carried ON the verdict so the named finalizer consumes the SAME
- * verification instead of re-proving the transaction. This is what replaced the shared-verifier
- * memo: no cache, no shared instance, no temporal coupling — the evidence travels with the
- * verdict that earned it. The CREATE side deliberately does NOT get an equivalent: its
- * `publishProof` remains the finalizer's own canonical-receipt read (settled position).
+ * The canonical facts a chain verdict established, carried ON that verdict so the named
+ * finalizer consumes the SAME verification instead of re-proving the transaction. There is no
+ * cache, shared instance, or temporal coupling: evidence travels only with the verdict that
+ * earned it.
  */
 export interface CanonicalUpdateEvidence {
   /** The chain-verified new root — already proven equal to the root the queued seal intended. */
@@ -448,9 +446,35 @@ export interface CanonicalUpdateEvidence {
   readonly merkleRootCount?: string;
 }
 
+/**
+ * The exact canonical CREATE receipt already read and finality-gated by the generic verdict.
+ *
+ * The chain package owns the live receipt shape; this publisher-owned projection uses only
+ * persisted-safe primitives so it can cross the resolver boundary without coupling the publisher
+ * back to a concrete chain adapter. Every field needed by the named finalizer is carried, and the
+ * finalizer re-binds it to the lookup and immutable queued seal before consuming it.
+ */
+export interface CanonicalCreateEvidence {
+  readonly txHash: LiftJobHex;
+  readonly blockNumber: number;
+  readonly blockHash: LiftJobHex;
+  readonly txIndex: number;
+  readonly merkleRoot: LiftJobHex;
+  readonly publisherAddress: LiftJobHex;
+  readonly authorAddress: LiftJobHex;
+  readonly batchId: `${bigint}`;
+  readonly kaId: `${bigint}`;
+  readonly startKAId: `${bigint}`;
+  readonly endKAId: `${bigint}`;
+  readonly knowledgeAssetsContract: LiftJobHex;
+  readonly chainId: string;
+}
+
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationInput;
+  /** Present exactly when the verdict came from a canonical, finalized CREATE receipt. */
+  canonicalCreate?: CanonicalCreateEvidence;
   /** Present exactly when the verdict came from canonical UPDATE recognition. */
   canonicalUpdate?: CanonicalUpdateEvidence;
 }
@@ -698,9 +722,9 @@ export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
   lookup: AsyncLiftChainProofLookup,
   /**
    * PR #2300 r2 — the dispatcher's verdict recovery, when this finalize follows one. For an
-   * UPDATE whose verdict carried {@link CanonicalUpdateEvidence}, the resolver consumes it
-   * directly instead of re-verifying the transaction; the LIVE interrupted lane passes nothing
-   * (no verdict ran) and the resolver verifies once itself.
+   * CREATE or UPDATE whose verdict carried canonical evidence, the resolver consumes it directly
+   * instead of re-reading the transaction; the LIVE interrupted lane passes nothing (no verdict
+   * ran) and the resolver performs its existing canonical read itself.
    */
   verdictRecovery?: AsyncLiftPublisherRecoveryResult,
   /**

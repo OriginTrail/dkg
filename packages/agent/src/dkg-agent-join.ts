@@ -97,7 +97,7 @@ import {
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryReplaceSubjectAtomically, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -878,7 +878,10 @@ export class JoinRequestMethods extends DKGAgentBase {
     // This is a total private-recipient cap, not merely an allowlist-row cap:
     // participant agents receive ciphertext keys and private read authority too.
     // Use the fresh authoritative union (allowed + participant - revoked).
-    const activeMembers = await this.getMemberRecoveryGate(contextGraphId) ?? [];
+    const activeMembers = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.joinPolicyRoster,
+      () => this.getMemberRecoveryGate(contextGraphId),
+    ) ?? [];
     return {
       ownerDid,
       ownerAgentAddress,
@@ -1171,7 +1174,10 @@ export class JoinRequestMethods extends DKGAgentBase {
       isPolicyDisableRequested: (contextGraphId) =>
         (this.contextGraphJoinPolicyDisableIntentCounts.get(contextGraphId) ?? 0) > 0,
       getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
-      getActiveMembers: (contextGraphId) => this.getMemberRecoveryGate(contextGraphId),
+      getActiveMembers: (contextGraphId) => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.joinAdmissionRoster,
+        () => this.getMemberRecoveryGate(contextGraphId),
+      ),
       getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
       resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),
       assertAlreadyMemberDelegationRefresh: (contextGraphId, delegation, carrierPeerId) =>

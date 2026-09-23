@@ -478,10 +478,16 @@ describe('Context Graph discovery/subscription boundary', () => {
       await agentA.stop().catch(() => {});
     }
 
+    const restartChain = new MockChainAdapter();
+    vi.spyOn(restartChain, 'getContextGraphLiveAuthority').mockResolvedValue({
+      active: true,
+      accessPolicy: 0,
+      participantAgents: [],
+    });
     const agentB = await DKGAgent.create({
       name: 'DiscoveryBoundaryB',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: restartChain,
       contextGraphSubscriptionStore: subscriptionStore,
       contextGraphMembershipStore: membershipStore,
       nodeRole: 'edge',
@@ -627,6 +633,91 @@ describe('Context Graph discovery/subscription boundary', () => {
         expect((agent as any).gossipRegistered.has(id)).toBe(false);
         expect(persisted.has(id)).toBe(false);
       }
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('ignores out-of-uint256 chain ids from store discovery and direct metadata recording', async () => {
+    const overflow = (1n << 256n).toString(10);
+    const storeId = 'hostile-store-binding';
+    const laterValidId = 'later-valid-store-binding';
+    const directId = 'hostile-direct-binding';
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    const save = vi.fn(async (record: ContextGraphSubscriptionRecord) => {
+      persisted.set(record.id, { ...record });
+    });
+    const agent = await DKGAgent.create({
+      name: 'HostileStoreBinding',
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save,
+        delete: async (id) => { persisted.delete(id); },
+      },
+    });
+
+    try {
+      await agent.start();
+      const bind = vi.spyOn(agent, 'bindSubscriptionOnChainId');
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      await agent.store.insert([
+        {
+          subject: contextGraphDataGraphUri(storeId),
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: contextGraphDataGraphUri(storeId),
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: `"${overflow}"`,
+          graph: ontologyGraph,
+        },
+        {
+          subject: contextGraphDataGraphUri(laterValidId),
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: contextGraphDataGraphUri(laterValidId),
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: '"9"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(2);
+      expect(agent.getSubscribedContextGraphs().get(storeId)).toMatchObject({
+        subscribed: false,
+      });
+      expect(agent.getSubscribedContextGraphs().get(storeId)?.onChainId).toBeUndefined();
+      expect(agent.getSubscribedContextGraphs().get(laterValidId)?.onChainId).toBe('9');
+
+      // Exercise the durable enrichment path as well as discovery-only rows:
+      // an invalid ID must be omitted before the strict subscription writer.
+      agent.subscribeToContextGraph(directId);
+      await vi.waitFor(() => expect(persisted.get(directId)?.subscribed).toBe(true));
+      save.mockClear();
+      expect(() => agent.recordDiscoveredContextGraph(directId, {
+        name: 'Hostile direct binding',
+        onChainId: overflow,
+      })).not.toThrow();
+      expect(agent.getSubscribedContextGraphs().get(directId)?.onChainId).toBeUndefined();
+      await vi.waitFor(() => expect(save).toHaveBeenCalled());
+      expect(persisted.get(directId)?.onChainId).toBeUndefined();
+      expect(bind).toHaveBeenCalledOnce();
+      expect(bind).toHaveBeenCalledWith(
+        laterValidId,
+        expect.any(Object),
+        '9',
+      );
+      expect(persisted.has(storeId)).toBe(false);
+      expect(persisted.has(laterValidId)).toBe(false);
+      expect(persisted.get(directId)?.subscribed).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

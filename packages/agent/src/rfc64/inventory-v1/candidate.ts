@@ -68,9 +68,13 @@ import {
   sqlBlobsEqualV1,
 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
-import { prepareVerifiedSwmAuthorInventoryCommitInputV1 } from './swm-author-inventory-auth-v1.js';
+import {
+  prepareVerifiedMergeSwmAuthorInventoryCommitInputV1,
+  prepareVerifiedSwmAuthorInventoryCommitInputV1,
+} from './swm-author-inventory-auth-v1.js';
 import {
   encodeSwmAuthorInventoryKeyV1,
+  prepareMergeSwmAuthorInventoryCommitV1,
   prepareSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import { SwmAuthorInventoryPersistenceV1 } from './swm-author-inventory-persistence.js';
@@ -88,12 +92,16 @@ import {
   type Rfc64UnregisteredAuthoritySeedRecordV1,
 } from '../unregistered-authority-seed-store-v1.js';
 import type {
+  CompareAndSwapMergeSwmAuthorInventoryInputV1,
   CompareAndSwapSwmAuthorInventoryInputV1,
+  DeleteSwmAuthorInventoryInputV1,
   SwmAuthorInventoryCasResultV1,
   SwmAuthorInventoryErrorCodeV1,
 } from './swm-author-inventory-contracts.js';
 export type {
+  CompareAndSwapMergeSwmAuthorInventoryInputV1,
   CompareAndSwapSwmAuthorInventoryInputV1,
+  DeleteSwmAuthorInventoryInputV1,
   SwmAuthorInventoryCasResultV1,
   SwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-contracts.js';
@@ -278,6 +286,10 @@ export interface Rfc64SwmAuthorInventoryOperationsV1 {
   compareAndSwapSwmAuthorInventoryV1(
     input: CompareAndSwapSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1;
+  compareAndSwapMergeSwmAuthorInventoryV1(
+    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1;
+  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void;
 }
 
 export interface Rfc64InventoryV1CandidateApi
@@ -437,6 +449,16 @@ export function createRfc64SwmAuthorInventoryOperationsViewV1(
     ): SwmAuthorInventoryCasResultV1 => {
       requireOwnerOpen();
       return inventory.compareAndSwapSwmAuthorInventoryV1(input);
+    },
+    compareAndSwapMergeSwmAuthorInventoryV1: (
+      input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+    ): SwmAuthorInventoryCasResultV1 => {
+      requireOwnerOpen();
+      return inventory.compareAndSwapMergeSwmAuthorInventoryV1(input);
+    },
+    deleteSwmAuthorInventoryV1: (input: DeleteSwmAuthorInventoryInputV1): void => {
+      requireOwnerOpen();
+      inventory.deleteSwmAuthorInventoryV1(input);
     },
   });
 }
@@ -811,6 +833,45 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     return this.readTransaction(() => persistence.read(key));
   }
 
+  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      input.inventoryScopeDigest,
+      input.authorAddress,
+      swmAuthorInventoryErrorV1,
+    );
+    const expectedHead = digest32ToSqlBlobV1(input.expectedCurrentHeadDigest);
+    const deleteExact = (): void => {
+      const current = persistence.read(key);
+      if (current === null) return;
+      if (current.head.objectDigest !== input.expectedCurrentHeadDigest) {
+        throw swmAuthorInventoryErrorV1(
+          'swm-inventory-cas-conflict',
+          `SWM inventory deletion expected ${input.expectedCurrentHeadDigest}`
+            + ` but found ${current.head.objectDigest}`,
+        );
+      }
+      const statement = this.prepare(INVENTORY_V1_STATEMENT_SQL.deleteSwmAuthorHeadCas);
+      const result = this.statement(() => statement.run({
+        scope: key.scope,
+        author: key.author,
+        expectedHead,
+      }));
+      if (Number(result.changes) !== 1 || persistence.read(key) !== null) {
+        throw swmAuthorInventoryErrorV1(
+          'swm-inventory-database-corrupt',
+          'SWM inventory deletion did not remove exactly the expected head and rows',
+        );
+      }
+    };
+    this.writeTransaction('delete SWM author inventory', deleteExact, {
+      resolve: () => persistence.read(key) === null ? 'committed' : 'not-committed',
+      retry: deleteExact,
+      resolvedCommittedResult: () => undefined,
+    });
+  }
+
   compareAndSwapSwmAuthorInventoryV1(
     input: CompareAndSwapSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1 {
@@ -840,6 +901,38 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } catch (cause) {
       if (cause instanceof InventoryV1CandidateError) throw cause;
       throw databaseError('failed to compare-and-swap SWM author inventory', cause);
+    }
+  }
+
+  compareAndSwapMergeSwmAuthorInventoryV1(
+    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1 {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const verified = prepareVerifiedMergeSwmAuthorInventoryCommitInputV1(
+      input,
+      swmAuthorInventoryErrorV1,
+    );
+    const prepared = prepareMergeSwmAuthorInventoryCommitV1(
+      verified,
+      swmAuthorInventoryErrorV1,
+    );
+    try {
+      return this.writeTransaction(
+        'compare-and-swap exact-merge SWM author inventory',
+        () => persistence.applyExactMerge(prepared),
+        {
+          resolve: () => persistence.resolveExactMerge(prepared),
+          retry: () => persistence.applyExactMerge(prepared),
+          resolvedCommittedResult: () => Object.freeze({
+            status: 'applied' as const,
+            snapshot: prepared.snapshot,
+          }),
+        },
+      );
+    } catch (cause) {
+      if (cause instanceof InventoryV1CandidateError) throw cause;
+      throw databaseError('failed to exact-merge SWM author inventory', cause);
     }
   }
 

@@ -4,7 +4,120 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-## [10.0.17] - 2026-09-13
+## [10.0.18] - 2026-09-22
+
+A hotfix for the 10.0.17 authority-index cold start; **10.0.17 is withdrawn**.
+On first start after updating to 10.0.17, every node rebuilds the new RFC-64
+authority index from chain history in `local-history` mode. On mainnet over a
+public RPC endpoint that rebuild took 24 minutes for a freshly registered graph
+and did not finish within 50 minutes for two-week-old graphs, and while the
+index is unresolved an edge denies public-graph subscriptions and skips their
+SWM sync. 10.0.18 bootstraps edge indexes from snapshots served by the
+network's relay cores by default and keeps the 10.0.17 scan as the fallback,
+so no node starts slower than it did on 10.0.17. It also carries the
+authority-read, sync, publisher and peer-connection fixes from the same
+validation round (#2714 to #2717, #2724 to #2726). **No smart-contract, ABI,
+wire-protocol, or deployment registry changes are required.**
+
+### Upgrading from 10.0.17
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Edge nodes bootstrap the authority index from the network relays by default | An edge with no `authorityIndex` block and a configured EVM chain with operational keys trusts the relays listed in its network file, each pinned by the PeerID in its multiaddr, and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s). An edge without that chain wiring (mock chain adapter, no chain configuration, or no operational wallets) or with `relay: "none"` keeps the local-history scan and logs why | No configuration change is required; update directly from 10.0.16 or 10.0.17. An explicit `authorityIndex` block keeps its pinned trust |
+| Local history remains the fallback | If no relay supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and continues with the 10.0.17 local-history scan, resuming from any checkpoint it already scanned locally instead of rescanning; the scan now logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
+
+### Fixed
+
+- **Authority-index cold start on public RPC**: 10.0.17 rebuilt the
+  contract-wide authority index from chain logs on every node's first start
+  (`local-history` mode). On mainnet with public RPC this took 24 minutes for
+  a freshly registered graph and had not finished after 50 minutes for
+  two-week-old graphs; until the index resolves, an edge denies public-graph
+  subscriptions and skips their SWM sync. Edge nodes now bootstrap the index
+  from a core snapshot by default: a two-week-old graph bound in 3 s, versus
+  still unresolved after 40 minutes on 10.0.17.
+
+- **Authority reads under slow public RPC** (#2715): the request-scoped
+  authority read deadline is configurable (`chain.authorityReadTimeoutMs`, env
+  `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS`, default 2500 ms), and a cold finalized
+  snapshot resolution keeps running under its own budget after the request
+  deadline (`chain.authorityColdResolutionTimeoutMs`, env
+  `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS`, default 20000 ms), so the
+  retry is answered from the retained projection instead of starting over.
+  Read-only host, sync and serve gates and author share/publish decisions
+  consult the finalized authority index before a live RPC read. The mutable
+  publish-policy bit is taken from the index only when the projection was
+  served fresh and no older than the caller accepts (about 5 s for host-mode
+  admission, 60 s otherwise); otherwise that bit comes from the bounded live
+  read, and the gate refuses if that read fails, so a graph switched from open
+  to curated publishing stops admitting open writes within seconds (#2726).
+- **Finalized query authority** (#2716): a scoped read of a graph whose local
+  row is keyed by its wire id now binds the chain's name hash through one
+  shared derivation. The read runs on the RFC-64 authority circuit, reports how
+  each answer was served, and during a cooldown answers from the retained
+  projection instead of walking the exhausted pool. A private roster is taken
+  from the finalized snapshot only when the projection was served fresh, so a
+  removed member cannot keep reading from a stale cache, and a graph registered
+  inside the finality window falls back to the bounded live read instead of
+  failing closed.
+- **Changelog delta pages** (#2717, #2725): every durable marker is served by
+  lookup, so holes and duplicate sequence numbers written by two workers during
+  an A/B release swap no longer push a page back to the full scan.
+- **Promote settle failures** (#2714): a store timeout inside a promote's
+  settle step that provably never started is retried instead of classified as
+  a fatal post-commit failure, and a share job that did fail after its commit
+  is recovered automatically through the idempotent recovery path, without the
+  manual `recover-share-job` command.
+- **Cold one-shot protocol sends** (#2724): a send that starts before any
+  connection to its target exists, such as the network-identity probe on
+  connect, no longer spends its whole budget resolving the peer when the target
+  connects a few milliseconds later. A healthy, connected peer is no longer kept
+  out by a failed probe's backoff (about 18 s at first, growing to 120 s).
+
+### Changed
+
+- **Network relays seed edge snapshot bootstrap**: an edge with no explicit
+  `authorityIndex` block trusts the relays listed in its network file (at
+  most eight, each pinned by the PeerID in its multiaddr; placeholder entries
+  are skipped) and requests a snapshot over
+  `/dkg/10.0.0/authority-index-snapshot/1`. The network file is the trust
+  anchor, as it already is for the chain the node joins. Operator-configured
+  `relay` and `preferredRelays` entries never enter the trust set, and
+  neither do agent-registry (phonebook) cores: registry profiles are
+  unauthenticated gossip, and nothing binds a profile's PeerID to the staked
+  identity it names. The startup line reports `mode=core-snapshot
+  trustedCoreCount=<relays> source=network-relays fallback=local-history`
+  together with the tail and cache-epoch values.
+- **The default applies only where it can run**: it needs a configured EVM
+  chain (`chain.rpcUrl` and `chain.hubAddress`) with operational keys and a
+  local index store, which the agent requires for any core-snapshot
+  configuration, plus at least one usable network-file relay. An edge on the
+  mock chain adapter, without a chain configuration, without operational
+  wallets, or with `relay: "none"` keeps the local-history scan: its startup
+  line reports `mode=local-history`, preceded by
+  `[authority-index] network-relay default skipped: <reason>; using local history`.
+  The agent makes this decision from its own configuration; the daemon logs
+  the same decision before constructing it.
+- **Local-history fallback**: when no relay supplies a usable snapshot within
+  the 30 s bootstrap budget, the node logs it and continues with the
+  local-history scan, resuming from any checkpoint it already scanned locally
+  instead of rescanning from the deployment block, so it is never worse than
+  10.0.17.
+- An explicit `authorityIndex` block still wins over the network-relay default
+  and keeps its pinned trusted-core semantics, its fail-closed behavior, and
+  its existing startup line. Cores receive no default and keep building the
+  index from chain history.
+- Authority-index scans now log their progress.
+
+### Deployment and validation
+
+- Deploy through the normal package path; no contract, ABI, or deployment
+  registry change is required.
+- All workspace package manifests are aligned at `10.0.18`.
+
+## [10.0.17] - 2026-09-22
+
+**Withdrawn.** Superseded by 10.0.18; see above.
 
 An RPC-bounded RFC-64 operational-hardening release. RFC-64 remains active by
 default for persistent nodes and keeps its 10.0.16 responsibility model, while
@@ -54,6 +167,18 @@ registry changes are required.**
   exposing private identifiers.
 ### Changed
 
+- RFC-64 roster authorization shares one finalized roster snapshot only within
+  a single authorization operation. Independent authorization decisions and
+  the three security gates retain live, fail-closed chain reads.
+- Finalized Knowledge Asset version evidence, Context Graph creation pairs,
+  Random Sampling period context, canonical creation receipts, and publisher
+  event horizons are reused only inside their bounded canonical bindings,
+  generations, or leases. They are not promoted into a long-lived node-wide
+  cache.
+- Publisher wallets can borrow the process one-log binding, and deterministic
+  gas-estimation reverts stop retrying equivalent providers.
+- Cumulative RPC diagnostics attribute bounded, privacy-safe consumers while
+  redacting sensitive dynamic labels and preserving issuer context.
 - Authority history pages combine six authority-bearing event signatures into
   one `eth_getLogs` filter. The logical single-CG cold case falls from `6P`
   requests to `P` pages (83.3%), while multiple CGs amortize across the same
@@ -86,6 +211,12 @@ registry changes are required.**
 
 ### Fixed
 
+- Random Sampling period reuse is fenced across generations and adapter
+  teardown; publisher event-horizon leases are revalidated immediately before
+  and after each dispatched event and again before cursor persistence, so
+  retirement prevents stale dispatch and cursor advancement.
+- Knowledge Asset snapshot reuse is fenced by canonical binding, and publisher
+  receipt fixtures use valid canonical contracts.
 - Authority scan progress no longer disappears on daemon restart, and stale or
   corrupt checkpoints fail closed without erasing a valid concurrent winner.
 - Authority-index admission, cache invalidation, compare-and-swap, and
@@ -116,6 +247,11 @@ registry changes are required.**
 
 ### RPC-volume expectations
 
+- The final four-cell Blackbox campaign observed 9,134 to 11,442 raw workload
+  RPC calls across the six-node 50-SWM/50-VM workload, with 100% publication
+  and synchronization in every cell. These are workload measurements rather
+  than a provider-credit guarantee; topology, idle cadence, failover, and
+  provider billing can change the total.
 - At the measured canary registry history of approximately 27,000 logical
   pages, missing-watermark startup falls from a full replay to the current tail
   plus at most 30 repair pages (approximately 99.89% fewer startup logical
@@ -157,6 +293,66 @@ registry changes are required.**
 - Provider credits may weight RPC methods and response sizes differently from
   raw daemon request counts. Validate both consumer-attributed DKG calls and
   provider-side billed usage before declaring provider-quota pressure resolved.
+
+### Final canary fixes (2026-09-20 to 2026-09-22)
+
+Landed on the canary after the section above was written; all are included in
+the 10.0.17 release commit.
+
+#### Fixed
+
+- **Beacon storage stability** (#2712): the OT-RFC-59 changelog page read
+  scanned and sorted the whole node-global log on every sync poll (2.4 million
+  entries on a testnet beacon), tripped the 30 s managed-store deadline and made
+  the node restart Oxigraph hundreds of times per day. Pages are now read by
+  direct entry lookup; duplicate seqs from A/B release-swap writer overlap are
+  tolerated and holes fall back to the exact scan.
+- **Scoped query authority from the finalized index** (#2711): query
+  authorization reads the deployment-scoped finalized authority snapshot instead
+  of a live chain RPC on every request; a finalized-lane fault or deadline falls
+  back to the bounded live read, while absent, inactive or mismatched snapshots
+  still fail closed.
+- **RFC-64 authority and recovery hardening** (#2695, #2696, #2697, #2698,
+  #2707, #2708, #2709, #2710): responsibility retries after finality lag,
+  catalog recovery after late authority finalization, atomic pre-catalog root
+  boundaries, graph-backed SWM recovery transport, safe retry of live authority
+  timeouts, bounded live authority successor flights, deterministic recovery of
+  persisted authority bindings, and reserved RPC capacity for Context Graph
+  authority gates.
+- **Chain index and Hub resilience** (#2683, #2685, #2699, #2700, #2701,
+  #2705): Hub rotation target identity retained, fallback when Hub log reads
+  fail, and index period/idle-headroom handling that keeps capped RPC budgets
+  from starving the scan.
+- **Storage ACK admission** (#2693, #2694): ACK peer admission is preflighted
+  and hardened.
+- **Registration discovery governance** (#2661): discovery is governed and the
+  half-open circuit status documentation corrected.
+
+#### Performance
+
+- **Chain RPC demand reductions** (#2675, #2676, #2677, #2681, #2682): fewer
+  chain calls on the publish, receipt and random-sampling paths; finalized
+  Context Graph authority reads served from the index projection cache; every
+  `getContextGraph` caller attributed and simultaneous live authority reads
+  shared.
+
+#### Security and hygiene
+
+- Wallet-action integration errors are no longer exposed and the secure wallet
+  bridge error handling is documented (#2687, #2688); remaining high-severity
+  CodeQL findings removed (#2689); one-log scope isolation is enforced by test
+  (#2686); publisher lane cursor flags replaced by typed strategies (#2612).
+
+#### Known issues (tracked in #2713)
+
+- Author/host and share paths still depend on a live on-chain authority read
+  with a hard-coded 2.5 s fail-closed deadline; under slow RPC providers or a
+  CPU-saturated publisher this can stall an author's catalog for its own graph
+  and slow receiver convergence. A non-member node querying a private graph can
+  answer 503 instead of 403 when authority cannot be resolved in time (no data
+  is exposed). A store timeout inside a promote's post-dispatch settle step is
+  classified fatal and needs `recover-share-job`. Fixes are in #2714 and #2715,
+  targeted at 10.0.18.
 
 ## [10.0.16] - 2026-09-03
 

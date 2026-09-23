@@ -1777,6 +1777,49 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('keeps recovery replay on live root/count and KA binding reads', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-snapshot-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const getLatestMerkleRoot = vi.fn(async () => new Uint8Array(32));
+      const getMerkleRootCount = vi.fn(async () => 1n);
+      const getKAContextGraphId = vi.fn(async () => 42n);
+      const chain = recoveryChain({
+        getLatestMerkleRoot,
+        getMerkleRootCount,
+        getKAContextGraphId,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.matchingEntries({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toHaveLength(1);
+
+      expect(getLatestMerkleRoot).toHaveBeenCalledOnce();
+      expect(getMerkleRootCount).toHaveBeenCalledOnce();
+      expect(getKAContextGraphId).toHaveBeenCalledOnce();
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('distinguishes reorged block placement from permanent receipt content mismatch', async () => {
     const resolve = async (
       receipt: CanonicalFinalizationReceipt,

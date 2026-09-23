@@ -336,13 +336,37 @@ export const ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS = 60_000;
 /**
  * #884 review — bound the on-chain liveness / access-policy reads on the
  * share/promote/publish hot path (`isContextGraphPublicOnChain`). Mirrors
- * `CHAIN_RPC_FALLBACK_TIMEOUT_MS` in `DKGAgent.getContextGraphOnChainPolicy`:
+ * the chain-RPC fallback race in `DKGAgent.getContextGraphOnChainPolicy`:
  * if the RPC layer HANGS (rather than rejecting), the helper must still
  * resolve so the caller fails closed to "not public / not known" instead of
  * blocking the request indefinitely. 2.5s stays well under the daemon-ready
  * budget while allowing a single slow eth_call hop under normal load.
+ *
+ * This is the DEFAULT request-scoped deadline. Operators can raise it through
+ * `chainConfig.authorityReadTimeoutMs` (`chain.authorityReadTimeoutMs` in the
+ * CLI config) or the `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` environment
+ * override; runtime code reads the resolved value from
+ * `DKGAgent.chainAuthorityReadBudgets` rather than this constant.
  */
 export const CHAIN_POLICY_READ_TIMEOUT_MS = 2_500;
+
+/**
+ * Default budget for one COLD finalized Context Graph authority resolution:
+ * the first read of a graph the local finalized authority index has never
+ * projected walks the contract's event log (dozens of `eth_getLogs` calls on
+ * a public endpoint) before it can answer. A request-scoped deadline must
+ * still fail closed on time, but it must NOT abort that resolution: aborting
+ * it discards the scan, caches nothing, and makes every retry repeat the full
+ * cold walk. The resolution therefore runs as one detached single flight per
+ * graph under this budget and populates the chain reader's projection cache,
+ * so the next request answers from the snapshot without RPC.
+ *
+ * Configurable through `chainConfig.authorityColdResolutionTimeoutMs`
+ * (`chain.authorityColdResolutionTimeoutMs` in the CLI config) or the
+ * `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS` environment override; never
+ * resolved below the request-scoped deadline.
+ */
+export const CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS = 20_000;
 
 /**
  * Cold Context Graph name-hash resolution may need to build the adapter's
