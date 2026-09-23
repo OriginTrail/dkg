@@ -69,8 +69,13 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
-import { parseIncludeStoreQuads, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
+import {
+  parseIncludeStoreQuads,
+  parseProbeStore,
+  type StoreQuadsStatusFields,
+} from '../../status-store-quads-wire.js';
 import { getCachedExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
+import { probeExternalStore } from '../store-reachability.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -671,6 +676,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       : includeStoreQuads
         ? getCachedExternalStoreQuads(agent, storeQuadsNow)
         : peekCachedExternalStoreQuads(storeQuadsNow);
+    // Started now so its wait overlaps the awaits below; awaited for the reply.
+    const storeReachabilityCheck = reportsExternalStoreQuads && parseProbeStore(url.searchParams)
+      ? probeExternalStore(agent)
+      : undefined;
     const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
@@ -712,6 +721,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
       }
     }
+    const storeReachability = await storeReachabilityCheck;
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -758,6 +768,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // 'pending', 'unreachable'); `storeQuadsAgeMs` is how old the cached
       // result is, since ordinary polling never refreshes it.
       ...storeQuadsFields,
+      // Only when requested (`probeStore`): whether the store answers right now.
+      storeReachability,
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =

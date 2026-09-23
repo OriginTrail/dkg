@@ -30,7 +30,12 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { INCLUDE_STORE_QUADS_QUERY, type StoreQuadsStatusFields } from './status-store-quads-wire.js';
+import {
+  INCLUDE_STORE_QUADS_QUERY,
+  PROBE_STORE_QUERY,
+  type StoreQuadsStatusFields,
+  type StoreReachabilityFields,
+} from './status-store-quads-wire.js';
 import type {
   CatchupStatusResponse,
   CatchupStatusWireResponse,
@@ -365,7 +370,7 @@ export interface RelayStatusResponse {
   configuredAnnounceAddresses: string[];
 }
 
-export interface DaemonStatusResponse extends StoreQuadsStatusFields {
+export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields {
   name: string;
   peerId: string;
   nodeRole?: string;
@@ -396,8 +401,8 @@ export interface DaemonStatusResponse extends StoreQuadsStatusFields {
   } | null;
   // Triple-store backend fields (RFC 120). For local backends only
   // `storeBackend` is meaningful; external backends additionally surface
-  // `storeUrl` and the cached quad count described by
-  // StoreQuadsStatusFields (status-store-quads-wire.ts).
+  // `storeUrl`, the cached quad count described by StoreQuadsStatusFields and,
+  // when requested, StoreReachabilityFields (status-store-quads-wire.ts).
   storeBackend?: string;
   storeUrl?: string | null;
   // Concurrency admission control (PR #1209 limiter, surfaced by #1230):
@@ -639,11 +644,18 @@ export class ApiClient {
   /**
    * `includeStoreQuads` asks the daemon to refresh its cached external-store
    * quad count in the background, which costs a full-store COUNT at most once
-   * per daemon cache TTL. Set it only when the count is actually needed, never
-   * for polling.
+   * per daemon cache TTL. `probeStore` asks it to check, with a cheap `ASK`,
+   * that the external store answers at all, waiting a few seconds at most.
+   * Set them only when that is actually needed, never for polling.
    */
-  async status(options: { includeStoreQuads?: boolean } = {}): Promise<DaemonStatusResponse> {
-    const path = options.includeStoreQuads ? `/api/status?${INCLUDE_STORE_QUADS_QUERY}` : '/api/status';
+  async status(
+    options: { includeStoreQuads?: boolean; probeStore?: boolean } = {},
+  ): Promise<DaemonStatusResponse> {
+    const query = [
+      ...(options.includeStoreQuads ? [INCLUDE_STORE_QUADS_QUERY] : []),
+      ...(options.probeStore ? [PROBE_STORE_QUERY] : []),
+    ].join('&');
+    const path = query ? `/api/status?${query}` : '/api/status';
     let status: unknown;
     try {
       status = await this.get<unknown>(path, { auth: false });

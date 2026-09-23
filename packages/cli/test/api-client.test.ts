@@ -154,6 +154,21 @@ describe('ApiClient', () => {
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
     });
 
+    it('status({ probeStore: true }) asks the public route for a reachability check, alone or with a count', async () => {
+      const body = { name: 'test', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      await client.status({ probeStore: true });
+      await client.status({ includeStoreQuads: true, probeStore: true });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        `http://127.0.0.1:${PORT}/api/status?probeStore=true`,
+        `http://127.0.0.1:${PORT}/api/status?includeStoreQuads=true&probeStore=true`,
+      ]);
+      expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
+    });
+
     it('normalizes catch-up jobStatus from a pre-field daemon response', async () => {
       globalThis.fetch = mockFetchOk({
         jobId: 'legacy-job',
