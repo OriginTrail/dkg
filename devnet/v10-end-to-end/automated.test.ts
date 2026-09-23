@@ -796,9 +796,24 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       expect(success.identityId).toBeGreaterThan(0n);
       expect(/^0x[0-9a-fA-F]+$/.test(success.txHash)).toBe(true);
 
-      const ch = await s.rss.getNodeChallenge(success.identityId);
-      const solved: boolean = ch[6];
-      expect(solved).toBe(true);
+      // A solve tx was already observed (success.txHash). getNodeChallenge
+      // returns the CURRENT challenge, which may belong to the NEXT ~100s
+      // proof period (solved=false) when this read lands past a period
+      // boundary — poll briefly for the on-chain solved flag instead of a
+      // single racy read. The prover ticks every 5s, so a rolled-over
+      // challenge is re-solved well within the deadline.
+      let ch = await s.rss.getNodeChallenge(success.identityId);
+      let solved: boolean = ch[6];
+      const solvedDeadline = Date.now() + 60_000;
+      while (!solved && Date.now() < solvedDeadline) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        ch = await s.rss.getNodeChallenge(success.identityId);
+        solved = ch[6];
+      }
+      expect(
+        solved,
+        `on-chain solved flag did not become true within 60s of the observed proof-submit tx ${success.txHash}`,
+      ).toBe(true);
       const epoch: bigint = ch[3];
       const periodStart: bigint = ch[4];
       console.log(

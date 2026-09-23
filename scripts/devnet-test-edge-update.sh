@@ -29,6 +29,14 @@
 # workspace package at v1 (mirrors `.github/workflows/npm-publish.yml`),
 # then bump the CLI to v2 and publish that one tarball. v2 CLI depends
 # on v1 workspace deps already in verdaccio, so `npm install -g` works.
+# Registry routing is split by scope: THIRD-PARTY dependencies (anything
+# outside `@origintrail-official/*`, e.g. the CLI's `@iarna/toml`) are
+# proxied through to registry.npmjs.org via a verdaccio uplink — with no
+# uplink, any dep absent from the machine's npm cache 404s on cache-cold
+# hosts. The `@origintrail-official/*` scope is deliberately NOT proxied:
+# our packages must resolve ONLY to the locally-built tarballs published
+# below, never to the real published `@origintrail-official/dkg` on
+# npmjs. Hermetic for OUR packages; open for everything else.
 # The scratch npm prefix and scratch `DKG_HOME` are isolated under a
 # per-run mktemp dir; no system state is touched.
 #
@@ -125,6 +133,13 @@ trap cleanup EXIT
 # scratch npmrc satisfies npm's "must have an auth header" check; the
 # token value is never validated server-side because `$anonymous` is
 # the publish ACL.
+#
+# Routing: the `npmjs` uplink proxies every NON-@origintrail-official
+# package to the public registry (third-party deps like `@iarna/toml`
+# must resolve even on a cache-cold machine), while the
+# `@origintrail-official/*` rule carries NO `proxy:` so our scope
+# resolves exclusively from the local storage this script publishes
+# into — never from the real npmjs packages of the same name.
 # ---------------------------------------------------------------------------
 
 cat > "$VERDACCIO_CONFIG" <<EOF
@@ -135,8 +150,12 @@ auth:
     # max_users: -1 disables registration but does NOT disable
     # anonymous access — \$anonymous below still works.
     max_users: -1
-uplinks: {}
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
 packages:
+  # No proxy on our scope: resolve ONLY from local storage, so the test
+  # can never fall through to the real published @origintrail-official/dkg.
   '@origintrail-official/*':
     access: \$anonymous
     publish: \$anonymous
@@ -145,6 +164,8 @@ packages:
     access: \$anonymous
     # Block accidental publishes of unrelated packages.
     publish: \$authenticated
+    # Third-party deps (e.g. @iarna/toml) proxy through to npmjs.
+    proxy: npmjs
 log:
   type: stdout
   format: pretty
@@ -193,7 +214,7 @@ log "stage 1: launching verdaccio@$VERDACCIO_VERSION (npx fetch via $PUBLIC_REGI
 # (after verdaccio is reachable) then flips NPM_CONFIG_REGISTRY to
 # the scratch instance for all subsequent npm/dkg invocations.
 NPM_CONFIG_REGISTRY="$PUBLIC_REGISTRY" nohup npx -y "verdaccio@$VERDACCIO_VERSION" \
-  --listen "$VERDACCIO_PORT" --config "$VERDACCIO_CONFIG" \
+  --listen "http://127.0.0.1:$VERDACCIO_PORT" --config "$VERDACCIO_CONFIG" \
   >"$VERDACCIO_LOG" 2>&1 &
 VERDACCIO_PID=$!
 
