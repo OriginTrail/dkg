@@ -340,11 +340,16 @@ describe('startOxigraphServer (real child processes)', () => {
       // `dkg status` asks for a count during the outage, and it fails.
       getCachedExternalStoreQuads(recoveringAgent, Date.now());
       await sleep(0);
-      expect(peekCachedExternalStoreQuads(Date.now())).toMatchObject({ status: 'unreachable' });
+      expect(peekCachedExternalStoreQuads(Date.now())).toMatchObject({ storeQuadsStatus: 'unreachable' });
 
       for (let i = 0; i < 100 && handle.getRecoveryState().recovering; i++) await sleep(50);
       expect(handle.getRecoveryState().recovering).toBe(false);
-      expect(peekCachedExternalStoreQuads(Date.now())).toEqual({ status: 'not-requested' });
+      expect(peekCachedExternalStoreQuads(Date.now())).toEqual({
+        storeQuads: null,
+        storeQuadsStatus: 'not-requested',
+        storeQuadsAgeMs: null,
+        storeQuadsRefreshing: false,
+      });
     } finally {
       await handle.stop();
       invalidateExternalStoreQuadsCache();

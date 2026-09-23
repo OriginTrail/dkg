@@ -37,15 +37,6 @@ type StoreQuadsCacheEntry =
   | { status: Ready; value: number; fetchedAt: number }
   | { status: Unreachable; fetchedAt: number };
 
-/** A cached result as reported; `ageMs` is null when the clock stepped back past it. */
-type CachedStoreQuadsSnapshot =
-  | { status: Ready; value: number; ageMs: number | null }
-  | { status: Unreachable; ageMs: number | null };
-
-type StoreQuadsSnapshot =
-  | { status: Extract<StoreQuadsStatus, 'not-requested' | 'pending'> }
-  | CachedStoreQuadsSnapshot;
-
 let storeQuadsCache: StoreQuadsCacheEntry | null = null;
 // The running count, if any. Only the count that still holds this marker may
 // publish its result: see getCachedExternalStoreQuads().
@@ -65,14 +56,18 @@ export function invalidateExternalStoreQuadsCache(): void {
 function snapshotStoreQuadsCache(
   cache: StoreQuadsCacheEntry,
   now: number,
-): CachedStoreQuadsSnapshot {
+  refreshing: boolean,
+): StoreQuadsStatusFields {
   // After a wall-clock step backwards the age is unknown: report it as such
   // rather than as 0, which would present an old count as just checked.
   const elapsedMs = now - cache.fetchedAt;
   const ageMs = elapsedMs >= 0 ? elapsedMs : null;
-  return cache.status === 'ready'
-    ? { status: 'ready', value: cache.value, ageMs }
-    : { status: 'unreachable', ageMs };
+  return {
+    storeQuads: cache.status === 'ready' ? cache.value : null,
+    storeQuadsStatus: cache.status,
+    storeQuadsAgeMs: ageMs,
+    storeQuadsRefreshing: refreshing,
+  };
 }
 
 // One full-store COUNT. A failure is a result too, so this never rejects: a
@@ -104,14 +99,13 @@ async function countStoreQuads(agent: DKGAgent): Promise<StoreQuadsCacheEntry> {
 export function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
-): StoreQuadsSnapshot {
-  const cached = storeQuadsCache ? snapshotStoreQuadsCache(storeQuadsCache, now) : null;
+): StoreQuadsStatusFields {
+  const known = peekCachedExternalStoreQuads(now);
   // An unknown age is stale, never fresh.
-  if (cached && cached.ageMs !== null && cached.ageMs < STORE_QUADS_CACHE_TTL_MS) {
-    return cached;
+  if (typeof known.storeQuadsAgeMs === 'number' && known.storeQuadsAgeMs < STORE_QUADS_CACHE_TTL_MS) {
+    return known;
   }
 
-  const currentSnapshot: StoreQuadsSnapshot = cached ?? { status: 'pending' };
   if (!storeQuadsInflight) {
     // A count that lost the marker to an invalidation (the managed Oxigraph
     // went down or came back up), or to a newer count started after one,
@@ -126,27 +120,23 @@ export function getCachedExternalStoreQuads(
     });
     storeQuadsInflight = refresh;
   }
-  return currentSnapshot;
-}
-
-// Ordinary polling: report what is already known and never start a count.
-export function peekCachedExternalStoreQuads(now: number): StoreQuadsSnapshot {
-  if (storeQuadsCache) return snapshotStoreQuadsCache(storeQuadsCache, now);
-  return { status: storeQuadsInflight ? 'pending' : 'not-requested' };
+  // Read again: a recount is running now, whether or not this call started it.
+  return peekCachedExternalStoreQuads(now);
 }
 
 /**
- * The flat `/api/status` fields for a snapshot; a local backend has none.
- * Call it as soon as the snapshot is taken: `storeQuadsRefreshing` reads the
- * in-flight count, which may settle at any later await.
+ * Ordinary polling: report what is already known and never start a count.
+ * Every field, including whether a count that will replace the reported
+ * result is running, is read at this one instant, so the returned fields stay
+ * true to that instant whenever the caller serializes them.
  */
-export function storeQuadsStatusFields(snapshot: StoreQuadsSnapshot | null): StoreQuadsStatusFields {
-  if (!snapshot) return { storeQuads: null };
+export function peekCachedExternalStoreQuads(now: number): StoreQuadsStatusFields {
+  const refreshing = storeQuadsInflight !== null;
+  if (storeQuadsCache) return snapshotStoreQuadsCache(storeQuadsCache, now, refreshing);
   return {
-    storeQuads: snapshot.status === 'ready' ? snapshot.value : null,
-    storeQuadsStatus: snapshot.status,
-    storeQuadsAgeMs: 'ageMs' in snapshot ? snapshot.ageMs : null,
-    // A count that will replace the reported result is running.
-    storeQuadsRefreshing: storeQuadsInflight !== null,
+    storeQuads: null,
+    storeQuadsStatus: refreshing ? 'pending' : 'not-requested',
+    storeQuadsAgeMs: null,
+    storeQuadsRefreshing: refreshing,
   };
 }
