@@ -1444,7 +1444,7 @@ describe('sync global backpressure', () => {
     try {
       delete process.env.DKG_VM_RECONCILER_ENABLED;
       process.env.DKG_SYNC_RECONCILER_ENABLED = '0';
-      // The 2026-07 containment shape: peer sync off must not switch VM off.
+      // Peer sync off must not switch VM reconcile off.
       expect(resolveSyncReconcilerEnabled(false)).toBe(false);
       expect(resolveVmReconcilerEnabled()).toBe(true);
 
