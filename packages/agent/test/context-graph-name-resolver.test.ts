@@ -312,6 +312,63 @@ describe('ContextGraphNameResolver', () => {
     expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
   });
 
+  it('adopts the id a decline already verified once the refusal clears, with its source gone', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let conflict = true;
+    const adopt = state.deps.adopt;
+    state.deps.adopt = async (target, contextGraphId, source) => (
+      conflict ? false : adopt(target, contextGraphId, source)
+    );
+    state.deps.isRefusalCurrent = () => conflict;
+    const resolver = resolverFor(state, { retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined', source: 'peer-protocol' });
+
+    // The revealing peer disconnects, this node's store has no definition,
+    // and the conflicting binding is freed.
+    state.deps.listPeers = () => [];
+    state.deps.findLocalCandidates = async () => [];
+    conflict = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({
+      state: 'resolved',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-protocol',
+    });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+    expect(state.asked).toEqual(['holder']);
+  });
+
+  it('keeps a decline when the refusal check throws, and reports it once', async () => {
+    vi.useFakeTimers();
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.log = { ...state.deps.log, warn: (message) => { warn.push(message); } };
+    let adoptCalls = 0;
+    state.deps.adopt = async () => {
+      adoptCalls += 1;
+      return false;
+    };
+    const resolver = resolverFor(state, { retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined' });
+
+    state.deps.isRefusalCurrent = () => { throw new TypeError('rows.get is not a function'); };
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(5_000);
+    // Fail closed: still declined, never re-attempted, and said once.
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined', contextGraphId: CLEARTEXT });
+    expect(adoptCalls).toBe(1);
+    expect(state.asked).toEqual(['holder']);
+    expect(warn).toEqual([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… refusal check failed; keeping the refusal: `
+        + 'TypeError: rows.get is not a function',
+    ]);
+  });
+
   it('adopts on an explicit request once a declined id is accepted, with no background pass', async () => {
     vi.useFakeTimers();
     const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });

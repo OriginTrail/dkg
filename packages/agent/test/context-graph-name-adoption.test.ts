@@ -412,6 +412,38 @@ describe('a declined adoption, through the agent resolver', () => {
     expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: ON_CHAIN_ID, onChainHash: NAME_HASH });
   });
 
+  it('refuses adoption and reports the refusal as current by one rule, so the two cannot drift', async () => {
+    const internals = await boot();
+    subscribeByNameHash(internals);
+    internals.setContextGraphSubscription(CLEARTEXT, { subscribed: false, synced: false, onChainId: '99' });
+    internals.setContextGraphSubscription(NAME_HASH, { ...internals.subscribedContextGraphs.get(NAME_HASH) });
+    const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
+    const rule = vi.spyOn(internals, 'contextGraphNameAdoptionRefusal');
+
+    // The real rule: the cleartext row is bound elsewhere. Both agree.
+    expect(internals.contextGraphNameAdoptionRefusal(target, CLEARTEXT)).toBe('binding-conflict');
+    expect(internals.isContextGraphNameRefusalCurrent(target, CLEARTEXT)).toBe(true);
+    await expect(internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol')).resolves.toBe(false);
+
+    // Any change to the rule reaches both: lifted, the re-check clears and
+    // adoption goes through.
+    rule.mockReturnValue(null);
+    expect(internals.isContextGraphNameRefusalCurrent(target, CLEARTEXT)).toBe(false);
+    await expect(internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol')).resolves.toBe(true);
+    expect(internals.resolveContextGraphIdAlias(NAME_HASH)).toBe(CLEARTEXT);
+  });
+
+  it('refuses for every reason the rule gives, and the re-check agrees', async () => {
+    const internals = await boot();
+    subscribeByNameHash(internals);
+    const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
+    // No conflicting row at all, but a (future) refusal reason from the rule.
+    vi.spyOn(internals, 'contextGraphNameAdoptionRefusal').mockReturnValue('binding-conflict');
+    expect(internals.isContextGraphNameRefusalCurrent(target, CLEARTEXT)).toBe(true);
+    await expect(internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol')).resolves.toBe(false);
+    expect(internals.contextGraphNamePlaceholder(NAME_HASH)).not.toBeNull();
+  });
+
   it('records nothing for the old binding when the row is re-bound while the attempt runs', async () => {
     const internals = await boot();
     subscribeByNameHash(internals);

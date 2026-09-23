@@ -382,10 +382,13 @@ export class ContextGraphNameResolver {
     const entry = this.entries.get(target.nameHash);
     if (entry?.state === 'resolved' || entry?.state === 'private') return Promise.resolve(entry);
     // A declined adoption is declined again for as long as its cause holds,
-    // so a background pass only checks that cause (cheaply, no scan, no log)
-    // and re-attempts once it is gone. An explicit request (the operator
-    // subscribing again) re-attempts at once. The refusal belongs to the
-    // binding it refused; a row re-bound to another slot is a new question.
+    // so a background pass only checks that cause (cheaply, no scan, no log).
+    // Once it is gone, the pass adopts the id the entry already verified: its
+    // source may be gone (a peer that disconnected, an ontology graph scanned
+    // in memory), and the hash has no other preimage to find. Refused again,
+    // it is declined again. An explicit request (the operator subscribing
+    // again) re-attempts at once. The refusal belongs to the binding it
+    // refused; a row re-bound to another slot is a new question.
     if (
       entry?.state === 'declined'
       && entry.onChainId === target.onChainId
@@ -397,7 +400,7 @@ export class ContextGraphNameResolver {
         this.entries.set(target.nameHash, rechecked);
         return Promise.resolve(rechecked);
       }
-      this.entries.delete(target.nameHash);
+      return this.track(target, this.adopt(target, entry.contextGraphId, entry.source));
     }
     if (
       onlyPeers === undefined
@@ -408,7 +411,15 @@ export class ContextGraphNameResolver {
     ) {
       return Promise.resolve(entry);
     }
-    const run = this.attemptOnce(target, onlyPeers, options.ignorePeerCooldowns === true)
+    return this.track(target, this.attemptOnce(target, onlyPeers, options.ignorePeerCooldowns === true));
+  }
+
+  /** Run one attempt as this hash's in-flight attempt; a failure stays on the retry schedule. */
+  private track(
+    target: ContextGraphNameTarget,
+    work: Promise<ContextGraphNameResolutionEntry | undefined>,
+  ): Promise<ContextGraphNameResolutionEntry | undefined> {
+    const run = work
       .catch((error: unknown) => this.failedAttempt(target, error))
       .finally(() => {
         if (this.inflight.get(target.nameHash) === run) this.inflight.delete(target.nameHash);
@@ -584,7 +595,8 @@ export class ContextGraphNameResolver {
       // Like the other sources: once this target's own adoption has settled
       // (resolved, declined, or the row changed under it), the attempt is
       // over. Parking it as pending would re-schedule a decline forever.
-      let ownAdoption: { readonly entry: ContextGraphNameResolutionEntry | undefined } | undefined;
+      let ownAdoptionSettled = false;
+      let ownAdoption: ContextGraphNameResolutionEntry | undefined;
       for (const nameHash of pending) {
         const verified = verifyContextGraphNameCandidate(candidates.get(nameHash), nameHash);
         if (verified === null) continue;
@@ -593,9 +605,12 @@ export class ContextGraphNameResolver {
           : this.targetFor(nameHash);
         if (pendingTarget === undefined) continue;
         const adopted = await this.adopt(pendingTarget, verified, 'peer-ontology', peerId);
-        if (nameHash === target.nameHash) ownAdoption = { entry: adopted };
+        if (nameHash === target.nameHash) {
+          ownAdoptionSettled = true;
+          ownAdoption = adopted;
+        }
       }
-      if (ownAdoption !== undefined) return ownAdoption.entry;
+      if (ownAdoptionSettled) return ownAdoption;
     }
 
     return this.pending(target, peers.length === 0 ? 'no-peers' : 'not-found', supporting);
