@@ -109,6 +109,7 @@ export default defineConfig({
       "test/context-graph-on-chain-id-resolution.test.ts",
       "test/vm-reconcile-peer-topology.test.ts",
       "test/swm-late-joiner-deferred-gossip.test.ts",
+      "test/context-graph-metadata-placement.test.ts",
       "test/swm-plaintext-oracle-wiring.test.ts",
       "test/oversize-filter.test.ts",
       "test/cg-registration-oversize-guard.test.ts",

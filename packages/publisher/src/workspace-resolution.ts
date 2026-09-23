@@ -7,6 +7,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   assertSafeIri,
+  contextGraphOnChainIdBindingQuery,
   createGraphKnowledgeAssetScope,
   isSafeIri,
   knowledgeAssetLayerGraphUri,
@@ -1589,10 +1590,8 @@ async function resolveOnChainContextGraphId(params: {
   store: TripleStore;
   contextGraphId: string;
 }): Promise<string | undefined> {
-  const ontologyGraph = 'did:dkg:context-graph:ontology';
-  const contextGraphUri = `did:dkg:context-graph:${params.contextGraphId}`;
   const result = await params.store.query(
-    `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
+    contextGraphOnChainIdBindingQuery(params.contextGraphId),
   );
   if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
   const value = stripLiteral(result.bindings[0]?.['id']);

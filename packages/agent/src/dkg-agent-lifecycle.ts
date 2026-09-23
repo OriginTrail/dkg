@@ -2264,6 +2264,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
 
+    // Curated and local-only graph metadata belongs in each graph's `_meta`.
+    // Move what earlier builds left in ontology, using local metadata only,
+    // before sync serving starts. Bare bindings of graphs this node doesn't
+    // hold need a chain read; that pass runs once start completes and before
+    // every store discovery pass.
+    try {
+      await this.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to relocate private context graph metadata out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // Load registered agents from triple store; auto-register default if none exist.
     // loadAgentsFromStore restores defaultAgentAddress from the persisted
     // isDefaultAgent marker, avoiding reliance on SPARQL result ordering.
@@ -4203,6 +4217,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // one flaky `getIdentityId()` call does not disable proving until the
     // next process restart.
     await this.randomSamplingRuntime.start();
+
+    void this.relocatePrivateContextGraphMetadata().catch((err: unknown) => {
+      this.log.warn(
+        ctx,
+        `Failed to relocate curated context graph bindings out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
 
     // Arm VM work only at the final successful-start boundary. Every network,
     // subscription, protocol, and persistence dependency is now initialized,
