@@ -2376,6 +2376,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         await this.node.libp2p.peerStore.delete(peerIdFromString(peerId));
       },
       cleanupRejectedPeerState: (peerId) => this.clearNetworkRejectedPeerState(peerId),
+      // Transport half of the verdict: stop libp2p (kad-dht, relay discovery,
+      // reconnect queue) from redialing a peer of another network, and lift
+      // that as soon as the peer proves it belongs to this one.
+      onPeerRejected: (peerId) => { this.node.denyPeerAfterNetworkMismatch(peerId); },
+      onPeerVerified: (peerId) => { this.node.clearPeerNetworkMismatchDenial(peerId); },
       log: this.log,
     });
     this.router = new ProtocolRouter(this.node, {
