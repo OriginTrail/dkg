@@ -52,6 +52,11 @@ import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapt
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
+import {
+  NetworkPeerDialPolicy,
+  peerIdFromRelayAddress,
+  type NetworkPeerConnectionGater,
+} from './network-peer-dial-policy.js';
 import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
 import { isPublicLikeAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
@@ -413,6 +418,12 @@ export class DKGNode {
    */
   private relayCapacity: number | null = null;
   /**
+   * Transport-level network isolation for the running libp2p instance
+   * (other-network relays + identity-rejected peers). Null when the node has
+   * no `networkIdentity` or is not started.
+   */
+  private networkPeerDialPolicy: NetworkPeerDialPolicy | null = null;
+  /**
    * AbortController whose signal is wired into long-await sites
    * (currently: `ProtocolRouter.readAll` via `stopSignal` below). PR-6:
    * `stop()` aborts this controller as its FIRST action, before
@@ -747,6 +758,21 @@ export class DKGNode {
       { log: (message) => console.warn(`[${new Date().toISOString()}] ${message}`) },
     );
     const activeRelayDiscoveryFilter = activeRelayNetworkPolicy?.discoveryFilter;
+    // The relay-path policy above only gates `/p2p-circuit` paths. This one
+    // refuses DIRECT dials to peers known to belong to another DKG network
+    // (other bundled networks' relays, peers that failed the identity proof)
+    // and keeps their addresses out of the peer store, so kad-dht, circuit
+    // relay discovery and the reconnect queue cannot keep re-dialing them.
+    const networkPeerDialPolicy = activeNetworkRelayPeerIds
+      ? new NetworkPeerDialPolicy({
+          selfPeerId: selfPeerIdEarly.toString(),
+          configuredRelayPeerIds: activeNetworkRelayPeerIds,
+          otherNetworkRelayPeerIds: (this.config.otherNetworkRelays ?? [])
+            .map((address) => peerIdFromRelayAddress(address))
+            .filter((peerId): peerId is string => peerId !== undefined),
+          log: (message) => console.log(`[${new Date().toISOString()}] ${message}`),
+        })
+      : null;
 
     // TCP keepAlive helps prevent idle relay connections from being dropped by
     // middleboxes or remote timeouts (common cause of ECONNRESET).
@@ -989,7 +1015,10 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayConnectionGater(activeRelayNetworkPolicy?.connectionGater),
+      connectionGater: this.createRelayConnectionGater(
+        activeRelayNetworkPolicy?.connectionGater,
+        networkPeerDialPolicy?.connectionGater,
+      ),
       connectionManager: {
         minConnections: 0,
         // Core Nodes scale this with relayServerCapacity (default
@@ -1004,6 +1033,7 @@ export class DKGNode {
       ...(this.relayMetrics ? { metrics: () => this.relayMetrics! } : {}),
     } as any);
     this.stopAbortController = startStopAbortController;
+    this.networkPeerDialPolicy = networkPeerDialPolicy;
 
     this.setupConnectionObservability();
 
@@ -1453,7 +1483,10 @@ export class DKGNode {
     }
   }
 
-  private createRelayConnectionGater(activeRelayGater?: RelayedConnectionGater): ConnectionGater {
+  private createRelayConnectionGater(
+    activeRelayGater?: RelayedConnectionGater,
+    networkPeerGater?: NetworkPeerConnectionGater,
+  ): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
     // is unit-tested (relay-flap-guard.test.ts) — a hook arg-shape or plumbing
@@ -1468,7 +1501,19 @@ export class DKGNode {
         flapGater.denyInboundRelayedConnection(relay, remotePeer),
       denyDialMultiaddr: (multiaddr) =>
         activeRelayGater?.denyDialMultiaddr(multiaddr) ||
+        networkPeerGater?.denyDialMultiaddr(multiaddr) ||
         flapGater.denyDialMultiaddr(multiaddr),
+      // Only installed with a network identity, so a node without one keeps
+      // exactly the pre-existing gater (and libp2p's allow-all address filter).
+      ...(networkPeerGater
+        ? {
+            denyDialPeer: networkPeerGater.denyDialPeer,
+            denyInboundEncryptedConnection: networkPeerGater.denyInboundEncryptedConnection,
+            denyOutboundEncryptedConnection: networkPeerGater.denyOutboundEncryptedConnection,
+            // libp2p passes this to the peer store as a bare function reference.
+            filterMultiaddrForPeer: networkPeerGater.filterMultiaddrForPeer,
+          }
+        : {}),
     } as ConnectionGater;
   }
 
@@ -1620,6 +1665,7 @@ export class DKGNode {
     this.relayMetrics = null;
     this.relayCapacity = null;
     this.relayReservationCountTarget = 1;
+    this.networkPeerDialPolicy = null;
     const node = this.node;
     try {
       await node.stop();
@@ -1663,6 +1709,23 @@ export class DKGNode {
       peerId: peerId.toString(),
       addresses: addrs.map((addr) => addr.toString()),
     }));
+  }
+
+  /**
+   * Refuse outbound connections to a peer that failed the network-identity
+   * proof, and stop storing its addresses, for a bounded TTL. Call this BEFORE
+   * closing the peer's connections: libp2p's reconnect queue reacts to the
+   * disconnect by redialing keep-alive-tagged peers. Returns false when
+   * transport isolation is inactive (not started, no `networkIdentity`) or the
+   * peer is exempt (this node or a configured relay).
+   */
+  denyPeerAfterNetworkMismatch(peerId: string): boolean {
+    return this.networkPeerDialPolicy?.denyAfterNetworkMismatch(peerId) ?? false;
+  }
+
+  /** Lift a mismatch dial denial once the peer proved it belongs to this network. */
+  clearPeerNetworkMismatchDenial(peerId: string): void {
+    this.networkPeerDialPolicy?.clearNetworkMismatchDenial(peerId);
   }
 
   /**
