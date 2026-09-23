@@ -2416,7 +2416,8 @@ export class DKGAgent extends DKGAgentBase {
     }
     // The chain now says what this id commits: drop any binding it refutes
     // (ontology claims bound unchecked by older versions, persisted by Cores),
-    // before it can make the id look known or answer a reverse lookup.
+    // before it can make the id look known or answer a reverse lookup, and
+    // repair a subscription keyed by this hash that never recorded it.
     if (nameHash !== null) {
       const cleared = this.clearRefutedOnChainContextGraphBindings(contextGraphId, nameHash);
       if (cleared.length > 0) {
@@ -2426,6 +2427,7 @@ export class DKGAgent extends DKGAgentBase {
             + cleared.map((id) => JSON.stringify(id.slice(0, 64))).join(', '),
         );
       }
+      this.repairContextGraphNameHashSubscription(contextGraphId, nameHash);
     }
     const knownBefore = previous !== undefined
       || this.seenOnChainIds.has(contextGraphId)

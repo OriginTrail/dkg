@@ -106,6 +106,7 @@ async function startAgent(
   chain: MockChainAdapter,
   nodeRole: 'edge' | 'core' = 'edge',
   store?: ContextGraphSubscriptionStore,
+  syncContextGraphs?: string[],
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: `OntologyClaims${nodeRole}`,
@@ -114,6 +115,7 @@ async function startAgent(
     chainAdapter: chain,
     rfc64CatalogActivation: { enabled: false },
     ...(store ? { contextGraphSubscriptionStore: store } : {}),
+    ...(syncContextGraphs ? { syncContextGraphs } : {}),
   });
   agents.push(agent);
   await agent.start();
@@ -340,7 +342,7 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     expect(nudge).toHaveBeenCalledWith(keccak(PRIVATE_34), expect.anything());
   });
 
-  it('subscribes the cleartext by hash before any chain lane reached the slot, and enumeration then records its hash', async () => {
+  it('binds the definition it holds once enumeration proves the slot, with no chain facts at discovery time', async () => {
     const agent = await startAgent(await baseShapedChain());
     await syncOntologyClaims(agent);
     await agent.discoverContextGraphsFromStore();
@@ -348,22 +350,124 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     expect(row(agent, REAL_ID)?.onChainId).toBeUndefined();
     expect(row(agent, 'baseball')?.onChainId).toBeUndefined();
 
-    const { contextGraphId, identity } = await subscribeByNameHash(agent, NAME_HASH);
+    await agent.discoverContextGraphsFromStorage();
 
-    // The hash names the definition this node already holds: no row is keyed
-    // by the hash string, whose identity would be keccak256 of that string.
+    // Enumeration binds the definition #33's hash names, through the reverse
+    // index, and nothing else.
+    expectOnlyProvenBindings(agent);
+    const { contextGraphId, identity } = await subscribeByNameHash(agent, NAME_HASH);
     expect(contextGraphId).toBe(REAL_ID);
-    expect(identity).toMatchObject({ state: 'resolved', nameHash: NAME_HASH, contextGraphId: REAL_ID });
-    expect(row(agent, NAME_HASH)).toBeUndefined();
-    // Admitted from its local public definition, as a subscribe by the
-    // cleartext id would be; the chain binding follows from enumeration.
-    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true });
+    expect(identity).toMatchObject({ state: 'resolved', contextGraphId: REAL_ID });
+  });
+
+  for (const heldCleartext of [false, true]) {
+    it(`repairs the durable row an earlier \`dkg subscribe <hash> --save\` left${heldCleartext ? ', next to its subscribed cleartext' : ''}`, async () => {
+      // The phase-0 node's state after the bug: a row keyed by the hash
+      // string, bound to #33 without its hash, and the hash in the sync scope
+      // (config.contextGraphs). The operator later subscribed the cleartext too.
+      const residue: ContextGraphSubscriptionRecord[] = [
+        { id: NAME_HASH, subscribed: true, synced: false, onChainId: '33', syncScoped: true },
+        ...(heldCleartext
+          ? [{ id: REAL_ID, subscribed: true, synced: false, onChainId: '33', syncScoped: true }]
+          : []),
+      ];
+      const { store, records } = memorySubscriptionStore(residue);
+      const syncContextGraphs = heldCleartext ? [NAME_HASH, REAL_ID] : [NAME_HASH];
+      const chain = await baseShapedChain();
+      const agent = await startAgent(chain, 'edge', store, [...syncContextGraphs]);
+      expect(row(agent, NAME_HASH)).toMatchObject({ subscribed: true, onChainId: '33' });
+      expect(row(agent, NAME_HASH)?.onChainHash).toBeUndefined();
+      expect(await rfc64IdentityOutcome(agent, NAME_HASH)).toMatch(/invalid identity/);
+
+      await syncOntologyClaims(agent);
+      await agent.discoverContextGraphsFromStore();
+      await agent.discoverContextGraphsFromStorage();
+      await vi.waitFor(() => expect(row(agent, NAME_HASH)).toBeUndefined());
+
+      const { contextGraphId, identity } = await subscribeByNameHash(agent, NAME_HASH);
+      expect(contextGraphId).toBe(REAL_ID);
+      expect(identity).toMatchObject({ state: 'resolved', nameHash: NAME_HASH, onChainId: '33', contextGraphId: REAL_ID });
+      expect(row(agent, NAME_HASH)).toBeUndefined();
+      expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+      expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+      const scope = (agent as unknown as { config: { syncContextGraphs?: string[] } }).config.syncContextGraphs ?? [];
+      expect(scope).toContain(REAL_ID);
+      expect(scope).not.toContain(NAME_HASH);
+      await vi.waitFor(() => expect(records.has(NAME_HASH)).toBe(false));
+      expect(records.get(REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+
+      // The next start restores only the cleartext row, and the saved hash in
+      // config.contextGraphs resolves to it.
+      await agents.pop()!.stop();
+      const restarted = await startAgent(chain, 'edge', store, [...syncContextGraphs]);
+      expect(row(restarted, NAME_HASH)).toBeUndefined();
+      expect(row(restarted, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+      const restartedScope =
+        (restarted as unknown as { config: { syncContextGraphs?: string[] } }).config.syncContextGraphs ?? [];
+      expect(restartedScope).toContain(REAL_ID);
+      expect(restartedScope).not.toContain(NAME_HASH);
+      expect(restarted.resolveContextGraphIdAlias(NAME_HASH)).toBe(REAL_ID);
+    });
+  }
+
+  it('turns that row into the slot\'s placeholder when no cleartext is held, so the name resolver takes over', async () => {
+    const { store } = memorySubscriptionStore([
+      { id: NAME_HASH, subscribed: true, synced: false, onChainId: '33', syncScoped: true },
+    ]);
+    const agent = await startAgent(await baseShapedChain(), 'edge', store, [NAME_HASH]);
+    expect(agent.describeContextGraphIdentity(NAME_HASH)).toBeNull();
 
     await agent.discoverContextGraphsFromStorage();
-    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+
+    // A #2744 name-hash placeholder again: the note, a resolution target, and
+    // an identity RFC-64 accepts.
+    expect(row(agent, NAME_HASH)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+    expect(agent.contextGraphNameTargetFor(NAME_HASH)).toEqual({ nameHash: NAME_HASH, onChainId: '33' });
+    expect(agent.describeContextGraphIdentity(NAME_HASH)).toMatchObject({
+      state: 'name-hash-only',
+      nameHash: NAME_HASH,
+      onChainId: '33',
+      message: `Context Graph ${SHORT_HASH} is known only by its on-chain name hash; `
+        + 'waiting for a peer to reveal the cleartext id, or subscribe with the cleartext id.',
+    });
+    expect(await rfc64IdentityOutcome(agent, NAME_HASH)).not.toMatch(/invalid identity/);
+
+    vi.spyOn(agent, 'contextGraphNameResolutionPeers').mockReturnValue(['12D3KooWHolderK92Xapyy']);
+    vi.spyOn(agent, 'peerAdvertisesProtocol').mockResolvedValue(true);
+    vi.spyOn(agent, 'askPeerForContextGraphName').mockResolvedValue(REAL_ID);
+    await expect(agent.resolveContextGraphNameHashNow(NAME_HASH)).resolves.toBe(REAL_ID);
     expect(row(agent, NAME_HASH)).toBeUndefined();
-    expect(agent.resolveContextGraphIdAlias(NAME_HASH)).toBe(REAL_ID);
-    expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+  });
+
+  it('keeps the repair when adopting the held cleartext fails', async () => {
+    const { store } = memorySubscriptionStore([
+      { id: NAME_HASH, subscribed: true, synced: false, onChainId: '33', syncScoped: true },
+    ]);
+    const agent = await startAgent(await baseShapedChain(), 'edge', store);
+    await syncOntologyClaims(agent);
+    await agent.discoverContextGraphsFromStore();
+    const adopt = vi.spyOn(agent, 'adoptVerifiedContextGraphCleartext').mockRejectedValue(new Error('adoption failed'));
+
+    expect(agent.repairContextGraphNameHashSubscription('33', NAME_HASH)).toBe(true);
+    await vi.waitFor(() => expect(adopt).toHaveBeenCalledWith({ nameHash: NAME_HASH, onChainId: '33' }, REAL_ID, 'local-store'));
+    expect(row(agent, NAME_HASH)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+    // Already a placeholder: nothing left to repair.
+    expect(agent.repairContextGraphNameHashSubscription('33', NAME_HASH)).toBe(false);
+  });
+
+  it('never turns a hash-shaped row the chain does not bind to the slot into a placeholder', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    // A cleartext id that happens to be hash-shaped (here, the very hash #33
+    // commits), created locally and never bound on chain.
+    agent.subscribeToContextGraph(NAME_HASH, { syncMode: 'always-on' });
+    expect(row(agent, NAME_HASH)?.onChainId).toBeUndefined();
+
+    await agent.discoverContextGraphsFromStorage();
+
+    expect(row(agent, NAME_HASH)).toMatchObject({ subscribed: true });
+    expect(row(agent, NAME_HASH)?.onChainHash).toBeUndefined();
+    expect(agent.repairContextGraphNameHashSubscription('33', 'not-a-hash')).toBe(false);
   });
 
   it('moves a subscription made by hash to the cleartext id once the definition arrives', async () => {
