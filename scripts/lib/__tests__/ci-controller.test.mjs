@@ -25,15 +25,6 @@ import {
 // continue to execute only reviewed policy from this immutable controller.
 const TRUSTED_CI_CONTROLLER_SHA = '780f14aa60c39bdca788967121085c3c0d82d85c';
 
-function workflowJobBlock(workflow, jobName) {
-  const marker = `  ${jobName}:\n`;
-  const start = workflow.indexOf(marker);
-  assert.notEqual(start, -1, `workflow must define ${jobName}`);
-  const remainder = workflow.slice(start + marker.length);
-  const nextJob = remainder.search(/^  [a-zA-Z0-9_-]+:\n/m);
-  return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
-}
-
 test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-manifest-'));
   t.after(() => fs.rmSync(temporaryDirectory, { recursive: true, force: true }));
@@ -116,20 +107,19 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     /ref: aba17f2e66cf48a6cd6dc06c567e1e8bd77bfb8d/,
     'the trusted controller must not point into candidate-only history',
   );
-  const abiFreshnessJob = workflowJobBlock(primaryWorkflow, 'abi-freshness');
-  assert.match(
-    abiFreshnessJob,
-    /^    if: needs\.changes\.outputs\.abi_freshness == 'true'$/m,
+  const { jobs: primaryJobs } = parse(primaryWorkflow);
+  assert.equal(
+    primaryJobs['abi-freshness'].if,
+    "needs.changes.outputs.abi_freshness == 'true'",
     'ABI freshness must use the trusted planner output once the controller is protected',
   );
-  assert.match(
-    workflowJobBlock(primaryWorkflow, 'changes'),
-    /^      abi_freshness: \$\{\{ steps\.plan\.outputs\.abi_freshness \}\}$/m,
+  assert.equal(
+    primaryJobs.changes.outputs.abi_freshness,
+    '${{ steps.plan.outputs.abi_freshness }}',
     'the trusted planner output must be exposed to the ABI freshness job',
   );
-  assert.doesNotMatch(
-    workflowJobBlock(primaryWorkflow, 'changes'),
-    /candidate\/scripts\/ci\/check-tracked-text-nul\.mjs/,
+  assert.ok(
+    primaryJobs.changes.steps.every((step) => !String(step.run ?? '').includes('candidate/scripts/ci/check-tracked-text-nul.mjs')),
     'an untrusted candidate must never supply its own security gate',
   );
   assert.ok(
@@ -315,10 +305,7 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     );
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
-  assert.match(
-    workflowJobBlock(workflow, 'abi-freshness'),
-    /^    if: needs\.changes\.outputs\.abi_freshness == 'true'$/m,
-  );
+  assert.equal(parse(workflow).jobs['abi-freshness'].if, "needs.changes.outputs.abi_freshness == 'true'");
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
