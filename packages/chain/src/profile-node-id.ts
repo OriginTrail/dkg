@@ -11,18 +11,19 @@
  * and do not interpret them; the contract bounds them at 64 bytes.
  */
 import { ethers } from 'ethers';
+import { PROFILE_NODE_ID_MAX_BYTES } from '@origintrail-official/dkg-core';
 import type { ProfileNodeIdUpdateResult, ProfileNodeIdUpdateSupport } from './chain-adapter.js';
 
 /** First Profile version with `updateNodeId`. */
 export const PROFILE_NODE_ID_UPDATE_MIN_VERSION = '10.1.0';
 
-/** Mirrors `Profile.MAX_NODE_ID_LENGTH` (Profile >= 10.1.0). */
-export const PROFILE_NODE_ID_MAX_LENGTH = 64;
-
 /** The Profile entry point whose selector the feature probe looks for. */
 export const PROFILE_UPDATE_NODE_ID_SIGNATURE = 'updateNodeId(uint72,bytes)';
 
-/** `nodeId` as lowercase 0x hex; throws unless it is 1..64 bytes. */
+/**
+ * `nodeId` as lowercase 0x hex; throws unless it is 1 to
+ * `PROFILE_NODE_ID_MAX_BYTES` (dkg-core, mirrors `Profile.MAX_NODE_ID_LENGTH`) bytes.
+ */
 export function normalizeProfileNodeId(nodeId: Uint8Array | string, label: string): string {
   let hex: string;
   try {
@@ -32,8 +33,8 @@ export function normalizeProfileNodeId(nodeId: Uint8Array | string, label: strin
   }
   const length = ethers.dataLength(hex);
   if (length === 0) throw new Error(`${label}: nodeId is empty`);
-  if (length > PROFILE_NODE_ID_MAX_LENGTH) {
-    throw new Error(`${label}: nodeId is ${length} bytes; the maximum is ${PROFILE_NODE_ID_MAX_LENGTH}`);
+  if (length > PROFILE_NODE_ID_MAX_BYTES) {
+    throw new Error(`${label}: nodeId is ${length} bytes; the maximum is ${PROFILE_NODE_ID_MAX_BYTES}`);
   }
   return hex.toLowerCase();
 }
