@@ -12,7 +12,7 @@ import {
 } from '../ci-delta.mjs';
 import { COVERAGE_JOBS } from '../ci-lanes.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
-import { REPO_ROOT, change, pullRequestPlan, selectedLanes, sourceFiles } from './ci-plan-fixtures.mjs';
+import { REPO_ROOT, change, pullRequestPlan, selectedLanes, sourceFiles, workflowJobCommands } from './ci-plan-fixtures.mjs';
 import { loadReferences, traceLaneLoads } from './load-graph.mjs';
 
 // Path routing: what individual changed paths select on pull requests -
@@ -233,8 +233,9 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // owning lanes, node-ui's browser specs in the e2e lane and its integration
   // suites in the EVM scope that lists them. Package scripts run in no lane,
   // and fixture workspaces (test-fixtures/) run only where a test builds them.
-  // A lane job also runs the support files its steps name: directly, through
-  // a root package.json script or through a reusable workflow it calls.
+  // A lane job also runs the support files its commands name, as
+  // workflowJobCommands follows them: its steps, the root package.json and
+  // shell scripts they call, and its local actions and reusable workflows.
   // What those files load comes from traceLaneLoads and loadReferences in
   // load-graph.mjs, which list the forms they follow. Each file reached
   // must select the lane or scope that loads it, or plan full CI.
@@ -261,38 +262,23 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
       }
     }
   }
-  const rootScripts = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).scripts;
-  // A command plus the bodies of the root package.json scripts it runs.
-  const withScripts = (command, seen = new Set()) => {
-    const nested = [];
-    for (const [, name] of command.matchAll(/\bpnpm (?:run )?([\w:-]+)/g)) {
-      if (!Object.hasOwn(rootScripts, name) || seen.has(name)) continue;
-      seen.add(name);
-      nested.push(withScripts(rootScripts[name], seen));
-    }
-    return [command, ...nested].join('\n');
-  };
-  const workflowJobs = (file) => Object.entries(parse(fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')).jobs);
   const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
   // A job runs for its mapped lane or, like a job that only calls a reusable
   // workflow, for the lane output its condition reads.
-  const laneOf = (job, condition = '') => [
+  const laneOf = (job, condition) => [
     laneByJob[job],
     condition.match(/needs\.changes\.outputs\.(\w+) == 'true'/)?.[1],
   ].find((lane) => CI_LANES.includes(lane));
-  const seedJobs = (jobs, laneFor) => {
-    for (const [job, { steps = [], uses = '', if: condition }] of jobs) {
-      const lane = laneFor(job, condition);
-      if (!lane) continue;
-      if (uses.startsWith('./')) seedJobs(workflowJobs(uses.slice(2)), () => lane);
-      for (const { run = '' } of steps) {
-        for (const [file] of withScripts(run).matchAll(/\b(?:bench|devnet|test-systems|tools)\/[^\s'"]+\.[cm]?[jt]sx?\b/g)) {
-          seed(file, [lane], `${job} job`);
-        }
+  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+  for (const { job, condition, commands } of workflowJobCommands(workflow)) {
+    const lane = laneOf(job, condition);
+    if (!lane) continue;
+    for (const command of commands) {
+      for (const [file] of command.matchAll(/\b(?:bench|devnet|test-systems|tools)\/[^\s'"]+\.[cm]?[jt]sx?\b/g)) {
+        seed(file, [lane], `${job} job`);
       }
     }
-  };
-  seedJobs(workflowJobs('.github/workflows/ci.yml'), laneOf);
+  }
 
   const loadedBy = traceLaneLoads(seeds);
 

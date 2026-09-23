@@ -15,6 +15,7 @@ import {
   gateNeeds,
   selectedLanes,
   succeeded,
+  workflowJobCommands,
 } from './ci-plan-fixtures.mjs';
 import { importSpecifiers } from './load-graph.mjs';
 
@@ -92,59 +93,14 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   assert.equal(mode(diff(exportsHead)), 'full', 'routed changes differ from the diff');
 });
 
-function readRepoText(file) {
-  try {
-    return fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
-  } catch {
-    return undefined;
-  }
-}
-
 // Every CI-policy script a workflow step runs must come from the trusted
 // checkout, however the other checkout is named or the path is spelled, and
 // whether the step runs it directly or through a root package.json script, a
 // shell script, a local composite action or a local reusable workflow.
-function untrustedPolicyRuns(workflowSource, readRepoFile = readRepoText) {
-  const { scripts = {} } = JSON.parse(readRepoFile('package.json') ?? '{}');
-  const followed = new Set();
-  const unseen = (key) => !followed.has(key) && Boolean(followed.add(key));
-  const commands = [];
-  const followRun = (text) => {
-    commands.push(text);
-    for (const [, name] of text.matchAll(/\b(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/g)) {
-      if (Object.hasOwn(scripts, name) && unseen(`script ${name}`)) followRun(scripts[name]);
-    }
-    for (const [script] of text.matchAll(/[\w./-]+\.sh\b/g)) {
-      const file = path.posix.normalize(script);
-      const source = readRepoFile(file);
-      if (source !== undefined && unseen(file)) followRun(source);
-    }
-  };
-  const followUses = (uses) => {
-    const target = uses?.match(/^\.\/(.+?)\/?$/)?.[1];
-    if (!target || !unseen(target)) return;
-    const definition = /\.ya?ml$/.test(target)
-      ? readRepoFile(target)
-      : ['action.yml', 'action.yaml'].map((name) => readRepoFile(`${target}/${name}`)).find((text) => text !== undefined);
-    assert.ok(definition !== undefined, `${uses} names no local workflow or action`);
-    const { jobs, runs } = parse(definition);
-    if (jobs) followJobs(jobs);
-    else followSteps(runs?.steps);
-  };
-  const followSteps = (steps = []) => {
-    for (const { run, uses } of steps) {
-      if (run) followRun(run);
-      followUses(uses);
-    }
-  };
-  const followJobs = (jobs) => {
-    for (const job of Object.values(jobs)) {
-      followSteps(job.steps);
-      followUses(job.uses);
-    }
-  };
-  followJobs(parse(workflowSource).jobs);
-  return commands.flatMap((text) => [...text.matchAll(/(\S*?)scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/g)])
+function untrustedPolicyRuns(workflowSource, readRepoFile) {
+  return workflowJobCommands(workflowSource, { readRepoFile })
+    .flatMap(({ commands }) => commands)
+    .flatMap((text) => [...text.matchAll(/(\S*?)scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/g)])
     .filter(([, prefix]) => prefix !== 'trusted-ci/')
     .map(([reference]) => reference);
 }
