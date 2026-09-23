@@ -341,11 +341,13 @@ describe('implicit SWM context graph metadata', () => {
     }>();
     const membershipStore: ContextGraphMembershipStore = {
       loadAll: async () => [...persistedMemberships.values()].map((row) => ({ ...row })),
-      loadLocalOrigins: async () => [...persistedOrigins.values()].map((row) => ({ ...row })),
-      recordLocalOrigin: async (record) => {
-        if (!persistedOrigins.has(record.contextGraphId)) {
-          persistedOrigins.set(record.contextGraphId, { ...record });
-        }
+      localOrigins: {
+        loadLocalOrigins: async () => [...persistedOrigins.values()].map((row) => ({ ...row })),
+        recordLocalOrigin: async (record) => {
+          if (!persistedOrigins.has(record.contextGraphId)) {
+            persistedOrigins.set(record.contextGraphId, { ...record });
+          }
+        },
       },
       upsert: async (record) => {
         persistedMemberships.set(

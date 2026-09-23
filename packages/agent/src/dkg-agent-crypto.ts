@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -321,6 +321,7 @@ import {
   CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import {
   isBoundedOperationTimeoutError,
@@ -399,6 +400,10 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import { localContextGraphIdMatchesCommittedNameHash } from './context-graph-binding-state.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 
@@ -526,6 +531,8 @@ async function evaluateContextGraphSlotBinding(
     label: string,
     readSignal?: AbortSignal,
   ) => Promise<T | typeof TIMEOUT_SENTINEL>,
+  /** The deadline `raceRead` applies; quoted in the fail-closed diagnostic. */
+  readTimeoutMs: number = CHAIN_POLICY_READ_TIMEOUT_MS,
 ): Promise<ContextGraphSlotBindingOutcome> {
   let numericId: bigint;
   try {
@@ -568,13 +575,13 @@ async function evaluateContextGraphSlotBinding(
     warn(
       opCtx ?? createOperationContext('share'),
       `isContextGraphPublicOnChain(${contextGraphId}): getContextGraphNameHash(${onChainId}) timed out after `
-      + `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — cannot verify local-mapping identity, `
+      + `${readTimeoutMs}ms — cannot verify local-mapping identity, `
       + 'treating CG as NOT public (fail-closed)',
     );
     return {
       kind: 'transportFailure',
       error: createRpcTimeoutError(
-        `getContextGraphNameHash(${onChainId}) timed out after ${CHAIN_POLICY_READ_TIMEOUT_MS}ms`,
+        `getContextGraphNameHash(${onChainId}) timed out after ${readTimeoutMs}ms`,
       ),
     };
   }
@@ -586,6 +593,46 @@ async function evaluateContextGraphSlotBinding(
     isWireIdKeyedSubscription,
     (message) => warn(opCtx ?? createOperationContext('share'), message),
   );
+}
+
+const LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS = 60_000;
+
+/**
+ * Bind an optional chain point read. Options are passed ONLY when a signal is
+ * present, so the call keeps the arity callers and spies have always observed.
+ */
+function bindOptionalChainRead<T>(
+  chain: unknown,
+  read: ((numericId: bigint, options?: { signal?: AbortSignal }) => Promise<T>) | undefined,
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => signal
+    ? read.call(chain, numericId, { signal })
+    : read.call(chain, numericId);
+}
+
+/**
+ * Bind the one-read authority WITH the caller's freshness choice.
+ *
+ * Separate from {@link bindOptionalChainRead} because only this read honours
+ * `freshness`; the point reads it falls back to are always live. That is the
+ * safe direction — a node whose adapter cannot serve the single tuple simply
+ * keeps today's behaviour rather than inheriting a bounded answer from a path
+ * that never offered one.
+ */
+function bindLiveAuthorityRead<T>(
+  chain: unknown,
+  read: ((
+    numericId: bigint,
+    options?: { signal?: AbortSignal; freshness?: 'live' | 'bounded' },
+  ) => Promise<T>) | undefined,
+  freshness: 'live' | 'bounded',
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => read.call(chain, numericId, {
+    ...(signal ? { signal } : {}),
+    freshness,
+  });
 }
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
@@ -645,7 +692,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<ContextGraphAgentGateAuthority> {
-    return resolveContextGraphAgentGateAuthorityDecision({
+    return withRpcUsageSite(CG_AUTH_RPC_SITES.gate, () => resolveContextGraphAgentGateAuthorityDecision({
       contextGraphId,
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
@@ -656,7 +703,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
       ),
-    });
+    }));
   }
 
   /** Compatibility projection for admission callers that only need fail-closed gate values. */
@@ -692,9 +739,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(
-      contextGraphId,
-      { signal: options.signal },
+    const registeredAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recoveryGate,
+      () => this.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        { signal: options.signal },
+      ),
     );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
     if (registeredAuthority.kind !== 'unregistered') return null;
@@ -827,22 +877,33 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   /**
    * #884 review — bound a single chain policy/liveness read on the hot path.
    * Mirrors the `withTimeout` race in {@link getContextGraphOnChainPolicy}:
-   * resolves to {@link TIMEOUT_SENTINEL} if the underlying RPC HANGS past
-   * {@link CHAIN_POLICY_READ_TIMEOUT_MS}, so callers fail closed instead of
+   * resolves to {@link TIMEOUT_SENTINEL} if the underlying RPC HANGS past the
+   * request-scoped authority deadline (`chainAuthorityReadBudgets`, default
+   * {@link CHAIN_POLICY_READ_TIMEOUT_MS}), so callers fail closed instead of
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
+   *
+   * `start` receives the bounded signal so the deadline reaches the read
+   * itself: a hung RPC is cancelled rather than merely abandoned, and a
+   * timed-out caller leaves any flight it was sharing.
    */
   private async raceChainPolicyRead<T>(
-    start: () => Promise<T>,
+    start: (signal: AbortSignal) => Promise<T>,
     label: string,
     signal?: AbortSignal,
   ): Promise<T | typeof TIMEOUT_SENTINEL> {
     try {
-      return await runBoundedOperation(start, {
-        label,
-        timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
-        signal,
-      });
+      // This remains inside the ordinary foreground RATE budget, but it must
+      // not wait behind a harness-sized queue longer than its 2.5s fail-closed
+      // deadline. Background callers retain their background class; the
+      // governor honors this priority only for foreground authority gates.
+      return await withRpcRequestContext({ admissionPriority: 'authority' }, () => (
+        runBoundedOperation(start, {
+          label,
+          timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+          signal,
+        })
+      ));
     } catch (error) {
       if (isBoundedOperationTimeoutError(error)) return TIMEOUT_SENTINEL;
       throw error;
@@ -872,22 +933,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   protected async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
   ): Promise<LiveOnChainAccessPolicyState> {
     const readLiveness = this.chain.isContextGraphActiveOnChain;
     const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    const readLiveAuthority = this.chain.getContextGraphLiveAuthority;
     return resolveLiveAccessPolicyState(
       {
-        isContextGraphActiveOnChain: typeof readLiveness === 'function'
-          ? (numericId, signal) => signal
-            ? readLiveness.call(this.chain, numericId, { signal })
-            : readLiveness.call(this.chain, numericId)
-          : undefined,
-        getContextGraphAccessPolicy: typeof readAccessPolicy === 'function'
-          ? (numericId, signal) => signal
-            ? readAccessPolicy.call(this.chain, numericId, { signal })
-            : readAccessPolicy.call(this.chain, numericId)
-          : undefined,
+        readTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+        // Defaults to live. Only a caller that has said its decision can wait
+        // for the next read is allowed to ask the index.
+        readLiveAuthority: bindLiveAuthorityRead(
+          this.chain, readLiveAuthority, options.freshness ?? 'live',
+        ),
+        isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
+        getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
         runBoundedRead: async (start, label, signal) => {
           const value = await this.raceChainPolicyRead(start, label, signal);
           return value === TIMEOUT_SENTINEL
@@ -897,6 +957,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         claimMissingLivenessWarning: () => {
           if (this.warnedMissingCgLivenessProbe) return false;
           this.warnedMissingCgLivenessProbe = true;
+          return true;
+        },
+        // Unlike the static condition above this one comes and goes (a node
+        // throttling at the JSON-RPC level reaches it too), so it is limited
+        // by time rather than to once per process.
+        claimLiveAuthorityFallbackWarning: () => {
+          const now = Date.now();
+          if (now - this.lastLiveAuthorityFallbackWarnAt < LIVE_AUTHORITY_FALLBACK_WARN_INTERVAL_MS) return false;
+          this.lastLiveAuthorityFallbackWarnAt = now;
           return true;
         },
         warn: (ctx, message) => this.log.warn(ctx, message),
@@ -912,9 +981,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async readLiveOnChainAccessPolicy(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
   ): Promise<0 | 1 | null> {
-    const state = await this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options);
+    const state = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.livePolicy,
+      () => this.resolveLiveOnChainAccessPolicyState(onChainId, opCtx, options),
+    );
     return state.kind === 'available' ? state.accessPolicy : null;
   }
 
@@ -1075,10 +1147,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // resolver collapses unknown↔not-public ONLY for this boolean predicate;
       // the publish-inline probe consumes the tri-state directly so it can
       // REFUSE (rather than choose plaintext) on a genuine UNKNOWN.
-      return (await this.resolveOnChainAccessPolicyState(
-        contextGraphId,
-        opCtx,
-        options,
+      return (await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publicProbe,
+        () => this.resolveOnChainAccessPolicyState(contextGraphId, opCtx, options),
       )) === 0;
     } catch (err) {
       // Fail closed (curated/encrypted) on any lookup failure, but not
@@ -1277,6 +1348,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       (localId) => this.isWireIdKeyedSubscription(localId),
       (ctx, message) => this.log.warn(ctx, message),
       (start, label, signal) => this.raceChainPolicyRead(start, label, signal),
+      chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
     );
     return mapContextGraphSlotBindingOutcome(outcome, bindingMode);
   }
@@ -1345,7 +1417,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
-   * Resolve encryption recipients from live registered-chain authority. The
+   * Resolve encryption recipients from registered-chain authority. The
    * local store remains the source of authenticated encryption keys and peer
    * routing, but only the chain roster selects which agents are resolved. When
    * the graph also has a peer allowlist, recipient routing must satisfy that
@@ -1353,11 +1425,23 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * at least one usable recipient key on an allowed peer before publishing can
    * proceed, otherwise either an unauthorized peer receives the sender key or
    * an authorized member cannot read the resulting write.
+   *
+   * "Whether the author may share plaintext" follows from the immutable
+   * on-chain access policy alone (the contract has no access-policy update),
+   * so a finalized, name-bound PUBLIC snapshot answers it without a live RPC.
+   * The PRIVATE roster is an encryption-key decision and is always read from
+   * current chain state (`requireLiveRosterForPrivate`), never from the index.
    */
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    const registeredAuthority = await this.resolveRegisteredContextGraphAuthority(input.contextGraphId);
+    const registeredAuthority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recipients,
+      () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId, {
+        authorityReadMode: 'finalized-index-or-live',
+        requireLiveRosterForPrivate: true,
+      }),
+    );
     if (registeredAuthority.kind === 'unregistered') {
       return resolveWorkspaceAgentRecipients(this.store, input);
     }
@@ -2318,7 +2402,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       );
     }
 
-    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(pkg.contextGraphId);
+    const agentGateAddresses = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.senderKeyAccept,
+      () => this.getContextGraphAgentGateAddresses(pkg.contextGraphId),
+    );
     if (!agentGateAddresses) {
       // A cold private member can receive Sender Key setup after the finalized
       // chain binding but before its accepted RFC-64 roster or legacy `_meta`
@@ -2772,7 +2859,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
   ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
-    const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId);
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.signer,
+      () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
+    );
     if (authority.kind === 'ungated') {
       return this.getWorkspaceGossipSigningAgent();
     }

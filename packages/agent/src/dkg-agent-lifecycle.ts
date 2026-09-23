@@ -1,5 +1,6 @@
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
+import { startAuthorityIndexSnapshotRuntime } from './authority-index-snapshot-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -287,7 +288,11 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
-import { composeSyncWorkAdmission } from './sync/work-admission.js';
+import {
+  composeSyncWorkAdmission,
+  createSyncFetchSharingIdentity,
+  type SyncFetchSharingIdentity,
+} from './sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -328,10 +333,12 @@ import {
   type ChallengeExactAssetFetchContext,
   type DurableMetaContinuation,
   type DurableSyncContext,
+  type ExactAssetResponderCapability,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
 import { createGraphScopedPhysicalOperationFence } from './sync/requester/graph-scoped-operation-fence.js';
 import {
+  mergeExactAssetResponderCapability,
   mergeExactDurableFetchDisposition,
   type ExactDurableFetchDisposition,
 } from './sync/requester/exact-durable-fetch.js';
@@ -501,6 +508,16 @@ import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-li
 const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 /** Yield to the event loop every N activations so concurrent store work can interleave. */
 const REHYDRATE_THROTTLE_BATCH = 8;
+/** Retry interval for a persisted-subscription activation that is waiting for a slot. */
+const REHYDRATION_ROLLING_RETRY_MS = 30_000;
+
+function rehydratedSubscriptionReachedSafeState(
+  subscription: Pick<ContextGraphSub, 'synced' | 'metaSynced' | 'pendingMeta'>,
+): boolean {
+  return subscription.synced === true
+    && subscription.metaSynced !== false
+    && subscription.pendingMeta !== true;
+}
 // A large rootless VM snapshot may need more than one graph-aligned fetch
 // window. Keep the post-approval bootstrap on the authenticated curator while
 // every round makes verified progress, instead of falling into a broad peer
@@ -584,9 +601,11 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { peekFinalizedAuthorityColdResolution } from
+  './finalized-authority-cold-resolution.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -644,6 +663,8 @@ import {
   type SyncPeerResolution,
 } from './dkg-agent-cg-resolve.js';
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
+import { isCanonicalAuthoritativeContextGraphId } from
+  './context-graph-binding-state.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -682,10 +703,10 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import {
   createLocalContextGraphOriginMembershipRecord,
-  normalizeLocalContextGraphOriginPersistence,
 } from
   './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
@@ -694,6 +715,7 @@ import {
 import {
   activatePersistedContextGraphSubscription as activatePersistedContextGraphSubscriptionTransaction,
   recoverDeferredContextGraphSubscriptionAuthorities,
+  type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
 } from './context-graph-subscription-authority-recovery.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
@@ -707,13 +729,20 @@ import {
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
 import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
+import {
   rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
-import { initializeRfc64LegacySwmBoundaryV1 } from
+import {
+  initializeRfc64LegacySwmBoundaryV1,
+  prepareRfc64LateLegacySwmBoundaryV1,
+} from
   './rfc64/legacy-swm-boundary-v1.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
@@ -895,7 +924,13 @@ type InFlightSyncSingleFlight = {
 };
 type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeers']>>;
 
-const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
+type InFlightSyncPageFetches = Map<
+  SyncFetchSharingIdentity,
+  Map<string, InFlightSyncPageFetch>
+>;
+
+const defaultPageFetchSharingIdentity = createSyncFetchSharingIdentity();
+const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, InFlightSyncPageFetches>();
 const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncSingleFlight>>();
 const syncPageSizeProfilesByAgent = new WeakMap<DKGAgent, SyncPageSizeProfileCache>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
@@ -1064,7 +1099,7 @@ function syncPageFetchCoalescingKey(params: {
   ]);
 }
 
-function inFlightSyncPageFetchesFor(agent: DKGAgent): Map<string, InFlightSyncPageFetch> {
+function inFlightSyncPageFetchesFor(agent: DKGAgent): InFlightSyncPageFetches {
   let inFlight = inFlightSyncPageFetchesByAgent.get(agent);
   if (!inFlight) {
     inFlight = new Map();
@@ -1559,12 +1594,14 @@ export type DurableSyncOptions = {
 export interface ExactKnowledgeAssetSyncResult {
   readonly result: DurableSyncResult;
   readonly disposition: ExactDurableFetchDisposition;
+  readonly responderCapability?: ExactAssetResponderCapability;
   readonly authenticatedAssets?: readonly ChallengePinnedGraphScopedAsset[];
 }
 
 type PhysicalDurableSyncResult = {
   readonly result: DurableSyncResult;
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
+  readonly exactResponderCapability?: ExactAssetResponderCapability;
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
 };
 
@@ -2068,6 +2105,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.
     const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
@@ -2081,8 +2119,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       new InMemoryProtocolOutboxStore();
     assertBoundedProtocolOutboxStore(outboxStore);
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
+    await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
+    // stop() aborts detached cold authority flights; a restarted agent admits
+    // new ones (the runtime is created lazily on first use otherwise).
+    peekFinalizedAuthorityColdResolution(this)?.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
@@ -2435,7 +2477,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // error, so private/curated/unregistered CGs remain denied.
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig, {
       isContextGraphPublic: (contextGraphId: string) =>
-        this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        withRpcUsageSite(
+          CG_AUTH_RPC_SITES.remoteQuery,
+          () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        ),
     });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
@@ -2799,6 +2844,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
               workspaceWriteLocks: this.writeLocks,
+              resolveDurableRootAtomicCompanion: (input) => {
+                if (this.config.dataDir === undefined) return;
+                return prepareRfc64LateLegacySwmBoundaryV1(
+                  this,
+                  input.contextGraphId,
+                  input.kaUal,
+                  input.shareOperationId,
+                  input.assertionVersion,
+                );
+              },
               ackHandlerDeadlineMs: this.config.storageAckTiming.handlerDeadlineMs,
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
@@ -3076,6 +3131,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.info(ctx, `Node role is '${effectiveRole}' — skipping StorageACK handler registration (core-only)`);
     }
 
+    // Deliberately AFTER StorageACK registration, not beside the other protocol
+    // handlers above. The first refresh is a finalized-anchor resolution plus a
+    // registry `eth_getLogs` walk; started earlier it competed with the boot
+    // `getIdentityId()` this block awaits, timing it out at 20s. That makes the
+    // registration above return 'retryable', so the core advertises no
+    // `/dkg/10.0.2/storage-ack` for STORAGE_ACK_REGISTRATION_RETRY_MS and every
+    // publish that needs its ACK fails. Nothing here depends on the index.
+    this.authorityIndexSnapshotRuntime = startAuthorityIndexSnapshotRuntime({
+      nodeRole: this.config.nodeRole ?? 'edge',
+      snapshots: this.chain.contextGraphAuthorityIndexSnapshots,
+      register: (protocol, handler, options) => this.router.register(protocol, handler, options),
+      warn: (message) => this.log.warn(ctx, message),
+    });
+
     // Register VERIFY proposal handler — responds to incoming M-of-N proposals.
     // Agents on the allowList sign the verify digest when they agree with the data.
     // Uses the ACK signer key (core nodes) or first operational key (edge nodes).
@@ -3132,7 +3201,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         chain: this.chain,
         publishHandler,
         cursorPersistence: this.config.chainEventCursorStore,
-        onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber }) => {
+        onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber, signal }) => {
+          signal?.throwIfAborted();
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy}, publishPolicy ${publishPolicy ?? '?'}, nameHash ${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'})`);
 
           // The finalized event can arrive before or after the explicit local
@@ -3213,6 +3283,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // doesn't need any of those gates beyond the event-side hash
           // presence and the curated flag.
           if (nameHash && accessPolicy === 1 && eventLocalId !== null) {
+            signal?.throwIfAborted();
             // Register the wire id → numeric id mapping so the receive
             // path's chain fallback resolver (Scope A) can take a hash
             // input and find the on-chain participant agents without an
@@ -3242,10 +3313,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // sweep is the safety net if this is missed. Only wired when reconciliation
         // is actually possible (chain + ordinal reads present).
         onKARegisteredToContextGraph: this.vmReconcileEnabled()
-          ? async ({ contextGraphId: onChainId, kaId }) => {
+          ? async ({ contextGraphId: onChainId, kaId, signal }) => {
               // GH #1098 — body extracted to `handleKARegisteredNudge` so the
               // bind-only-the-matching-CG branch is directly testable.
-              await this.handleKARegisteredNudge(onChainId, kaId, ctx);
+              await this.handleKARegisteredNudge(onChainId, kaId, ctx, signal);
             }
           : undefined,
       });
@@ -4221,6 +4292,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
       this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
     }
+    // Fairness state belongs to this exact recurring owner. Recreating the
+    // runtime resets it; no scheduler cursor leaks into durable subscription
+    // state or across lifecycle generations.
+    const authorityRecoveryColdCursor: DeferredContextGraphSubscriptionAuthorityRecoveryCursor = {};
     const authorityRecovery = new CoalescingRecurringTask({
         retryIntervalMs: 30_000,
         requestWhileRunning: 'drop',
@@ -4228,7 +4303,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await withOwnedRpcRequestContext({
             requestClass: 'background',
             signal,
-          }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(signal));
+          }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(
+            signal,
+            authorityRecoveryColdCursor,
+          ));
           return this.getContextGraphSubscriptionRehydrationStatus()
             ?.dormantReasons.authorityUnavailable.length
             ? 'rearm'
@@ -4248,6 +4326,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.getContextGraphSubscriptionRehydrationStatus()
       ?.dormantReasons.authorityUnavailable.length) {
       authorityRecovery.schedule();
+    }
+    const rehydrationPromotion = new CoalescingRecurringTask({
+      retryIntervalMs: REHYDRATION_ROLLING_RETRY_MS,
+      requestWhileRunning: 'drop',
+      runPass: async (signal) => this.promoteDormantContextGraphSubscriptions(signal),
+      onError: (error) => {
+        this.log.warn(
+          ctx,
+          `Rolling context-graph subscription activation failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      },
+      closingMessage: 'Rolling context-graph subscription activation closing',
+    });
+    this.contextGraphSubscriptionRehydrationPromotionRuntime = rehydrationPromotion;
+    if (this.contextGraphSubscriptionRehydrationPendingIds.size > 0) {
+      // Give the initial activation pass a full startup window.  Rows that
+      // were already safe at boot do not emit a later slot-release transition;
+      // the delayed first pass still drains those rows without extending the
+      // synchronous startup fanout beyond the configured cap.
+      rehydrationPromotion.schedule(REHYDRATION_ROLLING_RETRY_MS);
     }
   }
 
@@ -4278,10 +4378,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // malformed envelope must fail CLOSED (deny), never escape as a handler error.
     let authorized = false;
     try {
-      authorized = await this.authorizeSyncRequest(
-        request as unknown as SyncRequestEnvelope,
-        peerId,
-        { signal: options?.signal },
+      authorized = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.changelogAuthorize,
+        () => this.authorizeSyncRequest(
+          request as unknown as SyncRequestEnvelope,
+          peerId,
+          { signal: options?.signal },
+        ),
       );
     } catch {
       return encodeChangelogResponse({ kind: 'denied' });
@@ -4453,6 +4556,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
+    this.vmReconcileExactPeerCapabilities?.delete(remotePeer);
   }
 
   queueSelectedSwmFromPeerOnConnect(
@@ -5843,6 +5947,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.config.syncContextGraphPriorities,
     );
     let exactFetchDisposition: ExactDurableFetchDisposition | undefined;
+    let exactResponderCapability: ExactAssetResponderCapability | undefined;
     const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
     const markExactFetchIncomplete = () => {
       if (exactAssetUals === undefined) return;
@@ -5887,6 +5992,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 detailed.exactFetchDisposition,
               );
             }
+            exactResponderCapability = mergeExactAssetResponderCapability(
+              exactResponderCapability,
+              detailed.exactResponderCapability,
+            );
             if (detailed.authenticatedExactAssets !== undefined) {
               authenticatedExactAssets.push(...detailed.authenticatedExactAssets);
             }
@@ -5952,6 +6061,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return {
         result: finalizeDurableSyncCompletion(accumulator),
         ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
+        ...(exactResponderCapability ? { exactResponderCapability } : {}),
         ...(authenticatedExactAssets.length === 0
           ? {}
           : { authenticatedExactAssets: Object.freeze([...authenticatedExactAssets]) }),
@@ -6087,6 +6197,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return {
       result: detailed.result,
       disposition: detailed.exactFetchDisposition ?? 'incomplete',
+      ...(detailed.exactResponderCapability === undefined
+        ? {}
+        : { responderCapability: detailed.exactResponderCapability }),
       ...(detailed.authenticatedExactAssets === undefined
         ? {}
         : { authenticatedAssets: detailed.authenticatedExactAssets }),
@@ -6936,17 +7049,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } = options;
     const effectiveWorkAdmission = workAdmission ?? composeSyncWorkAdmission({
       deadline,
-      scope: { sharing: 'coalescible', key: 'default-page-fetch' },
+      fetchSharingIdentity: defaultPageFetchSharingIdentity,
     });
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals);
     // Coalescing is declared by the capability, never inferred from singleton
     // identity. Exclusive private rounds cannot inherit another job's clock.
-    const coalescingScopeKey = effectiveWorkAdmission.scope.sharing === 'coalescible'
-      ? effectiveWorkAdmission.scope.key
-      : null;
-    const coalescingKeyBase = signal || shouldStopAfterPage || coalescingScopeKey === null
+    const fetchSharingIdentity = effectiveWorkAdmission.fetchSharingIdentity;
+    const coalescingKey = signal || shouldStopAfterPage || fetchSharingIdentity === undefined
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,
@@ -6965,15 +7076,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         maxAcceptedQuads,
         maxAcceptedHeapBytesEstimate,
       });
-    const coalescingKey = coalescingKeyBase === null
-      ? null
-      : `${coalescingKeyBase}|admission:${coalescingScopeKey}`;
     const inFlight = inFlightSyncPageFetchesFor(this);
     // Read once, here: this fetch runs inside the admitted operation, so the
     // ambient source is the trigger that both a join and the shared fetch's
     // own attempts belong to.
     const pageFetchSource = activeSyncAdmissionSource();
-    const existing = coalescingKey ? inFlight.get(coalescingKey) : undefined;
+    const existingLane = coalescingKey && fetchSharingIdentity
+      ? inFlight.get(fetchSharingIdentity)
+      : undefined;
+    const existing = coalescingKey ? existingLane?.get(coalescingKey) : undefined;
     if (existing) {
       if (!existing.controller.signal.aborted) {
         // At map-hit time, before any bytes move. An aborted entry below is NOT
@@ -6985,7 +7096,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
         return waitForSyncPageFetch(existing, signal);
       }
-      if (coalescingKey) inFlight.delete(coalescingKey);
+      if (coalescingKey && existingLane) {
+        existingLane.delete(coalescingKey);
+        if (existingLane.size === 0 && fetchSharingIdentity) {
+          inFlight.delete(fetchSharingIdentity);
+        }
+      }
     }
     if (signal?.aborted) {
       return Promise.reject(asSyncFetchAbortError(signal.reason));
@@ -7004,6 +7120,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     let entry!: InFlightSyncPageFetch;
+    let coalescingLane: Map<string, InFlightSyncPageFetch> | undefined;
     const sharedFetch = fetchSyncPages({
       ctx,
       remotePeerId,
@@ -7078,8 +7195,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
     }).finally(() => {
       nodeStopSignal?.removeEventListener('abort', onNodeStop);
-      if (coalescingKey && inFlight.get(coalescingKey) === entry) {
-        inFlight.delete(coalescingKey);
+      if (coalescingKey && coalescingLane?.get(coalescingKey) === entry) {
+        coalescingLane.delete(coalescingKey);
+        if (
+          coalescingLane.size === 0
+          && fetchSharingIdentity
+          && inFlight.get(fetchSharingIdentity) === coalescingLane
+        ) {
+          inFlight.delete(fetchSharingIdentity);
+        }
       }
     });
     sharedFetch.catch(() => {
@@ -7088,7 +7212,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // active waiters through the original promise.
     });
     entry = { promise: sharedFetch, controller, waiters: 0, ownerSource: pageFetchSource };
-    if (coalescingKey) inFlight.set(coalescingKey, entry);
+    if (coalescingKey && fetchSharingIdentity) {
+      coalescingLane = inFlight.get(fetchSharingIdentity);
+      if (!coalescingLane) {
+        coalescingLane = new Map();
+        inFlight.set(fetchSharingIdentity, coalescingLane);
+      }
+      coalescingLane.set(coalescingKey, entry);
+    }
     return waitForSyncPageFetch(entry, signal);
   }
 
@@ -8776,9 +8907,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
 
-    const authority = await this.resolveContextGraphReadAuthority(contextGraphId, {
-      allowSubscriptionFallback: false,
-    }).catch(() => ({ outcome: 'unavailable' as const }));
+    const authority = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.joinResume,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, {
+        allowSubscriptionFallback: false,
+      }),
+    ).catch(() => ({ outcome: 'unavailable' as const }));
     if (authority.outcome !== 'allowed') {
       this.log.warn(
         ctx,
@@ -8915,15 +9049,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         let confirmedOnChainId: string | undefined;
         let confirmedOnChainHash: string | undefined;
+        let invalidOnChainId = false;
         if (registrationResult.type === 'bindings') {
           for (const row of registrationResult.bindings) {
             const predicate = row['predicate'];
             const value = stripLiteral(row['value'] ?? '');
-            if (predicate === onChainIdPredicate && /^\d+$/.test(value)) {
-              try {
-                if (BigInt(value) > 0n) confirmedOnChainId = value;
-              } catch {
-                // Ignore malformed or out-of-domain metadata fail-closed.
+            if (predicate === onChainIdPredicate) {
+              if (isCanonicalAuthoritativeContextGraphId(value)) {
+                confirmedOnChainId = value;
+              } else {
+                invalidOnChainId = true;
               }
             } else if (
               predicate === onChainHashPredicate
@@ -8932,6 +9067,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               confirmedOnChainHash = value.toLowerCase();
             }
           }
+        }
+        if (invalidOnChainId) {
+          confirmedOnChainId = undefined;
+          confirmedOnChainHash = undefined;
         }
 
         let current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
@@ -9060,6 +9199,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    const rehydratedUserSubscription =
+      this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled === true
+      && this.contextGraphSubscriptionRehydrationStatus.activationCap > 0
+      && this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)
+      && canonicalNext.coreHosted !== true
+      && canonicalNext.subscribed === true;
+    if (rehydratedUserSubscription) {
+      if (rehydratedSubscriptionReachedSafeState(canonicalNext)) {
+        if (this.contextGraphSubscriptionRehydrationSlotIds.delete(contextGraphId)) {
+          this.log.info(
+            createOperationContext('init'),
+            `Rehydrated context-graph subscription "${contextGraphId}" reached a safe state; rolling activation slot released`,
+          );
+          this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+        }
+      } else {
+        // Readiness can regress after a later metadata/bootstrap reset. Keep
+        // the rolling slot occupied until that new recovery cycle is safe.
+        this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
+      }
+    } else if (this.contextGraphSubscriptionRehydrationSlotIds?.delete(contextGraphId)) {
+      // An unsubscribe/deactivation also frees a slot, even though it does not
+      // satisfy the normal synced readiness signal.
+      this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+    }
     const configuredRfc64Authority =
       this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId];
     if (
@@ -9309,6 +9473,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     for (const id of clearedSet) {
       if (systemContextGraphs.has(id)) continue;
+      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+      this.contextGraphSubscriptionRehydrationSlotIds.delete(id);
       const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
       const wasDormant = dormancyById.delete(id);
       removeFrom(hostedActivatedIds, id);
@@ -9320,6 +9486,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     for (const id of new Set(deactivatedIds)) {
       if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
+      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+      this.contextGraphSubscriptionRehydrationSlotIds.delete(id);
       if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
       removeFrom(hostedActivatedIds, id);
       if (!dormancyById.has(id)) {
@@ -9412,12 +9580,83 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && this.rfc64PublicCatalogServiceV1 !== undefined) {
       void this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId)
         .catch(() => undefined);
+      // The catalog lane carries KA rows but no Context Graph declaration, and
+      // a catalog-authoritative CG is excluded from legacy durable sync, so a
+      // subscriber that activates while its peers are already connected would
+      // never receive `<cg>/_meta` on its own. Pull it now from the connected
+      // peers (bounded, public-definition-only, gated on the accepted policy)
+      // instead of waiting for a `connection:open` that never comes.
+      void this.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId)
+        .catch(() => undefined);
+      // A CG that becomes active while peers are already connected never
+      // receives connect-time catalog replay: that transition fires only on
+      // `connection:open`, and both replay request versions require the policy
+      // digest a cold replica does not yet hold, so it cannot pull either.
+      // Push the same fenced transition to every current peer so the head —
+      // and the policy it carries — reaches replicas that connected before
+      // this CG existed. Author-of-record only: a replica running this would
+      // take replay fences toward the very provider its own bootstrap pass is
+      // about to use ("no configured provider was reachable").
+      if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
+        void this.replayRfc64CatalogToConnectedPeersV1(contextGraphId)
+          .catch(() => undefined);
+      }
       // Re-entering the idempotent start boundary also dirties an existing
       // failed repair for this newly active CG, including retryIntervalMs=0.
       this.startRfc64SwmCatalogProjectionSupervisorV1(
         createOperationContext('system'),
       );
     }
+  }
+
+  /**
+   * Run the connect-time RFC-64 catalog replay transition for every peer that
+   * is already connected. Mirrors `syncOpenedPeerConnection` exactly —
+   * prepare, network admission, then admit or reject — so debounce, fences
+   * and policy gates are unchanged; only the trigger is new.
+   */
+  async replayRfc64CatalogToConnectedPeersV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<Readonly<{ attempted: number; admitted: number }>> {
+    const libp2p = (this.node as any)?.libp2p;
+    if (libp2p === undefined || this.rfc64PublicCatalogServiceV1 === undefined) {
+      return Object.freeze({ attempted: 0, admitted: 0 });
+    }
+    const localPeerId = libp2p.peerId.toString();
+    const ctx = createOperationContext('system');
+    let attempted = 0;
+    let admitted = 0;
+    for (const peer of libp2p.getPeers() as Array<{ toString(): string }>) {
+      const remotePeer = peer.toString();
+      if (remotePeer === localPeerId) continue;
+      const reservation = this.prepareRfc64CatalogConnectionReplayV1(remotePeer);
+      if (reservation === null) continue;
+      attempted += 1;
+      try {
+        const ok = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx);
+        if (!ok) {
+          reservation.reject();
+          continue;
+        }
+        reservation.admit();
+        admitted += 1;
+      } catch (error: unknown) {
+        reservation.reject();
+        const message = error instanceof Error ? error.message : String(error);
+        this.log.warn(
+          ctx,
+          `RFC-64 catalog replay to connected peer ${remotePeer.slice(-8)} failed for "${contextGraphId.slice(0, 28)}": ${message}`,
+        );
+      }
+    }
+    if (attempted > 0) {
+      this.log.info(
+        ctx,
+        `RFC-64 catalog replay pushed to ${admitted}/${attempted} already-connected peer(s) for "${contextGraphId.slice(0, 28)}"`,
+      );
+    }
+    return Object.freeze({ attempted, admitted });
   }
 
   persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): Promise<void> {
@@ -9866,7 +10105,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
     const store = this.config.contextGraphMembershipStore;
     if (store === undefined) return;
-    const originPersistence = normalizeLocalContextGraphOriginPersistence(store);
+    const originPersistence = store.localOrigins;
     try {
       if (originPersistence !== undefined) {
         await this.enqueueContextGraphMembershipPersistWrite(
@@ -10010,6 +10249,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async retryUnavailableContextGraphSubscriptionAuthorities(
     this: DKGAgent,
     signal: AbortSignal,
+    coldCursor: DeferredContextGraphSubscriptionAuthorityRecoveryCursor = {},
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     const isCurrentRetry = (): boolean => (
@@ -10023,6 +10263,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dormancyById: this.contextGraphSubscriptionDormancyById,
       persistRevisions: this.contextGraphSubscriptionPersistRevisions,
       subscriptions: this.subscribedContextGraphs,
+      coldCursor,
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
       isCurrent: isCurrentRetry,
       touchStatus: () => {
@@ -10037,10 +10278,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       clearStatus: (contextGraphId) => {
         this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
       },
-      resolveAuthority: (contextGraphId, retrySignal) => (
-        this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+      resolveAuthority: (row, retrySignal) => (
+        this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
           signal: retrySignal,
+          durableSubscriptionBinding: {
+            contextGraphId: row.id,
+            onChainId: row.onChainId,
+            onChainHash: row.onChainHash,
+          },
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,
@@ -10102,11 +10348,244 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Promote the next durable subscription when a rolling rehydration slot is
+   * released.  The startup pass deliberately leaves capped rows out of the
+   * live projection; this pass is the only automatic path that brings them
+   * online afterwards.  Every candidate is re-read from the durable store so
+   * an unsubscribe/delete racing with the timer cannot resurrect stale state.
+   */
+  async promoteDormantContextGraphSubscriptions(
+    this: DKGAgent,
+    signal: AbortSignal,
+  ): Promise<'rearm' | 'idle'> {
+    const store = this.config.contextGraphSubscriptionStore;
+    const status = this.contextGraphSubscriptionRehydrationStatus;
+    const runtime = this.contextGraphSubscriptionRehydrationPromotionRuntime;
+    if (
+      !store
+      || !status?.rehydrationEnabled
+      || status.activationCap <= 0
+      || !this.started
+      || !runtime?.owns(signal)
+    ) return 'idle';
+
+    const ctx = createOperationContext('init');
+    const loadRow = async (contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null> => (
+      store.load
+        ? store.load(contextGraphId)
+        : store.loadAll().then((rows) => rows.find((row) => row.id === contextGraphId) ?? null)
+    );
+    const touchStatus = (): void => {
+      const current = this.contextGraphSubscriptionRehydrationStatus;
+      if (current !== null) {
+        this.contextGraphSubscriptionRehydrationStatus = {
+          ...current,
+          updatedAt: Date.now(),
+        };
+      }
+    };
+    const pending = [...this.contextGraphSubscriptionRehydrationPendingIds]
+      .filter((id) => this.contextGraphSubscriptionDormancyById.get(id) === 'activationCap')
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    for (let i = 0; i < pending.length; i++) {
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (this.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
+      const contextGraphId = pending[i];
+      if (
+        !this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        || this.contextGraphSubscriptionDormancyById.get(contextGraphId) !== 'activationCap'
+      ) continue;
+
+      let row = await loadRow(contextGraphId);
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (row === null) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        continue;
+      }
+      // Rows without durable subscription or hosting intent are not eligible
+      // for activation.  A concurrent write may have removed that intent
+      // after startup even when the row still exists in a custom store.
+      if (!row.subscribed && !row.coreHosted) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        continue;
+      }
+      if (this.subscribedContextGraphs.has(contextGraphId)) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        continue;
+      }
+
+      const candidateRevision = this.contextGraphSubscriptionPersistRevisions
+        .get(contextGraphId) ?? 0;
+      const candidateBinding = {
+        id: row.id,
+        onChainId: row.onChainId,
+        onChainHash: row.onChainHash,
+      };
+
+      const authority = await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+        allowSubscriptionFallback: false,
+        signal,
+        durableSubscriptionBinding: {
+          contextGraphId: row.id,
+          onChainId: row.onChainId,
+          onChainHash: row.onChainHash,
+        },
+      }).catch(() => ({
+        outcome: 'unavailable' as const,
+        source: 'legacy-local' as const,
+        reason: 'unexpected-authority-error',
+        metadataBootstrap: 'eligible' as const,
+      }));
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (authority.outcome !== 'allowed') {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.contextGraphSubscriptionDormancyById.set(
+          contextGraphId,
+          authority.outcome === 'denied' ? 'authorityDenied' : 'authorityUnavailable',
+        );
+        touchStatus();
+        this.log.warn(
+          ctx,
+          `Left pending persisted context-graph subscription "${contextGraphId}" dormant: ` +
+            `${authority.outcome} by ${authority.source} (${authority.reason})`,
+        );
+        continue;
+      }
+
+      // Authority resolution may yield while an operator unsubscribes or a
+      // store writer replaces the durable row. Reconcile that boundary before
+      // installing any network effects so a stale timer cannot resurrect the
+      // old record.
+      const freshRow = await loadRow(contextGraphId);
+      signal.throwIfAborted();
+      if (!runtime.owns(signal)) return 'idle';
+      if (freshRow === null) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        continue;
+      }
+      if (!freshRow.subscribed && !freshRow.coreHosted) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        continue;
+      }
+      if (
+        !this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        || this.contextGraphSubscriptionDormancyById.get(contextGraphId) !== 'activationCap'
+      ) {
+        continue;
+      }
+      if (this.subscribedContextGraphs.has(contextGraphId)) {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        this.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        continue;
+      }
+      if (
+        (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          !== candidateRevision
+        || freshRow.id !== candidateBinding.id
+        || freshRow.onChainId !== candidateBinding.onChainId
+        || freshRow.onChainHash !== candidateBinding.onChainHash
+      ) {
+        // Authority belongs to the exact row snapshot that preceded the chain
+        // read. Keep the candidate pending and retry its new generation rather
+        // than activating a replacement under stale authority.
+        touchStatus();
+        continue;
+      }
+      row = freshRow;
+      const healedOnChainId = authority.onChainId?.toString();
+      const isCurrentPromotion = (subscription: ContextGraphSub): boolean => (
+        this.started
+        && runtime.owns(signal)
+        && this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        && this.contextGraphSubscriptionDormancyById.get(contextGraphId) === 'activationCap'
+        && (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          === candidateRevision
+        && this.subscribedContextGraphs.get(contextGraphId) === subscription
+      );
+
+      try {
+        await this.activatePersistedContextGraphSubscriptionRecord(row, {
+          onChainId: healedOnChainId,
+          updateRehydrationStatus: false,
+          prepare: async (subscription) => {
+            if (!isCurrentPromotion(subscription)) {
+              throw new Error('Persisted subscription promotion became stale');
+            }
+            if (healedOnChainId !== undefined && healedOnChainId !== row.onChainId) {
+              // A cold or strict finalized-index read repaired the binding.
+              // Commit it before responsibility, sync, or gossip effects can
+              // become visible so a crash cannot restore the stale value.
+              await this.persistContextGraphSubscriptionStrict(
+                row.id,
+                subscription,
+                row.syncScoped,
+                () => isCurrentPromotion(subscription),
+              );
+            }
+            if (!isCurrentPromotion(subscription)) {
+              throw new Error('Persisted subscription promotion became stale');
+            }
+            await this.reconcileRfc64CatalogResponsibilityV1(row.id);
+          },
+          isCurrent: isCurrentPromotion,
+        });
+      } catch (error) {
+        // Keep the durable row pending and retain its activation-cap dormancy;
+        // the recurring owner will retry after its bounded delay.
+        this.log.warn(
+          ctx,
+          `Could not promote pending context-graph subscription "${contextGraphId}": ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+        return 'rearm';
+      }
+      if (!runtime.owns(signal)) return 'idle';
+
+      this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+      this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, {
+        subscribed: row.subscribed,
+        coreHosted: row.coreHosted,
+      });
+      const activated = this.subscribedContextGraphs.get(contextGraphId);
+      if (
+        !row.coreHosted
+        && activated
+        && !rehydratedSubscriptionReachedSafeState(activated)
+      ) {
+        this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
+      }
+      this.log.info(
+        ctx,
+        `Promoted pending persisted context-graph subscription "${contextGraphId}"; ` +
+          `pending=${this.contextGraphSubscriptionRehydrationPendingIds.size}, ` +
+          `slots=${this.contextGraphSubscriptionRehydrationSlotIds.size}/${status.activationCap}`,
+      );
+      if ((i + 1) % REHYDRATE_THROTTLE_BATCH === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    return this.contextGraphSubscriptionRehydrationPendingIds.size > 0
+      && this.contextGraphSubscriptionRehydrationSlotIds.size < status.activationCap
+      ? 'rearm'
+      : 'idle';
+  }
+
   /** Bootstrap durable Context Graph projections in explicit ownership order. */
   async rehydrateContextGraphsFromDurableState(this: DKGAgent): Promise<void> {
     const ctx = createOperationContext('init');
     const membershipStore = this.config.contextGraphMembershipStore;
-    const originPersistence = normalizeLocalContextGraphOriginPersistence(membershipStore);
+    const originPersistence = membershipStore?.localOrigins;
     let membershipRows: ContextGraphMembershipSnapshot | null = null;
     if (membershipStore?.loadAll === undefined) {
       this.log.warn(
@@ -10121,8 +10600,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         membershipRows = await membershipStore.loadAll();
         if (originPersistence === undefined) {
           // Compatibility path for custom stores predating the independent
-          // graph-keyed journal, including one-sided implementations of that
-          // paired capability. New built-in stores never derive provenance
+          // graph-keyed journal. New built-in stores never derive provenance
           // from mutable membership rows.
           this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
         }
@@ -10160,6 +10638,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const store = this.config.contextGraphSubscriptionStore;
+    this.contextGraphSubscriptionRehydrationSlotIds.clear();
+    this.contextGraphSubscriptionRehydrationPendingIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
     try {
@@ -10249,20 +10729,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
 
-      // Cap how many subscriptions we ACTIVATE on boot. Activation
-      // (in-memory restore + sync-track + gossip subscribe + member persist)
-      // does store-touching work per row; a large stale backlog fans this out
-      // and starves authenticated store-backed routes (#997 — a node that had
-      // "Rehydrated 173" wedged every authenticated write/query while storeless
-      // /api/status stayed green). Rows beyond the cap stay PERSISTED but
-      // dormant — they re-activate on next explicit access, or an operator
-      // prunes them via `DELETE /api/context-graph/subscriptions`. Prioritise
-      // core-hosted, then subscribed, so the kept set is the most relevant.
-      // NOTE: a dormant (capped-out) row has no in-memory entry, so individual
-      // `POST /api/context-graph/unsubscribe` can't target it — the bulk DELETE
-      // above is the prune path for the stale backlog by design. (Follow-up:
-      // reconcile contextGraphMembershipStore for rows left dormant / cleared so
-      // a prior `active` local-node membership row doesn't linger.)
+      // Bound how many non-hosted subscriptions are being brought online at
+      // once. Activation (in-memory restore + sync-track + gossip subscribe +
+      // member persist) does store-touching work per row; a large stale
+      // backlog fans this out and starves authenticated store-backed routes
+      // (#997 — a node that had "Rehydrated 173" wedged every authenticated
+      // write/query while storeless /api/status stayed green). Rows beyond
+      // the cap stay PERSISTED but dormant and are promoted when an earlier
+      // rehydrated subscription reaches a safe synced state. Prioritise
+      // core-hosted, then subscribed, so the first set is most relevant.
+      // A dormant (capped-out) row has no in-memory entry, so individual
+      // `POST /api/context-graph/unsubscribe` cannot target it. The row remains
+      // eligible for rolling activation or bulk pruning through the existing
+      // DELETE endpoint.
       // coreHosted graphs MUST always be restored — their chain-driven
       // reconcile / host-mode path depends on it — so EXEMPT them from the cap.
       // The cap (a #997 anti-wedge measure) applies only to the non-hosted
@@ -10272,7 +10751,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const byId = (a: ContextGraphSubscriptionRecord, b: ContextGraphSubscriptionRecord): number =>
         a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
       const hostedRows = rows.filter((r) => r.coreHosted).sort(byId);
-      const userRows = [...rows.filter((r) => !r.coreHosted)].sort(
+      const userRows = rows.filter((r) => !r.coreHosted).sort(
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
       const toActivate = [...hostedRows, ...userRows];
@@ -10285,8 +10764,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // The cap limits successful non-hosted activations, not candidates.
         // A denied/unavailable row therefore cannot consume capacity that a
         // later authorized subscription could use.
-        if (!row.coreHosted && cap > 0 && activatedUserRows >= cap) {
+        if (
+          !row.coreHosted
+          && cap > 0
+          && activatedUserRows >= cap
+        ) {
           dormancyById.set(row.id, 'activationCap');
+          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           continue;
         }
         const approvedAgentAddress = row.subscribed
@@ -10318,7 +10802,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // resolver subsequently returns `allowed`.
         const readAuthority = await this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
-          signal: AbortSignal.timeout(CHAIN_POLICY_READ_TIMEOUT_MS),
+          signal: AbortSignal.timeout(chainAuthorityReadBudgetsOf(this).requestTimeoutMs),
+          durableSubscriptionBinding: {
+            contextGraphId: row.id,
+            onChainId: row.onChainId,
+            onChainHash: row.onChainHash,
+          },
         }).catch(() => ({
           outcome: 'unavailable' as const,
           source: 'legacy-local' as const,
@@ -10349,9 +10838,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         activatedRows.push(row);
         if (!row.coreHosted) activatedUserRows += 1;
         const restorePendingMeta = restrictedApprovalBootstrap;
+        const healedOnChainId = readAuthority.outcome === 'allowed'
+          ? readAuthority.onChainId?.toString()
+          : undefined;
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           restorePendingMeta,
+          onChainId: healedOnChainId,
+          ...(healedOnChainId !== undefined && healedOnChainId !== row.onChainId
+            ? {
+                // Persist a strict finalized-index repair before restoring any
+                // sync or gossip side effect. A crash can therefore never
+                // reactivate the same malformed/unbound durable id.
+                prepare: async (subscription) => {
+                  await this.persistContextGraphSubscriptionStrict(
+                    row.id,
+                    subscription,
+                    row.syncScoped,
+                  );
+                },
+              }
+            : {}),
         });
+        if (
+          !row.coreHosted
+          && cap > 0
+          && !rehydratedSubscriptionReachedSafeState({
+            synced: restorePendingMeta ? false : row.synced,
+            metaSynced: restorePendingMeta ? false : row.metaSynced,
+            pendingMeta: restorePendingMeta,
+          })
+        ) {
+          this.contextGraphSubscriptionRehydrationSlotIds.add(row.id);
+        }
         if (restrictedApprovalBootstrap) {
           const curatorPeerId = this.preferredSyncPeers.get(row.id);
           this.log.info(
@@ -10419,7 +10937,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.log.warn(
           ctx,
           `${dormancy.dormantReasons.activationCap.length} context-graph subscription(s) left dormant by the activation cap. ` +
-            `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
+            `They will be promoted as rehydrated work reaches a safe state; prune stale ones via ` +
+            `'DELETE /api/context-graph/subscriptions', or raise ` +
             `maxRehydratedContextGraphSubscriptions. Inspect ` +
             `'GET /api/context-graph/subscriptions' for dormant ids.`,
         );
@@ -10625,7 +11144,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async canUseSharedMemoryForContextGraph(this: DKGAgent,
     contextGraphId: string,
-    opts: { callerAgentAddress?: string } = {},
+    opts: {
+      callerAgentAddress?: string;
+      readAuthority?: ContextGraphReadAuthorityDecision;
+    } = {},
   ): Promise<boolean> {
     const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
       contextGraphId,
@@ -10638,10 +11160,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }
-    return this.canReadContextGraph(contextGraphId, {
-      callerAgentAddress: opts.callerAgentAddress,
-      allowSubscriptionFallback: false,
-    });
+    // Whether to host, sync, or serve SWM for a selected graph is a read-only
+    // authorization decision: the finalized, name-bound snapshot answers it
+    // whenever the index has one, and only a graph the index has no snapshot
+    // for, or a private roster the reader could not serve fresh, reaches the
+    // current-state read. Encryption and roster mutations keep their live
+    // reads elsewhere.
+    return opts.readAuthority !== undefined
+      ? opts.readAuthority.outcome === 'allowed'
+      : withRpcUsageSite(
+          CG_AUTH_RPC_SITES.sharedMemoryRead,
+          () => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: opts.callerAgentAddress,
+            allowSubscriptionFallback: false,
+            authorityReadMode: 'finalized-index-or-live',
+          }),
+        );
   }
 
   async verifySyncedDataInWorker(this: DKGAgent,
@@ -10714,181 +11248,198 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * and removes the root entities from workspaceOwnedEntities.
    */
   async cleanupExpiredSharedMemory(this: DKGAgent): Promise<number> {
-    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-    if (ttl <= 0) return 0;
+    if (this.swmCleanupInFlight) return this.swmCleanupInFlight;
 
-    const ctx = createOperationContext('share');
-    const cutoff = new Date(Date.now() - ttl).toISOString();
-    let totalDeleted = 0;
+    const run = (async (): Promise<number> => {
+      const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
+      if (ttl <= 0) return 0;
 
-    try {
-      const graphManager = new GraphManager(this.store);
-      const contextGraphs = await graphManager.listContextGraphs();
+      const ctx = createOperationContext('share');
+      const cutoff = new Date(Date.now() - ttl).toISOString();
+      let totalDeleted = 0;
 
-      for (const pid of contextGraphs) {
-        let graphDeleted = 0;
-        let expiredOpsCount = 0;
+      try {
+        const graphManager = new GraphManager(this.store);
+        const contextGraphs = await graphManager.listContextGraphs();
 
-        // Graph-scoped V2 operations and heads for sub-graph shares live in
-        // per-subgraph `…/{subGraph}/_shared_memory_meta` graphs (see
-        // GraphManager.sharedMemoryMetaUri), not only in the root
-        // `…/_shared_memory_meta` bucket — expire every meta graph.
-        const wsMetaGraphs = await listSharedMemoryMetaGraphs(this.store, pid);
+        for (const pid of contextGraphs) {
+          let graphDeleted = 0;
+          let expiredOpsCount = 0;
 
-        for (const wsMetaGraph of wsMetaGraphs) {
-          // Each meta graph describes exactly one SWM data bucket:
-          // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
-          const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
+          // Graph-scoped V2 operations and heads for sub-graph shares live in
+          // per-subgraph `…/{subGraph}/_shared_memory_meta` graphs (see
+          // GraphManager.sharedMemoryMetaUri), not only in the root
+          // `…/_shared_memory_meta` bucket — expire every meta graph.
+          const wsMetaGraphs = await listSharedMemoryMetaGraphs(this.store, pid);
 
-          const expiredOps = await this.store.query(
-            `SELECT ?op WHERE {
-            GRAPH <${wsMetaGraph}> {
-              ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-              ?op <http://dkg.io/ontology/publishedAt> ?ts .
-              FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-            }
-          }`,
-            { source: 'agent.swmCleanup.expiredOperations' },
-          );
+          for (const wsMetaGraph of wsMetaGraphs) {
+            // Each meta graph describes exactly one SWM data bucket:
+            // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
+            const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
 
-          if (expiredOps.type !== 'bindings' || expiredOps.bindings.length === 0) continue;
-          expiredOpsCount += expiredOps.bindings.length;
+            let wsGraphs: string[] | undefined;
+            let ownershipKeys: string[] | undefined;
+            for (;;) {
+              const expiredOps = await this.store.query(
+                `SELECT DISTINCT ?op WHERE {
+                GRAPH <${wsMetaGraph}> {
+                  ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+                  ?op <http://dkg.io/ontology/publishedAt> ?ts .
+                  FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+                }
+              } LIMIT ${DKGAgentBase.SWM_CLEANUP_BATCH_SIZE}`,
+                { source: 'agent.swmCleanup.expiredOperations' },
+              );
 
-          for (const row of expiredOps.bindings) {
-            const opUri = row['op'];
-            if (!opUri) continue;
+              if (expiredOps.type !== 'bindings' || expiredOps.bindings.length === 0) break;
+              expiredOpsCount += expiredOps.bindings.length;
+              wsGraphs ??= await listGraphFamily(this.store, wsGraph);
+              ownershipKeys ??= wsGraphs
+                .map((g) => sharedMemoryOwnershipKeyFromGraph(pid, g))
+                .filter((key): key is string => Boolean(key));
+              let metadataDeleted = 0;
 
-            const rootEntitiesResult = await this.store.query(
-              `SELECT ?re WHERE {
-              GRAPH <${wsMetaGraph}> {
-                <${opUri}> <http://dkg.io/ontology/rootEntity> ?re .
-              }
-            }`,
-              { source: 'agent.swmCleanup.operationRoots' },
-            );
+              for (const row of expiredOps.bindings) {
+                const opUri = row['op'];
+                if (!opUri) continue;
 
-            const rootEntities: string[] = [];
-            if (rootEntitiesResult.type === 'bindings') {
-              for (const r of rootEntitiesResult.bindings) {
-                if (r['re']) rootEntities.push(r['re']);
-              }
-            }
-
-            // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + bucket.
-            const wsGraphs = await listGraphFamily(this.store, wsGraph);
-            for (const re of rootEntities) {
-              for (const g of wsGraphs) {
-                // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
-                const exactDeleted = await this.store.deleteByPattern({ graph: g, subject: re });
-                graphDeleted += exactDeleted;
-                const childPrefix = `${re}/.well-known/genid/`;
-                const childDeleted = await this.store.deleteBySubjectPrefix(g, childPrefix);
-                graphDeleted += childDeleted;
-              }
-            }
-
-            // Graph-scoped V2 operations (dkg:contentScopeVersion=2) have no
-            // rootEntity rows, so the legacy sweep above no-ops for them and
-            // the generic op-subject delete below would strand the rest of the
-            // KA: the per-KA SWM assertion graph, the `${kaUal}#dkg-swm-head`
-            // subject and the operation's public snapshot graph. Discard them
-            // here. The snapshot graph always dies with its operation; the
-            // head and assertion graph die only when the head still points at
-            // THIS operation — when a newer operation owns the head they carry
-            // live data, and a surviving head whose operation rows are gone
-            // reads as CORRUPT in resolveKnowledgeAssetWorkspaceHead.
-            const v2Meta = await this.store.query(
-              `SELECT ?scopeVersion ?kaUal ?snapshotGraph WHERE {
-              GRAPH <${wsMetaGraph}> {
-                <${opUri}> <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
-                OPTIONAL { <${opUri}> <http://dkg.io/ontology/kaUal> ?kaUal }
-                OPTIONAL { <${opUri}> <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
-              }
-            } LIMIT 1`,
-              { source: 'agent.swmCleanup.graphScopedMetadata' },
-            );
-            const v2Row = v2Meta.type === 'bindings' ? v2Meta.bindings[0] : undefined;
-            const scopeVersion = v2Row?.['scopeVersion'] === undefined ? NaN : Number(stripLiteral(v2Row['scopeVersion']));
-            if (scopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
-              const kaUal = v2Row?.['kaUal'];
-              const headSubject = kaUal ? `${kaUal}#dkg-swm-head` : '';
-              if (headSubject && isSafeIri(headSubject)) {
-                // The head is owned by exactly one operation. Join on the
-                // dkg:shareOperationId literal (both rows are written by the
-                // same `lit()` serializer) so this op's expiry only tears the
-                // head down when the head still references it.
-                const headOwned = await this.store.query(
-                  `SELECT ?assertionGraph WHERE {
+                const rootEntitiesResult = await this.store.query(
+                  `SELECT ?re WHERE {
                   GRAPH <${wsMetaGraph}> {
-                    <${opUri}> <http://dkg.io/ontology/shareOperationId> ?opId .
-                    <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?opId .
-                    OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
+                    <${opUri}> <http://dkg.io/ontology/rootEntity> ?re .
+                  }
+                }`,
+                  { source: 'agent.swmCleanup.operationRoots' },
+                );
+
+                const rootEntities: string[] = [];
+                if (rootEntitiesResult.type === 'bindings') {
+                  for (const r of rootEntitiesResult.bindings) {
+                    if (r['re']) rootEntities.push(r['re']);
+                  }
+                }
+
+                // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + bucket.
+                for (const re of rootEntities) {
+                  for (const g of wsGraphs ?? []) {
+                    // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
+                    const exactDeleted = await this.store.deleteByPattern({ graph: g, subject: re });
+                    graphDeleted += exactDeleted;
+                    const childPrefix = `${re}/.well-known/genid/`;
+                    const childDeleted = await this.store.deleteBySubjectPrefix(g, childPrefix);
+                    graphDeleted += childDeleted;
+                  }
+                }
+
+                // Graph-scoped V2 operations (dkg:contentScopeVersion=2) have no
+                // rootEntity rows, so the legacy sweep above no-ops for them and
+                // the generic op-subject delete below would strand the rest of the
+                // KA: the per-KA SWM assertion graph, the `${kaUal}#dkg-swm-head`
+                // subject and the operation's public snapshot graph. Discard them
+                // here. The snapshot graph always dies with its operation; the
+                // head and assertion graph die only when the head still points at
+                // THIS operation — when a newer operation owns the head they carry
+                // live data, and a surviving head whose operation rows are gone
+                // reads as CORRUPT in resolveKnowledgeAssetWorkspaceHead.
+                const v2Meta = await this.store.query(
+                  `SELECT ?scopeVersion ?kaUal ?snapshotGraph WHERE {
+                  GRAPH <${wsMetaGraph}> {
+                    <${opUri}> <http://dkg.io/ontology/contentScopeVersion> ?scopeVersion .
+                    OPTIONAL { <${opUri}> <http://dkg.io/ontology/kaUal> ?kaUal }
+                    OPTIONAL { <${opUri}> <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
                   }
                 } LIMIT 1`,
-                  { source: 'agent.swmCleanup.currentHeadOwner' },
+                  { source: 'agent.swmCleanup.graphScopedMetadata' },
                 );
-                if (headOwned.type === 'bindings' && headOwned.bindings.length > 0) {
-                  // Whole KA expired: drop the per-KA SWM assertion graph and
-                  // the current-head subject with the operation.
-                  const assertionGraph = headOwned.bindings[0]?.['assertionGraph'];
-                  if (assertionGraph && isSafeIri(assertionGraph)) {
-                    graphDeleted += await this.store.deleteByPattern({ graph: assertionGraph });
-                    await this.store.dropGraph(assertionGraph);
+                const v2Row = v2Meta.type === 'bindings' ? v2Meta.bindings[0] : undefined;
+                const scopeVersion = v2Row?.['scopeVersion'] === undefined ? NaN : Number(stripLiteral(v2Row['scopeVersion']));
+                if (scopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+                  const kaUal = v2Row?.['kaUal'];
+                  const headSubject = kaUal ? `${kaUal}#dkg-swm-head` : '';
+                  if (headSubject && isSafeIri(headSubject)) {
+                    // The head is owned by exactly one operation. Join on the
+                    // dkg:shareOperationId literal (both rows are written by the
+                    // same `lit()` serializer) so this op's expiry only tears the
+                    // head down when the head still references it.
+                    const headOwned = await this.store.query(
+                      `SELECT ?assertionGraph WHERE {
+                      GRAPH <${wsMetaGraph}> {
+                        <${opUri}> <http://dkg.io/ontology/shareOperationId> ?opId .
+                        <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?opId .
+                        OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
+                      }
+                    } LIMIT 1`,
+                      { source: 'agent.swmCleanup.currentHeadOwner' },
+                    );
+                    if (headOwned.type === 'bindings' && headOwned.bindings.length > 0) {
+                      // Whole KA expired: drop the per-KA SWM assertion graph and
+                      // the current-head subject with the operation.
+                      const assertionGraph = headOwned.bindings[0]?.['assertionGraph'];
+                      if (assertionGraph && isSafeIri(assertionGraph)) {
+                        graphDeleted += await this.store.deleteByPattern({ graph: assertionGraph });
+                        await this.store.dropGraph(assertionGraph);
+                      }
+                      graphDeleted += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
+                    }
                   }
-                  graphDeleted += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
+                  const snapshotGraph = v2Row?.['snapshotGraph'];
+                  if (snapshotGraph && isSafeIri(snapshotGraph)) {
+                    graphDeleted += await this.store.deleteByPattern({ graph: snapshotGraph });
+                    await this.store.dropGraph(snapshotGraph);
+                  }
+                }
+
+                // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
+                const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
+                graphDeleted += metaDeleted;
+                metadataDeleted += metaDeleted;
+
+                for (const re of rootEntities) {
+                  const ownerDeleted = await this.store.deleteByPattern({
+                    graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
+                  });
+                  graphDeleted += ownerDeleted;
+                }
+
+                // Evict every per-subgraph ownership key for the expired roots.
+                // SWM data now spans the root workspace graph plus the per-KA /
+                // subgraph `…/_shared_memory/{addr}/{number}` graphs. Ownership
+                // keys are resolved once per metadata graph per cleanup run.
+                for (const ownershipKey of ownershipKeys ?? []) {
+                  const ownedSet = this.workspaceOwnedEntities.get(ownershipKey);
+                  if (!ownedSet) continue;
+                  for (const re of rootEntities) {
+                    ownedSet.delete(re);
+                  }
                 }
               }
-              const snapshotGraph = v2Row?.['snapshotGraph'];
-              if (snapshotGraph && isSafeIri(snapshotGraph)) {
-                graphDeleted += await this.store.deleteByPattern({ graph: snapshotGraph });
-                await this.store.dropGraph(snapshotGraph);
-              }
-            }
-
-            // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
-            const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
-            graphDeleted += metaDeleted;
-
-            for (const re of rootEntities) {
-              const ownerDeleted = await this.store.deleteByPattern({
-                graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
-              });
-              graphDeleted += ownerDeleted;
-            }
-
-            // Evict every per-subgraph ownership key for the expired roots.
-            // SWM data now spans the root workspace graph plus the per-KA /
-            // subgraph `…/_shared_memory/{addr}/{number}` graphs (wsGraphs), and
-            // ownership is cached under one key per graph family:
-            // `pid` for the root/bucket and `${pid}\0${subGraph}` for per-subgraph
-            // graphs (see sharedMemoryOwnershipKeyFromGraph). Only clearing the
-            // `pid`-keyed map would leave the per-subgraph entries behind, so an
-            // expired root could still look owned and mis-arbitrate later writes.
-            const ownershipKeys = new Set<string>();
-            for (const g of wsGraphs) {
-              const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, g);
-              if (ownershipKey) ownershipKeys.add(ownershipKey);
-            }
-            for (const ownershipKey of ownershipKeys) {
-              const ownedSet = this.workspaceOwnedEntities.get(ownershipKey);
-              if (!ownedSet) continue;
-              for (const re of rootEntities) {
-                ownedSet.delete(re);
+              if (metadataDeleted === 0) {
+                this.log.warn(
+                  ctx,
+                  `SWM cleanup for "${wsMetaGraph}" made no metadata-deletion progress; stopping this batch loop`,
+                );
+                break;
               }
             }
           }
-        }
 
-        totalDeleted += graphDeleted;
-        if (expiredOpsCount > 0) {
-          this.log.info(ctx, `SWM cleanup for "${pid}": evicted ${expiredOpsCount} expired operation(s), ${graphDeleted} triples`);
+          totalDeleted += graphDeleted;
+          if (expiredOpsCount > 0) {
+            this.log.info(ctx, `SWM cleanup for "${pid}": evicted ${expiredOpsCount} expired operation(s), ${graphDeleted} triples`);
+          }
         }
+      } catch (err) {
+        this.log.warn(ctx, `SWM cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-    } catch (err) {
-      this.log.warn(ctx, `SWM cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
 
-    return totalDeleted;
+      return totalDeleted;
+    })();
+    this.swmCleanupInFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (this.swmCleanupInFlight === run) this.swmCleanupInFlight = null;
+    }
   }
 
 }

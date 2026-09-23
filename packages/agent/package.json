@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.17",
+  "version": "10.0.18",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -17,6 +17,11 @@
       "types": "./dist/rfc64/public-catalog-activation-config-v1.d.ts",
       "import": "./dist/rfc64/public-catalog-activation-config-v1.js",
       "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
+    },
+    "./chain-authority-read-budgets": {
+      "types": "./dist/chain-authority-read-budgets.d.ts",
+      "import": "./dist/chain-authority-read-budgets.js",
+      "default": "./dist/chain-authority-read-budgets.js"
     },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
@@ -38,6 +43,7 @@
     "./dist/rfc64/abort-v1.js": null,
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-connection-runtime-v1.js": null,
+    "./dist/rfc64/catalog-replay-generation-v1.js": null,
     "./dist/rfc64/catalog-replay-recovery-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-snapshot-runtime-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
@@ -46,6 +52,9 @@
     "./dist/rfc64/catalog-shadow-observability-v1.js": null,
     "./dist/rfc64/serialized-scope-runtime-v1.js": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
+    "./dist/rfc64/unregistered-replica-authority-v1.js": null,
+    "./dist/rfc64/unregistered-authority-seed-store-v1.js": null,
+    "./dist/rfc64/unregistered-authority-transport-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,
     "./dist/rfc64/control-object-store-v1.js": null,

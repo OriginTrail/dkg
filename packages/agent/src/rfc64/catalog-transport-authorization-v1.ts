@@ -5,6 +5,8 @@ import type {
   Rfc64CatalogAccessAuthorizationV1,
   Rfc64CatalogAccessPolicyRegistryV1,
 } from './catalog-access-policy-v1.js';
+import { withRfc64CatalogAccessAuthorizationScopeV1 } from
+  './catalog-access-policy-v1.js';
 
 export type Rfc64LegacyOpenCatalogAuthorizerV1<
   Input extends Rfc64CatalogAccessAuthorizationInputV1,
@@ -51,19 +53,23 @@ export async function withCurrentRfc64CatalogPolicyV1<Value>(
   requireCurrentPolicy: () => Promise<void>,
   work: () => Value | Promise<Value>,
 ): Promise<Value> {
-  await requireCurrentPolicy();
-  const value = await work();
-  await requireCurrentPolicy();
-  return value;
+  return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+    await requireCurrentPolicy();
+    const value = await work();
+    await requireCurrentPolicy();
+    return value;
+  });
 }
 
 export async function recheckCurrentRfc64CatalogPolicyAfterAwaitV1<Value>(
   requireCurrentPolicy: () => Promise<void>,
   work: () => Value | Promise<Value>,
 ): Promise<Value> {
-  const value = await work();
-  await requireCurrentPolicy();
-  return value;
+  return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+    const value = await work();
+    await requireCurrentPolicy();
+    return value;
+  });
 }
 
 export type Rfc64AuthorizedCatalogWorkResultV1<Value> =
@@ -74,10 +80,12 @@ export async function withAuthorizedCurrentRfc64CatalogPolicyV1<Value>(
   isCurrentPolicyAuthorized: () => Promise<boolean>,
   work: () => Value | Promise<Value>,
 ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
-  if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
-  const value = await work();
-  if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
-  return Object.freeze({ authorized: true, value });
+  return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+    if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
+    const value = await work();
+    if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
+    return Object.freeze({ authorized: true, value });
+  });
 }
 
 function projectCatalogAccessAuthorizationInput(

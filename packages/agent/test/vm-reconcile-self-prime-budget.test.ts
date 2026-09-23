@@ -469,6 +469,7 @@ it.each(['fulfilled', 'rejected'])('retires a %s authority read before shutdown'
   canRead.mockReturnValueOnce(authority);
   const run = internals.resolveVmReconcileTarget('cg-0').catch(() => undefined);
   try {
+    await vi.waitFor(() => expect(canRead).toHaveBeenCalledOnce());
     expect(internals.vmReconcilePhysicalRuns.has(authority)).toBe(true);
     if (outcome === 'fulfilled') fulfill(true);
     else reject(new Error('authority unavailable'));

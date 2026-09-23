@@ -698,6 +698,8 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     });
     const sourceMeta = assets.flatMap((asset) => asset.meta);
     const snapshotStore = new MemorySnapshotStore();
+    const markerGraph = 'urn:test:rfc64-late-boundary';
+    const markerSubject = `urn:test:rfc64-late-boundary:partial-${expiry}`;
     const snapshotFetches = new Map<string, number>();
     let remaining = 10;
     let round = 1;
@@ -721,7 +723,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         );
         if (!asset) throw new Error(`Unexpected snapshot ref ${fetchOptions?.snapshotRef}`);
         snapshotFetches.set(asset.digest, (snapshotFetches.get(asset.digest) ?? 0) + 1);
-        if (expiry === 'transport' && round === 1 && asset === assets[1]) {
+        if (expiry === 'transport' && round <= 2 && asset === assets[1]) {
           return { ...page([], false), checkpointKey: `snapshot:${asset.digest}` };
         }
         if (expiry === 'time-budget' && round === 1) remaining = 0;
@@ -733,6 +735,16 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       ...completeApplyDeps(store),
       store,
       publicSnapshotStore: snapshotStore,
+      resolveRootAtomicCompanion: ({ kaUal }: { kaUal: string }) => ({
+        graphUri: markerGraph,
+        subject: `${markerSubject}:${kaUal === assets[0]!.ual ? 'first' : 'second'}`,
+        quads: [{
+          subject: `${markerSubject}:${kaUal === assets[0]!.ual ? 'first' : 'second'}`,
+          predicate: 'urn:test:entry',
+          object: '"partial"',
+          graph: markerGraph,
+        }],
+      }),
       ensureContextGraph: async () => {},
       setCheckpoint: () => {},
       deleteCheckpoint: () => {},
@@ -752,12 +764,30 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(firstVisible.type === 'bindings' ? firstVisible.bindings : []).toHaveLength(1);
     expect(secondStillHidden.type === 'bindings' ? secondStillHidden.bindings : []).toHaveLength(0);
 
-    round = 2;
+    if (expiry === 'transport') {
+      const firstMarkerSubject = `${markerSubject}:first`;
+      // Simulate an exact root left by a pre-fix partial invocation. The next
+      // invocation resolves that ref from cache, remains partial on its tail,
+      // and must still establish the durable marker before returning.
+      await store.deleteByPattern({ graph: markerGraph, subject: firstMarkerSubject });
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${firstMarkerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+      round = 2;
+      const exactPrefixPartial = await recover();
+      expect(exactPrefixPartial.completed).toBe(false);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${firstMarkerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+      round = 3;
+    } else {
+      round = 2;
+    }
     remaining = 10;
     const completed = await recover();
     expect(completed).toMatchObject({ completed: true, replacedGraphs: 2, insertedDataQuads: 2 });
     expect(snapshotFetches.get(assets[0]!.digest)).toBe(1);
-    expect(snapshotFetches.get(assets[1]!.digest)).toBe(expiry === 'transport' ? 2 : 1);
+    expect(snapshotFetches.get(assets[1]!.digest)).toBe(expiry === 'transport' ? 3 : 1);
     expect(dataFetches).toBe(0);
     for (const asset of assets) {
       const result = await store.query(

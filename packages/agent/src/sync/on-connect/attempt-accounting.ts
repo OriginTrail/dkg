@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { getSyncBackpressureBusyError } from '../backpressure.js';
+import { SyncBackpressureBusyError } from '../backpressure.js';
 import {
+  SyncOnConnectBackpressureError,
   SyncOnConnectPostSyncError,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
@@ -68,9 +69,14 @@ export async function executeSyncOnConnectAttempt(
     if (result.outcome === 'deferred-backpressure') options.onBackpressure();
     return result.outcome;
   } catch (error: unknown) {
-    const backpressureError = getSyncBackpressureBusyError(error);
-    if (backpressureError) {
-      options.onBackpressure(backpressureError.message);
+    if (error instanceof SyncOnConnectBackpressureError) {
+      options.onBackpressure(error.message);
+      return 'deferred-backpressure';
+    }
+    // Keep direct callers that already own the admission boundary compatible;
+    // deliberately do not inspect `Error.cause` here.
+    if (error instanceof SyncBackpressureBusyError) {
+      options.onBackpressure(error.message);
       return 'deferred-backpressure';
     }
     if (!(error instanceof SyncOnConnectPostSyncError) || error.backoffEligible) {

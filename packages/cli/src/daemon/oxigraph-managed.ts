@@ -277,7 +277,7 @@ export function planManagedOxigraph(
   // Oxigraph 0.5.x implements `--timeout-s` with one sleeping OS thread per
   // query. Under sustained load those timer threads can exhaust the process
   // before they expire. Keep the native deadline opt-in; the HTTP adapter's
-  // client deadline remains mandatory and onClientTimeout below restarts the
+  // client deadline remains mandatory and the recovery capability below restarts the
   // managed server so a timed-out evaluation cannot remain as a zombie.
   const {
     queryTimeoutS,
@@ -418,10 +418,12 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
-      getRecoveryState: () => handle.getRecoveryState(),
-      onClientTimeout: (operation: string) => {
-        if (operation !== 'query' && operation !== 'construct') return;
-        handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
+      managedRecovery: {
+        readState: () => handle.getRecoveryState(),
+        recover: (operation: string) => {
+          if (operation !== 'query' && operation !== 'construct') return;
+          handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
+        },
       },
     },
   };

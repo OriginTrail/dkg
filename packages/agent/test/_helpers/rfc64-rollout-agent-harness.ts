@@ -25,7 +25,7 @@ export const RFC64_ROLLOUT_AUTHOR = RFC64_ROLLOUT_AUTHOR_WALLET.address
   .toLowerCase() as EvmAddressV1;
 export const RFC64_ROLLOUT_NETWORK_ID = 'otp:20430' as NetworkIdV1;
 export const RFC64_ROLLOUT_CONTEXT_GRAPH_ID = (
-  '0x1111111111111111111111111111111111111111/rollout-authority'
+  `${RFC64_ROLLOUT_AUTHOR}/rollout-authority`
 ) as ContextGraphIdV1;
 export const RFC64_ROLLOUT_KAV10 = (
   '0x4444444444444444444444444444444444444444'

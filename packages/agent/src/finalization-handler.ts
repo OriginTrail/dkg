@@ -42,6 +42,7 @@ import {
   resolvePublicFinalizedMaterializationAuthority,
   type ChainAdapter,
   type EventFilter,
+  type PublicFinalizedMaterializationVersionSnapshot,
 } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -380,6 +381,10 @@ export interface ChainReconciledKCInput {
   batchId: bigint;
   versionBlock: number;
   authorAddress?: string;
+  /** Operation-scoped coherent snapshot; never retained across exact fetches. */
+  versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
+  /** Exact-fetch lifecycle fence; abort must never degrade to a live fallback. */
+  signal?: AbortSignal;
   subGraphName?: string;
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
 }
@@ -705,6 +710,8 @@ export class FinalizationHandler {
       ual: input.ual,
       merkleRoot: ethers.hexlify(input.merkleRoot),
       kaId: input.kaId.toString(),
+      // Recovery replay keeps its established live root/count reads. Its store
+      // awaits are independent of the later public-authority snapshot fence.
     });
   }
 
@@ -1650,6 +1657,8 @@ export class FinalizationHandler {
     batchId: bigint;
     versionBlock: number;
     authorAddress?: string;
+    versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
+    signal?: AbortSignal;
     subGraphName?: string;
     trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
   }, ctx: OperationContext): Promise<
@@ -1671,6 +1680,8 @@ export class FinalizationHandler {
       batchId,
       versionBlock,
       authorAddress,
+      versionSnapshot,
+      signal,
       subGraphName,
       trustedAssertionEvidence,
     } = input;
@@ -1947,6 +1958,8 @@ export class FinalizationHandler {
           merkleRoot,
           batchId: reconciliationBatchId,
           versionBlock,
+          versionSnapshot,
+          signal,
           subGraphName,
           verifiedLayer: {
             layer: MemoryLayer.VerifiableMemory,
@@ -2024,6 +2037,8 @@ export class FinalizationHandler {
         merkleRoot,
         batchId: reconciliationBatchId,
         versionBlock,
+        versionSnapshot,
+        signal,
         subGraphName,
         verifiedLayer: {
           layer: MemoryLayer.SharedWorkingMemory,
@@ -2090,6 +2105,8 @@ export class FinalizationHandler {
     merkleRoot: Uint8Array;
     batchId: bigint;
     versionBlock: number;
+    versionSnapshot?: PublicFinalizedMaterializationVersionSnapshot;
+    signal?: AbortSignal;
     subGraphName?: string;
     verifiedLayer: VerifiedPublicFinalizedLayer;
     /** VM repair keeps the receipt recovery diagnostic in its defer log. */
@@ -2105,6 +2122,8 @@ export class FinalizationHandler {
       merkleRoot,
       batchId,
       versionBlock,
+      versionSnapshot,
+      signal,
       subGraphName,
       verifiedLayer,
       unavailableReason,
@@ -2117,6 +2136,9 @@ export class FinalizationHandler {
       kaId: batchId,
       assertionVersion: scope.assertionVersion,
       merkleRoot,
+      versionBlock,
+      versionSnapshot,
+      signal,
     });
     if (publicAuthorityResult.kind === 'unavailable') {
       if (publicAuthorityResult.detail) {
@@ -3007,6 +3029,29 @@ export class FinalizationHandler {
   private async allowsGeneratedCatalogFloor(contextGraphId: string, onChainCgId: string | bigint | undefined): Promise<boolean> {
     if (onChainCgId === undefined || onChainCgId === null) return false;
     if (!this.chain || this.chain.chainId === 'none') return false;
+    const normalizedContextGraphId = contextGraphId.trim();
+    const normalizedOnChainId = String(onChainCgId).trim();
+    const readFinalizedCreation = this.chain.getContextGraphFinalizedCreation;
+    if (typeof readFinalizedCreation === 'function') {
+      try {
+        const creation = await readFinalizedCreation.call(
+          this.chain,
+          BigInt(normalizedOnChainId),
+        );
+        if (creation !== undefined) {
+          const idMatches = /^\d+$/.test(normalizedContextGraphId)
+            ? normalizedContextGraphId === normalizedOnChainId
+            : creation.nameHash.toLowerCase() === ethers.keccak256(
+              ethers.toUtf8Bytes(normalizedContextGraphId),
+            ).toLowerCase();
+          return idMatches && creation.accessPolicy === 1;
+        }
+      } catch {
+        // Never mix a partial/failing finalized creation proof with a latest
+        // point read: that can splice two forks into a false-private result.
+        return false;
+      }
+    }
     if (typeof this.chain.getContextGraphAccessPolicy !== 'function') return false;
     if (!await this.onChainContextGraphMatchesLocalId(contextGraphId, onChainCgId)) return false;
     try {
@@ -3321,7 +3366,7 @@ export class FinalizationHandler {
     const {
       contextGraphId, onChainCgId, ual, merkleRoot, publisherAddress,
       kaId, batchId, versionBlock, authorAddress, subGraphName,
-      trustedAssertionEvidence, assertionVersion,
+      trustedAssertionEvidence, assertionVersion, versionSnapshot, signal,
     } = input;
 
     if (!(await this.verifyChainCgBinding(kaId, onChainCgId, ctx))) {
@@ -3361,6 +3406,8 @@ export class FinalizationHandler {
       batchId,
       versionBlock,
       authorAddress,
+      versionSnapshot,
+      signal,
       subGraphName,
       trustedAssertionEvidence,
     }, ctx);

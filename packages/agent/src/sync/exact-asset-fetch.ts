@@ -60,11 +60,15 @@ export class ExactAssetFetchLifecycleClosedError extends Error {
 }
 
 export interface ExactAssetChainSnapshot {
+  knowledgeAssetId?: bigint;
   latestRoot: string;
   rootCount: bigint;
   latestAuthor: string;
   latestPublisher: string;
   blockNumber: number;
+  blockHash?: string;
+  knowledgeAssetStorageAddress?: string;
+  knowledgeAssetStorageGeneration?: number;
 }
 
 export interface ExactAssetFetchEvidence {
@@ -78,6 +82,8 @@ export interface ExactAssetFetchEvidence {
   authorAddress: string;
   publisherAddress: string;
   versionBlock: number;
+  /** Original coherent snapshot, retained only for this exact-fetch operation. */
+  versionSnapshot: ExactAssetChainSnapshot;
 }
 
 export type ExactAssetLocalState = 'present' | 'materialized' | 'missing';
@@ -249,6 +255,7 @@ async function resolveEvidence(
     authorAddress: snapshot.latestAuthor,
     publisherAddress: snapshot.latestPublisher,
     versionBlock: snapshot.blockNumber,
+    versionSnapshot: Object.freeze({ ...snapshot }),
   };
 }
 

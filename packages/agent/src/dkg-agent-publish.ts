@@ -456,6 +456,10 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 import { createLocalContextGraphOriginMembershipRecord } from
   './local-context-graph-provenance.js';
 
@@ -2652,7 +2656,10 @@ export class PublishMethods extends DKGAgentBase {
       return false;
     }
 
-    if ((await this.getContextGraphAgentGateAddresses(contextGraphId)) !== null) {
+    if ((await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.implicitContextGraph,
+      () => this.getContextGraphAgentGateAddresses(contextGraphId),
+    )) !== null) {
       return false;
     }
 
@@ -3933,12 +3940,13 @@ export class PublishMethods extends DKGAgentBase {
       // fails closed.
       let policyState: 0 | 1 | 'unregistered' | 'unknown';
       try {
-        if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
-          const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
-          policyState = policy === 0 || policy === 1 ? policy : 'unknown';
-        } else {
-          policyState = await this.resolveOnChainAccessPolicyState(cgId, ctx);
-        }
+        policyState = await withRpcUsageSite(CG_AUTH_RPC_SITES.curatedProbe, async () => {
+          if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
+            const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
+            return policy === 0 || policy === 1 ? policy : 'unknown';
+          }
+          return this.resolveOnChainAccessPolicyState(cgId, ctx);
+        });
       } catch (err) {
         this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
         return null;
@@ -4024,7 +4032,10 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
       );
     }
-    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
+    const resolution = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.curatedKeyContext,
+      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
+    );
     if (!resolution.requiresEncryption) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +

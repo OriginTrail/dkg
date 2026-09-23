@@ -220,7 +220,7 @@ describe('peer connection lifecycle', () => {
         if (stage === 'reannouncement') {
           reannounce.mockRejectedValue(new Error('reannouncement unavailable'));
         }
-        const replay = vi.spyOn(f.agent, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
+        const replay = vi.spyOn(f.agent as any, 'requestRfc64CatalogHeadReplayV1')
           .mockRejectedValue(new Error('replay unavailable'));
         if (stage === 'replay incomplete') replay.mockResolvedValue({ requested: 1, failed: 1 });
         const queue = vi.spyOn(f.agent, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
@@ -230,7 +230,10 @@ describe('peer connection lifecycle', () => {
         await flushMicrotasks();
         expect(drain).toHaveBeenCalledWith(f.peerId, expect.anything());
         expect(reannounce).toHaveBeenCalledExactlyOnceWith(f.peerId);
-        expect(replay).toHaveBeenCalledWith('connection-catalog', expect.anything());
+        expect(replay).toHaveBeenCalledWith(
+          'connection-catalog',
+          expect.objectContaining({ kind: 'connection-demand' }),
+        );
         if (stage === 'replay incomplete') {
           expect(warn).toHaveBeenCalledWith(
             expect.anything(),

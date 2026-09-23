@@ -34,6 +34,8 @@ export type OnContextGraphCreated = (info: {
    */
   nameHash?: string | null;
   blockNumber: number;
+  /** The current poll generation; aborts when the poller begins shutdown. */
+  signal?: AbortSignal;
 }) => Promise<void>;
 
 /** Callback for KnowledgeAssetUpdated events (spec §5.1). */
@@ -41,6 +43,7 @@ export type OnCollectionUpdated = (info: {
   merkleRoot: Uint8Array;
   batchId: bigint;
   blockNumber: number;
+  signal?: AbortSignal;
 }) => Promise<void>;
 
 /** Callback for AllowListUpdated events (spec §5.1). */
@@ -49,12 +52,14 @@ export type OnAllowListUpdated = (info: {
   agent: string;
   added: boolean;
   blockNumber: number;
+  signal?: AbortSignal;
 }) => Promise<void>;
 
 /** Callback for ProfileCreated / ProfileUpdated events (spec §5.1). */
 export type OnProfileEvent = (info: {
   identityId: bigint;
   blockNumber: number;
+  signal?: AbortSignal;
 }) => Promise<void>;
 
 /**
@@ -71,6 +76,7 @@ export type OnKARegisteredToContextGraph = (info: {
   txHash: string;
   txIndex?: number;
   blockNumber: number;
+  signal?: AbortSignal;
 }) => Promise<void>;
 
 /**
@@ -80,7 +86,7 @@ export type OnKARegisteredToContextGraph = (info: {
  * `number` is the per-author ordinal extracted from the low 96 bits of `kaId`
  * using full-precision bigint math.
  */
-export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number }) => void | Promise<void>;
+export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number; signal?: AbortSignal }) => void | Promise<void>;
 
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
@@ -268,27 +274,37 @@ export class ChainEventPoller {
         name: 'publish',
         enabled: () => this.publishHandler.hasPendingPublishes,
         eventTypes: () => ['KCCreated'],
-        requiresFullHistory: () => this.publishHandler.hasRestoredPendingPublishes,
-        canUseLegacyAggregateCursor: () => this.publishHandler.hasRestoredPendingPublishes,
-        // A live publish can be activated after its KCCreated event is already
-        // beyond the generic live-tail window on fast chains. Scan one full RPC
-        // page on activation without falling back to a genesis backfill.
-        liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
+        cursorStrategy: () => this.publishHandler.hasRestoredPendingPublishes
+          ? { kind: 'full-history', legacyAggregateCursor: true }
+          : {
+            kind: 'live-tail',
+            // A live publish has no pre-restart history to recover, so it must
+            // stay out of the shared legacy cursor.
+            legacyAggregateCursor: false,
+            // A live publish can be activated after its KCCreated event is
+            // beyond the generic live-tail window on fast chains. Scan one
+            // full RPC page on activation without a genesis backfill.
+            liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
+          },
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleBatchCreated(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleBatchCreated(event, ctx, signal),
       },
       {
         name: 'allocatorReconcile',
         enabled: () => !!this.onKnowledgeAssetCreated,
         eventTypes: () => ['KCCreated'],
-        requiresFullHistory: () => true,
-        canUseLegacyAggregateCursor: () => false,
+        cursorStrategy: () => ({
+          kind: 'full-history',
+          // A shared cursor that other live-tail lanes advanced near head would
+          // skip the genesis backfill this lane exists to perform.
+          legacyAggregateCursor: false,
+          onBackfillFromGenesis: (ctx) => {
+            if (!this.onKnowledgeAssetCreated) return;
+            this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');
+          },
+        }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleKACreated(event, ctx),
-        onBackfillFromGenesis: (ctx) => {
-          if (!this.onKnowledgeAssetCreated) return;
-          this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');
-        },
+        dispatch: (event, ctx, signal) => this.handleKACreated(event, ctx, signal),
       },
       {
         name: 'contextGraphDiscovery',
@@ -297,42 +313,41 @@ export class ChainEventPoller {
         // This poller is the low-latency live tail for new context graphs.
         // Historical recovery is handled by the daemon's
         // discoverContextGraphsFromChain scan and incremental watermark.
-        requiresFullHistory: () => false,
-        canUseLegacyAggregateCursor: () => true,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleContextGraphCreated(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleContextGraphCreated(event, ctx, signal),
       },
       {
         name: 'vmReconcile',
         enabled: () => !!this.onKARegisteredToContextGraph,
         eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleKARegistered(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleKARegistered(event, ctx, signal),
       },
       {
         name: 'collectionUpdates',
         enabled: () => !!this.onCollectionUpdated,
         eventTypes: () => ['KnowledgeAssetUpdated'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleCollectionUpdated(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleCollectionUpdated(event, ctx, signal),
       },
       {
         name: 'allowListUpdates',
         enabled: () => !!this.onAllowListUpdated,
         eventTypes: () => ['AllowListUpdated'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleAllowListUpdated(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleAllowListUpdated(event, ctx, signal),
       },
       {
         name: 'profileEvents',
         enabled: () => !!this.onProfileEvent,
         eventTypes: () => ['ProfileCreated', 'ProfileUpdated'],
-        requiresFullHistory: () => false,
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleProfileEvent(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleProfileEvent(event, ctx, signal),
       },
     ];
   }
@@ -344,7 +359,12 @@ export class ChainEventPoller {
     );
   }
 
-  private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleBatchCreated(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     const { data } = event;
 
     const merkleRoot = typeof data['merkleRoot'] === 'string'
@@ -370,13 +390,18 @@ export class ChainEventPoller {
       },
       ctx,
     );
+    signal?.throwIfAborted();
 
     if (confirmed) {
       this.log.info(ctx, `Confirmed tentative publish via chain event (block ${event.blockNumber})`);
     }
   }
 
-  private async handleContextGraphCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleContextGraphCreated(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.onContextGraphCreated) return;
     const { data } = event;
     const contextGraphId = String(data['contextGraphId'] ?? '');
@@ -406,13 +431,19 @@ export class ChainEventPoller {
         publishPolicy,
         nameHash,
         blockNumber: event.blockNumber,
+        signal,
       });
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       this.log.warn(ctx, `onContextGraphCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private async handleCollectionUpdated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleCollectionUpdated(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.onCollectionUpdated) return;
     const { data } = event;
     const merkleRoot = typeof data['merkleRoot'] === 'string'
@@ -425,13 +456,18 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onCollectionUpdated({ merkleRoot, batchId, blockNumber: event.blockNumber });
+      await this.onCollectionUpdated({ merkleRoot, batchId, blockNumber: event.blockNumber, signal });
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       this.log.warn(ctx, `onCollectionUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private async handleAllowListUpdated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleAllowListUpdated(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.onAllowListUpdated) return;
     const { data } = event;
     const contextGraphId = String(data['contextGraphId'] ?? '');
@@ -443,13 +479,18 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onAllowListUpdated({ contextGraphId, agent, added, blockNumber: event.blockNumber });
+      await this.onAllowListUpdated({ contextGraphId, agent, added, blockNumber: event.blockNumber, signal });
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       this.log.warn(ctx, `onAllowListUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private async handleProfileEvent(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleProfileEvent(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.onProfileEvent) return;
     const { data } = event;
     const identityId = BigInt(data['identityId'] as string ?? '0');
@@ -459,13 +500,18 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onProfileEvent({ identityId, blockNumber: event.blockNumber });
+      await this.onProfileEvent({ identityId, blockNumber: event.blockNumber, signal });
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       this.log.warn(ctx, `onProfileEvent callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private async handleKARegistered(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleKARegistered(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.onKARegisteredToContextGraph) return;
     const { data } = event;
     const contextGraphId = String(data['contextGraphId'] ?? '');
@@ -489,13 +535,19 @@ export class ChainEventPoller {
         txHash,
         txIndex,
         blockNumber: event.blockNumber,
+        signal,
       });
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       this.log.warn(ctx, `onKARegisteredToContextGraph callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private async handleKACreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleKACreated(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.onKnowledgeAssetCreated) return;
     const { data } = event;
     const kaId = BigInt((data['kaId'] as string) ?? '0');
@@ -523,8 +575,10 @@ export class ChainEventPoller {
         txHash,
         txIndex,
         blockNumber: event.blockNumber,
+        signal,
       });
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       this.log.warn(ctx, `onKnowledgeAssetCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }

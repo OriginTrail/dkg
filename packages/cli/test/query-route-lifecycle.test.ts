@@ -424,6 +424,61 @@ describe('/api/query request lifecycle', () => {
     }
   });
 
+  it.each([
+    {
+      contextGraphId: 'registered-public',
+      source: 'registered-chain',
+      reason: 'chain-access-policy-timeout',
+    },
+    {
+      contextGraphId: 'unknown-graph',
+      source: 'legacy-local',
+      reason: 'pending-authoritative-metadata',
+    },
+  ])(
+    'maps unavailable read authority to one retryable response without exposing $source details',
+    async ({ contextGraphId, source, reason }) => {
+      const req = new RequestStub({
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+        contextGraphId,
+      });
+      const res = new ResponseStub();
+      const tracker = {
+        start: vi.fn(),
+        startPhase: vi.fn(),
+        completePhase: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+        cancel: vi.fn(),
+      };
+      const authorityUnavailable = Object.assign(
+        new Error(`Internal authority detail for ${contextGraphId}`),
+        {
+          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+          retryable: true,
+          contextGraphId,
+          source,
+          reason,
+        },
+      );
+
+      await handleQueryRoutes(queryRouteContext(req, res, {
+        query: vi.fn(async () => { throw authorityUnavailable; }),
+      }, tracker));
+
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('3');
+      expect(JSON.parse(res.body)).toEqual({
+        error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+        code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+        retryable: true,
+      });
+      expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), authorityUnavailable);
+      expect(tracker.cancel).not.toHaveBeenCalled();
+      expect(tracker.complete).not.toHaveBeenCalled();
+    },
+  );
+
   it('maps a GenUI entity-query store timeout through the route as retryable 503', async () => {
     const req = new RequestStub({
       contextGraphId: 'cg-1',
