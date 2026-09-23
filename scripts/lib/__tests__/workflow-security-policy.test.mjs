@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
+  GitHubApiError,
   inspectCiPolicyFreshness,
   inspectCiPolicyProtections,
   parseCiPolicyArguments,
@@ -394,7 +395,7 @@ test('protection inspection excludes controller freshness acquisition', async ()
     token: 'test-token',
     requestJson: async (endpoint, token) => {
       if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) {
-        throw Object.assign(new Error('GitHub API returned 404'), { status: 404 });
+        throw new GitHubApiError(endpoint, 404);
       }
       return requestJson(endpoint, token);
     },
@@ -405,11 +406,20 @@ test('protection inspection excludes controller freshness acquisition', async ()
     inspection,
     token: 'test-token',
     requestJson: async (endpoint, token) => {
-      if (endpoint.includes('/contents/')) throw Object.assign(new Error('GitHub API returned 500'), { status: 500 });
+      if (endpoint.includes('/contents/')) throw new GitHubApiError(endpoint, 500);
       return requestJson(endpoint, token);
     },
   });
   assert.equal(unreachable.checks.freshness.status, 'error');
+  const lookalike = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) throw Object.assign(new Error('not an API response'), { status: 404 });
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(lookalike.checks.freshness.status, 'error', 'only a GitHub API 404 means the file is missing');
 });
 
 test('effective policy inspection reads every rules page and rejects malformed pages', async () => {
