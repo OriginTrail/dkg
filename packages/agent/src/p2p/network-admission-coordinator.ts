@@ -34,11 +34,13 @@ export interface NetworkAdmissionCoordinatorOptions {
   deletePeerFromPeerStore: (peerId: string) => Promise<void>;
   cleanupRejectedPeerState?: (peerId: string) => void;
   /**
-   * The peer failed the identity proof. Runs BEFORE its connections are closed
-   * so transport-level dial refusal is already in place when libp2p's reconnect
-   * machinery reacts to the disconnect. Best-effort: a throw is swallowed.
+   * The peer failed the identity proof and is quarantined for `quarantineMs`
+   * (the admission service's effective cooldown, so transport refusal can use
+   * the same window). Runs BEFORE its connections are closed so transport-level
+   * dial refusal is already in place when libp2p's reconnect machinery reacts
+   * to the disconnect. Best-effort: a throw is swallowed.
    */
-  onPeerRejected?: (peerId: string) => void;
+  onPeerRejected?: (peerId: string, quarantineMs: number) => void;
   /** The peer passed the identity proof. Best-effort: a throw is swallowed. */
   onPeerVerified?: (peerId: string) => void;
   log?: {
@@ -179,7 +181,7 @@ export class NetworkAdmissionCoordinator {
   private readonly getConnections: () => Iterable<NetworkAdmissionConnection>;
   private readonly deletePeerFromPeerStore: (peerId: string) => Promise<void>;
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
-  private readonly onPeerRejected?: (peerId: string) => void;
+  private readonly onPeerRejected?: (peerId: string, quarantineMs: number) => void;
   private readonly onPeerVerified?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
@@ -448,7 +450,7 @@ export class NetworkAdmissionCoordinator {
     });
     if (verdict.ok) {
       this.admission.markVerifiedSameNetwork(remotePeer);
-      notifyBestEffort(this.onPeerVerified, remotePeer);
+      notifyBestEffort(() => this.onPeerVerified?.(remotePeer));
       return true;
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
@@ -460,10 +462,10 @@ export class NetworkAdmissionCoordinator {
     // elapses the peer is re-probed, so an operator who corrects a mismatched
     // networkId and restarts the peer re-admits without every observer node
     // restarting.
-    this.admission.quarantinePeerForCooldown(remotePeer);
+    const quarantineMs = this.admission.quarantinePeerForCooldown(remotePeer);
     // Before the disconnect: libp2p redials keep-alive-tagged peers on
     // `peer:disconnect`, and discovery re-offers the peer within ~0.2s.
-    notifyBestEffort(this.onPeerRejected, remotePeer);
+    notifyBestEffort(() => this.onPeerRejected?.(remotePeer, quarantineMs));
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);
@@ -495,9 +497,9 @@ export class NetworkAdmissionCoordinator {
 
 }
 
-function notifyBestEffort(hook: ((peerId: string) => void) | undefined, peerId: string): void {
+function notifyBestEffort(notify: () => void): void {
   try {
-    hook?.(peerId);
+    notify();
   } catch {
     // Transport hints must never change an admission verdict.
   }

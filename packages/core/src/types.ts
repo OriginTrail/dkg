@@ -51,6 +51,15 @@ export interface DKGNodeConfig {
    * `relayPeers` are always exempt. Ignored without a `networkIdentity`.
    */
   otherNetworkRelays?: readonly string[];
+  /**
+   * Transport-level network peer isolation: with a `networkIdentity`, refuse
+   * `otherNetworkRelays` and peers that failed the network-identity proof at
+   * the connection gater. Default true. `false` is the operator kill switch:
+   * the node keeps exactly the pre-existing gater (the `/p2p-circuit` relay
+   * path gate and the relay flap guard), and admission alone rejects other
+   * networks' peers.
+   */
+  networkPeerIsolation?: boolean;
   /** Enable circuit relay server on this node (for nodes with public IPs). */
   enableRelayServer?: boolean;
   /**

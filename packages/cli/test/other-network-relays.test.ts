@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { peerIdFromRelayAddress } from '@origintrail-official/dkg-core';
-import { loadNetworkConfig, resolveOtherNetworkRelays, type NetworkConfig } from '../src/config.js';
+import {
+  loadNetworkConfig,
+  resolveNetworkPeerIsolationEnabled,
+  resolveOtherNetworkRelays,
+  type NetworkConfig,
+} from '../src/config.js';
 
 async function bundled(name: string): Promise<NetworkConfig> {
   const network = await loadNetworkConfig(name);
@@ -115,5 +120,32 @@ describe('resolveOtherNetworkRelays (legitimate exemptions)', () => {
       activeNetwork: null,
       registry: { 'net-b': { networkId: 'net-b', relays: [FOREIGN_RELAY] } },
     })).toEqual({ relays: [], networkNames: [] });
+  });
+});
+
+describe('resolveNetworkPeerIsolationEnabled (operator kill switch)', () => {
+  it('defaults on and follows the config flag', () => {
+    expect(resolveNetworkPeerIsolationEnabled(undefined, undefined)).toBe(true);
+    expect(resolveNetworkPeerIsolationEnabled(true, undefined)).toBe(true);
+    expect(resolveNetworkPeerIsolationEnabled(false, undefined)).toBe(false);
+  });
+
+  it('lets the environment override the config in either direction', () => {
+    for (const off of ['0', ' FALSE ', 'off', 'no']) {
+      expect(resolveNetworkPeerIsolationEnabled(true, off)).toBe(false);
+    }
+    for (const on of ['1', 'true', 'ON', 'yes']) {
+      expect(resolveNetworkPeerIsolationEnabled(false, on)).toBe(true);
+    }
+    // An empty variable is unset, not a vote.
+    expect(resolveNetworkPeerIsolationEnabled(false, '')).toBe(false);
+  });
+
+  it('fails startup on a value it cannot read instead of guessing', () => {
+    expect(() => resolveNetworkPeerIsolationEnabled(undefined, 'disable')).toThrow(
+      'DKG_NETWORK_PEER_ISOLATION_ENABLED must be one of 1, 0, true, false, on, off, yes, or no (received "disable")',
+    );
+    expect(() => resolveNetworkPeerIsolationEnabled('false', undefined))
+      .toThrow('networkPeerIsolationEnabled must be a boolean (received "false")');
   });
 });

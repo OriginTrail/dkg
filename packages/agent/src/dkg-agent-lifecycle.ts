@@ -2377,9 +2377,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       cleanupRejectedPeerState: (peerId) => this.clearNetworkRejectedPeerState(peerId),
       // Transport half of the verdict: stop libp2p (kad-dht, relay discovery,
-      // reconnect queue) from redialing a peer of another network, and lift
-      // that as soon as the peer proves it belongs to this one.
-      onPeerRejected: (peerId) => { this.node.denyPeerAfterNetworkMismatch(peerId); },
+      // reconnect queue) from redialing a peer of another network for exactly
+      // the quarantine just applied, and lift that as soon as the peer proves
+      // it belongs to this one.
+      onPeerRejected: (peerId, quarantineMs) => { this.node.denyPeerAfterNetworkMismatch(peerId, quarantineMs); },
       onPeerVerified: (peerId) => { this.node.clearPeerNetworkMismatchDenial(peerId); },
       log: this.log,
     });

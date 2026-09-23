@@ -704,6 +704,14 @@ export interface DkgConfig {
    * (standing up a relay VM, sharing multiaddrs, monitoring).
    */
   preferredRelays?: string[];
+  /**
+   * Transport-level network peer isolation: refuse to dial, store or accept
+   * the relays of the other bundled DKG networks and peers that failed the
+   * network-identity proof. Defaults to true. Set false (or
+   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to
+   * admission-only isolation without a new release.
+   */
+  networkPeerIsolationEnabled?: boolean;
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
@@ -1955,6 +1963,36 @@ export function loadNetworkRegistryFromRoots(
   }
 
   return registry;
+}
+
+const NETWORK_PEER_ISOLATION_ENV = 'DKG_NETWORK_PEER_ISOLATION_ENABLED';
+
+/**
+ * Resolve the transport-level network peer isolation switch (default on). The
+ * environment override wins so an operator can turn it off for one boot
+ * without rewriting the config file. Unknown values fail startup instead of
+ * silently picking a side.
+ */
+export function resolveNetworkPeerIsolationEnabled(
+  configValue: unknown,
+  envValue: string | undefined = process.env[NETWORK_PEER_ISOLATION_ENV],
+): boolean {
+  if (envValue !== undefined && envValue.trim() !== '') {
+    const normalized = envValue.trim().toLowerCase();
+    if (['1', 'true', 'on', 'yes'].includes(normalized)) return true;
+    if (['0', 'false', 'off', 'no'].includes(normalized)) return false;
+    throw new Error(
+      `${NETWORK_PEER_ISOLATION_ENV} must be one of 1, 0, true, false, on, off, yes, or no ` +
+      `(received ${JSON.stringify(envValue)})`,
+    );
+  }
+  if (configValue === undefined) return true;
+  if (typeof configValue !== 'boolean') {
+    throw new Error(
+      `networkPeerIsolationEnabled must be a boolean (received ${JSON.stringify(configValue)})`,
+    );
+  }
+  return configValue;
 }
 
 type NetworkRelayIdentity = Partial<Pick<NetworkConfig, 'networkId' | 'genesisId' | 'relays'>>;

@@ -123,6 +123,7 @@ import {
   resolveAutoUpdateConfig,
   resolveChainConfig,
   resolveOtherNetworkRelays,
+  resolveNetworkPeerIsolationEnabled,
   dkgDir,
   writeApiPort,
   removeApiPort,
@@ -1150,6 +1151,10 @@ async function runDaemonInnerWithStartupOwnership(
       config.contextGraphSubscriptionRehydrationEnabled,
       process.env.DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED,
     );
+  const networkPeerIsolationEnabled = resolveNetworkPeerIsolationEnabled(
+    config.networkPeerIsolationEnabled,
+    process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED,
+  );
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
@@ -1690,13 +1695,20 @@ async function runDaemonInnerWithStartupOwnership(
   // Transport-level network isolation: the node refuses to dial, store or
   // accept the relays of every OTHER bundled network (testnet refuses mainnet
   // relays exactly as mainnet refuses testnet ones). Our own effective
-  // relayPeers are always exempt.
-  const otherNetworkRelays = resolveOtherNetworkRelays({
-    activeNetworkName: selectedNetworkConfig,
-    activeNetwork: network,
-    localRelayPeers: relayPeers,
-  });
-  if (otherNetworkRelays.relays.length > 0) {
+  // relayPeers are always exempt. The operator kill switch turns the whole
+  // transport layer off; network admission still rejects foreign peers.
+  const otherNetworkRelays = networkPeerIsolationEnabled
+    ? resolveOtherNetworkRelays({
+        activeNetworkName: selectedNetworkConfig,
+        activeNetwork: network,
+        localRelayPeers: relayPeers,
+      })
+    : { relays: [], networkNames: [] };
+  if (!networkPeerIsolationEnabled) {
+    log(
+      "Network isolation: transport-level peer isolation disabled (networkPeerIsolationEnabled=false or DKG_NETWORK_PEER_ISOLATION_ENABLED=0); other DKG networks' peers are rejected by network admission only",
+    );
+  } else if (otherNetworkRelays.relays.length > 0) {
     log(
       `Network isolation: refusing connections to ${otherNetworkRelays.relays.length} relay peer(s) of other DKG networks (${otherNetworkRelays.networkNames.join(", ")})`,
     );
@@ -1860,6 +1872,7 @@ async function runDaemonInnerWithStartupOwnership(
     // snapshot trust, and `relay: "none"` means no relay is contacted at all.
     networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
     otherNetworkRelays: otherNetworkRelays.relays,
+    networkPeerIsolation: networkPeerIsolationEnabled,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,

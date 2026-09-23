@@ -94,7 +94,7 @@ function buildCoordinator(input: {
   quarantineCooldownMs?: number;
   maxProbeBackoffEntries?: number;
   now?: () => number;
-  onPeerRejected?: (peerId: string) => void;
+  onPeerRejected?: (peerId: string, quarantineMs: number) => void;
   onPeerVerified?: (peerId: string) => void;
 }) {
   const admission = new NetworkAdmissionService({
@@ -904,6 +904,38 @@ describe('NetworkAdmissionCoordinator', () => {
     ).resolves.toBe(false);
 
     expect(order).toEqual([`deny-dial:${REMOTE_PEER_ID}`, 'close', 'forget']);
+  });
+
+  it('hands the transport hook the quarantine the admission service applied', async () => {
+    // One source for both windows: the node refuses the peer for exactly as
+    // long as admission quarantines it, whatever the service's cooldown is.
+    let now = 1_000;
+    const onPeerRejected = vi.fn();
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      quarantineCooldownMs: 42_000,
+      now: () => now,
+      onPeerRejected,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+
+    expect(onPeerRejected).toHaveBeenCalledWith(REMOTE_PEER_ID, 42_000);
+    now += 41_999;
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
+    now += 1;
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
   });
 
   it('lifts the transport dial refusal when a peer passes the identity proof', async () => {
