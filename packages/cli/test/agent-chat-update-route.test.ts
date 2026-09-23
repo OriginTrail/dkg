@@ -174,7 +174,11 @@ describe('POST /api/update — kaId + attestation contract (KC→KA), real daemo
 
   it('allows an agent token with a mixed-case self update attestation through the guard', async () => {
     const agent = await registerAgentClient(daemon, 'update-author-case');
-    const mixedCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
+    // The EIP-55 checksum can already have every hex letter in upper case
+    // (about 1 in 4,000 addresses); fall back to lower case then.
+    const upperCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
+    const mixedCaseAgent =
+      upperCaseAgent === agent.agentAddress ? agent.agentAddress.toLowerCase() : upperCaseAgent;
     expect(mixedCaseAgent).not.toBe(agent.agentAddress);
     const seal = {
       authorAddress: mixedCaseAgent,

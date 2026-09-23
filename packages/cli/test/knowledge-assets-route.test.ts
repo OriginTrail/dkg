@@ -237,7 +237,11 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       const agent = await registerAgentClient('ka-atomic-author-case');
       const cg = `ka-atomic-author-case-${Date.now().toString(36)}`;
       await createRegisteredAgentContextGraph(agent, cg);
-      const mixedCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
+      // The EIP-55 checksum can already have every hex letter in upper case
+      // (about 1 in 4,000 addresses); fall back to lower case then.
+      const upperCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
+      const mixedCaseAgent =
+        upperCaseAgent === agent.agentAddress ? agent.agentAddress.toLowerCase() : upperCaseAgent;
       expect(mixedCaseAgent).not.toBe(agent.agentAddress);
 
       const res = await agent.post('/api/knowledge-assets', {
