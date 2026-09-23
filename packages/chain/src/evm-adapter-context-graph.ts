@@ -18,8 +18,13 @@ import {
 import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
+import { errorCode as rpcErrorCode, errorMessage as rpcErrorMessage } from './evm-adapter-errors.js';
+import {
+  ContextGraphLiveAuthorityUnsupportedError,
+  type ContextGraphLiveAuthority,
+} from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type ContextGraphFinalizedCreation, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
@@ -28,23 +33,22 @@ import {
   type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
 import {
-  resolveEvmContextGraphAuthoritySource,
-  type EvmContextGraphAuthoritySource,
+  normalizeEvmContextGraphCurrentAuthorityState,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
-import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
+import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
+import { isRetryableRpcError, isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { markContextGraphRegistrationNotSubmitted } from
   './context-graph-registration-error.js';
-import { contextGraphAuthorityIndexIdFromBigInt } from
-  './context-graph-authority-index-id.js';
 import {
-  readEvmContextGraphAuthorityIndexRpcV1,
-  readEvmContextGraphAuthorityStateV1,
+  contextGraphAuthorityAnchorUnavailableV1,
 } from
   './evm-context-graph-authority-index-reader.js';
 import { normalizeContextGraphAuthorityHash } from
   './context-graph-authority-generation.js';
+import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
+  './context-graph-authority-rpc-sites.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -99,6 +103,17 @@ type ContextGraphRegistryScanPlan =
   | ContextGraphRegistryRepairScanPlan;
 
 const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+
+type ContextGraphAuthorityMutation = 'addParticipantAgent' | 'removeParticipantAgent';
+
+/** Every authority writer invalidates projections, even when its receipt is lost. */
+function sendContextGraphAuthorityTransaction<T>(
+  write: () => Promise<T>,
+  dropProjections: () => void,
+): Promise<T> {
+  // Also on failure: a submission whose receipt was lost may still have landed.
+  return write().finally(dropProjections);
+}
 
 function normalizePageBudget(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) >= 1
@@ -708,6 +723,84 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     ));
   }
 
+  /**
+   * One `getContextGraph` read at `latest`; see
+   * ChainAdapter.getContextGraphLiveAuthority.
+   *
+   * Callers asking for the SAME graph at the same moment share one physical
+   * read through the coalescer. Nothing is retained: a caller arriving after
+   * that read started never receives it, so this stays a live read with zero
+   * staleness — which is what lets the security gates above it use it. See
+   * `context-graph-live-authority-coalescer.ts`.
+   */
+  async getContextGraphLiveAuthority(
+    contextGraphId: bigint,
+    options: ContextGraphLiveAuthorityReadOptions = {},
+  ): Promise<ContextGraphLiveAuthority | null> {
+    await this.init();
+    const cgs = this.requireContextGraphStorage();
+    // BEFORE THE COALESCER, AND THAT IS THE WHOLE POINT.
+    //
+    // `flightKey` below carries no freshness component, so a bounded answer
+    // placed inside `run()` would be handed to every caller sharing that key —
+    // including a live one that asked precisely because its decision cannot
+    // tolerate a stale roster. The coalescer's contract, stated in its own
+    // header and in the docstring above, is that it only ever carries reads
+    // with zero staleness; that is what lets the security gates use it.
+    //
+    // So a bounded read is answered here or not at all. A miss simply falls
+    // through to the live read below, unchanged.
+    if (this.contextGraphBoundedAuthorityReadsEnabled
+      && options.freshness === 'bounded') {
+      const peeked = await this.contextGraphAuthorityIndexReader
+        ?.peekContextGraphLiveAuthority(contextGraphId, { signal: options.signal });
+      // `undefined` is "the index cannot answer", never "no such graph": the
+      // caller falls back to the chain rather than inheriting a conclusion the
+      // index never reached.
+      if (peeked !== undefined) return peeked;
+    }
+    // Full lineage, never the bare numeric id: ContextGraphStorage hands out
+    // sequential ids, so another deployment reuses them freely.
+    const flightKey = [
+      this.deploymentId,
+      (await cgs.getAddress()).toLowerCase(),
+      contextGraphId.toString(10),
+    ].join(':');
+    return this.contextGraphLiveAuthorityCoalescer.run(
+      flightKey,
+      async (flightSignal) => {
+        let raw: unknown;
+        try {
+          raw = await this.readContractWithOptions(
+            cgs,
+            CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
+            'getContextGraph',
+            [contextGraphId],
+            {
+              signal: flightSignal,
+              // The agent's live authority gate fails closed after 2.5s. A
+              // normal point read gives one endpoint 4s, so its caller abort
+              // would pre-empt transport failover. This named policy lets a
+              // stalled endpoint yield to a configured fallback while keeping
+              // the outer security deadline unchanged.
+              policy: 'securityGatePointRead',
+            },
+          );
+        } catch (err) {
+          if (flightSignal.aborted) throw err;
+          if (isNonexistentContextGraphRevert(err, contextGraphId)) return null;
+          if (isLiveAuthorityReadTransient(err)) throw err;
+          throw new ContextGraphLiveAuthorityUnsupportedError(rpcErrorMessage(err), { cause: err });
+        }
+        return decodeContextGraphLiveAuthority(raw, contextGraphId);
+      },
+      {
+        signal: options.signal,
+        ...(options.requestClass === undefined ? {} : { requestClass: options.requestClass }),
+      },
+    );
+  }
+
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     await this.init();
     if (!this.contracts.contextGraphs || !this.contracts.contextGraphStorage) {
@@ -751,58 +844,61 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // approve it to the facade and retry once. The common path (deposit dormant)
     // is a single tx with NO extra eth_call, so it never perturbs timing-
     // sensitive integration tests.
-    const receipt = await (async () => {
-      try {
-        return await submitCreate();
-      } catch (err) {
-        // Only the deposit-allowance revert is recoverable here. Mirror the
-        // publish/update allowance recovery (`isTooLowAllowanceError`): an
-        // unrelated first-attempt revert (invalid access/publish policy, PCA
-        // coherence failure, paused contract, insufficient balance, RPC error)
-        // must NOT trigger a state-changing TRAC approval before re-failing.
-        if (!isTooLowAllowanceError(err)) {
-          throw err;
-        }
-        // #1340: read the deposit through the RPC-failover facade (`readContract`),
-        // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
-        // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
-        // approve + retry below never run, defeating failover for a new CG's first
-        // publish. `readContract` fails over on transport errors (429/5xx/timeout)
-        // and rethrows a decoded revert unchanged; the catch → 0n now fires only
-        // when ALL endpoints fail or the deposit is genuinely dormant.
-        const ps = this.contracts.parametersStorage as Contract | undefined;
-        let deposit = 0n;
+    const receipt = await sendContextGraphAuthorityTransaction(
+      async () => {
         try {
-          deposit = ps
-            ? await this.readContract<bigint>(
-                ps,
-                'parametersStorage.contextGraphRegistrationDeposit',
-                'contextGraphRegistrationDeposit',
-              )
-            : 0n;
-        } catch {
-          deposit = 0n;
+          return await submitCreate();
+        } catch (err) {
+          // Only the deposit-allowance revert is recoverable here. Mirror the
+          // publish/update allowance recovery (`isTooLowAllowanceError`): an
+          // unrelated first-attempt revert (invalid access/publish policy, PCA
+          // coherence failure, paused contract, insufficient balance, RPC error)
+          // must NOT trigger a state-changing TRAC approval before re-failing.
+          if (!isTooLowAllowanceError(err)) {
+            throw err;
+          }
+          // #1340: read the deposit through the RPC-failover facade (`readContract`),
+          // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
+          // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
+          // approve + retry below never run, defeating failover for a new CG's first
+          // publish. `readContract` fails over on transport errors (429/5xx/timeout)
+          // and rethrows a decoded revert unchanged; the catch → 0n now fires only
+          // when ALL endpoints fail or the deposit is genuinely dormant.
+          const ps = this.contracts.parametersStorage as Contract | undefined;
+          let deposit = 0n;
+          try {
+            deposit = ps
+              ? await this.readContract<bigint>(
+                  ps,
+                  'parametersStorage.contextGraphRegistrationDeposit',
+                  'contextGraphRegistrationDeposit',
+                )
+              : 0n;
+          } catch {
+            deposit = 0n;
+          }
+          if (deposit === 0n) throw err;
+          try {
+            await this.ensureV10ApproveTrac(
+              this.signer,
+              await contextGraphs.getAddress(),
+              deposit,
+              'cg registration deposit',
+              true,
+            );
+          } catch (approvalError) {
+            // The initial create attempt has definitively reverted with
+            // TooLowAllowance and the retry has not been submitted yet. Even if
+            // the approval receipt itself is ambiguous, it cannot have created
+            // the Context Graph. Preserve that distinction for the agent's
+            // durable registration state machine.
+            throw markContextGraphRegistrationNotSubmitted(approvalError);
+          }
+          return submitCreate();
         }
-        if (deposit === 0n) throw err;
-        try {
-          await this.ensureV10ApproveTrac(
-            this.signer,
-            await contextGraphs.getAddress(),
-            deposit,
-            'cg registration deposit',
-            true,
-          );
-        } catch (approvalError) {
-          // The initial create attempt has definitively reverted with
-          // TooLowAllowance and the retry has not been submitted yet. Even if
-          // the approval receipt itself is ambiguous, it cannot have created
-          // the Context Graph. Preserve that distinction for the agent's
-          // durable registration state machine.
-          throw markContextGraphRegistrationNotSubmitted(approvalError);
-        }
-        return submitCreate();
-      }
-    })();
+      },
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
+    );
 
     let contextGraphId: bigint | undefined;
     for (const log of receipt.logs) {
@@ -843,12 +939,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContractTransaction(
-      contextGraphs,
-      'addParticipantAgent',
-      [contextGraphId, ethers.getAddress(agent)],
-      this.signer,
-      'add context graph participant agent',
+    const receipt = await sendContextGraphAuthorityTransaction(
+      () => this.sendContractTransaction(
+        contextGraphs,
+        'addParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        [contextGraphId, ethers.getAddress(agent)],
+        this.signer,
+        'add context graph participant agent',
+      ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
     );
     return {
       hash: receipt.hash,
@@ -864,12 +963,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
-    const receipt = await this.sendContractTransaction(
-      contextGraphs,
-      'removeParticipantAgent',
-      [contextGraphId, ethers.getAddress(agent)],
-      this.signer,
-      'remove context graph participant agent',
+    const receipt = await sendContextGraphAuthorityTransaction(
+      () => this.sendContractTransaction(
+        contextGraphs,
+        'removeParticipantAgent' satisfies ContextGraphAuthorityMutation,
+        [contextGraphId, ethers.getAddress(agent)],
+        this.signer,
+        'remove context graph participant agent',
+      ),
+      () => this.contextGraphAuthorityIndex?.dropProjections(),
     );
     return {
       hash: receipt.hash,
@@ -1042,9 +1144,66 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     });
   }
 
+  /**
+   * Two positive `ContextGraphStorage` views below read the ONE log first.
+   *
+   * `latest`, not `finalized`, and that is what makes them stand in for the
+   * call at all: each one replaces an UNPINNED `eth_call`, answered at the
+   * chain's current head with that head's tip-reorg exposure. Reading them at
+   * the settled cursor instead would be a DIFFERENT answer, fifty blocks behind
+   * the call it replaces, and a KA registered inside that window would read as
+   * not registered.
+   *
+   * THE EXPOSURE IS THAT CALL'S WINDOW PLUS UP TO ONE TICK INTERVAL, and it is
+   * worth stating plainly rather than claiming parity. An `eth_call` self-heals
+   * the moment its endpoint follows a reorg; a tail row does not disappear
+   * until the tick's NEXT pass replaces the tail wholesale, so a registration
+   * orphaned by a tip reorg can still be folded into a positive `bound` or a
+   * known ordinal for up to `chain.indexTickMs`. The module's
+   * write-once justification (knowledge-asset-read-model.ts) is about a SETTLED
+   * row and does not cover the tail. Bounded by the tick's own liveness gate,
+   * not attacker-choosable — the id must have been emitted on a fork this
+   * node's own tick followed — and `verifyContextGraphBinding` still
+   * cross-checks the local id on the admission path this reaches.
+   *
+   * Negative bindings and counts never use the log: unlike a durable positive
+   * binding or already-known ordinal, they may change in the block immediately
+   * after the tick's head observation. Every other refusal — a cold log, a
+   * stalled tick, a held fork suspicion, a backfill that has not reached the
+   * graph's creation block, an ordinal past what the log holds — runs the
+   * `eth_call` exactly as it did before the log existed.
+   */
+  private async knowledgeAssetsFromLogFor(contract: Contract) {
+    const binding = this.chainEventLogBinding;
+    if (binding?.knowledgeAssets === undefined
+      || binding.contextGraphStorageAddress === undefined) return undefined;
+    let currentAddress: string;
+    try {
+      currentAddress = (await contract.getAddress()).toLowerCase();
+    } catch {
+      return undefined;
+    }
+    // A Hub self-heal may resolve the successor before the detached one-log
+    // runtime has rebuilt. Never answer the successor from the retired proxy's
+    // folded rows; an address mismatch takes the existing live eth_call below.
+    return binding.contextGraphStorageAddress === currentAddress
+      ? { binding, readModel: binding.knowledgeAssets }
+      : undefined;
+  }
+
   async getKAContextGraphId(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphForKa(
+      kaId,
+      { view: 'latest' },
+    );
+    if (logged !== undefined
+      && knowledgeAssetsFromLog !== undefined
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)) {
+      return logged.contextGraphId;
+    }
     const cgId: bigint = await this.readContractWithOptions(
       cgs,
       'cgStorage.kaToContextGraph',
@@ -1057,6 +1216,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
+    // Count is mutable. Even complete coverage only proves the tick's last
+    // observed head, while this unpinned call must include a registration that
+    // lands immediately afterwards. Keep the live call for that distinction.
     const cgs = this.requireContextGraphStorage();
     const count: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaCount', 'getContextGraphKaCount', contextGraphId,
@@ -1067,6 +1229,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
+    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaList(
+      contextGraphId,
+      { view: 'latest' },
+    );
+    // Position IS the ordinal — the on-chain list only ever appends. An index
+    // the log does not hold is NOT an out-of-range answer to invent: the chain
+    // reverts on one, and callers read that revert, so the call below must be
+    // the thing that produces it.
+    if (logged !== undefined
+      && knowledgeAssetsFromLog !== undefined
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)
+      && index >= 0n
+      && index < BigInt(logged.kaIds.length)) {
+      return logged.kaIds[Number(index)]!;
+    }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
     );
@@ -1101,14 +1279,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       try {
         const cg = await this.readContractWithOptions(
           cgs,
-          'cgStorage.getContextGraph',
+          CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
           'getContextGraph',
           [contextGraphId],
           { signal: options.signal },
         );
         const raw =
           cg?.accessPolicy
-          ?? (Array.isArray(cg) ? cg[5] : undefined);
+          ?? (Array.isArray(cg) ? cg[CONTEXT_GRAPH_TUPLE_INDEX.accessPolicy] : undefined);
         if (raw === undefined || raw === null) {
           throw new Error('ContextGraphStorage.getContextGraph returned no accessPolicy field');
         }
@@ -1177,30 +1355,40 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   /**
    * Resolve policy, membership, and their stable event-derived generations at
-   * one finalized block. The event generation (rather than the observation
-   * block) keeps independently booted RFC-64 peers on the same policy digest.
+   * ONE anchor block, selected by `chain.finalityConfirmations` — the node's
+   * single definition of finality (see evm-finality-anchor.ts). The event
+   * generation (rather than the observation block) keeps independently booted
+   * RFC-64 peers on the same policy digest: every field the digest is built
+   * from is event-derived, so peers agree once they have observed the same
+   * events, and never needed to agree on an observation bound.
    */
   async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
-    options: ChainReadOptions = {},
+    options: ContextGraphAuthorityReadOptions = {},
   ): Promise<ContextGraphAuthoritySnapshot> {
     await this.init();
     options.signal?.throwIfAborted();
+    const indexReader = this.contextGraphAuthorityIndexReader;
+    if (indexReader !== undefined) {
+      return indexReader.readContextGraphAuthoritySnapshot(contextGraphId, options);
+    }
     const base = this.requireContextGraphStorage();
     return this.readTipProvider(
       'getContextGraphAuthoritySnapshot',
       async (provider) => {
         options.signal?.throwIfAborted();
-        const finalized = this.contextGraphAuthorityIndex === undefined
-          ? await provider.getBlock('finalized')
-          : await readEvmContextGraphAuthorityIndexRpcV1(
-              'getContextGraphAuthoritySnapshot finalized head',
-              () => provider.getBlock('finalized'),
-              options.signal,
-            );
-        if (finalized === null || finalized.hash === null) {
-          throw new Error('finalized Context Graph authority block is unavailable');
-        }
+        // One anchor for the whole snapshot, at the operator-configured finality
+        // depth rather than at the endpoint's `finalized` tag. The docstring's
+        // "one finalized block" buys INTRA-snapshot coherence; peer agreement
+        // comes from the event-derived generations below, never from the
+        // observation bound (two peers reading the `finalized` tag at different
+        // wall-clock times never shared a bound either).
+        const finalized = await resolveEvmFinalityAnchorBlockV1({
+          finalityConfirmations: this.finalityConfirmations,
+          readHead: () => provider.getBlock('latest'),
+          readBlockAt: (anchorBlockNumber) => provider.getBlock(anchorBlockNumber),
+          unavailable: contextGraphAuthorityAnchorUnavailableV1,
+        });
         const finalizedHash = finalized.hash;
         const contract = base.connect(provider) as Contract;
         const filters = contract.filters as unknown as Record<
@@ -1212,185 +1400,201 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           contextGraphId,
           { blockTag: finalized.number },
         );
-        const authoritySource: EvmContextGraphAuthoritySource =
-          this.contextGraphAuthorityIndex !== undefined ? await (async () => {
-          // Reject invalid indexed ids before deployment discovery or any log scan.
-          const authorityIndexId = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
-          const deploymentBlockNumber = (await this.resolveContractDeployBlock(
+        const cache = this.contextGraphAuthorityHistory;
+        const cacheKey = [
+          this.deploymentId,
+          contractAddress,
+          contextGraphId.toString(10),
+        ].join(':');
+        const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
+        const readAuthorityEvents = async (
+          name: 'ContextGraphCreated' | ContextGraphAuthorityHistoryEventQuery['name'],
+          targetContextGraphId: bigint,
+          fromBlock: number,
+          toBlock: number,
+        ): Promise<ethers.EventLog[]> => {
+          let filter = authorityFilters.get(name);
+          if (filter === undefined) {
+            filter = name === 'Transfer'
+              ? filters[name]!(null, null, targetContextGraphId)
+              : filters[name]!(targetContextGraphId);
+            authorityFilters.set(name, filter);
+          }
+          return readAdaptiveEvmLogRange({
+            read: async (rangeFrom, rangeTo) => (
+              (await contract.queryFilter(filter!, rangeFrom, rangeTo))
+                .map((rawEvent) => rawEvent as ethers.EventLog)
+            ),
+            fromBlock,
+            toBlock,
+            signal: options.signal,
+          });
+        };
+        const readAuthorityHistory = () => resolveContextGraphAuthorityHistory({
+          cache,
+          cacheKey,
+          readScope: provider,
+          contextGraphId,
+          finalized: { number: finalized.number, hash: finalizedHash },
+          pageSize: this.cgRegistryScanPageSize,
+          signal: options.signal,
+          loadColdFromBlock: () => this.resolveContractDeployBlockNumber(
             contractAddress,
             'getContextGraphAuthoritySnapshot',
             'ContextGraphStorage',
-          )).fromBlock;
-          const indexed = await readEvmContextGraphAuthorityStateV1({
-            index: this.contextGraphAuthorityIndex!,
-            deploymentId: this.deploymentId,
-            contract,
-            contractAddress,
-            provider,
-            deploymentBlockNumber,
-            finalized: { number: finalized.number, hash: finalizedHash },
-            pageSize: this.cgRegistryScanPageSize,
-            stabilizationOperation: 'resolution',
-            contextGraphId: authorityIndexId,
-            signal: options.signal,
-          });
-          return Object.freeze({
-            kind: 'indexed' as const,
-            readSnapshot: async () => indexed.value,
-            stabilize: indexed.stabilize,
-          });
-        })() : (() => {
-          const cache = this.contextGraphAuthorityHistory;
-          const cacheKey = [
-            this.deploymentId,
-            contractAddress,
-            contextGraphId.toString(10),
-          ].join(':');
-          const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
-          const readAuthorityEvents = async (
-            name: 'ContextGraphCreated' | ContextGraphAuthorityHistoryEventQuery['name'],
-            targetContextGraphId: bigint,
-            fromBlock: number,
-            toBlock: number,
-          ): Promise<ethers.EventLog[]> => {
-            let filter = authorityFilters.get(name);
-            if (filter === undefined) {
-              filter = name === 'Transfer'
-                ? filters[name]!(null, null, targetContextGraphId)
-                : filters[name]!(targetContextGraphId);
-              authorityFilters.set(name, filter);
-            }
-            return readAdaptiveEvmLogRange({
-              read: async (rangeFrom, rangeTo) => (
-                (await contract.queryFilter(filter!, rangeFrom, rangeTo))
-                  .map((rawEvent) => rawEvent as ethers.EventLog)
-              ),
+          ),
+          readBlockHash: async (blockNumber) => (
+            (await provider.getBlock(blockNumber))?.hash ?? null
+          ),
+          readCreationEvents: async (targetContextGraphId, fromBlock, toBlock) => (
+            readAuthorityEvents(
+              'ContextGraphCreated',
+              targetContextGraphId,
               fromBlock,
               toBlock,
-              signal: options.signal,
-            });
-          };
-          return Object.freeze({
-            kind: 'legacy' as const,
-            readCurrent: readCurrentState,
-            readHistory: () => resolveContextGraphAuthorityHistory({
-              cache,
-              cacheKey,
-              readScope: provider,
-              contextGraphId,
-              finalized: { number: finalized.number, hash: finalizedHash },
-              pageSize: this.cgRegistryScanPageSize,
-              signal: options.signal,
-              loadColdFromBlock: async () => (await this.resolveContractDeployBlock(
-                contractAddress,
-                'getContextGraphAuthoritySnapshot',
-                'ContextGraphStorage',
-              )).fromBlock,
-              readBlockHash: async (blockNumber) => (
-                (await provider.getBlock(blockNumber))?.hash ?? null
-              ),
-              readCreationEvents: async (targetContextGraphId, fromBlock, toBlock) => (
-                readAuthorityEvents(
-                  'ContextGraphCreated',
-                  targetContextGraphId,
-                  fromBlock,
-                  toBlock,
-                ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => {
-                  const nameHash = normalizeContextGraphAuthorityHash(
-                    event.args.nameHash ?? event.args[2],
-                  );
-                  if (nameHash === undefined) {
-                    throw new Error(
-                      'ContextGraphStorage returned an invalid ContextGraphCreated name hash',
-                    );
-                  }
-                  return {
-                    blockNumber: event.blockNumber,
-                    blockHash: event.blockHash,
-                    index: event.index,
-                    nameHash,
-                  };
-                }))
-              ),
-              readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
-                const { name } = query;
-                const rawEvents = await readAuthorityEvents(
-                  name,
-                  query.contextGraphId,
-                  fromBlock,
-                  toBlock,
+            ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => {
+              const nameHash = normalizeContextGraphAuthorityHash(
+                event.args.nameHash ?? event.args[2],
+              );
+              if (nameHash === undefined) {
+                throw new Error(
+                  'ContextGraphStorage returned an invalid ContextGraphCreated name hash',
                 );
-                const normalized: ContextGraphAuthorityHistoryEvent[] = [];
-                for (const rawEvent of rawEvents) {
-                  const event = rawEvent;
-                  if (name === 'Transfer') {
-                    const from = String(event.args.from ?? event.args[0]).toLowerCase();
-                    const to = String(event.args.to ?? event.args[1]).toLowerCase();
-                    if (!ethers.isAddress(from)
-                      || !ethers.isAddress(to)
-                      || from === ethers.ZeroAddress
-                      || to === ethers.ZeroAddress
-                      || from === to) continue;
-                  }
-                  normalized.push({
-                    blockNumber: event.blockNumber,
-                    blockHash: event.blockHash,
-                    index: event.index,
-                  });
-                }
-                return normalized;
-              },
-            }),
-          });
-        })();
-        const authority = await resolveEvmContextGraphAuthoritySource(authoritySource);
+              }
+              return {
+                blockNumber: event.blockNumber,
+                blockHash: event.blockHash,
+                index: event.index,
+                nameHash,
+              };
+            }))
+          ),
+          readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
+            const { name } = query;
+            const rawEvents = await readAuthorityEvents(
+              name,
+              query.contextGraphId,
+              fromBlock,
+              toBlock,
+            );
+            const normalized: ContextGraphAuthorityHistoryEvent[] = [];
+            for (const rawEvent of rawEvents) {
+              const event = rawEvent;
+              if (name === 'Transfer') {
+                const from = String(event.args.from ?? event.args[0]).toLowerCase();
+                const to = String(event.args.to ?? event.args[1]).toLowerCase();
+                if (!ethers.isAddress(from)
+                  || !ethers.isAddress(to)
+                  || from === ethers.ZeroAddress
+                  || to === ethers.ZeroAddress
+                  || from === to) continue;
+              }
+              normalized.push({
+                blockNumber: event.blockNumber,
+                blockHash: event.blockHash,
+                index: event.index,
+              });
+            }
+            return normalized;
+          },
+        });
+        const [rawCurrent, history] = await Promise.all([
+          readCurrentState(),
+          readAuthorityHistory(),
+        ]);
+        const { throughBlockNumber: _number, throughBlockHash: _hash, ...generation } =
+          history.state;
+        const authority = Object.freeze(Object.assign(
+          {},
+          normalizeEvmContextGraphCurrentAuthorityState(rawCurrent),
+          generation,
+        ));
         options.signal?.throwIfAborted();
-        const chainId = (await (this.contextGraphAuthorityIndex === undefined
-          ? provider.getNetwork()
-          : readEvmContextGraphAuthorityIndexRpcV1(
-              'getContextGraphAuthoritySnapshot network',
-              () => provider.getNetwork(),
-              options.signal,
-            ))).chainId.toString(10);
+        const chainId = (await provider.getNetwork()).chainId.toString(10);
         const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
           chainId,
           governanceContract: contractAddress,
-          ...authority.state,
+          ...authority,
           contextGraphId: contextGraphId.toString(10),
-          ownershipEra: authority.state.ownershipEra.toString(10),
-          policyVersion: authority.state.policyVersion.toString(10),
-          rosterVersion: authority.state.rosterVersion.toString(10),
-          sourceBlockNumber: authority.state.sourceBlockNumber.toString(10),
+          ownershipEra: authority.ownershipEra.toString(10),
+          policyVersion: authority.policyVersion.toString(10),
+          rosterVersion: authority.rosterVersion.toString(10),
+          sourceBlockNumber: authority.sourceBlockNumber.toString(10),
         });
         // Verify the combined current-state + generation view only after both
-        // reads settle. The legacy reader publishes its checkpoint here; the
-        // shared index has already committed complete pages and this final
-        // check prevents a changed head from escaping as one mixed snapshot.
-        await authority.stabilize();
+        // reads settle. The legacy reader publishes its checkpoint here, so a
+        // changed head cannot escape as one mixed snapshot.
+        await history.publish();
         return snapshot;
       },
       {
-        // The caller signal remains bound to finalized/current/stabilization
-        // point reads. Shared index page reads explicitly rebind the narrower
-        // index lifecycle signal above, so one cancelled waiter does not abort
-        // transport work still serving another waiter.
         signal: options.signal,
-        ...(this.contextGraphAuthorityIndex === undefined ? {} : {
-          isRetryable: (error: unknown) => (
-            !options.signal?.aborted && (
-              isContextGraphAuthorityIndexRetryableError(error)
-              || isRpcEndpointFailoverEligible(error)
-            )
-          ),
-        }),
-        // A durable index gives every physical request its own 30s deadline and
-        // checkpoints each page, so its complete projection has no aggregate
-        // cap. The legacy history scan retains the ordinary wide-scan policy.
-        policy: this.contextGraphAuthorityIndex === undefined
-          ? 'wideLogScan'
-          : 'durablePagedLogScan',
+        // The legacy history reader raises ContextGraphAuthorityIndexRetryableError
+        // for a moved anchor, a cached checkpoint ahead of this endpoint and an
+        // unresolvable anchor block. It is recognized BY TYPE here, ahead of
+        // `isRpcEndpointFailoverEligible`'s message regex, so an authority read
+        // fails over instead of aborting the catalog admission it gates.
+        isRetryable: (error: unknown) => (
+          !options.signal?.aborted && (
+            isContextGraphAuthorityIndexRetryableError(error)
+            || isRpcEndpointFailoverEligible(error)
+          )
+        ),
+        // The legacy history scan retains the ordinary wide-scan policy.
+        policy: 'wideLogScan',
       },
     );
+  }
+
+  async getContextGraphFinalizedCreation(
+    contextGraphId: bigint,
+    options: ContextGraphAuthorityReadOptions = {},
+  ): Promise<ContextGraphFinalizedCreation | undefined> {
+    await this.init();
+    options.signal?.throwIfAborted();
+    const contractAddress = (
+      await this.requireContextGraphStorage().getAddress()
+    ).toLowerCase();
+    const binding = this.chainEventLogBinding;
+    const source = binding?.contextGraphAuthority;
+    const read = source?.readContextGraphFinalizedCreation;
+    if (binding === undefined
+      || source === undefined
+      || read === undefined
+      || binding.contextGraphStorageAddress !== contractAddress
+      || source.contractAddress !== contractAddress) {
+      return undefined;
+    }
+    const creation = await read.call(
+      source,
+      contextGraphId,
+      { signal: options.signal },
+    );
+    options.signal?.throwIfAborted();
+    // `getAddress()` is local for an ethers Contract but remains a Promise.
+    // Resolve it before the final synchronous generation check so there is no
+    // await between proving the binding current and handing the pair over.
+    const currentAddress = (
+      await this.requireContextGraphStorage().getAddress()
+    ).toLowerCase();
+    options.signal?.throwIfAborted();
+    if (creation === undefined
+      || currentAddress !== contractAddress
+      || !this.chainEventLogBindingIsCurrent(binding)
+      || binding.contextGraphAuthority !== source
+      || binding.contextGraphStorageAddress !== contractAddress
+      || source.contractAddress !== contractAddress) {
+      return undefined;
+    }
+    if (!ethers.isHexString(creation.nameHash, 32)
+      || creation.nameHash.toLowerCase() === ethers.ZeroHash
+      || (creation.accessPolicy !== 0 && creation.accessPolicy !== 1)) {
+      return undefined;
+    }
+    return Object.freeze({
+      nameHash: creation.nameHash.toLowerCase(),
+      accessPolicy: creation.accessPolicy,
+    });
   }
 
   /**
@@ -1421,7 +1625,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       'cgStorage.getNameHash',
       'getNameHash',
       [contextGraphId],
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        policy: 'securityGatePointRead',
+      },
     );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();
@@ -1444,4 +1651,107 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<ReadonlyMap<string, bigint | null>> {
     return this.getContextGraphNameHashResolver().resolveMany(nameHashes, options.signal);
   }
+}
+
+/**
+ * Positional layout of `ContextGraphStorage.getContextGraph`, for the one shape
+ * ethers may hand back without names. One map, so the two decoders that fall
+ * back to positions cannot drift apart.
+ */
+const CONTEXT_GRAPH_TUPLE_INDEX = { participantAgents: 1, active: 3, accessPolicy: 5 } as const;
+
+const ERC721_NONEXISTENT_TOKEN_INTERFACE = new ethers.Interface([
+  'error ERC721NonexistentToken(uint256 tokenId)',
+]);
+
+/**
+ * `getContextGraph` reverts only through `_requireExists`, which always carries
+ * the typed `ERC721NonexistentToken` payload. Match it exactly — the decoded
+ * name, or the encoded bytes for THIS id — so nothing else can be mistaken for
+ * "the chain proved this id does not exist".
+ */
+function isNonexistentContextGraphRevert(err: unknown, contextGraphId: bigint): boolean {
+  if (rpcErrorCode(err) !== 'CALL_EXCEPTION') return false;
+  const e = err as { revert?: unknown; data?: unknown; errorData?: unknown };
+  const revert = e.revert as { name?: unknown; args?: unknown } | null | undefined;
+  if (revert !== null && typeof revert === 'object' && revert.name === 'ERC721NonexistentToken') {
+    // Id-exact, like the bytes branch below: a revert that names some OTHER
+    // token proves nothing about this one, and answering "nonexistent" here is
+    // terminal - it would report a live, registered graph as permanently gone.
+    const named = (revert.args as ArrayLike<unknown> | null | undefined)?.[0];
+    try {
+      return named !== undefined && named !== null
+        && BigInt(named as string | number | bigint) === contextGraphId;
+    } catch {
+      return false;
+    }
+  }
+  const expected = ERC721_NONEXISTENT_TOKEN_INTERFACE
+    .encodeErrorResult('ERC721NonexistentToken', [contextGraphId])
+    .toLowerCase();
+  for (const raw of [e.data, e.errorData]) {
+    if (typeof raw === 'string' && raw.toLowerCase() === expected) return true;
+  }
+  return false;
+}
+
+/**
+ * Transient for this view, by the package's own disposition rather than a
+ * private reading of provider error strings: another attempt may succeed, and
+ * the three point reads would fail the same way, so the error propagates. That
+ * covers local governor saturation and an exhausted endpoint set
+ * (`retry-later`) — answering those with three MORE reads would be exactly
+ * wrong. `BAD_DATA` is excluded for the reason `isContractViewRetryable`
+ * gives: on a view it is a client-side decode, not an outage.
+ *
+ * Everything else falls back to the point reads. `getContextGraph` has shipped
+ * beside them since v10.0.0, so this is never "selector absent"; it is a tuple
+ * that does not decode, or a revert that proves nothing about this id. The
+ * point reads do not share the tuple and already own the established
+ * disposition of every such fault, so they decide.
+ *
+ * That set is NOT all deterministic. ethers v6 coerces every JSON-RPC error
+ * body on `eth_call` (an HTTP-200 rate limit, "header not found") into a bare
+ * CALL_EXCEPTION, which the shared classifier reads as `fail`. Such a fault
+ * takes the fallback too; the liveness read then fails the same way and yields
+ * the same retryable disposition it always did, at the cost of one extra read.
+ * Telling those apart is the shared classifier's job, not a matcher here.
+ */
+function isLiveAuthorityReadTransient(err: unknown): boolean {
+  return isRetryableRpcError(err) && rpcErrorCode(err) !== 'BAD_DATA';
+}
+
+function decodeContextGraphLiveAuthority(
+  raw: unknown,
+  contextGraphId: bigint,
+): ContextGraphLiveAuthority {
+  const named = (raw ?? {}) as { active?: unknown; accessPolicy?: unknown; participantAgents?: unknown };
+  const positional = Array.isArray(raw) ? (raw as unknown[]) : [];
+  const active = named.active ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.active];
+  const accessPolicy = named.accessPolicy ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.accessPolicy];
+  const agents = named.participantAgents ?? positional[CONTEXT_GRAPH_TUPLE_INDEX.participantAgents];
+  // Boundary check on an `unknown`. ethers itself never hands back a wrongly
+  // typed field - a real ABI mismatch arrives as BAD_DATA and takes the same
+  // exit through the catch in the caller - so this guards the seam (a rebound
+  // or substituted read), not the wire. Either way the answer is UNSUPPORTED:
+  // the three point reads own the established disposition of every malformed
+  // value, where a plain throw would resurface as the RETRYABLE
+  // policy-unavailable reason and retry a permanent fault forever.
+  let policy: number;
+  try {
+    if (typeof active !== 'boolean' || !Array.isArray(agents)) throw new Error('tuple layout');
+    policy = Number(BigInt(accessPolicy as string | number | bigint));
+  } catch {
+    throw new ContextGraphLiveAuthorityUnsupportedError(
+      `getContextGraph(${contextGraphId}) returned an undecodable tuple`,
+    );
+  }
+  // Roster entries are handed through as read. The resolver owns their
+  // validation and normalization, so a malformed entry keeps its terminal
+  // `chain-participant-authority-invalid` disposition on this path too.
+  return Object.freeze({
+    active,
+    accessPolicy: policy,
+    participantAgents: Object.freeze(agents.map((value) => String(value))),
+  });
 }

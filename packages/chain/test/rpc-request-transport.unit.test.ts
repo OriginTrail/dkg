@@ -76,7 +76,11 @@ describe('RPC request transport', () => {
     let composed!: RpcRequestContext;
     let owned!: RpcRequestContext;
 
-    withRpcRequestContext({ requestClass: 'background', signal: caller.signal }, () => {
+    withRpcRequestContext({
+      requestClass: 'background',
+      admissionPriority: 'authority',
+      signal: caller.signal,
+    }, () => {
       withRpcRequestContext({ signal: child.signal }, () => {
         composed = activeRpcRequestContext();
       });
@@ -86,7 +90,12 @@ describe('RPC request transport', () => {
     });
 
     expect(composed.requestClass).toBe('background');
-    expect(owned).toEqual({ requestClass: 'background', signal: owner.signal });
+    expect(composed.admissionPriority).toBe('authority');
+    expect(owned).toEqual({
+      requestClass: 'background',
+      admissionPriority: 'authority',
+      signal: owner.signal,
+    });
     caller.abort(new Error('caller left'));
     expect(composed.signal?.aborted).toBe(true);
     expect(owned.signal?.aborted).toBe(false);

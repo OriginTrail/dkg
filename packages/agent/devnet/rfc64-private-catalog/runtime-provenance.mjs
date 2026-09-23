@@ -49,7 +49,11 @@ export function createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild) {
       if (loaded === null || typeof loaded !== 'object' || Array.isArray(loaded)) {
         throw new Error(`${id}: shutdown receipt did not contain executed runtime provenance`);
       }
-      evidenceById.set(id, Object.freeze({ id, loaded }));
+      const identity = shutdownReceipt?.processIdentity;
+      if (identity === null || typeof identity !== 'object' || Array.isArray(identity)) {
+        throw new Error(`${id}: shutdown receipt did not contain process identity`);
+      }
+      evidenceById.set(id, Object.freeze({ id, identity, loaded }));
     },
     seal() {
       const processes = RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => {

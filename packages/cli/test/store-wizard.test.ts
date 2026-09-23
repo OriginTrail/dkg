@@ -444,6 +444,59 @@ describe('promptStoreBackend', () => {
     });
   });
 
+  it('preserves an operator-declared consistencyProfile for the SAME sparql-http endpoint', async () => {
+    // The profile is a fact about the operator's deployment that the wizard
+    // cannot re-derive from a URL. Dropping it on a re-run silently returns
+    // the node to the `best-effort` default, and RFC-64 durable sync then
+    // refuses every graph-scoped materialization.
+    const { fn } = mockFetch(
+      () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),
+    );
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', '']),
+      existingStore: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://byo.test/query',
+          updateEndpoint: 'http://byo.test/update',
+          consistencyProfile: 'atomic-readback',
+        },
+      } as unknown as DkgConfig['store'],
+      fetch: fn,
+      log: () => {},
+    });
+    expect(result.storeBlock?.backend).toBe('sparql-http');
+    expect(result.storeBlock?.options).toMatchObject({
+      queryEndpoint: 'http://byo.test/query',
+      updateEndpoint: 'http://byo.test/update',
+      consistencyProfile: 'atomic-readback',
+    });
+  });
+
+  it('does not carry a consistencyProfile onto a NEWLY typed sparql-http endpoint', async () => {
+    // A different endpoint is unverified: inheriting the old guarantee would
+    // assert a transaction property the new server may not have.
+    const { fn } = mockFetch(
+      () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),
+    );
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', 'http://new.test/sparql']),
+      existingStore: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://byo.test/query',
+          consistencyProfile: 'atomic-readback',
+        },
+      } as unknown as DkgConfig['store'],
+      fetch: fn,
+      log: () => {},
+    });
+    expect(result.storeBlock?.options).toMatchObject({
+      queryEndpoint: 'http://new.test/sparql',
+    });
+    expect(result.storeBlock?.options).not.toHaveProperty('consistencyProfile');
+  });
+
   it('preserves a --store sparql-http flag when operator presses Enter', async () => {
     const { fn } = mockFetch(
       () => new Response(JSON.stringify({ boolean: true }), { status: 200 }),

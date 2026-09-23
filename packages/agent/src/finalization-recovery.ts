@@ -1517,7 +1517,8 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return [];
     if (
-      !this.chain?.getLatestMerkleRoot
+      !this.chain
+      || !this.chain.getLatestMerkleRoot
       || !this.chain.getMerkleRootCount
       || !this.chain.getKAContextGraphId
     ) return [];

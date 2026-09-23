@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -130,6 +130,12 @@ import {
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
+import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
+  './rfc64/authority-rpc-circuit-breaker-v1.js';
+import {
+  finalizedContextGraphSnapshotMismatchV1,
+  resolveFinalizedContextGraphNameBindingV1,
+} from './internal/context-graph-authority/finalized-context-graph-binding.js';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -299,11 +305,17 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
-import { runBoundedOperation } from './bounded-operation.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { finalizedAuthorityColdResolutionOf } from
+  './finalized-authority-cold-resolution.js';
+import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
+import { parseRfc64AuthoritySnapshotV1 } from
+  './rfc64/release-native-catalog-authority-v1.js';
+import type { FinalizedContextGraphAuthoritySnapshotReadV1 } from
+  './dkg-agent-cg-resolve.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -330,6 +342,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -379,6 +392,7 @@ import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  isCanonicalAuthoritativeContextGraphId,
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -403,7 +417,8 @@ export type ContextGraphRegistrationBinding =
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'finalized-name-absence-unaccepted'
-        | 'chain-name-binding-unavailable';
+        | 'chain-name-binding-unavailable'
+        | 'authority-circuit-open';
       detail?: string;
     };
 
@@ -492,6 +507,142 @@ function selectContextGraphRegistrationRoute(
   if (target !== null) return { kind: 'local', target };
   if (isCanonicalPositiveContextGraphId(contextGraphId)) return { kind: 'numeric' };
   return { kind: 'name-hash' };
+}
+
+/** Explicit dependencies of one finalized policy read; prototype-bound test hosts may lack them. */
+interface FinalizedContextGraphPolicyDependencies {
+  /** Absent when the adapter (or a partial test host) has no finalized capability. */
+  readonly readSnapshot:
+    | ((
+        numericId: bigint,
+        options: { label: string },
+      ) => Promise<FinalizedContextGraphAuthoritySnapshotReadV1>)
+    | undefined;
+  readonly isWireIdKeyedSubscription: (localId: string) => boolean;
+  readonly warn: (ctx: OperationContext, message: string) => void;
+}
+
+/**
+ * Whether a finalized snapshot may answer the MUTABLE publish-policy bit for a
+ * caller that accepts a publish bit at most `maxAgeMs` old.
+ *
+ * `publishPolicy` changes on chain (`PublishPolicyUpdated`), so the projection
+ * behind the snapshot must be demonstrably fresh: the reader reported how it
+ * served it, did not serve it DESPITE a failed refresh (`stale-cache`, which
+ * can be up to `min(max(3T, 15s), 5m)` old), and the data is no older than the
+ * caller's bound. An unreported provenance proves nothing, and a negative age
+ * (a wall clock that stepped backwards) proves no age at all. The access bit
+ * is immutable on chain and never needs this check.
+ */
+function finalizedPublishPolicyIsFreshV1(
+  served: ContextGraphAuthorityProjectionServedEvidence | undefined,
+  maxAgeMs: number,
+): served is ContextGraphAuthorityProjectionServedEvidence {
+  return served !== undefined
+    && served.source !== 'stale-cache'
+    && served.ageMs >= 0
+    && served.ageMs <= maxAgeMs;
+}
+
+/**
+ * Both policy bits of a registered graph from the finalized authority
+ * index, bound to the caller's identity for that graph. `absent` and
+ * `unsupported` are the only outcomes that permit the current-state RPC
+ * fallback for both bits: an inactive or mis-bound snapshot is affirmative
+ * evidence against the graph, and a timed-out read keeps its detached
+ * resolution running so the next call is answered from the retained
+ * projection.
+ *
+ * `policies` carries how the reader served the projection (`served`), when it
+ * reported that: the access bit is immutable and answers at any provenance,
+ * while the caller consumes the mutable publish bit only from a fresh
+ * projection (see {@link finalizedPublishPolicyIsFreshV1}).
+ *
+ * A host without the finalized capability (an older adapter, or a
+ * prototype-bound test host that never composed the resolver mixin) is
+ * `unsupported`, exactly as an adapter without the index reader is.
+ */
+async function readFinalizedContextGraphPolicyV1(
+  dependencies: FinalizedContextGraphPolicyDependencies,
+  contextGraphId: string,
+  onChainId: string,
+  numericId: bigint,
+  ctx: OperationContext,
+): Promise<
+  | {
+      kind: 'policies';
+      accessPolicy: 0 | 1;
+      publishPolicy: 0 | 1;
+      served?: ContextGraphAuthorityProjectionServedEvidence;
+    }
+  | { kind: 'absent' }
+  | { kind: 'unsupported' }
+  | { kind: 'unknown' }
+  | { kind: 'unavailable' }
+> {
+  const { readSnapshot, warn } = dependencies;
+  if (readSnapshot === undefined) return { kind: 'unsupported' };
+  let read: FinalizedContextGraphAuthoritySnapshotReadV1;
+  try {
+    read = await readSnapshot(numericId, {
+      label: `getContextGraphOnChainPolicy finalized(${onChainId})`,
+    });
+  } catch (err) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority read for ${onChainId} `
+      + `${isBoundedOperationTimeoutError(err) ? 'timed out' : 'failed'} — treating as UNKNOWN `
+      + `(fail-closed; the finalized resolution continues in the background): `
+      + `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { kind: 'unavailable' };
+  }
+  if (read.kind !== 'snapshot') return read;
+  let snapshot: ReturnType<typeof parseRfc64AuthoritySnapshotV1>;
+  try {
+    snapshot = parseRfc64AuthoritySnapshotV1(read.snapshot, numericId);
+  } catch (err) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority snapshot for ${onChainId} is invalid — `
+      + `treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { kind: 'unknown' };
+  }
+  if (snapshot.active !== true) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority snapshot for ${onChainId} is inactive — `
+      + 'treating as UNKNOWN (fail-closed)',
+    );
+    return { kind: 'unknown' };
+  }
+  // A locally mapped id must still be THIS graph on the current chain: the
+  // persisted mapping survives a devnet reset and can point at a reused
+  // slot. A caller that addressed the numeric slot directly has no local
+  // identity to bind.
+  if (
+    onChainId !== contextGraphId.trim()
+    && !localContextGraphIdMatchesCommittedNameHash(
+      contextGraphId,
+      snapshot.nameHash,
+      (localId) => dependencies.isWireIdKeyedSubscription(localId),
+    )
+  ) {
+    warn(
+      ctx,
+      `getContextGraphOnChainPolicy: finalized authority snapshot for ${onChainId} commits `
+      + `name-hash ${snapshot.nameHash} that does not match Context Graph "${contextGraphId}" — `
+      + 'local mapping is STALE; treating as UNKNOWN (fail-closed)',
+    );
+    return { kind: 'unknown' };
+  }
+  return {
+    kind: 'policies',
+    accessPolicy: snapshot.accessPolicy,
+    publishPolicy: snapshot.publishPolicy,
+    served: read.served,
+  };
 }
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
@@ -676,10 +827,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const localCgId = matching[0]!;
     const accessPolicy = await raceContextGraphBindingAgainstAbort(
-      this.readLiveOnChainAccessPolicy(
-        cacheKey,
-        createOperationContext('sync'),
-        { signal },
+      withRpcUsageSite(
+        CG_AUTH_RPC_SITES.samplingBinding,
+        () => this.readLiveOnChainAccessPolicy(
+          cacheKey,
+          createOperationContext('sync'),
+          { signal },
+        ),
       ),
       signal,
     );
@@ -700,6 +854,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       source?: string;
+      onRpcRead?: () => void;
     } = {},
   ): Promise<string | null> {
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
@@ -718,20 +873,26 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetsV1(
     this: DKGAgent,
     contextGraphIds: readonly string[],
-    options: { signal?: AbortSignal } = {},
+    options: ContextGraphAuthorityReadOptions & Readonly<{
+      onRpcRead?: () => void;
+      /** Fresh durable identities used only by restart repair before install. */
+      durableBindingHints?: ReadonlyMap<
+        string,
+        Readonly<DurableContextGraphSubscriptionBinding>
+      >;
+    }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
+    const { onRpcRead, durableBindingHints, ...chainReadOptions } = options;
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
-      const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
-      const localId = canonicalTarget?.localId ?? contextGraphId;
-      const subscription = canonicalTarget?.subscription
-        ?? this.subscribedContextGraphs.get(localId);
-      const expectedNameHash = canonicalTarget?.nameHash
-        ?? (subscription?.onChainHash === undefined
-          ? this.contextGraphNameCommitment(localId)
-          : this.contextGraphWireId(subscription.onChainHash));
+      const hintedBinding = durableBindingHints?.get(contextGraphId);
+      const durableHint = hintedBinding?.contextGraphId === contextGraphId
+        ? hintedBinding
+        : undefined;
+      const { localId, subscription, expectedNameHash } =
+        resolveFinalizedContextGraphNameBindingV1(this, contextGraphId, durableHint);
       const authoritativeOnChainId = this.contextGraphBindingState
-        .authorityIndexOnChainIdFor(localId, subscription);
+        .authorityIndexOnChainIdFor(localId, subscription ?? durableHint);
       return {
         contextGraphId,
         expectedNameHash,
@@ -767,10 +928,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
+      onRpcRead?.();
       const snapshotsByNameHash = await resolveSnapshots.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
-        options,
+        chainReadOptions,
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
@@ -794,10 +956,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         .resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
       if (resolveSnapshot !== undefined) {
         const [{ contextGraphId, expectedNameHash }] = reverseBindingTargets;
+        onRpcRead?.();
         const finalizedSnapshot = await resolveSnapshot.call(
           indexReader,
           expectedNameHash,
-          options,
+          chainReadOptions,
         );
         if (finalizedSnapshot !== null) {
           targets.set(contextGraphId, Object.freeze({
@@ -814,10 +977,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
     if (resolveMany !== undefined) {
       options.signal?.throwIfAborted();
+      onRpcRead?.();
       const resolvedByNameHash = await resolveMany.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
-        options,
+        chainReadOptions,
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
@@ -838,10 +1002,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveOne = indexReader.resolveFinalizedContextGraphIdByNameHash;
     if (resolveOne === undefined) return { kind: 'legacy-current' };
     for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
+      onRpcRead?.();
       const expectedOnChainId = await resolveOne.call(
         indexReader,
         expectedNameHash,
-        options,
+        chainReadOptions,
       );
       if (expectedOnChainId !== null) {
         targets.set(contextGraphId, Object.freeze({
@@ -862,7 +1027,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetV1(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: ContextGraphAuthorityReadOptions & Readonly<{
+      onRpcRead?: () => void;
+    }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
     if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
       throw new Error(
@@ -911,6 +1078,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       registrationTimeoutMs?: number;
+      /**
+       * Freshly loaded durable subscription row for this exact candidate.
+       * This may establish only the immutable numeric binding; current policy
+       * and roster are still read after this method returns.
+       */
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Read-authority-only proof that exact RFC-64 absence was accepted. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
     } = {},
@@ -928,13 +1101,56 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       };
     }
 
+    // Rehydration deliberately resolves authority before installing the
+    // subscription. Without this explicit same-row hint, the authoritative
+    // on-chain id persisted by the prior process is invisible here and the
+    // node unnecessarily starts cold name discovery. The durable row is a
+    // trusted binding owner, exactly as it is after installation; validate it
+    // through the canonical binding state. A graph-id mismatch fails closed.
+    // A malformed or out-of-range id is not trusted, but may be repaired only
+    // by the strict finalized name index below (never local-first inference,
+    // numeric routing, ontology state, or the legacy scalar reverse resolver).
+    // A valid shortcut establishes only name -> numeric id;
+    // resolveRegisteredContextGraphAuthority() still owns the policy + roster
+    // read before admission: fresh current state, or, for scoped query reads,
+    // a finalized snapshot the reader served within its accepted age.
+    const durableBinding = options.durableSubscriptionBinding;
+    let strictFinalizedDurableBindingRepair = false;
+    if (durableBinding !== undefined) {
+      if (durableBinding.contextGraphId !== contextGraphId) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-chain-binding-unavailable',
+          detail: 'durable subscription binding belongs to a different Context Graph',
+        };
+      }
+      if (durableBinding.onChainId !== undefined) {
+        const authoritativeOnChainId = this.contextGraphBindingState
+          .authorityIndexOnChainIdFor(contextGraphId, {
+            onChainId: durableBinding.onChainId,
+          });
+        if (authoritativeOnChainId === undefined) {
+          strictFinalizedDurableBindingRepair = true;
+        } else {
+          return {
+            kind: 'registered',
+            onChainId: BigInt(authoritativeOnChainId),
+            provenance: 'authoritative',
+          };
+        }
+      }
+    }
+
     // A graph created by this node is explicitly local-first until its own
     // registration transaction commits. Do not turn SWM signing/gossip into a
     // chain availability dependency during that phase. The provenance set is
     // populated only by the local create boundary (and its durable graph-level
     // origin journal), while the RDF status is the transactionally updated register
     // boundary; neither fact is inferred from remote discovery.
-    if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
+    if (
+      !strictFinalizedDurableBindingRepair
+      && this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
+    ) {
       try {
         if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
           return { kind: 'unregistered' };
@@ -949,7 +1165,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
 
     const localTarget = route.kind === 'local' ? route.target : null;
-    const hasBindingCandidate = localTarget !== null
+    const hasBindingCandidate = !strictFinalizedDurableBindingRepair
+      && localTarget !== null
       && this.contextGraphBindingState.hasBindingCandidate(
         localTarget.localId,
         localTarget.subscription,
@@ -962,13 +1179,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // without being unhealthy.
     const registrationResolutionTimeoutMs = options.registrationTimeoutMs
       ?? (hasBindingCandidate
-        ? CHAIN_POLICY_READ_TIMEOUT_MS
+        ? chainAuthorityReadBudgetsOf(this).requestTimeoutMs
         : CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS);
 
     // A durable numeric binding is already authoritative and must stay on the
-    // zero-RPC fast path. Invalid durable values retain the strict ontology
-    // fallback below; they must never be replaced by reverse discovery.
-    if (localTarget !== null) {
+    // zero-RPC fast path. Invalid durable values may be repaired only by the
+    // finalized name index below; they bypass every local/ontology/legacy
+    // fallback and remain unavailable when that strict index cannot prove one
+    // active numeric binding.
+    if (!strictFinalizedDurableBindingRepair && localTarget !== null) {
       const currentBinding = this.contextGraphBindingState.currentBindingFor(
         localTarget.localId,
         localTarget.subscription,
@@ -1016,14 +1235,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // with that exact (numeric-looking) name already exists. Apply this before
     // local-subscription routing so HTTP admission followed by subscribe keeps
     // the same numeric identity on its first policy/VM read.
-    if (isCanonicalPositiveContextGraphId(contextGraphId)) {
+    if (
+      !strictFinalizedDurableBindingRepair
+      && isCanonicalPositiveContextGraphId(contextGraphId)
+    ) {
       let localGraphExists: boolean;
       try {
         localGraphExists = await runBoundedOperation(
           (signal) => this.contextGraphExists(contextGraphId, { signal }),
           {
             label: `contextGraphExists(${contextGraphId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            timeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
             signal: options.signal,
           },
         );
@@ -1054,63 +1276,139 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader !== undefined) {
       try {
-        const finalizedBinding = await runBoundedOperation(async (ownerSignal) => {
-          try {
-            const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
-              [contextGraphId],
-              { signal: ownerSignal },
-            );
-            // An older reader object without any finalized name capability is
-            // an explicitly legacy adapter and may use the compatibility path.
-            if (resolution.kind === 'legacy-current') return null;
-            const target = resolution.targets.get(contextGraphId);
-            if (target === undefined) {
-              return options.allowAcceptedRfc64FinalizedAbsence === true
-                ? { kind: 'unregistered' } as const
-                : {
-                    kind: 'unavailable' as const,
-                    reason: 'finalized-name-absence-unaccepted' as const,
-                    detail: 'finalized name absence has no accepted owner-signed unregistered authority',
-                  };
+        // The index resolution is a detached single flight per graph: this
+        // caller's registration deadline bounds only its own wait. A cold
+        // name walk that outlives the deadline keeps running under the cold
+        // budget and is retained by the chain reader, so the retry that
+        // follows the fail-closed answer is served from the projection.
+        //
+        // Registration discovery reads the same finalized authority index as
+        // the catalog refresh pass and the VM reconcile lane, so it shares
+        // the one circuit instead of staying the last ungoverned lane into
+        // the pool: its exhaustion now trips the circuit for every other
+        // reader, and a real provider read here proves recovery for them too.
+        //
+        // It takes the FOREGROUND lane, not the bulk serializer. This
+        // boundary backs query, crypto and Context Graph operations, it
+        // fails closed, and its budget here is the request-scoped authority
+        // deadline whenever the graph has a local binding candidate — queued
+        // behind a cold whole-contract scan it would spend that budget
+        // waiting and deny a policy decision on a node whose pool is healthy.
+        //
+        // It is not one caller-driven read, though: unscoped-query admission
+        // fans this boundary out once per candidate graph, up to
+        // `SCALAR_REGISTRATION_PREPARATION_CONCURRENCY` (32) scalar
+        // preparations at a time. The foreground lane's own permit is what
+        // bounds that fan-out to a single probe against an exhausted pool;
+        // the siblings are then refused at the re-evaluated admission gate.
+        const repairHints = strictFinalizedDurableBindingRepair && durableBinding !== undefined
+          ? {
+              durableBindingHints: new Map([[contextGraphId, {
+                contextGraphId,
+                onChainId: durableBinding.onChainId,
+                onChainHash: durableBinding.onChainHash,
+              }]]),
             }
-            if (
-              target.expectedOnChainId <= 0n
-              || target.expectedOnChainId >= (1n << 256n)
-            ) {
-              throw new Error('finalized Context Graph id is outside uint256');
+          : undefined;
+        const flightKey = repairHints === undefined
+          ? `registration-binding:${contextGraphId}`
+          : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
+        const resolution = await finalizedAuthorityColdResolutionOf(this).read(
+          flightKey,
+          async (flightSignal) => {
+            try {
+              return await this.rfc64AuthorityReadCoordinatorV1.runForeground(
+                flightSignal,
+                (readSignal, evidence) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+                  [contextGraphId],
+                  {
+                    ...evidence.agentResolverReadOptions(readSignal),
+                    ...repairHints,
+                  },
+                ),
+              );
+            } finally {
+              // The index reader's drain is global — one activity set shared with
+              // the bulk catalog lane — so it must run OUTSIDE the foreground
+              // permit: holding the permit across it would make every sibling
+              // registration read wait on unrelated bulk index activity inside
+              // this boundary's policy-read budget. It stays inside the flight,
+              // so a detached resolution retires only once its physical index
+              // work has settled.
+              await indexReader.whenIdle();
             }
-            if (target.kind === 'resolved-snapshot') {
-              const snapshot = target.finalizedSnapshot;
-              if (
-                snapshot.active !== true
-                || snapshot.contextGraphId !== target.expectedOnChainId.toString(10)
-                || this.contextGraphWireId(snapshot.nameHash)
-                  !== this.contextGraphWireId(target.expectedNameHash)
-              ) {
-                throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
-              }
+          },
+          {
+            label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
+            requestTimeoutMs: registrationResolutionTimeoutMs,
+            signal: options.signal,
+          },
+        );
+        const finalizedBinding = ((): ContextGraphRegistrationBinding | null => {
+          // An older reader object without any finalized name capability is
+          // an explicitly legacy adapter and may use the compatibility path.
+          if (resolution.kind === 'legacy-current') {
+            if (strictFinalizedDurableBindingRepair) {
+              throw new Error(
+                'invalid durable binding requires the finalized Context Graph authority index',
+              );
             }
-            return {
-              kind: 'registered',
-              onChainId: target.expectedOnChainId,
-              provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
-            } as const;
-          } finally {
-            await indexReader.whenIdle();
+            return null;
           }
-        }, {
-          label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,
-          timeoutMs: registrationResolutionTimeoutMs,
-          signal: options.signal,
-        });
+          const target = resolution.targets.get(contextGraphId);
+          if (target === undefined) {
+            return !strictFinalizedDurableBindingRepair
+              && options.allowAcceptedRfc64FinalizedAbsence === true
+              ? { kind: 'unregistered' } as const
+              : {
+                  kind: 'unavailable' as const,
+                  reason: 'finalized-name-absence-unaccepted' as const,
+                  detail: 'finalized name absence has no accepted owner-signed unregistered authority',
+                };
+          }
+          if (
+            target.expectedOnChainId <= 0n
+            || target.expectedOnChainId >= (1n << 256n)
+          ) {
+            throw new Error('finalized Context Graph id is outside uint256');
+          }
+          if (
+            target.kind === 'resolved-snapshot'
+            && finalizedContextGraphSnapshotMismatchV1(target.finalizedSnapshot, {
+              onChainId: target.expectedOnChainId,
+              nameHash: target.expectedNameHash,
+            }) !== undefined
+          ) {
+            throw new Error('finalized Context Graph authority snapshot does not match the requested active graph');
+          }
+          return {
+            kind: 'registered',
+            onChainId: target.expectedOnChainId,
+            provenance: localTarget === null ? 'name-hash' : 'reverse-name-hash',
+          } as const;
+        })();
         if (finalizedBinding !== null) return finalizedBinding;
       } catch (err) {
         return {
           kind: 'unavailable',
-          reason: 'chain-name-binding-unavailable',
+          // A cooldown is a deferral, not a failed chain read: nothing was
+          // asked of the pool. Reporting it as a binding failure would have a
+          // caller and its telemetry treat an unrelated graph's exhaustion as
+          // this graph's chain problem.
+          reason: isRfc64AuthorityRpcCircuitOpenErrorV1(err)
+            ? 'authority-circuit-open'
+            : 'chain-name-binding-unavailable',
           detail: err instanceof Error ? err.message : String(err),
         };
       }
+    }
+
+    if (strictFinalizedDurableBindingRepair) {
+      return {
+        kind: 'unavailable',
+        reason: 'chain-name-binding-unavailable',
+        detail: 'invalid durable binding could not be repaired by the finalized Context Graph authority index',
+      };
     }
 
     // Compatibility-only path for adapters with no finalized name index.
@@ -1179,14 +1477,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveContextGraphOnChainIdBinding(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; source?: string } = {},
+    options: { signal?: AbortSignal; source?: string; onRpcRead?: () => void } = {},
   ): Promise<(
     | { onChainId: string; provenance: 'authoritative' | 'ontology' }
     | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
   ) | null> {
     const currentBinding = await this.resolveCurrentNameHashContextGraphBinding(
       contextGraphId,
-      { signal: options.signal },
+      { signal: options.signal, onRpcRead: options.onRpcRead },
     );
     if (currentBinding !== undefined) return currentBinding;
 
@@ -1203,7 +1501,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const value = result.bindings[0]?.['id'];
     if (typeof value !== 'string') return null;
     const onChainId = value.replace(/^"|"$/g, '');
-    return isCanonicalPositiveContextGraphId(onChainId)
+    return isCanonicalAuthoritativeContextGraphId(onChainId)
       ? { onChainId, provenance: 'ontology' }
       : null;
   }
@@ -1326,7 +1624,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * per window per CG instead of an `eth_call` on every admitted envelope
      * (Branimir review #1239 follow-on). An RPC failure/timeout still leaves
      * `publishPolicy` undefined → the caller fails closed. (`accessPolicy` is
-     * immutable on-chain, so its cache read below is left un-TTL'd.)
+     * immutable on-chain, so its cache read below is left un-TTL'd.) The same
+     * bound caps the age of a publish bit taken from the finalized authority
+     * index, which is never taken from a projection served as `stale-cache`.
      */
     publishPolicyMaxCacheAgeMs?: number;
   }): Promise<{
@@ -1364,15 +1664,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // (lines ~1779, ~8403, ~10073) where stale-permissive cannot
     // escalate privilege (gossip decrypt is gated by sender-key
     // issuance) and stale-restrictive only causes a transient deny.
+    // A security-positive caller can shrink the accepted publish-bit age (e.g.
+    // the host-mode admission gate passes ~5s) so an open→curated downgrade is
+    // re-verified within seconds, while still rate-capping the chain RPC to ~1
+    // per window per CG. Default is the general 60s TTL. The same bound applies
+    // to a publish bit taken from the finalized authority index below.
+    const publishPolicyMaxAgeMs = options?.publishPolicyMaxCacheAgeMs
+      ?? ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS;
     const isPublishPolicyCacheFresh = (key: string): boolean => {
       const fetchedAt = this.onChainPublishPolicyCacheUpdatedAt.get(key);
       if (fetchedAt === undefined) return false;
-      // A security-positive caller can shrink the accepted cache age (e.g. the
-      // host-mode admission gate passes ~5s) so an open→curated downgrade is
-      // re-verified within seconds, while still rate-capping the chain RPC to
-      // ~1 per window per CG. Default is the general 60s TTL.
-      const maxAge = options?.publishPolicyMaxCacheAgeMs ?? ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS;
-      return Date.now() - fetchedAt <= maxAge;
+      return Date.now() - fetchedAt <= publishPolicyMaxAgeMs;
     };
     let publishPolicy = isPublishPolicyCacheFresh(contextGraphId)
       ? this.onChainPublishPolicyCache.get(contextGraphId)
@@ -1492,16 +1794,85 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
       if (numericId !== undefined) {
         const rpcCtx = createOperationContext('resolve');
+        // Finalized authority index FIRST. The snapshot carries both policy
+        // bits, is name-hash bound to this graph, and is answered from the
+        // reader's retained projection without RPC in the steady state, so a
+        // slow public endpoint no longer turns every share/host decision
+        // into a fail-closed timeout. Only a graph the finalized index has
+        // no snapshot for (or an adapter without the capability) continues
+        // to the current-state RPC reads below for both bits; an inactive or
+        // mis-bound snapshot and a timed-out finalized read stay UNKNOWN
+        // (fail-closed) rather than paying a second deadline on the same
+        // endpoints. A valid snapshot always settles the immutable access
+        // bit, but its MUTABLE publish bit only when the projection was
+        // served fresh; otherwise that one bit takes the bounded
+        // current-state read.
+        // A partial test host bound to this prototype may lack the resolver
+        // mixin; treat it exactly like an adapter without the index reader.
+        const readFinalizedSnapshot = this.chain.contextGraphAuthorityIndexRevisionReader
+          ?.readContextGraphAuthorityIndexSnapshots !== undefined
+          && typeof this.readFinalizedContextGraphAuthoritySnapshotV1 === 'function'
+          ? (id: bigint, readOptions: { label: string }) => (
+              this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions)
+            )
+          : undefined;
+        const finalizedPolicy = await readFinalizedContextGraphPolicyV1(
+          {
+            readSnapshot: readFinalizedSnapshot,
+            isWireIdKeyedSubscription: (localId) => this.isWireIdKeyedSubscription(localId),
+            warn: (warnCtx, message) => this.log.warn(warnCtx, message),
+          },
+          contextGraphId,
+          onChainId!,
+          numericId,
+          rpcCtx,
+        );
+        if (finalizedPolicy.kind === 'policies') {
+          // Immutable on chain: the snapshot settles it at any provenance.
+          if (accessPolicy === undefined) {
+            accessPolicy = finalizedPolicy.accessPolicy;
+            this.onChainAccessPolicyCache.set(onChainId!, accessPolicy);
+          }
+          // Mutable on chain: a projection the reader could not refresh
+          // (`stale-cache`) can be minutes old, and would keep an open→curated
+          // downgrade invisible to the host-mode gate for that whole window.
+          // Consume the bit only from a fresh projection no older than this
+          // caller accepts, and date the cache entry by when its data was
+          // observed so the local cache cannot extend that age. A bit that
+          // is not consumed is not cached either.
+          if (
+            publishPolicy === undefined
+            && finalizedPublishPolicyIsFreshV1(finalizedPolicy.served, publishPolicyMaxAgeMs)
+          ) {
+            publishPolicy = finalizedPolicy.publishPolicy;
+            this.onChainPublishPolicyCache.set(onChainId!, publishPolicy);
+            this.onChainPublishPolicyCacheUpdatedAt.set(
+              onChainId!,
+              Date.now() - finalizedPolicy.served.ageMs,
+            );
+          }
+        }
+        // `absent` and `unsupported` carry no finalized evidence, so both
+        // current-state reads stay available. A `policies` answer settled the
+        // access bit above; a publish bit it could not answer fresh may still
+        // take the bounded current-state read. Every other outcome keeps both
+        // bits UNKNOWN.
+        const noFinalizedEvidence = finalizedPolicy.kind === 'absent'
+          || finalizedPolicy.kind === 'unsupported';
+        const accessFallbackAllowed = noFinalizedEvidence;
+        const publishFallbackAllowed = noFinalizedEvidence
+          || finalizedPolicy.kind === 'policies';
         // Round-4 fix: bound each chain-RPC call so an unreachable
         // RPC stack (every endpoint returning 429 / hanging on
         // connect) cannot block the caller past the daemon-ready
         // budget. The fallback is an optimisation — failing fast
         // and returning undefined is correct (fail-closed via the
-        // strict guard at the route layer). 2.5s is tight enough
-        // to stay well under the 45s daemon-ready budget even when
+        // strict guard at the route layer). The default 2.5s is tight
+        // enough to stay well under the 45s daemon-ready budget even when
         // both fallbacks fire back-to-back, while still allowing a
-        // single slow eth_call hop to succeed under normal load.
-        const CHAIN_RPC_FALLBACK_TIMEOUT_MS = 2_500;
+        // single slow eth_call hop to succeed under normal load; operators
+        // on slow public endpoints raise it via `chain.authorityReadTimeoutMs`.
+        const CHAIN_RPC_FALLBACK_TIMEOUT_MS = chainAuthorityReadBudgetsOf(this).requestTimeoutMs;
         const withTimeout = <T,>(p: Promise<T>, label: string): Promise<T | typeof TIMEOUT_SENTINEL> => {
           let timer: ReturnType<typeof setTimeout> | undefined;
           const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
@@ -1521,7 +1892,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             timeout,
           ]);
         };
-        if (publishPolicy === undefined) {
+        if (publishFallbackAllowed && publishPolicy === undefined) {
           const getPublishPolicy = this.chain.getContextGraphPublishPolicy;
           if (typeof getPublishPolicy === 'function') {
             try {
@@ -1545,7 +1916,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             }
           }
         }
-        if (accessPolicy === undefined) {
+        if (accessFallbackAllowed && accessPolicy === undefined) {
           const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
           if (typeof getAccessPolicy === 'function') {
             try {

@@ -42,6 +42,7 @@ import {
   stripRelayedRegistrationBindingQuads,
   type CuratorMetaRefreshOptions,
 } from '../src/curator-meta-refresh.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { mintRfc64UnregisteredReplicaAuthoritySeedV1 } from
   '../src/rfc64/unregistered-replica-authority-v1.js';
 import {
@@ -66,6 +67,7 @@ interface ServedMetaShape {
   readonly curatorAddress?: string;
   readonly registrationStatus?: 'unregistered' | 'pending' | 'registered';
   readonly binding?: boolean;
+  readonly onChainId?: string;
 }
 
 /** A public root `_meta` declaration as a serving peer would hold it. */
@@ -97,9 +99,9 @@ function servedPublicMetaQuads(
       graph: metaGraph,
     });
   }
-  if (shape.binding === true) {
+  if (shape.binding === true || shape.onChainId !== undefined) {
     quads.push(
-      { subject: contextGraphUri, predicate: ON_CHAIN_ID_PREDICATE, object: `"${FORGED_ON_CHAIN_ID}"`, graph: metaGraph },
+      { subject: contextGraphUri, predicate: ON_CHAIN_ID_PREDICATE, object: `"${shape.onChainId ?? FORGED_ON_CHAIN_ID}"`, graph: metaGraph },
       { subject: contextGraphUri, predicate: ON_CHAIN_HASH_PREDICATE, object: `"${FORGED_ON_CHAIN_HASH}"`, graph: metaGraph },
     );
   }
@@ -285,6 +287,131 @@ describe('curator-meta-refresh: relayed (unauthenticated-source) snapshot guard'
         onChainHash: FORGED_ON_CHAIN_HASH.toLowerCase(),
       });
       expect(harness.persistContextGraphSubscription).toHaveBeenCalledOnce();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
+    ['padded', '007'],
+    ['out-of-uint256', (1n << 256n).toString(10)],
+  ] as const)('ignores an authenticated curator snapshot with a %s chain id', async (
+    _case,
+    onChainId,
+  ) => {
+    const store = new OxigraphStore();
+    try {
+      const harness = createRefreshAgent(
+        store,
+        servedPublicMetaQuads(contextGraphId, SERVING_PEER_ID, {
+          curatorAddress: OWNER,
+          registrationStatus: 'registered',
+          onChainId,
+        }),
+      );
+
+      await expect(runCuratorMetaRefreshFromPeer(
+        harness.agent,
+        contextGraphId,
+        SERVING_PEER_ID,
+        { force: true },
+      )).resolves.toBe(true);
+
+      expect(harness.subscription).toEqual({});
+      expect(harness.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+      expect(harness.recordCgWireId).not.toHaveBeenCalled();
+      expect(harness.persistContextGraphSubscription).not.toHaveBeenCalled();
+    } finally {
+      await store.close();
+    }
+  });
+
+  function createDurableMetaFlagAgent(store: OxigraphStore) {
+    const subscription: Record<string, unknown> = {
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    };
+    const subscribedContextGraphs = new Map([[contextGraphId, subscription]]);
+    const bindSubscriptionOnChainId = vi.fn(
+      (_id: string, sub: Record<string, unknown>, onChainId: string) => {
+        sub['onChainId'] = onChainId;
+      },
+    );
+    const setContextGraphSubscription = vi.fn(
+      (id: string, next: Record<string, unknown>) => {
+        subscribedContextGraphs.set(id, next);
+        return next;
+      },
+    );
+    const agent = {
+      subscribedContextGraphs,
+      hasConfirmedMetaState: vi.fn(async () => true),
+      store,
+      bindSubscriptionOnChainId,
+      setContextGraphSubscription,
+      reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => undefined),
+      queueSharedMemoryGossipSubscription: vi.fn(),
+    };
+    return { agent, subscription, bindSubscriptionOnChainId, setContextGraphSubscription };
+  }
+
+  it.each([
+    ['padded', '007'],
+    ['out-of-uint256', (1n << 256n).toString(10)],
+  ] as const)('ignores a %s chain id at the durable _meta readiness boundary', async (
+    _case,
+    onChainId,
+  ) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(servedPublicMetaQuads(contextGraphId, SERVING_PEER_ID, {
+        curatorAddress: OWNER,
+        registrationStatus: 'registered',
+        onChainId,
+      }));
+      const harness = createDurableMetaFlagAgent(store);
+
+      await expect(LifecycleSyncMethods.prototype.refreshMetaSyncedFlags.call(
+        harness.agent as unknown as DKGAgent,
+        [contextGraphId],
+      )).resolves.toBeUndefined();
+
+      expect(harness.subscription).not.toHaveProperty('onChainId');
+      expect(harness.subscription).not.toHaveProperty('onChainHash');
+      expect(harness.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+      expect(harness.setContextGraphSubscription).not.toHaveBeenCalled();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('retains canonical binding at the durable _meta readiness boundary', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(servedPublicMetaQuads(contextGraphId, SERVING_PEER_ID, {
+        curatorAddress: OWNER,
+        registrationStatus: 'registered',
+        binding: true,
+      }));
+      const harness = createDurableMetaFlagAgent(store);
+
+      await LifecycleSyncMethods.prototype.refreshMetaSyncedFlags.call(
+        harness.agent as unknown as DKGAgent,
+        [contextGraphId],
+      );
+
+      expect(harness.bindSubscriptionOnChainId).toHaveBeenCalledWith(
+        contextGraphId,
+        harness.subscription,
+        FORGED_ON_CHAIN_ID,
+      );
+      expect(harness.setContextGraphSubscription).toHaveBeenCalledOnce();
+      expect(harness.agent.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+        onChainId: FORGED_ON_CHAIN_ID,
+        onChainHash: FORGED_ON_CHAIN_HASH.toLowerCase(),
+      });
     } finally {
       await store.close();
     }

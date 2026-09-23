@@ -14,10 +14,19 @@
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
-import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
+import {
+  DEFAULT_APPROVAL_POLICY,
+  buildEvmDeploymentId,
+  ContextGraphLiveAuthorityUnsupportedError,
+} from './chain-adapter.js';
+import { ContextGraphLiveAuthorityCoalescer } from
+  './context-graph-live-authority-coalescer.js';
+import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  EventScanHorizonLease,
+  ContextGraphLiveAuthority,
   ContextGraphAuthorityIndexRevisionReader,
   KnowledgeAssetUpdateContext,
   V10PublishParams,
@@ -30,7 +39,8 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText } from './evm-error-text.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -73,6 +83,22 @@ import {
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
+import type {
+  ChainEventLogBinding,
+  ChainEventLogBindingSource,
+} from './chain-event-log-binding.js';
+import {
+  createEvmChainIndexRuntime,
+  type EvmChainIndexContract,
+} from './evm-chain-index-runtime.js';
+import { EvmChainIndexRuntimeOwner } from './evm-chain-index-runtime-owner.js';
+// The tick cadence resolver lives with the projection cache because `T` is ONE
+// number on this node: the cache's answer lifetime and the log tick's interval.
+import {
+  contextGraphAuthorityIndexScope,
+  resolveContextGraphAuthorityIndexTickMs,
+} from
+  './context-graph-authority-index-projection.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { ContextGraphRegistryRepairCoordinator } from
   './context-graph-registry-repair-coordinator.js';
@@ -80,8 +106,12 @@ import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fenc
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
+import type {
+  RandomSamplingBlockContext,
+  RandomSamplingReadContextReader,
+} from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -90,9 +120,13 @@ import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
-import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
+import {
+  createEvmContextGraphAuthorityIndexRevisionReaderV1,
+  type EvmContextGraphAuthorityIndexReaderV1,
+} from
   './evm-context-graph-authority-index-reader.js';
 import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
+import { EvmReceiptFinalityReader } from './evm-adapter-receipt-finality.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -177,6 +211,21 @@ const HUB_BINDING_INVALIDATOR_ENTRIES = [
 const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
   HUB_BINDING_INVALIDATOR_ENTRIES,
 );
+
+/**
+ * The bindings the ONE chain log is built around
+ * (`startChainIndexRuntime` — keep the two in step).
+ *
+ * A rotation of one of these does not invalidate a cache, it invalidates the
+ * whole runtime: its decoder registry is keyed by (address, topic0) and its
+ * binding publishes those addresses to every reader, both fixed at
+ * construction. Anything else in `HUB_BINDING_INVALIDATORS` is not indexed and
+ * costs the log nothing when it moves.
+ */
+const CHAIN_INDEX_CONTRACT_KEYS: ReadonlySet<HubContractCacheKey> = new Set([
+  'contextGraphStorage',
+  'knowledgeAssetStorage',
+]);
 
 /**
  * Contract names deliberately EXCLUDED from the `resolvedContractAddressCache`
@@ -285,7 +334,8 @@ const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 /** Default pre-10.0.4 fallback eth_getLogs window — the smallest common cap. */
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
 
-export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+export { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
+import { CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-constants.js';
 
 // Keep generic Hub binding invalidation responsive for read paths while still
 // replacing four hidden ethers subscription pollers with one owned log poller.
@@ -507,15 +557,23 @@ function isHistoricalStateUnavailable(err: unknown): boolean {
   );
 }
 
+function contractHandleTargetAddress(contract: Contract | undefined): string | undefined {
+  const target = (contract as any)?.target;
+  if (typeof target !== 'string') return undefined;
+  try {
+    return ethers.getAddress(target);
+  } catch {
+    return undefined;
+  }
+}
+
 async function contractAddress(contract: Contract): Promise<string> {
   const getAddress = (contract as any).getAddress;
   if (typeof getAddress === 'function') {
     return ethers.getAddress(await getAddress.call(contract));
   }
-  const target = (contract as any).target;
-  if (typeof target === 'string') {
-    return ethers.getAddress(target);
-  }
+  const target = contractHandleTargetAddress(contract);
+  if (target !== undefined) return target;
   throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
 }
 
@@ -626,6 +684,18 @@ export class EVMChainAdapterBase {
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
   protected readonly finalityConfirmations: number;
+  /**
+   * `chain.boundedAuthorityReads` — may the node's own event index answer a
+   * Context Graph authority read that asked for `freshness: 'bounded'`?
+   *
+   * OFF by default, and deliberately an operator switch rather than a code
+   * path: it is the one control that can be thrown without a deploy when the
+   * index is suspected of serving a roster the chain disagrees with. It can
+   * only ever REMOVE the index from the answer — no gate is disabled by it, and
+   * every read it declines falls through to the live chain read.
+   */
+  protected readonly contextGraphBoundedAuthorityReadsEnabled: boolean;
+  protected readonly receiptFinality: EvmReceiptFinalityReader;
 
   protected readonly maxFeePerGasWei?: bigint;
 
@@ -739,6 +809,28 @@ export class EVMChainAdapterBase {
 
   protected initialized = false;
 
+  /** Monotonic fence for physical Hub binding generations, including ABA. */
+  protected hubBindingGeneration = 0;
+
+  /** Monotonic physical DKGKnowledgeAssets binding fence, including ABA. */
+  protected knowledgeAssetStorageBindingGeneration = 0;
+
+  protected knowledgeAssetStorageBindingAddress(
+    contract: Contract | undefined,
+  ): string | undefined {
+    return contractHandleTargetAddress(contract)?.toLowerCase();
+  }
+
+  protected knowledgeAssetStorageBindingIsCurrent(
+    contract: Contract,
+    address: string,
+    generation: number,
+  ): boolean {
+    return this.contracts.knowledgeAssetStorage === contract
+      && this.knowledgeAssetStorageBindingGeneration === generation
+      && this.knowledgeAssetStorageBindingAddress(contract) === address;
+  }
+
   /**
    * Single self-refreshing cache for the `RandomSampling` /
    * `RandomSamplingStorage` pair. RS is the highest-value Hub-resolved
@@ -763,6 +855,43 @@ export class EVMChainAdapterBase {
    * `UnauthorizedAccess(Only Contracts in Hub)`.
    */
   protected readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
+
+  /**
+   * Immutable Chronos schedule, scoped to the exact resolved contract object,
+   * address, and observed Hub generation.
+   * This is not a cache of the changing epoch: every use still reads a fresh
+   * canonical tip and derives the epoch from that block's timestamp. A Chronos
+   * rotation advances the generation and therefore cannot reuse the old
+   * schedule, including same-address reset/ABA.
+   */
+  protected randomSamplingChronosSchedule:
+    | Readonly<{
+        bindingId: string;
+        contract: Contract;
+        generation: number;
+        startTime: bigint;
+        epochLength: bigint;
+      }>
+    | undefined;
+
+  /**
+   * Positive lifecycle-admission observation only. ACK verification continues
+   * to call `shardingTableStorage.nodeExists` live for every ACK; this record is
+   * consumed solely by `resolveRandomSamplingAvailability` while the same
+   * RS/RSS pair remains current.
+   */
+  protected randomSamplingEligibilityObservation:
+    | Readonly<{
+        bindingId: string;
+        identityId: bigint;
+        shardingTableAddress: string;
+        hubGeneration: number;
+        checkedAtMs: number;
+      }>
+    | undefined;
+
+  /** One skipped 30 s reconcile; membership is read live again by 60 s. */
+  protected static readonly RANDOM_SAMPLING_ELIGIBILITY_MAX_REUSE_MS = 60_000;
 
   /**
    * OT-RFC-39 — per-process identity-id cache. Positive hits are memoised with
@@ -806,6 +935,69 @@ export class EVMChainAdapterBase {
   protected readonly resolvedContractAddressCache: ReadThroughTtlCache<string, string>;
 
   protected readonly hubRotationPoller: HubRotationPoller;
+
+  /**
+   * This adapter's window onto the node's ONE chain log, once something owns a
+   * tick that fills it.
+   *
+   * It is BOUND rather than constructed because the log is process-wide and
+   * adapters are not: per-wallet publisher adapters are built without a store
+   * (`publisher-runner.ts:81-88`), so an adapter that built its own log would
+   * be a SECOND scanner — exactly what this work exists to remove. While it is
+   * unset, every event reader keeps its own `queryFilter`, which is the
+   * pre-log behaviour and never a degraded one.
+   */
+  private readonly chainIndexOwner: EvmChainIndexRuntimeOwner;
+  private readonly chainEventLogBindingSource: ChainEventLogBindingSource | undefined;
+
+  /** Durable identity of the one-log runtime this adapter is allowed to read. */
+  private get chainEventLogScope(): string {
+    return [this.deploymentId, this.hubAddress.toLowerCase()].join(':');
+  }
+
+  protected get chainEventLogBinding(): ChainEventLogBinding | undefined {
+    const source = this.chainEventLogBindingSource;
+    if (source === undefined) return this.chainIndexOwner.binding;
+
+    // The borrowed source is authoritative, including an empty interval while
+    // its owner rebuilds or stops. Falling through to a static attachment here
+    // would resurrect precisely the retired generation the late binding avoids.
+    let binding: ChainEventLogBinding | undefined;
+    try {
+      binding = source();
+    } catch {
+      return undefined;
+    }
+    // Scope pins chain + Hub. Contract readers additionally compare the
+    // binding's per-contract addresses with their own current handles before
+    // accepting rows. Old/static bindings without a runtime scope are never
+    // borrowable, but remain valid through the explicit attachment API below.
+    return binding?.scope === this.chainEventLogScope ? binding : undefined;
+  }
+
+  /** Object identity is the generation token for a late-bound binding. */
+  protected chainEventLogBindingIsCurrent(binding: ChainEventLogBinding): boolean {
+    return this.chainEventLogBinding === binding;
+  }
+
+  /**
+   * Bind (or clear) the one log for this adapter's event readers.
+   *
+   * Safe after `init()`: the readers consult the binding per call and fall
+   * back the moment coverage cannot carry the range they were asked for.
+   */
+  attachChainEventLog(binding: ChainEventLogBinding | undefined): void {
+    // A borrowing adapter must not retain a second, hidden static generation.
+    // Its source returning undefined is a lifecycle signal, not permission to
+    // fall back to an older attachment.
+    if (this.chainEventLogBindingSource !== undefined) return;
+    this.chainIndexOwner.attach(binding);
+  }
+
+  /** The binding the process hands DOWN to every adapter that has no store. */
+  get chainEventLog(): ChainEventLogBinding | undefined {
+    return this.chainEventLogBinding;
+  }
 
   /**
    * Single-flight guard for the best-effort
@@ -908,6 +1100,19 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
+  /**
+   * In-flight sharing for the one-read Context Graph live authority. An
+   * instance FIELD, not a lazy accessor: two empty maps cost nothing, and the
+   * adapter's prototype API surface is audited for mock parity. Retains no
+   * value, so it is safe below every security gate — see the module docstring.
+   */
+  protected readonly contextGraphLiveAuthorityCoalescer =
+    new ContextGraphLiveAuthorityCoalescer<ContextGraphLiveAuthority | null>({
+      // The only deterministic "this read cannot answer" fault; everything else
+      // (transport failure, abort) is the initiator's own and is never shared.
+      isDefinitiveError: (error) => error instanceof ContextGraphLiveAuthorityUnsupportedError
+        || (error instanceof Error && error.name === 'ContextGraphLiveAuthorityUnsupportedError'),
+    });
   /** Lazily constructed by the base-owned internal accessor below. */
   protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
 
@@ -976,9 +1181,14 @@ export class EVMChainAdapterBase {
   /** Shared contract-wide authority history, enabled by daemon-local persistence. */
   protected readonly contextGraphAuthorityIndex: ContextGraphAuthorityIndex | undefined;
 
+  /** One owner for indexed point, batch, and snapshot reads. */
+  protected readonly contextGraphAuthorityIndexReader:
+    EvmContextGraphAuthorityIndexReaderV1 | undefined;
+
   /** Sole public scheduling capability backed by the private materialized index. */
   readonly contextGraphAuthorityIndexRevisionReader:
     ContextGraphAuthorityIndexRevisionReader | undefined;
+  readonly contextGraphAuthorityIndexSnapshots: ContextGraphAuthorityIndexSnapshots | undefined;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -988,6 +1198,15 @@ export class EVMChainAdapterBase {
   protected readonly kaHighWaterScanPageSize: number;
 
   protected readonly cgRegistryScanPageSize: number;
+
+  /**
+   * `chain.indexTickMs` (T) as configured, unvalidated.
+   *
+   * Kept raw so every consumer normalizes through the ONE resolver
+   * (`resolveContextGraphAuthorityIndexTickMs`) and an invalid value is
+   * rejected identically wherever it is read.
+   */
+  protected readonly indexTickMs: EVMAdapterConfig['indexTickMs'];
 
   /**
    * Reset the PR3 publish-preflight cache. Public so daemon code that
@@ -1007,7 +1226,12 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
+    this.receiptFinality.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
+    // Rotation cannot poison a shared flight — the key carries the contract
+    // address — but a flight opened against the pre-rotation binding must stop
+    // taking new callers all the same.
+    this.contextGraphLiveAuthorityCoalescer.detachAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
@@ -1101,6 +1325,11 @@ export class EVMChainAdapterBase {
   }
 
   constructor(config: EVMAdapterConfig) {
+    if (config.chainEventLogStore !== undefined
+      && config.chainEventLogBindingSource !== undefined) {
+      throw new TypeError('An EVM adapter cannot own and borrow the one-log runtime at the same time');
+    }
+    this.chainEventLogBindingSource = config.chainEventLogBindingSource;
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.signerTxSerializer = new SignerTxSerializer({
@@ -1109,6 +1338,10 @@ export class EVMChainAdapterBase {
       stallAfterMs: resolveTxSerializerStallAfterMs(this.receiptTimeoutMs),
     });
     this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
+    // Strict `=== true`: an operator who has not stated an opinion, or who
+    // supplied a truthy-but-not-boolean value from a config file, gets the
+    // live read.
+    this.contextGraphBoundedAuthorityReadsEnabled = config.boundedAuthorityReads === true;
     this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
@@ -1126,6 +1359,7 @@ export class EVMChainAdapterBase {
       config.cgRegistryScanPageSize,
       CG_REGISTRY_DEFAULT_PAGE_SIZE,
     );
+    this.indexTickMs = config.indexTickMs;
     // BUG-022 root-cause fix: force ethers' `PollingEventSubscriber`
     // (eth_getLogs over a sliding block window) instead of the default
     // `FilterIdEventSubscriber` (eth_newFilter + eth_getFilterChanges).
@@ -1239,11 +1473,42 @@ export class EVMChainAdapterBase {
         stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
       },
     );
+    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
+      config.chainEventLogStore,
+      (error) => {
+        console.warn(
+          `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
+    this.receiptFinality = new EvmReceiptFinalityReader(
+      this.finalityConfirmations,
+      (label, read, options) => this.readProviderRetryingNull(label, read, options),
+    );
     this.hubRotationPoller = new HubRotationPoller({
       readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
       intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
       reorgBufferBlocks: HUB_ROTATION_REORG_BUFFER_BLOCKS,
       onContractName: (name) => this.applyHubRotationEventName(name),
+      // The one log, consulted LIVE per pass rather than captured here. The
+      // binding is attached after `initContracts` resolves the Hub, which is
+      // strictly after this constructor runs, so anything decided once at
+      // construction would pin this listener to the scan forever.
+      logSource: async (lastScannedBlock, reorgBufferBlocks) => {
+        const binding = this.chainEventLogBinding;
+        const readWindow = binding?.readHubRotationWindow;
+        if (binding === undefined || readWindow === undefined) return undefined;
+        const window = await readWindow.call(
+          binding,
+          lastScannedBlock,
+          reorgBufferBlocks,
+        );
+        // A rotation/rebuild may complete while the old generation is reading.
+        // Treat its answer as unavailable so the poller performs the live scan;
+        // otherwise that old empty window could advance the wallet past a Hub
+        // rotation the new binding must deliver.
+        return this.chainEventLogBindingIsCurrent(binding) ? window : undefined;
+      },
     });
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
@@ -1332,10 +1597,16 @@ export class EVMChainAdapterBase {
       undefined,
       config.localContextGraphAuthorityHistoryStore,
     );
+    if (config.contextGraphAuthorityIndexBootstrap !== undefined
+      && config.localContextGraphAuthorityIndexStore === undefined) {
+      throw new TypeError('Context Graph authority index bootstrap requires a local durable index store');
+    }
     this.contextGraphAuthorityIndex = config.localContextGraphAuthorityIndexStore === undefined
       ? undefined
-      : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore);
-    this.contextGraphAuthorityIndexRevisionReader = this.contextGraphAuthorityIndex === undefined
+      : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore,
+          config.contextGraphAuthorityIndexBootstrap,
+          { tickMs: config.indexTickMs });
+    const authorityIndexReader = this.contextGraphAuthorityIndex === undefined
       ? undefined
       : createEvmContextGraphAuthorityIndexRevisionReaderV1({
           index: this.contextGraphAuthorityIndex,
@@ -1347,11 +1618,23 @@ export class EVMChainAdapterBase {
             read,
             options,
           ),
-          resolveContractDeployBlock: (address, operationLabel, contractLabel) => (
-            this.resolveContractDeployBlock(address, operationLabel, contractLabel)
-          ),
+          // The index reader consumes only the deploy block: no head probe on a cache hit.
+          resolveContractDeployBlockNumber: (address, operationLabel, contractLabel) =>
+            this.resolveContractDeployBlockNumber(
+              address,
+              operationLabel,
+              contractLabel,
+            ),
           pageSize: () => this.cgRegistryScanPageSize,
+          finalityConfirmations: () => this.finalityConfirmations,
+          // Read per call, never captured: a Hub rotation replaces the binding
+          // wholesale, and this reader must see the NEW one — or none — rather
+          // than the log built around the `ContextGraphStorage` it left.
+          chainEventLogAuthority: () => this.chainEventLogBinding?.contextGraphAuthority,
         });
+    this.contextGraphAuthorityIndexReader = authorityIndexReader;
+    this.contextGraphAuthorityIndexRevisionReader = authorityIndexReader;
+    this.contextGraphAuthorityIndexSnapshots = authorityIndexReader?.snapshots;
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
@@ -1645,10 +1928,9 @@ export class EVMChainAdapterBase {
       receiptTimeoutMs: this.receiptTimeoutMs,
       pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
-      isReceiptEligible: (receipt, { deadlineMs }) => this.isReceiptBlockFinalAndCanonical(
-        receipt,
-        { deadlineMs },
-      ),
+      isReceiptEligible: async (receipt, { deadlineMs }) => (
+        await this.receiptFinality.read(receipt, { deadlineMs })
+      ) !== null,
       assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
       formatTimeoutMessage: ({ lastError }) =>
         `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
@@ -1660,26 +1942,18 @@ export class EVMChainAdapterBase {
    * Return true only when the receipt has the configured canonical depth.
    * The head and block-hash reads use one provider, so a reorg cannot splice
    * facts from different endpoints into a successful result.
+   *
+   * At depth 1 the required head IS the receipt block, so the block-hash read
+   * alone decides: a provider that serves a block at that height has a head at
+   * or above it, and a provider that has not reached it answers null exactly as
+   * the head comparison did. The separate `eth_blockNumber` (one per mined tx)
+   * is therefore issued only for depths > 1, where it is still the proof.
    */
   async isReceiptBlockFinalAndCanonical(
     receipt: { txHash?: string; blockNumber: number; blockHash: string },
     options: ChainReadOptions & { deadlineMs?: number } = {},
   ): Promise<boolean> {
-    return (await this.readProviderRetryingNull(
-      'publish receipt finality',
-      async (provider) => {
-        const latestBlockNumber = await provider.getBlockNumber();
-        const requiredBlockNumber = requiredHeadBlockForReceipt(
-          receipt.blockNumber,
-          this.finalityConfirmations,
-        );
-        if (latestBlockNumber < requiredBlockNumber) return null;
-        const atHeight = await provider.getBlock(receipt.blockNumber);
-        if (!atHeight?.hash) return null;
-        return atHeight.hash.toLowerCase() === receipt.blockHash.toLowerCase();
-      },
-      { signal: options.signal, deadlineMs: options.deadlineMs },
-    )) ?? false;
+    return (await this.receiptFinality.read(receipt, options)) !== null;
   }
 
   protected async signPopulatedTransaction(
@@ -3010,6 +3284,11 @@ export class EVMChainAdapterBase {
       // RandomSampling not deployed — proof submission unavailable
     }
 
+    // THE tick. Started here because the Hub bindings resolved above ARE its
+    // address array, and started WITHOUT an await so a cold backfill can never
+    // delay a chain write. Only the adapter the composition root gave a store
+    // does anything at all here.
+    this.startChainIndexRuntime();
     await this.startHubRotationListener();
 
     const tokenAddress: string = this.tokenAddress ?? await this.readContract(
@@ -3069,6 +3348,20 @@ export class EVMChainAdapterBase {
       },
     );
     return block?.timestamp != null ? Number(block.timestamp) : 0;
+  }
+
+  /** Read a receipt block timestamp, reusing the hash-bound finality header. */
+  protected async getFinalizedBlockTimestamp(
+    blockNumber: number,
+    blockHash: string | null | undefined,
+    options: ChainReadOptions = {},
+  ): Promise<number> {
+    // A memo hit must not turn a cancelled call into an answer.
+    options.signal?.throwIfAborted();
+    const rememberedTimestamp = typeof blockHash === 'string'
+      ? this.receiptFinality.finalizedBlockTimestamp(blockNumber, blockHash)
+      : undefined;
+    return rememberedTimestamp ?? this.getBlockTimestamp(blockNumber, options);
   }
 
   // =====================================================================
@@ -3320,7 +3613,7 @@ export class EVMChainAdapterBase {
         for (const { provider } of ordered) {
           try {
             await withRpcRequestTimeout(
-              RPC_READ_STALL_TIMEOUT_MS,
+              CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
               `${label} chainId validation`,
               () => this.ensureConfiguredStaticChainIdValidated(provider),
             );
@@ -3428,7 +3721,7 @@ export class EVMChainAdapterBase {
     for (const provider of this.providers) {
       try {
         await withRpcRequestTimeout(
-          RPC_READ_STALL_TIMEOUT_MS,
+          CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
           () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
@@ -3451,6 +3744,29 @@ export class EVMChainAdapterBase {
     return { head: reachable[0].backendHead, scanProviders: reachable };
   }
 
+  /**
+   * Deploy block ONLY, for callers that anchor a scan's lower bound and take
+   * their head from elsewhere (the authority index/snapshot paths discard
+   * `head`/`scanProviders`). A cached deploy block is immutable, so a hit is
+   * answered without `resolveContractDeployBlock`'s per-backend
+   * `eth_blockNumber` probe — that probe's result was thrown away on every
+   * authority scan. A miss (first resolution, or the uncached degraded `0`)
+   * still takes the full probe + search below, unchanged.
+   */
+  protected async resolveContractDeployBlockNumber(
+    address: string,
+    operationLabel: string,
+    contractLabel: string,
+  ): Promise<number> {
+    const cached = this.cachedContractDeployBlocks.get(address.toLowerCase());
+    if (cached !== undefined) return cached;
+    return (await this.resolveContractDeployBlock(
+      address,
+      operationLabel,
+      contractLabel,
+    )).fromBlock;
+  }
+
   protected async resolveContractDeployBlock(
     address: string,
     operationLabel: string,
@@ -3470,7 +3786,7 @@ export class EVMChainAdapterBase {
     for (const provider of this.providers) {
       try {
         await withRpcRequestTimeout(
-          RPC_READ_STALL_TIMEOUT_MS,
+          CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
           () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
@@ -3640,6 +3956,14 @@ export class EVMChainAdapterBase {
     return addr;
   }
 
+  /**
+   * The resolved operator depth backing every anchor this adapter resolves.
+   * See `ChainAdapter.getFinalityConfirmations`.
+   */
+  getFinalityConfirmations(): number {
+    return this.finalityConfirmations;
+  }
+
   async getEvmChainId(): Promise<bigint> {
     // PR3 / RC11: TTL-cached so an `eth_chainId` rate-limit on the
     // public RPC (the dzudza failure mode) cannot kill steady-state
@@ -3677,7 +4001,7 @@ export class EVMChainAdapterBase {
           signal: sharedSignal,
         },
         () => withRpcRequestTimeout(
-          RPC_READ_STALL_TIMEOUT_MS,
+          CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS,
           'configured chainId validation',
           async () => {
             const raw = await provider.send('eth_chainId', []);
@@ -4023,7 +4347,12 @@ export class EVMChainAdapterBase {
     // estimate). Absent for a non-PCA publish → the UI badge degrades hidden.
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    // waitForReceipt already checked this exact canonical hash and memoized
+    // its header; naming the hash makes timestamp reuse explicit and reorg-safe.
+    const blockTimestamp = await this.getFinalizedBlockTimestamp(
+      receipt.blockNumber,
+      receipt.blockHash,
+    );
 
     return {
       batchId: kaId,
@@ -4061,12 +4390,220 @@ export class EVMChainAdapterBase {
     return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
+  /** Exact physical handle used by the lifecycle-only membership observation. */
+  protected async readRandomSamplingLifecycleMembership(
+    shardingTableStorage: Contract,
+    identityId: bigint,
+  ): Promise<boolean> {
+    return Boolean(await this.readContract(
+      shardingTableStorage,
+      'shardingTableStorage.nodeExists',
+      'nodeExists',
+      identityId,
+    ));
+  }
+
+  protected contractBindingAddress(contract: Contract | undefined): string | undefined {
+    return contractHandleTargetAddress(contract)?.toLowerCase();
+  }
+
+  /** One cohesive optional capability for solved-period reuse. */
+  getRandomSamplingReadContextReader(): RandomSamplingReadContextReader {
+    const getBindingId = (): string | undefined => {
+      const rsTarget = contractHandleTargetAddress(this.contracts.randomSampling);
+      const rssTarget = contractHandleTargetAddress(this.contracts.randomSamplingStorage);
+      if (rsTarget === undefined || rssTarget === undefined) return undefined;
+      return `${rsTarget.toLowerCase()}:${rssTarget.toLowerCase()}`;
+    };
+    const isCurrent = (bindingId: string): boolean =>
+      this.isRandomSamplingReady() && getBindingId() === bindingId;
+    return Object.freeze({
+      getRandomSamplingBindingId: getBindingId,
+      readRandomSamplingContext: async () => {
+        const bindingId = getBindingId();
+        if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
+        const chronosEpoch = await this.getCurrentEpoch();
+        const context = Object.freeze({ bindingId, chronosEpoch });
+        return isCurrent(context.bindingId) ? context : undefined;
+      },
+      readRandomSamplingBlockContext: async (): Promise<RandomSamplingBlockContext | undefined> => {
+        const bindingId = getBindingId();
+        if (!this.isRandomSamplingReady() || bindingId === undefined) return undefined;
+        try {
+          // `init()` is the observed-Hub-rotation fence for Chronos. The
+          // RS/RSS binding captured above is checked again after every await.
+          await this.init();
+          if (!isCurrent(bindingId)) return undefined;
+          const hubGeneration = this.hubBindingGeneration;
+          const randomSamplingGeneration = this.randomSamplingPairCache.currentGeneration();
+          if (!this.contracts.chronos) {
+            this.contracts.chronos = await this.resolveContract('Chronos');
+          }
+          const chronos = this.contracts.chronos;
+          const chronosBindingId = contractHandleTargetAddress(chronos)?.toLowerCase();
+          if (chronosBindingId === undefined) return undefined;
+
+          let schedule = this.randomSamplingChronosSchedule;
+          if (
+            schedule?.bindingId !== chronosBindingId
+            || schedule.contract !== chronos
+            || schedule.generation !== hubGeneration
+          ) {
+            const [startTimeValue, epochLengthValue] = await Promise.all([
+              this.readContract(chronos, 'chronos.startTime', 'startTime'),
+              this.readContract(chronos, 'chronos.epochLength', 'epochLength'),
+            ]);
+            const startTime = BigInt(startTimeValue as bigint | string | number);
+            const epochLength = BigInt(epochLengthValue as bigint | string | number);
+            if (startTime <= 0n || epochLength <= 0n) return undefined;
+            if (
+              !isCurrent(bindingId)
+              || this.hubBindingGeneration !== hubGeneration
+              || this.randomSamplingPairCache.currentGeneration() !== randomSamplingGeneration
+              || this.contracts.chronos !== chronos
+              || contractHandleTargetAddress(this.contracts.chronos)?.toLowerCase() !== chronosBindingId
+            ) return undefined;
+            schedule = Object.freeze({
+              bindingId: chronosBindingId,
+              contract: chronos,
+              generation: hubGeneration,
+              startTime,
+              epochLength,
+            });
+            this.randomSamplingChronosSchedule = schedule;
+          }
+
+          const block = await this.readTipProvider(
+            'randomSampling current block context',
+            (provider) => provider.getBlock('latest'),
+          );
+          if (block === null) return undefined;
+          if (
+            !isCurrent(bindingId)
+            || this.hubBindingGeneration !== hubGeneration
+            || this.randomSamplingPairCache.currentGeneration() !== randomSamplingGeneration
+            || this.contracts.chronos !== chronos
+            || contractHandleTargetAddress(this.contracts.chronos)?.toLowerCase() !== chronosBindingId
+          ) return undefined;
+          const timestamp = BigInt(block.timestamp);
+          const chronosEpoch = timestamp < schedule.startTime
+            ? 1n
+            : ((timestamp - schedule.startTime) / schedule.epochLength) + 1n;
+          return Object.freeze({
+            bindingId,
+            chronosEpoch,
+            epochBindingId: `${chronosBindingId}:g${hubGeneration}`,
+            headBlockNumber: BigInt(block.number),
+          });
+        } catch {
+          // Optimization capability only. An unfenced context is never
+          // published or served: the caller drops its solved-period record
+          // and resumes the pre-existing live challenge/status path.
+          return undefined;
+        }
+      },
+      isRandomSamplingBindingCurrent: isCurrent,
+    });
+  }
+
+  async getCurrentEpoch(): Promise<bigint> {
+    if (!this.contracts.chronos) {
+      this.contracts.chronos = await this.resolveContract('Chronos');
+    }
+    return BigInt(await this.readContract(
+      this.contracts.chronos,
+      'chronos.getCurrentEpoch',
+      'getCurrentEpoch',
+    ));
+  }
+
   async getBlockNumber(): Promise<number> {
     // TIP-SENSITIVE: the current head drives the event-lane cursor, proof-
     // challenge block, and finalization reads. A lagging sticky backend would
     // make the head non-monotonic across calls (poller moving backwards / re-
     // scanning), so read canonical-order + preference-transparent.
     return this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber());
+  }
+
+  /**
+   * Borrow the ONE log's conservative upper bound for publisher event lanes.
+   * Every uncertainty returns `undefined`; the lane runner then performs its
+   * original live head read. The exact contract handle, address, topics and
+   * binding generation are fenced across the await so a Hub rotation or
+   * runtime rebuild cannot lend a retired generation's horizon.
+   */
+  async acquireEventScanHorizonLease(
+    eventTypes: readonly string[],
+  ): Promise<EventScanHorizonLease | undefined> {
+    if (eventTypes.length !== 1) return undefined;
+    const eventType = eventTypes[0] === 'ContextGraphCreated'
+      ? 'ContextGraphCreated' as const
+      : eventTypes[0] === 'KnowledgeAssetRegisteredToContextGraph'
+        ? 'KnowledgeAssetRegisteredToContextGraph' as const
+        : undefined;
+    if (eventType === undefined) return undefined;
+
+    const binding = this.chainEventLogBinding;
+    const readLease = binding?.readEventScanLease;
+    const contextGraphStorage = this.contracts.contextGraphStorage;
+    if (binding === undefined || readLease === undefined || contextGraphStorage === undefined) {
+      return undefined;
+    }
+
+    let address: string;
+    let topic0: string | undefined;
+    try {
+      address = (await contextGraphStorage.getAddress()).toLowerCase();
+      topic0 = contextGraphStorage.interface.getEvent(eventType)?.topicHash.toLowerCase();
+    } catch {
+      return undefined;
+    }
+    if (topic0 === undefined) return undefined;
+
+    try {
+      const logLease = await readLease.call(binding, {
+        eventType,
+        contextGraphStorageAddress: address,
+        topic0,
+      });
+      if (
+        logLease === undefined
+        || !this.chainEventLogBindingIsCurrent(binding)
+        || this.contracts.contextGraphStorage !== contextGraphStorage
+        || !Number.isSafeInteger(logLease.throughBlockNumber)
+        || logLease.throughBlockNumber < 0
+      ) return undefined;
+
+      const contractGenerationHolds = async (): Promise<boolean> => {
+        if (
+          !this.chainEventLogBindingIsCurrent(binding)
+          || this.contracts.contextGraphStorage !== contextGraphStorage
+        ) return false;
+        try {
+          const currentAddress = (await contextGraphStorage.getAddress()).toLowerCase();
+          const currentTopic0 = contextGraphStorage.interface
+            .getEvent(eventType)?.topicHash.toLowerCase();
+          return this.chainEventLogBindingIsCurrent(binding)
+            && this.contracts.contextGraphStorage === contextGraphStorage
+            && currentAddress === address
+            && currentTopic0 === topic0;
+        } catch {
+          return false;
+        }
+      };
+      if (!await contractGenerationHolds()) return undefined;
+
+      return Object.freeze({
+        throughBlockNumber: logLease.throughBlockNumber,
+        holds: async (): Promise<boolean> => {
+          if (!await contractGenerationHolds()) return false;
+          if (!await logLease.holds()) return false;
+          return contractGenerationHolds();
+        },
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   getProvider(): JsonRpcProvider {
@@ -4245,6 +4782,7 @@ export class EVMChainAdapterBase {
     this.inflightDurationProbe = undefined;
     this.inflightDurationProbeContract = undefined;
     this.inflightDurationProbeStartedAt = 0;
+    this.randomSamplingEligibilityObservation = undefined;
   }
 
   /**
@@ -4296,6 +4834,12 @@ export class EVMChainAdapterBase {
    * ethers implements each subscription as its own steady `eth_getLogs`
    * poller. One adapter-owned poller with an OR-topic filter preserves
    * rotation detection without four hidden idle log streams.
+   *
+   * SINCE THE ONE LOG: this listener no longer scans. Its `logSource` reads
+   * the Hub rows the tick already fetched, so `Hub_rotation_poll_getBlockNumber`
+   * and `Hub_rotation_poll_getLogs` are issued only by an adapter with no log
+   * bound, or while the log cannot prove it covers the window — the pre-log
+   * behaviour, kept as the fallback and never running beside the log.
    */
   protected async startHubRotationListener(): Promise<void> {
     if (this.hubRotationPoller.isStarted) return;
@@ -4311,7 +4855,153 @@ export class EVMChainAdapterBase {
     }
   }
 
+  /**
+   * Start the node's ONE chain log, once, for the adapter that owns the store.
+   *
+   * DETACHED on purpose, and the caller must not await it. Resolving the Hub's
+   * deploy block is a per-backend head probe plus a `getCode` binary search,
+   * and the first pass then reads a head and one log range; `initContracts`
+   * sits on the critical path of every chain write, so neither may be allowed
+   * to delay it. Until the first pass commits, every reader's coverage check
+   * refuses and each one does exactly what it did before the log existed.
+   *
+   * A failure here is a degraded index, not a degraded node: it is reported
+   * and the adapter keeps every pre-log path.
+   *
+   * Re-entrant after a Hub rotation, and only after one:
+   * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next
+   * `initContracts` builds the log around the addresses the Hub now points at.
+   * Two builds racing are resolved by the generation counter, never by both
+   * attaching.
+  */
+  protected startChainIndexRuntime(): void {
+    // Snapshot SYNCHRONOUSLY, before the first `await`, exactly as the Hub
+    // handle already was. `initContracts` re-assigns these fields and the
+    // rotation invalidator nulls them, while this task is detached: read after
+    // an await, a rotation landing in that gap would build the log with no
+    // Context Graph or KA source at all, silently and for good.
+    const hubContract = this.contracts.hub;
+    const contextGraphStorageContract = this.contracts.contextGraphStorage;
+    const knowledgeAssetStorageContract = this.contracts.knowledgeAssetStorage;
+    this.chainIndexOwner.start(async (store) => {
+      const hub = await this.chainIndexContract(hubContract, 'Hub');
+      if (hub === undefined) throw new Error('Hub address is unresolvable');
+      const contextGraphStorage = await this.chainIndexContract(
+        contextGraphStorageContract,
+        'ContextGraphStorage',
+        'assetStorage',
+      );
+      const resumeFromBlockNumber = contextGraphStorage === undefined
+        || this.contextGraphAuthorityIndex === undefined
+        ? undefined
+        : await this.contextGraphAuthorityIndex.durableCursorBlockNumber(
+            contextGraphAuthorityIndexScope(
+              this.deploymentId,
+              contextGraphStorage.address,
+            ),
+            contextGraphStorage.deploymentBlockNumber,
+          );
+      return createEvmChainIndexRuntime({
+        // Keyed on the HUB, and deliberately NOT the authority index's scope.
+        //
+        // This one string keys the whole runtime's durable state
+        // (`store.load(options.scope)`), and that state spans every contract the
+        // tick walks — Hub, ContextGraphStorage and KnowledgeAssetStorage in one
+        // cursor. A key naming ONE of them would move for reasons the other two
+        // know nothing about: a ContextGraphStorage rotation would orphan the
+        // Hub and KA progress nothing had invalidated, and the tick would re-walk
+        // history it already held.
+        //
+        // The authority index keys per-CONTRACT on purpose — a rotated
+        // ContextGraphStorage must be a cache MISS for it
+        // (`evm-context-graph-authority-index-reader.ts`,
+        // `contextGraphAuthorityIndexScope`). That is right for a projection of
+        // one contract's events and wrong for a Hub-wide log, so the two scopes
+        // are different strings over different keyspaces by design.
+        //
+        // The Hub is the address that can carry it: it is the root of the
+        // binding registry rather than an entry in it, so no name binds it and
+        // it has no binding to be rotated off (see `chainIndexContract` below).
+        // One chain identity still holds, which is what matters: both scopes are
+        // rooted at the same `deploymentId`, which already pins chainId + Hub
+        // (`buildEvmDeploymentId`) — two keyspaces under one identity, not two
+        // identities. That makes the `hub.address` suffix redundant for
+        // identity; it stays because this is a DURABLE key, and shortening it
+        // would strand every existing node's cursor and re-walk history.
+        scope: this.chainEventLogScope,
+        store,
+        intervalMs: resolveContextGraphAuthorityIndexTickMs(this.indexTickMs),
+        // The depth the Context Graph registry scan already treats as
+        // reorg-safe. Reusing it keeps ONE definition of "settled" on this
+        // node rather than introducing a second one under the log.
+        reorgHoldbackBlocks: CG_REGISTRY_REORG_BUFFER_BLOCKS,
+        // The widest `eth_getLogs` window this node already asks a provider
+        // for, reused so the tick cannot ask for one the pool has never been
+        // sized for. It is an operator knob NAMED for the registry scan, so
+        // one lowered for a strict provider also shortens the log's backfill
+        // page and its catch-up step — slower to walk history, never wider.
+        backfillPageBlocks: this.cgRegistryScanPageSize,
+        maxCatchUpBlocks: this.cgRegistryScanPageSize,
+        ...(resumeFromBlockNumber === undefined ? {} : { resumeFromBlockNumber }),
+        hub,
+        // Both indexed storages live in the Hub's ASSET STORAGE registry
+        // (`resolveAssetStorage`), whose kind lets a rotation retire this
+        // address rather than look like an unrelated first registration.
+        contextGraphStorage,
+        knowledgeAssetStorage: await this.chainIndexContract(
+          knowledgeAssetStorageContract,
+          'DKGKnowledgeAssets',
+          'assetStorage',
+        ),
+        readTipProvider: (label, read, opts) => this.readTipProvider(label, read, opts),
+        ...(this.contextGraphAuthorityIndexReader === undefined
+          ? {}
+          : {
+              readContextGraphFinalizedCreation: (
+                contextGraphId: bigint,
+                options?: Readonly<{ signal?: AbortSignal }>,
+              ) => this.contextGraphAuthorityIndexReader!
+                .readContextGraphFinalizedCreation(contextGraphId, options),
+            }),
+        onError: (error) => {
+          console.warn(
+            `[chain] chain index tick failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      });
+    });
+  }
+
+  /** One indexed contract, or `undefined` when the Hub binds none. */
+  private async chainIndexContract(
+    contract: Contract | undefined,
+    contractLabel: string,
+    hubRegistry?: 'contract' | 'assetStorage',
+  ): Promise<EvmChainIndexContract | undefined> {
+    if (contract === undefined) return undefined;
+    const address = (await contractAddress(contract)).toLowerCase();
+    if (address === ethers.ZeroAddress) return undefined;
+    return {
+      address,
+      contractInterface: contract.interface,
+      deploymentBlockNumber: await this.resolveContractDeployBlockNumber(
+        address,
+        'chainIndex deploy block',
+        contractLabel,
+      ),
+      // The Hub is the root of the scope, not an entry in it: no name binds it,
+      // so it has no binding to be rotated off.
+      ...(hubRegistry === undefined
+        ? {}
+        : { hubBinding: { name: contractLabel, kind: hubRegistry } }),
+    };
+  }
+
   protected applyHubRotationEventName(name: string): void {
+    this.hubBindingGeneration += 1;
+    if (name === 'DKGKnowledgeAssets') {
+      this.knowledgeAssetStorageBindingGeneration += 1;
+    }
     // #1583 (review round-2) — flush the resolved-address memo on EVERY observed
     // Hub rotation, unconditionally and first. The memo caches the address of
     // any non-excluded name, including per-call names with no lazy binding and
@@ -4326,6 +5016,11 @@ export class EVMChainAdapterBase {
     // may have moved; flushing all of them is correct and keeps the 30s TTL as a
     // pure missed-rotation backstop.
     this.resolvedContractAddressCache.invalidateAll();
+    // A membership admission observed under any prior Hub registry state is
+    // cheap to discard and unsafe to carry across a binding change. This does
+    // not affect the per-ACK live authorization path.
+    this.randomSamplingEligibilityObservation = undefined;
+    if (name === 'Chronos') this.randomSamplingChronosSchedule = undefined;
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
       return;
@@ -4333,7 +5028,34 @@ export class EVMChainAdapterBase {
     const policy = HUB_BINDING_INVALIDATORS.get(name);
     if (!policy) return;
     this.invalidateHubBindingOnRotation(policy);
+    this.rebuildChainIndexRuntimeOnRotation(policy);
     this.finalizeKnownHubRotation();
+  }
+
+  /**
+   * Retire the one log's runtime when a contract it INDEXES is rotated.
+   *
+   * Everything that decides which addresses the log speaks for is fixed at
+   * construction — the decoder registry, the per-family floors, and the
+   * addresses the binding publishes to every reader. So a rotation the runtime
+   * cannot be told about leaves it answering out of a retired proxy: the tick
+   * would go on fetching the old address, coverage would go on claiming its
+   * blocks, and `evm-adapter-events.ts` would read a confident empty list for
+   * events the NEW contract emitted. The lane advances past them regardless
+   * (`chain-event-lane-runner.ts:289`), so those events are skipped for good.
+   *
+   * Dropping the binding here is the fail-closed half and it takes effect
+   * immediately: every reader is back on its own scan, which is exactly what it
+   * did before the log existed. The rebuild is the other half —
+   * `finalizeKnownHubRotation` re-arms `init()`, `initContracts` re-resolves
+   * the rotated name and calls `startChainIndexRuntime()` again, which now
+   * passes its own guard. The CURSOR is untouched: it lives in the store, keyed
+   * by (deployment, Hub), so only the address set moves and no history is
+   * re-walked.
+   */
+  protected rebuildChainIndexRuntimeOnRotation(policy: HubBindingInvalidationPolicy): void {
+    if (!('contractKey' in policy) || !CHAIN_INDEX_CONTRACT_KEYS.has(policy.contractKey)) return;
+    this.chainIndexOwner.rebuild();
   }
 
   protected invalidateHubBindingOnRotation(policy: HubBindingInvalidationPolicy): void {
@@ -4379,6 +5101,13 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
+    this.hubBindingGeneration += 1;
+    this.knowledgeAssetStorageBindingGeneration += 1;
+    // The bulk self-heal does not know which Hub name moved. Retire the whole
+    // one-log runtime before exposing freshly resolved handles: until a runtime
+    // built around those handles attaches, every log-backed reader must use its
+    // live fallback rather than rows indexed from a retired proxy.
+    this.chainIndexOwner.rebuild();
     for (const policy of HUB_BINDING_INVALIDATORS.values()) {
       this.invalidateHubBinding(policy);
     }
@@ -4420,7 +5149,12 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.hubBindingGeneration += 1;
+    this.knowledgeAssetStorageBindingGeneration += 1;
     this.hubRotationPoller.stop();
+    // The owner disowns an in-flight build, clears the binding synchronously,
+    // and stops any current runtime without making synchronous destroy wait.
+    this.chainIndexOwner.stop();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();
     for (const provider of this.providers) {

@@ -170,10 +170,18 @@ function renderEventArgs(event: AuthorityScenarioEvent) {
 export interface AuthorityScenarioOptions {
   readonly deactivated?: boolean;
   readonly reorg?: boolean;
+  /** Operator depth; the anchor resolves to `finalizedNumber - this + 1`. */
+  readonly finalityConfirmations?: number;
   readonly secondContextGraph?: boolean;
+  readonly extraContextGraph?: Readonly<{ contextGraphId: bigint; nameHash: string }>;
   readonly zeroHashContextGraphs?: number;
   readonly lateContextGraphNameHash?: string;
   readonly finalizedNumber?: number;
+  /**
+   * The head block's own hash. Needed when the head carries events: the page
+   * reducer requires an event AT the page anchor to match the anchor's hash.
+   */
+  readonly finalizedHash?: string;
 }
 
 export interface AuthorityScenarioGate {
@@ -187,8 +195,26 @@ export interface AuthorityScenarioGate {
  */
 export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) {
   let finalizedNumber = options.finalizedNumber ?? 30;
-  let finalizedHash = FINALIZED_HASH;
+  let finalizedHash = options.finalizedHash ?? FINALIZED_HASH;
   let cachedAnchorReplaced = false;
+  const finalityConfirmations = options.finalityConfirmations ?? 1;
+  /** The height the reader's anchor resolves to, for THIS scenario's depth. */
+  const anchorNumber = () => finalizedNumber - finalityConfirmations + 1;
+  /**
+   * The reader derives its anchor from the HEAD block and
+   * `chain.finalityConfirmations`. The head is read as `getBlock('latest')`, so
+   * at the default depth the anchor read is structurally distinct from every
+   * numbered read and no bookkeeping is needed. Below the default depth the
+   * anchor IS a numbered read at `anchorNumber()`, and the stabilization fence
+   * re-reads that same height — so one flag, armed by the head read and
+   * disarmed by the first numbered read AT THE ANCHOR HEIGHT, separates them.
+   *
+   * Keying on `anchorNumber()` rather than on the head is what makes this hold
+   * at every depth: keyed on the head it never disarms below depth 1, which
+   * silently turned `holdBlockRead` into a no-op and dropped the `reorg`
+   * injection on the floor.
+   */
+  let anchorReadArmed = false;
   let replacementAuthorityFork = false;
   let currentReadGate: Readonly<{
     entered: PromiseWithResolvers<void>;
@@ -196,6 +222,10 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
   }> | undefined;
   let blockReadGate: Readonly<{
     tag: string | number;
+    entered: PromiseWithResolvers<void>;
+    release: PromiseWithResolvers<void>;
+  }> | undefined;
+  let headReadGate: Readonly<{
     entered: PromiseWithResolvers<void>;
     release: PromiseWithResolvers<void>;
   }> | undefined;
@@ -273,6 +303,28 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         to: MEMBER,
         tokenId: 10n,
       }] : []),
+      ...(options.extraContextGraph === undefined ? [] : [{
+        name: 'ContextGraphCreated' as const,
+        blockNumber: 19,
+        blockHash: `0x${'68'.repeat(32)}`,
+        index: 1,
+        contextGraphId: options.extraContextGraph.contextGraphId,
+        owner: MEMBER,
+        nameHash: options.extraContextGraph.nameHash,
+        participantAgents: [MEMBER],
+        accessPolicy: 1n,
+        publishPolicy: 0n,
+        publishAuthority: SECOND_AUTHORITY,
+        publishAuthorityAccountId: 8n,
+      }, {
+        name: 'Transfer' as const,
+        blockNumber: 19,
+        blockHash: `0x${'68'.repeat(32)}`,
+        index: 0,
+        from: ethers.ZeroAddress,
+        to: MEMBER,
+        tokenId: options.extraContextGraph.contextGraphId,
+      }]),
       {
         name: 'PublishPolicyUpdated',
         blockNumber: 20,
@@ -399,14 +451,49 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
       }
       return renderCurrentState(current, malformedPublishAuthorityAccountId);
     },
+    /**
+     * The chain head. The reader derives its anchor from this height and
+     * `chain.finalityConfirmations` — it must never ask for the `finalized` tag.
+     */
+    async getBlockNumber() {
+      return finalizedNumber;
+    },
     async getBlock(tag: string | number) {
+      if (typeof tag === 'string') {
+        if (tag !== 'latest') {
+          // The endpoint's `finalized`/`safe` markers are NOT this node's
+          // definition of finality — that is `chain.finalityConfirmations`
+          // applied to the head. A reader reaching for one has reintroduced the
+          // second notion of finality this scenario exists to keep out, so the
+          // fixture refuses rather than quietly answering with the head.
+          throw new Error(
+            `Context Graph authority reads must not use the '${tag}' block tag`,
+          );
+        }
+        // The HEAD read. Gated by `holdHeadRead()`, and at the default depth it
+        // is also the anchor read, so it must carry the anchor's hash.
+        const gate = headReadGate;
+        if (gate !== undefined) {
+          headReadGate = undefined;
+          gate.entered.resolve();
+          await gate.release.promise;
+        }
+        // Arm ONLY when the depth actually puts the anchor below the head. At
+        // depth 1 this read IS the anchor, so a later numbered read at this
+        // height is unambiguously the stabilization fence.
+        anchorReadArmed = anchorNumber() !== finalizedNumber;
+        return { number: finalizedNumber, hash: finalizedHash };
+      }
+      // A numbered read: the deeper anchor resolution below depth 1, or the
+      // stabilization fence / historical hash read.
+      const anchorResolution = anchorReadArmed && tag === anchorNumber();
+      if (anchorResolution) anchorReadArmed = false;
       const gate = blockReadGate;
-      if (gate?.tag === tag) {
+      if (gate?.tag === tag && !anchorResolution) {
         blockReadGate = undefined;
         gate.entered.resolve();
         await gate.release.promise;
       }
-      if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
       const historicalHash = tag === 30 && cachedAnchorReplaced
         ? REPLACEMENT_FINALIZED_HASH
         : tag === 30
@@ -414,7 +501,7 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
           : finalizedHash;
       return {
         number: Number(tag),
-        hash: options.reorg && tag === finalizedNumber
+        hash: options.reorg && tag === anchorNumber() && !anchorResolution
           ? REPLACEMENT_FINALIZED_HASH
           : historicalHash,
       };
@@ -448,6 +535,13 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       blockReadGate = { tag, entered, release };
+      return { entered: entered.promise, release: release.resolve };
+    },
+    /** Gate the head read that opens every anchor resolution. */
+    holdHeadRead(): AuthorityScenarioGate {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      headReadGate = { entered, release };
       return { entered: entered.promise, release: release.resolve };
     },
     setPublishAuthorityAccountId(value: unknown): void {

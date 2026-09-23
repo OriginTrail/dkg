@@ -44,6 +44,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
+import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
@@ -66,12 +67,16 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
+  snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
   loadOpWallets,
   KaNumberAllocator,
+  planAuthorityIndexBootstrap,
+  resolveAuthorityIndexConfig,
   resolveSyncAgentsMeta,
+  type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -102,6 +107,7 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
+  SqliteChainEventLogStore,
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
@@ -110,6 +116,7 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
+  assertAuthorityIndexConfigPlacement,
   saveConfig,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
@@ -193,6 +200,7 @@ import {
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
   decodeVmReconcileNegativeRow,
@@ -1129,6 +1137,12 @@ async function runDaemonInnerWithStartupOwnership(
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
+  // Snapshot peers supply authority-bearing state. Validate explicit operator
+  // trust before allocating startup resources; it always wins. Without it an
+  // edge seeds from the network file's relays, planned below from the
+  // finished agent config.
+  assertAuthorityIndexConfigPlacement(config);
+  const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
@@ -1778,6 +1792,12 @@ async function runDaemonInnerWithStartupOwnership(
     new SqliteContextGraphAuthorityHistoryStore(dashDb);
   const localContextGraphAuthorityIndexStore =
     new SqliteContextGraphAuthorityIndexStore(dashDb);
+  // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
+  // adapter builds the tick, starts it, and publishes the binding every other
+  // eligible reader consults. Per-wallet publisher adapters receive only a
+  // late-bound binding getter below — never this store — because a second store
+  // would be a second scanner, which is what this log exists to delete.
+  const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1804,7 +1824,7 @@ async function runDaemonInnerWithStartupOwnership(
     changelogEraGuard,
   });
 
-  const agent = await DKGAgent.create({
+  const agentConfig: DKGAgentConfig = {
     kaNumberAllocator,
     name: config.name,
     genesisId: network?.genesisId,
@@ -1819,9 +1839,14 @@ async function runDaemonInnerWithStartupOwnership(
     dataDir: dkgDir(),
     bootstrapPeers: config.bootstrapPeers,
     relayPeers,
+    // Only the network file's relays seed an edge without `authorityIndex`:
+    // `relayPeers` may carry operator transport relays, which never become
+    // snapshot trust, and `relay: "none"` means no relay is contacted at all.
+    networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
+    authorityIndex,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
     logging: config.logging,
@@ -1899,6 +1924,7 @@ async function runDaemonInnerWithStartupOwnership(
     contextGraphRegistryScanCursorStore,
     localContextGraphAuthorityHistoryStore,
     localContextGraphAuthorityIndexStore,
+    chainEventLogStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2108,7 +2134,18 @@ async function runDaemonInnerWithStartupOwnership(
         detail: event.detail ?? null,
       });
     },
-  });
+  };
+  // The agent plans again from this same config, so the startup line always
+  // describes the authority-index policy the node runs.
+  const authorityIndexPlan = planAuthorityIndexBootstrap(agentConfig);
+  if (authorityIndexPlan.source === 'local-history' && authorityIndexPlan.skipReason !== undefined) {
+    log(
+      `[info] [authority-index] network-relay default skipped: ${authorityIndexPlan.skipReason}; `
+      + 'using local history',
+    );
+  }
+  log(formatAuthorityIndexStartupLine(authorityIndexPlan));
+  const agent = await DKGAgent.create(agentConfig);
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the
@@ -2407,6 +2444,7 @@ async function runDaemonInnerWithStartupOwnership(
         pollIntervalMs: promoteWorkerConfig?.pollIntervalMs,
         heartbeatIntervalMs: promoteWorkerConfig?.heartbeatIntervalMs,
         shutdownTimeoutMs: promoteWorkerConfig?.shutdownTimeoutMs,
+        postCommitRecoveryIntervalMs: promoteWorkerConfig?.postCommitRecoveryIntervalMs,
       },
     });
 
@@ -2418,6 +2456,10 @@ async function runDaemonInnerWithStartupOwnership(
           store: agent.store,
           keypair: agent.wallet.keypair,
           chainBase: publisherChainBase,
+          // Late-bound: Hub rotation/rebuild clears the owner binding before a
+          // replacement exists, and every wallet must observe that gap as a
+          // live-fallback signal rather than retain the retired generation.
+          chainEventLogBindingSource: () => agent.getChainEventLogBinding(),
           ackTransportFactory: agent.createACKTransportFactory({
             sendTimeoutMs: storageAckTiming.sendTimeoutMs,
             log,
@@ -3534,6 +3576,19 @@ async function runDaemonInnerWithStartupOwnership(
         corsOrigin: resolveCorsOrigin(req, corsAllowed),
       });
       if (!authentication.allowed) return;
+
+      // Auth runs first and the route also requires a loopback peer. Snapshot
+      // capture is pure in-memory accounting: it never drains counters or
+      // initiates chain reconciliation/RPC.
+      if (handleRpcUsageSnapshotRequest({
+        req,
+        res,
+        url: reqUrl,
+        // Unlike ordinary routes, local-only diagnostics are unavailable when
+        // the operator explicitly disables API authentication.
+        authenticated: authEnabled,
+        snapshot: snapshotProcessRpcUsage,
+      })) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked

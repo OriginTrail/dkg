@@ -16,17 +16,31 @@ import type {
 } from 'ethers';
 import { errorMessage } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import {
+  captureRpcUsageIssuerContext,
+  withRpcUsageIssuerContext,
+  type RpcUsageIssuerContext,
+} from './rpc-usage.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
+
+/**
+ * Internal admission priority for a foreground read that must complete before
+ * its fail-closed security deadline. It changes queue order only: the request
+ * still consumes the operator's ordinary foreground rate budget.
+ */
+export type RpcRequestAdmissionPriority = 'authority';
 
 /** One raw-RPC policy context: priority and cancellation cannot drift apart. */
 export interface RpcRequestContext {
   readonly requestClass: RpcRequestClass;
+  readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
 }
 
 export interface RpcRequestContextInput {
   readonly requestClass?: RpcRequestClass;
+  readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
 }
 
@@ -42,6 +56,7 @@ export function activeRpcRequestContext(): RpcRequestContext {
  */
 export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () => T): T {
   const parent = activeRpcRequestContext();
+  const admissionPriority = input.admissionPriority ?? parent.admissionPriority;
   const inheritedSignal = parent.signal;
   const signal = inheritedSignal === undefined
     ? input.signal
@@ -50,6 +65,7 @@ export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () =
       : AbortSignal.any([inheritedSignal, input.signal]);
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
+    ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(signal === undefined ? {} : { signal }),
   }, fn);
 }
@@ -64,8 +80,10 @@ export function withOwnedRpcRequestContext<T>(
   fn: () => T,
 ): T {
   const parent = activeRpcRequestContext();
+  const admissionPriority = input.admissionPriority ?? parent.admissionPriority;
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
+    ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }, fn);
 }
@@ -364,16 +382,20 @@ function configuredProviderOptions(
  * debug/error events, destruction checks, response matching, and RPC errors.
  */
 class RequestContextJsonRpcProvider extends JsonRpcProvider {
-  readonly #pendingRequestContexts: Array<{ readonly context: RpcRequestContext }> = [];
+  readonly #pendingRequestContexts: Array<{
+    readonly request: RpcRequestContext;
+    readonly usage: RpcUsageIssuerContext;
+  }> = [];
 
   override _detectNetwork(): Promise<Network> {
     // Network discovery belongs to the provider lifecycle. It can be triggered
     // synchronously by the first caller's `_start()`, but must not inherit that
-    // caller's deadline and leave the shared provider retrying forever inside
-    // an already-aborted context.
+    // caller's deadline or consumer label and leave the shared provider
+    // retrying forever inside an already-aborted context (or billing a shared
+    // `eth_chainId` probe to that caller).
     return rpcRequestContext.run(
       { requestClass: 'foreground' },
-      () => super._detectNetwork(),
+      () => withRpcUsageIssuerContext({}, () => super._detectNetwork()),
     );
   }
 
@@ -381,7 +403,10 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
     method: string,
     params: Array<unknown> | Record<string, unknown>,
   ): Promise<unknown> {
-    const pending = { context: activeRpcRequestContext() };
+    const pending = {
+      request: activeRpcRequestContext(),
+      usage: captureRpcUsageIssuerContext(),
+    };
     // JsonRpcProvider.send performs this same lazy start before delegating. Do
     // it first so bootstrap network detection cannot consume a user payload's
     // queued context, then delegate the complete request lifecycle unchanged.
@@ -401,7 +426,10 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
   ): Promise<Array<JsonRpcResult>> {
     const pending = this.#pendingRequestContexts.shift();
     if (!pending) return super._send(payload);
-    return rpcRequestContext.run(pending.context, () => super._send(payload));
+    return rpcRequestContext.run(
+      pending.request,
+      () => withRpcUsageIssuerContext(pending.usage, () => super._send(payload)),
+    );
   }
 }
 

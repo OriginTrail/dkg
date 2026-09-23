@@ -1,4 +1,14 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  authorityIndexTrustDomain,
+  planAuthorityIndexBootstrap,
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexBootstrapInput,
+  type AuthorityIndexBootstrapPlan,
+  type AuthorityIndexConfig,
+  type AuthorityIndexSnapshotPlan,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
@@ -85,6 +95,7 @@ export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
 export type {
+  Rfc64AgentAuthorityResolverReadOptionsV1,
   Rfc64AuthorityReadCoordinatorSnapshotV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 export * from './rfc64/policy-cell-v1.js';
@@ -106,6 +117,21 @@ export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export {
+  FinalizedAuthorityColdResolutionV1,
+  finalizedAuthorityColdResolutionOf,
+  peekFinalizedAuthorityColdResolution,
+} from './finalized-authority-cold-resolution.js';
+export {
+  CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_ENV,
+  CHAIN_AUTHORITY_READ_TIMEOUT_ENV,
+  DEFAULT_CHAIN_AUTHORITY_READ_BUDGETS,
+  chainAuthorityReadBudgetsOf,
+  resolveChainAuthorityReadBudgets,
+  resolveChainAuthorityTimeoutMs,
+  type ChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgetsConfig,
+} from './chain-authority-read-budgets.js';
 export {
   classifySharedMemoryFreshness,
   type SelectedSharedMemorySyncResult,
@@ -315,6 +341,7 @@ export type {
   ContextGraphReadAuthoritySource,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityReadMode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,
@@ -322,6 +349,7 @@ export type {
   RegisteredContextGraphAuthorityUnavailableReason,
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
+export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-cg-resolve.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,

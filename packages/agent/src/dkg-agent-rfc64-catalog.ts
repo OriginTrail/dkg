@@ -88,9 +88,11 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
-import type {
-  AcceptRfc64CatalogAccessSnapshotInputV1,
-  AcceptedRfc64CatalogAccessSnapshotV1,
+import {
+  resolveRfc64CatalogAuthorizationRosterV1,
+  type AcceptRfc64CatalogAccessSnapshotInputV1,
+  type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogLocalAuthorizationScopeV1,
 } from './rfc64/catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogCurrentReceiverReconcilerV1,
@@ -162,8 +164,10 @@ import {
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/catalog-rollout-authority-v1.js';
-import type { Rfc64AuthorityReadCoordinatorSnapshotV1 } from
-  './rfc64/authority-rpc-circuit-breaker-v1.js';
+import type {
+  Rfc64AuthorityReadCoordinatorSnapshotV1,
+  Rfc64AuthorityReadRunOptionsV1,
+} from './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -171,13 +175,20 @@ import {
   parseRfc64AuthoritySnapshotV1,
   type Rfc64ReleaseNativeAuthoritySnapshotV1,
 } from './rfc64/release-native-catalog-authority-v1.js';
-import { readRfc64LegacySwmBoundaryCountV1 } from
+import {
+  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
+  readRfc64LegacySwmBoundaryCountV1,
+} from
   './rfc64/legacy-swm-boundary-v1.js';
 import type { Rfc64CatalogMutationCoordinatorV1 } from
   './rfc64/catalog-mutation-runtime-v1.js';
 import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
+import {
+  assertRfc64ReplayManifestScopesUniqueV1,
+  isRfc64CatalogHeadOfAcceptedGenerationV1,
+} from './rfc64/catalog-replay-generation-v1.js';
 import {
   Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
   type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
@@ -188,6 +199,7 @@ import {
 } from './rfc64/catalog-authority-refresh-loop-v1.js';
 import { loadRfc64UnregisteredReplicaAuthorityV1 } from
   './rfc64/unregistered-replica-authority-v1.js';
+import type { ContextGraphSub } from './dkg-agent-types.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -377,6 +389,10 @@ export {
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from './rfc64/catalog-authority-config-v1.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   /** Exact durable predecessor returned by genesis or a prior successor. */
@@ -554,8 +570,20 @@ const rfc64AuthorityAcceptedCatchupTimersV1 =
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64ResponsibilityAuthorityBatchRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1>();
+interface Rfc64ScheduledFinalizedAbsenceRetryV1 {
+  readonly contextGraphId: string;
+  readonly revision: number;
+  readonly attempt: number;
+  readonly delayMs: number;
+  /** Unique ownership key; attempt identity must never be reconstructed by callers. */
+  readonly key: string;
+}
 interface Rfc64ScheduledResponsibilityStateV1 {
   readonly targets: Map<string, number>;
+  readonly finalizedAbsenceRetries: Map<
+    string,
+    Readonly<Rfc64ScheduledFinalizedAbsenceRetryV1>
+  >;
   activityRevision: number;
   producerHolds: number;
 }
@@ -563,13 +591,60 @@ const rfc64ScheduledResponsibilityStatesV1 =
   new WeakMap<DKGAgent, Rfc64ScheduledResponsibilityStateV1>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1 = 'responsibility-batch';
+const RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_KEY_PREFIX_V1 =
+  'responsibility-finalized-absence-retry';
 const RFC64_SCHEDULED_RESPONSIBILITY_QUIET_MS_V1 = 25;
 const RFC64_SCHEDULED_RESPONSIBILITY_MAX_COALESCE_MS_V1 = 1_000;
 const RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1 = 30_000;
+const RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_DELAYS_MS_V1 = Object.freeze([
+  30_000,
+  60_000,
+  120_000,
+  240_000,
+]);
+const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
+  250,
+  1_000,
+  4_000,
+]);
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
 export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
+
+type Rfc64ActiveRegisteredSubscriptionV1 = ContextGraphSub & Required<
+  Pick<ContextGraphSub, 'onChainId' | 'onChainHash'>
+>;
+
+function isRfc64ActiveRegisteredSubscriptionV1(
+  subscription: ContextGraphSub | undefined,
+): subscription is Rfc64ActiveRegisteredSubscriptionV1 {
+  return subscription?.subscribed === true
+    && subscription.onChainId !== undefined
+    && subscription.onChainHash !== undefined;
+}
+
+/**
+ * Construct the complete retry identity once so dispatcher-key uniqueness,
+ * the revision fence, attempt, and delay cannot drift at separate call sites.
+ */
+function createRfc64ScheduledFinalizedAbsenceRetryV1(
+  contextGraphId: string,
+  revision: number,
+  attempt: number,
+): Readonly<Rfc64ScheduledFinalizedAbsenceRetryV1> | null {
+  const delayMs = RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_DELAYS_MS_V1[attempt - 1];
+  if (delayMs === undefined) return null;
+  return Object.freeze({
+    contextGraphId,
+    revision,
+    attempt,
+    delayMs,
+    key: `${RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_KEY_PREFIX_V1}\0${
+      contextGraphId
+    }\0${revision}\0${attempt}`,
+  });
+}
 
 /** Pure projection of responsibility through the accepted-authority refresh fence. */
 function projectRfc64ResponsibilityAuthorityWithRefreshFenceV1(input: {
@@ -1195,7 +1270,12 @@ function rfc64ScheduledResponsibilityStateForV1(
 ): Rfc64ScheduledResponsibilityStateV1 {
   let state = rfc64ScheduledResponsibilityStatesV1.get(agent);
   if (state === undefined) {
-    state = { targets: new Map(), activityRevision: 0, producerHolds: 0 };
+    state = {
+      targets: new Map(),
+      finalizedAbsenceRetries: new Map(),
+      activityRevision: 0,
+      producerHolds: 0,
+    };
     rfc64ScheduledResponsibilityStatesV1.set(agent, state);
   }
   return state;
@@ -1398,13 +1478,30 @@ export function projectRfc64OperationalRowCountsV1(
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Stable recovery capabilities are captured once per agent-owned runtime. */
+  /**
+   * The node's SINGLE finality depth, taken from the adapter that actually
+   * resolves the anchors whenever it can report one.
+   *
+   * `dkg-agent-types.ts` documents `chainAdapter` as "If provided, chainConfig
+   * is ignored", so in the SDK-embedding shape `chainConfig.finalityConfirmations`
+   * is absent or stale while the adapter holds the operator's real value. An
+   * adapter that does not implement the accessor (mocks, out-of-tree adapters)
+   * has no opinion, and the configured value stands.
+   */
+  private resolveChainFinalityConfirmationsV1(this: DKGAgent): number | undefined {
+    const fromAdapter = typeof this.chain.getFinalityConfirmations === 'function'
+      ? this.chain.getFinalityConfirmations()
+      : undefined;
+    return fromAdapter ?? this.config.chainConfig?.finalityConfirmations;
+  }
+
   private rfc64CatalogReplayRecoveryRuntimeV1(
     this: DKGAgent,
   ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
     let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
     if (runtime !== undefined) return runtime;
     runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
-      requestPeer: async (contextGraphId, remotePeerId) => {
+      requestPeer: async (contextGraphId, remotePeerId, signal) => {
         const service = this.rfc64PublicCatalogServiceV1;
         const networkId = (
           this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -1422,6 +1519,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             remotePeerId,
             networkId,
             contextGraphId: contextGraphId as ContextGraphIdV1,
+            ...(signal === undefined ? {} : { signal }),
           });
           return Object.freeze({
             status: 'completed' as const,
@@ -1435,8 +1533,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           throw error;
         }
       },
-      whenReceiverIdle: async () => {
-        await this.rfc64PublicCatalogServiceV1?.whenReceiverIdle();
+      whenReceiverIdleForContextGraph: async (contextGraphId, signal) => {
+        await this.rfc64PublicCatalogServiceV1
+          ?.whenReceiverIdleForContextGraph(contextGraphId, signal);
       },
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
       pruneSupersededTargets: pruneRfc64SupersededCatalogTargetsV1,
@@ -1482,10 +1581,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reannounce: (replayPeerId) =>
           this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId),
         replay: (contextGraphId, replayDemand) =>
-          this.requestRfc64CatalogHeadReplayForConnectionDemandV1(
-            contextGraphId,
+          this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
+            kind: 'connection-demand',
             replayDemand,
-          ),
+          }),
         warn: (message) => this.log.warn(createOperationContext('system'), message),
       });
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
@@ -1913,7 +2012,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
       return null;
     }
-    const gate = await this.getMemberRecoveryGate(contextGraphId).catch(() => null);
+    const gate = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.rfc64Roster,
+      () => this.getMemberRecoveryGate(contextGraphId),
+    ).catch(() => null);
     if (gate === null || gate.length === 0) return null;
     const members = new Set<EvmAddressV1>();
     for (const candidate of gate) {
@@ -1941,10 +2043,24 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async resolveRfc64CatalogLocalAgentAddressV1(
     this: DKGAgent,
     contextGraphId: string,
+    authorizationScope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
   ): Promise<EvmAddressV1 | null> {
-    const roster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+    // Transport authorization already owns an accepted-current, immutable
+    // policy/roster generation. Reuse its exact member set inside this one
+    // authorization attempt instead of performing another live chain roster
+    // read. Non-transport callers omit the scope and retain the live path.
+    const roster = await resolveRfc64CatalogAuthorizationRosterV1(
+      contextGraphId as ContextGraphIdV1,
+      authorizationScope,
+      () => this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId),
+    );
     if (roster === null) return null;
-    const rosterSet = new Set(roster);
+    const rosterSet = new Set<EvmAddressV1>();
+    for (const address of roster) {
+      if (!ethers.isAddress(address) || address === ethers.ZeroAddress) return null;
+      rosterSet.add(address.toLowerCase() as EvmAddressV1);
+    }
+    if (rosterSet.size === 0) return null;
     const configured = this.config.rfc64CatalogAccessPolicyAuthority
       ?.localAgentAddress
       ?.toLowerCase();
@@ -1981,25 +2097,71 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return matching.length === 1 ? matching[0]! : null;
   }
 
-  /** Read the exact current owner generation used to bind a curator peer. */
+  /** Canonical coordinated boundary for one registered authority snapshot. */
+  private async readRfc64RegisteredAuthoritySnapshotV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    signal?: AbortSignal,
+    runOptions: Rfc64AuthorityReadRunOptionsV1 = {},
+  ) {
+    if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
+    return this.rfc64AuthorityReadCoordinatorV1.run(
+      signal,
+      async (readSignal, evidence) => {
+        try {
+          const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
+            contextGraphId,
+            evidence.agentResolverReadOptions(readSignal),
+          );
+          readSignal.throwIfAborted();
+          if (target === null) return null;
+          const { expectedNameHash, expectedOnChainId } = target;
+          const snapshot = parseRfc64AuthoritySnapshotV1(
+            target.kind === 'resolved-snapshot'
+              ? target.finalizedSnapshot
+              : await requireRfc64ContextGraphAuthorityReaderV1(
+                this.contextGraphAuthorityReaderCapability,
+              ).getContextGraphAuthoritySnapshot(
+                expectedOnChainId,
+                evidence.chainReadOptions(readSignal),
+              ),
+            expectedOnChainId,
+          );
+          return { expectedNameHash, expectedOnChainId, snapshot } as const;
+        } finally {
+          await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
+        }
+      },
+      runOptions,
+    );
+  }
+
+  /**
+   * Read the exact current owner generation used to bind a curator peer.
+   *
+   * `admitWhileOpen` belongs only to a caller that stamps the binding into a
+   * one-shot join decision: the substrate outbox replays the payload bytes it
+   * was given, so a deferral there does not postpone the send, it ships a
+   * decision permanently missing its binding. Repeatable callers — notably the
+   * per-message catalog admission hook — leave it off: refused, they defer
+   * without reaching a provider, and admitting one probe per inbound message
+   * for the length of an outage is the stampede the circuit exists to prevent.
+   */
   async readRfc64CurrentCuratorAuthorityBindingV1(
     this: DKGAgent,
     contextGraphId: string,
+    options: { admitWhileOpen?: boolean } = {},
   ): Promise<Readonly<{
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
-    const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(contextGraphId);
-    if (target !== null) {
-      const { expectedNameHash, expectedOnChainId } = target;
-      const snapshot = parseRfc64AuthoritySnapshotV1(
-        target.kind === 'resolved-snapshot'
-          ? target.finalizedSnapshot
-          : await requireRfc64ContextGraphAuthorityReaderV1(
-            this.contextGraphAuthorityReaderCapability,
-          ).getContextGraphAuthoritySnapshot(expectedOnChainId),
-        expectedOnChainId,
-      );
+    const registeredAuthority = await this.readRfc64RegisteredAuthoritySnapshotV1(
+      contextGraphId,
+      undefined,
+      options.admitWhileOpen === true ? { admitWhileOpen: true } : {},
+    );
+    if (registeredAuthority !== null) {
+      const { expectedNameHash, snapshot } = registeredAuthority;
       if (!snapshot.active || snapshot.nameHash !== expectedNameHash) return null;
       return Object.freeze({
         agentAddress: snapshot.owner,
@@ -2188,12 +2350,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
         readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
           undefined,
-          async (readSignal) => {
+          async (readSignal, evidence) => {
             try {
               return await readSnapshots.call(
                 indexedReader,
                 targets,
-                { signal: readSignal },
+                evidence.chainReadOptions(readSignal),
               );
             } finally {
               await indexedReader.whenIdle();
@@ -2242,11 +2404,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const registeredCandidates = contextGraphIds.filter((id) => !localFirst.has(id));
     const resolution = await this.rfc64AuthorityReadCoordinatorV1.run(
       signal,
-      async (readSignal) => {
+      async (readSignal, evidence) => {
         try {
           return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
             registeredCandidates,
-            { signal: readSignal },
+            evidence.agentResolverReadOptions(readSignal),
           );
         } finally {
           await indexedReader.whenIdle();
@@ -2308,9 +2470,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
           readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
             undefined,
-            async (readSignal) => {
+            async (readSignal, evidence) => {
               try {
-                return await readSnapshots.call(indexedReader, targets, { signal: readSignal });
+                return await readSnapshots.call(
+                  indexedReader,
+                  targets,
+                  evidence.chainReadOptions(readSignal),
+                );
               } finally {
                 await indexedReader.whenIdle();
               }
@@ -2695,6 +2861,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // and deactivate the registry/receiver synchronously instead of waiting
       // behind that batch's physical RPC or retry delay.
       targets.delete(contextGraphId);
+      this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId);
       state.activityRevision += 1;
       if (isCurrentRfc64CatalogResponsibilityRevisionV1(
         this,
@@ -2736,6 +2903,100 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
       if (!scheduled) state.targets.clear();
     };
+  }
+
+  /** Central retry-state teardown for terminal and successfully resolved revisions. */
+  private clearRfc64ScheduledFinalizedAbsenceRetryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    expectedRevision?: number,
+  ): void {
+    const retries = rfc64ScheduledResponsibilityStateForV1(this)
+      .finalizedAbsenceRetries;
+    if (
+      expectedRevision !== undefined
+      && retries.get(contextGraphId)?.revision !== expectedRevision
+    ) return;
+    retries.delete(contextGraphId);
+  }
+
+  /**
+   * Arm one bounded, independently owned finalized-index retry.
+   *
+   * The initial selection remains fail-closed. Each retry sleeps under its
+   * own dispatcher key so the shared responsibility batch remains available
+   * to unrelated lifecycle notifications. Revision checks fence stale timers,
+   * and the finite delay schedule bounds both RPC work and dispatcher drain.
+   */
+  private scheduleRfc64ScheduledFinalizedAbsenceRetryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    revision: number,
+    authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1,
+    responsibility: Rfc64CatalogResponsibilitySelectionV1,
+  ): void {
+    const state = rfc64ScheduledResponsibilityStateForV1(this);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    const eligible = authorityRequest.kind === 'finalized-absence'
+      && !responsibility.active
+      && !this.config.rfc64CatalogExecutionPlan.killSwitchActive
+      && isRfc64ActiveRegisteredSubscriptionV1(subscription)
+      && isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision);
+    if (!eligible) {
+      this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, revision);
+      return;
+    }
+
+    const previous = state.finalizedAbsenceRetries.get(contextGraphId);
+    const attempt = previous?.revision === revision ? previous.attempt + 1 : 1;
+    const retry = createRfc64ScheduledFinalizedAbsenceRetryV1(
+      contextGraphId,
+      revision,
+      attempt,
+    );
+    if (retry === null) return;
+    state.finalizedAbsenceRetries.set(contextGraphId, retry);
+    const scheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+      retry.key,
+      async (signal) => {
+        await waitForRfc64ScheduledResponsibilityDelayV1(signal, retry.delayMs);
+        signal.throwIfAborted();
+        if (state.finalizedAbsenceRetries.get(contextGraphId) !== retry) return;
+        if (!isCurrentRfc64CatalogResponsibilityRevisionV1(
+          this,
+          contextGraphId,
+          retry.revision,
+        )) {
+          this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
+            contextGraphId,
+            retry.revision,
+          );
+          return;
+        }
+        const currentSubscription = this.subscribedContextGraphs.get(contextGraphId);
+        if (!isRfc64ActiveRegisteredSubscriptionV1(currentSubscription)) {
+          this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
+            contextGraphId,
+            retry.revision,
+          );
+          return;
+        }
+        if (!state.targets.has(contextGraphId)) {
+          state.targets.set(contextGraphId, retry.revision);
+          state.activityRevision += 1;
+        }
+        const batchScheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+          RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+          (ownerSignal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(ownerSignal),
+        );
+        if (!batchScheduled && state.targets.get(contextGraphId) === retry.revision) {
+          state.targets.delete(contextGraphId);
+        }
+      },
+    );
+    if (!scheduled) {
+      this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, retry.revision);
+    }
   }
 
   /** One immutable scheduled selection set owns one finalized authority batch. */
@@ -2886,14 +3147,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         revision,
       )) continue;
       try {
-        await this.reconcileRfc64CatalogResponsibilityCoreV1(
+        const authorityRequest = requests.get(contextGraphId)!;
+        const responsibility = await this.reconcileRfc64CatalogResponsibilityCoreV1(
           contextGraphId,
           ownerSignal,
           {
             deferRegisteredAuthority: true,
             revision,
-            authorityRequest: requests.get(contextGraphId)!,
+            authorityRequest,
           },
+        );
+        this.scheduleRfc64ScheduledFinalizedAbsenceRetryV1(
+          contextGraphId,
+          revision,
+          authorityRequest,
+          responsibility,
         );
       } catch (error) {
         if (ownerSignal.aborted) {
@@ -3130,34 +3398,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ),
           } as const;
         })()
-        : await this.rfc64AuthorityReadCoordinatorV1.run(
-          signal,
-          async (readSignal) => {
-            try {
-              const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
-                contextGraphId,
-                { signal: readSignal },
-              );
-              if (readSignal?.aborted) throw readSignal.reason;
-              if (target === null) return null;
-              const { expectedNameHash, expectedOnChainId } = target;
-              const snapshot = parseRfc64AuthoritySnapshotV1(
-                target.kind === 'resolved-snapshot'
-                  ? target.finalizedSnapshot
-                  : await requireRfc64ContextGraphAuthorityReaderV1(
-                    this.contextGraphAuthorityReaderCapability,
-                  ).getContextGraphAuthoritySnapshot(
-                    expectedOnChainId,
-                    { signal: readSignal },
-                  ),
-                expectedOnChainId,
-              );
-              return { expectedNameHash, expectedOnChainId, snapshot } as const;
-            } finally {
-              await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
-            }
-          },
-        );
+        : await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId, signal);
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
       if (registeredAuthorityRead !== null) {
         const { expectedNameHash, snapshot } = registeredAuthorityRead;
@@ -3344,7 +3585,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
       }
-      await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
+      this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+        contextGraphId,
+        acceptedAuthority.policyDigest,
+      );
       return authority;
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
@@ -3397,6 +3641,43 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       throw error;
     }
+  }
+
+  /**
+   * Release the authority single-flight before catalog promotion or replay can
+   * wait on receiver admission. The keyed dispatcher owns cancellation,
+   * coalescing, error reporting, and shutdown drain for the detached work.
+   */
+  private scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    policyDigest: Digest32V1,
+  ): void {
+    const workKey = `authority-catalog-recovery\0${contextGraphId}\0${policyDigest}`;
+    this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(workKey, async (signal) => {
+      for (
+        let attempt = 0;
+        attempt <= RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1.length;
+        attempt += 1
+      ) {
+        try {
+          await this.promoteRfc64OwnerSignedSwmInventoriesV1(contextGraphId, signal);
+          signal.throwIfAborted();
+          await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+            contextGraphId,
+            signal,
+          );
+          return;
+        } catch (error) {
+          if (signal.aborted) throw signal.reason ?? error;
+          const retryDelayMs = RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1[
+            attempt
+          ];
+          if (retryDelayMs === undefined) throw error;
+          await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
+        }
+      }
+    });
   }
 
   /**
@@ -3761,8 +4042,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       localPeerId: this.peerId,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority
         ?? {
-          resolveLocalAgentAddress: (contextGraphId) =>
-            this.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId),
+          resolveLocalAgentAddress: (contextGraphId, authorizationScope) =>
+            this.resolveRfc64CatalogLocalAgentAddressV1(
+              contextGraphId,
+              authorizationScope,
+            ),
           resolveRemoteAgentAddress: (peerId, contextGraphId) =>
             this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
         },
@@ -4022,6 +4306,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
       rfc64CatalogReplayRuntimesV1.delete(this);
+      rfc64CatalogReplaySnapshotRuntimesV1.delete(this);
       rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
       rfc64CatalogReplayRecoveryRuntimesV1.delete(this);
       rfc64CatalogReplayConnectionRuntimesV1.get(this)?.reset();
@@ -4294,6 +4579,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           ) {
             throw new Error('RFC-64 scoped catalog replay policy changed before snapshot');
           }
+          // A CG authored before its registration keeps owner-signed heads
+          // alongside the finalized-chain heads that follow. Both are durable
+          // and current for their own catalog scope, but the announcement
+          // carries neither the governance binding nor the ownership
+          // transition, so on the wire they are one scope — and a manifest
+          // that repeats a scope cannot encode. Replaying a superseded
+          // generation under the current policy digest is unusable to the
+          // receiver anyway: its catalog scope digest no longer matches.
+          if (!isRfc64CatalogHeadOfAcceptedGenerationV1(head.payload, accepted.policy)) {
+            continue;
+          }
           manifest.push(Object.freeze({
             kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
             networkId: head.payload.networkId,
@@ -4318,6 +4614,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           const rightKey = rfc64CatalogTargetExactIdentityKeyV1(right);
           return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
         });
+        // The generation filter above is what keeps one author lane to one
+        // wire scope, but it can only compare the fields the accepted policy
+        // carries. Assert the guarantee the V2 completion depends on here,
+        // where the offending scope can still be named, rather than letting
+        // the encoder fail the whole response at delivery time.
+        assertRfc64ReplayManifestScopesUniqueV1(manifest);
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
           try {
@@ -4347,32 +4649,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
     this: DKGAgent,
     contextGraphId: string,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
       kind: 'connected-peers',
-    });
+    }, signal);
   }
 
   /** Continue only already-owned recovery demand without reseeding peers. */
   async continueRfc64CatalogHeadReplayRecoveryV1(
     this: DKGAgent,
     contextGraphId: string,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
       kind: 'pending-recovery',
-    });
-  }
-
-  /** Consume one admission-owned connection demand without a full peer scan. */
-  async requestRfc64CatalogHeadReplayForConnectionDemandV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    replayDemand: Rfc64CatalogReplayPeerDemandV1,
-  ): Promise<Readonly<{ requested: number; failed: number }>> {
-    return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-      kind: 'connection-demand',
-      replayDemand,
-    });
+    }, signal);
   }
 
   private async requestRfc64CatalogHeadReplayV1(
@@ -4386,7 +4678,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           replayDemand: Rfc64CatalogReplayPeerDemandV1;
         }
     >,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
+    signal?.throwIfAborted();
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -4414,17 +4708,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       case 'connected-peers':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'full-connected-peers',
           connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
         });
       case 'pending-recovery':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'pending-recovery',
         });
       case 'connection-demand':
         return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'connection-demand',
           demand: request.replayDemand,
         });
@@ -4819,6 +5116,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           rpcEndpoints: chainConfig === undefined
             ? null
             : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
+          // accepts a pre-built `chainAdapter`, and in that mode
+          // `chainConfig` is ignored, so reading it here would pin the
+          // precommits to the default while the adapter's own authority
+          // reads honoured the operator. One anchor, one source.
+          finalityConfirmations: this.resolveChainFinalityConfirmationsV1(),
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),
@@ -4828,6 +5131,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           rpcEndpoints: chainConfig === undefined
             ? null
             : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          // The ADAPTER's resolved depth, not the raw config: `DKGAgent`
+          // accepts a pre-built `chainAdapter`, and in that mode
+          // `chainConfig` is ignored, so reading it here would pin the
+          // precommits to the default while the adapter's own authority
+          // reads honoured the operator. One anchor, one source.
+          finalityConfirmations: this.resolveChainFinalityConfirmationsV1(),
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),
@@ -4873,6 +5182,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           store: this.store,
           verifyIssuerSignature: clients.verifyIssuerSignature,
           beforeAppliedHeadCommit,
+          acquireLegacySwmBoundaryLease: (scope) =>
+            acquireRfc64LegacySwmBoundaryReceiverLeaseV1(this, scope),
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         readNativeResourceStats = () => nativeReceiver.resourceStats();

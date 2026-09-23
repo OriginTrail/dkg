@@ -305,10 +305,10 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -335,6 +335,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -381,7 +382,9 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphAuthorityReadMode } from './registered-context-graph-authority.js';
 import {
+  ContextGraphReadAuthorityUnavailableError,
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -389,6 +392,22 @@ import {
 import { runBoundedOperation } from './bounded-operation.js';
 import { isRfc64UnregisteredOwnerUnresolvedErrorV1 } from './dkg-agent-rfc64-catalog.js';
 import type { Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 } from './dkg-agent-rfc64-seed-fetch.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
+
+/**
+ * Request-local plan for one canonical read-authority resolution. Every internal
+ * caller states its lane explicitly, so a new call site cannot silently land in
+ * a different authority view than it intends.
+ */
+interface ContextGraphReadAuthorityPlan {
+  registrationTimeoutMs: number;
+  authorityReadMode: ContextGraphAuthorityReadMode;
+  /** Subscription bootstrap proves the accepted public policy itself. */
+  hasAcceptedRfc64PublicPolicy?: boolean;
+}
 
 export class QueryMethods extends DKGAgentBase {
   async query(this: DKGAgent,
@@ -525,24 +544,44 @@ export class QueryMethods extends DKGAgentBase {
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
 
+    let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
+    if (opts.contextGraphId) {
+      const scopedContextGraphId = opts.contextGraphId;
+      // Keep the public read-authority seam: tests and embedders stub it, and
+      // the outer `query` RPC site already owns attribution for the nested call.
+      scopedReadAuthority = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.query,
+        () => this.resolveContextGraphReadAuthority(scopedContextGraphId, {
+          callerAgentAddress: callerAgentAddressStr,
+          allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
+          signal: opts.signal,
+          authorityReadMode: 'finalized-index',
+        }),
+      );
+      if (scopedReadAuthority.outcome === 'unavailable') {
+        throw new ContextGraphReadAuthorityUnavailableError(
+          opts.contextGraphId,
+          scopedReadAuthority,
+        );
+      }
+      if (scopedReadAuthority.outcome === 'denied') {
+        this.log.info(ctx, `Query denied for context graph "${opts.contextGraphId}"`);
+        // A-1 follow-up review: synthetic deny must match the SPARQL form
+        // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
+        // instead of a SELECT-shaped `{ bindings: [] }`.
+        return emptyQueryResultForKind(sparql);
+      }
+    }
+
     if (
       opts.contextGraphId
       && targetsSharedMemory
       && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
         callerAgentAddress: callerAgentAddressStr,
+        readAuthority: scopedReadAuthority,
       }))
     ) {
       this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
-      return emptyQueryResultForKind(sparql);
-    }
-
-    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId, {
-      callerAgentAddress: callerAgentAddressStr,
-    }))) {
-      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      // A-1 follow-up review: synthetic deny must match the SPARQL form
-      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
-      // instead of a SELECT-shaped `{ bindings: [] }`.
       return emptyQueryResultForKind(sparql);
     }
 
@@ -704,9 +743,14 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /** Read-only gates may consume the finalized snapshot; defaults to `live-current`. */
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<boolean> {
-    return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
+    return (await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.canRead,
+      () => this.resolveContextGraphReadAuthority(contextGraphId, opts),
+    )).outcome === 'allowed';
   }
 
   /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
@@ -730,7 +774,13 @@ export class QueryMethods extends DKGAgentBase {
     return prepareUnscopedContextGraphReadChecks({
       createReadAuthorityInput: (id, signal) => (
         QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-          this, id, { callerAgentAddress: opts.callerAgentAddress, signal }, CHAIN_POLICY_READ_TIMEOUT_MS,
+          this,
+          id,
+          { callerAgentAddress: opts.callerAgentAddress, signal },
+          {
+            registrationTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+            authorityReadMode: 'finalized-index',
+          },
         )
       ),
       prepareRegistrationReadPlan: (candidateIds, readSignal) => (
@@ -753,13 +803,27 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /**
+       * Scoped query reads and the read-only host/sync/share gates consume the
+       * finalized authority projection and fall back to current state when the
+       * index holds no evidence (e.g. no snapshot); every other caller
+       * (admission, the default `canReadContextGraph`) keeps current state.
+       */
+      authorityReadMode?: ContextGraphAuthorityReadMode;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
-    return QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
-      this,
-      contextGraphId,
-      opts,
-      CHAIN_POLICY_READ_TIMEOUT_MS,
+    const { authorityReadMode = 'live-current', ...readOpts } = opts;
+    return withRpcUsageSite(
+      CG_AUTH_RPC_SITES.readAuthority,
+      () => QueryMethods.prototype.resolveContextGraphReadAuthorityWithRegistrationTimeout.call(
+        this,
+        contextGraphId,
+        readOpts,
+        {
+          registrationTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+          authorityReadMode,
+        },
+      ),
     );
   }
 
@@ -770,6 +834,12 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /**
+       * Freshly loaded durable row for this exact bootstrap candidate. Its
+       * canonical numeric id may skip name discovery, but never the fresh
+       * policy/roster authority gate below.
+       */
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
     } = {},
   ): Promise<ContextGraphReadAuthorityDecision> {
     try {
@@ -781,10 +851,14 @@ export class QueryMethods extends DKGAgentBase {
               this,
               contextGraphId,
               boundedOpts,
-              CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-              this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-                ? true
-                : undefined,
+              {
+                registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+                authorityReadMode: 'live-current',
+                hasAcceptedRfc64PublicPolicy:
+                  this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                    ? true
+                    : undefined,
+              },
             ),
           );
           const initial = await resolve();
@@ -801,7 +875,7 @@ export class QueryMethods extends DKGAgentBase {
           // reopen legacy scalar RPC discovery. A forged/missing seed preserves
           // the initial denial. Local state runs FIRST so a replica that
           // already holds the seed never spends its caller's budget (restart
-          // rehydration passes CHAIN_POLICY_READ_TIMEOUT_MS) on the network.
+          // rehydration passes the request-scoped authority deadline) on the network.
           const finalizedAbsence = Object.freeze({ kind: 'finalized-absence' as const });
           try {
             await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal, finalizedAbsence);
@@ -899,11 +973,14 @@ export class QueryMethods extends DKGAgentBase {
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
     },
-    registrationTimeoutMs: number,
+    plan: ContextGraphReadAuthorityPlan,
   ): Promise<ContextGraphReadAuthorityDecision> {
     return resolveContextGraphReadAuthorityDecision(
       QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-        this, contextGraphId, opts, registrationTimeoutMs,
+        this,
+        contextGraphId,
+        opts,
+        plan,
       ),
     );
   }
@@ -914,10 +991,11 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
     },
-    registrationTimeoutMs: number,
-    hasAcceptedRfc64PublicPolicy?: boolean,
+    plan: ContextGraphReadAuthorityPlan,
   ): ContextGraphReadAuthorityInput {
+    const { registrationTimeoutMs, authorityReadMode, hasAcceptedRfc64PublicPolicy } = plan;
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
@@ -928,16 +1006,30 @@ export class QueryMethods extends DKGAgentBase {
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
       getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
-      getRegisteredAuthority: () => (
-        this.resolveRegisteredContextGraphAuthority(
+      getRegisteredAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.readRegistered,
+        () => this.resolveRegisteredContextGraphAuthority(
           contextGraphId,
           {
             registrationTimeoutMs,
             signal: opts.signal,
+            ...(opts.durableSubscriptionBinding === undefined
+              ? {}
+              : { durableSubscriptionBinding: opts.durableSubscriptionBinding }),
             allowAcceptedRfc64FinalizedAbsence:
               this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+            authorityReadMode,
+            // READ authorization, and therefore correctable by the next read.
+            // A roster this node has not caught up on denies a member who was
+            // just added — they retry and are let in — and admits one who was
+            // just removed for at most the index's freshness bound. Neither
+            // outcome hands out anything that outlives the bound, which is what
+            // separates this from key issuance and from the roster mutation
+            // itself. Inert unless the operator enables
+            // `chain.boundedAuthorityReads`.
+            freshness: 'bounded',
           },
-        )
+        ),
       ),
       isAgentAllowed: (agentAddress, roster) => this.isAgentAddressAllowed(agentAddress, roster),
       hasLocalAgentInRoster: (roster) => this.hasLocalAgentInGate(roster),
@@ -954,7 +1046,10 @@ export class QueryMethods extends DKGAgentBase {
       isPendingMetadata:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
       isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),
-      getLocalAgentGate: () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      getLocalAgentGate: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.readLocalGate,
+        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      ),
       getLegacyParticipants: () => this.getPrivateContextGraphParticipants(contextGraphId),
       // A crash-safe join approval may restore a restricted pending-metadata
       // row before ordinary read authority is proven. Its durable subscription
