@@ -40,7 +40,7 @@ type StoreQuadsCacheEntry =
 
 let storeQuadsCache: StoreQuadsCacheEntry | null = null;
 // The running count, if any. Only the count that still holds this marker may
-// publish its result: see getCachedExternalStoreQuads().
+// publish its result: see requestExternalStoreQuads().
 let storeQuadsInflight: Promise<void> | null = null;
 
 /**
@@ -110,7 +110,7 @@ function isStoreQuadsCacheFresh(now: number): boolean {
  * that decision, so a recount this call started already shows as `pending`
  * (no cached result) or as refreshing the cached one.
  */
-export function getCachedExternalStoreQuads(
+export function requestExternalStoreQuads(
   agent: DKGAgent,
   now: number,
 ): StoreQuadsStatusFields {

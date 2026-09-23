@@ -18,7 +18,7 @@ interface StoreFields {
  * Run `dkg status` against a stubbed client. `peek` answers plain status
  * requests and `requested` answers those asking for a store count.
  */
-async function renderStatus(peek: StoreFields, requested: StoreFields = peek): Promise<{
+async function renderStatus(peek: StoreFields, requested: StoreFields | Error = peek): Promise<{
   storeLine: string | undefined;
   statusRequests: unknown[][];
 }> {
@@ -27,11 +27,16 @@ async function renderStatus(peek: StoreFields, requested: StoreFields = peek): P
   const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
     lines.push(args.map(String).join(' '));
   });
+  // The command exits 1 on an error; make that fail the test instead.
+  const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    throw new Error(`dkg status exited with ${code}`);
+  }) as never);
   const connectSpy = vi.spyOn(ApiClient, 'connect').mockResolvedValue({
     controlPlaneWarning: null,
     status: async (...args: unknown[]) => {
       statusRequests.push(args);
       const options = args[0] as { includeStoreQuads?: boolean } | undefined;
+      if (options?.includeStoreQuads && requested instanceof Error) throw requested;
       return {
         name: 'status-store-test',
         peerId: 'peer-status-store-test',
@@ -41,7 +46,7 @@ async function renderStatus(peek: StoreFields, requested: StoreFields = peek): P
         multiaddrs: [],
         storeBackend: 'sparql-http',
         storeUrl: 'http://127.0.0.1:9999/query',
-        ...(options?.includeStoreQuads ? requested : peek),
+        ...(options?.includeStoreQuads ? requested as StoreFields : peek),
       };
     },
   } as never);
@@ -57,6 +62,7 @@ async function renderStatus(peek: StoreFields, requested: StoreFields = peek): P
     };
   } finally {
     connectSpy.mockRestore();
+    exitSpy.mockRestore();
     logSpy.mockRestore();
   }
 }
@@ -183,6 +189,16 @@ describe('dkg status external-store count requests', () => {
     );
 
     expect(storeLine).toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — 70 quads');
+  });
+
+  it('prints the plain response when the optional refresh request fails', async () => {
+    const { storeLine, statusRequests } = await renderStatus(
+      { storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 700_000, storeReachability: 'reachable' },
+      new Error('socket hang up'),
+    );
+
+    expect(statusRequests).toEqual(PLAIN_THEN_COUNT);
+    expect(storeLine).toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — 66 quads (checked 11m 40s ago)');
   });
 
   it('keeps this run\'s reachability when it renders the refreshed count', async () => {

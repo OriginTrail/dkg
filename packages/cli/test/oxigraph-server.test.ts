@@ -29,9 +29,9 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import {
-  getCachedExternalStoreQuads,
   invalidateExternalStoreQuadsCache,
   peekCachedExternalStoreQuads,
+  requestExternalStoreQuads,
 } from '../src/daemon/store-quads-cache.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
@@ -331,14 +331,14 @@ describe('startOxigraphServer (real child processes)', () => {
           throw new Error('Managed Oxigraph is recovering; query was not started');
         },
       },
-    } as unknown as Parameters<typeof getCachedExternalStoreQuads>[0];
+    } as unknown as Parameters<typeof requestExternalStoreQuads>[0];
     try {
       process.kill(await fetchPid(port), 'SIGKILL');
       for (let i = 0; i < 100 && !handle.getRecoveryState().recovering; i++) await sleep(10);
       expect(handle.getRecoveryState().recovering).toBe(true);
 
       // `dkg status` asks for a count during the outage, and it fails.
-      getCachedExternalStoreQuads(recoveringAgent, Date.now());
+      requestExternalStoreQuads(recoveringAgent, Date.now());
       await sleep(0);
       expect(peekCachedExternalStoreQuads(Date.now())).toMatchObject({ storeQuadsStatus: 'unreachable' });
 
