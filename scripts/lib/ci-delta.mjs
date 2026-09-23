@@ -127,6 +127,7 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: EVM_SCOPES,
   },
   'packages/storage': {
+    // kosava_node_ui: node-ui tests import storage source by relative path.
     lanes: [
       'tornado_core',
       'tornado_blazegraph',
@@ -134,6 +135,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_agent',
       'bura_cli',
       'bura_query',
+      'kosava_node_ui',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -187,7 +189,8 @@ export const WORKSPACE_RULES = Object.freeze({
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
-    evmScopes: ['agent'],
+    // chain: the chain scope's node-ui identity-wallet suite starts a DKGAgent.
+    evmScopes: ['chain', 'agent'],
   },
   'packages/cli': {
     lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
@@ -366,18 +369,28 @@ const MAX_REPORTED_FILES = 200;
 // scripts/ci/trusted-controller-pins.mjs and enforced by sparseCheckoutPaths(),
 // so a fifth entry hard-fails every workflow that runs the planner. The
 // manifest names the test files the chain scope RUNS; the patterns below name
-// the SOURCE changes that must trigger it. Drift between the two copies is
-// guarded from the test side in scripts/lib/__tests__/ci-delta-routing.test.mjs.
+// the SOURCE changes that must trigger it: the node-ui suite and everything it
+// loads outside chain and agent, whose rules select the scope themselves.
+// scripts/lib/__tests__/ci-delta-routing.test.mjs derives that set from the
+// suite's imports and fails when a file it loads is missing here.
 const IDENTITY_WALLET_EVM_PATTERNS = [
-  /^packages\/node-ui\/src\/ui\/web3\/(?:identityWalletActions|browserWalletTransaction)\.[cm]?[jt]sx?/,
+  /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
+  /^packages\/node-ui\/src\/ui\/(?:api|http|identity-wallet-api|pca-api)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:lib\/nativeGasSymbol|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
+  // The daemon route the suite drives and the CLI modules it loads.
+  /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|auth|config|oxigraph-memory-limits|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
 // of the rule for the area that owns them (a workspace or a support route). A
-// path outside every area is classified by its triggers alone. Per-file
-// refinements belong in this table, never as special cases inside planCi.
+// path outside every area is classified by its triggers alone, and a path a
+// trigger claims is a CI input, never documentation. Per-file refinements
+// belong in this table, never as special cases inside planCi.
+// ci-delta-routing.test.mjs follows every relative reference from the files
+// each lane runs and fails when a file it reaches does not select that lane.
 const PATH_TRIGGERS = Object.freeze([
   {
     patterns: BLAZEGRAPH_ARM64_PATTERNS,
@@ -390,6 +403,39 @@ const PATH_TRIGGERS = Object.freeze([
     lanes: [],
     evmScopes: ['chain'],
     reason: 'identity-wallet browser actions require real EVM coverage',
+  },
+  // Documents that tests read and assert on.
+  {
+    patterns: [/^RELEASE_PROCESS\.md$/],
+    lanes: ['bura_cli'],
+    evmScopes: [],
+    reason: 'the CLI release tests assert the release process document',
+  },
+  {
+    patterns: [/^packages\/query\/README\.md$/],
+    lanes: ['bura_query'],
+    evmScopes: [],
+    reason: 'the query security tests assert the query README',
+  },
+  // Files other packages load by relative path, outside their declared
+  // dependencies.
+  {
+    patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
+    lanes: ['tornado_agent'],
+    evmScopes: [],
+    reason: 'the agent memory-layer tests import the CLI markdown extractor',
+  },
+  {
+    patterns: [/^packages\/cli\/src\/(?:auth|config|oxigraph-memory-limits|runtime-assets)\.ts$/],
+    lanes: ['tornado_blazegraph', 'kosava_supporting'],
+    evmScopes: [],
+    reason: 'the EPCIS API tests import the CLI auth and config modules',
+  },
+  {
+    patterns: [/^packages\/cli\/skills\/dkg-node\/SKILL\.md$/],
+    lanes: ['kosava_supporting'],
+    evmScopes: [],
+    reason: 'the OpenClaw adapter entry loads the CLI node skill',
   },
 ]);
 
@@ -456,12 +502,9 @@ function hasDocumentationExtension(filePath) {
   return DOCUMENTATION_EXTENSIONS.has(extension);
 }
 
-// Documents that package tests read and assert on; they are test inputs, so
-// they route through SUPPORT_PATH_ROUTES instead of the docs-only profile.
-const DOCUMENTS_READ_BY_TESTS = new Set(['RELEASE_PROCESS.md']);
-
 function isDocumentationOnlyPath(filePath) {
-  if (DOCUMENTS_READ_BY_TESTS.has(filePath)) return false;
+  // A document a test reads is claimed by PATH_TRIGGERS, its one home.
+  if (pathTriggers(filePath).length > 0) return false;
   if (
     filePath === 'LICENSE'
     || filePath === 'SECURITY.md'
@@ -526,25 +569,6 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     full: 'Devnet workspace manifest changed',
   },
   {
-    // packages/cli/test/markitdown-binaries.test.ts asserts its wording.
-    pattern: /^RELEASE_PROCESS\.md$/,
-    lanes: ['bura_cli'],
-    reason: 'the CLI release tests assert the release process document',
-  },
-  {
-    pattern: /^devnet\/rfc64-gate1-public-open\//,
-    lanes: ['tornado_agent', 'tornado_blazegraph'],
-    reason: 'RFC-64 Gate 1 harness runs in the agent and Blazegraph lanes',
-  },
-  {
-    // Agent code imports the Gate 0 evidence helpers, and the Gate 1 rollout
-    // tests, which the agent and Blazegraph jobs run, load its process
-    // lifecycle.
-    pattern: /^devnet\/rfc64-persistence-lifecycle\//,
-    lanes: ['tornado_agent', 'tornado_blazegraph'],
-    reason: 'RFC-64 persistence harness is loaded by agent code and the Gate 1 rollout tests',
-  },
-  {
     // The CLI's harness-only `rfc64-gate2-adapter` command loads
     // adapter-process.ts, which imports the shared rfc64-runtime-* modules and
     // the CP2 batch planning; agent fixtures import the Gate 2 runtime hooks.
@@ -556,7 +580,8 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     // Devnet harnesses are built on the agent, and agent tests, fixtures and
     // packages/agent/devnet import several of them. The Gate 0 lifecycle and
     // evidence harnesses (rfc64-persistence-lifecycle, _bootstrap) run in the
-    // Windows job, which follows the agent lane.
+    // Windows job and the Gate 1 rollout tests in the Blazegraph job; both
+    // follow the agent lane.
     pattern: /^devnet\//,
     lanes: ['tornado_agent'],
     reason: 'devnet harnesses are imported by agent tests and fixtures',
@@ -887,6 +912,10 @@ export function planCi({
 
   // tornado_agent_windows is defined as the agent lane (see PRIMARY_LANE_JOBS).
   if (lanes.tornado_agent) lanes.tornado_agent_windows = true;
+  // The Blazegraph job also runs the agent's live Blazegraph suites
+  // (packages/agent/vitest.blazegraph.config.ts), so ci.yml starts it for
+  // either lane; the plan records that, so the gate requires the job.
+  if (lanes.tornado_agent) lanes.tornado_blazegraph = true;
 
   const deduplicatedReasons = [...new Set(reasons)];
   if (!buildChecks && !CI_LANES.some((lane) => lanes[lane]) && evmScopes.size === 0) {

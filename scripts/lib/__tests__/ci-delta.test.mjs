@@ -206,13 +206,14 @@ test('code and config files under documentation trees fail closed', () => {
 test('leaf and shared package snapshots include conservative downstream consumers', () => {
   const agent = pullRequestPlan([change('packages/agent/src/agent.ts')]);
   assert.deepEqual(selectedLanes(agent), [
+    'tornado_blazegraph',
     'tornado_agent',
     'tornado_agent_windows',
     'bura_cli',
     'kosava_supporting',
     'kosava_hardhat_plugins',
   ]);
-  assert.deepEqual(agent.evmScopes, ['agent']);
+  assert.deepEqual(agent.evmScopes, ['chain', 'agent']);
 
   const networkSim = pullRequestPlan([change('packages/network-sim/src/index.ts')]);
   assert.deepEqual(selectedLanes(networkSim), ['kosava_supporting']);

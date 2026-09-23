@@ -163,15 +163,14 @@ test('repository support paths route to the lanes that execute them', () => {
   for (const [filePath, expected] of [
     ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
     ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
-    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_agent', 'tornado_agent_windows']],
-    ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent', 'tornado_agent_windows', 'bura_cli']],
-    ['devnet/rfc64-cp2-private-swm-vm-recovery/batch-plan.ts', ['tornado_agent', 'tornado_agent_windows', 'bura_cli']],
-    ['devnet/suites.json', ['tornado_agent', 'tornado_agent_windows']],
+    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
+    ['devnet/rfc64-runtime-provenance.mts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
+    ['devnet/rfc64-cp2-private-swm-vm-recovery/batch-plan.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
+    ['devnet/suites.json', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
-    ['RELEASE_PROCESS.md', ['bura_cli']],
-    ['devnet/v10-stress/automated.test.ts', ['tornado_agent', 'tornado_agent_windows']],
-    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent', 'tornado_agent_windows', 'bura_cli']],
-    ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_agent', 'tornado_agent_windows', 'bura_cli']],
+    ['devnet/v10-stress/automated.test.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
     ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
     ['.github/oxlint-baseline.json', []],
@@ -365,33 +364,66 @@ test('each changed path gets one routing decision with a fixed precedence', () =
   assert.match(pullRequestPlan([change('new-root-tool.ts')]).reasons[0], /^Unclassified path changed/);
 });
 
-test('support routes include every lane that loads them, directly or through other support files', () => {
-  // A package file referencing something outside the workspaces (bench/,
-  // devnet/, test-systems/, tools/) makes that package's lane a CI consumer
-  // of it, and so does a lane job that runs a support file: in its own steps,
-  // through a root package.json script or through a reusable workflow it
-  // calls. The lane also loads whatever that file imports, so consumers carry through
-  // support-to-support imports (a harness importing a shared devnet module):
-  // a change anywhere on the chain must select the lane; full CI covers the
-  // rest. References are static and dynamic imports and `new URL(...)` paths.
-  const importPattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bnew\s+URL\(\s*)['"]((?:\.\.?\/)+[^'"]+)['"]/g;
-  const references = (file) => [...fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').matchAll(importPattern)]
-    .map(([, specifier]) => path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier)))
-    .filter((target) => !target.startsWith('packages/') && !target.startsWith('../'))
-    // TypeScript sources are imported by their emitted extension.
-    .map((target) => [target, target.replace(/\.js$/, '.ts'), target.replace(/\.mjs$/, '.mts')]
-      .find((candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile()) ?? target);
-  const consumers = new Map(); // support path -> Map(lane -> the reference through which it loads)
-  const load = (target, lanes, via) => {
-    const loadedBy = consumers.get(target) ?? consumers.set(target, new Map()).get(target);
-    const added = lanes.filter((lane) => !loadedBy.has(lane));
-    for (const lane of added) loadedBy.set(lane, via);
+test('every file a lane runs, or loads by relative path, selects that lane', () => {
+  // Seeds: what each lane executes. A workspace's code and tests run in its
+  // owning lanes, node-ui's browser specs in the e2e lane and its integration
+  // suites in the EVM scope that lists them; package scripts run in no lane.
+  // A lane job also runs the support files its steps name: directly, through
+  // a root package.json script or through a reusable workflow it calls.
+  // A lane also loads everything those files reference by relative path
+  // (static and dynamic imports and `new URL(...)` paths, including documents
+  // a test reads), in other packages and support areas alike. Only module
+  // loads carry on to what the loaded file imports; any other `new URL(...)`
+  // path (a document read, a process to spawn) is loaded but not followed, and
+  // type-only imports are erased before anything runs. Declared package.json
+  // dependencies are covered by the reverse-dependency test; this covers the
+  // couplings they miss. Each file reached must select the lane or scope, or
+  // plan full CI.
+  const modulePattern = /(?:\bfrom\s*|\bimport\s*\(\s*(?:new\s+URL\(\s*)?)['"]((?:\.\.?\/)+[^'"]+)['"]/g;
+  const pathPattern = /\bnew\s+URL\(\s*['"]((?:\.\.?\/)+[^'"]+)['"]/g;
+  const isFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile();
+  const resolve = (file, specifier) => {
+    const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
+    // TypeScript sources are imported by their emitted extension, or none.
+    return [
+      target,
+      target.replace(/\.js$/, '.ts'),
+      target.replace(/\.js$/, '.tsx'),
+      target.replace(/\.mjs$/, '.mts'),
+      `${target}.ts`,
+      `${target}/index.ts`,
+    ].find(isFile) ?? target;
+  };
+  const references = (file) => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
+      .replace(/\b(?:import|export)\s+type\s[^;]*?\bfrom\s*['"][^'"]+['"]/g, '');
+    const modules = [...source.matchAll(modulePattern)].map(([, specifier]) => resolve(file, specifier));
+    const paths = [...source.matchAll(pathPattern)].map(([, specifier]) => resolve(file, specifier));
+    const inRepo = (target) => !target.startsWith('../');
+    return { modules: modules.filter(inRepo), paths: paths.filter((target) => inRepo(target) && !modules.includes(target)) };
+  };
+
+  const loadedBy = new Map(); // path -> Map(lane or evm:scope -> how it is reached)
+  const load = (target, requirements, via) => {
+    const entry = loadedBy.get(target) ?? loadedBy.set(target, new Map()).get(target);
+    const added = requirements.filter((requirement) => !entry.has(requirement));
+    for (const requirement of added) entry.set(requirement, via);
     return added.length > 0;
   };
+  const evmScopeFiles = new Map(Object.entries(EVM_TEST_SCOPES).flatMap(([scope, { packageDirectory, files }]) =>
+    files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), `evm:${scope}`])));
   for (const [workspace, owningLanes] of Object.entries(WORKSPACE_OWNING_LANES)) {
-    if (!workspace.startsWith('packages/')) continue;
+    if (WORKSPACE_RULES[workspace].forceFull) continue;
     for (const file of sourceFiles(workspace)) {
-      for (const target of references(file)) load(target, owningLanes, file);
+      const inside = file.slice(workspace.length + 1);
+      if (/^(?:scripts|test\/archive)\//.test(inside)) continue;
+      if (inside.startsWith('integration/')) {
+        if (evmScopeFiles.has(file)) load(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
+      } else if (workspace === 'packages/node-ui' && inside.startsWith('e2e/')) {
+        load(file, ['kosava_node_ui_e2e'], 'the browser suite');
+      } else {
+        load(file, [...owningLanes, ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
+      }
     }
   }
   const rootScripts = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).scripts;
@@ -420,25 +452,75 @@ test('support routes include every lane that loads them, directly or through oth
     }
   };
   seedJobs(workflowJobs('.github/workflows/ci.yml'), (job) => laneByJob[job]);
-  const queue = [...consumers.keys()];
+
+  const queue = [...loadedBy.keys()];
   while (queue.length) {
     const file = queue.shift();
-    if (!fs.statSync(path.join(REPO_ROOT, file), { throwIfNoEntry: false })?.isFile()) continue;
-    for (const target of references(file)) {
-      if (load(target, [...consumers.get(file).keys()], file)) queue.push(target);
+    if (!isFile(file) || !/\.[cm]?[jt]sx?$/.test(file)) continue;
+    const requirements = [...loadedBy.get(file).keys()];
+    const { modules, paths } = references(file);
+    for (const target of modules) {
+      if (load(target, requirements, file)) queue.push(target);
     }
+    for (const target of paths) load(target, requirements, file);
   }
-  assert.ok(consumers.get('devnet/rfc64-runtime-provenance.mts')?.has('bura_cli'), 'the CLI-started Gate 2 adapter imports the shared runtime modules');
-  assert.ok(consumers.get('devnet/rfc64-persistence-lifecycle/process-lifecycle.ts')?.has('tornado_blazegraph'), 'the Blazegraph job runs the Gate 1 rollout tests');
-  assert.ok(consumers.get('test-systems/storage-conformance.test.ts')?.has('tornado_blazegraph'), 'pnpm test:conformance runs in the Blazegraph job');
-  assert.ok(consumers.get('devnet/rfc64-persistence-lifecycle/verify.ts')?.has('tornado_agent_windows'), 'the reusable Windows workflow runs the Gate 0 harness');
-  for (const [target, loadedBy] of consumers) {
+
+  for (const [target, requirement, why] of [
+    ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
+    ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
+    ['devnet/rfc64-runtime-provenance.mts', 'bura_cli', 'the CLI-started Gate 2 adapter imports the shared runtime modules'],
+    ['devnet/rfc64-persistence-lifecycle/process-lifecycle.ts', 'tornado_blazegraph', 'the Blazegraph job runs the Gate 1 rollout tests'],
+    ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
+    ['devnet/rfc64-persistence-lifecycle/verify.ts', 'tornado_agent_windows', 'the reusable Windows workflow runs the Gate 0 harness'],
+  ]) {
+    assert.ok(loadedBy.get(target)?.has(requirement), why);
+  }
+  const missing = [];
+  for (const [target, requirements] of loadedBy) {
     const plan = pullRequestPlan([change(target)]);
     if (plan.mode === 'full') continue;
-    for (const [lane, via] of loadedBy) {
-      assert.ok(plan.lanes[lane], `${lane} loads ${target} via ${via}, so changing it must select ${lane}`);
+    for (const [requirement, via] of requirements) {
+      const selected = requirement.startsWith('evm:')
+        ? plan.evmScopes.includes(requirement.slice(4))
+        : plan.lanes[requirement];
+      if (!selected) missing.push(`${requirement} loads ${target} via ${via}`);
     }
   }
+  assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
+});
+
+test('a document a test reads is a CI input; other documentation stays docs-only', () => {
+  // PATH_TRIGGERS is the one home of that fact: its claim alone lifts a path
+  // out of the docs-only profile (RELEASE_PROCESS.md matches the root *.md
+  // documentation rule) and selects the lane whose tests read it.
+  for (const [filePath, lane] of [['RELEASE_PROCESS.md', 'bura_cli'], ['packages/query/README.md', 'bura_query']]) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'delta', filePath);
+    assert.equal(plan.lanes[lane], true, filePath);
+  }
+  for (const filePath of ['CHANGELOG.md', 'packages/agent/README.md', 'packages/query/CHANGELOG.md', 'docs/ci-delta-policy.md']) {
+    assert.equal(pullRequestPlan([change(filePath)]).mode, 'docs-only', filePath);
+  }
+});
+
+test('the Blazegraph lane follows the agent lane, as ci.yml starts its job', () => {
+  // The Blazegraph job runs the agent's live Blazegraph suites and starts for
+  // either lane; every plan that runs the agent lane says so, so the gate
+  // requires the job.
+  const job = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['tornado-blazegraph'];
+  assert.match(job.if, /needs\.changes\.outputs\.tornado_agent == 'true'/);
+  assert.ok(job.steps.some(({ run = '' }) => run.includes('dkg-agent exec vitest run --config vitest.blazegraph.config.ts')));
+  for (const filePath of [
+    'packages/agent/test-live/rfc64-legacy-swm-boundary-v1.blazegraph.test.ts',
+    'packages/agent/src/dkg-agent.ts',
+    'packages/core/src/index.ts',
+    'devnet/v10-stress/automated.test.ts',
+  ]) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.lanes.tornado_agent, true, filePath);
+    assert.equal(plan.lanes.tornado_blazegraph, true, filePath);
+  }
+  assert.equal(pullRequestPlan([change('packages/network-sim/src/index.ts')]).lanes.tornado_blazegraph, false);
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
@@ -449,7 +531,10 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
     'packages/node-ui/src/ui/web3/identityWalletActions.tsx',
     'packages/node-ui/src/ui/web3/browserWalletTransaction.ts',
     'packages/node-ui/src/ui/pages/identity-wallets/useIdentityWalletManagement.ts',
+    'packages/node-ui/src/ui/web3/session.ts',
+    'packages/node-ui/src/ui/stores/wallet.ts',
     'packages/node-ui/integration/identity-wallet-actions-v10.test.ts',
+    'packages/cli/src/daemon/routes/identity-wallets.ts',
   ]) {
     const plan = pullRequestPlan([change(filePath)]);
     assert.deepEqual(plan.evmScopes, ['chain'], filePath);
@@ -458,7 +543,7 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
 
   for (const filePath of [
     'packages/node-ui/src/ui/pages/Dashboard.tsx',
-    'packages/node-ui/src/ui/web3/session.ts',
+    'packages/cli/src/daemon/routes/context.ts',
   ]) {
     assert.deepEqual(pullRequestPlan([change(filePath)]).evmScopes, [], filePath);
   }
