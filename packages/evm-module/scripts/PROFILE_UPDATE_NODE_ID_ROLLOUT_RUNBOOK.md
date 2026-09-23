@@ -23,10 +23,14 @@ must be flipped by hand (same as `KA_HIGH_WATER_GETTER_ROLLOUT_RUNBOOK.md`).
 | `base_mainnet` | `0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13` | `0x370943487c766633Da68DB4048E57674a7a6c076` (10.0.2) | `0x98B045daeFFDA88741EEa76C18abAecaF14175eF` (10.0.4) | `0xa4F4f1e61f2BE32E92Fd1D07558a3DB5b519D288` (10.0.3) |
 | `gnosis_mainnet` | `0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f` | `0x370943487c766633Da68DB4048E57674a7a6c076` (10.0.2) | `0x98B045daeFFDA88741EEa76C18abAecaF14175eF` (10.0.4) | `0xa4F4f1e61f2BE32E92Fd1D07558a3DB5b519D288` (10.0.3) |
 
-On both mainnets the Hub owner is a contract (the Safe).
-`Hub.setAndReinitializeContracts` is `onlyOwnerOrMultiSigOwner`, so the deploy
-wallet must be one of the Safe's owners, or the registration step must be
-submitted as a Safe transaction (see the manual path below).
+On both mainnets the Hub owner is a classic multisig wallet (not a Safe): it
+has 3 owners, requires 2 confirmations, and executes one call per transaction
+through `submitTransaction(destination, value, data)`
+(Base `0x4Cd6467b797846E63a27c92350d040C428394068`, Gnosis
+`0xBF92638301f5d4c98c0B06750181B99E20F87F17`). `Hub.setAndReinitializeContracts`
+is `onlyOwnerOrMultiSigOwner`, so an EOA that is one of the multisig's owners
+can send it directly. Otherwise, submit it through the multisig (see the
+manual path below).
 
 ## Order
 
@@ -101,13 +105,14 @@ configured (`RPC_<NETWORK>`, and the key `utils/network.ts` reads for it).
    with the new address, `version: "10.1.0"`, `deployed: true`) in a follow-up
    PR, as for earlier single-contract redeploys.
 
-### Manual path (Safe transaction)
+### Manual path (multisig transaction)
 
-If the deploy wallet is not a Safe owner:
+If the deploy wallet is not one of the multisig's owners:
 
 1. Deploy the Profile artifact from any funded wallet with the Hub address as
    the only constructor argument.
-2. From the Safe, call
+2. Through the multisig (`submitTransaction(hub, 0, data)`, then a second
+   owner confirms), call
    `Hub.setAndReinitializeContracts([["Profile", <newProfile>]], [], [<newProfile>], [])`.
    Only the new Profile needs `initialize()`.
 3. Verify as in step 4, then record the address in the registry.
@@ -132,7 +137,8 @@ If the deploy wallet is not a Safe owner:
 
 ## Rollback
 
-From the Safe, re-register the previous Profile:
+Through the multisig (or directly from one of its owners), re-register the
+previous Profile:
 `Hub.setAndReinitializeContracts([["Profile", <oldProfile>]], [], [<oldProfile>], [])`.
 nodeIds that were already updated stay in `ProfileStorage`. That is harmless:
 10.0.2 reads and writes them the same way, and the ring stays consistent
@@ -145,18 +151,28 @@ a profile whose nodeId is someone else's peer id. The victim's `updateNodeId`
 then reverts with `NodeIdAlreadyExists`, and `dkg identity node-id` shows the
 conflict and, when the holder is in the sharding table, its identity.
 
-The Hub owner can move the squatter off the value without a new entry point.
-`ProfileStorage.setNodeId` and `ShardingTable.removeNode` / `insertNode` are
-`onlyContracts`, which also admits `hub.owner()`. Batch these calls in ONE
-Safe transaction (MultiSend) so the ring is never inconsistent:
+The Hub owner can release the value without a new entry point.
+`ProfileStorage.setNodeId` is `onlyContracts`, which also admits `hub.owner()`,
+so it takes ONE multisig transaction:
 
-1. `ShardingTable.removeNode(squatterId)`, only if
-   `ShardingTableStorage.nodeExists(squatterId)` is true
-2. `ProfileStorage.setNodeId(squatterId, <unique placeholder>)`, for example
-   the UTF-8 bytes of `revoked-<squatterId>`, after checking
-   `nodeIdsList(placeholder)` is false
-3. `ShardingTable.insertNode(squatterId)`, only if step 1 ran
+- `ProfileStorage.setNodeId(squatterId, <unique placeholder>)`, for example
+  the UTF-8 bytes of `revoked-<squatterId>`, after checking
+  `nodeIdsList(placeholder)` is false.
 
-The victim then runs `dkg identity sync-node-id`. The evm-module test
-"squatting remedy" (`test/unit/Profile.updateNodeId.test.ts`) exercises
-exactly this sequence from a Hub owner that is not a registered contract.
+This releases the peer id at once, and the victim then runs
+`dkg identity sync-node-id`. If the squatter is a sharding-table member, its
+cached ring entry (`ShardingTableStorage` nodeId and position) keeps the old
+bytes until the squatter is next re-inserted: its own next `updateNodeId`, or
+a stake exit and re-entry. That is harmless today. Ring position has no
+effect in V10 Phase A, `getShardingTable()` reads nodeIds from ProfileStorage,
+and `recreateProfile` for the squatter's own identity is the only reader of
+the cache.
+
+Do **not** send `ShardingTable.removeNode` / `insertNode` as separate multisig
+transactions to "re-sync" the ring. `removeNode` does not check membership, so
+if the squatter leaves the ring (for example by unstaking) before the multisig
+transaction executes, it corrupts the index table. An atomic, membership-checked
+`onlyHubOwner` entry point on Profile is the recommended follow-up.
+
+The evm-module test "squatting remedy" (`test/unit/Profile.updateNodeId.test.ts`)
+runs this single call from a Hub owner that is not a registered contract.

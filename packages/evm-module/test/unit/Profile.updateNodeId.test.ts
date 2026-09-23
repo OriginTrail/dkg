@@ -402,7 +402,7 @@ describe('@unit Profile.updateNodeId', function () {
       await expectRingConsistent(members);
     });
 
-    it('squatting remedy: the Hub owner can move a squatter off a peer id without a new entry point', async () => {
+    it('squatting remedy: one Hub-owner setNodeId call releases a squatted peer id', async () => {
       // A victim core with a legacy nodeId, and a squatter that registered the
       // victim's peer id first (profile creation is not whitelisted on mainnet).
       const victim = await createProfile(accounts[1], accounts[2], toNodeId('victim-legacy'));
@@ -415,23 +415,35 @@ describe('@unit Profile.updateNodeId', function () {
 
       // Prove the Hub OWNER privilege alone suffices: hand Hub ownership to a
       // wallet that is NOT registered as a Hub contract (accounts[0] is, for
-      // the other tests). ProfileStorage.setNodeId and ShardingTable.removeNode
-      // / insertNode are `onlyContracts`, which also admits hub.owner(). On
-      // mainnet the owner is a Safe, which can batch these three calls
-      // atomically (MultiSend).
+      // the other tests). ProfileStorage.setNodeId is `onlyContracts`, which
+      // also admits hub.owner(). On mainnet the owner is a classic 2-of-3
+      // multisig wallet that executes one call per transaction, so the remedy
+      // is this single call. (A standalone ShardingTable.removeNode would be
+      // unsafe there: it does not check membership, and the squatter could
+      // leave the ring before the multisig transaction executes.)
       const hubOwner = accounts[50];
       await Hub.transferOwnership(hubOwner.address);
       expect(await Hub.owner()).to.equal(hubOwner.address);
       expect(await Hub['isContract(address)'](hubOwner.address)).to.equal(false);
 
       const placeholder = toNodeId(`revoked-squatter-${squatter}`);
-      await ShardingTable.connect(hubOwner).removeNode(squatter);
       await ProfileStorage.connect(hubOwner).setNodeId(squatter, placeholder);
-      await ShardingTable.connect(hubOwner)['insertNode(uint72)'](squatter);
-      await expectRingConsistent([victim, squatter]);
 
+      // The peer id is released at once: the victim claims it.
       await Profile.connect(accounts[1]).updateNodeId(victim, toNodeId(PEER_A));
       expect(await ProfileStorage.getNodeId(victim)).to.equal(toNodeId(PEER_A));
+
+      // What ring readers get (getShardingTable reads nodeIds from ProfileStorage).
+      const table = await ShardingTable['getShardingTable()']();
+      const nodeIdOf = (id: bigint) => table.find((node) => node.identityId === id)!.nodeId;
+      expect(nodeIdOf(victim)).to.equal(toNodeId(PEER_A));
+      expect(nodeIdOf(squatter)).to.equal(placeholder);
+
+      // Only the squatter's cached ring entry is stale, until its next
+      // re-insertion; its own next update (or a stake exit and re-entry)
+      // refreshes it.
+      expect((await ShardingTableStorage.getNode(squatter)).nodeId).to.equal(toNodeId(PEER_A));
+      await Profile.connect(accounts[3]).updateNodeId(squatter, toNodeId('squatter-next'));
       await expectRingConsistent([victim, squatter]);
     });
   });
@@ -471,16 +483,21 @@ describe('@unit Profile.updateNodeId', function () {
         await Profile.connect(accounts[members.indexOf(head)]).updateNodeId(head, headNodeId)
       ).wait();
 
-      const perShift = (worst!.gasUsed - best!.gasUsed) / BigInt(2 * (count - 1));
-      const worstAt500 = best!.gasUsed + perShift * 2n * 499n;
-      console.log(
-        `      updateNodeId gas, ${count}-node ring: best ${best!.gasUsed}, worst ${worst!.gasUsed}, ` +
-          `~${perShift} per shifted node; extrapolated worst case at the 500-node cap ~${worstAt500}`,
-      );
-
       await expectRingConsistent(members);
-      // Guard rail: the 100-node worst case stays well inside one block.
-      expect(worst!.gasUsed).to.be.lessThan(10_000_000n);
+
+      // solidity-coverage instrumentation inflates gas, so the numbers only
+      // mean something in a plain run (same detection as the @gas suites).
+      const underCoverage = process.argv.some((arg) => arg.includes('coverage'));
+      if (!underCoverage) {
+        const perShift = (worst!.gasUsed - best!.gasUsed) / BigInt(2 * (count - 1));
+        const worstAt500 = best!.gasUsed + perShift * 2n * 499n;
+        console.log(
+          `      updateNodeId gas, ${count}-node ring: best ${best!.gasUsed}, worst ${worst!.gasUsed}, ` +
+            `~${perShift} per shifted node; extrapolated worst case at the 500-node cap ~${worstAt500}`,
+        );
+        // Guard rail: the 100-node worst case stays well inside one block.
+        expect(worst!.gasUsed).to.be.lessThan(10_000_000n);
+      }
     });
   });
 });
