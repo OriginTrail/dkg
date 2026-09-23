@@ -695,13 +695,20 @@ function classifyManifestChange(filePath, readManifest) {
   if (typeof readManifest !== 'function') {
     return { packageScoped: false, detail: `${filePath} contents are unavailable to the planner` };
   }
+  let texts;
   let before;
   let after;
   try {
-    before = JSON.parse(readManifest('base', filePath));
-    after = JSON.parse(readManifest('head', filePath));
+    texts = { base: readManifest('base', filePath), head: readManifest('head', filePath) };
+    before = JSON.parse(texts.base);
+    after = JSON.parse(texts.head);
   } catch {
     return { packageScoped: false, detail: `${filePath} could not be read and compared` };
+  }
+  // git reports the manifest as modified, so identical text means the compared
+  // commits are not the diff being routed.
+  if (texts.base === texts.head) {
+    return { packageScoped: false, detail: `${filePath} is identical in both compared commits although the diff modifies it` };
   }
   if (!isPlainObject(before) || !isPlainObject(after)) {
     return { packageScoped: false, detail: `${filePath} is not a JSON object` };

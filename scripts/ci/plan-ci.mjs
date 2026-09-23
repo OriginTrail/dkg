@@ -35,8 +35,10 @@ if (!Array.isArray(labels) || labels.some((label) => typeof label !== 'string'))
 // The workflow exports the candidate checkout and the two diffed commits as
 // environment variables (not flags, which an older pinned controller would
 // reject). Reading blobs is data-only: `git cat-file blob` applies no
-// filters and runs nothing from the merge candidate. Without all three, the
-// planner receives no reader and every workspace manifest edit stays full.
+// filters and runs nothing from the merge candidate. The pair must be what
+// the workflow diffs, the checked-out candidate and its first parent; without
+// that, or without all three variables, the planner receives no reader and
+// every workspace manifest edit stays full.
 function manifestReaderFromEnvironment(environment) {
   const repository = environment[MANIFEST_READER_ENV.repository];
   const commits = {
@@ -45,6 +47,16 @@ function manifestReaderFromEnvironment(environment) {
   };
   const isObjectId = (value) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value ?? '');
   if (!repository || !isObjectId(commits.base) || !isObjectId(commits.head)) return undefined;
+  const revision = (name) => execFileSync(
+    'git',
+    ['-C', repository, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+  ).trim();
+  try {
+    if (revision('HEAD') !== commits.head || revision(`${commits.head}^1`) !== commits.base) return undefined;
+  } catch {
+    return undefined;
+  }
   return (side, filePath) => execFileSync(
     'git',
     ['-C', repository, 'cat-file', 'blob', `${commits[side]}:${filePath}`],

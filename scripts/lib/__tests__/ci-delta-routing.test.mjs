@@ -112,6 +112,10 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     assert.equal(plan.mode, 'full', String(reason));
     assert.match(plan.reasons[0], reason);
   }
+  // Identical text on both sides means the compared commits are not the diff.
+  const identical = manifestPlan(manifest);
+  assert.equal(identical.mode, 'full', 'identical base and head');
+  assert.match(identical.reasons[0], /identical in both compared commits/);
   const withHook = { ...manifest, scripts: { ...manifest.scripts, postinstall: 'node setup.js' } };
   const removedHook = manifestPlan(manifest, undefined, withHook);
   assert.equal(removedHook.mode, 'full', 'removing an install hook');
