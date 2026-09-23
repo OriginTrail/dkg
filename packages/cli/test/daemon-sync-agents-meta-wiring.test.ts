@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { peerIdFromRelayAddress } from '@origintrail-official/dkg-core';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 // Wiring guard for the CLI DAEMON call site in
@@ -216,6 +217,94 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
       + 'fallback=local-history maxTailBlocks=2000 cacheEpoch=0',
     );
     expect(logs).not.toContain(skippedDefaultPrefix);
+  });
+
+  describe('transport-level network peer isolation', () => {
+    const originalIsolationEnv = process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED;
+    afterEach(() => {
+      if (originalIsolationEnv === undefined) delete process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED;
+      else process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED = originalIsolationEnv;
+    });
+
+    async function bundled(name: string) {
+      const actual = await vi.importActual<typeof import('../src/config.js')>('../src/config.js');
+      const network = await actual.loadNetworkConfig(name);
+      if (!network) throw new Error(`bundled network config ${name} is missing`);
+      return network;
+    }
+    const peerIds = (addresses: readonly string[]) =>
+      addresses.map((address) => peerIdFromRelayAddress(address) ?? `unparseable:${address}`);
+
+    it('hands the node the other bundled networks\' relays, never its own effective relays', async () => {
+      delete process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED;
+      const [gnosis, base, testnet] = await Promise.all(
+        ['mainnet-gnosis', 'mainnet-base', 'testnet'].map(bundled),
+      );
+      // "Changed `network`, forgot `relay`": the operator's relay is a testnet
+      // one. It stays the node's relay (the identity proof judges it), so it
+      // must not also be on the static refusal list.
+      const operatorRelay = testnet.relays[1]!;
+      mocks.loadNetworkConfig.mockResolvedValue(gnosis);
+
+      const createArg = await captureCreateArg({ relay: operatorRelay });
+
+      const handed = peerIds(createArg.otherNetworkRelays);
+      expect(createArg.relayPeers).toEqual([operatorRelay]);
+      expect(handed).toEqual(expect.arrayContaining(peerIds(base.relays)));
+      expect(handed).toEqual(expect.arrayContaining(
+        peerIds(testnet.relays.filter((relay) => relay !== operatorRelay)),
+      ));
+      expect(handed).not.toContain(peerIdFromRelayAddress(operatorRelay));
+      for (const own of peerIds(gnosis.relays)) expect(handed).not.toContain(own);
+      expect(createArg.networkPeerIsolation).toBe(true);
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain(
+        `Network isolation: refusing connections to ${handed.length} relay peer(s) of other DKG networks`,
+      );
+    });
+
+    it('turns the transport layer off with the config kill switch', async () => {
+      delete process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED;
+      const createArg = await captureCreateArg({ networkPeerIsolationEnabled: false });
+
+      expect(createArg.networkPeerIsolation).toBe(false);
+      expect(createArg.otherNetworkRelays).toEqual([]);
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain('Network isolation: transport-level peer isolation disabled');
+      expect(logs).not.toContain('Network isolation: refusing connections to');
+    });
+
+    it('lets DKG_NETWORK_PEER_ISOLATION_ENABLED=0 turn it off over the config', async () => {
+      process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED = '0';
+      const createArg = await captureCreateArg({ networkPeerIsolationEnabled: true });
+
+      expect(createArg.networkPeerIsolation).toBe(false);
+      expect(createArg.otherNetworkRelays).toEqual([]);
+    });
+
+    it('lets DKG_NETWORK_PEER_ISOLATION_ENABLED=1 turn it back on over the config', async () => {
+      process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED = '1';
+      const createArg = await captureCreateArg({ networkPeerIsolationEnabled: false });
+
+      expect(createArg.networkPeerIsolation).toBe(true);
+      expect(createArg.otherNetworkRelays.length).toBeGreaterThan(0);
+    });
+
+    it.each(['off', '', 'disable'])(
+      'refuses to start on an unreadable DKG_NETWORK_PEER_ISOLATION_ENABLED=%j instead of guessing',
+      async (value) => {
+        process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED = value;
+        await expect(runDaemonInner(true, {
+          name: 'invalid-peer-isolation-env',
+          networkConfig: 'mainnet-gnosis',
+          listenPort: 0,
+          nodeRole: 'core',
+        } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(
+          `DKG_NETWORK_PEER_ISOLATION_ENABLED must be one of 1, 0, true, or false (received ${JSON.stringify(value)})`,
+        );
+        expect(mocks.agentCreate).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('keeps a relay "none" edge off every relay, authority-index seeding included', async () => {

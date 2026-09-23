@@ -1,27 +1,8 @@
 import type { DkgConfig } from './config.js';
+import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 
 export interface ResolvedMetricsCollectorConfig {
   enabled: boolean;
-}
-
-function resolveEnabled(configValue: unknown, envValue: string | undefined): boolean {
-  if (envValue !== undefined) {
-    const normalized = envValue.trim().toLowerCase();
-    if (normalized === '1' || normalized === 'true') return true;
-    if (normalized === '0' || normalized === 'false') return false;
-    throw new Error(
-      'DKG_METRICS_COLLECTION_ENABLED must be one of 1, 0, true, or false ' +
-      `(received ${JSON.stringify(envValue)})`,
-    );
-  }
-  if (configValue === undefined) return true;
-  if (typeof configValue !== 'boolean') {
-    throw new Error(
-      'telemetry.metrics.collectionEnabled must be a boolean ' +
-      `(received ${JSON.stringify(configValue)})`,
-    );
-  }
-  return configValue;
 }
 
 /**
@@ -34,10 +15,13 @@ export function resolveMetricsCollectorConfig(
   env: Record<string, string | undefined> = process.env,
 ): ResolvedMetricsCollectorConfig {
   return {
-    enabled: resolveEnabled(
-      config?.telemetry?.metrics?.collectionEnabled,
-      env.DKG_METRICS_COLLECTION_ENABLED,
-    ),
+    enabled: resolveBooleanEnvOverride({
+      envName: 'DKG_METRICS_COLLECTION_ENABLED',
+      configName: 'telemetry.metrics.collectionEnabled',
+      envValue: env.DKG_METRICS_COLLECTION_ENABLED,
+      configValue: config?.telemetry?.metrics?.collectionEnabled,
+      defaultValue: true,
+    }),
   };
 }
 
