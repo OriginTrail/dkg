@@ -48,6 +48,7 @@ import {
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
+import { stopOrphanedOxigraph } from './oxigraph-orphan.js';
 import {
   readCgroupOomSnapshot,
   readCgroupOomKill,
@@ -243,6 +244,7 @@ export async function startOxigraphServer(
   // childAlive() wrongly report it alive. Track them so childAlive() and the
   // ready/revive loops treat a spawn error as a dead child.
   const erroredChildren = new WeakSet<ChildProcess>();
+  const processGroupLeaders = new WeakSet<ChildProcess>();
   const oomSnapshots = new WeakMap<ChildProcess, CgroupOomSnapshot>();
   const isStopping = (): boolean => lifecycle.phase === 'stopping';
   const childAlive = (candidate: ChildProcess | null): candidate is ChildProcess =>
@@ -260,11 +262,13 @@ export async function startOxigraphServer(
       spawnSpec.args,
       {
         stdio: ['ignore', 'pipe', 'pipe'],
+        ...(spawnSpec.processGroup ? { detached: true } : {}),
         ...(spawnSpec.environment
           ? { env: { ...process.env, ...spawnSpec.environment } }
           : {}),
       },
     );
+    if (spawnSpec.processGroup) processGroupLeaders.add(c);
     // Without this listener Node throws the `error` event as an uncaught
     // exception, killing the daemon. Route it through the normal
     // startup/revive failure path instead (the binary couldn't be executed).
@@ -329,6 +333,20 @@ export async function startOxigraphServer(
     return c;
   };
 
+  // Callers signal only a child that has not exited, so its group id cannot
+  // have been reused yet.
+  const signalChild = (c: ChildProcess, signal: NodeJS.Signals): void => {
+    if (c.pid !== undefined && processGroupLeaders.has(c)) {
+      try {
+        process.kill(-c.pid, signal);
+        return;
+      } catch {
+        // Fall back to the wrapper alone.
+      }
+    }
+    c.kill(signal);
+  };
+
   const captureOomSnapshotForListener = (c: ChildProcess, listenerPid: number): void => {
     if (oomSnapshots.has(c)) return;
     const snapshot = io.readCgroupOomSnapshot(listenerPid);
@@ -383,6 +401,12 @@ export async function startOxigraphServer(
     }, delay).unref?.();
   };
 
+  const releaseOrphanedStore = (): Promise<number[]> => stopOrphanedOxigraph({
+    binaryPath: opts.binaryPath,
+    location: opts.location,
+    log,
+  });
+
   // Respawn and re-validate ownership after a steady-state crash. Mirrors
   // the startup ownership guard: `ready` is restored ONLY once the child WE
   // spawned is confirmed to be the process answering on the port. If another
@@ -396,6 +420,10 @@ export async function startOxigraphServer(
     const reason = lifecycle.phase === 'recovering'
       ? lifecycle.reason
       : 'supervised recovery';
+    // A watchdog killed abruptly on a host without a parent-death signal can
+    // leave Oxigraph holding the store lock while this daemon lives on.
+    await releaseOrphanedStore();
+    if (isStopping()) return;
     // GH#1400 — size THIS attempt, not the one at boot. The WAL grows during
     // the session, so a mid-life respawn (onClientTimeout, a crashed child)
     // faces a larger replay than the daemon ever measured at startup. Reusing
@@ -466,7 +494,7 @@ export async function startOxigraphServer(
     // EADDRINUSE). Its exit handler won't restart (ready is false).
     if (childAlive(candidate)) {
       try {
-        candidate.kill('SIGKILL');
+        signalChild(candidate, 'SIGKILL');
       } catch {
         /* best-effort */
       }
@@ -487,7 +515,7 @@ export async function startOxigraphServer(
     };
     markStoreDown();
     try {
-      if (childAlive(candidate)) candidate.kill('SIGTERM');
+      if (childAlive(candidate)) signalChild(candidate, 'SIGTERM');
     } catch {
       /* best-effort */
     }
@@ -595,11 +623,11 @@ export async function startOxigraphServer(
         resolve();
       };
       c.once('exit', done);
-      c.kill('SIGTERM');
+      signalChild(c, 'SIGTERM');
       const killTimer = setTimeout(() => {
         if (c.exitCode === null && c.signalCode === null) {
           log('[oxigraph] did not exit on SIGTERM; sending SIGKILL');
-          c.kill('SIGKILL');
+          signalChild(c, 'SIGKILL');
         }
       }, stopGraceMs);
       killTimer.unref?.();
@@ -614,6 +642,10 @@ export async function startOxigraphServer(
   );
   const launchSummary = launchStrategy.logSummary();
   if (launchSummary) log(launchSummary);
+  // A previous worker that died without stopping its Oxigraph (SIGKILL from
+  // the supervisor's liveness watchdog, OOM) leaves it holding the store
+  // lock, and this child would fail to open the store.
+  await releaseOrphanedStore();
   // GH#1400 — measure BEFORE the spawn, so the child cannot delete segments
   // underneath the scan.
   const bootReady = nextReadyTimeout();

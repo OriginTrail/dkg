@@ -8,8 +8,9 @@
  *
  * `lsof` is preferred on Unix but often missing in minimal Linux/container
  * images; Linux fallbacks use `ss`, `fuser`, then `/proc` inode matching.
- * Managed memory scopes use a tiny parent watchdog, so callers may explicitly
- * permit a descendant PID while still rejecting unrelated local listeners.
+ * On Unix hosts Oxigraph runs under a tiny parent watchdog, so callers may
+ * explicitly permit a descendant PID while still rejecting unrelated local
+ * listeners.
  */
 import { execFile } from 'node:child_process';
 import { readdir, readFile, readlink } from 'node:fs/promises';
@@ -124,7 +125,7 @@ async function procfsListenOwnerPid(pids: ReadonlySet<number>, port: number): Pr
   }
 }
 
-async function linuxProcessTree(rootPid: number): Promise<Set<number>> {
+export async function linuxProcessTree(rootPid: number): Promise<Set<number>> {
   const pids = new Set<number>([rootPid]);
   const pending = [rootPid];
   while (pending.length > 0) {
@@ -148,6 +149,33 @@ async function linuxProcessTree(rootPid: number): Promise<Set<number>> {
   return pids;
 }
 
+/** Descendants from one `ps` snapshot, for Unix hosts without `/proc`. */
+export async function psProcessTree(rootPid: number): Promise<Set<number>> {
+  const pids = new Set<number>([rootPid]);
+  try {
+    const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid='], { timeout: 2_000 });
+    const childrenOf = new Map<number, number[]>();
+    for (const line of stdout.split('\n')) {
+      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+      if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+      const siblings = childrenOf.get(ppid);
+      if (siblings) siblings.push(pid);
+      else childrenOf.set(ppid, [pid]);
+    }
+    const pending = [rootPid];
+    while (pending.length > 0) {
+      for (const childPid of childrenOf.get(pending.pop()!) ?? []) {
+        if (pids.has(childPid)) continue;
+        pids.add(childPid);
+        pending.push(childPid);
+      }
+    }
+  } catch {
+    // Without a snapshot only the direct child can prove ownership.
+  }
+  return pids;
+}
+
 async function windowsListenOwnerPid(pid: number, port: number): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync('netstat', ['-ano'], { timeout: 3_000 });
@@ -165,7 +193,7 @@ async function windowsListenOwnerPid(pid: number, port: number): Promise<number 
 }
 
 /**
- * Return the PID when `child` (or, when explicitly enabled, one of its Linux
+ * Return the PID when `child` (or, when explicitly enabled, one of its Unix
  * descendants) is alive and owns the TCP listener on `port`.
  * For non-loopback hosts we only require the child to be alive (tests).
  */
@@ -181,13 +209,14 @@ export async function findListenOwnerPid(
   if (host !== '127.0.0.1' && host !== 'localhost') return child.pid;
 
   const pid = child.pid;
-  const pids = ownership === 'process-tree' && process.platform === 'linux'
-    ? await linuxProcessTree(pid)
-    : new Set([pid]);
-
   if (process.platform === 'win32') {
     return windowsListenOwnerPid(pid, port);
   }
+  const pids = ownership === 'child-only'
+    ? new Set([pid])
+    : process.platform === 'linux'
+      ? await linuxProcessTree(pid)
+      : await psProcessTree(pid);
 
   const lsofOwner = await lsofListenOwnerPid(pids, port);
   if (lsofOwner !== null) return lsofOwner;

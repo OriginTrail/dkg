@@ -1,8 +1,12 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 import type { ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
-import { OXIGRAPH_WATCHDOG_OOM_MARKER } from './oxigraph-parent-watchdog.js';
+import {
+  OXIGRAPH_WATCHDOG_DIRECT_FLAG,
+  OXIGRAPH_WATCHDOG_OOM_MARKER,
+} from './oxigraph-parent-watchdog.js';
 
 export { normalizeOxigraphMemoryLimits, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 
@@ -10,6 +14,12 @@ export interface OxigraphSpawnSpec {
   command: string;
   args: string[];
   environment?: NodeJS.ProcessEnv;
+  /**
+   * Lead a new process group, so the daemon's own signals reach the wrapper
+   * and Oxigraph together. A SIGKILL sent to the wrapper alone cannot be
+   * forwarded and would leave Oxigraph running.
+   */
+  processGroup?: boolean;
 }
 
 export type ListenOwnerResolver = (
@@ -48,6 +58,19 @@ function cgroupEvidenceIncremented(
   return typeof oomKillNow === 'number' && oomKillNow > input.snapshot.oomKill;
 }
 
+/**
+ * Node arguments that run the parent watchdog. A built install ships
+ * `oxigraph-parent-watchdog.js` beside this module; a source checkout
+ * (tsx, tests) only has the `.ts` file, which Node runs through tsx.
+ */
+function defaultWatchdogNodeArgs(): string[] {
+  const built = fileURLToPath(new URL('./oxigraph-parent-watchdog.js', import.meta.url));
+  if (existsSync(built)) return [built];
+  const source = fileURLToPath(new URL('./oxigraph-parent-watchdog.ts', import.meta.url));
+  if (existsSync(source)) return ['--import', import.meta.resolve('tsx'), source];
+  return [built];
+}
+
 export function createOxigraphLaunchStrategy(opts: {
   memoryLimits?: OxigraphMemoryLimits;
   platform: NodeJS.Platform;
@@ -56,11 +79,39 @@ export function createOxigraphLaunchStrategy(opts: {
   nodeExecutable?: string;
   watchdogPath?: string;
 }): OxigraphLaunchStrategy {
+  const nodeExecutable = opts.nodeExecutable ?? process.execPath;
+  const watchdogNodeArgs = (): string[] =>
+    opts.watchdogPath === undefined ? defaultWatchdogNodeArgs() : [opts.watchdogPath];
+
   if (!opts.memoryLimits) {
+    // Windows resolves listener ownership for the direct child only (netstat
+    // has no process tree), so it keeps launching the binary itself.
+    if (opts.platform === 'win32') {
+      return {
+        mode: 'direct',
+        nextSpawnSpec: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),
+        resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
+        observeStderr: () => {},
+        classifyOomExit: cgroupEvidenceIncremented,
+        logSummary: () => null,
+      };
+    }
+    // A worker SIGKILLed by the supervisor's liveness watchdog cannot stop
+    // its children. Without the parent watchdog, Oxigraph would be reparented
+    // to init and keep `<location>/LOCK`, and every respawned worker would
+    // fail to open the store.
     return {
       mode: 'direct',
-      nextSpawnSpec: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),
-      resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
+      nextSpawnSpec: (binaryPath, binaryArgs) => ({
+        command: nodeExecutable,
+        args: [
+          ...watchdogNodeArgs(),
+          OXIGRAPH_WATCHDOG_DIRECT_FLAG, String(opts.parentPid),
+          binaryPath, ...binaryArgs,
+        ],
+        processGroup: true,
+      }),
+      resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'process-tree'),
       observeStderr: () => {},
       classifyOomExit: cgroupEvidenceIncremented,
       logSummary: () => null,
@@ -74,8 +125,6 @@ export function createOxigraphLaunchStrategy(opts: {
     throw new Error('Managed Oxigraph memory limits require a numeric service user id');
   }
   const runtimeDir = `/run/user/${opts.uid}`;
-  const watchdogPath = opts.watchdogPath ?? fileURLToPath(new URL('./oxigraph-parent-watchdog.js', import.meta.url));
-  const nodeExecutable = opts.nodeExecutable ?? process.execPath;
   const watchdogOomChildren = new WeakSet<ChildProcess>();
   let generation = 0;
 
@@ -92,7 +141,7 @@ export function createOxigraphLaunchStrategy(opts: {
           ...(limits.highMiB === undefined ? [] : [`--property=MemoryHigh=${limits.highMiB}M`]),
           `--property=MemoryMax=${limits.maxMiB}M`,
           '--property=MemorySwapMax=0',
-          '--', nodeExecutable, watchdogPath, String(opts.parentPid), binaryPath, ...binaryArgs,
+          '--', nodeExecutable, ...watchdogNodeArgs(), String(opts.parentPid), binaryPath, ...binaryArgs,
         ],
         environment: {
           XDG_RUNTIME_DIR: runtimeDir,

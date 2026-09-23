@@ -11,10 +11,18 @@ import {
 export const OXIGRAPH_WATCHDOG_OOM_MARKER =
   '[oxigraph-watchdog] scoped child OOM-killed by cgroup memory cap (or host OOM)';
 
+/**
+ * How the daemon launched this watchdog. `systemd-scope` places Oxigraph in a
+ * sibling cgroup that stopping the daemon's service does not reach; `direct`
+ * leaves it inside the daemon's own process tree and cgroup.
+ */
+export type OxigraphWatchdogLaunchMode = 'direct' | 'systemd-scope';
+
 export interface OxigraphParentWatchdogOptions {
   parentPid: number;
   command: string;
   args: readonly string[];
+  launchMode?: OxigraphWatchdogLaunchMode;
   pollIntervalMs?: number;
   stopGraceMs?: number;
   spawnChild?: typeof spawn;
@@ -42,14 +50,21 @@ export interface OxigraphWatchdogLaunchPlan {
   readonly protectedByParentDeathSignal: boolean;
 }
 
-/** Pure host-policy seam; runtime callers cannot select a different platform. */
+/**
+ * Pure host-policy seam; runtime callers cannot select a different platform.
+ * Only a scoped child needs the kernel parent-death signal (and util-linux
+ * `setpriv`): a direct child stays in the daemon's cgroup, so stopping the
+ * service still reaches it, and requiring `setpriv` there would stop musl
+ * hosts (which run a PATH Oxigraph and often lack util-linux) from starting.
+ */
 export function buildOxigraphWatchdogLaunchPlan(
   platform: NodeJS.Platform,
   watchdogPid: number,
   command: string,
   args: readonly string[],
+  launchMode: OxigraphWatchdogLaunchMode = 'systemd-scope',
 ): OxigraphWatchdogLaunchPlan {
-  if (platform !== 'linux') {
+  if (platform !== 'linux' || launchMode === 'direct') {
     return Object.freeze({
       command,
       args: Object.freeze([...args]),
@@ -77,10 +92,12 @@ function processIsAlive(pid: number): boolean {
 }
 
 /**
- * Keep Oxigraph tied to the DKG daemon even though systemd places it in a
- * sibling cgroup. The typed watchdog forwards shutdown signals and terminates
- * Oxigraph when the original daemon PID disappears. On Linux, a kernel
- * parent-death signal also covers abrupt death of the watchdog itself.
+ * Keep Oxigraph tied to the DKG daemon worker. A worker SIGKILLed by the
+ * supervisor's liveness watchdog cannot stop its children, and systemd may
+ * place Oxigraph in a sibling cgroup. The typed watchdog forwards shutdown
+ * signals and terminates Oxigraph when the original daemon PID disappears.
+ * For a scoped child on Linux, a kernel parent-death signal also covers
+ * abrupt death of the watchdog itself.
  */
 export function startOxigraphParentWatchdog(
   opts: OxigraphParentWatchdogOptions,
@@ -110,13 +127,16 @@ export function startOxigraphParentWatchdog(
     process.pid,
     opts.command,
     opts.args,
+    opts.launchMode,
   );
   const child = spawnChild(launch.command, [...launch.args], { stdio: 'inherit' });
   // The watchdog already runs inside the transient scope, so it can retain a
   // valid baseline and re-read memory.events while the scope still contains
   // this process. The parent supervisor cannot reliably do that after exit:
   // systemd may remove the empty cgroup before its ChildProcess callback runs.
-  const oomSnapshot = readOomSnapshot(process.pid);
+  // A direct watchdog shares the daemon's cgroup; it passes SIGKILL on as exit
+  // 137 and leaves OOM attribution to the daemon, as before it was wrapped.
+  const oomSnapshot = opts.launchMode === 'direct' ? null : readOomSnapshot(process.pid);
   let parentLost = false;
   let stopping = false;
   let settled = false;
@@ -174,17 +194,25 @@ export function startOxigraphParentWatchdog(
   };
 }
 
+export const OXIGRAPH_WATCHDOG_DIRECT_FLAG = '--direct';
+
 export function parseOxigraphParentWatchdogArgs(argv: readonly string[]): {
   parentPid: number;
   command: string;
   args: string[];
+  launchMode: OxigraphWatchdogLaunchMode;
 } {
-  const [rawParentPid, command, ...args] = argv;
+  const launchMode: OxigraphWatchdogLaunchMode = argv[0] === OXIGRAPH_WATCHDOG_DIRECT_FLAG
+    ? 'direct'
+    : 'systemd-scope';
+  const [rawParentPid, command, ...args] = launchMode === 'direct' ? argv.slice(1) : argv;
   const parentPid = Number(rawParentPid);
   if (!Number.isInteger(parentPid) || parentPid <= 0 || !command) {
-    throw new Error('Usage: oxigraph-parent-watchdog <parent-pid> <command> [args...]');
+    throw new Error(
+      `Usage: oxigraph-parent-watchdog [${OXIGRAPH_WATCHDOG_DIRECT_FLAG}] <parent-pid> <command> [args...]`,
+    );
   }
-  return { parentPid, command, args };
+  return { parentPid, command, args, launchMode };
 }
 
 export function conventionalSignalExitCode(signal: NodeJS.Signals): number {

@@ -6,6 +6,19 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **A worker killed by the supervisor no longer leaves managed Oxigraph
+  holding the store lock**: after five failed liveness probes the supervisor
+  SIGKILLs its worker. A directly launched `oxigraph serve` (macOS, or any node
+  without memory limits) survived that, reparented to init, and kept
+  `oxigraph-data/LOCK`. Every respawned worker then failed with
+  `While lock file … Resource temporarily unavailable` until the supervisor
+  gave up. Oxigraph now runs under the parent watchdog on Linux and macOS
+  whether or not memory limits are set, and the daemon's stop and restart
+  signals reach it through the watchdog's process group. Before each Oxigraph
+  start, the daemon also stops an orphan that holds this store's lock, runs
+  this node's binary for this store, and has been reparented to PID 1. Any
+  other lock holder is logged and left running, and the lock file itself is
+  never touched.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which

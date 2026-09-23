@@ -245,13 +245,6 @@
     "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
   },
   {
-    "key": "packages/cli/test/oxigraph-server.test.ts:D1:5b1435cbf10c4777a3a2c04e3fb6c933ba18af1e",
-    "path": "packages/cli/test/oxigraph-server.test.ts",
-    "api": "it.runIf",
-    "count": 1,
-    "reason": "Existing debt at 580a3607; requires triage before removal. Live-service guards remain intentional."
-  },
-  {
     "key": "packages/cli/test/oxigraph-server.test.ts:D1:b539d159a0765a7d598299fb841bb2150097b448",
     "path": "packages/cli/test/oxigraph-server.test.ts",
     "api": "describe.skipIf",

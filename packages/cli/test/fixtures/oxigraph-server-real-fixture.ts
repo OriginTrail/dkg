@@ -9,14 +9,23 @@ export interface OxigraphStandinFixture {
   cleanup(): Promise<void>;
 }
 
-/** Real HTTP child with the small CLI surface the supervisor needs. */
-export async function createOxigraphStandinFixture(): Promise<OxigraphStandinFixture> {
+/**
+ * Real HTTP child with the small CLI surface the supervisor needs. With
+ * `holdStoreLock`, it also keeps `<location>/LOCK` open for its lifetime, as
+ * RocksDB does, so tests can find it the way the daemon finds a lock holder.
+ */
+export async function createOxigraphStandinFixture(
+  opts: { holdStoreLock?: boolean } = {},
+): Promise<OxigraphStandinFixture> {
   const directory = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
   const binaryPath = join(directory, 'oxigraph-standin.cjs');
+  const holdStoreLock = opts.holdStoreLock
+    ? `require('node:fs').openSync(require('node:path').join(process.argv[process.argv.indexOf('--location') + 1], 'LOCK'), 'a');\n`
+    : '';
   await writeFile(
     binaryPath,
     `#!/usr/bin/env node
-const http = require('node:http');
+${holdStoreLock}const http = require('node:http');
 const bindIdx = process.argv.indexOf('--bind');
 const [host, port] = process.argv[bindIdx + 1].split(':');
 const srv = http.createServer((req, res) => {

@@ -199,6 +199,7 @@ export default defineConfig({
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-parent-watchdog.test.ts',
+          'test/oxigraph-orphan.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so

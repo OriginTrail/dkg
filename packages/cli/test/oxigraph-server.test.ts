@@ -99,14 +99,41 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
 }
 
 describe('buildOxigraphSpawnSpec', () => {
-  it('launches the binary directly when memory isolation is not configured', () => {
+  it.each(['linux', 'darwin'] as const)(
+    'ties an unscoped Oxigraph to the daemon through the direct parent watchdog on %s',
+    async (platform) => {
+      const strategy = createOxigraphLaunchStrategy({
+        platform,
+        parentPid: 42,
+        uid: 1000,
+        nodeExecutable: '/opt/node',
+        watchdogPath: '/opt/oxigraph-watchdog.js',
+      });
+      expect(strategy.mode).toBe('direct');
+      expect(strategy.nextSpawnSpec('/opt/oxigraph', ['serve'])).toEqual({
+        command: '/opt/node',
+        args: ['/opt/oxigraph-watchdog.js', '--direct', '42', '/opt/oxigraph', 'serve'],
+        processGroup: true,
+      });
+      const resolver = vi.fn(async () => 4242);
+      const child = {} as import('node:child_process').ChildProcess;
+      await expect(strategy.resolveListenerPid(child, 7878, '127.0.0.1', resolver)).resolves.toBe(4242);
+      expect(resolver).toHaveBeenCalledWith(child, 7878, '127.0.0.1', 'process-tree');
+    },
+  );
+
+  it('launches the binary directly on Windows, where only the direct child can own the listener', async () => {
     const strategy = createOxigraphLaunchStrategy({
-      platform: 'linux',
+      platform: 'win32',
       parentPid: 42,
-      uid: 1000,
+      uid: -1,
     });
-    expect(strategy.nextSpawnSpec('/opt/oxigraph', ['serve']))
-      .toEqual({ command: '/opt/oxigraph', args: ['serve'] });
+    expect(strategy.nextSpawnSpec('C:\\oxigraph.exe', ['serve']))
+      .toEqual({ command: 'C:\\oxigraph.exe', args: ['serve'] });
+    const resolver = vi.fn(async () => 4242);
+    const child = {} as import('node:child_process').ChildProcess;
+    await strategy.resolveListenerPid(child, 7878, '127.0.0.1', resolver);
+    expect(resolver).toHaveBeenCalledWith(child, 7878, '127.0.0.1', 'child-only');
   });
 
   it('wraps Oxigraph in a finite systemd user scope', () => {
@@ -201,7 +228,7 @@ describe('startOxigraphServer (real child processes)', () => {
     }
   });
 
-  it.runIf(process.platform === 'linux')('accepts a descendant process as the verified listener owner', async () => {
+  it('accepts a descendant process as the verified listener owner', async () => {
     const port = await freePort();
     const wrapper = spawn('/bin/sh', [
       '-c',
