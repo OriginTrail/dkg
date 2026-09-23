@@ -29,6 +29,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import oxigraph from 'oxigraph';
 import { SparqlHttpStore, type Quad } from '../src/index.js';
 import { buildBlankNodeSafeDelete, isBlankNodeTerm } from '../src/adapters/sparql-http.js';
+import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 const G = 'http://example.org/graph/wm';
 const G2 = 'http://example.org/graph/wm2';
@@ -215,6 +216,50 @@ describe('buildBlankNodeSafeDelete — generated SPARQL shape', () => {
     expect(buildBlankNodeSafeDelete([])).toBeNull();
   });
 
+  it('renders well-formed terms byte-identically to the pre-validation builder', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const update = buildBlankNodeSafeDelete([
+        { subject: 'http://ex/s1', predicate: 'http://ex/p', object: 'http://ex/o1', graph: G },
+        { subject: 'http://ex/s3', predicate: 'http://ex/nested', object: '_:b0', graph: G },
+        { subject: '_:b0', predicate: 'http://ex/v', object: '"blank"@en', graph: G },
+      ]);
+      const component = `GRAPH <${G}> {\n`
+        + '    <http://ex/s3> <http://ex/nested> ?b0 .\n'
+        + '    ?b0 <http://ex/v> "blank"@en .\n'
+        + '  }';
+      expect(update).toBe(
+        `DELETE DATA {\nGRAPH <${G}> { <http://ex/s1> <http://ex/p> <http://ex/o1> . }\n};\n`
+          + `DELETE { ${component} } WHERE { ${component} }`,
+      );
+      expect(observed.counted).toEqual([]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('logs and counts a malformed term in a blank-node component instead of silently stripping it', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const update = buildBlankNodeSafeDelete([
+        { subject: 'http://ex/s', predicate: 'http://ex/p|q', object: '_:b0', graph: G },
+      ])!;
+      // Observe mode: the pre-validation (stripped) predicate is still sent.
+      expect(update).toContain('<http://ex/s> <http://ex/pq> ?b0 .');
+      expect(observed.counted).toEqual([{
+        value: 1,
+        adapter: 'sparql-http',
+        operation: 'delete',
+        position: 'predicate',
+        kind: 'iri',
+        enforcement: 'observe',
+      }]);
+      expect(observed.warnings).toEqual([expect.stringContaining('"http://ex/p|q"')]);
+    } finally {
+      observed.restore();
+    }
+  });
+
   it('isBlankNodeTerm distinguishes blank nodes from IRIs and literals', () => {
     expect(isBlankNodeTerm('_:b0')).toBe(true);
     expect(isBlankNodeTerm('http://ex/s')).toBe(false);
@@ -378,6 +423,19 @@ describe('SparqlHttpStore.delete() — full HTTP path against a real Oxigraph en
     // Pre-fix this rejected with "SPARQL HTTP delete failed (400)".
     await expect(adapter.delete(quads)).resolves.toBeUndefined();
     expect(countGraph(store, G)).toBe(0);
+  });
+
+  it('inserts engine-generated blank-node labels without an invalid-term observation', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const quads = readGraph(loaded(FIXTURES[2].nquads), G);
+      expect(quads.some((q) => isBlankNodeTerm(q.subject))).toBe(true);
+      await expect(adapter.insert(quads)).resolves.toBeUndefined();
+      expect(countGraph(store, G)).toBe(quads.length);
+      expect(observed.counted).toEqual([]);
+    } finally {
+      observed.restore();
+    }
   });
 
   it('still deletes ground-only quads exactly (no regression to the fast path)', async () => {

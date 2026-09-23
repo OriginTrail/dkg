@@ -1,9 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import {
-  assertSafeIri,
-  assertSafeRdfTerm,
-} from '@origintrail-official/dkg-core';
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
+import { formatObject, formatResource, unwrapIri } from './sparql-terms.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -219,33 +217,4 @@ export function formatGraphBlock(graphUri: string, quads: readonly Quad[]): stri
     .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
     .join('\n');
   return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
-}
-
-function formatResource(term: string, role: string): string {
-  if (term.startsWith('"')) {
-    throw new Error(`Atomic graph replacement ${role} must be an IRI`);
-  }
-  return `<${assertSafeIri(unwrapIri(term))}>`;
-}
-
-export function formatObject(term: string): string {
-  if (term.startsWith('"')) {
-    const normalized = normalizeLiteralDatatype(term);
-    assertSafeRdfTerm(normalized);
-    return normalized;
-  }
-  return formatResource(term, 'object');
-}
-
-function normalizeLiteralDatatype(term: string): string {
-  const bareDatatype = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-  return bareDatatype
-    ? `${bareDatatype[1]}^^<${assertSafeIri(unwrapIri(bareDatatype[2]))}>`
-    : term;
-}
-
-export function unwrapIri(term: string): string {
-  return term.startsWith('<') && term.endsWith('>')
-    ? term.slice(1, -1)
-    : term;
 }

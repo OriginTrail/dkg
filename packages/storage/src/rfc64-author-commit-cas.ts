@@ -6,10 +6,9 @@ import {
   assertReplacementPayload,
   assertSubjectReplacementPayload,
   formatGraphBlock,
-  formatObject,
   isAtomicGraphReplaceStagingGraph,
-  unwrapIri,
 } from './atomic-graph-replace.js';
+import { formatObject, unwrapIri } from './sparql-terms.js';
 import {
   decodeRfc64AuthorCommitPlanV1,
   finalizeRfc64AuthorCommitPlanV1,

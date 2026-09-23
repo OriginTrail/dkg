@@ -34,6 +34,7 @@ import {
   type Rfc64AuthorCommitCasUpdateV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
+import { sparqlIriTerm, sparqlStringLiteral } from '../sparql-terms.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -377,7 +378,8 @@ export class OxigraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string): Promise<void> {
-    this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
+    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'oxigraph', operation: 'dropGraph' });
+    this.store.update(`DROP SILENT GRAPH ${graph}`);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
@@ -532,8 +534,12 @@ export class OxigraphStore implements TripleStore {
     prefix: string,
   ): Promise<number> {
     const before = this.store.size;
+    const graph = sparqlIriTerm(graphUri, 'graph', {
+      adapter: 'oxigraph',
+      operation: 'deleteBySubjectPrefix',
+    });
     this.store.update(
-      `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
+      `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlStringLiteral(prefix)})) } }`,
     );
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();
@@ -698,14 +704,6 @@ function termToString(t: OxTerm): string {
   }
   if (t.termType === 'BlankNode') return `_:${t.value}`;
   return t.value;
-}
-
-function escapeUri(uri: string): string {
-  return uri.replace(/[<>"{}|\\^`]/g, '');
-}
-
-function escapeString(s: string): string {
-  return s.replace(/[\\"]/g, '\\$&');
 }
 
 registerTripleStoreAdapter('oxigraph', async () => new OxigraphStore());

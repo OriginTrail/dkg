@@ -72,6 +72,12 @@ import {
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
+  sparqlIriTerm,
+  sparqlRdfTerm,
+  sparqlStringLiteral,
+  type SparqlTermSite,
+} from '../sparql-terms.js';
+import {
   isStoreOperationTimeoutError,
   StoreOperationTimeoutError,
 } from '../store-operation-timeout.js';
@@ -671,11 +677,14 @@ export class SparqlHttpStore implements TripleStore {
       if (!byGraph.has(g)) byGraph.set(g, []);
       byGraph.get(g)!.push(q);
     }
+    const site = { adapter: 'sparql-http', operation: 'insert' } as const;
     const parts: string[] = [];
     for (const [graph, list] of byGraph) {
-      const triples = list.map((q) => `${formatTerm(q.subject)} <${escapeUri(q.predicate)}> ${formatTerm(q.object)} .`).join('\n    ');
+      const triples = list.map((q) =>
+        `${sparqlRdfTerm(q.subject, 'subject', site, 'allow')} ${sparqlIriTerm(q.predicate, 'predicate', site)} ${sparqlRdfTerm(q.object, 'object', site, 'allow')} .`,
+      ).join('\n    ');
       if (graph) {
-        parts.push(`GRAPH <${escapeUri(graph)}> {\n    ${triples}\n  }`);
+        parts.push(`GRAPH ${sparqlIriTerm(graph, 'graph', site)} {\n    ${triples}\n  }`);
       } else {
         parts.push(triples);
       }
@@ -740,13 +749,16 @@ export class SparqlHttpStore implements TripleStore {
     options?: QueryOptions,
   ): Promise<void> {
     const graphUri = pattern.graph;
-    const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
-    const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
-    const o = pattern.object ? formatTerm(pattern.object) : '?o';
+    const site = { adapter: 'sparql-http', operation: 'deleteByPattern' } as const;
+    const s = pattern.subject ? sparqlIriTerm(pattern.subject, 'subject', site) : '?s';
+    const p = pattern.predicate ? sparqlIriTerm(pattern.predicate, 'predicate', site) : '?p';
+    // A DELETE template cannot contain a blank node.
+    const o = pattern.object ? sparqlRdfTerm(pattern.object, 'object', site, 'reject') : '?o';
     const triple = `${s} ${p} ${o}`;
     let update: string;
     if (graphUri) {
-      update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ${triple} } } WHERE { GRAPH <${escapeUri(graphUri)}> { ${triple} } }`;
+      const graph = sparqlIriTerm(graphUri, 'graph', site);
+      update = `DELETE { GRAPH ${graph} { ${triple} } } WHERE { GRAPH ${graph} { ${triple} } }`;
     } else {
       // The DELETE template must use the `GRAPH` keyword — `{ ?g_ctx { … } }`
       // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
@@ -770,8 +782,11 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
     });
-    const escapedPrefix = escapeString(prefix);
-    const update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapedPrefix}")) } }`;
+    const graph = sparqlIriTerm(graphUri, 'graph', {
+      adapter: 'sparql-http',
+      operation: 'deleteBySubjectPrefix',
+    });
+    const update = `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlStringLiteral(prefix)})) } }`;
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
@@ -1140,8 +1155,9 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'sparql-http', operation: 'hasGraph' });
     const r = await this.queryWithOperation(
-      `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
+      `ASK { GRAPH ${graph} { ?s ?p ?o } }`,
       { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
       'hasGraph',
     );
@@ -1153,7 +1169,8 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    const update = `DROP SILENT GRAPH <${escapeUri(graphUri)}>`;
+    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'sparql-http', operation: 'dropGraph' });
+    const update = `DROP SILENT GRAPH ${graph}`;
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
@@ -1227,8 +1244,11 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const sparql = graphUri
-      ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
+    const graph = graphUri
+      ? sparqlIriTerm(graphUri, 'graph', { adapter: 'sparql-http', operation: 'countQuads' })
+      : undefined;
+    const sparql = graph
+      ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ${graph} { ?s ?p ?o } }`
       : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
     const r = await this.queryWithOperation(
       sparql,
@@ -1392,25 +1412,6 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
 // N-Quads / term helpers
 // ---------------------------------------------------------------------------
 
-function formatTerm(term: string): string {
-  if (term.startsWith('"')) {
-    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-    if (m) return `${m[1]}^^<${m[2]}>`;
-    return term;
-  }
-  if (term.startsWith('_:')) return term;
-  if (term.startsWith('<')) return term;
-  return `<${term}>`;
-}
-
-function escapeUri(uri: string): string {
-  return uri.replace(/[<>"{}|\\^`]/g, '');
-}
-
-function escapeString(s: string): string {
-  return s.replace(/[\\"]/g, '\\$&');
-}
-
 /** True when an N-Quads term string denotes an RDF blank node (`_:label`). */
 export function isBlankNodeTerm(term: string): boolean {
   return typeof term === 'string' && term.startsWith('_:');
@@ -1483,8 +1484,12 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  *
  * Exported for unit testing of the generated SPARQL.
  */
-export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
+export function buildBlankNodeSafeDelete(
+  quads: DKGQuad[],
+  adapter: SparqlTermSite['adapter'] = 'sparql-http',
+): string | null {
   if (quads.length === 0) return null;
+  const site: SparqlTermSite = { adapter, operation: 'delete' };
 
   const ground: DKGQuad[] = [];
   const bnode: DKGQuad[] = [];
@@ -1497,8 +1502,8 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
 
   if (ground.length > 0) {
     const body = ground.map((q) => {
-      const g = q.graph ? `GRAPH <${escapeUri(q.graph)}> ` : '';
-      return `${g}{ ${formatTerm(q.subject)} <${escapeUri(q.predicate)}> ${formatTerm(q.object)} . }`;
+      const g = q.graph ? `GRAPH ${sparqlIriTerm(q.graph, 'graph', site)} ` : '';
+      return `${g}{ ${sparqlRdfTerm(q.subject, 'subject', site, 'reject')} ${sparqlIriTerm(q.predicate, 'predicate', site)} ${sparqlRdfTerm(q.object, 'object', site, 'reject')} . }`;
     }).join('\n');
     statements.push(`DELETE DATA {\n${body}\n}`);
   }
@@ -1515,17 +1520,17 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
     for (const [graph, list] of byGraph) {
       for (const component of connectedBlankNodeComponents(list)) {
         const vars = new Map<string, string>();
-        const render = (t: string): string => {
-          if (!isBlankNodeTerm(t)) return formatTerm(t);
+        const render = (t: string, position: 'subject' | 'object'): string => {
+          if (!isBlankNodeTerm(t)) return sparqlRdfTerm(t, position, site, 'reject');
           let v = vars.get(t);
           if (!v) { v = `?b${vars.size}`; vars.set(t, v); }
           return v;
         };
         const triples = component
-          .map((q) => `${render(q.subject)} <${escapeUri(q.predicate)}> ${render(q.object)} .`)
+          .map((q) => `${render(q.subject, 'subject')} ${sparqlIriTerm(q.predicate, 'predicate', site)} ${render(q.object, 'object')} .`)
           .join('\n    ');
         const inner = graph
-          ? `GRAPH <${escapeUri(graph)}> {\n    ${triples}\n  }`
+          ? `GRAPH ${sparqlIriTerm(graph, 'graph', site)} {\n    ${triples}\n  }`
           : triples;
         statements.push(`DELETE { ${inner} } WHERE { ${inner} }`);
       }

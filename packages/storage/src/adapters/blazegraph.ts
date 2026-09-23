@@ -43,6 +43,7 @@ import {
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadToNQuad } from '../bounded-rdf.js';
+import { sparqlIriTerm, sparqlRdfTerm, sparqlStringLiteral } from '../sparql-terms.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
@@ -364,7 +365,7 @@ export class BlazegraphStore implements TripleStore {
     // Blazegraph is SPARQL 1.1, so blank nodes are illegal in `DELETE DATA`
     // (same constraint as Oxigraph). Reuse the shared blank-node-safe builder
     // so blank-node quads are removed via `DELETE { … } WHERE { … }`.
-    const update = buildBlankNodeSafeDelete(quads);
+    const update = buildBlankNodeSafeDelete(quads, 'blazegraph');
     if (!update) return;
     await this.sparqlUpdate(update, {
       ...options,
@@ -396,13 +397,16 @@ export class BlazegraphStore implements TripleStore {
     pattern: Partial<DKGQuad>,
     options?: QueryOptions,
   ): Promise<void> {
-    const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
-    const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
-    const o = pattern.object ? formatTerm(pattern.object) : '?o';
+    const site = { adapter: 'blazegraph', operation: 'deleteByPattern' } as const;
+    const s = pattern.subject ? sparqlIriTerm(pattern.subject, 'subject', site) : '?s';
+    const p = pattern.predicate ? sparqlIriTerm(pattern.predicate, 'predicate', site) : '?p';
+    // A DELETE template cannot contain a blank node.
+    const o = pattern.object ? sparqlRdfTerm(pattern.object, 'object', site, 'reject') : '?o';
     const triple = `${s} ${p} ${o}`;
     if (pattern.graph) {
+      const graph = sparqlIriTerm(pattern.graph, 'graph', site);
       await this.sparqlUpdate(
-        `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
+        `DELETE { GRAPH ${graph} { ${triple} } } WHERE { GRAPH ${graph} { ${triple} } }`,
         { ...options, source: options?.source ?? 'blazegraph.deleteByPattern' },
         'deleteByPattern',
       );
@@ -422,8 +426,12 @@ export class BlazegraphStore implements TripleStore {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countBefore',
     });
+    const graph = sparqlIriTerm(graphUri, 'graph', {
+      adapter: 'blazegraph',
+      operation: 'deleteBySubjectPrefix',
+    });
     await this.sparqlUpdate(
-      `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
+      `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlStringLiteral(prefix)})) } }`,
       { ...options, source: options?.source ?? 'blazegraph.deleteBySubjectPrefix' },
       'deleteBySubjectPrefix',
     );
@@ -692,8 +700,9 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'blazegraph', operation: 'hasGraph' });
     const r = await this.queryWithOperation(
-      `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
+      `ASK { GRAPH ${graph} { ?s ?p ?o } }`,
       { ...options, source: options?.source ?? 'blazegraph.hasGraph' },
       'hasGraph',
     );
@@ -705,8 +714,9 @@ export class BlazegraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
+    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'blazegraph', operation: 'dropGraph' });
     await this.sparqlUpdate(
-      `DROP SILENT GRAPH <${escapeUri(graphUri)}>`,
+      `DROP SILENT GRAPH ${graph}`,
       { ...options, source: options?.source ?? 'blazegraph.dropGraph' },
       'dropGraph',
     );
@@ -729,8 +739,11 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const sparql = graphUri
-      ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
+    const graph = graphUri
+      ? sparqlIriTerm(graphUri, 'graph', { adapter: 'blazegraph', operation: 'countQuads' })
+      : undefined;
+    const sparql = graph
+      ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ${graph} { ?s ?p ?o } }`
       : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
     const r = await this.queryWithOperation(
       sparql,
@@ -812,17 +825,6 @@ function quadToBlazegraphNQuad(q: DKGQuad): string {
   return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
 }
 
-function formatTerm(term: string): string {
-  if (term.startsWith('"')) {
-    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-    if (m) return `${m[1]}^^<${m[2]}>`;
-    return term;
-  }
-  if (term.startsWith('_:')) return term;
-  if (term.startsWith('<')) return term;
-  return `<${term}>`;
-}
-
 /**
  * Parse a Blazegraph CONSTRUCT body and reject one that the engine cut short.
  *
@@ -879,14 +881,6 @@ function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   }
 
   return quads;
-}
-
-function escapeUri(uri: string): string {
-  return uri.replace(/[<>"{}|\\^`]/g, '');
-}
-
-function escapeString(s: string): string {
-  return s.replace(/[\\"]/g, '\\$&');
 }
 
 // =====================================================================

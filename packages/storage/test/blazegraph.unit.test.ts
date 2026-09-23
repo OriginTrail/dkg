@@ -9,6 +9,7 @@ import {
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
 } from '../src/store-priority-scheduler.js';
+import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 async function waitForCondition(
   predicate: () => boolean,
@@ -1080,5 +1081,108 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(fetchCalls).toHaveLength(1);
     const body = String(fetchCalls[0][1]?.body);
     expect(body).toContain(longUri);
+  });
+
+  describe('RDF term formatting', () => {
+    function respondToSparql(): void {
+      setFetch(async (_url, init) => {
+        const body = String(init?.body ?? '');
+        if (body.startsWith('ASK')) {
+          return new Response(JSON.stringify({ boolean: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (body.startsWith('SELECT')) {
+          return new Response(
+            JSON.stringify({ head: { vars: ['c'] }, results: { bindings: [{ c: { type: 'literal', value: '0' } }] } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(null, { status: 200 });
+      });
+    }
+    const bodies = () => fetchCalls.map(([, init]) => String(init?.body));
+
+    it('sends byte-identical SPARQL for well-formed terms', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.deleteByPatternWithoutCount({
+          graph: 'http://g',
+          subject: '<http://s>',
+          predicate: 'http://p',
+          object: '"5"^^http://www.w3.org/2001/XMLSchema#integer',
+        });
+        await s.delete([
+          { subject: 'http://s', predicate: 'http://p', object: '_:b0', graph: 'http://g' },
+          { subject: '_:b0', predicate: 'http://q', object: '"v"@en', graph: 'http://g' },
+        ]);
+        await s.deleteBySubjectPrefix('http://g', 'http://s/');
+        await s.dropGraph('http://g');
+        await s.hasGraph('http://g');
+
+        const component = 'GRAPH <http://g> {\n    <http://s> <http://p> ?b0 .\n    ?b0 <http://q> "v"@en .\n  }';
+        expect(bodies()).toEqual([
+          'DELETE { GRAPH <http://g> { <http://s> <http://p> "5"^^<http://www.w3.org/2001/XMLSchema#integer> } } '
+            + 'WHERE { GRAPH <http://g> { <http://s> <http://p> "5"^^<http://www.w3.org/2001/XMLSchema#integer> } }',
+          `DELETE { ${component} } WHERE { ${component} }`,
+          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://g> { ?s ?p ?o } }',
+          'DELETE { GRAPH <http://g> { ?s ?p ?o } } '
+            + 'WHERE { GRAPH <http://g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://s/")) } }',
+          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://g> { ?s ?p ?o } }',
+          'DROP SILENT GRAPH <http://g>',
+          'ASK { GRAPH <http://g> { ?s ?p ?o } }',
+        ]);
+        expect(observed.counted).toEqual([]);
+        expect(observed.warnings).toEqual([]);
+      } finally {
+        observed.restore();
+      }
+    });
+
+    it('logs and counts a malformed IRI instead of silently stripping it', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.dropGraph('http://g{x}');
+        // Observe mode: the pre-validation (stripped) update is still sent.
+        expect(bodies()).toEqual(['DROP SILENT GRAPH <http://gx>']);
+        expect(observed.counted).toEqual([{
+          value: 1,
+          adapter: 'blazegraph',
+          operation: 'dropGraph',
+          position: 'graph',
+          kind: 'iri',
+          enforcement: 'observe',
+        }]);
+        expect(observed.warnings).toEqual([
+          expect.stringContaining('blazegraph.dropGraph: invalid iri in SPARQL graph position "http://g{x}"'),
+        ]);
+      } finally {
+        observed.restore();
+      }
+    });
+
+    it('labels blank-node-safe deletes and escapes subject prefixes', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.delete([{ subject: 'http://s', predicate: 'http://p q', object: '"v"', graph: 'http://g' }]);
+        await s.deleteBySubjectPrefix('http://g', 'http://s/\n"x"');
+        expect(bodies()[0]).toBe('DELETE DATA {\nGRAPH <http://g> { <http://s> <http://p q> "v" . }\n}');
+        expect(bodies()[2]).toContain('FILTER(STRSTARTS(STR(?s), "http://s/\\n\\"x\\""))');
+        expect(observed.counted).toEqual([expect.objectContaining({
+          adapter: 'blazegraph',
+          operation: 'delete',
+          position: 'predicate',
+        })]);
+      } finally {
+        observed.restore();
+      }
+    });
   });
 });
