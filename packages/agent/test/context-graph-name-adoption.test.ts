@@ -104,21 +104,28 @@ function subscribeByNameHash(internals: Record<string, any>): void {
   });
 }
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+/** Durable writes are queued asynchronously; wait for them, not for a fixed time. */
+async function waitFor(check: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 describe('adopting a verified cleartext id', () => {
   it('promotes a durable hash subscription to the cleartext id everywhere', async () => {
     const store = recordingStore();
     const internals = await boot({ store });
     subscribeByNameHash(internals);
-    await flush();
-    expect(store.saved.map((row) => row.id)).toContain(NAME_HASH);
+    await waitFor(() => store.saved.some((row) => row.id === NAME_HASH));
     expect(internals.config.syncContextGraphs).toContain(NAME_HASH);
 
     const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
     await expect(internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol'))
       .resolves.toBe(true);
-    await flush();
+    await waitFor(() => store.deleted.includes(NAME_HASH)
+      && store.saved.some((row) => row.id === CLEARTEXT && row.onChainHash === NAME_HASH));
 
     expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
     expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({
@@ -212,7 +219,7 @@ describe('adopting a verified cleartext id', () => {
     const internals = await boot({ store });
     subscribeByNameHash(internals);
     internals.subscribeToContextGraph(CLEARTEXT, { syncMode: 'always-on' });
-    await flush();
+    await waitFor(() => store.deleted.includes(NAME_HASH));
     expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
     expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({
       subscribed: true,

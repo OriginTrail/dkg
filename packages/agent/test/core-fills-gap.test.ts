@@ -593,6 +593,15 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     const cleartext = 'acme-fun-facts';
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
 
+    /** Durable writes are queued asynchronously; wait for them, not for a fixed time. */
+    async function waitForCondition(check: () => boolean): Promise<void> {
+      const deadline = Date.now() + 5_000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error('condition not met in time');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+
     async function bootWithPlaceholder(): Promise<AgentInternals & Record<string, any>> {
       const internals = await boot() as AgentInternals & Record<string, any>;
       internals.chain.getContextGraphAccessPolicy = async () => 0;
@@ -624,16 +633,14 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
         syncMode: 'always-on',
         coreHosted: true,
       });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(saved.find((row) => row.id === nameHash)).toMatchObject({ coreHosted: true });
+      await waitForCondition(() => saved.some((row) => row.id === nameHash && row.coreHosted === true));
 
       await internals.recordCoreHostedPublicCg('7', cleartext);
 
       expect(internals.subscribedContextGraphs.has(nameHash)).toBe(false);
       expect(internals.subscribedContextGraphs.get(cleartext)).toMatchObject({ coreHosted: true, onChainId: '7' });
       // The durable hash row is gone too, or restart would resurrect the trap.
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      expect(deleted).toContain(nameHash);
+      await waitForCondition(() => deleted.includes(nameHash));
     });
 
     it('keeps the placeholder when the hint is not the committed name', async () => {

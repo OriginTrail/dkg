@@ -56,6 +56,19 @@ function harness(overrides: Partial<{
   return state;
 }
 
+async function waitFor(check: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function attemptsOf(resolver: ContextGraphNameResolver): number | undefined {
+  const entry = resolver.entryFor(NAME_HASH);
+  return entry?.state === 'pending' ? entry.attempts : undefined;
+}
+
 const resolvers: ContextGraphNameResolver[] = [];
 function resolverFor(state: Harness, options = {}): ContextGraphNameResolver {
   const resolver = new ContextGraphNameResolver(state.deps, options);
@@ -153,37 +166,40 @@ describe('ContextGraphNameResolver', () => {
     const state = harness({ peers: ['peer-a'], protocols: { 'peer-a': true }, answers: {} });
     const resolver = resolverFor(state);
     resolver.request();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => resolver.entryFor(NAME_HASH)?.state === 'pending');
     expect(state.asked).toEqual(['peer-a']);
+    // Identify updates arrive often; the same peer is not asked again.
     resolver.onPeerUpdated('peer-a');
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => attemptsOf(resolver) === 2);
     expect(state.asked).toEqual(['peer-a']);
     await resolver.resolveNow(TARGET);
     expect(state.asked).toEqual(['peer-a', 'peer-a']);
   });
 
-  it('asks a newly identified peer even while an attempt is in flight', async () => {
-    let releaseFirst!: () => void;
-    const state = harness({ peers: ['slow'], protocols: { slow: true, holder: true }, answers: { holder: CLEARTEXT } });
+  it('queues a peer identified while an attempt is in flight and asks it afterwards', async () => {
+    let releaseSlow: (() => void) | undefined;
+    const state = harness({ peers: ['slow'], protocols: { slow: true, holder: true } });
     (state.deps as { askPeer: (peer: string) => Promise<string | null> }).askPeer = async (peerId) => {
       state.asked.push(peerId);
-      if (peerId === 'slow') {
-        await new Promise<void>((resolve) => { releaseFirst = resolve; });
-        return null;
+      if (peerId === 'holder') return CLEARTEXT;
+      if (state.asked.length > 1) {
+        // The second ask of `slow` hangs until the test releases it.
+        await new Promise<void>((resolve) => { releaseSlow = resolve; });
       }
-      return CLEARTEXT;
+      return null;
     };
     const resolver = resolverFor(state);
-    const first = resolver.resolveNow(TARGET);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(state.asked).toEqual(['slow']);
-    // The pending entry exists only after the first attempt; seed it.
-    releaseFirst();
-    expect(await first).toMatchObject({ state: 'pending' });
-    resolver.onPeerUpdated('holder');
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(state.asked).toEqual(['slow', 'holder']);
-    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', source: 'peer-protocol' });
+    expect(await resolver.resolveNow(TARGET)).toMatchObject({ state: 'pending' });
+
+    const second = resolver.resolveNow(TARGET);
+    await waitFor(() => releaseSlow !== undefined);
+    resolver.onPeerUpdated('holder'); // arrives while `slow` is still being asked
+    expect(state.asked).toEqual(['slow', 'slow']);
+    releaseSlow!();
+    await second;
+    await waitFor(() => resolver.entryFor(NAME_HASH)?.state === 'resolved');
+    expect(state.asked).toEqual(['slow', 'slow', 'holder']);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ source: 'peer-protocol', contextGraphId: CLEARTEXT });
   });
 
   it('shares one attempt between concurrent explicit requests', async () => {
