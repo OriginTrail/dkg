@@ -482,9 +482,13 @@ type StoreQuadsSnapshot = { status: 'not-requested' | 'pending' } | CachedStoreQ
 
 let storeQuadsCache: StoreQuadsCacheEntry | null = null;
 let storeQuadsInflight: Promise<void> | null = null;
+// Bumped by every invalidation. A running COUNT cannot be cancelled, so a
+// refresh writes its result only if no invalidation happened since it began.
+let storeQuadsGeneration = 0;
 
 /** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
 export function invalidateExternalStoreQuadsCache(): void {
+  storeQuadsGeneration += 1;
   storeQuadsCache = null;
   storeQuadsInflight = null;
 }
@@ -514,6 +518,7 @@ function getCachedExternalStoreQuads(
 
   const currentSnapshot: StoreQuadsSnapshot = cached ?? { status: 'pending' };
   if (!storeQuadsInflight) {
+    const generation = storeQuadsGeneration;
     const refresh = (async () => {
       let result: StoreQuadsCacheEntry;
       try {
@@ -537,10 +542,14 @@ function getCachedExternalStoreQuads(
         // a flapping endpoint.
         result = { status: 'unreachable', fetchedAt: Date.now() };
       }
-      storeQuadsCache = result;
+      // Drop the result if the cache was invalidated while this count ran
+      // (the managed Oxigraph went down): typically a failure against the
+      // dying server, it would report the revived store as unreachable.
+      if (generation === storeQuadsGeneration) storeQuadsCache = result;
     })();
     storeQuadsInflight = refresh;
     void refresh.finally(() => {
+      // After an invalidation a newer count may own the marker; leave it.
       if (storeQuadsInflight === refresh) storeQuadsInflight = null;
     });
   }
