@@ -1,8 +1,8 @@
 /**
- * The external-store quad-count part of the GET /api/status wire contract,
- * defined once. The daemon route and ApiClient both import it, so changing a
- * status value, a field or the query spelling breaks the other side's compile
- * instead of drifting silently.
+ * The external-store part of the GET /api/status wire contract (quad count and
+ * reachability), defined once. The daemon route and ApiClient both import it,
+ * so changing a status value, a field or a query spelling breaks the other
+ * side's compile instead of drifting silently.
  */
 
 /**
@@ -41,4 +41,27 @@ export const INCLUDE_STORE_QUADS_QUERY = `${INCLUDE_STORE_QUADS_PARAM}=true`;
 export function parseIncludeStoreQuads(params: URLSearchParams): boolean {
   const value = params.get(INCLUDE_STORE_QUADS_PARAM);
   return value === 'true' || value === '1';
+}
+
+/**
+ * How an external store answered a cheap reachability check (`ASK`) made for
+ * this request: it answered, it failed, or it gave no answer in time. No
+ * answer is not reported as unreachable, because a busy store, or a busy
+ * daemon store scheduler, delays the check too.
+ */
+export type StoreReachability = 'reachable' | 'unreachable' | 'no-answer';
+
+/** Sent only when the request asked for the check and the store is external. */
+export interface StoreReachabilityFields {
+  storeReachability?: StoreReachability;
+}
+
+const PROBE_STORE_PARAM = 'probeStore';
+
+/** Query asking the daemon to check, cheaply, that the store answers at all. */
+export const PROBE_STORE_QUERY = `${PROBE_STORE_PARAM}=true`;
+
+/** Whether a status request asked for a reachability check. */
+export function parseProbeStore(params: URLSearchParams): boolean {
+  return params.get(PROBE_STORE_PARAM) === 'true';
 }

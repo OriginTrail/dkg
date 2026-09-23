@@ -30,7 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import type { StoreQuadsStatusFields } from '../status-store-quads-wire.js';
+import type { StoreQuadsStatusFields, StoreReachabilityFields } from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -162,11 +162,14 @@ function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
 }
 
 /**
- * The quad-count part of the `dkg status` store line. A daemon that reports
- * `storeQuadsStatus` says what a missing count means; only an older daemon
- * that omits it keeps the legacy reading of `null` as unreachable.
+ * The state part of the `dkg status` store line. This run's reachability
+ * check outranks the cached count, which may be minutes old. A daemon that
+ * reports `storeQuadsStatus` says what a missing count means; only an older
+ * daemon that omits it keeps the legacy reading of `null` as unreachable.
  */
-function formatStoreQuads(s: StoreQuadsStatusFields): string {
+function formatStoreState(s: StoreQuadsStatusFields & StoreReachabilityFields): string {
+  if (s.storeReachability === 'unreachable') return 'UNREACHABLE';
+  if (s.storeReachability === 'no-answer') return 'NOT RESPONDING';
   const status = s.storeQuadsStatus;
   if (status === 'pending') return 'CHECKING';
   if (status === 'not-requested') return 'NOT CHECKED';
@@ -180,7 +183,13 @@ function formatStoreQuads(s: StoreQuadsStatusFields): string {
   // The daemon answers a refresh request with the result it already has while
   // the new count runs, so say that this one is about to be replaced.
   const refreshing = s.storeQuadsRefreshing === true ? ', refreshing' : '';
-  if (status === 'unreachable') return `UNREACHABLE${age}${refreshing}`;
+  if (status === 'unreachable') {
+    // A store that answered this run's check is up even if the last count
+    // failed; a COUNT can time out on a large store that answers an ASK.
+    return s.storeReachability === 'reachable'
+      ? `reachable, count failed${age}${refreshing}`
+      : `UNREACHABLE${age}${refreshing}`;
+  }
   if (typeof s.storeQuads === 'number') return `${s.storeQuads.toLocaleString()} quads${age}${refreshing}`;
   // A status this CLI does not know comes from a newer daemon, for which a
   // null count no longer implies an unreachable store.
@@ -356,11 +365,14 @@ program
   .action(async () => {
     try {
       const client = await ApiClient.connect({ allowConfigFallback: true });
-      // Plain /api/status never starts a full-store COUNT. Ask for one only
-      // when the cached count is missing, failed or old.
-      let s = await client.status();
-      if (s.storeUrl && shouldRefreshStoreQuads(s)) {
-        s = await client.status({ includeStoreQuads: true });
+      // Every run checks, cheaply, that the store answers at all. The costly
+      // full-store COUNT is asked for only when the cached count is missing,
+      // failed or old, and not while the store fails that check.
+      let s = await client.status({ probeStore: true });
+      const storeAnswered = s.storeReachability !== 'unreachable' && s.storeReachability !== 'no-answer';
+      if (s.storeUrl && storeAnswered && shouldRefreshStoreQuads(s)) {
+        const refreshed = await client.status({ includeStoreQuads: true });
+        s = { ...refreshed, storeReachability: s.storeReachability };
       }
       const uptime = formatUptime(s.uptimeMs);
       console.log(`  Node:      ${s.name}`);
@@ -374,12 +386,12 @@ program
       // Backend visibility: local backends print just the name (file
       // bytes are graphed via /api/dashboard); external backends print
       // backend + endpoint + quad count, falling back to a clear
-      // "unreachable" signal when the daemon couldn't talk to the
-      // remote store. The first request on a cold daemon starts the count
-      // and renders as CHECKING (see formatStoreQuads).
+      // "unreachable" signal when the store fails this run's reachability
+      // check. The first request on a cold daemon starts the count and
+      // renders as CHECKING (see formatStoreState).
       const backend = s.storeBackend ?? 'oxigraph-worker';
       if (s.storeUrl) {
-        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${formatStoreQuads(s)}`);
+        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${formatStoreState(s)}`);
       } else {
         console.log(`  Store:     ${backend}`);
       }

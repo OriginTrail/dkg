@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
-import type { StoreQuadsStatusFields } from '../src/status-store-quads-wire.js';
+import type { StoreQuadsStatusFields, StoreReachability } from '../src/status-store-quads-wire.js';
 
 interface StoreFields {
   storeUrl?: string | null;
@@ -11,6 +11,7 @@ interface StoreFields {
   storeQuadsStatus?: StoreQuadsStatusFields['storeQuadsStatus'] | 'from-a-newer-daemon';
   storeQuadsAgeMs?: number | null;
   storeQuadsRefreshing?: boolean;
+  storeReachability?: StoreReachability;
 }
 
 /**
@@ -60,8 +61,9 @@ async function renderStatus(peek: StoreFields, requested: StoreFields = peek): P
   }
 }
 
-const PLAIN_ONLY = [[]];
-const PLAIN_THEN_COUNT = [[], [{ includeStoreQuads: true }]];
+// Every run checks reachability first; a count refresh is a second request.
+const PLAIN_ONLY = [[{ probeStore: true }]];
+const PLAIN_THEN_COUNT = [[{ probeStore: true }], [{ includeStoreQuads: true }]];
 
 const REQUEST_CASES: Array<[label: string, peek: StoreFields, requests: unknown[][]]> = [
   ['asks for a count nobody has requested yet', {
@@ -91,6 +93,15 @@ const REQUEST_CASES: Array<[label: string, peek: StoreFields, requests: unknown[
   ['never asks a local backend for a count', {
     storeUrl: null, storeQuads: null,
   }, PLAIN_ONLY],
+  ['starts no count while the store is unreachable', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 700_000, storeReachability: 'unreachable',
+  }, PLAIN_ONLY],
+  ['starts no count while the store gives no answer', {
+    storeQuads: null, storeQuadsStatus: 'not-requested', storeQuadsAgeMs: null, storeReachability: 'no-answer',
+  }, PLAIN_ONLY],
+  ['still refreshes an old count when the store answers', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 700_000, storeReachability: 'reachable',
+  }, PLAIN_THEN_COUNT],
 ];
 
 const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]> = [
@@ -133,6 +144,18 @@ const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]>
   ['a status this CLI does not know as unknown rather than unreachable', {
     storeQuads: null, storeQuadsStatus: 'from-a-newer-daemon',
   }, 'UNKNOWN'],
+  ['a store that failed this run\'s check as unreachable, even with a cached count', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 120_000, storeReachability: 'unreachable',
+  }, 'UNREACHABLE'],
+  ['a store that gave this run\'s check no answer as not responding, not unreachable', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 120_000, storeReachability: 'no-answer',
+  }, 'NOT RESPONDING'],
+  ['a failed count of a store that answers as a failed count, not an outage', {
+    storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeReachability: 'reachable',
+  }, 'reachable, count failed (checked 2m 5s ago)'],
+  ['the count of a store that answers', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 120_000, storeReachability: 'reachable',
+  }, '66 quads (checked 2m 0s ago)'],
 ];
 
 describe('dkg status external-store count requests', () => {
@@ -160,6 +183,18 @@ describe('dkg status external-store count requests', () => {
     );
 
     expect(storeLine).toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — 70 quads');
+  });
+
+  it('keeps this run\'s reachability when it renders the refreshed count', async () => {
+    const { storeLine } = await renderStatus(
+      {
+        storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeReachability: 'reachable',
+      },
+      { storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeQuadsRefreshing: true },
+    );
+
+    expect(storeLine)
+      .toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — reachable, count failed (checked 2m 5s ago), refreshing');
   });
 });
 

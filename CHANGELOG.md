@@ -23,6 +23,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
   `storeQuadsAgeMs`, the age of the cached count (null when unknown), which
   ordinary polling still never refreshes, and `storeQuadsRefreshing`, true
   while a count runs in the background.
+  Because a reused count says nothing about the store's current state, every
+  `dkg status` run also checks that the store answers at all, with a cheap
+  `ASK` (`?probeStore=true`, reported as `storeReachability`). A store that
+  stops answering shows as `UNREACHABLE` on the next run even while its last
+  count is cached, and no count is started for it. A store that gives no
+  answer within five seconds shows as `NOT RESPONDING`, since a busy store
+  delays the check too. The check is never cancelled, so it cannot trigger a
+  managed Oxigraph's deadline restart.
 
 ## [10.0.18] - 2026-09-22
 

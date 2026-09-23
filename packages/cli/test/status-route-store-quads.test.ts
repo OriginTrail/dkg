@@ -53,6 +53,11 @@ const COUNT_66 = {
   type: 'bindings',
   bindings: [{ c: '"66"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
 };
+const ASK_TRUE = { type: 'boolean', value: true };
+
+function isAsk(sparql: string): boolean {
+  return sparql.startsWith('ASK');
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -75,15 +80,18 @@ function nextTick(): Promise<void> {
 }
 
 async function startStatusServer(
-  query: () => Promise<unknown>,
+  query: (sparql: string) => Promise<unknown>,
   store: StoreConfig = SPARQL_HTTP_STORE,
-  // Yield to the event loop inside the route, as the real status blocks do
-  // with I/O, so a count can settle between the snapshot and the reply.
-  { yieldBeforeReply = false }: { yieldBeforeReply?: boolean } = {},
+  // Awaited inside the route after the store fields are read and the
+  // reachability check has started, as the real status blocks await I/O: a
+  // count can settle meanwhile, and a test can see every request reach it.
+  { beforeReply }: { beforeReply?: () => Promise<void> } = {},
 ): Promise<{
   server: Server;
   baseUrl: string;
 }> {
+  // One store for every request, as in the daemon.
+  const agentStore = { query };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     await handleStatusRoutes({
@@ -106,16 +114,16 @@ async function startStatusServer(
         peerId: 'peer-status-store-quads-test',
         multiaddrs: [],
         getSyncContextGraphIds: () => [],
-        store: { query },
+        store: agentStore,
         node: {
           libp2p: { getConnections: () => [] },
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
-        ...(yieldBeforeReply
+        ...(beforeReply
           ? {
               getFinalizationRecoveryHealth: async () => {
-                await nextTick();
+                await beforeReply();
                 return { available: false };
               },
             }
@@ -143,6 +151,7 @@ interface StatusBody {
   storeQuadsStatus?: string;
   storeQuadsAgeMs?: number | null;
   storeQuadsRefreshing?: boolean;
+  storeReachability?: string;
 }
 
 async function fetchStatus(baseUrl: string, includeStoreQuads = false): Promise<{
@@ -395,7 +404,7 @@ describe('/api/status external-store quad count', () => {
     const { server, baseUrl } = await startStatusServer(async () => {
       queryCalls += 1;
       return COUNT_66;
-    }, SPARQL_HTTP_STORE, { yieldBeforeReply: true });
+    }, SPARQL_HTTP_STORE, { beforeReply: nextTick });
     const countedAt = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(countedAt);
 
@@ -533,7 +542,8 @@ describe('dkg status against the status route', () => {
   it('shows a cold, healthy managed Oxigraph as CHECKING and then its count, never UNREACHABLE', async () => {
     const countResult = deferred<unknown>();
     let queryCalls = 0;
-    const { server, baseUrl } = await startStatusServer(async () => {
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      if (isAsk(sparql)) return ASK_TRUE;
       queryCalls += 1;
       return countResult.promise;
     }, MANAGED_OXIGRAPH_STORE);
@@ -558,7 +568,8 @@ describe('dkg status against the status route', () => {
 
   it('starts no count while the cached one is under ten minutes old, then refreshes it', async () => {
     let queryCalls = 0;
-    const { server, baseUrl } = await startStatusServer(async () => {
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      if (isAsk(sparql)) return ASK_TRUE;
       queryCalls += 1;
       return COUNT_66;
     }, MANAGED_OXIGRAPH_STORE);
@@ -581,6 +592,131 @@ describe('dkg status against the status route', () => {
       expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 10m 0s ago), refreshing');
       expect(queryCalls).toBe(2);
     } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('shows an external store that stopped answering as UNREACHABLE on the next run, without a count', async () => {
+    let storeUp = true;
+    let asks = 0;
+    let counts = 0;
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      if (isAsk(sparql)) asks += 1;
+      else counts += 1;
+      if (!storeUp) throw new Error('connect ECONNREFUSED 127.0.0.1:9');
+      return isAsk(sparql) ? ASK_TRUE : COUNT_66;
+    });
+    const countedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(countedAt);
+
+    try {
+      expect(await runStatusCommand(baseUrl)).toContain('— CHECKING');
+      await nextTick();
+      expect(counts).toBe(1);
+
+      // Two minutes later, well inside the ten-minute count reuse, the store
+      // is down: this run's check says so, and no count is started for it.
+      storeUp = false;
+      clock.mockReturnValue(countedAt + 2 * 60_000);
+      expect(await runStatusCommand(baseUrl))
+        .toContain('Store:     sparql-http (http://127.0.0.1:9/query) — UNREACHABLE');
+      expect(counts).toBe(1);
+
+      // Back up: the cached count shows again, with its age.
+      storeUp = true;
+      clock.mockReturnValue(countedAt + 3 * 60_000);
+      expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 3m 0s ago)');
+      expect(counts).toBe(1);
+      expect(asks).toBe(3);
+    } finally {
+      await closeServer(server);
+    }
+  });
+});
+
+describe('/api/status store reachability check', () => {
+  afterEach(cleanUpStoreQuads);
+
+  async function fetchProbed(baseUrl: string): Promise<StatusBody> {
+    const response = await fetch(`${baseUrl}/api/status?probeStore=true`);
+    return await response.json() as StatusBody;
+  }
+
+  it('checks with one ASK when asked, and starts no count', async () => {
+    const queries: string[] = [];
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      queries.push(sparql);
+      return isAsk(sparql) ? ASK_TRUE : COUNT_66;
+    });
+
+    try {
+      expect(await fetchProbed(baseUrl)).toMatchObject({
+        storeReachability: 'reachable',
+        storeQuadsStatus: 'not-requested',
+      });
+      expect(queries).toEqual(['ASK { ?s ?p ?o }']);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('reports a store whose ASK fails as unreachable', async () => {
+    const { server, baseUrl } = await startStatusServer(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:9');
+    });
+
+    try {
+      expect((await fetchProbed(baseUrl)).storeReachability).toBe('unreachable');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('never checks during ordinary polling or for a local backend', async () => {
+    const queries: string[] = [];
+    const record = async (sparql: string) => {
+      queries.push(sparql);
+      return ASK_TRUE;
+    };
+    const external = await startStatusServer(record);
+    const local = await startStatusServer(record, LOCAL_STORE);
+
+    try {
+      expect((await fetchStatus(external.baseUrl)).body).not.toHaveProperty('storeReachability');
+      expect(await fetchProbed(local.baseUrl)).not.toHaveProperty('storeReachability');
+      expect(queries).toEqual([]);
+    } finally {
+      await closeServer(external.server);
+      await closeServer(local.server);
+    }
+  });
+
+  it('runs one ASK for concurrent requests', async () => {
+    const answer = deferred<unknown>();
+    const bothArrived = deferred<void>();
+    let arrived = 0;
+    let asks = 0;
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      if (isAsk(sparql)) asks += 1;
+      return answer.promise;
+    }, SPARQL_HTTP_STORE, {
+      // Each request has started or joined the check by the time it gets here.
+      beforeReply: async () => {
+        arrived += 1;
+        if (arrived === 2) bothArrived.resolve();
+      },
+    });
+
+    try {
+      const both = Promise.all([fetchProbed(baseUrl), fetchProbed(baseUrl)]);
+      await bothArrived.promise;
+      answer.resolve(ASK_TRUE);
+      const [first, second] = await both;
+      expect(first.storeReachability).toBe('reachable');
+      expect(second.storeReachability).toBe('reachable');
+      expect(asks).toBe(1);
+    } finally {
+      answer.resolve(ASK_TRUE);
       await closeServer(server);
     }
   });
