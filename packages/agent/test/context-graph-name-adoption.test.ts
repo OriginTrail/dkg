@@ -639,6 +639,13 @@ describe('retiring the hash id after adoption (Base #34 canary)', () => {
     internals.setContextGraphSubscription(hashShaped, { subscribed: false, synced: false });
     expect(internals.supersedingContextGraphIdFor(hashShaped)).toBeNull();
 
+    // A graph only ever known by cleartext indexes its own hash, but no hash
+    // row was retired for it: nothing is superseded.
+    internals.setContextGraphSubscription('acme-plain', { subscribed: false, synced: false, onChainId: '7' });
+    const plainHash = ethers.keccak256(ethers.toUtf8Bytes('acme-plain')).toLowerCase();
+    expect(internals.wireIdToLocalCgId.get(plainHash)).toBe('acme-plain');
+    expect(internals.supersedingContextGraphIdFor(plainHash)).toBeNull();
+
     // A cleartext row that carries the hash but is not bound on-chain proves
     // no slot: it stays an alias for subscribe, never a policy answer.
     internals.setContextGraphSubscription(CLEARTEXT, { subscribed: false, synced: false, onChainHash: NAME_HASH });
