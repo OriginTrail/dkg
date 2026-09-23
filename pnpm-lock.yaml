@@ -738,6 +738,9 @@ importers:
       typescript:
         specifier: ^5.7
         version: 5.9.3
+      undici:
+        specifier: ^7.29.1
+        version: 7.29.1
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7
@@ -7491,6 +7494,10 @@ packages:
   undici@6.24.0:
     resolution: {integrity: sha512-lVLNosgqo5EkGqh5XUDhGfsMSoO8K0BAN0TyJLvwNRSl4xWGZlCVYsAIpa/OpA3TvmnM01GWcoKmc3ZWo5wKKA==}
     engines: {node: '>=18.17'}
+
+  undici@7.29.1:
+    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
+    engines: {node: '>=20.18.1'}
 
   unicorn-magic@0.3.0:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
@@ -14926,6 +14933,8 @@ snapshots:
   undici-types@6.21.0: {}
 
   undici@6.24.0: {}
+
+  undici@7.29.1: {}
 
   unicorn-magic@0.3.0: {}
 
