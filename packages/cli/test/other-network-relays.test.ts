@@ -131,20 +131,22 @@ describe('resolveNetworkPeerIsolationEnabled (operator kill switch)', () => {
   });
 
   it('lets the environment override the config in either direction', () => {
-    for (const off of ['0', ' FALSE ', 'off', 'no']) {
+    for (const off of ['0', ' FALSE ', 'false']) {
       expect(resolveNetworkPeerIsolationEnabled(true, off)).toBe(false);
     }
-    for (const on of ['1', 'true', 'ON', 'yes']) {
+    for (const on of ['1', 'true', ' TRUE ']) {
       expect(resolveNetworkPeerIsolationEnabled(false, on)).toBe(true);
     }
-    // An empty variable is unset, not a vote.
-    expect(resolveNetworkPeerIsolationEnabled(false, '')).toBe(false);
   });
 
   it('fails startup on a value it cannot read instead of guessing', () => {
-    expect(() => resolveNetworkPeerIsolationEnabled(undefined, 'disable')).toThrow(
-      'DKG_NETWORK_PEER_ISOLATION_ENABLED must be one of 1, 0, true, false, on, off, yes, or no (received "disable")',
-    );
+    // Same token set and empty-value rule as the daemon's other env-overrides-
+    // config flags: an empty or unknown value is a loud error, never a default.
+    for (const invalid of ['disable', 'off', 'no', 'yes', 'on', '', '   ']) {
+      expect(() => resolveNetworkPeerIsolationEnabled(false, invalid)).toThrow(
+        `DKG_NETWORK_PEER_ISOLATION_ENABLED must be one of 1, 0, true, or false (received ${JSON.stringify(invalid)})`,
+      );
+    }
     expect(() => resolveNetworkPeerIsolationEnabled('false', undefined))
       .toThrow('networkPeerIsolationEnabled must be a boolean (received "false")');
   });

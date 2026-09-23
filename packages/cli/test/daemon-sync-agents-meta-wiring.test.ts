@@ -289,6 +289,22 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
       expect(createArg.networkPeerIsolation).toBe(true);
       expect(createArg.otherNetworkRelays.length).toBeGreaterThan(0);
     });
+
+    it.each(['off', '', 'disable'])(
+      'refuses to start on an unreadable DKG_NETWORK_PEER_ISOLATION_ENABLED=%j instead of guessing',
+      async (value) => {
+        process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED = value;
+        await expect(runDaemonInner(true, {
+          name: 'invalid-peer-isolation-env',
+          networkConfig: 'mainnet-gnosis',
+          listenPort: 0,
+          nodeRole: 'core',
+        } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow(
+          `DKG_NETWORK_PEER_ISOLATION_ENABLED must be one of 1, 0, true, or false (received ${JSON.stringify(value)})`,
+        );
+        expect(mocks.agentCreate).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('keeps a relay "none" edge off every relay, authority-index seeding included', async () => {

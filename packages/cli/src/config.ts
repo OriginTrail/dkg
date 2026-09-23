@@ -1,4 +1,5 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
+import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -1231,23 +1232,13 @@ export function resolveContextGraphSubscriptionRehydrationEnabled(
   configValue: unknown,
   envValue: string | undefined = process.env[CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV],
 ): boolean {
-  if (envValue !== undefined) {
-    const normalized = envValue.trim().toLowerCase();
-    if (normalized === '1' || normalized === 'true') return true;
-    if (normalized === '0' || normalized === 'false') return false;
-    throw new Error(
-      `${CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV} must be one of 1, 0, true, or false ` +
-      `(received ${JSON.stringify(envValue)})`,
-    );
-  }
-  if (configValue === undefined) return true;
-  if (typeof configValue !== 'boolean') {
-    throw new Error(
-      'contextGraphSubscriptionRehydrationEnabled must be a boolean ' +
-      `(received ${JSON.stringify(configValue)})`,
-    );
-  }
-  return configValue;
+  return resolveBooleanEnvOverride({
+    envName: CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV,
+    configName: 'contextGraphSubscriptionRehydrationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
 }
 
 /**
@@ -1970,29 +1961,22 @@ const NETWORK_PEER_ISOLATION_ENV = 'DKG_NETWORK_PEER_ISOLATION_ENABLED';
 /**
  * Resolve the transport-level network peer isolation switch (default on). The
  * environment override wins so an operator can turn it off for one boot
- * without rewriting the config file. Unknown values fail startup instead of
- * silently picking a side.
+ * without rewriting the config file. Same rule as every other env-overrides-
+ * config flag ({@link resolveBooleanEnvOverride}): 1, 0, true or false, and
+ * anything else, an empty value included, fails startup instead of silently
+ * picking a side.
  */
 export function resolveNetworkPeerIsolationEnabled(
   configValue: unknown,
   envValue: string | undefined = process.env[NETWORK_PEER_ISOLATION_ENV],
 ): boolean {
-  if (envValue !== undefined && envValue.trim() !== '') {
-    const normalized = envValue.trim().toLowerCase();
-    if (['1', 'true', 'on', 'yes'].includes(normalized)) return true;
-    if (['0', 'false', 'off', 'no'].includes(normalized)) return false;
-    throw new Error(
-      `${NETWORK_PEER_ISOLATION_ENV} must be one of 1, 0, true, false, on, off, yes, or no ` +
-      `(received ${JSON.stringify(envValue)})`,
-    );
-  }
-  if (configValue === undefined) return true;
-  if (typeof configValue !== 'boolean') {
-    throw new Error(
-      `networkPeerIsolationEnabled must be a boolean (received ${JSON.stringify(configValue)})`,
-    );
-  }
-  return configValue;
+  return resolveBooleanEnvOverride({
+    envName: NETWORK_PEER_ISOLATION_ENV,
+    configName: 'networkPeerIsolationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
 }
 
 type NetworkRelayIdentity = Partial<Pick<NetworkConfig, 'networkId' | 'genesisId' | 'relays'>>;
