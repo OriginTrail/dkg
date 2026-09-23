@@ -214,6 +214,30 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     expect(edge.agentsFetches()).toHaveLength(1);
   });
 
+  it.each([
+    ['network admission', 'ensurePeerAdmittedForRecovery'],
+    ['the sync-protocol check', 'waitForSyncProtocol'],
+  ] as const)('never fetches the phonebook from a peer that fails %s', async (_label, gate) => {
+    const edge = await createFreshEdge(`PhonebookGate-${gate}`);
+    agents.push(edge.agent);
+    // A connected Core that sorts first, so without the gate it would be asked.
+    const rejected = '12D3KooWAckSigningCoreAAA';
+    edge.connected.unshift(rejected);
+    edge.internals.knownCorePeerIds.add(rejected);
+    const checked: string[] = [];
+    edge.internals[gate] = async (peer: string | { toString(): string }) => {
+      const peerId = peer.toString();
+      checked.push(peerId);
+      return peerId !== rejected;
+    };
+
+    edge.agent.subscribeToContextGraph(CG, { syncMode: 'always-on' });
+    await vi.waitFor(() => expect(edge.fetchLogLines()).toHaveLength(1), { timeout: 5_000 });
+
+    expect(checked).toContain(rejected);
+    expect(edge.agentsFetches().map(([peerId]) => peerId)).toEqual([CORE]);
+  });
+
   it('asks for the phonebook only after the subscribe path has installed the row', async () => {
     const edge = await createFreshEdge('PhonebookSubscribeOrder');
     agents.push(edge.agent);
