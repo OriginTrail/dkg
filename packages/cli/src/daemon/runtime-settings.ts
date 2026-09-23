@@ -1,6 +1,8 @@
 // The daemon's runtime settings. Each one applies its change to the running
 // node and persists only the config keys it owns, so a concurrent CLI edit to
-// any other key survives.
+// any other key survives. The persisted value is read from the in-memory
+// config when the write runs, so overlapping changes leave the file matching
+// the latest one.
 
 import type { LlmSettingsCallbacks } from '@origintrail-official/dkg-node-ui';
 import { updateConfigFile, type DkgConfig, type LlmConfig } from '../config.js';
@@ -40,7 +42,7 @@ export function createLlmSettings(opts: {
         log('LLM config cleared via settings');
       }
       await updateConfigFile((onDisk) => {
-        if (llm) onDisk.llm = llm;
+        if (config.llm) onDisk.llm = config.llm;
         else delete onDisk.llm;
       });
     },
@@ -56,7 +58,7 @@ export async function applySharedMemoryTtl(
   node.config.workspaceTtlMs = ttlMs;
   node.agent.setSharedMemoryTtlMs(ttlMs);
   await updateConfigFile((onDisk) => {
-    onDisk.sharedMemoryTtlMs = ttlMs;
-    onDisk.workspaceTtlMs = ttlMs;
+    onDisk.sharedMemoryTtlMs = node.config.sharedMemoryTtlMs;
+    onDisk.workspaceTtlMs = node.config.workspaceTtlMs;
   });
 }

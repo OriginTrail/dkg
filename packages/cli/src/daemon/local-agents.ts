@@ -451,13 +451,15 @@ export function updateLocalAgentIntegration(
 /**
  * Write one integration's in-memory record to the config file, plus the
  * legacy OpenClaw key cleanup that `connect`/`update` apply in memory. Other
- * integrations and every other config key are left as they are on disk.
+ * integrations and every other config key are left as they are on disk. The
+ * record is read when the write runs, so of two writes for one integration
+ * (a connect route and its attach job) the later one stores the newer state.
  */
 export async function persistLocalAgentIntegration(config: DkgConfig, id: string): Promise<void> {
   const normalizedId = normalizeIntegrationId(id);
-  const record = getStoredLocalAgentIntegrations(config)[normalizedId];
-  if (!record) return;
+  if (!getStoredLocalAgentIntegrations(config)[normalizedId]) return;
   await updateConfigFile((onDisk) => {
+    const record = getStoredLocalAgentIntegrations(config)[normalizedId];
     onDisk.localAgentIntegrations = { ...onDisk.localAgentIntegrations, [normalizedId]: record };
     if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(onDisk);
   });

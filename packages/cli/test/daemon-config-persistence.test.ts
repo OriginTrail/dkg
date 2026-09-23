@@ -13,6 +13,15 @@ import {
   createLlmSettings,
 } from '../src/daemon/runtime-settings.js';
 
+// The Hermes attach job and refresh probe run for real; only the bridge probe
+// and the setup entrypoint they call are stubbed.
+const hermesMocks = vi.hoisted(() => ({ probe: vi.fn(), setup: vi.fn() }));
+vi.mock('../src/daemon/hermes.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/daemon/hermes.js')>(),
+  probeHermesChannelHealth: hermesMocks.probe,
+  runHermesUiSetup: hermesMocks.setup,
+}));
+
 // The daemon keeps the config it loaded at boot in memory. Each of its writes
 // patches only the keys that setting or integration owns, so an edit another
 // process (the CLI) made to the file after boot survives the daemon's write.
@@ -193,6 +202,76 @@ describe('daemon local agent integration writes', () => {
     const file = await readFileConfig();
     expect(file.contextGraphs).toEqual(['saved-by-cli']);
     expect(file.localAgentIntegrations['custom-agent']).toMatchObject({ id: 'custom-agent', name: 'Custom agent', enabled: true });
+  });
+
+  it('persists the state a node-UI attach job reaches after the route has answered', async () => {
+    const config = bootConfig();
+    await fileEditedAfterBoot({ name: 'node', contextGraphs: ['saved-by-cli'] });
+    const transport = { kind: 'hermes-channel', bridgeUrl: 'http://127.0.0.1:9202' };
+    hermesMocks.probe.mockResolvedValue({ ok: false, error: 'bridge offline' });
+    // Setup finishes only after the route has answered and written its own record.
+    let finishSetup!: (result: unknown) => void;
+    hermesMocks.setup.mockReturnValue(new Promise((resolve) => { finishSetup = resolve; }));
+    const res = jsonResponse();
+
+    await handleLocalAgentsRoutes({
+      req: jsonRequest('POST', '/api/local-agent-integrations/connect', {
+        id: 'hermes',
+        metadata: { source: 'node-ui', profileName: 'test', hermesHome: home },
+      }),
+      res,
+      config,
+      path: '/api/local-agent-integrations/connect',
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).integration.runtime.status).toBe('connecting');
+    expect((await readFileConfig()).localAgentIntegrations.hermes.runtime.status).toBe('connecting');
+
+    finishSetup({
+      ok: true,
+      status: 'configured',
+      profile: { profileName: 'test', hermesHome: home },
+      daemonStarted: true,
+      fundedWallets: [],
+      transport,
+      warnings: [],
+      errors: [],
+    });
+    await vi.waitFor(async () => {
+      expect((await readFileConfig()).localAgentIntegrations?.hermes?.runtime?.status).toBe('ready');
+    });
+    const file = await readFileConfig();
+    expect(file.contextGraphs).toEqual(['saved-by-cli']);
+    expect(file.localAgentIntegrations.hermes).toMatchObject({ enabled: true, transport, runtime: { ready: true } });
+  });
+
+  it('persists what a refresh finds as that integration entry only', async () => {
+    const config = bootConfig({
+      localAgentIntegrations: {
+        hermes: {
+          id: 'hermes',
+          enabled: true,
+          transport: { kind: 'hermes-channel', bridgeUrl: 'http://127.0.0.1:9202' },
+          runtime: { status: 'degraded', ready: false, lastError: 'bridge offline' },
+        },
+      },
+    });
+    await fileEditedAfterBoot({ name: 'node', contextGraphs: ['saved-by-cli'] });
+    hermesMocks.probe.mockResolvedValue({ ok: true, target: 'bridge' });
+    const res = jsonResponse();
+
+    await handleLocalAgentsRoutes({
+      req: jsonRequest('POST', '/api/local-agent-integrations/hermes/refresh', {}),
+      res,
+      config,
+      path: '/api/local-agent-integrations/hermes/refresh',
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    const file = await readFileConfig();
+    expect(file.contextGraphs).toEqual(['saved-by-cli']);
+    expect(file.localAgentIntegrations.hermes.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
   });
 
   it('writes nothing when a connect request is rejected', async () => {
