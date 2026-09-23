@@ -34,7 +34,6 @@ import {
   STORE_QUADS_REFRESH_AFTER_MS,
   type StoreQuadsStatusFields,
   type StoreReachability,
-  type StoreReachabilityFields,
 } from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -161,10 +160,11 @@ function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
 /** What `dkg status` prints from. */
 interface DkgStatusReading {
   /**
-   * The daemon's status: the count request's response when one was answered.
-   * Its reachability field is left out, since the count request makes no check.
+   * The daemon's status, without a reachability field: the count request's
+   * response when one was answered (that request makes no check), otherwise
+   * the check's response with its result moved to `storeReachability`.
    */
-  status: Omit<DaemonStatusResponse, keyof StoreReachabilityFields>;
+  status: Omit<DaemonStatusResponse, 'storeReachability'>;
   /** This run's reachability check, which only the first request makes. */
   storeReachability: StoreReachability | undefined;
 }
@@ -188,9 +188,9 @@ function checkAllowsCount(storeReachability: StoreReachability | undefined): boo
  * first is printed.
  */
 async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DkgStatusReading> {
-  const probed = await client.status({ probeStore: true });
-  const reading: DkgStatusReading = { status: probed, storeReachability: probed.storeReachability };
-  if (!probed.storeUrl || !checkAllowsCount(reading.storeReachability) || !shouldRefreshStoreQuads(probed)) {
+  const { storeReachability, ...probed } = await client.status({ probeStore: true });
+  const reading: DkgStatusReading = { status: probed, storeReachability };
+  if (!probed.storeUrl || !checkAllowsCount(storeReachability) || !shouldRefreshStoreQuads(probed)) {
     return reading;
   }
   try {
