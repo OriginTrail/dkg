@@ -187,16 +187,16 @@ test('every pnpm workspace manifest is compared field by field or keeps full CI'
 
 test('repository support paths route to the lanes that execute them', () => {
   for (const [filePath, expected] of [
-    ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
-    ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
-    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
-    ['devnet/rfc64-runtime-provenance.mts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
-    ['devnet/rfc64-cp2-private-swm-vm-recovery/batch-plan.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
-    ['devnet/suites.json', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
+    ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent']],
+    ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_blazegraph', 'tornado_agent']],
+    ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_blazegraph', 'tornado_agent']],
+    ['devnet/rfc64-runtime-provenance.mts', ['tornado_blazegraph', 'tornado_agent', 'bura_cli']],
+    ['devnet/rfc64-cp2-private-swm-vm-recovery/batch-plan.ts', ['tornado_blazegraph', 'tornado_agent', 'bura_cli']],
+    ['devnet/suites.json', ['tornado_blazegraph', 'tornado_agent']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
-    ['devnet/v10-stress/automated.test.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
-    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
-    ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows', 'bura_cli']],
+    ['devnet/v10-stress/automated.test.ts', ['tornado_blazegraph', 'tornado_agent']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_blazegraph', 'tornado_agent', 'bura_cli']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_blazegraph', 'tornado_agent', 'bura_cli']],
     ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
     ['.github/oxlint-baseline.json', []],
@@ -264,35 +264,18 @@ test('the browser suite follows the UI surface and the packages its harness comp
   }
 });
 
-test('the Windows lifecycle lane follows the agent dependency closure its harnesses load', () => {
+test('the Windows lifecycle job follows the agent lane, which covers the closure its harnesses load', () => {
   // The Windows job runs the SQLite persistence suites and the RFC-64 Gate 0
-  // and evidence harnesses, which start a real agent and run on no Linux lane,
-  // so every plan that runs the agent lane runs it too: every workspace, every
-  // support area and every trigger path.
-  const windowsSelected = (filePath) => pullRequestPlan([change(filePath)]).lanes.tornado_agent_windows;
-  const probes = [
-    ...Object.keys(WORKSPACE_RULES)
-      .filter((workspace) => !WORKSPACE_RULES[workspace].forceFull)
-      .map((workspace) => `${workspace}/src/index.ts`),
-    'devnet/rfc64-gate1-public-open/run.ts',
-    'devnet/rfc64-persistence-lifecycle/verify.ts',
-    'devnet/_bootstrap/rfc64-evidence.ts',
-    'devnet/rfc64-runtime-provenance.mts',
-    'devnet/v10-stress/automated.test.ts',
-    'test-systems/storage-conformance.test.ts',
-    'bench/publish-async-get.bench.ts',
-    'tools/observability/lib/w1.mjs',
-    '.github/CODEOWNERS',
-    'blazegraph-image.json',
-    'packages/node-ui/src/ui/web3/identityWalletActions.ts',
-  ];
-  for (const filePath of probes) {
-    const plan = pullRequestPlan([change(filePath)]);
-    assert.equal(plan.lanes.tornado_agent_windows, plan.lanes.tornado_agent, filePath);
-  }
+  // and evidence harnesses, which start a real agent and run on no Linux
+  // lane. ci.yml starts it on the agent lane's output and the gate requires it
+  // with that lane, so every plan that runs the agent lane runs it too.
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const windowsLane = jobs['inventory-windows'].if.match(/^needs\.changes\.outputs\.(\w+) == 'true'$/)?.[1];
+  assert.equal(windowsLane, 'tornado_agent');
+  const windowsSelected = (filePath) => pullRequestPlan([change(filePath)]).lanes[windowsLane];
 
   // Derive the closure from what the harnesses actually import, so a new
-  // import or dependency cannot silently drop the lane.
+  // import or dependency cannot silently drop the job.
   const closure = importedWorkspaceClosure([
     ...sourceFiles('devnet/rfc64-persistence-lifecycle'),
     ...sourceFiles('devnet/_bootstrap').filter((file) => path.posix.basename(file).startsWith('rfc64-evidence')),
@@ -309,16 +292,19 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
     if (workspace) assert.ok(windowsSelected(`${workspace}/src/index.ts`), filter);
   }
 
-  // Modules the harness loads, new or renamed persistence modules, and every
-  // suite the job runs all keep the lane; unrelated workspaces do not.
+  // Modules the harness loads, new or renamed persistence modules, the
+  // harnesses themselves and every suite the job runs all keep the job;
+  // unrelated workspaces do not.
   for (const filePath of [
     'packages/agent/src/finalization-recovery-worker.ts',
     'packages/agent/src/rfc64/journal-store-v1.ts',
     'packages/agent/src/finalization-recovery-sqlite-store-v2.ts',
     'packages/storage/src/oxigraph-store.ts',
     'packages/core/src/index.ts',
+    'devnet/rfc64-persistence-lifecycle/verify.ts',
+    'devnet/_bootstrap/rfc64-evidence.ts',
   ]) {
-    assert.equal(pullRequestPlan([change(filePath)]).lanes.tornado_agent_windows, true, filePath);
+    assert.equal(windowsSelected(filePath), true, filePath);
   }
   const selectors = windowsWorkflow.jobs['inventory-lifecycle'].strategy.matrix.include
     .flatMap((group) => group.tests.trim().split(/\s+/));
@@ -327,17 +313,19 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
     const matches = agentTests.filter((file) => `test/${file}`.startsWith(selector));
     assert.ok(matches.length > 0, `${selector} matches no agent test`);
     for (const file of matches) {
-      assert.equal(pullRequestPlan([change(`packages/agent/test/${file}`)]).lanes.tornado_agent_windows, true, file);
+      assert.equal(windowsSelected(`packages/agent/test/${file}`), true, file);
     }
   }
   for (const filePath of ['packages/node-ui/src/ui/pages/Dashboard.tsx', 'packages/network-sim/src/index.ts']) {
-    assert.equal(pullRequestPlan([change(filePath)]).lanes.tornado_agent_windows, false, filePath);
+    assert.equal(windowsSelected(filePath), false, filePath);
   }
 
+  // The gate requires the job whenever the plan selects the agent lane.
   const persistence = pullRequestPlan([change('packages/agent/src/sqlite/owned-sqlite-v1.ts')]);
   const needs = gateNeeds(succeeded(
     'build',
     'evm-node-test-artifacts',
+    'inventory-windows',
     selectedLanes(persistence).map((lane) => PRIMARY_LANE_JOBS[lane]),
   ));
   assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan: persistence, needs }), []);
@@ -347,14 +335,14 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
     /inventory-windows was selected but ended with skipped/,
   );
 
-  // The Gate 0 harness selects the Windows job that runs it, the agent lane
-  // whose code imports its evidence helpers and Blazegraph (the Gate 1
-  // rollout tests load its process lifecycle), plus the shared build checks;
-  // full plans always include the lane.
+  // The Gate 0 harness selects the agent lane, whose code imports its
+  // evidence helpers, and Blazegraph (the Gate 1 rollout tests load its
+  // process lifecycle), plus the shared build checks; full plans always
+  // include the lane.
   const harness = pullRequestPlan([change('devnet/rfc64-persistence-lifecycle/verify.ts')]);
-  assert.deepEqual(selectedLanes(harness), ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']);
+  assert.deepEqual(selectedLanes(harness), ['tornado_blazegraph', 'tornado_agent']);
   assert.equal(needsSharedBuild(harness), true);
-  assert.equal(planCi({ eventName: 'push' }).lanes.tornado_agent_windows, true);
+  assert.equal(planCi({ eventName: 'push' }).lanes[windowsLane], true);
 });
 
 test('each changed path gets one routing decision with a fixed precedence', () => {
@@ -466,7 +454,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['devnet/rfc64-runtime-provenance.mts', 'bura_cli', 'the CLI-started Gate 2 adapter imports the shared runtime modules'],
     ['devnet/rfc64-persistence-lifecycle/process-lifecycle.ts', 'tornado_blazegraph', 'the Blazegraph job runs the Gate 1 rollout tests'],
     ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
-    ['devnet/rfc64-persistence-lifecycle/verify.ts', 'tornado_agent_windows', 'the reusable Windows workflow runs the Gate 0 harness'],
+    ['devnet/rfc64-persistence-lifecycle/verify.ts', 'tornado_agent', 'the reusable Windows workflow, run on the agent lane, runs the Gate 0 harness'],
   ]) {
     assert.ok(loadedBy.get(target)?.has(requirement), why);
   }

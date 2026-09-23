@@ -27,11 +27,6 @@ export const PRIMARY_LANE_JOBS = Object.freeze({
   tornado_blazegraph: 'tornado-blazegraph',
   tornado_publisher: 'tornado-publisher',
   tornado_agent: 'tornado-agent',
-  // Defined as the agent lane: planCi selects it exactly when it selects
-  // tornado_agent, because the Windows harnesses need the agent closure. It is
-  // a lane of its own only so the generic gate loop validates the
-  // inventory-windows job like every other selected job.
-  tornado_agent_windows: 'inventory-windows',
   bura_cli: 'bura-cli',
   bura_blazegraph_arm64: 'bura-blazegraph-arm64',
   bura_query: 'bura-supporting',
@@ -44,9 +39,9 @@ export const PRIMARY_LANE_JOBS = Object.freeze({
 export const NODE_EVM_LANES = Object.freeze(Object.keys(PRIMARY_LANE_JOBS));
 
 // Lanes whose jobs build what they need on their own runner (the native arm64
-// image contract and the reusable Windows lifecycle workflow), so selecting
-// them alone never requires the shared Linux build.
-export const SELF_BUILDING_LANES = Object.freeze(['tornado_agent_windows', 'bura_blazegraph_arm64']);
+// image contract), so selecting them alone never requires the shared Linux
+// build.
+export const SELF_BUILDING_LANES = Object.freeze(['bura_blazegraph_arm64']);
 const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
 
 // Whether a plan must run the shared build job: a selected lane consumes its
@@ -57,13 +52,12 @@ export function needsSharedBuild(plan) {
   return plan.buildChecks === true || NODE_LANES.some((lane) => plan.lanes?.[lane] === true);
 }
 
-// Lanes whose jobs run whenever another lane's do. tornado_agent_windows is
-// defined as the agent lane (see PRIMARY_LANE_JOBS). The Blazegraph job also
+// Lanes whose jobs run whenever another lane's do. The Blazegraph job also
 // runs the agent's live Blazegraph suites (packages/agent/vitest.blazegraph
 // .config.ts), so ci.yml starts it for either lane; every plan records that,
 // so the gate requires the job.
 const IMPLIED_LANES = Object.freeze({
-  tornado_agent: Object.freeze(['tornado_agent_windows', 'tornado_blazegraph']),
+  tornado_agent: Object.freeze(['tornado_blazegraph']),
 });
 
 // `contracts` remains a workflow output for compatibility, but Solidity is an

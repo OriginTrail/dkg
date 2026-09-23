@@ -21,10 +21,11 @@ export const EVM_SCOPES = Object.freeze(['chain', 'publisher', 'agent']);
 // a PR in before merging.
 //
 // The Windows lifecycle job (rfc64-inventory-windows.yml) runs wherever the
-// agent lane does; planCi derives that once for every plan rather than per
-// rule. Besides the SQLite persistence suites it runs the RFC-64 Gate 0
-// lifecycle and evidence harnesses, which start a real agent (agent, core,
-// chain, storage and their dependencies) and run on no Linux lane.
+// agent lane does: ci.yml starts it on that lane's output and the gate
+// requires it with the lane, so no rule names it. Besides the SQLite
+// persistence suites it runs the RFC-64 Gate 0 lifecycle and evidence
+// harnesses, which start a real agent (agent, core, chain, storage and their
+// dependencies) and run on no Linux lane.
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
     lanes: [

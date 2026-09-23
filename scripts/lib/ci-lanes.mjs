@@ -16,7 +16,6 @@ export const TEST_LANE_METADATA = Object.freeze({
   'kosava-node-ui-e2e': { layer: 'browser', prerequisites: [...SYSTEM_PREREQUISITES, 'Playwright Chromium'] },
   'kosava-supporting': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
   'kosava-hardhat-plugins': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
-  'inventory-windows': { layer: 'unit/component', prerequisites: ['native Windows runner', ...UNIT_PREREQUISITES] },
   'evm-integration': { layer: 'chain integration', prerequisites: ['Hardhat artifacts', 'free local port'] },
   solidity: { layer: 'chain integration', prerequisites: ['Hardhat artifacts', 'free local port'] },
   python: { layer: 'Python contract', prerequisites: ['Python 3', 'pytests/requirements.txt'] },

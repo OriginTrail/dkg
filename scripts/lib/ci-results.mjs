@@ -91,6 +91,9 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   for (const [lane, job] of Object.entries(PRIMARY_LANE_JOBS)) {
     requireSuccess(needs, job, Boolean(plan.lanes?.[lane]), errors);
   }
+  // ci.yml runs the Windows lifecycle workflow (persistence suites and the
+  // RFC-64 Gate 0 and evidence harnesses) wherever the agent lane runs.
+  requireSuccess(needs, 'inventory-windows', Boolean(plan.lanes?.tornado_agent), errors);
 
   const contracts = Boolean(plan.lanes?.contracts);
   requireSuccess(needs, 'abi-freshness', Boolean(plan.abiFreshnessRelevant), errors);

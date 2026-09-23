@@ -14,15 +14,7 @@ test('the Windows gate runs directly for integration pushes and through CI for p
   assert.equal(workflow.on.pull_request, undefined);
   assert.deepEqual(ciWorkflow.on.pull_request.branches, ['main', 'testnet-canary']);
   assert.equal(ciWorkflow.jobs['inventory-windows'].uses, './.github/workflows/rfc64-inventory-windows.yml');
-  assert.equal(ciWorkflow.jobs['inventory-windows'].if, "needs.changes.outputs.tornado_agent_windows == 'true'");
-  // Until the controller rotation that emits the lane, the job keeps following
-  // tornado_agent exactly as before.
-  assert.equal(
-    ciWorkflow.jobs.changes.outputs.tornado_agent_windows,
-    '${{ steps.plan.outputs.tornado_agent_windows || steps.plan.outputs.tornado_agent }}',
-  );
-  const gateStep = ciWorkflow.jobs['ci-gate'].steps.find((step) => step.name === 'Require selected Windows lifecycle tests');
-  assert.equal(gateStep.env.SELECTED, '${{ needs.changes.outputs.tornado_agent_windows }}');
+  assert.equal(ciWorkflow.jobs['inventory-windows'].if, "needs.changes.outputs.tornado_agent == 'true'");
 });
 
 test('Windows groups retain every original test selector exactly once', () => {
