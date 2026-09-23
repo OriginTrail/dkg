@@ -616,7 +616,6 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     ...params,
     workAdmission: params.workAdmission ?? composeSyncWorkAdmission({
       deadline: params.deadline,
-      scope: { sharing: 'coalescible', key: 'direct-page-fetch' },
     }),
   };
   if (admittedParams.ephemeralRequesterState !== true) {

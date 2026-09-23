@@ -1999,6 +1999,43 @@ export class TripleStoreAsyncLiftPublisher
     } catch {
       structuredCode = undefined;
     }
+    let structuredReason: unknown;
+    try {
+      structuredReason = (error as { reason?: unknown } | null | undefined)?.reason;
+    } catch {
+      structuredReason = undefined;
+    }
+    // The registered-CG authority gate raises this before signing or
+    // broadcasting. Its closed reason registry has the same transient/terminal
+    // partition as the agent's promote prerequisite. Keep the package boundary
+    // structural (publisher cannot import agent without a cycle), and fail any
+    // future/ill-shaped reason closed as terminal until it is classified here.
+    // Recording one of these as a tx-submit timeout would invent broadcast
+    // uncertainty for a transaction that does not exist.
+    if (structuredCode === 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE') {
+      switch (structuredReason) {
+        case 'finalized-name-absence-unaccepted':
+        case 'chain-name-binding-unavailable':
+        // An RFC-64 authority read cooldown ends on its own without anything
+        // being asked of the pool, so it is transient in exactly the sense
+        // this group means. The agent's own promote policy classifies it the
+        // same way; left to the terminal default it would turn one unrelated
+        // graph's RPC exhaustion into a permanent failure for this publish.
+        case 'authority-circuit-open':
+        case 'local-chain-binding-unavailable':
+        case 'local-existence-unavailable':
+        case 'chain-access-policy-unavailable':
+        case 'chain-access-policy-timeout':
+        case 'chain-participant-authority-unavailable':
+        case 'rfc64-private-read-roster-unavailable':
+          return 'authority_unavailable';
+        case 'chain-access-policy-unknown':
+        case 'chain-participant-authority-unsupported':
+        case 'chain-participant-authority-invalid':
+        default:
+          return 'authority_forbidden';
+      }
+    }
     if (structuredCode === 'PUBLISH_INTENT_STALE') return 'publish_intent_stale';
     // The EVM adapter rejects this before signing or broadcasting. Keep it in
     // the validated retry lane, where an operator can raise the cap or wait for

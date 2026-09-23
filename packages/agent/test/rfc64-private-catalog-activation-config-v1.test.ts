@@ -108,6 +108,7 @@ describe('RFC-64 private catalog activation', () => {
           reconciliationLane: 'catalog-apply',
         }),
         resolveRecoveryConfig: () => bootstrap,
+        resolveDynamicallyAcceptedPolicy: () => null,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },

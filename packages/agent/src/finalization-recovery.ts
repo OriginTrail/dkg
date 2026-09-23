@@ -25,8 +25,10 @@ import type {
   FinalizationRecoverySettledPublisherUpgradeResult,
   FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
-import { FinalizationPublisherAuthorityObserver } from
-  './finalization-publisher-authority-observer.js';
+import {
+  FinalizationPublisherAuthorityObserver,
+  type FinalizationPublisherAuthorityLiveEntry,
+} from './finalization-publisher-authority-observer.js';
 
 export type FinalizationRecoveryApplyOutcome =
   | 'applied'
@@ -403,12 +405,8 @@ export class FinalizationRecovery<
         if (input.sourcePeerId) {
           await this.publisherAuthorityObserver.observe({
             store,
-            identity: {
-              entryKey: key,
-              generation: 'pending',
-              sourcePeerId: input.sourcePeerId,
-            },
-            ual: input.candidate.scope.ual,
+            target: { kind: 'pending', key, ual: input.candidate.scope.ual },
+            sourcePeerId: input.sourcePeerId,
             prepareInput: input,
           });
         }
@@ -441,14 +439,9 @@ export class FinalizationRecovery<
       const authority = input.sourcePeerId
         ? await this.publisherAuthorityObserver.observe({
             store,
-            identity: {
-              entryKey: key,
-              generation: entry.generation,
-              sourcePeerId: input.sourcePeerId,
-            },
-            ual: input.candidate.scope.ual,
+            target: { kind: 'live', entry },
+            sourcePeerId: input.sourcePeerId,
             prepareInput: input,
-            entry,
           })
         : {};
 
@@ -677,7 +670,9 @@ export class FinalizationRecovery<
     }
   }
 
-  private isLiveEntry(entry: FinalizationRecoveryEntry): boolean {
+  private isLiveEntry(
+    entry: FinalizationRecoveryEntry,
+  ): entry is FinalizationPublisherAuthorityLiveEntry {
     return entry.state === 'RECEIVED'
       || entry.state === 'VERIFIED'
       || entry.state === 'REORGED';
@@ -1522,7 +1517,8 @@ export class FinalizationRecovery<
     const store = this.getStore();
     if (!store) return [];
     if (
-      !this.chain?.getLatestMerkleRoot
+      !this.chain
+      || !this.chain.getLatestMerkleRoot
       || !this.chain.getMerkleRootCount
       || !this.chain.getKAContextGraphId
     ) return [];

@@ -1,6 +1,7 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   withKeyedLocks,
+  type DurableRootAtomicCompanionResolver,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -155,6 +156,8 @@ export interface RecoverContextGraphSwmDeps {
    * one store with a materializer over another, is unrepresentable.
    */
   readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
+  /** Durable boundary companion for every admitted root snapshot mutation. */
+  readonly resolveRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
   /** Manifest-bound progress retained by the owning private recovery executor. */
   readonly snapshotWalkProgress?: (
     orderedManifest: readonly PublicSnapshotMetadata[],
@@ -242,7 +245,6 @@ export const ABSOLUTE_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 24;
  */
 export async function recoverContextGraphSwmWithProgressRetries(params: {
   readonly window: PrivateSwmRecoveryWindow;
-  readonly owner: string;
   readonly createRoundDeadline: (round: number) => number;
   readonly recover: (
     round: number,
@@ -267,9 +269,7 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
     const deadline = params.createRoundDeadline(round);
     // The driver owns both round gating and page/transport admission from the
     // same window. Callers receive the composed capability with its deadline.
-    const workAdmission = params.window.admitRound(deadline, {
-      sharing: 'exclusive', owner: `${params.owner}:round-${round}`,
-    });
+    const workAdmission = params.window.admitRound(deadline);
     result = await params.recover(round, workAdmission, deadline);
     if (result.completed) return result;
 
@@ -371,7 +371,6 @@ export async function recoverContextGraphSwm(
     ...deps,
     workAdmission: deps.workAdmission ?? composeSyncWorkAdmission({
       deadline: deps.deadline,
-      scope: { sharing: 'exclusive', owner: 'direct-private-swm-round' },
     }),
   };
   const boundary = createRecoveryExecutionAdmission(deps.recoveryGuard);
@@ -491,18 +490,45 @@ async function recoverContextGraphSwmUnlocked(
     for (const descriptor of snapshotDescriptorsByRef.get(snapshotRef) ?? []) {
       const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
       if (incrementallyReadyGraphs.has(graphKey)) continue;
-      if (await boundary.read(() => (
-        deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
-      ))) {
-        incrementallyReadyGraphs.add(graphKey);
-        continue;
-      }
-
       const verifiedAssetMeta = descriptor.metadataQuads.filter(
         (quad) => verifiedMetaKeys.has(canonicalQuadKey(quad)),
       );
       if (verifiedAssetMeta.length !== descriptor.metadataQuads.length) {
         throw new Error(`Verified SWM metadata is incomplete for ${descriptor.kaUal}`);
+      }
+      if (await boundary.read(() => (
+        deps.snapshotMaterializer.isGraphAssetMaterialized(descriptor)
+      ))) {
+        if (
+          descriptor.subGraphName === undefined
+          && deps.resolveRootAtomicCompanion !== undefined
+        ) {
+          // A bounded/partial manifest may stop after this exact ref. Establish
+          // the durable root boundary now, under the canonical KA lock owned by
+          // applyVerifiedSwmRecoveryGraphAsset, instead of waiting for the final
+          // all-manifest plan that this invocation may never reach.
+          const applied = await boundary.admitAsyncMutation(() => (
+            applyVerifiedSwmRecoveryGraphAsset({
+              contextGraphId: deps.contextGraphId,
+              asset: { kind: 'preserve-equivalent', descriptor },
+              ports: {
+                store: deps.store,
+                replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
+                snapshotMaterializer: deps.snapshotMaterializer,
+                resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion!,
+              },
+            })
+          ));
+          const withheld = new Set(applied.withholdRows.map(canonicalQuadKey));
+          const insertableMeta = verifiedAssetMeta.filter(
+            (quad) => !withheld.has(canonicalQuadKey(quad)),
+          );
+          if (insertableMeta.length > 0) await deps.store.insert([...insertableMeta]);
+          incrementallyInsertedMetaQuads += insertableMeta.length;
+          rewrittenGraphKeys.add(graphKey);
+        }
+        incrementallyReadyGraphs.add(graphKey);
+        continue;
       }
       const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
         descriptor,
@@ -528,6 +554,9 @@ async function recoverContextGraphSwmUnlocked(
             store: deps.store,
             replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
             snapshotMaterializer: deps.snapshotMaterializer,
+            ...(deps.resolveRootAtomicCompanion === undefined
+              ? {}
+              : { resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion }),
           },
         });
         if (verifiedAssetMeta.length > 0) {
@@ -746,6 +775,9 @@ async function recoverContextGraphSwmUnlocked(
       replaceMetaForRoots: deps.replaceMetaForRoots,
       replaceMetaForGraphAssets: deps.replaceMetaForGraphAssets,
       snapshotMaterializer: deps.snapshotMaterializer,
+      ...(deps.resolveRootAtomicCompanion === undefined
+        ? {}
+        : { resolveRootAtomicCompanion: deps.resolveRootAtomicCompanion }),
       ensureOwnedMap: deps.ensureOwnedMap,
     },
   });

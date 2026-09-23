@@ -567,8 +567,13 @@ function assertVmReconciled(value: Gate1VmReconcileResult, label: string): void 
 }
 
 function assertVmAuthorityRejected(value: Gate1VmReconcileResult, label: string): void {
+  // Liveness decides an inactive graph, and it must be read from the chain.
+  // The policy is not part of that verdict: the public materialization gate
+  // reads one `getContextGraph` tuple instead of the liveness/policy pair, and
+  // `MockChainAdapter` composes that tuple without a policy read once liveness
+  // is false. Requiring one here would pin the old two-read shape.
   assert.equal(value.chainReadDelta.active >= 1, true);
-  assert.equal(value.chainReadDelta.accessPolicy >= 1, true);
+  assert.equal(value.chainReadDelta.nameHashResolution, 0);
   assert.equal(
     value.replicationEvents.some((event) => event.action === 'promote'),
     false,

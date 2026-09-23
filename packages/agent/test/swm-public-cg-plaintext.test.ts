@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 // Hand-rolled call recorder: records every invocation's args and delegates to
@@ -170,6 +171,23 @@ const isPublic = (a: any, cgId = '0xCURATOR/experimental-music') =>
   (DKGAgent.prototype as any).isContextGraphPublicOnChain.call(a, cgId);
 
 describe('DKGAgent.isContextGraphPublicOnChain', () => {
+  it('attributes the production public-policy probe instead of the shared funnel', async () => {
+    const tracker = new RpcUsageTracker(() => '31337');
+    const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0 });
+    agentLike.resolveOnChainAccessPolicyState = async () => withRpcUsageConsumer(
+      'cgStorage.getContextGraph',
+      () => {
+        tracker.record('eth_call');
+        return 0;
+      },
+    );
+
+    await expect(isPublic(agentLike)).resolves.toBe(true);
+    expect(tracker.drainWindow().ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph:cgAuth.publicProbe': 1,
+    });
+  });
+
   it('preserves the legacy strict binding option while retryable strict reads propagate transport errors', async () => {
     const cgId = '0xCURATOR/experimental-music';
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0 });

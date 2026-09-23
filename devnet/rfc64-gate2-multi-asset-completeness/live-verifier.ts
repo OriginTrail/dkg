@@ -1,6 +1,17 @@
 import { createHash } from 'node:crypto';
 
+import {
+  contextGraphLayerUri,
+  MemoryLayer,
+  parseDeterministicKnowledgeAssetUal,
+} from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
+
 import { stableJson } from '../rfc64-persistence-lifecycle/evidence.js';
+import {
+  assertRuntimeProcessIdentityV1,
+  type RuntimeProcessIdentityV1,
+} from '../rfc64-runtime-process-evidence.mts';
 import {
   GATE2_ADAPTER_PROTOCOL_VERSION,
   GATE2_RAW_SCHEMA_VERSION,
@@ -155,7 +166,7 @@ function verifyArtifact(
   );
   exactJson(adapter.inspectedProductCommits, [expectedHead], '$.adapter.inspectedProductCommits');
 
-  const runtimeProvenanceDigest = verifyRuntimeProvenance(
+  const runtimeProvenance = verifyRuntimeProvenance(
     raw.runtimeProvenance,
     expectedRuntimeManifest,
   );
@@ -174,7 +185,11 @@ function verifyArtifact(
   exact(repository.trackedSourceCleanBeforeSpawn, true, '$.repository.cleanBefore');
   exact(repository.trackedSourceCleanAfterProcesses, true, '$.repository.cleanAfter');
 
-  const peers = verifyReadyPair(raw.ready, expectedRuntimeManifest.manifestDigest);
+  const peers = verifyReadyPair(
+    raw.ready,
+    expectedRuntimeManifest.manifestDigest,
+    runtimeProvenance.processIdentities,
+  );
   verifyProcessBoundary(raw.processBoundary);
   const policy = verifyPolicy(raw.policy);
   const inventories = verifyInventories(raw.inventory, policy);
@@ -219,14 +234,21 @@ function verifyArtifact(
     peers,
     positiveWire.semantic,
     expectedRuntimeManifest.manifestDigest,
+    runtimeProvenance.processIdentities.receiverAfterRestart,
   );
-  return runtimeProvenanceDigest;
+  return runtimeProvenance.provenanceDigest;
 }
 
 function verifyRuntimeProvenance(
   value: unknown,
   expectedRuntimeManifest: Gate2RuntimeManifestV1,
-): string {
+): {
+  provenanceDigest: string;
+  processIdentities: Readonly<Record<
+    'author' | 'receiverBeforeCrash' | 'receiverAfterRestart',
+    RuntimeProcessIdentityV1
+  >>;
+} {
   try {
     const raw = value as Gate2RuntimeProvenanceV1;
     exactJson(raw.sourceBuild, expectedRuntimeManifest, '$.runtimeProvenance.sourceBuild');
@@ -235,7 +257,14 @@ function verifyRuntimeProvenance(
       raw.processes as readonly Gate2RuntimeProcessEvidenceV1[],
     );
     exactJson(raw, rebuilt, '$.runtimeProvenance');
-    return digest(raw.provenanceDigest, '$.runtimeProvenance.provenanceDigest');
+    return {
+      provenanceDigest: digest(raw.provenanceDigest, '$.runtimeProvenance.provenanceDigest'),
+      processIdentities: Object.freeze({
+        author: rebuilt.processes[0]!.identity,
+        receiverBeforeCrash: rebuilt.processes[1]!.identity,
+        receiverAfterRestart: rebuilt.processes[2]!.identity,
+      }),
+    };
   } catch (cause) {
     if (cause instanceof Error && cause.message.startsWith('Gate 2 evidence verification failed')) {
       throw cause;
@@ -354,7 +383,16 @@ function verifyWireSynchronization(
   expectedApplied: unknown,
   peers: { author: string; receiver: string },
 ): { semantic: unknown; verifiedControlObjectCount: number } {
-  exact(negative.expectedFailureCode, 'catalog-native-receiver-authorization', `${path}.failureCode`);
+  // Scoped provider closures intentionally collapse an unauthorized or
+  // missing object into the indistinguishable not-found result. Preserve the
+  // stronger authorization code when the receiver reaches that check, while
+  // accepting the generic terminal record produced by a fail-closed not-found.
+  if (
+    negative.expectedFailureCode !== 'catalog-native-receiver-authorization'
+    && negative.expectedFailureCode !== null
+  ) {
+    fail(`${path}.failureCode`, 'must be authorization or null for a fail-closed rejection');
+  }
   digest(negative.attemptedCatalogHeadDigest, `${path}.attemptedCatalogHeadDigest`);
   const author = address(negative.catalogAuthorAddress, `${path}.catalogAuthorAddress`);
   exact(author, inventories.authored.catalogScope.authorAddress, `${path}.catalogAuthorAddress`);
@@ -377,7 +415,16 @@ function verifyWireSynchronization(
     inventories,
   );
   exactJson(negative.semanticAfter, negative.semanticBefore, `${path}.semanticAfter`);
-  verifySemanticState(negative.semanticBefore, `${path}.semanticBefore`, wire.rows);
+  const semanticProjections = verifySemanticState(
+    negative.semanticBefore,
+    `${path}.semanticBefore`,
+    wire.rows,
+  );
+  verifyLifecycleReceiptProjectionDigests(
+    wire.lifecycleReceipts,
+    semanticProjections,
+    `${path}.positiveInventoryBefore.finalizedSwmRetirementLifecycleReceipts`,
+  );
   return {
     semantic: negative.semanticBefore,
     verifiedControlObjectCount: wire.verifiedControlObjectCount,
@@ -388,11 +435,16 @@ function verifyPositiveWireInventory(
   value: unknown,
   path: string,
   inventories: { authored: Gate2AuthoredInventory; received: Gate2ReceivedInventory },
-): { rows: readonly WireRow[]; verifiedControlObjectCount: number } {
+): {
+  rows: readonly WireRow[];
+  lifecycleReceipts: readonly Readonly<LifecycleReceipt>[];
+  verifiedControlObjectCount: number;
+} {
   const wire = closedRecord(value, path, [
     'activatedTripleCount',
     'appliedHeadStatus',
     'catalogHeadDigest',
+    'finalizedSwmRetirementLifecycleReceipts',
     'inventoryDigest',
     'inventoryRowCount',
     'rows',
@@ -448,18 +500,122 @@ function verifyPositiveWireInventory(
   if (new Set(rows.map((row) => row.swmGraph)).size !== rows.length) {
     fail(`${path}.rows`, 'SWM graphs must be distinct per KA');
   }
-  return { rows: Object.freeze(rows), verifiedControlObjectCount };
+  const lifecycleReceipts = verifyLifecycleReceipts(
+    wire.finalizedSwmRetirementLifecycleReceipts,
+    `${path}.finalizedSwmRetirementLifecycleReceipts`,
+    rows,
+    inventories.authored.catalogScope.contextGraphId,
+  );
+  return { rows: Object.freeze(rows), lifecycleReceipts, verifiedControlObjectCount };
 }
 
 interface WireRow extends AssetRowV1 {
   readonly swmGraph: string;
 }
 
+interface LifecycleReceipt {
+  readonly kaUal: string;
+  readonly vmPostReadDigest: string;
+}
+
+const FINALIZED_VM_POST_READ_DIGEST_DOMAIN_V1 = ethers.toUtf8Bytes(
+  'OT-RFC-64:finalized-vm-post-read:v1\0',
+);
+
+function verifyLifecycleReceipts(
+  value: unknown,
+  path: string,
+  rows: readonly WireRow[],
+  contextGraphId: string,
+): readonly Readonly<LifecycleReceipt>[] {
+  return Object.freeze(closedArray(value, path, rows.length).map((entry, index) => {
+    const receiptPath = `${path}[${index}]`;
+    const receipt = closedRecord(entry, receiptPath, [
+      'assertionVersion',
+      'contextGraphId',
+      'kaUal',
+      'kind',
+      'swmReconciliationOutcome',
+      'vmGraphIri',
+      'vmMaterializationStatus',
+      'vmPostReadDigest',
+    ]);
+    const row = rows[index]!;
+    exact(
+      receipt.kind,
+      'rfc64-finalized-swm-retirement-lifecycle-receipt-v2',
+      `${receiptPath}.kind`,
+    );
+    exact(receipt.contextGraphId, contextGraphId, `${receiptPath}.contextGraphId`);
+    exact(receipt.kaUal, row.kaUal, `${receiptPath}.kaUal`);
+    exact(receipt.assertionVersion, '1', `${receiptPath}.assertionVersion`);
+    let parsedUal: ReturnType<typeof parseDeterministicKnowledgeAssetUal>;
+    try {
+      parsedUal = parseDeterministicKnowledgeAssetUal(row.kaUal);
+    } catch (cause) {
+      fail(`${receiptPath}.kaUal`, cause instanceof Error ? cause.message : String(cause));
+    }
+    exact(
+      receipt.vmGraphIri,
+      contextGraphLayerUri(
+        contextGraphId,
+        MemoryLayer.VerifiableMemory,
+        parsedUal.agentAddress,
+        parsedUal.kaNumber,
+      ),
+      `${receiptPath}.vmGraphIri`,
+    );
+    exact(
+      receipt.vmMaterializationStatus,
+      'materialized',
+      `${receiptPath}.vmMaterializationStatus`,
+    );
+    exact(
+      receipt.swmReconciliationOutcome,
+      'retired',
+      `${receiptPath}.swmReconciliationOutcome`,
+    );
+    return Object.freeze({
+      kaUal: row.kaUal,
+      vmPostReadDigest: digest(receipt.vmPostReadDigest, `${receiptPath}.vmPostReadDigest`),
+    });
+  }));
+}
+
+function verifyLifecycleReceiptProjectionDigests(
+  receipts: readonly Readonly<LifecycleReceipt>[],
+  lineFramedProjections: readonly string[],
+  path: string,
+): void {
+  receipts.forEach((receipt, index) => {
+    const projection = lineFramedProjections[index]!;
+    if (!projection.endsWith('\n') || projection.endsWith('\n\n') || projection.includes('\r')) {
+      fail(
+        `${path}[${index}].vmPostReadDigest`,
+        'semantic projection must have exactly one trailing LF',
+      );
+    }
+    exact(
+      receipt.vmPostReadDigest,
+      ethers.keccak256(ethers.concat([
+        FINALIZED_VM_POST_READ_DIGEST_DOMAIN_V1,
+        ethers.toUtf8Bytes(projection.slice(0, -1)),
+      ])).toLowerCase(),
+      `${path}[${index}].vmPostReadDigest`,
+    );
+  });
+}
+
 const KA_PROJECTION_DIGEST_DOMAIN_V1 = 'dkg-ka-projection-v1\n';
 
-function verifySemanticState(value: unknown, path: string, rows: readonly WireRow[]): void {
+function verifySemanticState(
+  value: unknown,
+  path: string,
+  rows: readonly WireRow[],
+): readonly string[] {
   const semantic = closedArray(value, path, 3);
   const projections = new Set<string>();
+  const orderedProjections: string[] = [];
   semantic.forEach((entry, index) => {
     const state = closedRecord(entry, `${path}[${index}]`, ['kaId', 'readBack']);
     exact(state.kaId, rows[index]!.kaId, `${path}[${index}].kaId`);
@@ -480,6 +636,7 @@ function verifySemanticState(value: unknown, path: string, rows: readonly WireRo
       256 * 1024,
     );
     projections.add(projection);
+    orderedProjections.push(projection);
     exact(
       sha256Digest(KA_PROJECTION_DIGEST_DOMAIN_V1, projection),
       rows[index]!.contentDigest,
@@ -487,6 +644,7 @@ function verifySemanticState(value: unknown, path: string, rows: readonly WireRo
     );
   });
   if (projections.size !== rows.length) fail(path, 'semantic projections must be distinct per KA');
+  return Object.freeze(orderedProjections);
 }
 
 function verifyRestart(
@@ -496,6 +654,7 @@ function verifyRestart(
   peers: { author: string; receiver: string },
   semanticBefore: unknown,
   runtimeManifestDigest: string,
+  receiverAfterRestartIdentity: RuntimeProcessIdentityV1,
 ): void {
   const restart = closedRecord(value, '$.restartReplay', [
     'appliedReadBack',
@@ -527,6 +686,7 @@ function verifyRestart(
     '$.restartReplay.restartedReady',
     'receiver',
     runtimeManifestDigest,
+    receiverAfterRestartIdentity,
   );
   exact(restartedPeer, peers.receiver, '$.restartReplay.restartedReady.peerId');
   exactJson(restart.semanticPostRead, semanticBefore, '$.restartReplay.semanticPostRead');
@@ -544,14 +704,25 @@ function verifyRestart(
 function verifyReadyPair(
   value: unknown,
   runtimeManifestDigest: string,
+  processIdentities: Readonly<Record<
+    'author' | 'receiverBeforeCrash',
+    RuntimeProcessIdentityV1
+  >>,
 ): { author: string; receiver: string } {
   const ready = closedRecord(value, '$.ready', ['author', 'receiver']);
-  const author = verifyReadyEvent(ready.author, '$.ready.author', 'author', runtimeManifestDigest);
+  const author = verifyReadyEvent(
+    ready.author,
+    '$.ready.author',
+    'author',
+    runtimeManifestDigest,
+    processIdentities.author,
+  );
   const receiver = verifyReadyEvent(
     ready.receiver,
     '$.ready.receiver',
     'receiver',
     runtimeManifestDigest,
+    processIdentities.receiverBeforeCrash,
   );
   if (author === receiver) fail('$.ready', 'author and receiver peers must be distinct');
   return { author, receiver };
@@ -562,10 +733,12 @@ function verifyReadyEvent(
   path: string,
   role: 'author' | 'receiver',
   runtimeManifestDigest: string,
+  expectedProcessIdentity: RuntimeProcessIdentityV1,
 ): string {
   const ready = closedRecord(value, path, [
     'adapterId',
     'peerId',
+    'processIdentity',
     'protocolVersion',
     'role',
     'runtimeBuildManifestDigest',
@@ -576,6 +749,12 @@ function verifyReadyEvent(
   exact(ready.role, role, `${path}.role`);
   exact(ready.runtimeBuildManifestDigest, runtimeManifestDigest, `${path}.runtimeBuildManifestDigest`);
   exact(ready.startupRepair, null, `${path}.startupRepair`);
+  try {
+    assertRuntimeProcessIdentityV1(ready.processIdentity, `${path}.processIdentity`);
+  } catch (cause) {
+    fail(path, cause instanceof Error ? cause.message : String(cause));
+  }
+  exactJson(ready.processIdentity, expectedProcessIdentity, `${path}.processIdentity`);
   return boundedString(ready.peerId, `${path}.peerId`);
 }
 
@@ -636,6 +815,7 @@ function closedRecord(
   value: unknown,
   path: string,
   expectedKeys: readonly string[],
+  optionalKeys: readonly string[] = [],
 ): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     fail(path, 'must be a plain object');
@@ -644,8 +824,15 @@ function closedRecord(
   if (prototype !== Object.prototype && prototype !== null) fail(path, 'must be plain');
   const keys = Object.keys(value).sort();
   const expected = [...expectedKeys].sort();
-  if (stableJson(keys) !== stableJson(expected)) {
-    fail(path, `must contain exactly keys ${expected.join(', ')}`);
+  const optional = new Set(optionalKeys);
+  const required = expectedKeys.filter((key) => !optional.has(key));
+  const allowed = new Set([...expectedKeys, ...optionalKeys]);
+  if (
+    required.some((key) => !keys.includes(key))
+    || keys.some((key) => !allowed.has(key))
+  ) {
+    fail(path, `must contain exactly keys ${expected.join(', ')}`
+      + (optionalKeys.length === 0 ? '' : ` (optional: ${optionalKeys.join(', ')})`));
   }
   return value as Record<string, unknown>;
 }

@@ -37,8 +37,19 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
     log: { info() {}, warn() {}, debug() {}, error() {} },
     config: {},
     queryEngine: stubEngine,
-    subscribedContextGraphs: new Set<string>(),
+    // Production type is `Map<string, ContextGraphSub>`; a Set made
+    // `resolveContextGraphReadAuthority` throw once the scoped gate started
+    // consulting it directly instead of going through `canReadContextGraph`.
+    subscribedContextGraphs: new Map(),
     // These scoped queries must reach the engine to verify option forwarding.
+    // The scoped gate resolves a tri-state decision, so the grant has to be
+    // stubbed on that seam — `canReadContextGraph` alone no longer gates it.
+    resolveContextGraphReadAuthority: async () => ({
+      outcome: 'allowed' as const,
+      source: 'system' as const,
+      reason: 'test stub grants scoped read',
+      metadataBootstrap: 'eligible' as const,
+    }),
     canReadContextGraph: async () => true,
     isPrivateContextGraph: async () => false,
     listPrivateContextGraphIdsNotReadableBy: async () => [],

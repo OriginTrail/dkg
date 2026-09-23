@@ -24,6 +24,11 @@ import {
   type Rfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairStoreV1,
 } from './finalized-private-placement-repair-store-v1.js';
+import {
+  createRfc64UnregisteredAuthoritySeedStoreV1,
+  type Rfc64UnregisteredAuthoritySeedRecordV1,
+  type Rfc64UnregisteredAuthoritySeedStoreV1,
+} from './unregistered-authority-seed-store-v1.js';
 
 export interface OpenRfc64PersistenceOptionsV1 {
   /** Yield after each non-terminal fixed-size startup purge batch. */
@@ -39,6 +44,8 @@ export interface Rfc64PersistenceV1 {
   readonly swmAuthorInventory: Rfc64SwmAuthorInventoryOperationsV1;
   /** Durable post-confirmation work that must survive catalog delivery failures. */
   readonly finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1;
+  /** Keyed owner-signed unregistered authority seeds; a point lookup per (network, graph). */
+  readonly unregisteredAuthoritySeeds: Rfc64UnregisteredAuthoritySeedStoreV1;
   /** Non-owning cache operations; lifecycle methods remain private to this owner. */
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
   /** Durable content-addressed opaque KA bundles served by the native catalog transport. */
@@ -57,6 +64,7 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   readonly inventory: Rfc64InventoryV1OperationsV1;
   readonly swmAuthorInventory: Rfc64SwmAuthorInventoryOperationsV1;
   readonly finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1;
+  readonly unregisteredAuthoritySeeds: Rfc64UnregisteredAuthoritySeedStoreV1;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
   readonly kaBundles: Rfc64KaBundleOperationsV1;
 
@@ -66,6 +74,7 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
     ownedControlObjectStore: Rfc64ControlObjectStoreV1,
     ownedKaBundleStore: Rfc64KaBundleStoreV1,
     finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1,
+    unregisteredAuthoritySeeds: Rfc64UnregisteredAuthoritySeedStoreV1,
   ) {
     this.#ownedInventory = ownedInventory;
     this.#ownedControlObjectStore = ownedControlObjectStore;
@@ -91,6 +100,19 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
       delete: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
         this.requireOpen();
         await finalizedPrivatePlacementRepairs.delete(repair);
+        this.requireOpen();
+      },
+    });
+    this.unregisteredAuthoritySeeds = Object.freeze({
+      read: async (
+        ...input: Parameters<Rfc64UnregisteredAuthoritySeedStoreV1['read']>
+      ) => {
+        this.requireOpen();
+        return unregisteredAuthoritySeeds.read(...input);
+      },
+      put: async (record: Readonly<Rfc64UnregisteredAuthoritySeedRecordV1>) => {
+        this.requireOpen();
+        await unregisteredAuthoritySeeds.put(record);
         this.requireOpen();
       },
     });
@@ -185,12 +207,15 @@ export async function openRfc64PersistenceV1(
     kaBundleStore = await openRfc64KaBundleStoreForOwnedPersistenceRootV1(ownership);
     const finalizedPrivatePlacementRepairs =
       createRfc64FinalizedPrivatePlacementRepairStoreV1(inventory);
+    const unregisteredAuthoritySeeds =
+      createRfc64UnregisteredAuthoritySeedStoreV1(inventory);
     return new OwnedRfc64PersistenceV1(
       rootPath,
       inventory,
       controlObjectStore,
       kaBundleStore,
       finalizedPrivatePlacementRepairs,
+      unregisteredAuthoritySeeds,
     );
   } catch (cause) {
     const failures: unknown[] = [cause];

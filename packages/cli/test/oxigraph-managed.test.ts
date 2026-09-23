@@ -630,22 +630,26 @@ describe('startManagedOxigraph (real download + real server)', () => {
       log: () => {},
     });
     try {
-      const onClientTimeout = result!.storeConfig.options.onClientTimeout as (operation: string) => void;
-      const getRecoveryState = result!.storeConfig.options.getRecoveryState as () => {
-        recovering: boolean;
-        generation: number;
+      const managedRecovery = result!.storeConfig.options.managedRecovery as {
+        recover: (operation: string) => void;
+        readState: () => {
+          recovering: boolean;
+          generation: number;
+        };
       };
+      const recover = managedRecovery.recover;
+      const readState = managedRecovery.readState;
       const pid1 = await fetchManagedPid(port);
 
-      onClientTimeout('insert');
+      recover('insert');
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(await fetchManagedPid(port)).toBe(pid1);
-      expect(getRecoveryState().generation).toBe(0);
+      expect(readState().generation).toBe(0);
 
-      onClientTimeout('query');
+      recover('query');
       // Ownership verification is asynchronous; an unverified request is not
       // yet a recovery generation and must not be exposed as one.
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      expect(readState()).toEqual({ recovering: false, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -658,12 +662,12 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid2).toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
-      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+      for (let i = 0; i < 50 && readState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+      expect(readState()).toEqual({ recovering: false, generation: 1 });
 
-      onClientTimeout('construct');
+      recover('construct');
       let pid3 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -676,10 +680,10 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid3).toBeGreaterThan(0);
       expect(pid3).not.toBe(pid2);
-      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+      for (let i = 0; i < 50 && readState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 2 });
+      expect(readState()).toEqual({ recovering: false, generation: 2 });
     } finally {
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
@@ -758,8 +762,10 @@ describe('startManagedOxigraph (real download + real server)', () => {
             timeout: 30_000,
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
-            getRecoveryState: expect.any(Function),
-            onClientTimeout: expect.any(Function),
+            managedRecovery: {
+              readState: expect.any(Function),
+              recover: expect.any(Function),
+            },
           },
         });
         const runtimeStore = await createTripleStore(result!.storeConfig);

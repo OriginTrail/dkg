@@ -1,11 +1,21 @@
-export type SyncWorkAdmissionScope = Readonly<
-  | { sharing: 'coalescible'; key: string }
-  | { sharing: 'exclusive'; owner: string }
->;
+declare const syncFetchSharingIdentityBrand: unique symbol;
+
+/**
+ * Opaque authority to join an in-flight page fetch. Only capabilities minted
+ * once and then deliberately shared can coalesce; caller-controlled labels
+ * are never fetch ownership.
+ */
+export type SyncFetchSharingIdentity = Readonly<{
+  [syncFetchSharingIdentityBrand]: true;
+}>;
+
+export function createSyncFetchSharingIdentity(): SyncFetchSharingIdentity {
+  return Object.freeze({}) as SyncFetchSharingIdentity;
+}
 
 /** One already-composed job-window + round-deadline capability. */
 export interface SyncWorkAdmission {
-  readonly scope: SyncWorkAdmissionScope;
+  readonly fetchSharingIdentity?: SyncFetchSharingIdentity;
   readonly canAdmitWork: () => boolean;
   readonly assertCurrent: () => void;
   readonly capTimeout: (timeoutMs: number) => number;
@@ -13,8 +23,10 @@ export interface SyncWorkAdmission {
   readonly admitTimeout: (timeoutMs: number) => number;
 }
 
+const unrestrictedSyncFetchSharingIdentity = createSyncFetchSharingIdentity();
+
 export const UNRESTRICTED_SYNC_WORK: SyncWorkAdmission = Object.freeze({
-  scope: Object.freeze({ sharing: 'coalescible', key: 'unrestricted' }),
+  fetchSharingIdentity: unrestrictedSyncFetchSharingIdentity,
   canAdmitWork: () => true,
   assertCurrent: () => {},
   capTimeout: (timeoutMs: number) => timeoutMs,
@@ -23,11 +35,13 @@ export const UNRESTRICTED_SYNC_WORK: SyncWorkAdmission = Object.freeze({
 
 export function createSyncWorkAdmission(
   remainingMs: () => number,
-  scope: SyncWorkAdmissionScope = { sharing: 'exclusive', owner: 'scoped-operation' },
+  options: Readonly<{ fetchSharingIdentity?: SyncFetchSharingIdentity }> = {},
 ): SyncWorkAdmission {
   const canAdmitWork = () => remainingMs() > 0;
   return Object.freeze({
-    scope: Object.freeze({ ...scope }),
+    ...(options.fetchSharingIdentity === undefined
+      ? {}
+      : { fetchSharingIdentity: options.fetchSharingIdentity }),
     canAdmitWork,
     assertCurrent: () => {
       if (!canAdmitWork()) throw new SyncWorkAdmissionExhaustedError();
@@ -46,7 +60,7 @@ export function createSyncWorkAdmission(
 export function composeSyncWorkAdmission(options: {
   readonly deadline: number;
   readonly window?: SyncWorkAdmission;
-  readonly scope: SyncWorkAdmissionScope;
+  readonly fetchSharingIdentity?: SyncFetchSharingIdentity;
   readonly now?: () => number;
 }): SyncWorkAdmission {
   const now = options.now ?? Date.now;
@@ -57,7 +71,9 @@ export function composeSyncWorkAdmission(options: {
     window.capTimeout(Number.MAX_SAFE_INTEGER),
   ));
   return Object.freeze({
-    scope: Object.freeze({ ...options.scope }),
+    ...(options.fetchSharingIdentity === undefined
+      ? {}
+      : { fetchSharingIdentity: options.fetchSharingIdentity }),
     canAdmitWork: () => remainingMs() > 0,
     assertCurrent: () => {
       if (deadlineRemainingMs() <= 0) {

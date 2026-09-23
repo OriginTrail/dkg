@@ -343,7 +343,6 @@ describe('sync memory attribution metrics', () => {
       checkpointStore: new MemorySyncCheckpointStore(),
       workAdmission: createSyncWorkAdmission(
         () => admitted ? 1_000 : 0,
-        { sharing: 'exclusive', owner: 'memory-metrics-test' },
       ),
       buildSyncRequest: async () => encoder.encode('request'),
       parseAndFilter: async () => ({

@@ -71,6 +71,7 @@ import {
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type ContextGraphIdV1, type EvmAddressV1, type NetworkIdV1,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -94,7 +95,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, isChainRpcTransportError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, classifyContextGraphRegistrationFailure, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -131,6 +132,11 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
+import {
+  RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+  mintRfc64UnregisteredReplicaAuthoritySeedV1,
+  type Rfc64MintedUnregisteredReplicaAuthoritySeedV1,
+} from './rfc64/unregistered-replica-authority-v1.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -405,37 +411,6 @@ interface ContextGraphAgentInviteMutationPlan {
 export type PreparedContextGraphAgentInviteMutation =
   PreparedContextGraphMembershipMutation<ContextGraphAgentInviteMutationPlan>;
 
-const DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES = new Set([
-  'ACTION_REJECTED',
-  'CALL_EXCEPTION',
-  'INSUFFICIENT_FUNDS',
-  'INVALID_ARGUMENT',
-  'UNPREDICTABLE_GAS_LIMIT',
-]);
-
-/** True only when the chain boundary proves no successful registration committed. */
-function isDefinitiveContextGraphRegistrationFailure(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const record = error as {
-    code?: unknown;
-    txHash?: unknown;
-    receipt?: { status?: unknown };
-    contextGraphRegistrationSubmitted?: unknown;
-  };
-  if (record.contextGraphRegistrationSubmitted === false) return true;
-  if (record.receipt?.status === 0) return true;
-  const code = typeof record.code === 'string' ? record.code : '';
-  if (DEFINITIVE_CONTEXT_GRAPH_REGISTRATION_ERROR_CODES.has(code)) return true;
-  // Transport failure before the adapter has a signed/broadcast transaction
-  // hash is pre-submission. Once a hash exists, or receipt lookup itself
-  // failed, the outcome remains ambiguous and the durable pending fence stays.
-  if (isChainRpcTransportError(error)) {
-    return error.code !== 'RPC_RECEIPT_LOOKUP_FAILED'
-      && typeof error.txHash !== 'string';
-  }
-  return false;
-}
-
 export class ContextGraphMethods extends DKGAgentBase {
   async createContextGraph(this: DKGAgent, opts: {
     id: string;
@@ -584,6 +559,98 @@ export class ContextGraphMethods extends DKGAgentBase {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${isCurated || opts.private ? 'private' : 'public'}"`, graph: defGraph },
     ];
+
+    // A public unregistered CG has no finalized chain record from which a
+    // replica can derive RFC-64 authority. Mint a canonical policy envelope
+    // ("seed"), signed by the custodial caller/curator. Its primary home is the
+    // keyed RFC-64 seed store written after the durability boundary below; the
+    // ontology definition still carries it for backward compatibility.
+    // Receivers still require finalized chain absence before they may accept
+    // this evidence.
+    let mintedReplicaAuthoritySeed: Readonly<{
+      readonly networkId: NetworkIdV1;
+      readonly seed: Rfc64MintedUnregisteredReplicaAuthoritySeedV1;
+    }> | null = null;
+    if (!isCurated && !opts.private) {
+      const networkId = (
+        this.config.rfc64CatalogDeploymentProfile?.networkId
+        ?? this.config.networkIdentity?.chainId
+      );
+      // The wallet namespace is the only independently checkable owner before
+      // registration. Never mint a self-asserted policy for a different
+      // caller/default address: replicas would (correctly) reject it forever.
+      const ownerAddress = opts.id.match(/^(0x[0-9a-f]{40})(?:\/|$)/iu)?.[1]?.toLowerCase();
+      const effectiveCallerAddress = (
+        opts.callerAgentAddress ?? this.defaultAgentAddress
+      )?.toLowerCase();
+      const requiresAuthenticatedReplicaAuthority =
+        this.config.rfc64CatalogDeploymentProfile !== undefined
+        && !this.config.rfc64CatalogExecutionPlan.killSwitchActive
+        && ownerAddress !== undefined;
+      if (requiresAuthenticatedReplicaAuthority) {
+        if (effectiveCallerAddress === undefined) {
+          throw new Error(
+            `Context graph "${opts.id}" uses wallet namespace ${ownerAddress}, ` +
+            'but no authenticated EVM caller is available. Use the matching agent-scoped token.',
+          );
+        }
+        if (ownerAddress !== effectiveCallerAddress) {
+          throw new Error(
+            `Context graph "${opts.id}" uses wallet namespace ${ownerAddress}, ` +
+            `but the authenticated caller is ${effectiveCallerAddress}. ` +
+            'Use the matching agent-scoped token.',
+          );
+        }
+      }
+      // Resolve the key only after the authenticated effective principal has
+      // been proven to own the namespace. A sibling tenant must never be able
+      // to make this node sign authority with another local agent's key.
+      const signerRecord = ownerAddress === effectiveCallerAddress
+        ? this.getWorkspaceSigningAgentForAddress(ownerAddress)
+        : null;
+      if (requiresAuthenticatedReplicaAuthority && signerRecord === null) {
+        throw new Error(
+          `Context graph "${opts.id}" requires an authenticated RFC-64 replica authority, ` +
+          `but this node has no custodial signing key for ${ownerAddress}.`,
+        );
+      }
+      if (
+        networkId !== undefined
+        && networkId !== 'none'
+        && ownerAddress !== undefined
+        && /^0x[0-9a-f]{40}$/iu.test(ownerAddress)
+        && signerRecord !== null
+      ) {
+        const owner = ownerAddress as EvmAddressV1;
+        const wallet = new ethers.Wallet(signerRecord.privateKey);
+        const seed = await mintRfc64UnregisteredReplicaAuthoritySeedV1({
+          networkId: networkId as NetworkIdV1,
+          contextGraphId: opts.id as ContextGraphIdV1,
+          ownerAddress: owner,
+          accessPolicy: 0,
+          publishPolicy: opts.publishPolicy ?? 1,
+          publishAuthorityAccountId:
+            normalisedPublishAuthorityAccountId?.toString(10) ?? '0',
+          memberAddresses: [],
+          rosterVersion: '0',
+          signer: Object.freeze({
+            issuer: owner,
+            signDigest: (digest: Uint8Array) => wallet.signMessage(digest),
+          }),
+        });
+        mintedReplicaAuthoritySeed = Object.freeze({ networkId: networkId as NetworkIdV1, seed });
+        // DEPRECATED compat path: the ontology system graph is being retired as
+        // a carrier. This literal stays only so older peers and pre-migration
+        // replicas that still read the ontology copy can authenticate the seed;
+        // new consumers use the keyed seed store / peer fetch instead.
+        quads.push({
+          subject: contextGraphUri,
+          predicate: RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+          object: `"${seed.evidence}"`,
+          graph: ontologyGraph,
+        });
+      }
+    }
 
     // Store registration status and curator in _meta. Also persist
     // `publishPolicy` / `publishAuthorityAccountId` when supplied so
@@ -739,6 +806,27 @@ export class ContextGraphMethods extends DKGAgentBase {
     // immutable fact, so publish its runtime projection before any best-effort
     // subscription, membership, gossip, or RFC-64 follow-up can run.
     await this.persistLocalContextGraphOrigin(opts.id, 'local-create');
+
+    // Keyed seed store row for the owner-signed replica authority. The graph is
+    // already durable and the author never reads its own seed (its reconcile
+    // takes the local-first path), so this row only serves replicas and peer
+    // fetches with a point lookup; contain a store fault like the other
+    // best-effort RFC-64 follow-ups below rather than failing the create.
+    if (mintedReplicaAuthoritySeed !== null && this.rfc64PersistenceV1 !== undefined) {
+      try {
+        await this.persistVerifiedRfc64UnregisteredAuthoritySeedV1({
+          networkId: mintedReplicaAuthoritySeed.networkId,
+          contextGraphId: opts.id,
+          canonicalEnvelopeBytes: mintedReplicaAuthoritySeed.seed.canonicalEnvelopeBytes,
+        });
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `RFC-64 unregistered authority seed for "${opts.id}" was not stored in the keyed seed store: ` +
+          (error instanceof Error ? error.message : String(error)),
+        );
+      }
+    }
 
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
@@ -1056,6 +1144,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     let ownerAddress = ethers.getAddress(owner.replace(/^did:dkg:agent:/, ''));
     // Check if already registered
     const cgMetaGraph = contextGraphMetaUri(id);
+    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${id}`;
     const registrationStatuses = new LocalContextGraphRegistrationStatusStore({
       store: this.store,
@@ -1071,10 +1160,110 @@ export class ContextGraphMethods extends DKGAgentBase {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
+    if (registrationStatus === 'pending') {
+      // The previous process may have exited after the transaction was mined
+      // but before the local binding and final status were committed. Reconcile
+      // read-only from the immutable name commitment and require an independently
+      // live slot before adopting it. Any absence, unsupported liveness probe,
+      // or RPC/store failure keeps the fail-closed pending fence in place and
+      // must never submit another registration transaction.
+      let reconciledOnChainId: string | null = null;
+      let reconciledNameHash: string | null = null;
+      try {
+        const nameHash = this.contextGraphNameCommitment(id).toLowerCase();
+        const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
+        const resolved = typeof resolveByNameHash === 'function'
+          ? await resolveByNameHash.call(this.chain, nameHash)
+          : null;
+        const resolvedOnChainId = resolved !== null
+          && resolved > 0n
+          && resolved < (1n << 256n)
+          ? resolved.toString()
+          : null;
+        const isActive = this.chain.isContextGraphActiveOnChain;
+        if (
+          resolvedOnChainId !== null
+          && typeof isActive === 'function'
+          && await isActive.call(this.chain, BigInt(resolvedOnChainId))
+        ) {
+          await deleteByPatternWithoutCount(this.store, {
+            graph: ontologyGraph,
+            subject: contextGraphUri,
+            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          });
+          await deleteByPatternWithoutCount(this.store, {
+            graph: cgMetaGraph,
+            subject: contextGraphUri,
+            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          });
+          await this.store.insert([
+            {
+              subject: contextGraphUri,
+              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+              object: `"${resolvedOnChainId}"`,
+              graph: ontologyGraph,
+            },
+            {
+              subject: contextGraphUri,
+              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+              object: `"${resolvedOnChainId}"`,
+              graph: cgMetaGraph,
+            },
+            {
+              subject: contextGraphUri,
+              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
+              object: `"${nameHash}"`,
+              graph: cgMetaGraph,
+            },
+          ]);
+          await this.store.flush?.();
+          await persistRegistrationStatus('registered');
+          reconciledOnChainId = resolvedOnChainId;
+          reconciledNameHash = nameHash;
+        }
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Context graph "${id}" pending registration could not be reconciled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (reconciledOnChainId === null || reconciledNameHash === null) {
+        throw new Error(
+          `Context graph "${id}" has a pending registration outcome. ` +
+          'Refusing to submit another transaction until chain reconciliation resolves it.',
+        );
+      }
+
+      this.invalidateListContextGraphsCache();
+      this.contextGraphMetaProjection.markDirty(id);
+      const sub = this.subscribedContextGraphs.get(id);
+      if (sub) {
+        const next = { ...sub, onChainHash: reconciledNameHash };
+        this.bindSubscriptionOnChainId(id, next, reconciledOnChainId);
+        this.setContextGraphSubscription(id, next, { persist: false });
+        this.subscribeToContextGraph(id, {
+          trackSyncScope: true,
+          syncMode: 'always-on',
+        });
+        this.persistContextGraphSubscription(id);
+      }
+      try {
+        this.scheduleRfc64CatalogResponsibilityReconciliationV1(id);
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Context graph "${id}" was reconciled, but its RFC-64 responsibility refresh could not be scheduled: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      this.log.info(
+        ctx,
+        `Context graph "${id}" pending registration reconciled to live on-chain ID ${reconciledOnChainId}`,
+      );
+      return { onChainId: reconciledOnChainId, txHash: undefined };
+    }
 
     // Read existing description and access policy. Curated CGs store
     // definition in _meta rather than ONTOLOGY, so check both locations.
-    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const descResult = await this.store.query(
       `SELECT ?desc WHERE {
         { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
@@ -1522,7 +1711,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           nameHash,
         });
       } catch (error) {
-        if (isDefinitiveContextGraphRegistrationFailure(error)) {
+        if (classifyContextGraphRegistrationFailure(error) === 'definitive-failure') {
           try {
             await persistRegistrationStatus('unregistered');
           } catch (recoveryError) {
@@ -1917,7 +2106,17 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: candidateChainAgents,
       chain: this.chain,
-      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      // This roster decides whether a transaction is sent, not merely when.
+      // `allowCachedRoster` is passed explicitly so a future default cannot
+      // quietly hand the idempotence filter a projection to read.
+      rosterFreshness: 'live',
+      resolveAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.memberAdd,
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          { allowCachedRoster: false },
+        ),
+      ),
     });
 
     return this.contextGraphMembershipMutations.prepare(
@@ -2144,7 +2343,18 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: [normalizedAgentAddress],
       chain: this.chain,
-      resolveAuthority: () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+      // A roster behind the chain here does not delay the revocation, it
+      // cancels it: the agent is filtered out as "not present", no transaction
+      // is sent, and it stays on the chain roster while local state records a
+      // removal. See `prepareRegisteredParticipantMutation`.
+      rosterFreshness: 'live',
+      resolveAuthority: () => withRpcUsageSite(
+        CG_AUTH_RPC_SITES.memberRemove,
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          { allowCachedRoster: false },
+        ),
+      ),
     });
     await commitRegisteredParticipantMutation({
       prepared: registeredParticipantMutation,

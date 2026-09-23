@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
+import { PROTOCOL_STORAGE_ACK_V2 } from '../../core/src/constants.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = resolvePath(__dirname, '..', '..', 'cli', 'dist', 'cli.js');
 const BARE_FIXTURE_DIR = resolvePath(
@@ -268,17 +269,58 @@ async function daemonBootstrapAddress(d: Daemon): Promise<{ address: string; pee
     address: raw.includes('/p2p/') ? raw : `${raw}/p2p/${peerId}`,
   };
 }
-async function waitForConnectedPeer(d: Daemon, peerId: string, timeoutMs = 15_000): Promise<void> {
+async function topologyLogTails(edge: Daemon, core: Daemon): Promise<string> {
+  const [edgeLog, coreLog] = await Promise.all([
+    readFile(join(edge.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no edge log>'),
+    readFile(join(core.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no core log>'),
+  ]);
+  return `--- edge daemon log tail ---\n${edgeLog.split('\n').slice(-100).join('\n')}\n` +
+    `--- core daemon log tail ---\n${coreLog.split('\n').slice(-100).join('\n')}`;
+}
+async function waitForStorageAckPeer(
+  edge: Daemon,
+  core: Daemon,
+  peerId: string,
+  timeoutMs = 45_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('StorageACK readiness deadline exceeded')), timeoutMs);
   let last: any = null;
-  while (Date.now() < deadline) {
-    last = await daemonStatus(d);
-    const connections = Array.isArray(last.connections) ? last.connections : [];
-    if (connections.some((connection: any) => connection?.peerId === peerId)) return;
-    if (Number(last.connectedPeers ?? 0) > 0) return;
-    await sleep(250);
+  let requestError: unknown;
+  try {
+    while (!controller.signal.aborted && Date.now() < deadline) {
+      const path = `/api/peer-info?peerId=${encodeURIComponent(peerId)}`;
+      const responses = await Promise.all([
+        authed(edge, 'GET', path, undefined, controller.signal),
+        authed(core, 'GET', path, undefined, controller.signal),
+      ]);
+      const [edgePeer, coreSelf] = await Promise.all(responses.map((response) =>
+        response.ok ? response.json() : { status: response.status },
+      ));
+      last = { edgePeer, coreSelf };
+      if (controller.signal.aborted || Date.now() >= deadline) break;
+      // A healthy HTTP listener and a connection do not prove StorageACK is
+      // registered: transient chain failures defer it to a background retry.
+      // Query the core's own peer store, which libp2p updates when it registers
+      // handlers. The edge's cached identify advertisement can stay stale
+      // after late registration, even while the core already accepts V2 ACKs.
+      if (edgePeer.peerId === peerId && edgePeer.connected === true &&
+          coreSelf.peerId === peerId && Array.isArray(coreSelf.peerStore?.protocols) &&
+          coreSelf.peerStore.protocols.includes(PROTOCOL_STORAGE_ACK_V2)) return;
+      await sleep(Math.max(0, Math.min(250, deadline - Date.now())));
+    }
+  } catch (error) {
+    requestError = error;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
   }
-  throw new Error(`Daemon did not connect to ACK core ${peerId} within ${timeoutMs}ms (status=${JSON.stringify(last)})`);
+  throw new Error(
+    `ACK core ${peerId} did not become ready for ${PROTOCOL_STORAGE_ACK_V2} within ${timeoutMs}ms ` +
+    `(peer=${JSON.stringify(last)}, requestError=${String(requestError ?? 'none')})\n` +
+    await topologyLogTails(edge, core),
+  );
 }
 async function startLiveKafkaTopology(pluginPath: string, cgId: string): Promise<{
   core: Daemon;
@@ -288,16 +330,18 @@ async function startLiveKafkaTopology(pluginPath: string, cgId: string): Promise
     nodeRole: 'core',
     wallet: { address: REC1_OP_ADDRESS, privateKey: HARDHAT_KEYS.REC1_OP },
   });
+  let edge: Daemon | null = null;
   try {
     const bootstrap = await daemonBootstrapAddress(core);
-    const edge = await startDaemon({
+    edge = await startDaemon({
       pluginPath,
       cgId,
       bootstrapPeers: [bootstrap.address],
     });
-    await waitForConnectedPeer(edge, bootstrap.peerId);
+    await waitForStorageAckPeer(edge, core, bootstrap.peerId);
     return { core, edge };
   } catch (err) {
+    await stopDaemon(edge);
     await stopDaemon(core);
     throw err;
   }
@@ -317,9 +361,10 @@ async function authed(
   method: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const headers: Record<string, string> = { Authorization: `Bearer ${d.token}` };
-  const init: RequestInit = { method, headers };
+  const init: RequestInit = { method, headers, ...(signal ? { signal } : {}) };
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
@@ -425,6 +470,119 @@ describe('pollUntilFinalized', () => {
     }
   });
 });
+describe('StorageACK topology readiness', () => {
+  const edge = { apiPort: 1, token: 'test-token', home: '/missing-kafka-edge-log' } as Daemon;
+  const core = { apiPort: 2, token: 'test-token', home: '/missing-kafka-core-log' } as Daemon;
+  const ready = {
+    peerId: 'expected-core',
+    connected: true,
+    peerStore: { protocols: [PROTOCOL_STORAGE_ACK_V2] },
+  };
+
+  it('waits for the exact connected core to register V2 ACKs even when remote identify stays stale', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    for (const [edgePeer, coreSelf] of [
+      [ready, { ...ready, peerStore: { protocols: [] } }],
+      [{ ...ready, peerId: 'different-core' }, ready],
+      [ready, { ...ready, peerId: 'different-core' }],
+      [{ ...ready, connected: false }, ready],
+      [{ ...ready, peerStore: { protocols: [] } }, { ...ready, connected: false }],
+    ]) {
+      fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(edgePeer), { status: 200 }));
+      fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(coreSelf), { status: 200 }));
+    }
+    try {
+      let settled = false;
+      const pending = waitForStorageAckPeer(edge, core, ready.peerId).then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      for (let i = 0; i < 4; i++) {
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(250);
+      }
+      await pending;
+      expect(fetchSpy).toHaveBeenCalledTimes(10);
+      expect(fetchSpy).toHaveBeenLastCalledWith(
+        'http://127.0.0.1:2/api/peer-info?peerId=expected-core',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds readiness and includes both daemon logs when ACK registration never completes', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(
+      JSON.stringify({ ...ready, peerStore: { protocols: [] } }), { status: 200 },
+    ));
+    try {
+      const pending = waitForStorageAckPeer(edge, core, ready.peerId, 500).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(500);
+      const error = await pending;
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).toContain(`did not become ready for ${PROTOCOL_STORAGE_ACK_V2} within 500ms`);
+      expect(String(error)).toContain('--- edge daemon log tail ---');
+      expect(String(error)).toContain('--- core daemon log tail ---');
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
+    } finally {
+      fetchSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['headers', 'body'] as const)('cancels stalled HTTP %s at the readiness deadline', async (stage) => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      signal = init?.signal ?? undefined;
+      if (stage === 'headers') {
+        return new Promise<Response>((_resolve, reject) => {
+          signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
+        });
+      }
+      return new Response(new ReadableStream({
+        start(stream) {
+          signal!.addEventListener('abort', () => stream.error(signal!.reason), { once: true });
+        },
+      }));
+    });
+    try {
+      const pending = waitForStorageAckPeer(edge, core, ready.peerId, 500).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(500);
+      const error = await pending;
+      expect(signal?.aborted).toBe(true);
+      expect(String(error)).toContain('StorageACK readiness deadline exceeded');
+      expect(String(error)).toContain('--- edge daemon log tail ---');
+      expect(String(error)).toContain('--- core daemon log tail ---');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels the sibling diagnostics request when the other request fails', async () => {
+    let siblingSignal: AbortSignal | undefined;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new Error('peer diagnostics unavailable'))
+      .mockImplementationOnce(async (_url, init) => {
+        siblingSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          siblingSignal!.addEventListener('abort', () => reject(siblingSignal!.reason), { once: true });
+        });
+      });
+    try {
+      const error = await waitForStorageAckPeer(edge, core, ready.peerId, 500).catch((error: unknown) => error);
+      expect(String(error)).toContain('peer diagnostics unavailable');
+      expect(siblingSignal?.aborted).toBe(true);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
 describe('kafka-plugin live daemon E2E — bare baseline', () => {
   let core: Daemon | null = null;
   let daemon: Daemon | null = null;
@@ -454,8 +612,10 @@ describe('kafka-plugin live daemon E2E — bare baseline', () => {
     expect(typeof body.receivedAt).toBe('string');
     const final = await pollUntilFinalized(daemon!, '/api/kafka/streams', body.captureID);
     if (!['finalized', 'completed'].includes(final.state)) {
-      const log = await readFile(join(daemon!.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no log>');
-      throw new Error(`Expected finalized/completed; got ${final.state} error=${final.error}\n--- daemon log tail ---\n${log.split('\n').slice(-80).join('\n')}`);
+      throw new Error(
+        `Expected finalized/completed; got ${final.state} error=${final.error}\n` +
+        await topologyLogTails(daemon!, core!),
+      );
     }
     expect(['finalized', 'completed']).toContain(final.state);
     expect(final.ual).toBeTruthy();
@@ -536,20 +696,20 @@ describe('kafka-plugin live daemon E2E — extension', () => {
     expect(typeof body.captureID).toBe('string');
     const final = await pollUntilFinalized(daemon!, '/api/kafka/streams', body.captureID);
     if (!['finalized', 'completed'].includes(final.state)) {
-      const [edgeLog, coreLog] = await Promise.all([
-        readFile(join(daemon!.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no edge log>'),
-        readFile(join(core!.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no core log>'),
-      ]);
       throw new Error(
         `Expected extension publication to finalize; got ${final.state} error=${final.error}\n` +
-        `--- edge daemon log tail ---\n${edgeLog.split('\n').slice(-100).join('\n')}\n` +
-        `--- core daemon log tail ---\n${coreLog.split('\n').slice(-100).join('\n')}`,
+        await topologyLogTails(daemon!, core!),
       );
     }
     expect(['finalized', 'completed']).toContain(final.state);
     expect(final.ual).toBeTruthy();
     const get = await authed(daemon!, 'GET', `/api/kafka/streams/${encodeURIComponent(final.ual!)}`);
-    expect(get.status).toBe(200);
+    if (get.status !== 200) {
+      throw new Error(
+        `GET extension stream: ${get.status} ${await get.text()}\n` +
+        await topologyLogTails(daemon!, core!),
+      );
+    }
     const ka = await get.json();
     expect(ka['@type']).toBe('dkg-streams:KafkaStream');
     expect(ka['@context']).toMatchObject({

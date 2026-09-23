@@ -93,7 +93,9 @@ type ExpectedLegacyRegisteredAuthority =
   | {
       kind: 'unavailable';
       reason:
+        | 'finalized-name-absence-unaccepted'
         | 'chain-name-binding-unavailable'
+        | 'authority-circuit-open'
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'chain-access-policy-unavailable'
