@@ -895,18 +895,14 @@ export function planCi({
 
   const productionFiles = changedFiles.filter((filePath) => !isDocumentationOnlyPath(filePath));
   if (productionFiles.length === 0) {
-    return {
+    return planOf({
       mode: 'docs-only',
-      fullCi: false,
-      runNode: false,
-      buildChecks: false,
-      abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
       lanes: emptyLanes(),
       evmScopes: [],
-      changedFileCount: changedFiles.length,
-      changedFiles: changedFiles.slice(0, MAX_REPORTED_FILES),
+      solidityRelevance,
+      changedFiles,
       reasons: ['Only documentation or repository metadata changed'],
-    };
+    });
   }
 
   if (productionFiles.length > 100) {
