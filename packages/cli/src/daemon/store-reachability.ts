@@ -19,7 +19,12 @@ import type { StoreReachability } from '../status-store-quads-wire.js';
 /** How long a status request waits for the store's answer. */
 const STORE_PROBE_WAIT_MS = 5_000;
 
-// Keyed by store, so each store has at most one probe running.
+// Keyed by store, unlike the count cache's single module-level slot. The
+// daemon has one store, so both hold one entry at a time. The count cache is
+// emptied through invalidateExternalStoreQuadsCache(), which the managed
+// Oxigraph supervisor needs anyway; a probe is never aborted and has no such
+// reset, so in a single slot one that never settles would answer for every
+// store checked after it, such as the next test's.
 const runningProbes = new WeakMap<DKGAgent['store'], Promise<StoreReachability>>();
 
 function runProbe(agent: DKGAgent): Promise<StoreReachability> {

@@ -29,25 +29,6 @@ export interface StoreQuadsStatusFields {
   storeQuadsRefreshing?: boolean;
 }
 
-// Every boolean flag of this contract accepts `true` and the legacy `1`.
-function isFlagSet(params: URLSearchParams, name: string): boolean {
-  const value = params.get(name);
-  return value === 'true' || value === '1';
-}
-
-const INCLUDE_STORE_QUADS_PARAM = 'includeStoreQuads';
-
-/**
- * Query asking the daemon to refresh its cached count in the background, which
- * costs a full-store COUNT at most once per daemon cache TTL.
- */
-export const INCLUDE_STORE_QUADS_QUERY = `${INCLUDE_STORE_QUADS_PARAM}=true`;
-
-/** Whether a status request asked for a count refresh. */
-export function parseIncludeStoreQuads(params: URLSearchParams): boolean {
-  return isFlagSet(params, INCLUDE_STORE_QUADS_PARAM);
-}
-
 /**
  * How an external store answered a cheap reachability check (`ASK`) made for
  * this request: it answered, it failed, or it gave no answer in time. No
@@ -61,12 +42,44 @@ export interface StoreReachabilityFields {
   storeReachability?: StoreReachability;
 }
 
-const PROBE_STORE_PARAM = 'probeStore';
+/**
+ * What a status request asks the daemon to do besides reporting. Both cost
+ * store work, so set them only when actually needed, never for polling.
+ */
+export interface StatusQueryOptions {
+  /**
+   * Refresh the cached count in the background, which costs a full-store
+   * COUNT at most once per daemon cache TTL.
+   */
+  includeStoreQuads?: boolean;
+  /** Check, with a cheap `ASK`, that the store answers at all. */
+  probeStore?: boolean;
+}
 
-/** Query asking the daemon to check, cheaply, that the store answers at all. */
-export const PROBE_STORE_QUERY = `${PROBE_STORE_PARAM}=true`;
+/**
+ * Option name -> query parameter name. `satisfies` makes the map total: an
+ * option added to {@link StatusQueryOptions} without a wire key is a compile
+ * error.
+ */
+const STATUS_QUERY_WIRE_KEYS = {
+  includeStoreQuads: 'includeStoreQuads',
+  probeStore: 'probeStore',
+} as const satisfies Record<keyof StatusQueryOptions, string>;
 
-/** Whether a status request asked for a reachability check. */
-export function parseProbeStore(params: URLSearchParams): boolean {
-  return isFlagSet(params, PROBE_STORE_PARAM);
+/** The query string for a status request; empty when nothing is asked. */
+export function serializeStatusQuery(options: StatusQueryOptions): string {
+  const params = new URLSearchParams();
+  for (const option of Object.keys(STATUS_QUERY_WIRE_KEYS) as Array<keyof StatusQueryOptions>) {
+    if (options[option]) params.set(STATUS_QUERY_WIRE_KEYS[option], 'true');
+  }
+  return params.toString();
+}
+
+/** What a status request asked for. Each flag accepts `true` and the legacy `1`. */
+export function parseStatusQuery(params: URLSearchParams): Required<StatusQueryOptions> {
+  const isSet = (option: keyof StatusQueryOptions): boolean => {
+    const value = params.get(STATUS_QUERY_WIRE_KEYS[option]);
+    return value === 'true' || value === '1';
+  };
+  return { includeStoreQuads: isSet('includeStoreQuads'), probeStore: isSet('probeStore') };
 }

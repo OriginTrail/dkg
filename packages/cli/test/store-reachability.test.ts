@@ -1,5 +1,9 @@
-import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
-import { describe, expect, it } from 'vitest';
+import {
+  SparqlHttpStore,
+  StorePriorityScheduler,
+  StoreSchedulerBusyError,
+} from '@origintrail-official/dkg-storage';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { probeExternalStore } from '../src/daemon/store-reachability.js';
 
 type ProbeAgent = Parameters<typeof probeExternalStore>[0];
@@ -34,6 +38,50 @@ function agentAnswering(query: (sparql: string) => Promise<unknown>): {
 function nextTick(): Promise<void> {
   return new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+interface HeldRequest {
+  sparql: string;
+  signal: AbortSignal;
+  answer: (body: unknown) => void;
+  fail: (error: Error) => void;
+}
+
+// Stands in for the store's SPARQL endpoint: every request the store sends
+// waits until the test answers or fails it, and an aborted one rejects, as
+// with the real fetch.
+function holdStoreRequests(): HeldRequest[] {
+  const requests: HeldRequest[] = [];
+  vi.stubGlobal('fetch', (_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+    const signal = init.signal as AbortSignal;
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    requests.push({
+      sparql: String(init.body),
+      signal,
+      answer: (body) => resolve(new Response(JSON.stringify(body), {
+        headers: { 'Content-Type': 'application/sparql-results+json' },
+      })),
+      fail: reject,
+    });
+  }));
+  return requests;
+}
+
+function agentWithStore(scheduler: StorePriorityScheduler): { agent: ProbeAgent; store: SparqlHttpStore } {
+  const store = new SparqlHttpStore({ queryEndpoint: 'http://store.test/query', scheduler });
+  return { agent: { store } as unknown as ProbeAgent, store };
+}
+
+// One slot and no reserves: a single running read makes every other wait.
+const ONE_SLOT = {
+  maxConcurrent: 1,
+  ackReservedSlots: 0,
+  healthReservedSlots: 0,
+  backgroundReservedSlots: 0,
+};
 
 describe('probeExternalStore', () => {
   it.each([true, false])('reports a store that answers the ASK with %s as reachable', async (answer) => {
@@ -102,5 +150,95 @@ describe('probeExternalStore', () => {
 
     await expect(results).resolves.toEqual(['reachable', 'reachable']);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('probeExternalStore over a real SPARQL HTTP store', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('reports a store that answers the ASK as reachable', async () => {
+    const requests = holdStoreRequests();
+    const { agent } = agentWithStore(new StorePriorityScheduler({ maxConcurrent: 4 }));
+
+    const probe = probeExternalStore(agent);
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0].sparql).toBe('ASK { ?s ?p ?o }');
+    requests[0].answer({ head: {}, boolean: true });
+
+    await expect(probe).resolves.toBe('reachable');
+  });
+
+  it('reports a store whose endpoint refuses the connection as unreachable', async () => {
+    const requests = holdStoreRequests();
+    const { agent } = agentWithStore(new StorePriorityScheduler({ maxConcurrent: 4 }));
+
+    const probe = probeExternalStore(agent);
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    requests[0].fail(new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED') }));
+
+    await expect(probe).resolves.toBe('unreachable');
+  });
+
+  // The probe waits ten seconds and the test fails after five: only the
+  // scheduler's own refusal can answer these in time.
+  it('reports a probe the scheduler refuses, its health queue full, as no answer without sending it', async () => {
+    const requests = holdStoreRequests();
+    const scheduler = new StorePriorityScheduler({
+      ...ONE_SLOT,
+      queueLimits: { ack: 1, health: 1, normal: 1, background: 1 },
+    });
+    const { agent } = agentWithStore(scheduler);
+    const release = deferred<void>();
+    const running = scheduler.run('health', 'test.running', () => release.promise);
+    const queued = scheduler.run('health', 'test.queued', async () => {});
+
+    try {
+      await expect(probeExternalStore(agent, 10_000)).resolves.toBe('no-answer');
+      expect(requests).toEqual([]);
+    } finally {
+      release.resolve();
+      await Promise.all([running, queued]);
+    }
+  }, 5_000);
+
+  it('reports a probe that times out in the scheduler queue behind a running COUNT as no answer', async () => {
+    const requests = holdStoreRequests();
+    const { agent, store } = agentWithStore(new StorePriorityScheduler({
+      ...ONE_SLOT,
+      queueWaitTimeoutMs: 20,
+    }));
+    // A status count holds the only slot on the same health lane.
+    const count = store.query(
+      'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
+      { priority: 'health' },
+    );
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+
+    try {
+      await expect(probeExternalStore(agent, 10_000)).resolves.toBe('no-answer');
+      expect(requests).toHaveLength(1);
+    } finally {
+      requests[0].fail(new Error('test finished'));
+      await expect(count).rejects.toThrow('test finished');
+    }
+  }, 5_000);
+
+  it('stops waiting for an ASK the store holds without aborting it, and the read completes', async () => {
+    const requests = holdStoreRequests();
+    const { agent, store } = agentWithStore(new StorePriorityScheduler({ maxConcurrent: 4 }));
+    const query = vi.spyOn(store, 'query');
+
+    await expect(probeExternalStore(agent, 20)).resolves.toBe('no-answer');
+    // Well after the caller gave up, the request is still open: aborting a
+    // read Oxigraph is evaluating makes a managed store restart itself.
+    await sleep(100);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].signal.aborted).toBe(false);
+
+    requests[0].answer({ head: {}, boolean: true });
+    await expect(query.mock.results[0].value).resolves.toEqual({ type: 'boolean', value: true });
   });
 });

@@ -31,8 +31,8 @@ import {
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import {
-  INCLUDE_STORE_QUADS_QUERY,
-  PROBE_STORE_QUERY,
+  serializeStatusQuery,
+  type StatusQueryOptions,
   type StoreQuadsStatusFields,
   type StoreReachabilityFields,
 } from './status-store-quads-wire.js';
@@ -642,19 +642,11 @@ export class ApiClient {
   }
 
   /**
-   * `includeStoreQuads` asks the daemon to refresh its cached external-store
-   * quad count in the background, which costs a full-store COUNT at most once
-   * per daemon cache TTL. `probeStore` asks it to check, with a cheap `ASK`,
-   * that the external store answers at all, waiting a few seconds at most.
-   * Set them only when that is actually needed, never for polling.
+   * Both options cost store work on the daemon ({@link StatusQueryOptions}):
+   * set them only when that is actually needed, never for polling.
    */
-  async status(
-    options: { includeStoreQuads?: boolean; probeStore?: boolean } = {},
-  ): Promise<DaemonStatusResponse> {
-    const query = [
-      ...(options.includeStoreQuads ? [INCLUDE_STORE_QUADS_QUERY] : []),
-      ...(options.probeStore ? [PROBE_STORE_QUERY] : []),
-    ].join('&');
+  async status(options: StatusQueryOptions = {}): Promise<DaemonStatusResponse> {
+    const query = serializeStatusQuery(options);
     const path = query ? `/api/status?${query}` : '/api/status';
     let status: unknown;
     try {

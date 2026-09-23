@@ -80,7 +80,7 @@ function nextTick(): Promise<void> {
 }
 
 async function startStatusServer(
-  query: (sparql: string) => Promise<unknown>,
+  query: (sparql: string, options?: { priority?: string }) => Promise<unknown>,
   store: StoreConfig = SPARQL_HTTP_STORE,
   // Awaited inside the route after the store fields are read and the
   // reachability check has started, as the real status blocks await I/O: a
@@ -865,6 +865,34 @@ describe('/api/status store reachability check', () => {
     } finally {
       await closeServer(external.server);
       await closeServer(local.server);
+    }
+  });
+
+  it('answers a request for both a count and the check with one COUNT and one ASK', async () => {
+    const count = deferred<unknown>();
+    const reads: Array<{ read: string; priority?: string }> = [];
+    const { server, baseUrl } = await startStatusServer(async (sparql, options) => {
+      reads.push({ read: isAsk(sparql) ? 'ASK' : 'COUNT', priority: options?.priority });
+      return isAsk(sparql) ? ASK_TRUE : count.promise;
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}/api/status?includeStoreQuads=true&probeStore=true`);
+      expect(await response.json()).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'pending',
+        storeReachability: 'reachable',
+      });
+      // Both run on the store's health lane, the count first, so on a
+      // saturated store the check can wait behind the count and reply
+      // no-answer, never unreachable. `dkg status` sends them separately.
+      expect(reads).toEqual([
+        { read: 'COUNT', priority: 'health' },
+        { read: 'ASK', priority: 'health' },
+      ]);
+    } finally {
+      count.resolve(COUNT_66);
+      await closeServer(server);
     }
   });
 

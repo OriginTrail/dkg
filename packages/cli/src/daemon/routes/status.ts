@@ -69,11 +69,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
-import {
-  parseIncludeStoreQuads,
-  parseProbeStore,
-  type StoreQuadsStatusFields,
-} from '../../status-store-quads-wire.js';
+import { parseStatusQuery, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
 import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
 import { probeExternalStore } from '../store-reachability.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -668,7 +664,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
-    const includeStoreQuads = parseIncludeStoreQuads(url.searchParams);
+    const { includeStoreQuads, probeStore } = parseStatusQuery(url.searchParams);
     const storeQuadsNow = Date.now();
     // A local backend reports no count; the cache returns complete fields.
     const storeQuadsFields: StoreQuadsStatusFields = !reportsExternalStoreQuads
@@ -677,7 +673,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         ? requestExternalStoreQuads(agent, storeQuadsNow)
         : peekCachedExternalStoreQuads(storeQuadsNow);
     // Started now so its wait overlaps the awaits below; awaited for the reply.
-    const storeReachabilityCheck = reportsExternalStoreQuads && parseProbeStore(url.searchParams)
+    const storeReachabilityCheck = reportsExternalStoreQuads && probeStore
       ? probeExternalStore(agent)
       : undefined;
     const backpressure = backpressureRegistry.capture();
