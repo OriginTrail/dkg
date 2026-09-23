@@ -372,8 +372,13 @@ export class ContextGraphNameResolver {
     if (entry?.state === 'resolved' || entry?.state === 'private') return Promise.resolve(entry);
     // A declined adoption would only be declined again: background passes
     // leave it alone, an explicit request (the operator subscribing again)
-    // checks once more.
-    if (entry?.state === 'declined' && options.ignoreBackoff !== true) return Promise.resolve(entry);
+    // checks once more. The refusal belongs to the binding it refused; a row
+    // re-bound to another on-chain slot is a new question.
+    if (
+      entry?.state === 'declined'
+      && entry.onChainId === target.onChainId
+      && options.ignoreBackoff !== true
+    ) return Promise.resolve(entry);
     if (
       onlyPeers === undefined
       && options.ignoreBackoff !== true

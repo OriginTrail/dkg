@@ -306,6 +306,26 @@ describe('ContextGraphNameResolver', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('scopes a refusal to the binding it refused: a row re-bound to another slot is tried again', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    const adopt = state.deps.adopt;
+    // The cleartext row belongs to on-chain 99, so a placeholder bound to 33 is refused.
+    state.deps.adopt = async (target, contextGraphId, source) => (
+      target.onChainId === '99' ? adopt(target, contextGraphId, source) : false
+    );
+    const resolver = resolverFor(state, { peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined', onChainId: '33' });
+
+    // The placeholder is re-bound to 99; an ordinary background pass resolves it.
+    state.targets = [{ nameHash: NAME_HASH, onChainId: '99' }];
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', onChainId: '99', contextGraphId: CLEARTEXT });
+  });
+
   it('records nothing when adoption was declined because the row went away', async () => {
     const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
     state.deps.adopt = async () => {
