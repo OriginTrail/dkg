@@ -15,19 +15,19 @@ import {
   sourceFiles,
   succeeded,
 } from './ci-plan-fixtures.mjs';
-import { loadReferences, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
+import { loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
 // workspaces depend on: what code outside the package lanes compiles against.
+// Type-only imports count, since they compile.
 function importedWorkspaceClosure(files) {
   const workspaceByName = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
     JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')).name,
     workspace,
   ]));
-  return workspaceClosure(files.flatMap((file) => [
-    ...fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
-      .matchAll(/(?:from|import\()\s*['"](@origintrail-official\/[a-z0-9-]+)/g),
-  ].map(([, name]) => workspaceByName.get(name)).filter(Boolean)));
+  return workspaceClosure(files.flatMap((file) => packageImports(fs.readFileSync(path.join(REPO_ROOT, file), 'utf8'))
+    .map((name) => workspaceByName.get(name))
+    .filter(Boolean)));
 }
 
 // Path routing: what individual changed paths select on pull requests -

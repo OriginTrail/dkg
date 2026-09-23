@@ -116,6 +116,12 @@ function builtPaths(file, source) {
     .map(([, , base, text]) => joined(base, text));
 }
 
+// The workspaces `source` imports by package name: static, side-effect and
+// dynamic imports and require().
+export function packageImports(source) {
+  return [...new Set([...source.matchAll(PACKAGE_IMPORT)].map(([, name]) => name))];
+}
+
 // What `file` (repo-relative, with `source` as its contents) loads by path:
 // - `modules`: relative imports (side-effect `import './x.js'` included),
 //   dynamic imports, `import(new URL(...))` and CommonJS require(), whose own
@@ -125,8 +131,7 @@ function builtPaths(file, source) {
 //   builtPaths) and, in tests and test-runner configs, quoted literals naming
 //   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
 //   tests list them);
-// - `packages`: workspaces it imports by package name, side-effect imports
-//   included.
+// - `packages`: workspaces it imports by package name (packageImports).
 // Type-only imports are erased before anything runs; paths assembled at run
 // time from variables are out of reach.
 export function loadReferences(file, source) {
@@ -146,7 +151,7 @@ export function loadReferences(file, source) {
   return {
     modules,
     paths: [...new Set(paths)].filter((target) => !modules.includes(target) && target !== file),
-    packages: [...new Set([...code.matchAll(PACKAGE_IMPORT)].map(([, name]) => name))],
+    packages: packageImports(code),
   };
 }
 
