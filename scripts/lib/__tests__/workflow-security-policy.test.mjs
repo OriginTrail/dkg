@@ -25,9 +25,9 @@ import {
   rulesetIdsRequiringDetails,
   TESTNET_CANARY_ROLLOUT_POLICY,
 } from '../../ci/validate-delta-rollout-ruleset.mjs';
+import { TRUSTED_CI_CONTROLLER_SHA } from './ci-plan-fixtures.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const CONTROLLER_SHA = '4aca346d4818eb63e661c6028a4e2c1cbea2bd92';
 
 function rulesetDetail(id, overrides = {}) {
   return {
@@ -56,7 +56,7 @@ function evaluateDeltaRules(rules, rulesets = rulesetDetailsFor(rules)) {
 }
 
 function controllerCheckout({
-  ref = CONTROLLER_SHA,
+  ref = TRUSTED_CI_CONTROLLER_SHA,
   repository = TESTNET_CANARY_ROLLOUT_POLICY.repository,
   uses = 'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0',
   quotedPath = false,
@@ -118,7 +118,7 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
       planCheckout: controllerCheckout({ quotedPath: true, idFirst: true }),
     }),
   }]);
-  assert.equal(result.ref, CONTROLLER_SHA);
+  assert.equal(result.ref, TRUSTED_CI_CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 2);
 
   const reordered = validateTrustedControllerPins([{
@@ -127,7 +127,7 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
       planCheckout: controllerCheckout({ controllerFiles: [...CONTROLLER_POLICY_FILES].reverse() }),
     }),
   }]);
-  assert.equal(reordered.ref, CONTROLLER_SHA, 'manifest membership must not impose file ordering');
+  assert.equal(reordered.ref, TRUSTED_CI_CONTROLLER_SHA, 'manifest membership must not impose file ordering');
 });
 
 test('controller validation rejects missing, inconsistent, fake, and over-broad checkouts', () => {
@@ -209,7 +209,7 @@ test('repository workflows expose one canonical protected-history controller pin
       source: fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/evm-integration.yml'), 'utf8'),
     },
   ]);
-  assert.equal(result.ref, CONTROLLER_SHA);
+  assert.equal(result.ref, TRUSTED_CI_CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 4);
   // The security-reviewed controller boundary, file by file.
   assert.deepEqual([...CONTROLLER_POLICY_FILES].sort(), [
@@ -582,7 +582,7 @@ test('policy report renderer owns clean, drift, safeguard, and acquisition statu
     version: 2,
     policy: TESTNET_CANARY_ROLLOUT_POLICY,
     controller: {
-      pin: CONTROLLER_SHA,
+      pin: TRUSTED_CI_CONTROLLER_SHA,
       protectedBranches: ['main', 'testnet-canary'],
       freshnessBranch: 'testnet-canary',
     },
