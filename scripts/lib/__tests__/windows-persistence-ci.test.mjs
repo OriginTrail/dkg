@@ -67,13 +67,15 @@ test('the required unit route owns exactly the unit files across the repository'
   // Resolve exactly as `pnpm test:inventory` does: no earlier route (such as
   // devnet/**) may shadow a unit file, and a widened pattern may not claim any other test.
   const resolved = secondaryRoutes(discoverTestSurface(repoRoot), routes);
-  const owned = [...resolved].filter(([, route]) => route.pattern === unitRoute.pattern).map(([file]) => file);
+  const isUnitRoute = (route) => ['pattern', 'lane', 'cadence', 'command'].every((key) => route[key] === unitRoute[key]);
+  const owned = [...resolved].filter(([, route]) => isUnitRoute(route)).map(([file]) => file);
   assert.deepEqual(owned.sort(), [...unitFiles].sort());
 });
 
 test('every Gate 0 harness test, including subdirectories, is a unit file', () => {
-  // This also catches a missing unit file, which `node --test` silently skips
-  // while any other listed path exists.
+  // Fails on a new unrouted harness test and on a missing unit file: Node 22's
+  // `node --test` treats each path as a glob and silently skips one that matches
+  // nothing while any other listed path exists.
   assert.deepEqual(discoverTestSurface(repoRoot, [harnessDir]).sort(), [...unitFiles].sort());
 });
 

@@ -47,7 +47,7 @@
     ]
   },
   {
-    "pattern": "devnet/rfc64-persistence-lifecycle/{evidence,process-lifecycle,verifier}.test.ts",
+    "pattern": "devnet/rfc64-persistence-lifecycle/*.test.ts",
     "lane": "inventory-windows",
     "reason": "Gate 0 evidence-encoder, child-process cleanup and verifier unit tests run on the Windows inventory evidence leg before generation and on the Linux tornado-agent sidecar shard, which also runs the POSIX-only cases",
     "cadence": "required",
