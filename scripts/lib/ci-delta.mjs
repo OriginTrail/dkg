@@ -55,8 +55,9 @@ export const SELF_BUILDING_LANES = lanesWith('selfBuilding');
 const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
 
 // Whether a plan must run the shared build job: a selected lane consumes its
-// outputs, or the plan declared the build job's own repository checks. The
-// planner derives runNode from it and the aggregate gate checks against it.
+// outputs, or the plan declared the build job's own repository checks. This is
+// the only derivation: githubOutputsForPlan emits the build job's run_node
+// condition from it and the aggregate gate requires the build from it.
 export function needsSharedBuild(plan) {
   return plan.buildChecks === true || NODE_LANES.some((lane) => plan.lanes?.[lane] === true);
 }
@@ -125,7 +126,6 @@ function isAbiFreshnessRelevantPath(filePath) {
     || /^packages\/evm-module\/abi\/.*\.json$/i.test(filePath);
 }
 
-
 const MAX_REPORTED_FILES = 200;
 
 function pathTriggers(filePath) {
@@ -153,7 +153,6 @@ function planOf({ mode, lanes, evmScopes, buildChecks = false, solidityRelevance
   return {
     mode,
     fullCi: mode === 'full',
-    runNode: needsSharedBuild({ lanes, buildChecks }),
     buildChecks,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
@@ -544,9 +543,7 @@ export function planCi({
   }
 
   const deduplicatedReasons = [...new Set(reasons)];
-  const runNode = needsSharedBuild({ lanes, buildChecks });
-  const selfBuildingLane = SELF_BUILDING_LANES.some((lane) => lanes[lane]);
-  if (!runNode && !selfBuildingLane && !lanes.contracts && evmScopes.size === 0) {
+  if (!buildChecks && !CI_LANES.some((lane) => lanes[lane]) && evmScopes.size === 0) {
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
   }
 
@@ -567,7 +564,6 @@ export function planCi({
 export const GATE_PLAN_FIELDS = Object.freeze([
   'mode',
   'fullCi',
-  'runNode',
   'buildChecks',
   'abiFreshnessRelevant',
   'lanes',
@@ -578,7 +574,7 @@ export function githubOutputsForPlan(plan) {
   const gatePlan = Object.fromEntries(GATE_PLAN_FIELDS.map((field) => [field, plan[field]]));
   return {
     full_ci: String(plan.fullCi),
-    run_node: String(plan.runNode),
+    run_node: String(needsSharedBuild(plan)),
     node_test_artifacts: String(needsNodeTestArtifacts(plan)),
     abi_freshness: String(plan.abiFreshnessRelevant),
     ...Object.fromEntries(CI_LANES.map((lane) => [lane, String(plan.lanes[lane])])),

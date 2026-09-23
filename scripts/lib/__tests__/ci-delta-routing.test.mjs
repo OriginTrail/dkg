@@ -5,20 +5,44 @@ import test from 'node:test';
 import { parse } from 'yaml';
 import {
   CI_LANES,
-  PRIMARY_LANE_JOBS,
   WORKSPACE_OWNING_EVM_SCOPES,
   WORKSPACE_OWNING_LANES,
   WORKSPACE_RULES,
+  needsSharedBuild,
+  planCi,
 } from '../ci-delta.mjs';
 import { COVERAGE_JOBS } from '../ci-lanes.mjs';
+import { PRIMARY_LANE_JOBS, validatePrimaryResults } from '../ci-results.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
-import { REPO_ROOT, change, pullRequestPlan, selectedLanes, sourceFiles, workflowJobCommands } from './ci-plan-fixtures.mjs';
-import { loadReferences, traceLaneLoads } from './load-graph.mjs';
+import {
+  REPO_ROOT,
+  change,
+  gateNeeds,
+  pullRequestPlan,
+  selectedLanes,
+  sourceFiles,
+  succeeded,
+  workflowJobCommands,
+} from './ci-plan-fixtures.mjs';
+import { loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
+
+// The workspaces that `files` import by package name, plus everything those
+// workspaces depend on: what code outside the package lanes compiles against.
+// Type-only imports count, since they compile.
+function importedWorkspaceClosure(files) {
+  const workspaceByName = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
+    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')).name,
+    workspace,
+  ]));
+  return workspaceClosure(files.flatMap((file) => packageImports(fs.readFileSync(path.join(REPO_ROOT, file), 'utf8'))
+    .map((name) => workspaceByName.get(name))
+    .filter(Boolean)));
+}
 
 // Path routing: what individual changed paths select on pull requests -
 // git statuses, workspace manifests, repository support areas and the
-// per-file triggers (identity wallet, Blazegraph arm64) - and that the lane
-// a path selects runs or loads it.
+// per-file triggers (browser surface, Windows lifecycle, identity wallet,
+// Blazegraph arm64) - and that the lane a path selects runs or loads it.
 
 test('deletions, renames and copies route every path they touch like edits', () => {
   const deleted = pullRequestPlan([change('packages/network-sim/src/removed.ts', 'D')]);
@@ -66,18 +90,18 @@ test('multi-workspace PRs select the union of their rules instead of full CI', (
 
 test('package-scoped manifest edits route to their workspace; install inputs stay full', () => {
   const manifest = {
-    name: '@origintrail-official/dkg-agent',
+    name: '@origintrail-official/dkg-publisher',
     version: '10.0.0',
     type: 'module',
     exports: { '.': './dist/index.js' },
     scripts: { build: 'tsc', test: 'vitest run' },
     dependencies: { ethers: '^6.13.0' },
   };
-  const manifestPlan = (head, entries = [change('packages/agent/package.json')], base = manifest) => pullRequestPlan(entries, {
+  const manifestPlan = (head, entries = [change('packages/publisher/package.json')], base = manifest) => pullRequestPlan(entries, {
     readManifest: (side) => JSON.stringify(side === 'base' ? base : head),
   });
   const without = (object, field) => Object.fromEntries(Object.entries(object).filter(([key]) => key !== field));
-  const sourcePlan = pullRequestPlan([change('packages/agent/src/agent.ts')]);
+  const sourcePlan = pullRequestPlan([change('packages/publisher/src/index.ts')]);
 
   for (const head of [
     { ...manifest, exports: { ...manifest.exports, './sync': './dist/sync.js' } },
@@ -130,14 +154,17 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
   assert.equal(removedHook.mode, 'full', 'removing an install hook');
   assert.match(removedHook.reasons[0], /install lifecycle scripts postinstall$/);
 
-  const agentManifest = [change('packages/agent/package.json')];
-  for (const readManifest of [
-    undefined,
-    () => { throw new Error('missing blob'); },
-    () => '{ not json',
-    () => '[]',
+  const publisherManifest = [change('packages/publisher/package.json')];
+  for (const [readManifest, reason] of [
+    [undefined, /contents are unavailable to the planner$/],
+    [() => { throw new Error('missing blob\nfatal: details'); }, /could not be read and parsed: missing blob$/],
+    [() => '{ not json', /could not be read and parsed: .*JSON/],
+    [(side) => (side === 'base' ? '[]' : '[1]'), /is not a JSON object$/],
   ]) {
-    assert.equal(pullRequestPlan(agentManifest, { readManifest }).mode, 'full', String(readManifest));
+    const plan = pullRequestPlan(publisherManifest, { readManifest });
+    assert.equal(plan.mode, 'full', String(readManifest));
+    assert.match(plan.reasons[0], /^Workspace manifest could not be compared: packages\/publisher\/package\.json /);
+    assert.match(plan.reasons[0], reason);
   }
   assert.equal(manifestPlan(manifest, [change('package.json')]).mode, 'full', 'root manifest');
   assert.equal(manifestPlan(manifest, [change('devnet/v10-stress/package.json')]).mode, 'full', 'devnet workspace');
@@ -189,10 +216,142 @@ test('repository support paths route to the lanes that execute them', () => {
   ]) {
     const plan = pullRequestPlan([change(filePath)]);
     assert.equal(plan.mode, 'delta', filePath);
-    assert.equal(plan.runNode, true, `${filePath} still needs the shared build checks`);
+    assert.equal(needsSharedBuild(plan), true, `${filePath} still needs the shared build checks`);
     assert.deepEqual(selectedLanes(plan), expected, filePath);
     assert.deepEqual(plan.evmScopes, [], filePath);
   }
+});
+
+test('the browser suite follows the UI surface and the packages its harness compiles against', () => {
+  // UI surface: node-ui, its graph-viz dependency and the daemon HTTP API in
+  // cli. Harness: the workspaces packages/node-ui/e2e imports, with their
+  // dependencies.
+  const uiSurface = ['packages/cli', 'packages/graph-viz', 'packages/node-ui'];
+  const harness = importedWorkspaceClosure(sourceFiles('packages/node-ui/e2e'));
+  assert.ok(harness.has('packages/core'), 'the e2e helpers import dkg-core');
+  const triggers = new Set([...uiSurface, ...harness]);
+  for (const [workspace, rule] of Object.entries(WORKSPACE_RULES)) {
+    if (rule.forceFull) continue;
+    assert.equal(rule.lanes.includes('kosava_node_ui_e2e'), triggers.has(workspace), workspace);
+  }
+
+  // The deliberate exception: the rest of the runtime scripts/devnet.sh boots
+  // (the workspaces it starts and their dependencies). On the PR each runs its
+  // own lanes and bura_cli's daemon tests; the browser suite follows after
+  // merge. A new runtime dependency fails here until it is a trigger or listed.
+  const devnet = fs.readFileSync(path.join(REPO_ROOT, 'scripts/devnet.sh'), 'utf8');
+  const booted = workspaceClosure([...devnet.matchAll(/\$REPO_ROOT\/(packages\/[a-z0-9-]+)\//g)].map(([, workspace]) => workspace));
+  assert.ok(booted.has('packages/agent'), 'the devnet daemons run the agent');
+  const deferred = [...booted].filter((workspace) => !triggers.has(workspace) && !WORKSPACE_RULES[workspace].forceFull).sort();
+  assert.deepEqual(deferred, [
+    'packages/adapter-hermes',
+    'packages/adapter-openclaw',
+    'packages/adapter-prime-agent',
+    'packages/agent',
+    'packages/chain',
+    'packages/epcis',
+    'packages/http-utils',
+    'packages/local-llm',
+    'packages/mcp-dkg',
+    'packages/okf',
+    'packages/publisher',
+    'packages/query',
+    'packages/random-sampling',
+    'packages/storage',
+  ]);
+  for (const workspace of deferred) {
+    const plan = pullRequestPlan([change(`${workspace}/src/index.ts`)]);
+    assert.equal(plan.lanes.kosava_node_ui_e2e, false, workspace);
+    assert.equal(plan.lanes.bura_cli, true, `${workspace} keeps the CLI daemon tests on the PR`);
+  }
+  for (const filePath of ['packages/node-ui/src/ui/pages/Dashboard.tsx', 'packages/cli/src/daemon/routes/context.ts', 'packages/core/src/constants.ts']) {
+    assert.equal(pullRequestPlan([change(filePath)]).lanes.kosava_node_ui_e2e, true, filePath);
+  }
+  // Protected pushes, merge-queue candidates, nightly runs and `ci:full` keep it.
+  for (const plan of [planCi({ eventName: 'push' }), pullRequestPlan([change('packages/agent/src/agent.ts')], { labels: ['ci:full'] })]) {
+    assert.equal(plan.lanes.kosava_node_ui_e2e, true);
+  }
+});
+
+test('the Windows lifecycle job follows the agent lane, which covers the closure its harnesses load', () => {
+  // The Windows job runs the SQLite persistence suites and the RFC-64 Gate 0
+  // and evidence harnesses, which start a real agent and run on no Linux
+  // lane. ci.yml starts it on the agent lane's output and the gate requires it
+  // with that lane, so every plan that runs the agent lane runs it too.
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const windowsLane = jobs['inventory-windows'].if.match(/^needs\.changes\.outputs\.(\w+) == 'true'$/)?.[1];
+  assert.equal(windowsLane, 'tornado_agent');
+  const windowsSelected = (filePath) => pullRequestPlan([change(filePath)]).lanes[windowsLane];
+
+  // Derive the closure from what the harnesses actually import, so a new
+  // import or dependency cannot silently drop the job.
+  const closure = importedWorkspaceClosure([
+    ...sourceFiles('devnet/rfc64-persistence-lifecycle'),
+    ...sourceFiles('devnet/_bootstrap').filter((file) => path.posix.basename(file).startsWith('rfc64-evidence')),
+  ]);
+  assert.ok(closure.has('packages/agent'), 'the Gate 0 harness starts a real agent');
+  for (const workspace of closure) {
+    assert.ok(windowsSelected(`${workspace}/src/index.ts`), workspace);
+  }
+
+  // The Windows workflow's own push filter names the same packages.
+  const windowsWorkflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/rfc64-inventory-windows.yml'), 'utf8'));
+  for (const filter of windowsWorkflow.on.push.paths) {
+    const workspace = filter.match(/^(packages\/[^/]+)\/\*\*$/)?.[1];
+    if (workspace) assert.ok(windowsSelected(`${workspace}/src/index.ts`), filter);
+  }
+
+  // Modules the harness loads, new or renamed persistence modules, the
+  // harnesses themselves and every suite the job runs all keep the job;
+  // unrelated workspaces do not.
+  for (const filePath of [
+    'packages/agent/src/finalization-recovery-worker.ts',
+    'packages/agent/src/rfc64/journal-store-v1.ts',
+    'packages/agent/src/finalization-recovery-sqlite-store-v2.ts',
+    'packages/storage/src/oxigraph-store.ts',
+    'packages/core/src/index.ts',
+    'devnet/rfc64-persistence-lifecycle/verify.ts',
+    'devnet/_bootstrap/rfc64-evidence.ts',
+  ]) {
+    assert.equal(windowsSelected(filePath), true, filePath);
+  }
+  const selectors = windowsWorkflow.jobs['inventory-lifecycle'].strategy.matrix.include
+    .flatMap((group) => group.tests.trim().split(/\s+/));
+  const agentTests = fs.readdirSync(path.join(REPO_ROOT, 'packages/agent/test'));
+  for (const selector of selectors) {
+    const matches = agentTests.filter((file) => `test/${file}`.startsWith(selector));
+    assert.ok(matches.length > 0, `${selector} matches no agent test`);
+    for (const file of matches) {
+      assert.equal(windowsSelected(`packages/agent/test/${file}`), true, file);
+    }
+  }
+  for (const filePath of ['packages/node-ui/src/ui/pages/Dashboard.tsx', 'packages/network-sim/src/index.ts']) {
+    assert.equal(windowsSelected(filePath), false, filePath);
+  }
+
+  // The gate requires the job whenever the plan selects the agent lane.
+  const persistence = pullRequestPlan([change('packages/agent/src/sqlite/owned-sqlite-v1.ts')]);
+  const needs = gateNeeds(succeeded(
+    'build',
+    'evm-node-test-artifacts',
+    'inventory-windows',
+    selectedLanes(persistence).map((lane) => PRIMARY_LANE_JOBS[lane]),
+  ));
+  assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan: persistence, needs }), []);
+  needs['inventory-windows'].result = 'skipped';
+  assert.match(
+    validatePrimaryResults({ eventName: 'pull_request', plan: persistence, needs }).join('\n'),
+    /inventory-windows was selected but ended with skipped/,
+  );
+
+  // The Gate 0 harness selects the agent lane, whose code imports its
+  // evidence helpers, and Blazegraph (the Gate 1 rollout tests load its
+  // process lifecycle), plus the shared build checks; full plans always
+  // include the lane.
+  const harness = pullRequestPlan([change('devnet/rfc64-persistence-lifecycle/verify.ts')]);
+  assert.deepEqual(selectedLanes(harness), ['tornado_blazegraph', 'tornado_agent']);
+  assert.equal(needsSharedBuild(harness), true);
+  assert.equal(planCi({ eventName: 'push' }).lanes[windowsLane], true);
 });
 
 test('each changed path gets one routing decision with a fixed precedence', () => {
@@ -330,7 +489,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['devnet/rfc64-runtime-provenance.mts', 'bura_cli', 'the CLI-started Gate 2 adapter imports the shared runtime modules'],
     ['devnet/rfc64-persistence-lifecycle/process-lifecycle.ts', 'tornado_blazegraph', 'the Blazegraph job runs the Gate 1 rollout tests'],
     ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
-    ['devnet/_bootstrap/vitest.evidence.config.ts', 'tornado_agent', 'the Windows job, gated on the agent lane, runs the evidence suite'],
+    ['devnet/rfc64-persistence-lifecycle/verify.ts', 'tornado_agent', 'the reusable Windows workflow, run on the agent lane, runs the Gate 0 harness'],
   ]) {
     assert.ok(loadedBy.get(target)?.has(requirement), why);
   }
@@ -544,7 +703,7 @@ test('the Blazegraph lane follows the agent lane, as ci.yml starts its job', () 
 });
 
 test('identity-wallet browser actions select the real-EVM chain scope', () => {
-  // Every shape isIdentityWalletEvmPath matches, including the extension
+  // Every shape IDENTITY_WALLET_EVM_PATTERNS matches, including the extension
   // alternation (the .tsx spelling is a shape probe, not an existing file).
   for (const filePath of [
     'packages/node-ui/src/ui/web3/identityWalletActions.ts',

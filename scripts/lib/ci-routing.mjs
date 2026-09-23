@@ -8,6 +8,24 @@
 
 export const EVM_SCOPES = Object.freeze(['chain', 'publisher', 'agent']);
 
+// The Playwright suite boots four real daemons and drives node-ui against
+// them (7 shards, ~45 runner-minutes). On pull requests it follows the UI
+// surface it exercises (node-ui, its graph-viz dependency and the daemon HTTP
+// API in cli) and the packages its own harness code compiles against (core,
+// which packages/node-ui/e2e imports, and its dependency rdf-utils). The rest
+// of the runtime those daemons boot (agent, chain, storage, publisher, query,
+// adapters, ...; ci-delta-routing.test.mjs pins the list) is deliberately not
+// a PR trigger: its own lanes and bura_cli's daemon tests cover it on the PR,
+// and the browser suite still runs for it on every protected push,
+// merge-queue candidate and nightly run (full CI) and whenever `ci:full` opts
+// a PR in before merging.
+//
+// The Windows lifecycle job (rfc64-inventory-windows.yml) runs wherever the
+// agent lane does: ci.yml starts it on that lane's output and the gate
+// requires it with the lane, so no rule names it. Besides the SQLite
+// persistence suites it runs the RFC-64 Gate 0 lifecycle and evidence
+// harnesses, which start a real agent (agent, core, chain, storage and their
+// dependencies) and run on no Linux lane.
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
     lanes: [
@@ -48,7 +66,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -64,7 +81,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -77,7 +93,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -89,7 +104,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_agent',
       'bura_cli',
       'bura_query',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -101,7 +115,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -112,7 +125,6 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -123,7 +135,6 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_agent',
       'bura_cli',
-      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -158,12 +169,12 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/epcis': {
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/mcp-dkg': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/local-llm': {
@@ -171,22 +182,22 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/okf': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-hermes': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-openclaw': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-prime-agent': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-elizaos': {
@@ -352,8 +363,10 @@ export const PATH_TRIGGERS = Object.freeze([
 // Repository areas outside the package workspaces, in first-match order. An
 // entry with `full` keeps full CI with its own reason (the CI control plane,
 // unknown workflow paths, devnet install inputs). Every other entry selects
-// the lanes that actually execute the area in CI (ci.yml and its reusable
-// workflows) plus the shared build job's own checks (`buildChecks`): its lint,
+// the lanes that actually load the area in CI (a CI job running it, or a
+// package referencing it, directly or through another support file; the
+// routing tests follow those imports) plus the shared build job's own checks
+// (`buildChecks`): its lint,
 // repository-script tests and test-inventory checks cover these files, and for
 // routes with no lanes they are the only CI consumer (the suites are manual or
 // have their own workflow).
@@ -389,8 +402,9 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     // Devnet harnesses are built on the agent, and agent tests, fixtures and
     // packages/agent/devnet import several of them. The Gate 0 lifecycle and
-    // evidence harnesses run in the Windows job and the Gate 1 rollout tests
-    // in the Blazegraph job; ci.yml selects both through tornado_agent.
+    // evidence harnesses (rfc64-persistence-lifecycle, _bootstrap) run in the
+    // Windows job and the Gate 1 rollout tests in the Blazegraph job; both
+    // follow the agent lane.
     pattern: /^devnet\//,
     lanes: ['tornado_agent'],
     reason: 'devnet harnesses are imported by agent tests and fixtures',

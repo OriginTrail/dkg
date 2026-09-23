@@ -8,7 +8,7 @@ import {
   needsNodeTestArtifacts,
   planCi,
 } from '../ci-delta.mjs';
-import { PRIMARY_LANE_JOBS, validateEvmResults, validatePrimaryResults } from '../ci-results.mjs';
+import { validateEvmResults, validatePrimaryResults } from '../ci-results.mjs';
 import { LANE_JOBS, change, gateNeeds, pullRequestPlan, succeeded } from './ci-plan-fixtures.mjs';
 
 // The aggregate gates: which job results each plan shape accepts or rejects.
@@ -37,28 +37,35 @@ test('a build-only plan requires the shared build and nothing else', () => {
     /build was selected but ended with skipped/,
   );
 
-  const laneWithoutBuild = { ...pullRequestPlan([change('packages/network-sim/src/index.ts')]), runNode: false };
-  assert.match(
-    validatePrimaryResults({ eventName: 'pull_request', plan: laneWithoutBuild, needs }).join('\n'),
-    /runNode=false is inconsistent with selected Node lanes/,
-  );
-
-  // Running the build without any lane is accepted only when the planner
-  // declared the shared build checks; otherwise the plan forgot its lanes.
+  // Without any lane, only the declared build checks require the build.
   assert.equal(plan.buildChecks, true);
-  assert.equal(JSON.parse(githubOutputsForPlan(plan).plan_json).buildChecks, true);
-  needs.build.result = 'success';
-  for (const [shape, inconsistent] of [
-    [{ ...plan, buildChecks: false }, /runNode=true is inconsistent with selected Node lanes \(buildChecks=false\)/],
-    [{ ...plan, runNode: false }, /runNode=false is inconsistent with selected Node lanes \(buildChecks=true\)/],
-  ]) {
-    assert.match(validatePrimaryResults({ eventName: 'pull_request', plan: shape, needs }).join('\n'), inconsistent);
-  }
+  assert.deepEqual(validatePrimaryResults({ eventName: 'pull_request', plan: { ...plan, buildChecks: false }, needs }), []);
   const { buildChecks: _omitted, ...unmarked } = plan;
   assert.match(
     validatePrimaryResults({ eventName: 'pull_request', plan: unmarked, needs }).join('\n'),
     /flags must be booleans/,
   );
+});
+
+test('the build job condition and the gate derive the shared build from one rule', () => {
+  // The build job runs on the run_node output (ci-controller.test.mjs pins
+  // that wiring); the gate reads plan_json back and requires the build
+  // through the same needsSharedBuild call.
+  for (const [filePath, buildNeeded] of [
+    ['tools/observability/lib/w1.mjs', true],
+    ['packages/network-sim/src/index.ts', true],
+    ['README.md', false],
+  ]) {
+    const outputs = githubOutputsForPlan(pullRequestPlan([change(filePath)]));
+    assert.equal(outputs.run_node, String(buildNeeded), filePath);
+    const needs = gateNeeds(succeeded(Object.keys(gateNeeds())));
+    needs.build.result = 'skipped';
+    assert.deepEqual(
+      validatePrimaryResults({ eventName: 'pull_request', plan: JSON.parse(outputs.plan_json), needs }),
+      buildNeeded ? ['build was selected but ended with skipped'] : [],
+      filePath,
+    );
+  }
 });
 
 test('aggregate gates reject failed or accidentally skipped selected jobs', () => {
@@ -124,7 +131,6 @@ test('artifact capability selects its producer and gate for each consumer lane o
   for (const lane of CI_LANES) {
     const plan = {
       ...planCi({ eventName: 'push' }), mode: 'delta', fullCi: false,
-      runNode: Object.hasOwn(PRIMARY_LANE_JOBS, lane) && lane !== 'bura_blazegraph_arm64',
       lanes: Object.fromEntries(CI_LANES.map((candidate) => [candidate, candidate === lane])),
     };
     const selected = NODE_TEST_ARTIFACT_LANES.includes(lane);

@@ -7,7 +7,9 @@ import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 export const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
-export const LANE_JOBS = Object.values(PRIMARY_LANE_JOBS);
+// The jobs selected lanes run: each lane's own job, and the Windows lifecycle
+// job, which runs with the agent lane.
+export const LANE_JOBS = [...Object.values(PRIMARY_LANE_JOBS), 'inventory-windows'];
 
 export function change(filePath, status = 'M') {
   return { status, paths: [filePath] };

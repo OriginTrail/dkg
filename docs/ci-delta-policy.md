@@ -21,9 +21,11 @@ CI whenever it cannot prove that a smaller plan is safe.
 | --- | --- |
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
 | Documentation only | Planner and aggregate gates only. A document a test reads (`RELEASE_PROCESS.md`, `packages/query/README.md`) is a CI input instead: its `PATH_TRIGGERS` entry selects only the lanes that read it, not the rule of the package it documents |
-| Agent lane | Also the Blazegraph lane: that job runs the agent's live Blazegraph suites, and `ci.yml` starts it for either lane |
+| Agent lane | Also the Blazegraph lane and the Windows lifecycle job: the Blazegraph job runs the agent's live Blazegraph suites and `ci.yml` starts it for either lane; the Windows job is described below |
 | A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the node-ui lane for the CLI daemon sources its tests scan, the core lane for the agent, publisher and CLI sources the chain RPC-site census reads, the Blazegraph lane for the CLI's Oxigraph launcher that the storage conformance suite runs, the chain scope for the identity-wallet code its node-ui suite loads) |
-| `core` / `rdf-utils` | All downstream Node and real-EVM lanes |
+| `core` / `rdf-utils` | All downstream Node and real-EVM lanes, including the browser E2E suite (its harness imports `core`) |
+| Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching the UI surface it drives (`node-ui`, `graph-viz`, and `cli`, the daemon HTTP API) or a package its harness code imports (`core` and its dependency `rdf-utils`). The rest of the daemon runtime (`agent`, `chain`, `storage`, `publisher`, `query`, adapters and the other packages `cli` depends on) is a deliberate exception: those PRs run their own lanes plus the CLI daemon tests and get the suite after merge. `ci-delta-routing.test.mjs` derives both sets from the harness imports and `scripts/devnet.sh`, and pins the exception list |
+| Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane, whether a package, a `devnet/` harness or the Gate 0 paths selected it: `ci.yml` starts the job on the agent lane's output and the gate requires it with that lane. Besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
@@ -31,7 +33,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Deletion, rename or copy | Routed by every old and new path, like edits |
 | Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
 | Several workspaces | Union of their rules |
-| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that load them: `devnet/` the agent lane (with Blazegraph; the Gate 2 adapter the CLI starts, the shared `rfc64-runtime-*` modules and the CP2 batch planning it imports also the CLI lane), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone |
+| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that load them: `devnet/` the agent lane (with Blazegraph and the Windows job; the Gate 2 adapter the CLI starts, the shared `rfc64-runtime-*` modules and the CP2 batch planning it imports also the CLI lane), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone |
 | More than 100 production files | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
 | Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
@@ -57,13 +59,12 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   catching cross-package type and build failures even when a test lane is
   skipped.
 - Shared packages run conservative reverse consumers and explicit integrations;
-  this includes undeclared edges such as committed EVM ABIs consumed by `chain`
-  and the real devnet used by node-UI E2E. Beyond declared dependencies, a
-  routing test seeds from what each lane runs (package code and tests, and the
-  support files CI jobs run directly, through root `package.json` or shell
-  scripts, or through local actions and reusable workflows), follows every
-  relative reference (imports,
-  dynamic imports, CommonJS `require`, `new URL(...)` paths, paths built with
+  this includes undeclared edges such as committed EVM ABIs consumed by `chain`.
+  Beyond declared dependencies, a routing test seeds from what each lane runs
+  (package code and tests, and the support files CI jobs run directly, through
+  root `package.json` or shell scripts, or through local actions and reusable
+  workflows), follows every relative reference (imports, dynamic imports,
+  CommonJS `require`, `new URL(...)` paths, paths built with
   `path.resolve`/`join` or their imported aliases from a file's own directory
   and, in tests and test-runner configs, quoted repo paths naming a file;
   documents included, and a built directory counts when the file walks it;
@@ -78,13 +79,21 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   package name (and their dependencies) must select the lane too: the chain
   scope's node-ui suite starts a DKGAgent, so storage, publisher, query and
   random-sampling changes run that scope.
+  The most expensive system lane, real-node browser E2E, follows on PRs only
+  the UI surface it drives and the packages its harness imports, and runs in
+  full on every protected-branch push, merge-queue candidate and nightly run;
+  `ci:full` opts a PR in before merging.
+  The Windows lifecycle job is not narrowed that way: its Gate 0 and evidence
+  harnesses have no Linux equivalent, so it runs for the whole agent closure.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
-  selected job was accidentally skipped, failed, or was cancelled. The primary
-  gate also requires the shared build to run exactly when a Node lane needs it
-  or the plan explicitly declares `buildChecks` (repository paths whose only CI
-  consumer is the build job's own checks), so a plan that forgot its lanes
-  cannot pass on the build alone.
+  selected job was accidentally skipped, failed, or was cancelled. The shared
+  build is required when a Node lane needs it or the plan declares
+  `buildChecks` (repository paths whose only CI consumer is the build job's own
+  checks). One function, `needsSharedBuild`, decides this for both the build
+  job's `run_node` condition and the primary gate, so the two cannot disagree;
+  a delta plan that selects no lane and no build checks fails closed to full
+  CI.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
   present on protected `main` or `testnet-canary` history. Only a follow-up PR
@@ -186,8 +195,8 @@ for about 86% of compute.
 - A leaf supporting-package change should take roughly 3 minutes instead of 14
   (shared build plus the supporting lane).
 - A Hardhat-plugin-only change should take roughly 5 minutes.
-- UI and shared protocol changes still run the real-node E2E suite, but its 326
-  tests now run in seven isolated devnet shards instead of one serial lane.
+- UI and daemon-API changes still run the real-node E2E suite on the PR, in
+  seven isolated devnet shards; deeper protocol changes run it after merge.
 
 The full PR path was also measured independently of delta selection. On the
 same PR, the original full workflow took

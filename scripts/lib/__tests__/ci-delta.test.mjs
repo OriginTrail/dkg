@@ -190,7 +190,7 @@ test('documentation-only PRs select no test lane or shared build', () => {
     change('packages/agent/README.md'),
   ]);
   assert.equal(plan.mode, 'docs-only');
-  assert.equal(plan.runNode, false);
+  assert.equal(needsSharedBuild(plan), false);
   assert.deepEqual(selectedLanes(plan), []);
   assert.deepEqual(plan.evmScopes, []);
 });
@@ -217,7 +217,6 @@ test('leaf and shared package snapshots include conservative downstream consumer
     'tornado_blazegraph',
     'tornado_agent',
     'bura_cli',
-    'kosava_node_ui_e2e',
     'kosava_supporting',
     'kosava_hardhat_plugins',
   ]);
@@ -299,7 +298,7 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
     const plan = pullRequestPlan([change(filePath)]);
     assert.equal(plan.mode, 'full', filePath);
     assert.equal(plan.fullCi, true, filePath);
-    assert.equal(plan.runNode, true, filePath);
+    assert.equal(needsSharedBuild(plan), true, filePath);
     assert.deepEqual(
       selectedLanes(plan),
       filePath === '.github/workflows/ci.yml' ? CI_LANES : NON_SOLIDITY_LANES,

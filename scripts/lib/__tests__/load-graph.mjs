@@ -138,6 +138,16 @@ export function importSpecifiers(code) {
   ];
 }
 
+const packageNames = (specifiers) => [...new Set(specifiers
+  .map((specifier) => specifier.match(/^@origintrail-official\/[a-z0-9-]+/)?.[0])
+  .filter(Boolean))];
+
+// The workspaces `source` imports by package name: static, side-effect and
+// dynamic imports and require().
+export function packageImports(source) {
+  return packageNames(importSpecifiers(source));
+}
+
 // Module loads whose specifier is computed at run time (import(name),
 // require(`../${file}`)), as their source text: no trace can follow them.
 // A string specifier, or new URL() of one (URL_IMPORT and URL_PATH read
@@ -177,8 +187,7 @@ function computedLoads(file, code) {
 //   builtPaths) and, in tests and test-runner configs, quoted literals naming
 //   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
 //   tests list them);
-// - `packages`: workspaces it imports by package name, side-effect imports
-//   included;
+// - `packages`: workspaces it imports by package name (packageImports);
 // - `computed`: module loads computed at run time (computedLoads).
 // Type-only imports are erased before anything runs; paths assembled at run
 // time from variables are out of reach.
@@ -202,9 +211,7 @@ export function loadReferences(file, source) {
   return {
     modules,
     paths: [...new Set(paths)].filter((target) => !modules.includes(target) && target !== file),
-    packages: [...new Set(specifiers
-      .map((specifier) => specifier.match(/^@origintrail-official\/[a-z0-9-]+/)?.[0])
-      .filter(Boolean))],
+    packages: packageNames(specifiers),
     computed: computedLoads(file, code),
   };
 }
