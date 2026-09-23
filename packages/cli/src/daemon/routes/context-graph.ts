@@ -483,6 +483,35 @@ function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: b
   );
 }
 
+/**
+ * The read-authority decision that admits a caller to a Context Graph's
+ * subscription. It is the single admission boundary for subscribe, and for
+ * unsubscribe when it follows a name hash to the cleartext id it resolves
+ * to, so the two routes cannot drift apart. The caller is the request's
+ * agent, or the node's default agent for a node-level token. The legacy
+ * subscription fallback stays off: a subscription cannot be its own
+ * authorization proof. Each route maps the decision itself; a throw is the
+ * route's to handle.
+ */
+async function readContextGraphSubscriptionAdmission(
+  agent: DKGAgent,
+  contextGraphId: string,
+  requestAgentAddress: string | undefined,
+): Promise<{
+  callerAgentAddress: string | undefined;
+  authority: Awaited<ReturnType<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>>;
+}> {
+  const callerAgentAddress = requestAgentAddress ?? agent.getDefaultAgentAddress();
+  const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+    callerAgentAddress,
+    allowSubscriptionFallback: false,
+    // This explicit admission boundary may spend a bounded cold lookup to
+    // populate the chain adapter's reverse name-hash index. Ordinary
+    // queries and restart rehydration retain the short fail-closed timeout.
+  });
+  return { callerAgentAddress, authority };
+}
+
 /** Fail closed without misreporting a transient authority outage as a denial. */
 function catchupAuthorityUnavailableResponse(
   res: ServerResponse,
@@ -1914,16 +1943,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // cannot also serve as its authorization proof. Keep a permanent denial
     // distinct from transient authority unavailability at the HTTP boundary;
     // both fail closed and leave no subscription or catch-up-job side effect.
-    const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+    let callerAddr: string | undefined;
     let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphSubscriptionBootstrapAuthority>>;
     try {
-      readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-        callerAgentAddress: callerAddr,
-        allowSubscriptionFallback: false,
-        // This explicit admission boundary may spend a bounded cold lookup to
-        // populate the chain adapter's reverse name-hash index. Ordinary
-        // queries and restart rehydration retain the short fail-closed timeout.
-      });
+      ({ callerAgentAddress: callerAddr, authority: readAuthority } =
+        await readContextGraphSubscriptionAdmission(agent, contextGraphId, requestAgentAddress));
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
@@ -2321,11 +2345,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       let mayFollowAlias = isNodeAdminCaller();
       if (!mayFollowAlias) {
         try {
-          const readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(alias, {
-            callerAgentAddress: requestAgentAddress ?? agent.getDefaultAgentAddress(),
-            allowSubscriptionFallback: false,
-          });
-          mayFollowAlias = readAuthority.outcome === 'allowed';
+          const { authority } = await readContextGraphSubscriptionAdmission(agent, alias, requestAgentAddress);
+          mayFollowAlias = authority.outcome === 'allowed';
         } catch {
           mayFollowAlias = false;
         }

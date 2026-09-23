@@ -376,6 +376,36 @@ describe('managing a subscription made by name hash', () => {
     }
   });
 
+  it('admits and refuses a caller exactly as subscribe does, through the same admission read', async () => {
+    daemonState.catchupRunner = {
+      run: async () => unproductiveRound(),
+      close: async () => undefined,
+    } as any;
+    const decisions: Array<[string, () => Promise<AuthorityDecision>, number]> = [
+      ['allowed', async () => ALLOWED, 200],
+      ['denied', async () => ({ ...ALLOWED, outcome: 'denied', reason: 'not-a-member', onChainId: undefined }), 403],
+      ['unavailable', async () => ({ ...ALLOWED, outcome: 'unavailable', reason: 'rpc-down', onChainId: undefined }), 503],
+      ['a throw', async () => { throw new Error('authority read failed'); }, 503],
+    ];
+    for (const [label, decision, subscribeStatus] of decisions) {
+      const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
+      const agent = nameHashAgent({ isResolved: () => true, subscriptions, authority: decision });
+      const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
+
+      const subscribed = await route.subscribe(NAME_HASH);
+      const unsubscribed = await route.unsubscribe(NAME_HASH);
+      expect(subscribed.status, label).toBe(subscribeStatus);
+      // Unsubscribe follows the hash exactly when subscribe admitted the caller.
+      expect(unsubscribed.body.unsubscribed === CLEARTEXT, label).toBe(subscribed.status === 200);
+      // One admission read each, for the same graph, caller and options.
+      expect(agent.calls.authority, label).toEqual([CLEARTEXT, CLEARTEXT]);
+      expect(agent.calls.authorityOptions, label).toEqual([
+        { callerAgentAddress: OTHER_AGENT_ADDRESS, allowSubscriptionFallback: false },
+        { callerAgentAddress: OTHER_AGENT_ADDRESS, allowSubscriptionFallback: false },
+      ]);
+    }
+  });
+
   it('unsubscribes a hash-only row and an ordinary id as given', async () => {
     const subscriptions = new Map([
       [NAME_HASH, { subscribed: true, synced: false }],
