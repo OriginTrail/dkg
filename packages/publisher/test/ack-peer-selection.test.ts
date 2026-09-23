@@ -6,12 +6,29 @@
 // `ackCandidatePeerIds` field remains a true caller-supplied allowlist.
 import { describe, it, expect } from 'vitest';
 import { PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
-import { selectACKCandidatePeers } from '../src/ack-peer-selection.js';
+import {
+  selectACKCandidatePeers,
+  selectACKCandidateUniverse,
+} from '../src/ack-peer-selection.js';
 
 const RELAYS = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
 const STAKED = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
 
 describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () => {
+  it('exposes every connected non-self peer as the pre-admission universe by default', () => {
+    expect(selectACKCandidateUniverse({
+      connectedPeers: ['self', 'classified-core', 'unclassified-core', 'unclassified-core'],
+      selfPeerId: 'self',
+    })).toEqual(['classified-core', 'unclassified-core']);
+  });
+
+  it('keeps the configured ACK allowlist authoritative in the pre-admission universe', () => {
+    expect(selectACKCandidateUniverse({
+      connectedPeers: ['allow-a', 'outside', 'allow-b'],
+      ackCandidatePeerIds: [' allow-b ', 'allow-a', 'disconnected'],
+    })).toEqual(['allow-a', 'allow-b']);
+  });
+
   it('keeps ackCandidatePeerIds as a legacy allowlist (unlisted connected peers are excluded)', () => {
     const out = selectACKCandidatePeers({
       connectedPeers: ['trusted-core', 'untrusted-peer'],

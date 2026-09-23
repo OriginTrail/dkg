@@ -136,6 +136,12 @@ export {
   type CASCondition,
 } from './dkg-publisher.js';
 export {
+  tryReplaceGraphWithDurableRootCompanionAtomically,
+  type DurableRootMaterializationIdentity,
+  type DurableRootAtomicCompanion,
+  type DurableRootAtomicCompanionResolver,
+} from './durable-root-atomic-companion.js';
+export {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
@@ -165,6 +171,7 @@ export {
 } from './ack-transport.js';
 export {
   selectACKCandidatePeers,
+  selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
   type ACKCandidatePeerDiagnostic,
@@ -366,6 +373,7 @@ export {
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
+  type CanonicalCreateEvidence,
   type CanonicalUpdateEvidence,
   type AsyncLiftChainProofLookup,
   type AsyncLiftCreateChainProofLookup,
@@ -406,6 +414,7 @@ export {
   type PromoteJobState,
   type PromoteLease,
   type PromoteListFilter,
+  type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
   type PromoteResult,

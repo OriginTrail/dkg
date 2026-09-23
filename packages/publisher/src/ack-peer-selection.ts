@@ -41,6 +41,18 @@ function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
   return new Set((ids ?? []).map((id) => id.trim()).filter((id) => id.length > 0));
 }
 
+export function selectACKCandidateUniverse(input: Pick<
+  ACKCandidatePeerSelectionInput,
+  'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId'
+>): string[] {
+  const connected = [...new Set(input.connectedPeers)]
+    .filter((id) => id !== input.selfPeerId);
+  const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
+  return allowlistedACKPeers.size > 0
+    ? connected.filter((id) => allowlistedACKPeers.has(id))
+    : connected;
+}
+
 function rankPreferredWithinTier(ids: readonly string[], preferred: ReadonlySet<string>): string[] {
   if (preferred.size === 0) return [...ids];
   const listed: string[] = [];
@@ -125,13 +137,12 @@ function diagnosticForPeer(input: {
 export function selectACKCandidatePeersWithDiagnostics(
   input: ACKCandidatePeerSelectionInput,
 ): ACKCandidatePeerSelectionResult {
-  const connected = input.connectedPeers.filter((id) => id !== input.selfPeerId);
+  const connected = [...new Set(input.connectedPeers)]
+    .filter((id) => id !== input.selfPeerId);
   const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
   const preferredACKPeers = normalizePeerIdSet(input.preferredACKPeerIds);
   const allowlistEnabled = allowlistedACKPeers.size > 0;
-  const allowlisted = allowlistEnabled
-    ? connected.filter((id) => allowlistedACKPeers.has(id))
-    : connected;
+  const allowlisted = selectACKCandidateUniverse(input);
   const eligible = input.verifiedSameNetworkPeerIds
     ? allowlisted.filter((id) => input.verifiedSameNetworkPeerIds!.has(id))
     : allowlisted;

@@ -166,6 +166,25 @@ export function isSyncPermanentRejection(error: unknown): boolean {
   return isOversizedRdfLiteralError(error);
 }
 
+/**
+ * Work for a Context Graph id that another local id has superseded: a
+ * name-hash id whose graph this node adopted under its verified cleartext id.
+ * It is a cancellation, not a peer or transport fault: an untagged AbortError
+ * is never backoff-worthy, and callers log it quietly.
+ */
+export class SyncTargetSupersededError extends Error {
+  readonly code = 'SYNC_TARGET_SUPERSEDED';
+
+  constructor(readonly contextGraphId: string, readonly supersededBy: string) {
+    super(`Context Graph ${contextGraphId} was superseded by cleartext adoption of "${supersededBy}"`);
+    this.name = 'AbortError';
+  }
+}
+
+export function isSyncTargetSupersededError(error: unknown): error is SyncTargetSupersededError {
+  return error instanceof SyncTargetSupersededError;
+}
+
 export function isSyncBackoffWorthyError(error: unknown): boolean {
   if (
     isSyncTransportFailure(error)

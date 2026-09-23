@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest';
-import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import { ContextGraphAuthorityIndex as ContextGraphAuthorityIndexBase } from
+  '../src/context-graph-authority-index.js';
 import type { ContextGraphAuthorityIndexId } from '../src/context-graph-authority-index-id.js';
-import type { ContextGraphAuthorityIndexCheckpoint, ContextGraphAuthorityIndexStore } from
+import type { ContextGraphAuthorityIndexCheckpoint } from
   '../src/context-graph-authority-index-checkpoint.js';
 import { createContextGraphAuthorityIndexCheckpoint } from
   '../src/context-graph-authority-index-checkpoint.js';
@@ -16,6 +17,7 @@ import {
   type ContextGraphAuthorityIndexBootstrap,
   type ContextGraphAuthorityIndexSnapshotRequest,
 } from '../src/context-graph-authority-index-snapshot.js';
+import { ScopedAuthorityIndexStore as ScopedStore } from './helpers/context-graph-authority-index.js';
 
 const SCOPE = 'evm:84532:hub=0x1111:0x2222';
 const DEPLOYMENT = 10;
@@ -24,20 +26,14 @@ const OWNER = `0x${'11'.repeat(20)}`;
 const NAME = `0x${'99'.repeat(32)}`;
 const hash = (block: number) => `0x${block.toString(16).padStart(64, '0')}`;
 
-class ScopedStore implements ContextGraphAuthorityIndexStore {
-  readonly records = new Map<string, { token: number; value: unknown | null }>();
-  load = vi.fn(async (scope: string) => this.records.get(scope));
-  compareAndSwap = vi.fn(async (scope: string, token: number | undefined, value: unknown) => {
-    if (this.records.get(scope)?.token !== token) return undefined;
-    const next = (token ?? 0) + 1;
-    this.records.set(scope, { token: next, value });
-    return next;
-  });
-  invalidate = vi.fn(async (scope: string, token: number) => {
-    if (this.records.get(scope)?.token !== token) return undefined;
-    this.records.set(scope, { token: token + 1, value: null });
-    return token + 1;
-  });
+/** Bootstrap lifecycle tests select their state explicitly from the canonical view. */
+class ContextGraphAuthorityIndex extends ContextGraphAuthorityIndexBase {
+  async resolve(
+    input: Parameters<ContextGraphAuthorityIndexBase['view']>[0]
+      & { readonly contextGraphId: ContextGraphAuthorityIndexId },
+  ) {
+    return (await this.view(input)).resolve(input.contextGraphId);
+  }
 }
 
 function checkpoint(throughBlockNumber = HEAD - 100): ContextGraphAuthorityIndexCheckpoint {
@@ -86,6 +82,9 @@ describe('trusted core authority index bootstrap', () => {
     { trustDomain: 'x'.repeat(257) },
     { trustDomain: 1 as unknown as string },
     { fetchSnapshot: undefined as unknown as ContextGraphAuthorityIndexBootstrap['fetchSnapshot'] },
+    { localHistoryFallback: 'yes' as unknown as boolean },
+    { onLocalHistoryFallback: 'log' as unknown as ContextGraphAuthorityIndexBootstrap['onLocalHistoryFallback'] },
+    { onScanProgress: 1 as unknown as ContextGraphAuthorityIndexBootstrap['onScanProgress'] },
   ])('rejects invalid bootstrap construction before store or transport activity: %j', (invalid) => {
     const store = new ScopedStore();
     const source = bootstrap(invalid);

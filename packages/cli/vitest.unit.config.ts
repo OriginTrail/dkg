@@ -41,6 +41,7 @@ export default defineConfig({
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
+      'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/query-catalog-profile-route.test.ts',
       'test/store-unavailable-response.test.ts',
@@ -71,6 +72,9 @@ export default defineConfig({
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
+          // Subscribing by an on-chain name hash (Base #33): route, catch-up
+          // text and the public status summary. Pure handler, no hardhat.
+          'test/context-graph-name-hash-subscribe-route.test.ts',
           'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
@@ -134,6 +138,8 @@ export default defineConfig({
           // #1066 Item 1 — metrics presence gate. Pure logic (injected clock).
           'test/metrics-presence.test.ts',
           'test/rpc-usage-log.test.ts',
+          'test/rpc-usage-snapshot-route.test.ts',
+          'test/publisher-runner-rpc-usage.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',
@@ -229,6 +235,9 @@ export default defineConfig({
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
+          'test/chain-discovery-scan-storage.test.ts',
+          'test/context-graph-list-cli.test.ts',
+          'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/

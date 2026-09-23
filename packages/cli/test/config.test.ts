@@ -1505,6 +1505,45 @@ describe('resolveChainConfig (field-level merge)', () => {
     }
   });
 
+  it('validates chain.indexTickMs as a positive integer with network fallback and operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.indexTickMs).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(12_000);
+    expect(resolveChainConfig({ chain: { indexTickMs: 3_000 } }, {
+      chain: { ...fullNetworkChain, indexTickMs: 12_000 },
+    })?.indexTickMs).toBe(3_000);
+
+    for (const indexTickMs of [null, 0, -1, 1.5, Number.NaN, '6000']) {
+      expect(() => resolveChainConfig({
+        chain: { indexTickMs: indexTickMs as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        /chain\.indexTickMs must be a positive integer/,
+      );
+    }
+  });
+
+  it.each([
+    'authorityReadTimeoutMs',
+    'authorityColdResolutionTimeoutMs',
+  ] as const)('validates chain.%s as a positive integer with network fallback and operator precedence', (key) => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.[key]).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(12_000);
+    expect(resolveChainConfig({ chain: { [key]: 3_000 } }, {
+      chain: { ...fullNetworkChain, [key]: 12_000 },
+    })?.[key]).toBe(3_000);
+
+    for (const value of [null, 0, -1, 1.5, Number.NaN, '2500']) {
+      expect(() => resolveChainConfig({
+        chain: { [key]: value as any },
+      }, { chain: fullNetworkChain })).toThrow(
+        new RegExp(`chain\\.${key} must be a positive integer`),
+      );
+    }
+  });
+
   it('rejects non-finite and sub-minimum receipt timeouts', () => {
     for (const receiptTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 999]) {
       expect(() => resolveChainConfig({ chain: { receiptTimeoutMs } }, { chain: fullNetworkChain }))

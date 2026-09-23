@@ -1,9 +1,13 @@
 import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
+import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ethers } from 'ethers';
+import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
+import type { ContextGraphAuthorityProjectionServedEvidence } from
+  './context-graph-authority-index-projection.js';
 import type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 export type { ContextGraphAuthorityIndexId } from
@@ -361,8 +365,18 @@ export type CanonicalFinalizationReceiptResolution =
  * absence.
  */
 export type PublishTransactionResolution =
-  /** Mined, successful, and carries a publish this adapter parsed. */
-  | { status: 'confirmed'; publish: OnChainPublishResult }
+  /**
+   * Mined, successful, and carries a publish this adapter parsed. An adapter
+   * that established the verdict from a canonical receipt may also carry that
+   * exact receipt so same-operation consumers do not have to re-prove it.
+   * Absence preserves compatibility with adapters that cannot project the
+   * stricter receipt shape; callers must then perform their existing read.
+   */
+  | {
+      status: 'confirmed';
+      publish: OnChainPublishResult;
+      canonicalReceipt?: CanonicalFinalizationReceipt;
+    }
   /** Mined with a failure receipt: proven ineffective, and permanently so. */
   | { status: 'reverted' }
   /**
@@ -495,6 +509,17 @@ export interface ChainEvent {
 }
 
 /**
+ * A process-local, non-serializable lease over one conservative background
+ * event-scan boundary. It has no chain-head, finality or authorization
+ * meaning. Consumers must re-check `holds()` after every awaited dispatch and
+ * immediately before advancing or persisting their cursor.
+ */
+export interface EventScanHorizonLease {
+  readonly throughBlockNumber: number;
+  holds(): Promise<boolean>;
+}
+
+/**
  * Why an off-chain ACK signer pre-flight rejected a recovered signer.
  * Mirrors the two on-chain gates in
  * `KnowledgeAssetsV10._verifyACKSignature` plus an explicit
@@ -610,13 +635,21 @@ export interface ContextGraphAuthoritySnapshot {
   readonly sourceBlockHash: string;
 }
 
-/** Internal physical projection size used by production authority-index readers. */
-export const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS = 4_096;
+/**
+ * The two write-once fields committed by one finalized
+ * `ContextGraphCreated` event. This value is deliberately all-or-nothing:
+ * callers must never combine one field from the event index with the other
+ * from a later unpinned point read.
+ */
+export interface ContextGraphFinalizedCreation {
+  readonly nameHash: string;
+  readonly accessPolicy: 0 | 1;
+}
 
 /**
  * Logical finalized-authority capability. Callers provide the complete target
- * set for one operation; the chain implementation owns validation, physical
- * chunking, projection, and the single finalized anchor.
+ * set for one operation; the chain implementation owns validation, projection,
+ * and the single finalized anchor.
  */
 export interface ContextGraphAuthorityIndexRevisionReader {
   /**
@@ -625,7 +658,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphIdByNameHash?(
     nameHash: string,
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<bigint | null>;
   /**
    * Resolve many unique name commitments from one finalized index projection.
@@ -633,7 +666,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphIdsByNameHashes?(
     nameHashes: readonly string[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<string, bigint>>;
   /**
    * Resolve a name commitment and its complete authority state atomically at
@@ -642,7 +675,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
     nameHash: string,
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ContextGraphAuthoritySnapshot | null>;
   /**
    * Resolve many name commitments and their complete authority state from one
@@ -651,11 +684,11 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
     nameHashes: readonly string[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
   readContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
   /**
    * Read complete authority snapshots for many graphs at one finalized anchor.
@@ -664,7 +697,7 @@ export interface ContextGraphAuthorityIndexRevisionReader {
    */
   readContextGraphAuthorityIndexSnapshots?(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ChainReadOptions,
+    options?: ContextGraphAuthorityReadOptions,
   ): Promise<ReadonlyMap<
     ContextGraphAuthorityIndexId,
     ContextGraphAuthoritySnapshot
@@ -814,6 +847,65 @@ export interface ContextGraphRegistryScanCursorStore {
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
   /** Optional grouped capability for opaque, atomically replaced repair state. */
   repairAudit?: ContextGraphRegistryRepairAuditStore;
+}
+
+// ----- ContextGraphStorage id enumeration (historical Context Graph discovery) -----
+
+/**
+ * Chain-public facts for one ContextGraphStorage slot, all read at the same
+ * anchor block by {@link ChainAdapter.readContextGraphStorageRange}.
+ */
+export interface ContextGraphStorageEntry {
+  /** Positive decimal ContextGraphStorage id. */
+  readonly contextGraphId: string;
+  /**
+   * Current ERC-721 owner, lowercase. This is the creator unless the graph's
+   * ownership token was transferred after creation.
+   */
+  readonly owner: string;
+  /** `false` once the graph was deactivated on chain. Mutable. */
+  readonly active: boolean;
+  /** Creation time in unix seconds (`block.timestamp` at creation). */
+  readonly createdAt: number;
+  /** 0 = public, 1 = private (curated access). Write-once on chain. */
+  readonly accessPolicy: number;
+  /** 0 = curated (only the publish authority), 1 = open. Mutable. */
+  readonly publishPolicy: number;
+  /** Lowercase publish authority, or null for the zero address. Mutable. */
+  readonly publishAuthority: string | null;
+  /**
+   * Curator-committed name hash (lowercase bytes32), or null when the curator
+   * opted out at creation. Write-once on chain.
+   */
+  readonly nameHash: string | null;
+}
+
+export interface ContextGraphStorageRangeOptions extends ChainReadOptions {
+  /** First ContextGraphStorage id to read (>= 1). */
+  readonly fromId: bigint;
+  /** Maximum number of ids this call may read (>= 1). */
+  readonly maxIds: number;
+}
+
+/** One bounded, block-pinned slice of the ContextGraphStorage id space. */
+export interface ContextGraphStorageRange {
+  /** Lowercase ContextGraphStorage address the range was read from. */
+  readonly storageAddress: string;
+  /** The finality-anchor block every read in this range was pinned to. */
+  readonly anchorBlockNumber: number;
+  readonly anchorBlockHash: string;
+  /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
+  readonly latestId: bigint;
+  /**
+   * Entries in ascending id order for `[fromId, nextId)`. An id the chain
+   * proves nonexistent (`ERC721NonexistentToken`) is omitted, not an error.
+   */
+  readonly entries: readonly ContextGraphStorageEntry[];
+  /**
+   * The first id this call did NOT read. Equals `fromId` when `fromId` is
+   * already above `latestId`, so a caller's cursor never moves past the chain.
+   */
+  readonly nextId: bigint;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
@@ -1339,6 +1431,87 @@ export interface ChainReadOptions {
 }
 
 /**
+ * One coherent finalized Knowledge Asset version and the immutable physical
+ * evidence that produced it. The binding fields are optional only for legacy
+ * and third-party adapters; optimizations must refuse reuse when any is absent.
+ */
+export interface KnowledgeAssetVersionSnapshot {
+  knowledgeAssetId?: bigint;
+  latestRoot: string;
+  rootCount: bigint;
+  latestAuthor: string;
+  latestPublisher: string;
+  blockNumber: number;
+  blockHash?: string;
+  knowledgeAssetStorageAddress?: string;
+  knowledgeAssetStorageGeneration?: number;
+}
+
+/** Options honored only by the shared live-authority read. */
+export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
+  /**
+   * Explicit transport priority for this read. Only
+   * `getContextGraphLiveAuthority` consults it today, to partition its shared
+   * flights so a foreground gate read never waits behind a throttled
+   * background one. Omitted means the caller's ambient class, which is what an
+   * unshared read would have used anyway.
+   */
+  requestClass?: RpcRequestClass;
+  /**
+   * How fresh this caller's answer has to be. Defaults to `'live'`.
+   *
+   * `'live'` is the existing behaviour and the only safe setting for a decision
+   * that cannot be taken back: issuing a sender key, permitting a plaintext
+   * downgrade, or sending a roster-mutating transaction. A roster that is
+   * behind the chain hands a key to a removed member, and the epoch will not
+   * re-wrap until the roster catches up — so the exposure is not repaired by
+   * the next read.
+   *
+   * `'bounded'` permits the node's own event index to answer instead, when it
+   * can prove coverage, lineage and freshness at its anchor. It is for reads
+   * where being briefly behind only DELAYS a decision that the next read
+   * corrects: query and sync authorization, reconciliation, sizing.
+   *
+   * THE CHOICE IS MADE AT THE CALLEE, never by inspecting an RPC usage label:
+   * `withRpcUsageSite` is outermost-wins, so the label a read appears under is
+   * a property of the call stack above it and a switch on it would fail open
+   * for exactly the nested callers that matter most.
+   */
+  freshness?: 'live' | 'bounded';
+}
+
+/** Options honored only by finalized Context Graph authority projections. */
+export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
+  /**
+   * Finalized Context Graph authority reads only: told how the read was
+   * answered. FOUR ways, and a consumer that assumes three will read the
+   * fourth as something it is not:
+   *
+   *  - `scan` exercised the RPC pool now.
+   *  - `cache` came from a projection still inside `chain.indexTickMs`.
+   *  - `log` was FOLDED out of the node-local chain event log's stored rows and
+   *    touched no endpoint at all. It is neither inside `chain.indexTickMs`
+   *    (its bound is `min(max(3T, 15s), 5m)` against the background tick's last
+   *    head read, not T) nor the consequence of any failure — a healthy node
+   *    answers this way in the steady state. That combination is what makes it
+   *    worth naming here: the pre-log rule "a non-scan answer is either fresh
+   *    inside T or a failure" is no longer true of this interface.
+   *  - `stale-cache` was answered DESPITE a failed refresh.
+   *
+   * ONLY `scan` and `cache` are evidence that the pool is alive. A health
+   * governor — the RFC-64 authority circuit breaker is the one that exists —
+   * needs the distinction and must default to the no-proof side, so a member
+   * added later cannot be mistaken for health by omission.
+   * {@link ContextGraphAuthorityProjectionServedEvidence} carries the full
+   * statement of each member. Every other reader ignores this and no other read
+   * reports it.
+   */
+  onContextGraphAuthorityProjectionServed?: (
+    evidence: ContextGraphAuthorityProjectionServedEvidence,
+  ) => void;
+}
+
+/**
  * Scalar KA state returned by
  * `DKGKnowledgeAssets.getKnowledgeAssetUpdateContext(uint256)`.
  *
@@ -1544,6 +1717,15 @@ export interface ChainAdapter {
   // Block height (used by ChainEventPoller to seed the scan cursor)
   getBlockNumber?(): Promise<number>;
 
+  /**
+   * Conservative, possibly lagging one-log horizon for background event
+   * polling. This is not a canonical head, finality fact, or authorization
+   * input; absence makes the poller use `getBlockNumber()` exactly as before.
+   */
+  acquireEventScanHorizonLease?(
+    eventTypes: readonly string[],
+  ): Promise<EventScanHorizonLease | undefined>;
+
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
 
@@ -1563,6 +1745,23 @@ export interface ChainAdapter {
     /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
     hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
     /**
+     * Whether a ContextGraphNameRegistry is registered in the Hub. The registry
+     * is archived; when it is absent the `NameClaimed` scans above return
+     * nothing, and historical discovery relies on
+     * {@link readContextGraphStorageRange} instead.
+     */
+    hasContextGraphNameRegistry?(): Promise<boolean>;
+    /**
+     * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
+     * `getLatestContextGraphId()`) with view calls pinned to one block: the
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are
+     * sequential, so this enumerates every Context Graph that exists on chain
+     * without event logs or archive state. Stateless: callers own any cursor.
+     */
+    readContextGraphStorageRange?(
+      options: ContextGraphStorageRangeOptions,
+    ): Promise<ContextGraphStorageRange>;
+    /**
      * Resolve one graph's current policy and roster at a stable finalized
      * anchor. Optional for NoChain and legacy adapters; default RFC-64 callers
      * must bind the explicit ContextGraphAuthorityReader capability instead of
@@ -1570,8 +1769,19 @@ export interface ChainAdapter {
      */
     getContextGraphAuthoritySnapshot?(
       contextGraphId: bigint,
-      options?: ChainReadOptions,
+      options?: ContextGraphAuthorityReadOptions,
     ): Promise<ContextGraphAuthoritySnapshot>;
+    /**
+     * Read the immutable creation pair from one complete, current finalized
+     * authority projection. Returns `undefined` when the event index cannot
+     * prove a positive non-zero name commitment; callers then keep their
+     * existing live reads. Implementations must not cache misses or either
+     * field independently.
+     */
+    getContextGraphFinalizedCreation?(
+      contextGraphId: bigint,
+      options?: ContextGraphAuthorityReadOptions,
+    ): Promise<ContextGraphFinalizedCreation | undefined>;
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
    * Used by the daemon's curated-CG registration preflight to populate the
@@ -2047,19 +2257,10 @@ export interface ChainAdapter {
    * check rather than only testing method presence.
    */
   isRandomSamplingReady?(): boolean;
-  /**
-   * Derived identity of the currently bound RandomSampling +
-   * RandomSamplingStorage addresses. Synchronous and zero-RPC; `undefined`
-   * means the adapter cannot vouch for the pair. Deriving this from the bound
-   * handles keeps a new assignment path from forgetting to bump a parallel
-   * generation counter.
-   */
-  getRandomSamplingBindingId?(): string | undefined;
-  /** Current Chronos epoch. Cross-tick Random Sampling caches use it as the
-   * boundary before a pending proof-period duration may take effect. */
-  getCurrentEpoch?(): Promise<bigint>;
   /** Refresh RandomSampling bindings and read membership through one typed capability. */
   resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
+  /** Cohesive binding/epoch capability used for solved-period reuse. */
+  getRandomSamplingReadContextReader?(): RandomSamplingReadContextReader | undefined;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.
@@ -2194,13 +2395,18 @@ export interface ChainAdapter {
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,
     options?: ChainReadOptions,
-  ): Promise<{
-    latestRoot: string;
-    rootCount: bigint;
-    latestAuthor: string;
-    latestPublisher: string;
-    blockNumber: number;
-  } | null>;
+  ): Promise<KnowledgeAssetVersionSnapshot | null>;
+
+  /**
+   * Cheap lease validation for a previously-read coherent snapshot. A true
+   * result proves that the same finalized block hash and exact physical KAS
+   * binding generation are still current. Missing evidence is always false.
+   */
+  knowledgeAssetVersionSnapshotIsCurrent?(
+    kaId: bigint,
+    snapshot: KnowledgeAssetVersionSnapshot,
+    options?: ChainReadOptions,
+  ): Promise<boolean>;
 
   /**
    * Constant-cost scalar update context for a KA. Consumers that need version
@@ -2390,7 +2596,7 @@ export interface ChainAdapter {
    */
   getContextGraphLiveAuthority?(
     contextGraphId: bigint,
-    options?: ChainReadOptions,
+    options?: ContextGraphLiveAuthorityReadOptions,
   ): Promise<ContextGraphLiveAuthority | null>;
 
   /**

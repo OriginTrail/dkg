@@ -249,6 +249,18 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         putSnapshot: async () => { throw new Error('No snapshot write expected'); },
       },
       snapshotMaterializer: {
+        withKaWriteLock: async (
+          _contextGraphId: string,
+          _subGraphName: string | undefined,
+          _kaUal: string,
+          fn: () => Promise<unknown>,
+        ) => fn(),
+        readStoredHead: async () => ({
+          version: null,
+          shareOperationId: null,
+          shareOperationIds: [],
+          needsRepair: false,
+        }),
         isGraphAssetMaterialized,
         preserveStoredIdentityForSkippedAsset: async () => ({ outcome: 'replace' }),
       } as unknown as SharedMemorySnapshotMaterializer,

@@ -22,6 +22,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { ethers } from 'ethers';
 import {
   ChainRpcTransportError,
   noteRpcFailover,
@@ -190,6 +191,7 @@ async function requestStatusWithAgent(
   rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
   rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
   routeRpcTransport?: DaemonRouteRpcTransport,
+  opWalletsOverride: RequestContext['opWallets'] = { wallets: [] },
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -232,6 +234,7 @@ async function requestStatusWithAgent(
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
       routeRpcTransport,
+      opWallets: opWalletsOverride,
     } as unknown as RequestContext);
   });
 
@@ -246,6 +249,159 @@ async function requestStatusWithAgent(
     });
   }
 }
+
+describe('/api/wallets/balances governed transport', () => {
+  const hubAddress = '0x1111111111111111111111111111111111111111';
+  const tokenAddress = '0x2222222222222222222222222222222222222222';
+  const walletAddress = '0x3333333333333333333333333333333333333333';
+  const opWallets: RequestContext['opWallets'] = {
+    wallets: [{
+      address: walletAddress,
+      privateKey: `0x${'11'.repeat(32)}`,
+    }],
+  };
+
+  it('accounts every wallet RPC through the daemon-owned governor', async () => {
+    const methods: string[] = [];
+    const abi = ethers.AbiCoder.defaultAbiCoder();
+    const rpc = createServer((req, res) => {
+      let raw = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        const call = JSON.parse(raw) as {
+          id: string | number;
+          method: string;
+          params?: Array<{ data?: string }>;
+        };
+        methods.push(call.method);
+        const data = call.params?.[0]?.data?.toLowerCase();
+        const result = call.method === 'eth_chainId'
+          ? '0x7a69'
+          : call.method === 'eth_getBalance'
+            ? ethers.toBeHex(ethers.parseEther('1.5'))
+            : call.method === 'eth_call' && data?.startsWith('0x95d89b41')
+              ? abi.encode(['string'], ['TRAC'])
+              : call.method === 'eth_call' && data?.startsWith('0x70a08231')
+                ? abi.encode(['uint256'], [ethers.parseEther('7')])
+                : '0x10';
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const chain = {
+      type: 'evm',
+      rpcUrl,
+      chainId: 'evm:31337',
+      hubAddress,
+      tokenAddress,
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 100,
+        foregroundReservePercent: 80,
+        burstRequests: 10,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    };
+    const runtime = createDaemonRpcRuntime(chain)!;
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { chain },
+        '/api/wallets/balances',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+        opWallets,
+      );
+
+      expect(response).toMatchObject({
+        status: 200,
+        body: {
+          wallets: [walletAddress],
+          balances: [{
+            address: walletAddress,
+            eth: '1.5',
+            trac: '7.0',
+            symbol: 'TRAC',
+          }],
+          symbol: 'TRAC',
+        },
+      });
+      const usage = runtime.drainRouteRpcUsage();
+      expect(usage.byMethod.eth_getBalance).toBe(1);
+      expect(usage.byMethod.eth_call).toBe(2);
+      expect(methods).toEqual(expect.arrayContaining([
+        'eth_chainId',
+        'eth_getBalance',
+        'eth_call',
+      ]));
+      expect(runtime.governor.snapshot().foregroundAdmitted).toBe(methods.length);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+
+  it('fails locally without reaching RPC when the governed queue is saturated', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x7a69' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const chain = {
+      type: 'evm',
+      rpcUrl,
+      chainId: 'evm:31337',
+      hubAddress,
+      tokenAddress,
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 1,
+        foregroundReservePercent: 99,
+        burstRequests: 1,
+        maxQueueSize: 1,
+        startupJitterMs: 0,
+      },
+    };
+    const runtime = createDaemonRpcRuntime(chain)!;
+    const controller = new AbortController();
+    await runtime.governor.acquire('foreground');
+    const queued = runtime.governor.acquire('foreground', controller.signal);
+    await vi.waitFor(() => expect(runtime.governor.snapshot().foregroundQueued).toBe(1));
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { chain },
+        '/api/wallets/balances',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+        opWallets,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.balances).toEqual([]);
+      expect(response.body.error).toContain('RPC request governor queue is full');
+      expect(hits).toBe(0);
+      expect(runtime.governor.snapshot().rejected).toBeGreaterThanOrEqual(1);
+    } finally {
+      controller.abort(new Error('test cleanup'));
+      await expect(queued).rejects.toThrow('test cleanup');
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
 
 describe('/api/chain/rpc-health partial adapter configuration', () => {
   it('uses the governed daemon transport when rpcUrl exists without a Hub address', async () => {

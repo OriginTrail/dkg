@@ -11,6 +11,13 @@ import type {
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
+// The config loader must stay off the agent package ROOT at runtime: that entry
+// loads the whole agent runtime (libp2p, sync lanes, the process-wide
+// `sync-global` backpressure registration) into every config-only command, and
+// a CLI test that also loads agent sources directly then registers that
+// singleton twice. The light subpath carries only the budget resolver, like the
+// RFC-64 activation config below.
+import { resolveChainAuthorityTimeoutMs } from '@origintrail-official/dkg-agent/chain-authority-read-budgets';
 import {
   resolveRfc64CatalogActivationsV1,
   type Rfc64CatalogNormalizedActivationStateV1,
@@ -30,6 +37,7 @@ import {
   hasErrorCode,
   resolveDkgConfigHome,
   dkgAuthTokenPath,
+  peerIdFromRelayAddress,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
 import {
@@ -43,6 +51,7 @@ import {
   DEFAULT_REPLENISH_TARGET_ALLOWANCE,
   DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
+  resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
@@ -231,6 +240,12 @@ export interface NetworkConfig {
      * A value of 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /** See `ChainConfig.indexTickMs`. */
+    indexTickMs?: number;
+    /** See `ChainConfig.authorityReadTimeoutMs`. */
+    authorityReadTimeoutMs?: number;
+    /** See `ChainConfig.authorityColdResolutionTimeoutMs`. */
+    authorityColdResolutionTimeoutMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint | string | number;
     /**
@@ -399,6 +414,52 @@ export interface ChainConfig {
    * successor-block buffer. Defaults to 1.
    */
   finalityConfirmations?: number;
+  /**
+   * How long (ms) one completed finalized Context Graph authority projection
+   * answers RFC-64 authority reads before the next read refreshes it from the
+   * chain. A lower value observes on-chain authority changes sooner and costs
+   * proportionally more RPC. After a failed refresh the previous projection
+   * keeps answering until it is `min(max(3 × indexTickMs, 15s), 5m)` old,
+   * then those reads fail closed. Values above five minutes do not extend
+   * cache service past the RFC-64 accepted-authority interval. A positive
+   * integer; defaults to 6000.
+   *
+   * ALSO the cadence of the node's one chain-index tick
+   * (`evm-adapter-base.ts:startChainIndexRuntime`), which runs whether or not
+   * anything reads it: one head read, one block-hash re-read and one
+   * `eth_getLogs` every T for the whole indexed event set. Lowering it to
+   * freshen authority answers therefore also buys a proportionally faster
+   * background scanner. The same T bounds how stale the log's Hub rotation
+   * window may be — `max(3T, 15s)`, with no five-minute ceiling: the ceiling
+   * above exists because a stale authority answer is still bounded by the
+   * RFC-64 accepted-authority interval, whereas a rotation listener that
+   * promises never to miss a rotation has no such backstop — before that
+   * listener goes back to scanning the chain for itself.
+   */
+  indexTickMs?: number;
+  /**
+   * Request-scoped deadline (ms) for one on-chain Context Graph authority
+   * read: liveness, access/publish policy, participant roster, or the
+   * finalized-index snapshot behind a query, share, or SWM sync decision. A
+   * read that misses it fails CLOSED for that request (HTTP 503 with a
+   * retryable `chain-access-policy-timeout` reason on the query path). Raise
+   * it on slow public RPC endpoints. The environment variable
+   * `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` wins over this value. A positive
+   * integer; defaults to 2500.
+   */
+  authorityReadTimeoutMs?: number;
+  /**
+   * Budget (ms) for the detached cold finalized-authority resolution. The
+   * first authority read of a graph the local finalized index has never
+   * projected walks the contract event log (many `eth_getLogs` calls) and
+   * routinely outlives `authorityReadTimeoutMs`. That request still fails
+   * closed on time, but the resolution keeps running under this budget as one
+   * flight per graph and populates the index, so the retry is answered from
+   * the snapshot without RPC. Never applied below `authorityReadTimeoutMs`.
+   * The environment variable `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS`
+   * wins over this value. A positive integer; defaults to 20000.
+   */
+  authorityColdResolutionTimeoutMs?: number;
   /** Optional operator cap for transaction fee-per-gas fields (wei). */
   maxFeePerGasWei?: bigint | string | number;
 }
@@ -969,6 +1030,12 @@ export interface DkgConfig {
     heartbeatIntervalMs?: number;
     /** Default 30_000ms. Max time `stop()` waits for in-flight promotes to drain on shutdown. */
     shutdownTimeoutMs?: number;
+    /**
+     * Default 30_000ms. Interval of the sweep that requeues terminal
+     * post-commit share failures for the publisher's idempotent replay
+     * (bounded by each job's retry budget). `0` keeps only the startup sweep.
+     */
+    postCommitRecoveryIntervalMs?: number;
   };
   /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
   corsOrigins?: string | string[];
@@ -1820,6 +1887,24 @@ export function resolveChainConfig(
   if (operatorHasFinalityConfirmations || finalityConfirmations !== undefined) {
     merged.finalityConfirmations = resolveFinalityConfirmations(finalityConfirmations);
   }
+  // Presence matters: explicit null/zero must fail rather than silently
+  // falling through to the network or adapter default.
+  const operatorHasIndexTickMs = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'indexTickMs');
+  const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
+  if (operatorHasIndexTickMs || indexTickMs !== undefined) {
+    merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
+  }
+  // Presence matters for both authority deadlines: an explicit null/zero is an
+  // operator error, not a request to fall back to the network or agent default.
+  for (const key of ['authorityReadTimeoutMs', 'authorityColdResolutionTimeoutMs'] as const) {
+    const operatorHasValue = cfg !== undefined && cfg !== null
+      && Object.prototype.hasOwnProperty.call(cfg, key);
+    const value: unknown = operatorHasValue ? cfg[key] : net?.[key];
+    if (operatorHasValue || value !== undefined) {
+      merged[key] = resolveChainAuthorityTimeoutMs(value, `chain.${key}`);
+    }
+  }
   const maxFeePerGasWei = parseWeiFloor(
     cfg?.maxFeePerGasWei ?? net?.maxFeePerGasWei,
     'chain.maxFeePerGasWei',
@@ -1938,6 +2023,61 @@ export function loadNetworkRegistryFromRoots(
   }
 
   return registry;
+}
+
+type NetworkRelayIdentity = Partial<Pick<NetworkConfig, 'networkId' | 'genesisId' | 'relays'>>;
+
+export interface OtherNetworkRelays {
+  /** Relay multiaddrs of the other bundled networks, one per distinct peer id. */
+  relays: string[];
+  /** Sorted names of the bundled networks those relays belong to. */
+  networkNames: string[];
+}
+
+/**
+ * Relays declared by the bundled network configs OTHER than the active one:
+ * peers this node must never dial (`DKGNodeConfig.otherNetworkRelays`), in
+ * both directions — a testnet node derives the mainnet relays exactly as a
+ * mainnet node derives the testnet ones.
+ *
+ * An entry counts as the active network when its name, networkId or genesisId
+ * matches, so a renamed copy of the active overlay is never "other". Relays
+ * whose peer id the active network or the node's effective relay set (config
+ * relay, preferred relays) also lists are dropped, as are unparseable ids such
+ * as the `PEER_ID_*` placeholders of a pre-deployment network.
+ */
+export function resolveOtherNetworkRelays(input: {
+  activeNetworkName: string;
+  activeNetwork: NetworkRelayIdentity | null | undefined;
+  localRelayPeers?: readonly string[];
+  registry?: Readonly<Record<string, NetworkRelayIdentity>>;
+}): OtherNetworkRelays {
+  const active = input.activeNetwork;
+  if (!active) return { relays: [], networkNames: [] };
+  const registry = input.registry ?? loadBundledNetworkRegistry();
+  const localPeerIds = new Set<string>();
+  for (const address of [...(active.relays ?? []), ...(input.localRelayPeers ?? [])]) {
+    const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+    if (peerId) localPeerIds.add(peerId);
+  }
+
+  const seen = new Set<string>();
+  const relays: string[] = [];
+  const networkNames = new Set<string>();
+  for (const name of Object.keys(registry).sort()) {
+    const network = registry[name];
+    if (!network || name === input.activeNetworkName) continue;
+    if (network.networkId && network.networkId === active.networkId) continue;
+    if (network.genesisId && network.genesisId === active.genesisId) continue;
+    for (const address of Array.isArray(network.relays) ? network.relays : []) {
+      const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+      if (!peerId || localPeerIds.has(peerId) || seen.has(peerId)) continue;
+      seen.add(peerId);
+      relays.push(address.trim());
+      networkNames.add(name);
+    }
+  }
+  return { relays, networkNames: [...networkNames] };
 }
 
 /**

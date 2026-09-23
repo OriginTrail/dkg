@@ -2,7 +2,10 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { resolveEvmFinalityAnchorBlockV1 } from '../src/evm-finality-anchor.js';
+import {
+  resolveEvmFinalityAnchorBlockV1,
+  resolveEvmFinalityAnchorWithHeadV1,
+} from '../src/evm-finality-anchor.js';
 
 const HASH = `0x${'ab'.repeat(32)}`;
 const HEAD_HASH = `0x${'cd'.repeat(32)}`;
@@ -68,6 +71,25 @@ describe('the single chain finality anchor', () => {
     await expect(reader.resolve()).resolves.toEqual({ number: 100, hash: HEAD_HASH });
     expect(reader.requested).toEqual([]);
     expect(reader.headReads()).toBe(1);
+  });
+
+  it('returns the exact one-read head beside a deeper finality anchor', async () => {
+    let headReads = 0;
+    const resolved = await resolveEvmFinalityAnchorWithHeadV1<Block>({
+      finalityConfirmations: 2,
+      readHead: async () => {
+        headReads += 1;
+        return headAt(100);
+      },
+      readBlockAt: async (number) => ({ number, hash: HASH }),
+      unavailable,
+    });
+
+    expect(resolved).toEqual({
+      head: { number: 100, hash: HEAD_HASH },
+      finalized: { number: 99, hash: HASH },
+    });
+    expect(headReads).toBe(1);
   });
 
   it.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2])(

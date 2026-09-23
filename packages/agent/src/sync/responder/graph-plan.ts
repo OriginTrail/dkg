@@ -68,6 +68,7 @@ const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
 const DKG_CONTEXT_GRAPH = `${DKG}contextGraph`;
+const DKG_CONTEXT_GRAPH_ID = `${DKG}contextGraphId`;
 const DKG_PUBLIC_TRIPLE_COUNT = `${DKG}publicTripleCount`;
 const DKG_PRIVATE_TRIPLE_COUNT = `${DKG}privateTripleCount`;
 const DKG_STATUS = `${DKG}status`;
@@ -102,7 +103,8 @@ export interface SubGraphNameMemo {
 
 interface FreshSwmDataGraphPlanEntry {
   graph: string;
-  roots: readonly string[];
+  /** Null selects a complete graph-scoped KA; otherwise select root closures. */
+  roots: readonly string[] | null;
   rowCount: number;
 }
 
@@ -1010,6 +1012,7 @@ export async function readSwmDataPage(params: {
       dataGraphs,
       params.graphMembership,
       params.cutoffIso!,
+      params.contextGraphId,
       signal,
     );
     const plan = params.freshGraphPlanMemo && params.rowListCacheKey
@@ -1590,16 +1593,34 @@ export async function readChangelogDeltaPage(params: {
     records.push({ seq, graph, op: 'upsert', quads });
   }
 
-  // (5) nextSeq: on a budget-truncated page, the last emitted record's seq; else
-  // the scanned-through high-water — head.seq if the scan drained the log,
-  // otherwise the max raw seq scanned (more remains beyond this window).
-  const scannedTo = raw.length > 0 ? raw[raw.length - 1].seq : head.seq;
+  // (5) The page may reach past the head captured in (1): this node's own
+  // writes landed meanwhile, or readChanges adopted markers another writer
+  // appended above this instance's counter. The wire requires `headSeq` to
+  // cover every emitted record, so it comes from the head AFTER the read. An
+  // era that rotated underneath the read is a restore in progress: hand the
+  // requester a resync rather than records from two eras.
+  const headAfter = await params.reader.changelogHead(
+    syncResponderStoreOptions(params.signal, 'sync.responder.changelogHead'),
+  );
+  if (headAfter.era !== head.era) {
+    return { kind: 'resync', era: headAfter.era, headSeq: headAfter.seq };
+  }
+
+  // (6) nextSeq: on a budget-truncated page, the last emitted record's seq;
+  // else the scanned-through high-water. A full window stops at the last raw
+  // seq (more remains beyond it). A drained scan read everything up to at
+  // least the head captured in (1) — readChanges skips holes and stops only at
+  // the head — so it advances to the higher of that head and the last raw seq.
+  // Never the head AFTER the read: a marker committed while this page was
+  // serialized was not scanned, and counting it would make the requester skip
+  // it for good.
+  const lastRawSeq = raw.length > 0 ? raw[raw.length - 1].seq : head.seq;
   const drained = raw.length < params.limit;
   const nextSeq = budgetStopped
     ? records[records.length - 1].seq
-    : drained ? head.seq : scannedTo;
+    : drained ? Math.max(lastRawSeq, head.seq) : lastRawSeq;
 
-  return { kind: 'delta', era: head.era, headSeq: head.seq, nextSeq, records };
+  return { kind: 'delta', era: headAfter.era, headSeq: headAfter.seq, nextSeq, records };
 }
 
 export async function readDurableDataPage(params: {
@@ -3566,6 +3587,85 @@ function parseSparqlInteger(value: string | undefined): number {
 }
 
 /**
+ * Discover complete graph-scoped KA graphs selected by fresh V2 operation/head
+ * pairs in one SWM metadata bucket. These graphs already belong to the normal
+ * `_shared_memory/{address}/{number}` family; this only teaches the TTL planner
+ * that V2 operations have no `rootEntity` and must be paged as exact graphs.
+ */
+async function readFreshGraphScopedSwmDataGraphs(params: {
+  store: TripleStore;
+  graphMembership: GraphMembershipSnapshot;
+  contextGraphId: string;
+  bucketGraph: string;
+  metaGraph: string;
+  cutoffIso: string;
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  const result = await params.store.query(`
+    SELECT DISTINCT ?op ?head ?ual ?version ?shareId ?assertionGraph WHERE {
+      GRAPH <${assertSafeIri(params.metaGraph)}> {
+        ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+            <${DKG_CONTENT_SCOPE_VERSION}> ?opScope ;
+            <${DKG_CONTEXT_GRAPH_ID}> ?operationContextGraphId ;
+            <${DKG_KA_UAL}> ?ual ;
+            <${DKG_ASSERTION_VERSION}> ?version ;
+            <${DKG_SHARE_OPERATION_ID}> ?shareId ;
+            <${DKG_PUBLISHED_AT}> ?ts .
+        ?head <${DKG_CONTENT_SCOPE_VERSION}> ?headScope ;
+              <${DKG_KA_UAL}> ?ual ;
+              <${DKG_ASSERTION_VERSION}> ?version ;
+              <${DKG_SHARE_OPERATION_ID}> ?shareId ;
+              <${DKG_ASSERTION_GRAPH}> ?assertionGraph .
+        FILTER(STR(?opScope) = ${sparqlString(String(GRAPH_KA_CONTENT_SCOPE_VERSION))})
+        FILTER(STR(?headScope) = ${sparqlString(String(GRAPH_KA_CONTENT_SCOPE_VERSION))})
+        FILTER(STR(?operationContextGraphId) = ${sparqlString(params.contextGraphId)})
+        FILTER(?ts >= ${sparqlString(params.cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      }
+    }
+  `, syncResponderStoreOptions(params.signal, 'sync.responder.readFreshGraphScopedSwmDataGraphs'));
+  if (result.type !== 'bindings') return [];
+
+  const rootBucket = `${contextGraphDataGraphUri(params.contextGraphId)}/_shared_memory`;
+  let subGraphName: string | undefined;
+  if (params.bucketGraph !== rootBucket) {
+    const prefix = `${contextGraphDataGraphUri(params.contextGraphId)}/`;
+    const suffix = '/_shared_memory';
+    if (!params.bucketGraph.startsWith(prefix) || !params.bucketGraph.endsWith(suffix)) return [];
+    subGraphName = params.bucketGraph.slice(prefix.length, -suffix.length);
+    if (!validateSubGraphName(subGraphName).valid) return [];
+  }
+
+  const graphs = new Set<string>();
+  for (const row of result.bindings) {
+    const ual = row['ual'];
+    const assertionVersion = stripLiteral(row['version'] ?? '').trim();
+    const shareOperationId = stripLiteral(row['shareId'] ?? '').trim();
+    const assertionGraph = row['assertionGraph'];
+    if (!ual || !assertionVersion || !shareOperationId || !assertionGraph) continue;
+    if (row['op'] !== `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`) continue;
+    if (row['head'] !== `${ual}#dkg-swm-head`) continue;
+    let expectedGraph: string;
+    try {
+      expectedGraph = knowledgeAssetLayerGraphUri(
+        params.contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        createGraphKnowledgeAssetScope(ual, assertionVersion),
+        subGraphName,
+      );
+    } catch {
+      continue;
+    }
+    if (
+      assertionGraph !== expectedGraph
+      || !params.graphMembership.has(expectedGraph)
+      || !isSharedMemoryBucketDescendantDataGraph(expectedGraph, params.bucketGraph)
+    ) continue;
+    graphs.add(expectedGraph);
+  }
+  return [...graphs].sort(compareCodePoint);
+}
+
+/**
  * Build a tiny, stable pagination plan for an oversized TTL-filtered SWM phase.
  *
  * The old fallback put all candidate graphs behind one `FILTER EXISTS` join for
@@ -3594,15 +3694,26 @@ async function buildFreshSwmDataGraphPlan(
   dataGraphs: readonly string[],
   graphMembership: GraphMembershipSnapshot,
   cutoffIso: string,
+  contextGraphId: string,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
   const rootsByGraph = new Map<string, Set<string>>();
+  const exactGraphs = new Set<string>();
   for (const bucketGraph of dedupeStrings(dataGraphs).sort(compareCodePoint)) {
     throwIfAborted(signal);
     const metaGraph = `${bucketGraph}_meta`;
     if (!graphMembership.has(metaGraph)) continue;
     const roots = [...await readFreshSwmRoots(store, metaGraph, cutoffIso, signal)]
       .sort(compareCodePoint);
+    for (const graph of await readFreshGraphScopedSwmDataGraphs({
+      store,
+      graphMembership,
+      contextGraphId,
+      bucketGraph,
+      metaGraph,
+      cutoffIso,
+      signal,
+    })) exactGraphs.add(graph);
     for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
       const chunkSet = new Set(chunk);
       // sparql-scan-allow: R2 -- ?root is VALUES-bound to at most 100 fresh metadata roots and every result graph is admitted against the finite current graph snapshot
@@ -3640,11 +3751,20 @@ async function buildFreshSwmDataGraphPlan(
   }
 
   const countsByGraph = new Map<string, number>();
-  const admitted = [...rootsByGraph.entries()]
-    .map(([graph, roots]) => ({ graph, roots: [...roots].sort(compareCodePoint) }))
+  const admitted: Array<{ graph: string; roots: readonly string[] | null }> = [
+    ...[...rootsByGraph.entries()]
+      .filter(([graph]) => !exactGraphs.has(graph))
+      .map(([graph, roots]) => ({ graph, roots: [...roots].sort(compareCodePoint) })),
+    ...[...exactGraphs].map((graph) => ({ graph, roots: null })),
+  ]
     .sort((a, b) => compareCodePoint(a.graph, b.graph));
   for (const chunk of chunkValues(admitted, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
-    const unions = chunk.map(({ graph, roots }) => `
+    const unions = chunk.map(({ graph, roots }) => roots === null ? `
+      {
+        SELECT (<${assertSafeIri(graph)}> AS ?g) (COUNT(*) AS ?count) WHERE {
+          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+        }
+      }` : `
       {
         SELECT (<${assertSafeIri(graph)}> AS ?g) (COUNT(*) AS ?count) WHERE {
           {
@@ -3694,11 +3814,15 @@ async function readFreshSwmDataRowsPageFromPlan(
       skip -= entry.rowCount;
       continue;
     }
+    const selection = entry.roots === null
+      ? `GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }`
+      : `VALUES ?root { ${graphValues(entry.roots)} }
+        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))`;
+    // sparql-scan-allow: R3 -- the retained session plan pre-counts each exact admitted graph, bounds skip to that graph rowCount, and LIMIT is the remaining response page
     const result = await store.query(`
       SELECT DISTINCT ?s ?p ?o WHERE {
-        VALUES ?root { ${graphValues(entry.roots)} }
-        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
-        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+        ${selection}
       }
       ORDER BY ?s ?p ?o
       OFFSET ${skip}

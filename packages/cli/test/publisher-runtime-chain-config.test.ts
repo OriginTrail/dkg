@@ -17,6 +17,7 @@ describe('publisher runtime chain config projection', () => {
       chainId: 'evm:31337',
       receiptTimeoutMs: 1_200_000,
       finalityConfirmations: 1,
+      indexTickMs: 12_000,
       maxFeePerGasWei: 100_000_000n,
       approvalPolicy: {
         mode: 'replenishing',
@@ -37,6 +38,7 @@ describe('publisher runtime chain config projection', () => {
       chainId: 'evm:31337',
       receiptTimeoutMs: 1_200_000,
       finalityConfirmations: 1,
+      indexTickMs: 12_000,
       maxFeePerGasWei: 100_000_000n,
       approvalPolicy: {
         mode: 'replenishing',

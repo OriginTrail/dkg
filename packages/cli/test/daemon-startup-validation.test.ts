@@ -283,6 +283,13 @@ describe('daemon startup network validation', () => {
         compareAndSwap: expect.any(Function),
         invalidate: expect.any(Function),
       },
+      chainEventLogStore: {
+        load: expect.any(Function),
+        commit: expect.any(Function),
+        tombstone: expect.any(Function),
+        readEvents: expect.any(Function),
+        blockHashAt: expect.any(Function),
+      },
     });
     const authorityCheckpoint = {
       version: 1,

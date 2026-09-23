@@ -985,56 +985,76 @@ export class ProtocolRouter {
         // connection table per send — N is the total open-conn
         // count of the node, typically <100, so the cost is a few
         // microseconds and the correctness win is large.
-        const fastResult = await tryReuseExistingConnection(
-          () => {
-            try {
-              const all = libp2p.getConnections() as ReadonlyArray<
-                ReusableConnection & {
-                  remotePeer?: { equals?: (other: unknown) => boolean };
-                }
-              >;
-              return all.filter((c) => {
-                try {
-                  return c.remotePeer?.equals?.(peerId) === true;
-                } catch {
-                  return false;
-                }
-              });
-            } catch {
-              return [];
+        //
+        // Every connection the walk hands the fast path is recorded, so
+        // the resolver watch below can tell a connection that opened
+        // after this pass from one the pass already skipped or failed on.
+        const consideredConnections = new WeakSet<ReusableConnection>();
+        const getPeerConnections = (): ReadonlyArray<ReusableConnection> => {
+          const connections = rawGetConnectionsFor(libp2p, peerId);
+          for (const connection of connections) consideredConnections.add(connection);
+          return connections;
+        };
+        const fastPathOptions: TryReuseExistingConnectionOptions = {
+          // Probe peerStore for non-circuit (direct) addresses; the
+          // fast path uses this to gate whether reusing a LIMITED
+          // (circuit-relay-v2) connection is safe or whether
+          // libp2p's CM is about to auto-upgrade and prune it
+          // mid-stream. See the JSDoc inside
+          // `tryReuseExistingConnection` + the PR #537 CI
+          // postmortem for the DCUtR upgrade race detail.
+          peerHasDirectAddrs: async (): Promise<boolean> => {
+            const peer = await libp2p.peerStore.get(peerId);
+            const addrs = peer.addresses ?? [];
+            for (const a of addrs) {
+              const ma = a.multiaddr?.toString?.() ?? '';
+              if (ma && !ma.includes('/p2p-circuit')) return true;
             }
+            return false;
           },
+          allowLimitedWithDirectAddrs: normalDialFailed,
+          excludeConnections: triedConnections,
+        };
+        let fastResult = await tryReuseExistingConnection(
+          getPeerConnections,
           protocolId,
           attemptSignal,
-          {
-            // Probe peerStore for non-circuit (direct) addresses; the
-            // fast path uses this to gate whether reusing a LIMITED
-            // (circuit-relay-v2) connection is safe or whether
-            // libp2p's CM is about to auto-upgrade and prune it
-            // mid-stream. See the JSDoc inside
-            // `tryReuseExistingConnection` + the PR #537 CI
-            // postmortem for the DCUtR upgrade race detail.
-            peerHasDirectAddrs: async (): Promise<boolean> => {
-              const peer = await libp2p.peerStore.get(peerId);
-              const addrs = peer.addresses ?? [];
-              for (const a of addrs) {
-                const ma = a.multiaddr?.toString?.() ?? '';
-                if (ma && !ma.includes('/p2p-circuit')) return true;
-              }
-              return false;
-            },
-            allowLimitedWithDirectAddrs: normalDialFailed,
-            excludeConnections: triedConnections,
-          },
+          fastPathOptions,
         );
+
+        if (this.peerResolver && !fastResult) {
+          // One resolver step can spend the whole remaining budget:
+          // kad-dht parks a findPeer until its signal aborts while the
+          // routing table is empty. A connection to the peer that opens
+          // meanwhile (the peer dialing us, or a concurrent dial) makes
+          // further resolution pointless, just as the resolver's own
+          // live-connection step would, so it ends the resolver early and
+          // the fast path runs again over it. Only the resolver's signal
+          // is cut short; the rest of the attempt keeps `attemptSignal`.
+          const peerConnected = watchForNewPeerConnection(libp2p, peerId, consideredConnections);
+          try {
+            if (!peerConnected?.signal.aborted) {
+              await this.peerResolver
+                .resolve(peerIdStr, {
+                  signal: composeAbortSignals(attemptSignal, peerConnected?.signal) ?? attemptSignal,
+                  perStepTimeoutMs: remaining,
+                })
+                .catch(() => undefined);
+            }
+          } finally {
+            peerConnected?.dispose();
+          }
+          if (peerConnected?.signal.aborted) {
+            fastResult = await tryReuseExistingConnection(
+              getPeerConnections,
+              protocolId,
+              attemptSignal,
+              fastPathOptions,
+            );
+          }
+        }
         const fastStream = fastResult?.stream ?? null;
         pickedConnection = fastResult?.connection ?? null;
-
-        if (this.peerResolver && !fastStream) {
-          await this.peerResolver
-            .resolve(peerIdStr, { signal: attemptSignal, perStepTimeoutMs: remaining })
-            .catch(() => undefined);
-        }
 
         const dialStartedAt = Date.now();
         let stream: Stream;
@@ -1428,21 +1448,69 @@ function rawGetConnectionsFor(
   peerId: unknown,
 ): ReadonlyArray<ReusableConnection> {
   try {
-    const all = libp2p.getConnections() as ReadonlyArray<
-      ReusableConnection & {
-        remotePeer?: { equals?: (other: unknown) => boolean };
-      }
-    >;
-    return all.filter((c) => {
-      try {
-        return c.remotePeer?.equals?.(peerId) === true;
-      } catch {
-        return false;
-      }
-    });
+    const all = libp2p.getConnections() as ReadonlyArray<ReusableConnection>;
+    return all.filter((c) => isConnectionToPeer(c, peerId));
   } catch {
     return [];
   }
+}
+
+function isConnectionToPeer(connection: unknown, peerId: unknown): boolean {
+  try {
+    const remotePeer = (connection as { remotePeer?: { equals?: (other: unknown) => boolean } } | null)
+      ?.remotePeer;
+    return remotePeer?.equals?.(peerId) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The slice of libp2p's event target the resolver watch uses. Optional
+ * so unit-test fakes without one keep the plain resolver path.
+ */
+interface ConnectionOpenEvents {
+  addEventListener?(type: 'connection:open', listener: (evt: Event) => void): void;
+  removeEventListener?(type: 'connection:open', listener: (evt: Event) => void): void;
+}
+
+/**
+ * Watch, for the length of one resolver call, for a connection to
+ * `peerId` that the preceding fast-path pass never saw. The signal aborts
+ * on the first `connection:open` for the peer, or immediately if such a
+ * connection opened between the pass's snapshot and this watch attaching;
+ * the check right after attaching leaves no gap between the two.
+ *
+ * Connections the pass already considered do not count. The pass skipped
+ * or failed on them, and treating them as "connected" would skip the
+ * resolver's peerStore priming that the dialProtocol fallback needs.
+ *
+ * Returns `null` when the node emits no connection events; the caller
+ * then runs the resolver unchanged. Call `dispose` once resolution ends.
+ */
+function watchForNewPeerConnection(
+  libp2p: ConnectionOpenEvents & { getConnections: () => ReadonlyArray<unknown> },
+  peerId: unknown,
+  considered: WeakSet<ReusableConnection>,
+): { signal: AbortSignal; dispose: () => void } | null {
+  if (typeof libp2p.addEventListener !== 'function' || typeof libp2p.removeEventListener !== 'function') {
+    return null;
+  }
+  const controller = new AbortController();
+  const onConnectionOpen = (evt: Event): void => {
+    if (isConnectionToPeer((evt as CustomEvent<unknown>).detail, peerId)) {
+      controller.abort(new Error('peer connected during address resolution'));
+    }
+  };
+  libp2p.addEventListener('connection:open', onConnectionOpen);
+  const openedSincePass = rawGetConnectionsFor(libp2p, peerId).some(
+    (connection) => (!connection.status || connection.status === 'open') && !considered.has(connection),
+  );
+  if (openedSincePass) controller.abort(new Error('peer connected before address resolution'));
+  return {
+    signal: controller.signal,
+    dispose: () => libp2p.removeEventListener?.('connection:open', onConnectionOpen),
+  };
 }
 
 /**

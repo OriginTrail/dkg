@@ -2046,8 +2046,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2076,6 +2078,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2094,7 +2098,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
-        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageChanged',
+        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageRemoved',
       ));
     } finally {
       warnSpy.mockRestore();
@@ -2134,8 +2138,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       interface: new ethers.Interface([
         'event NewContract(string contractName, address newContractAddress)',
         'event ContractChanged(string contractName, address newContractAddress)',
+        'event ContractRemoved(string contractName, address contractAddress)',
         'event NewAssetStorage(string contractName, address newContractAddress)',
         'event AssetStorageChanged(string contractName, address newContractAddress)',
+        'event AssetStorageRemoved(string contractName, address contractAddress)',
       ]),
       getAddress: async () => '0x0000000000000000000000000000000000000001',
     };
@@ -2156,8 +2162,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const changed = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
       'ContextGraphs',
@@ -2211,8 +2219,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
         iface.getEvent('ContractChanged')!.topicHash,
         iface.getEvent('NewContract')!.topicHash,
+        iface.getEvent('ContractRemoved')!.topicHash,
         iface.getEvent('AssetStorageChanged')!.topicHash,
         iface.getEvent('NewAssetStorage')!.topicHash,
+        iface.getEvent('AssetStorageRemoved')!.topicHash,
       ]);
       expect(a.contracts.contextGraphs).toEqual({ stale: true });
       expect(a.cachedKav10Address).toBeUndefined();
@@ -2230,8 +2240,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
       'event ContractChanged(string contractName, address newContractAddress)',
+      'event ContractRemoved(string contractName, address contractAddress)',
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
+      'event AssetStorageRemoved(string contractName, address contractAddress)',
     ]);
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
@@ -2319,7 +2331,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect((a as any).contracts.randomSamplingStorage).toBe(freshPair.rss);
   });
 
-  it('getRandomSamplingBindingId fails closed when a resolved handle has no string target', async () => {
+  it('Random Sampling read context fails closed when a resolved handle has no string target', async () => {
     // The prover reuses a remembered read only while the address-derived id is
     // available, so "cannot tell" must land on the side of a chain re-read.
     const a = new EVMChainAdapter(minimalConfig());
@@ -2331,11 +2343,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       currentGeneration: () => 0,
       get: async () => pairs.shift(),
     };
+    const reader = a.getRandomSamplingReadContextReader();
 
     await (a as any).resolveAndAssignRandomSamplingPair();
-    expect(a.getRandomSamplingBindingId()).toBeUndefined();
+    expect(reader.getRandomSamplingBindingId()).toBeUndefined();
     await (a as any).resolveAndAssignRandomSamplingPair();
-    expect(a.getRandomSamplingBindingId()).toBeUndefined();
+    expect(reader.getRandomSamplingBindingId()).toBeUndefined();
   });
 
   it('getCurrentEpoch resolves Chronos once and reads the live epoch', async () => {
@@ -4511,10 +4524,9 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(caught.cause).toBeDefined(); // original error preserved
   });
 
-  it('forwards the publish receipt block hash to the timestamp reader', async () => {
-    // This parser-level test pins the hash pass-through. The real receipt-wait
-    // memo population and zero-extra-read behavior are covered in the focused
-    // redundant-head-reads suite without stubbing `getBlockTimestamp`.
+  it('names the publish receipt block timestamp read by the receipt block hash', async () => {
+    // The parser must pass the canonical receipt block hash through to the
+    // timestamp reader; the separate redundant-head-read suite pins cache reuse.
     const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     const kasInterface = new ethers.Interface(['event KnowledgeAssetCreated(uint256 id, address author)']);
     const created = kasInterface.encodeEventLog('KnowledgeAssetCreated', [55n, ethers.ZeroAddress]);
@@ -4527,14 +4539,14 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       index: 0,
       logs: [{ address: PARITY_KA_ADDRESS, topics: created.topics, data: created.data }],
     }));
-    const getBlockTimestamp = recorder(async (..._args: unknown[]) => 1_700);
-    (a as any).getBlockTimestamp = getBlockTimestamp;
+    const getFinalizedBlockTimestamp = recorder(async (..._args: unknown[]) => 1_700);
+    (a as any).getFinalizedBlockTimestamp = getFinalizedBlockTimestamp;
 
     const result = await a.createKnowledgeAssets(makeV10PublishParams());
 
     expect(result.kaId).toBe(55n);
     expect(result.blockTimestamp).toBe(1_700);
-    expect(getBlockTimestamp.calls).toEqual([[123, { blockHash }]]);
+    expect(getFinalizedBlockTimestamp.calls).toEqual([[123, blockHash]]);
   });
 
   it('kill-switch keeps legacy routing balance-blind but cannot bypass strict publish planning', async () => {

@@ -12,6 +12,7 @@ import {
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -32,6 +33,14 @@ export interface NetworkAdmissionCoordinatorOptions {
   getConnections: () => Iterable<NetworkAdmissionConnection>;
   deletePeerFromPeerStore: (peerId: string) => Promise<void>;
   cleanupRejectedPeerState?: (peerId: string) => void;
+  /**
+   * The peer failed the identity proof. Runs BEFORE its connections are closed
+   * so transport-level dial refusal is already in place when libp2p's reconnect
+   * machinery reacts to the disconnect. Best-effort: a throw is swallowed.
+   */
+  onPeerRejected?: (peerId: string) => void;
+  /** The peer passed the identity proof. Best-effort: a throw is swallowed. */
+  onPeerVerified?: (peerId: string) => void;
   log?: {
     info(ctx: OperationContext, message: string): void;
     warn(ctx: OperationContext, message: string): void;
@@ -42,6 +51,17 @@ export interface NetworkAdmissionCoordinatorOptions {
 export interface NetworkAdmissionAttemptOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+}
+
+export interface NetworkAdmissionPreflightOptions {
+  /** Bound parallel identity streams so publish cannot fan out without limit. */
+  maxConcurrency?: number;
+}
+
+export interface NetworkAdmissionPreflightResult {
+  checked: number;
+  admitted: number;
+  unresolved: number;
 }
 
 interface NetworkAdmissionAttemptPolicy {
@@ -55,6 +75,8 @@ const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
 const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
+
+const DEFAULT_PREFLIGHT_CONCURRENCY = 4;
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -157,6 +179,8 @@ export class NetworkAdmissionCoordinator {
   private readonly getConnections: () => Iterable<NetworkAdmissionConnection>;
   private readonly deletePeerFromPeerStore: (peerId: string) => Promise<void>;
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
+  private readonly onPeerRejected?: (peerId: string) => void;
+  private readonly onPeerVerified?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
@@ -172,6 +196,8 @@ export class NetworkAdmissionCoordinator {
     this.getConnections = options.getConnections;
     this.deletePeerFromPeerStore = options.deletePeerFromPeerStore;
     this.cleanupRejectedPeerState = options.cleanupRejectedPeerState;
+    this.onPeerRejected = options.onPeerRejected;
+    this.onPeerVerified = options.onPeerVerified;
     this.log = options.log;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 3_000;
   }
@@ -243,6 +269,64 @@ export class NetworkAdmissionCoordinator {
       EXPLICIT_CONNECT_ADMISSION_POLICY,
       options,
     );
+  }
+
+  /**
+   * Resolve admission for a bounded, caller-selected peer set.
+   *
+   * The coordinator remains the sole owner of accepted/rejected state. An ACK
+   * round may briefly bypass the active retry window so a healthy peer cannot
+   * be frozen out of a quorum. The admission service owns a short preflight
+   * lease inside its bounded retry state, preventing concurrent probe storms
+   * without inheriting the longer automatic backoff.
+   */
+  async preflightPeerAdmission(
+    peerIds: Iterable<string>,
+    ctx: OperationContext,
+    options: NetworkAdmissionPreflightOptions = {},
+  ): Promise<NetworkAdmissionPreflightResult> {
+    if (!this.enabled) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const canonicalPeerIds: CanonicalPeerId[] = [];
+    for (const peerId of peerIds) {
+      try {
+        canonicalPeerIds.push(canonicalAdmissionPeerId(peerId));
+      } catch {
+        // Invalid peer IDs are already rejected by the coordinator boundary.
+      }
+    }
+    const pending = [...new Set(canonicalPeerIds)]
+      .filter((peerId) => peerId !== this.selfPeerId)
+      .filter((peerId) => !this.isAcceptedPeer(peerId) && !this.isRejectedPeer(peerId));
+    if (pending.length === 0) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const requestedConcurrency = options.maxConcurrency ?? DEFAULT_PREFLIGHT_CONCURRENCY;
+    const maxConcurrency = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0
+      ? Math.min(requestedConcurrency, DEFAULT_PREFLIGHT_CONCURRENCY)
+      : 1;
+    const results = await mapWithConcurrencySettled(
+      pending,
+      maxConcurrency,
+      async (peerId) => {
+        if (!this.admission.claimRetryablePreflightProbe(peerId)) return false;
+        try {
+          return await this.ensureAdmittedWithPolicy(
+            peerId,
+            ctx,
+            EXPLICIT_CONNECT_ADMISSION_POLICY,
+            {},
+          );
+        } catch (error) {
+          this.admission.markRetryablePreflightProbeAttempted(peerId);
+          throw error;
+        }
+      },
+    );
+    const admitted = results.filter(
+      (result) => result.status === 'fulfilled' && result.value,
+    ).length;
+    const unresolved = pending.length - admitted;
+    return { checked: pending.length, admitted, unresolved };
   }
 
   private async ensureAdmittedWithPolicy(
@@ -364,6 +448,7 @@ export class NetworkAdmissionCoordinator {
     });
     if (verdict.ok) {
       this.admission.markVerifiedSameNetwork(remotePeer);
+      notifyBestEffort(this.onPeerVerified, remotePeer);
       return true;
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
@@ -376,6 +461,9 @@ export class NetworkAdmissionCoordinator {
     // networkId and restarts the peer re-admits without every observer node
     // restarting.
     this.admission.quarantinePeerForCooldown(remotePeer);
+    // Before the disconnect: libp2p redials keep-alive-tagged peers on
+    // `peer:disconnect`, and discovery re-offers the peer within ~0.2s.
+    notifyBestEffort(this.onPeerRejected, remotePeer);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);
@@ -405,6 +493,14 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
+}
+
+function notifyBestEffort(hook: ((peerId: string) => void) | undefined, peerId: string): void {
+  try {
+    hook?.(peerId);
+  } catch {
+    // Transport hints must never change an admission verdict.
+  }
 }
 
 function abortErrorFromSignal(reason: unknown): Error {

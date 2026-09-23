@@ -45,6 +45,16 @@ export const MAX_PROBE_AGE_MS = 30_000;
 export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
 
 /**
+ * Per-endpoint cap for a live Context Graph authority read performed under the
+ * agent's 2.5s fail-closed security deadline. The ordinary 4s point-read cap
+ * cannot fail over before that caller deadline aborts the whole read, so a
+ * stalled preferred endpoint would prevent every configured fallback from
+ * being tried. Keep this comfortably below the outer deadline; single-RPC
+ * nodes remain governed by that outer boundary rather than this transport cap.
+ */
+export const RPC_SECURITY_GATE_ATTEMPT_TIMEOUT_MS = 1_000;
+
+/**
  * Per-attempt deadline for the configured-chainId identity gate
  * (`ensureConfiguredStaticChainIdValidated`) and its caller-side wrappers.
  *
@@ -102,18 +112,22 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
 export const STICKY_PREFERRED_TTL_MS = 30_000;
 
 /**
- * Per-attempt deadline for WIDE `eth_getLogs` reads (the `evm-adapter-events.ts`
- * `queryFilter` scans, which run over `[fromBlock ?? 0, toBlock]` — up to the
- * event poller's 9,000-block window, and the full chain on a cold-start
- * backfill). These legitimately take tens of seconds on a busy/slow chain, so
- * the 4s `RPC_READ_STALL_TIMEOUT_MS` point-read cap would abort a healthy scan
- * and fail it over across every endpoint → spurious `RPC_ENDPOINTS_EXHAUSTED`
+ * Deadline for one physical WIDE `eth_getLogs` request (the
+ * `evm-adapter-events.ts` `queryFilter` scans, which run over
+ * `[fromBlock ?? 0, toBlock]` — up to the event poller's 9,000-block window,
+ * fitted per provider to its eth_getLogs span cap by `readAdaptiveEvmLogRange`).
+ * These legitimately take tens of seconds on a busy/slow chain, so the 4s
+ * `RPC_READ_STALL_TIMEOUT_MS` point-read cap would abort a healthy scan and
+ * fail it over across every endpoint → spurious `RPC_ENDPOINTS_EXHAUSTED`
  * (which, in the poller, escapes before the cursor advances → a permanent
  * stall). 30s still hard-bounds a genuinely hung backend on a multi-RPC node;
- * it is consumed via the `wideLogScan` ReadPolicy in `resolveCapMs`
- * (rpc-failover-client.ts), so single-RPC stays uncapped (#894).
- * Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS` (15s) because that bounds smaller
- * 2,000-block pages, whereas this covers the wider 9,000-block poller window.
+ * the events scan resolves it via the `wideLogScan` ReadPolicy in
+ * `resolveCapMs` (rpc-failover-client.ts), so single-RPC stays uncapped (#894).
+ * The background watchdog scans (the chain-index tick and Hub rotation poll)
+ * apply it to every physical request on every node, so a hung backend cannot
+ * wedge a one-RPC node either. Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS`
+ * (15s) because that bounds smaller 2,000-block pages, whereas this covers the
+ * wider 9,000-block poller window on a provider without a span cap.
  */
 export const RPC_LOG_SCAN_TIMEOUT_MS = 30_000;
 

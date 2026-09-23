@@ -9,7 +9,13 @@ import {
   type ContextGraphAuthorityIndexBootstrap,
   type ContextGraphAuthorityIndexSnapshots,
 } from '@origintrail-official/dkg-chain';
-import { DEFAULT_GENESIS_ID, computeNetworkId } from '@origintrail-official/dkg-core';
+import {
+  DEFAULT_GENESIS_ID,
+  Logger,
+  PROTOCOL_NETWORK_IDENTITY,
+  computeNetworkId,
+  type LogRecord,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { resolveAuthorityIndexConfig } from '../src/authority-index-config.js';
@@ -209,10 +215,25 @@ describe('authority index snapshot production wiring', () => {
 
   it('keeps network admission on the bootstrap protocol even for a pinned reachable core', async () => {
     const core = await startAgent('ForeignSnapshotCore', 'core', capability(), 'gnosis-mainnet');
+    // Both nodes probe each other on connect, and the first rejection closes the
+    // connection. If the core rejects first, the edge's in-flight probe ends
+    // without a response and stays retryable instead of quarantined. Park the
+    // core's reciprocal probe until the edge's fetch settles, so the edge always
+    // receives the core's identity proof before the core can disconnect it.
+    const edgeFetchSettled = Promise.withResolvers<void>();
+    const coreSend = core.agent.router.send.bind(core.agent.router);
+    vi.spyOn(core.agent.router, 'send').mockImplementation(async (peerId, protocolId, data, options) => {
+      if (protocolId === PROTOCOL_NETWORK_IDENTITY) await edgeFetchSettled.promise;
+      return coreSend(peerId, protocolId, data, options);
+    });
     const edge = await startAgent('SnapshotEdgeAdmission', 'edge');
 
-    await expect(snapshotClient(edge.agent, core.agent).fetchSnapshot(request))
-      .rejects.toThrow('No configured trusted core supplied a usable authority index snapshot');
+    try {
+      await expect(snapshotClient(edge.agent, core.agent).fetchSnapshot(request))
+        .rejects.toThrow('No configured trusted core supplied a usable authority index snapshot');
+    } finally {
+      edgeFetchSettled.resolve();
+    }
 
     expect(core.snapshots.exportSnapshot).not.toHaveBeenCalled();
     expect(edge.agent.networkAdmission.snapshot().verifiedPeerIds).not.toContain(core.agent.peerId);
@@ -435,4 +456,142 @@ describe('authority index snapshot production wiring', () => {
       }, 'edge')).toThrow('authorityIndex.cacheEpoch must be a non-negative safe integer');
     },
   );
+
+  it('seeds an edge without operator config from the network relays only, with local-history fallback hooks', async () => {
+    const logs: LogRecord[] = [];
+    Logger.setSink((record) => { logs.push(record); });
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'SnapshotNetworkRelayDefault',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      store,
+      nodeRole: 'edge',
+      // An operator transport relay the network file never vouched for.
+      relayPeers: [secondPinnedAddress],
+      networkRelays: [pinnedAddress],
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      chainConfig: evmChainConfig,
+    });
+    const chain = (agent as any).chain;
+    const bootstrap = chain.contextGraphAuthorityIndex.bootstrap as ContextGraphAuthorityIndexBootstrap;
+    try {
+      expect(bootstrap.maxTailBlocks).toBe(2_000);
+      expect(bootstrap.localHistoryFallback).toBe(true);
+      // The namespace an operator block pinning the same relay would use.
+      expect(bootstrap.trustDomain).toBe(createHash('sha256').update(JSON.stringify([PINNED_PEER])).digest('hex'));
+
+      const libp2p = {
+        peerStore: { merge: vi.fn(async () => {}) },
+        dial: vi.fn(async () => ({})),
+      };
+      vi.spyOn(agent.node, 'libp2p', 'get').mockReturnValue(libp2p as any);
+      // A forged registry row: a "core" claiming a staked member's operational
+      // address under an unrelated PeerID, which the chain would vouch for.
+      const findAgents = vi.spyOn(agent.discovery, 'findAgents').mockResolvedValue([{
+        agentUri: 'did:dkg:agent:0x00000000000000000000000000000000000000c0',
+        name: 'forged-core',
+        peerId: '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
+        nodeRole: 'core',
+        agentAddress: '0x00000000000000000000000000000000000000c0',
+        lastSeen: new Date().toISOString(),
+      }]);
+      vi.spyOn(chain, 'getIdentityIdForAddress').mockResolvedValue(7n);
+      vi.spyOn(chain, 'isShardingTableMember').mockResolvedValue(true);
+      const send = vi.fn(async () => encode({ version: 1, status: 'ok', snapshot }));
+      (agent as any).router = { send };
+      (agent as any).started = true;
+      const validate = vi.fn(async () => {});
+      await expect(bootstrap.fetchSnapshot(request, new AbortController().signal, validate)).resolves.toEqual(snapshot);
+      // Only the network relay is asked, dialed by the address the network file
+      // pins; the phonebook is never consulted, so no registry row earns trust.
+      expect(findAgents).not.toHaveBeenCalled();
+      expect(send.mock.calls.map(([peerId]) => peerId)).toEqual([PINNED_PEER]);
+      expect(libp2p.dial).toHaveBeenCalledExactlyOnceWith(multiaddr(pinnedAddress), { signal: expect.any(AbortSignal) });
+      expect(validate).toHaveBeenCalledOnce();
+
+      bootstrap.onLocalHistoryFallback!({ scope: request.scope, reason: 'no trusted core answered' });
+      expect(logs.filter((record) => record.level === 'warn').map((record) => record.message)).toContain(
+        `[authority-index] no network relay supplied a snapshot for ${request.scope}; `
+        + 'falling back to local history: no trusted core answered',
+      );
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      const progress = (throughBlockNumber: number, scannedBlocks: number) => bootstrap.onScanProgress!({
+        scope: request.scope, fromBlockNumber: 100, throughBlockNumber, finalizedNumber: 2_500, scannedBlocks,
+      });
+      progress(600, 500);
+      progress(1_100, 1_000);
+      now.mockReturnValue(1_029_999);
+      progress(1_600, 1_500);
+      now.mockReturnValue(1_030_000);
+      progress(2_100, 2_000);
+      expect(logs.filter((record) => record.message.startsWith('[authority-index] scope=')).map((record) => record.message))
+        .toEqual([
+          `[authority-index] scope=${request.scope} scanned=500 through=600 behind=1900`,
+          `[authority-index] scope=${request.scope} scanned=2000 through=2100 behind=400`,
+        ]);
+    } finally {
+      Logger.setSink(null);
+      (agent as any).started = false;
+      await agent.node.stop();
+      await store.close();
+      chain.destroy();
+    }
+  }, 20_000);
+
+  it.each([
+    ['no network relay', { networkRelays: [] }],
+    ['no local index store', { localContextGraphAuthorityIndexStore: undefined }],
+    ['an injected chain adapter', { chainAdapter: new MockChainAdapter('mock:31337') }],
+  ])('builds an edge that cannot seed from network relays on local history: %s', async (_label, overrides) => {
+    // The default is the agent's own decision: where it cannot run, the edge
+    // indexes chain history instead of failing construction.
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'SnapshotDefaultSkipped',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      store,
+      nodeRole: 'edge',
+      networkRelays: [pinnedAddress],
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      chainConfig: evmChainConfig,
+      ...overrides,
+    });
+    const chain = (agent as any).chain;
+    try {
+      expect(chain.contextGraphAuthorityIndex?.bootstrap).toBeUndefined();
+    } finally {
+      await agent.node.stop();
+      await store.close();
+      chain.destroy?.();
+    }
+  }, 20_000);
+
+  it('keeps operator trust on its pinned walk over the network relays, without fallback hooks', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'SnapshotOperatorNoFallback',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      store,
+      nodeRole: 'edge',
+      authorityIndex: { mode: 'core-snapshot', trustedCorePeers: [pinnedAddress] },
+      networkRelays: [secondPinnedAddress],
+      localContextGraphAuthorityIndexStore: localAuthorityIndexStore(),
+      chainConfig: evmChainConfig,
+    });
+    const chain = (agent as any).chain;
+    const bootstrap = chain.contextGraphAuthorityIndex.bootstrap as ContextGraphAuthorityIndexBootstrap;
+    try {
+      expect(bootstrap.trustDomain).toBe(createHash('sha256').update(JSON.stringify([PINNED_PEER])).digest('hex'));
+      expect('localHistoryFallback' in bootstrap).toBe(false);
+      expect(bootstrap.onLocalHistoryFallback).toBeUndefined();
+      expect(bootstrap.onScanProgress).toBeUndefined();
+    } finally {
+      await agent.node.stop();
+      await store.close();
+      chain.destroy();
+    }
+  });
 });

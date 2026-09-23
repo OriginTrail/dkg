@@ -143,6 +143,8 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { prepareRfc64LateLegacySwmBoundaryV1 } from
+  './rfc64/legacy-swm-boundary-v1.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -211,6 +213,7 @@ import {
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
@@ -388,6 +391,10 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
@@ -400,6 +407,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     /** Authoritative numeric slot established by the admission owner. */
     onChainId?: string;
   }): ContextGraphSub {
+    // A name hash this node already resolved (and holds no row for) is the
+    // verified cleartext graph: never mint a second, empty identity for it.
+    const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
+    if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
+    // Subscribing the cleartext of a graph held only by its name hash moves
+    // the subscription: nothing may keep running under the hash id.
+    this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {
@@ -534,7 +548,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    */
   unsubscribeFromContextGraph(this: DKGAgent,
     contextGraphId: string,
-    options?: { persist?: boolean; updateRehydrationStatus?: boolean },
+    options?: {
+      persist?: boolean;
+      updateRehydrationStatus?: boolean;
+      /** The cleartext id that supersedes this name-hash id (adoption). */
+      supersededBy?: string;
+    },
   ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
@@ -600,7 +619,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
     this.log.info(
       createOperationContext('system'),
-      `Unsubscribed from "${contextGraphId}" (coreHosted=${existing.coreHosted === true}); live gossip dropped, chain reconcile path retained if hosting`,
+      options?.supersededBy === undefined
+        ? `Unsubscribed from "${contextGraphId}" (coreHosted=${existing.coreHosted === true}); live gossip dropped, chain reconcile path retained if hosting`
+        : `Retired name-hash subscription "${contextGraphId}": superseded by cleartext adoption of "${options.supersededBy}"`,
     );
   }
 
@@ -686,6 +707,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
+    // Retired name-hash id: skip. It shares the wire topic and host-mode key
+    // with the cleartext row, and a topic-wide unsubscribe here would drop
+    // that row's handler (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) {
+      this.log.debug(
+        createOperationContext('system'),
+        `SWM gossip reconcile for "${contextGraphId}" skipped: superseded by cleartext adoption of "${supersedingId}"`,
+      );
+      return;
+    }
     // Reconcile is the membership boundary; rebuild this CG's policy view
     // before deciding whether to keep or drop the SWM subscription.
     this.contextGraphMetaProjection.markDirty(contextGraphId);
@@ -1095,7 +1127,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // send on a public CG — silently breaking member->curator SWM shares on
         // every public/curated context graph.
         publicAccessPolicyOnChainOracle: (cgId: string) =>
-          this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+          withRpcUsageSite(
+            CG_AUTH_RPC_SITES.swmPublicOracle,
+            () => this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+          ),
         // RFC-64 catalog authority already excludes selected CGs from legacy
         // durable catch-up. Apply the same decision to live gossip/substrate
         // delivery so a partial ambient generation cannot race ahead of an
@@ -1103,6 +1138,16 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         legacyApplyAllowedOracle: (cgId: string, subGraphName: string | null) => (
           this.rfc64LegacySwmApplyAllowedForScope(cgId, subGraphName)
         ),
+        resolveDurableRootAtomicCompanion: (input) => {
+          if (this.config.dataDir === undefined) return;
+          return prepareRfc64LateLegacySwmBoundaryV1(
+            this,
+            input.contextGraphId,
+            input.kaUal,
+            input.shareOperationId,
+            input.assertionVersion,
+          );
+        },
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
@@ -1111,7 +1156,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // agent allowlist on context graph" and the LU-6 substrate
         // collapses for any CG the hosting core didn't itself
         // create or join. See `resolveOnChainParticipantAgents`.
-        chainAgentGateOracle: (cgId: string) => this.resolveOnChainParticipantAgents(cgId),
+        chainAgentGateOracle: (cgId: string) => withRpcUsageSite(
+          CG_AUTH_RPC_SITES.swmGateOracle,
+          () => this.resolveOnChainParticipantAgents(cgId),
+        ),
         // OT-RFC-38 / LU-6 Phase B — final fallback when chain has no
         // answer yet. Looks up the curator EOA the local node pinned
         // from this CG's discovery beacon. Hits during the pre-reg
@@ -1186,8 +1234,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * known path in the real libp2p API, which would make this
    * predicate return false for peers we DO have cached addresses
    * for — dropping legitimate substrate targets. We parse with
-   * `peerIdFromString` first; on parse failure (malformed
-   * gossipsub entry) the catch returns false (safe drop).
+   * `toLibp2pPeerId` first; on parse failure (malformed
+   * gossipsub entry) we fall back to the connected-peer check.
    *
    * Pre-start: if libp2p hasn't booted, `getPeers()` throws →
    * caught → return false → substrate target set is empty →
@@ -1212,11 +1260,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // "connected ⇒ dialable" semantics for them so existing
       // integration tests that stub gossip subscribers with
       // these short ids keep working.
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      let pid: ReturnType<typeof peerIdFromString>;
-      try {
-        pid = peerIdFromString(peerId);
-      } catch {
+      const pid = toLibp2pPeerId(peerId);
+      if (pid === undefined) {
         return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
       }
 
@@ -1351,7 +1396,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<WorkspaceAgentRecipientFanoutSnapshot | null> {
-    const resolution = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
+    const resolution = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.fanOut,
+      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
+    );
     if (!resolution.requiresEncryption) return null;
     return projectWorkspaceAgentRecipientFanout(
       resolution,

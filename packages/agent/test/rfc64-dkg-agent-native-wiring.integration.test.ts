@@ -6744,7 +6744,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
   }, 60_000);
 
-  it('publishes inherited deprecated-public catalog authority without a legacy boundary', async () => {
+  it('captures an inherited deprecated-public root boundary before exact catalog publication', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -6830,7 +6830,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).resolves.toMatchObject({
       promotedAllRoots: true,
     });
-    expect(readRfc64LegacySwmBoundaryCountV1(author, CONTEXT_GRAPH_ID)).toBe(0);
+    expect(readRfc64LegacySwmBoundaryCountV1(author, CONTEXT_GRAPH_ID)).toBe(1);
   }, 60_000);
 
   it('keeps a root SHARE written after legacy capture incomplete across catalog re-enable', async () => {

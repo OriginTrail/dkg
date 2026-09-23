@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  activeRpcRequestContext,
   ContextGraphLiveAuthorityUnsupportedError,
   MockChainAdapter,
   type ContextGraphLiveAuthority,
@@ -18,7 +19,10 @@ function dependencies(
   return {
     isContextGraphActiveOnChain: vi.fn(async () => true),
     getContextGraphAccessPolicy: vi.fn(async () => 1),
-    runBoundedRead: async (start) => ({ kind: 'value', value: await start() }),
+    runBoundedRead: async (start) => ({
+      kind: 'value',
+      value: await start(new AbortController().signal),
+    }),
     claimMissingLivenessWarning: vi.fn(() => true),
     warn: vi.fn(),
     cacheAccessPolicy: vi.fn(),
@@ -186,7 +190,10 @@ describe('registered authority resolution uses the roster from the single read',
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue({ kind: 'registered', onChainId: 7n, provenance: 'numeric-id' });
     const live = vi.spyOn(chain, 'getContextGraphLiveAuthority')
-      .mockResolvedValue({ active: true, accessPolicy: 1, participantAgents: [MEMBER] });
+      .mockImplementation(async () => {
+        expect(activeRpcRequestContext().admissionPriority).toBe('authority');
+        return { active: true, accessPolicy: 1, participantAgents: [MEMBER] };
+      });
     const roster = vi.spyOn(chain, 'getContextGraphParticipantAgents');
 
     await expect(agent.resolveRegisteredContextGraphAuthority('cg')).resolves.toEqual({
@@ -345,17 +352,67 @@ describe('agent-bound chain reads keep their arity, signal and receiver', () => 
     return { agent, chain };
   }
 
-  it('hands the caller signal to the single read, called ON the adapter', async () => {
+  it('hands the BOUNDED signal to the single read, called ON the adapter', async () => {
     const { agent: bound, chain } = await boundAgent('BinderLive');
+    let forwarded: AbortSignal | undefined;
     const live = vi.spyOn(chain, 'getContextGraphLiveAuthority')
-      .mockResolvedValue({ active: true, accessPolicy: 0, participantAgents: [] });
-    const { signal } = new AbortController();
+      .mockImplementation(async (_id, options) => {
+        forwarded = options?.signal;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { active: true, accessPolicy: 0, participantAgents: [] };
+      });
+    const controller = new AbortController();
 
-    await bound.resolveRegisteredContextGraphAuthority('cg', { signal });
-    expect(live.mock.calls[0]).toEqual([7n, { signal }]);
-    // Identity, not shape: two different AbortSignals are deep-equal.
-    expect((live.mock.calls[0][1] as { signal?: AbortSignal }).signal).toBe(signal);
+    const resolving = bound.resolveRegisteredContextGraphAuthority('cg', {
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // NOT the caller's own signal. This read is shared in flight below the
+    // adapter, so it must be bounded by the caller's abort AND by this
+    // caller's deadline — a timed-out caller has to LEAVE the flight, not
+    // merely walk away from it. What still has to hold is that cancellation
+    // reaches the read at all.
+    expect(forwarded).toBeInstanceOf(AbortSignal);
+    expect(forwarded).not.toBe(controller.signal);
+    expect(forwarded?.aborted).toBe(false);
+    controller.abort(new Error('caller stopped'));
+    expect(forwarded?.aborted).toBe(true);
+
+    await resolving;
+    expect(live.mock.calls[0][0]).toBe(7n);
     expect(live.mock.contexts[0]).toBe(chain);
+  });
+
+  it('aborts the single-read flight when the bounded deadline expires', async () => {
+    const { agent: bound, chain } = await boundAgent('BinderLiveDeadline');
+    let forwarded: AbortSignal | undefined;
+    vi.spyOn(chain, 'getContextGraphLiveAuthority')
+      .mockImplementation(async (_id, options) => {
+        forwarded = options?.signal;
+        return new Promise<ContextGraphLiveAuthority>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+            once: true,
+          });
+        });
+      });
+
+    vi.useFakeTimers();
+    try {
+      const resolving = bound.resolveRegisteredContextGraphAuthority('cg');
+      // Dispatch the coalescer's same-turn batch, then expire the caller-owned
+      // policy-read budget. The bounded caller must leave the shared flight.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(forwarded).toBeInstanceOf(AbortSignal);
+      expect(forwarded?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(forwarded?.aborted).toBe(true);
+      await expect(resolving).resolves.toMatchObject({
+        kind: 'unavailable',
+        reason: 'chain-access-policy-timeout',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('hands it to both point reads on the fallback leg too', async () => {

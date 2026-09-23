@@ -1,64 +1,52 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ChainAdapter, NodeChallenge } from '@origintrail-official/dkg-chain';
+import {
+  type ChainAdapter,
+  type NodeChallenge,
+  type RandomSamplingReadContext,
+  type RandomSamplingReadContextReader,
+} from '@origintrail-official/dkg-chain';
 
 /** Re-read even inside a long stable proof period. */
-export const SOLVED_PERIOD_MAX_SKIP_MS = 5 * 60_000;
-
-export interface SolvedPeriodReadContext {
-  /** Derived identity of the currently bound RandomSampling contract pair. */
-  readonly bindingId: string;
-  /** Chronos epoch whose duration schedule produced the status read. */
-  readonly chronosEpoch: bigint;
-}
-
-export interface SolvedPeriodObservation {
-  readonly context?: SolvedPeriodReadContext;
-  readonly challenge: NodeChallenge;
-  readonly staleness: CachedChallengeStaleness;
-  readonly durationInBlocks?: bigint;
-}
+export const SOLVED_PERIOD_MAX_SKIP_MS = 60_000;
 
 export interface SolvedPeriodRecord {
   readonly challengePeriodEpoch: bigint;
   readonly periodStartBlock: bigint;
   readonly bindingId: string;
+  readonly epochBindingId: string;
   readonly chronosEpoch: bigint;
   readonly rereadAtBlock: bigint;
   readonly rereadAtMs: number;
 }
 
-export interface CachedChallengeStaleness {
+interface CachedChallengeStaleness {
   readonly stale: boolean;
   /** Present only when the adapter successfully supplied a head. */
   readonly head?: bigint;
 }
 
-/**
- * Read the head once and return both the decision and the evidence used to
- * make it. A missing capability, invalid duration, or failed head read keeps
- * the historical fail-open behaviour: do not force a rotation and do not
- * build a solved-period record from guessed evidence.
- */
-export async function readCachedChallengeStaleness(
-  chain: ChainAdapter,
-  existing: NodeChallenge,
-  liveDurationInBlocks?: bigint,
-): Promise<CachedChallengeStaleness> {
-  if (!chain.getBlockNumber) return { stale: false };
-  const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
-  if (duration <= 0n) return { stale: false };
-  let head: bigint;
-  try {
-    head = BigInt(await chain.getBlockNumber());
-  } catch {
-    return { stale: false };
-  }
-  return {
-    stale: head >= existing.activeProofPeriodStartBlock + duration,
-    head,
-  };
+export interface SolvedPeriodLiveRead<T> {
+  readonly value: T;
+  /** The current challenge, if the caller's status/challenge pair agreed. */
+  readonly currentChallenge?: Readonly<{
+    challenge: NodeChallenge;
+    durationInBlocks?: bigint;
+  }>;
 }
+
+export type SolvedPeriodReadResult<T> =
+  | Readonly<{ kind: 'reused'; record: SolvedPeriodRecord }>
+  | Readonly<{
+      kind: 'live';
+      value: T;
+      /** RS/RSS binding captured before the caller's live reads. */
+      observationBindingId?: string;
+      currentChallenge?: Readonly<{
+        challenge: NodeChallenge;
+        stale: boolean;
+      }>;
+    }>;
 
 /**
  * In-memory policy for reusing one on-chain `solved: true` observation.
@@ -72,45 +60,192 @@ export async function readCachedChallengeStaleness(
  * `RandomSamplingStorage.clearOutstandingChallenges` deletes the challenge
  * struct even though the separately earned score survives. That operation or
  * a reorg can therefore invalidate the observed solved flag in-period. The
- * block safety bound is capped inside the open period, and the five-minute
+ * block safety bound is capped inside the open period, and the one-minute
  * bound applies independently, so the premise is always revalidated.
+ *
+ * The collaborator owns the full read sequence. Callers provide only the live
+ * status/challenge read: this class checks reuse, captures the cheap binding
+ * identity before that callback, reads the head afterwards, and pays for the
+ * Chronos epoch only when the challenge is solved and non-stale. A caller
+ * cannot accidentally omit or reorder one guard.
  */
 export class SolvedPeriodSkip {
   readonly #chain: ChainAdapter;
+  readonly #contextReader?: RandomSamplingReadContextReader;
   readonly #now: () => number;
   #record?: SolvedPeriodRecord;
 
   constructor(chain: ChainAdapter, now: () => number = () => performance.now()) {
     this.#chain = chain;
+    this.#contextReader = chain.getRandomSamplingReadContextReader?.();
     this.#now = now;
   }
 
   /**
-   * Sample the pair/epoch BEFORE the status and challenge reads. If either can
-   * not be vouched for, callers still perform the normal read but do not retain
-   * its answer across ticks.
+   * Reuse a proven solved period or perform one correctly ordered live read.
+   * Staleness remains fail-open: a missing head cannot force a rotation, but it
+   * also cannot create a reusable solved-period record.
    */
-  async captureReadContext(): Promise<SolvedPeriodReadContext | undefined> {
-    if (
-      this.#chain.isRandomSamplingReady?.() !== true
-      || !this.#chain.getCurrentEpoch
-    ) return undefined;
-    let epoch: bigint;
+  async read<T>(readLive: () => Promise<SolvedPeriodLiveRead<T>>): Promise<SolvedPeriodReadResult<T>> {
+    const reusable = await this.#reusable();
+    if (reusable !== undefined) return Object.freeze({ kind: 'reused', record: reusable });
+
+    // Capture the free binding identity BEFORE the status/challenge callback.
+    // The paid Chronos epoch is deferred until there is a reusable observation.
+    const bindingId = this.#captureBindingId();
+    const live = await readLive();
+    const current = live.currentChallenge;
+    if (current === undefined) {
+      this.#record = undefined;
+      return Object.freeze({
+        kind: 'live',
+        value: live.value,
+        ...(bindingId === undefined ? {} : { observationBindingId: bindingId }),
+      });
+    }
+
+    const blockContext = await this.#captureBlockContext(bindingId);
+    const staleness = await this.#readCachedChallengeStaleness(
+      current.challenge,
+      current.durationInBlocks,
+      blockContext?.headBlockNumber,
+    );
+    if (current.challenge.solved && !staleness.stale) {
+      const context = blockContext ?? (
+        this.#hasBlockContextCapability() ? undefined : await this.#captureReadContext(bindingId)
+      );
+      this.#observe({
+        context,
+        challenge: current.challenge,
+        staleness,
+        durationInBlocks: current.durationInBlocks,
+      });
+    } else {
+      this.#record = undefined;
+    }
+    return Object.freeze({
+      kind: 'live',
+      value: live.value,
+      ...(bindingId === undefined ? {} : { observationBindingId: bindingId }),
+      currentChallenge: Object.freeze({
+        challenge: current.challenge,
+        stale: staleness.stale,
+      }),
+    });
+  }
+
+  /**
+   * Install the same bounded record after this node's proof transaction has
+   * succeeded. The submission is stronger evidence than a follow-up
+   * `getNodeChallenge` read, but it is reusable only when the pre-read RS/RSS
+   * binding is still current and the live tip remains in the challenge period.
+   */
+  async observeSubmittedProof(input: Readonly<{
+    observationBindingId?: string;
+    challenge: NodeChallenge;
+    durationInBlocks?: bigint;
+  }>): Promise<boolean> {
+    const { observationBindingId, challenge, durationInBlocks } = input;
+    if (observationBindingId === undefined) {
+      this.#record = undefined;
+      return false;
+    }
+    const blockContext = await this.#captureBlockContext(observationBindingId);
+    const staleness = await this.#readCachedChallengeStaleness(
+      challenge,
+      durationInBlocks,
+      blockContext?.headBlockNumber,
+    );
+    if (staleness.stale) {
+      this.#record = undefined;
+      return false;
+    }
+    const context = blockContext ?? (
+      this.#hasBlockContextCapability()
+        ? undefined
+        : await this.#captureReadContext(observationBindingId)
+    );
+    return this.#observe({
+      context,
+      challenge: Object.freeze({ ...challenge, solved: true }),
+      staleness,
+      durationInBlocks,
+    });
+  }
+
+  /** Cheap guards checked both before and after the live head/epoch reads. */
+  #stillBound(record: SolvedPeriodRecord, now: number): boolean {
+    return this.#contextReader?.isRandomSamplingBindingCurrent(record.bindingId) === true
+      && now < record.rereadAtMs;
+  }
+
+  #captureBindingId(): string | undefined {
     try {
-      epoch = await this.#chain.getCurrentEpoch();
+      return this.#contextReader?.getRandomSamplingBindingId();
     } catch {
       return undefined;
     }
-    const bindingId = this.#chain.getRandomSamplingBindingId?.();
-    if (bindingId === undefined) return undefined;
-    return Object.freeze({ bindingId, chronosEpoch: epoch });
+  }
+
+  async #captureReadContext(bindingId: string | undefined): Promise<RandomSamplingReadContext | undefined> {
+    if (!this.#contextReader || bindingId === undefined) return undefined;
+    try {
+      const context = await this.#contextReader.readRandomSamplingContext();
+      return context?.bindingId === bindingId ? context : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async #captureBlockContext(bindingId: string | undefined) {
+    if (!this.#contextReader?.readRandomSamplingBlockContext || bindingId === undefined) {
+      return undefined;
+    }
+    try {
+      const context = await this.#contextReader.readRandomSamplingBlockContext();
+      return context?.bindingId === bindingId ? context : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  #hasBlockContextCapability(): boolean {
+    return typeof this.#contextReader?.readRandomSamplingBlockContext === 'function';
+  }
+
+  async #readCachedChallengeStaleness(
+    existing: NodeChallenge,
+    liveDurationInBlocks?: bigint,
+    contextHead?: bigint,
+  ): Promise<CachedChallengeStaleness> {
+    const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
+    if (duration <= 0n) return { stale: false };
+    let head = contextHead;
+    if (head === undefined) {
+      if (!this.#chain.getBlockNumber) return { stale: false };
+      try {
+        head = BigInt(await this.#chain.getBlockNumber());
+      } catch {
+        return { stale: false };
+      }
+    }
+    return {
+      stale: head >= existing.activeProofPeriodStartBlock + duration,
+      head,
+    };
   }
 
   /** Record only when every live evidence source needed by the guards exists. */
-  observe(input: SolvedPeriodObservation): boolean {
+  #observe(input: Readonly<{
+    context?: RandomSamplingReadContext;
+    challenge: NodeChallenge;
+    staleness: CachedChallengeStaleness;
+    durationInBlocks?: bigint;
+  }>): boolean {
     const { context, challenge, staleness, durationInBlocks } = input;
     if (
       context === undefined
+      || challenge.epoch !== context.chronosEpoch
       || staleness.head === undefined
       || durationInBlocks === undefined
       || durationInBlocks <= 0n
@@ -129,6 +264,7 @@ export class SolvedPeriodSkip {
       challengePeriodEpoch: challenge.epoch,
       periodStartBlock: challenge.activeProofPeriodStartBlock,
       bindingId: context.bindingId,
+      epochBindingId: context.epochBindingId ?? context.bindingId,
       chronosEpoch: context.chronosEpoch,
       rereadAtBlock: halfPeriodRereadBlock < latestOpenPeriodBlock
         ? halfPeriodRereadBlock
@@ -139,28 +275,46 @@ export class SolvedPeriodSkip {
   }
 
   /** Return the reusable record, or forget it on the first failed guard. */
-  async reusable(): Promise<SolvedPeriodRecord | undefined> {
+  async #reusable(): Promise<SolvedPeriodRecord | undefined> {
     const record = this.#record;
-    if (!record || !this.#chain.getBlockNumber || !this.#chain.getCurrentEpoch) {
+    if (!record || !this.#contextReader) {
       this.#record = undefined;
       return undefined;
     }
-    if (!this.#matchesCurrentBindingAndWindow(record)) {
+    if (!this.#stillBound(record, this.#now())) {
       this.#record = undefined;
       return undefined;
     }
-    let head: bigint;
-    let epoch: bigint;
+    let head: bigint | undefined;
+    let context: RandomSamplingReadContext | undefined;
     try {
-      head = BigInt(await this.#chain.getBlockNumber());
-      epoch = await this.#chain.getCurrentEpoch();
+      const blockContext = await this.#captureBlockContext(record.bindingId);
+      if (blockContext !== undefined) {
+        head = blockContext.headBlockNumber;
+        context = blockContext;
+      } else {
+        if (this.#hasBlockContextCapability()) {
+          this.#record = undefined;
+          return undefined;
+        }
+        if (!this.#chain.getBlockNumber) {
+          this.#record = undefined;
+          return undefined;
+        }
+        head = BigInt(await this.#chain.getBlockNumber());
+        context = await this.#contextReader.readRandomSamplingContext();
+      }
     } catch {
       this.#record = undefined;
       return undefined;
     }
     const stillReusable = (
-      this.#matchesCurrentBindingAndWindow(record)
-      && epoch === record.chronosEpoch
+      context !== undefined
+      && this.#stillBound(record, this.#now())
+      && context.bindingId === record.bindingId
+      && (context.epochBindingId ?? context.bindingId) === record.epochBindingId
+      && context.chronosEpoch === record.chronosEpoch
+      && head !== undefined
       && head >= record.periodStartBlock
       && head < record.rereadAtBlock
     );
@@ -169,12 +323,5 @@ export class SolvedPeriodSkip {
       return undefined;
     }
     return record;
-  }
-
-  /** Synchronous guards checked both before and after the evidence RPCs. */
-  #matchesCurrentBindingAndWindow(record: SolvedPeriodRecord): boolean {
-    return this.#chain.isRandomSamplingReady?.() === true
-      && this.#chain.getRandomSamplingBindingId?.() === record.bindingId
-      && this.#now() < record.rereadAtMs;
   }
 }

@@ -23,6 +23,7 @@ import {
   type CreateChallengeResult,
   type NodeChallenge,
   type ProofPeriodStatus,
+  type RandomSamplingReadContextReader,
   type TxResult,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -33,6 +34,7 @@ import {
   hashTripleV10,
   structuredKARootV10,
   tripleContentV10,
+  keccak256Hex,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -42,6 +44,7 @@ import {
   startProverLoop,
   type RandomSamplingRepairMaterial,
 } from '../src/index.js';
+import { SOLVED_PERIOD_MAX_SKIP_MS } from '../src/solved-period-skip.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -65,9 +68,12 @@ interface FakeChainState {
   bindingId?: string;
   /** When set, exposes the current Chronos epoch. */
   currentEpoch?: bigint;
+  contextGraphNameHash?: string;
 }
 
-function makeChain(state: FakeChainState): ChainAdapter {
+type TestChain = ChainAdapter;
+
+function makeChain(state: FakeChainState): TestChain {
   // OT-RFC-49 WS-B proof-race snapshot: the on-chain `createChallenge` PINS the
   // current (root, leafCount) onto the Challenge struct, and `submitProof` (and
   // the prover) verify against THOSE pinned values, not a live re-read. Mirror
@@ -102,16 +108,31 @@ function makeChain(state: FakeChainState): ChainAdapter {
   if (state.blockNumber !== undefined) {
     partial.getBlockNumber = vi.fn(async () => state.blockNumber!);
   }
+  if (state.contextGraphNameHash !== undefined) {
+    partial.getContextGraphNameHash = vi.fn(async () => state.contextGraphNameHash!);
+  }
   if (state.randomSamplingReady !== undefined) {
     partial.isRandomSamplingReady = vi.fn(() => state.randomSamplingReady!);
   }
-  if (state.bindingId !== undefined) {
-    partial.getRandomSamplingBindingId = vi.fn(() => state.bindingId);
+  const chain = partial as TestChain;
+  if (
+    state.randomSamplingReady !== undefined
+    && state.bindingId !== undefined
+    && state.currentEpoch !== undefined
+  ) {
+    const contextReader: RandomSamplingReadContextReader = {
+      getRandomSamplingBindingId: vi.fn(() =>
+        state.randomSamplingReady ? state.bindingId : undefined),
+      readRandomSamplingContext: vi.fn(async () =>
+        state.randomSamplingReady && state.bindingId !== undefined && state.currentEpoch !== undefined
+          ? Object.freeze({ bindingId: state.bindingId, chronosEpoch: state.currentEpoch })
+          : undefined),
+      isRandomSamplingBindingCurrent: vi.fn((bindingId) =>
+        state.randomSamplingReady === true && state.bindingId === bindingId),
+    };
+    chain.getRandomSamplingReadContextReader = vi.fn(() => contextReader);
   }
-  if (state.currentEpoch !== undefined) {
-    partial.getCurrentEpoch = vi.fn(async () => state.currentEpoch!);
-  }
-  return partial as ChainAdapter;
+  return chain;
 }
 
 interface KCFixture {
@@ -257,6 +278,46 @@ describe('RandomSamplingProver — happy path', () => {
 
     const trail = (await wal.readAll()).map((e) => e.status);
     expect(trail).toEqual(['challenge', 'extracted', 'built', 'submitted']);
+    await prover.close();
+  });
+
+  it('submits proof from the chain-attested graph despite a stale first binding', async () => {
+    const fixture: KCFixture = {
+      cgId: 14n,
+      kaId: 7n,
+      ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    await store.insert([{
+      subject: 'did:dkg:context-graph:aaa-stale',
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+      object: '"14"',
+      graph: 'did:dkg:context-graph:ontology',
+    }]);
+    const { root, leafCount } = await seedKC(store, fixture);
+    const submitProof = vi.fn(async () => ({ hash: '0xproof', blockNumber: 1001, success: true }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0xchallenge',
+        blockNumber: 1000,
+        success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      contextGraphNameHash: keccak256Hex(new TextEncoder().encode('cg-14')),
+      submitProof,
+    });
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+
+    await expect(prover.tick()).resolves.toMatchObject({ kind: 'submitted', txHash: '0xproof' });
+    expect(chain.getContextGraphNameHash).toHaveBeenCalledWith(14n);
+    expect(submitProof).toHaveBeenCalledTimes(1);
     await prover.close();
   });
 });
@@ -1598,7 +1659,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     };
   }
 
-  function chainReads(chain: ChainAdapter): {
+  function chainReads(chain: TestChain): {
     status: number;
     challenge: number;
     head: number;
@@ -1608,7 +1669,9 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       status: vi.mocked(chain.getActiveProofPeriodStatus!).mock.calls.length,
       challenge: vi.mocked(chain.getNodeChallenge!).mock.calls.length,
       head: chain.getBlockNumber ? vi.mocked(chain.getBlockNumber).mock.calls.length : 0,
-      epoch: chain.getCurrentEpoch ? vi.mocked(chain.getCurrentEpoch).mock.calls.length : 0,
+      epoch: chain.getRandomSamplingReadContextReader?.()?.readRandomSamplingContext
+        ? vi.mocked(chain.getRandomSamplingReadContextReader().readRandomSamplingContext).mock.calls.length
+        : 0,
     };
   }
 
@@ -1666,7 +1729,9 @@ describe('RandomSamplingProver — solved-period read skip', () => {
 
     state.blockNumber = 1049;
     expect(await prover.tick()).toEqual({ kind: 'cg-not-found', kaId: 7n });
-    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 4, epoch: 4 });
+    // The live reread found an unsolved challenge, so it deliberately skipped
+    // the final Chronos epoch RPC.
+    expect(chainReads(chain)).toEqual({ status: 2, challenge: 2, head: 4, epoch: 3 });
     await prover.close();
   });
 
@@ -1918,13 +1983,19 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   });
 
   it.each([
-    ['lacks getRandomSamplingBindingId', undefined],
-    ['reports an undefined binding id', () => undefined],
-  ] as const)('never skips for an adapter that %s', async (_label, capability) => {
+    ['lacks the bound read-context capability', false],
+    ['reports an undefined read context', true],
+  ] as const)('never skips for an adapter that %s', async (_label, exposeCapability) => {
     const state = makeSolvedState({ bindingId: undefined });
     const chain = makeChain(state);
-    expect(chain.getRandomSamplingBindingId).toBeUndefined();
-    if (capability) chain.getRandomSamplingBindingId = capability;
+    expect(chain.getRandomSamplingReadContextReader).toBeUndefined();
+    if (exposeCapability) {
+      chain.getRandomSamplingReadContextReader = vi.fn(() => ({
+        getRandomSamplingBindingId: vi.fn(() => undefined),
+        readRandomSamplingContext: vi.fn(async () => undefined),
+        isRandomSamplingBindingCurrent: vi.fn(() => false),
+      }));
+    }
     const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
     for (let i = 0; i < 3; i += 1) {
@@ -1937,7 +2008,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
   it('never skips for an adapter that cannot report its current epoch', async () => {
     const state = makeSolvedState({ currentEpoch: undefined });
     const chain = makeChain(state);
-    expect(chain.getCurrentEpoch).toBeUndefined();
+    expect(chain.getRandomSamplingReadContextReader).toBeUndefined();
     const prover = new RandomSamplingProver({
       chain,
       store: new OxigraphStore(),
@@ -1951,10 +2022,11 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
-  it('keeps ticking and records no skip when the Chronos epoch read fails', async () => {
+  it('keeps ticking and records no skip when the read-context RPC fails', async () => {
     const state = makeSolvedState();
     const chain = makeChain(state);
-    vi.mocked(chain.getCurrentEpoch!).mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
+    vi.mocked(chain.getRandomSamplingReadContextReader!().readRandomSamplingContext)
+      .mockRejectedValueOnce(new Error('Chronos RPC unavailable'));
     const prover = new RandomSamplingProver({
       chain,
       store: new OxigraphStore(),
@@ -1995,9 +2067,10 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
-  it('re-reads the chain 5 minutes after the recording tick even if the head barely moved', async () => {
-    // Safety re-read (review R8), time bound — the one that matters on a
-    // long period (Base: 30 min), where half a period is 15 min away.
+  it('detects an in-period challenge clear at the one-minute revalidation bound', async () => {
+    // An admin migration sweep or reorg can clear the challenge while the
+    // separately earned score survives. The time bound must reveal that reset
+    // promptly even on a long period whose block bound is many minutes away.
     vi.useFakeTimers({ toFake: ['performance'] });
     try {
       const state = makeSolvedState();
@@ -2005,13 +2078,15 @@ describe('RandomSamplingProver — solved-period read skip', () => {
       const prover = new RandomSamplingProver({ chain, store: new OxigraphStore(), identityId: IDENTITY_ID });
 
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-      vi.advanceTimersByTime(5 * 60_000 - 1);
+      state.challengeForNode = null;
+      vi.advanceTimersByTime(SOLVED_PERIOD_MAX_SKIP_MS - 1);
       expect(await prover.tick()).toEqual({ kind: 'already-solved' });
       expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
 
       vi.advanceTimersByTime(1);
-      expect(await prover.tick()).toEqual({ kind: 'already-solved' });
+      expect(await prover.tick()).toEqual({ kind: 'no-challenge', reason: 'no-eligible-cg' });
       expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+      expect(state.createChallenge).toHaveBeenCalledTimes(1);
       await prover.close();
     } finally {
       vi.useRealTimers();
@@ -2056,7 +2131,7 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     await prover.close();
   });
 
-  it('does not infer "solved" from its own submit — the next tick confirms it on chain first', async () => {
+  it('reuses a binding-checked confirmed submission without re-reading its challenge', async () => {
     const store = new OxigraphStore();
     const fixture: KCFixture = {
       cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
@@ -2084,14 +2159,14 @@ describe('RandomSamplingProver — solved-period read skip', () => {
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
 
     expect((await prover.tick()).kind).toBe('submitted');
-    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 0, epoch: 1 });
+    expect(chainReads(chain)).toEqual({ status: 1, challenge: 1, head: 1, epoch: 1 });
 
     state.challengeForNode = { ...challenge, solved: true };
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
 
     expect(await prover.tick()).toEqual({ kind: 'already-solved' });
-    expect(chainReads(chain)).toMatchObject({ status: 2, challenge: 2 });
+    expect(chainReads(chain)).toMatchObject({ status: 1, challenge: 1 });
     await prover.close();
   });
 

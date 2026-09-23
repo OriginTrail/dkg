@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
@@ -10,6 +10,7 @@ import { ContextGraphAuthorityIndexRetryableError } from
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { activeRpcRequestAbortSignal } from '../src/rpc-request-transport.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { RpcEndpointsExhaustedError } from '../src/chain-rpc-transport-error.js';
 import {
   createAbortableTipReader,
   MemoryAuthorityIndexStore,
@@ -32,6 +33,7 @@ const authorityIndexId = (value: string): ContextGraphAuthorityIndexId => (
 interface IndexedAuthorityEvidence {
   readonly blockReads: Array<string | number>;
   readonly headReads: number[];
+  readonly networkReads: bigint[];
   readonly filters: Array<readonly [string, ...unknown[]]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly readOptions: Array<Readonly<{
@@ -79,17 +81,25 @@ function makeIndexedAuthorityAdapter(
   options: Readonly<{
     deactivated?: boolean;
     secondContextGraph?: boolean;
+    extraContextGraph?: Readonly<{ contextGraphId: bigint; nameHash: string }>;
     zeroHashContextGraphs?: number;
     lateContextGraphNameHash?: string;
     finalizedNumber?: number;
     finalizedHash?: string;
     authorityIndexPageSize?: number;
     maxLogRangeBlocks?: number;
+    /**
+     * How wider ranges are refused: a genuine span cap (mainnet.base.org's
+     * wording, the default), or dRPC's free plan, whose "ranges over N blocks"
+     * refusal a narrower span over the same blocks does not fix.
+     */
+    logRangeRefusal?: 'span' | 'free-plan';
     transientFailIndexRangeOnce?: readonly [number, number];
     hangIndexRangeOnce?: readonly [number, number];
     indexReadDelayMs?: number;
     authorityIndexStore?: MemoryAuthorityIndexStore;
     finalityConfirmations?: number;
+    indexTickMs?: number;
     authorityIndexBootstrap?: import('../src/context-graph-authority-index-snapshot.js').ContextGraphAuthorityIndexBootstrap;
   }> = {},
 ): IndexedAuthorityHarness {
@@ -106,6 +116,7 @@ function makeIndexedAuthorityAdapter(
     ...(options.finalityConfirmations === undefined
       ? {}
       : { finalityConfirmations: options.finalityConfirmations }),
+    ...(options.indexTickMs === undefined ? {} : { indexTickMs: options.indexTickMs }),
   });
   adapter.initialized = true;
   adapter.init = async () => {};
@@ -114,6 +125,7 @@ function makeIndexedAuthorityAdapter(
   const evidence: IndexedAuthorityEvidence = {
     blockReads: [],
     headReads: [],
+    networkReads: [],
     filters: [],
     staticCalls: [],
     readOptions: [],
@@ -181,7 +193,10 @@ function makeIndexedAuthorityAdapter(
       else evidence.blockReads.push(tag);
       return block;
     },
-    getNetwork: async () => ({ chainId: 31337n }),
+    getNetwork: async () => {
+      evidence.networkReads.push(31337n);
+      return { chainId: 31337n };
+    },
     getLogs: async (filter) => {
       const requestSignal = activeRpcRequestAbortSignal();
       if (requestSignal !== undefined) evidence.indexPageSignals.push(requestSignal);
@@ -213,10 +228,15 @@ function makeIndexedAuthorityAdapter(
           info: {
             responseBody: JSON.stringify({
               jsonrpc: '2.0',
-              error: {
-                message: `ranges over ${options.maxLogRangeBlocks} blocks are not supported on free plan`,
-                code: 35,
-              },
+              error: options.logRangeRefusal === 'free-plan'
+                ? {
+                  message: `ranges over ${options.maxLogRangeBlocks} blocks are not supported on free plan`,
+                  code: 35,
+                }
+                : {
+                  message: `eth_getLogs is limited to a ${options.maxLogRangeBlocks.toLocaleString('en-US')} range`,
+                  code: -32614,
+                },
             }),
             responseStatus: '400 Bad Request',
           },
@@ -265,7 +285,7 @@ function makeIndexedAuthorityAdapter(
   };
 
   adapter.contracts = {
-    contextGraphStorage: { connect: () => contract },
+    contextGraphStorage: { connect: () => contract, getAddress: contract.getAddress },
   };
   adapter.readTipProvider = async (
     _label: string,
@@ -461,16 +481,34 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
 
     expect(evidence.indexRanges).toEqual([
       // The committing page stops at the durable horizon (10_020 less the
-      // holdback), and the provider's stricter cap splits THAT range.
+      // holdback), and the provider's stated cap splits THAT range into
+      // cap-sized requests.
       [7, 9_970],
-      [7, 4_988],
-      [4_989, 9_970],
+      [7, 5_006],
+      [5_007, 9_970],
       // Tail above the horizon: projected, never persisted.
       [9_971, 10_020],
     ]);
     expect(evidence.rejectedIndexRanges).toEqual([[7, 9_970]]);
     expect(evidence.headReads).toEqual([10_020]);
     expect(evidence.blockReads).toEqual([9_970, 10_020]);
+  });
+
+  it('does not split a free-plan refusal that a narrower span would not fix', async () => {
+    // dRPC's free plan says "ranges over 5000 blocks" to a request well under
+    // 5,000 blocks as well: splitting only multiplies the refusals.
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      finalizedNumber: 10_020,
+      authorityIndexPageSize: 25_000,
+      maxLogRangeBlocks: 5_000,
+      logRangeRefusal: 'free-plan',
+    });
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .rejects.toThrow('is beyond the history, archive or plan limit');
+    expect(evidence.indexRanges).toEqual([[7, 9_970]]);
+    expect(evidence.rejectedIndexRanges).toEqual([[7, 9_970]]);
   });
 
   it('gives each sequential adaptive split its own physical RPC deadline', async () => {
@@ -521,10 +559,10 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       await expect(pending).resolves.toMatchObject({ contextGraphId: '9' });
       expect(harness.evidence.indexRanges).toEqual([
         // The committing page stops at the durable horizon and the provider's
-        // stricter cap splits it; the fourth leg is the tail above the horizon.
+        // stated cap splits it; the fourth leg is the tail above the horizon.
         [7, 9_956],
-        [7, 4_981],
-        [4_982, 9_956],
+        [7, 5_006],
+        [5_007, 9_956],
         [9_957, 10_006],
       ]);
       expect(backupReads).toEqual([]);
@@ -711,6 +749,15 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       .resolveFinalizedContextGraphIdByNameHash!(ethers.ZeroHash))
       .resolves.toBeNull();
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+  });
+
+  it('rejects malformed finalized reverse-binding hashes before scanning', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .resolveFinalizedContextGraphIdByNameHash!('not-a-hash'))
+      .rejects.toThrow('name-hash target must be bytes32');
+    expect(evidence.indexRanges).toEqual([]);
   });
 
   it('projects many finalized name bindings through one index read', async () => {
@@ -1043,8 +1090,12 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       .resolves.toBeInstanceOf(Map);
   });
 
-  it('validates revision targets and owns physical chunking behind one finalized anchor', async () => {
-    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+  it('validates revision targets and projects an oversized set from one finalized scan', async () => {
+    const boundaryId = 4_097n;
+    const boundaryNameHash = ethers.zeroPadValue(ethers.toBeHex(boundaryId), 32);
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      extraContextGraph: { contextGraphId: boundaryId, nameHash: boundaryNameHash },
+    });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
     await expect(reader.readContextGraphAuthorityIndexRevisions([])).resolves.toEqual(new Map());
@@ -1054,39 +1105,36 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       ]))
         .rejects.toThrow('target id is invalid');
     }
-    const revisions = vi.spyOn(
-      (adapter as any).contextGraphAuthorityIndex,
-      'revisions',
-    );
+    // Targets used to be chunked into repeated index scans. They are now
+    // projected in memory from the ONE view a finalized read scans.
+    const view = vi.spyOn((adapter as any).contextGraphAuthorityIndex, 'view');
     await expect(reader.readContextGraphAuthorityIndexRevisions(
       Array.from({ length: 4_097 }, (_, index) => authorityIndexId(String(index + 1))),
-    )).resolves.toEqual(new Map([[
-      '9',
-      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
-    ]]));
-    expect(revisions.mock.calls.map(([input]) => input.contextGraphIds.length))
-      .toEqual([4_096, 1]);
+    )).resolves.toEqual(new Map([
+      ['9', expect.stringMatching(/^0x[0-9a-f]{64}$/u)],
+      [boundaryId.toString(10), expect.stringMatching(/^0x[0-9a-f]{64}$/u)],
+    ]));
+    expect(view).toHaveBeenCalledOnce();
     expect(evidence.headReads).toHaveLength(1);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
-  it('owns oversized name-hash chunking and superset projection at one finalized anchor', async () => {
-    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+  it('projects an oversized name-hash set from one finalized scan', async () => {
+    const boundaryId = 4_097n;
+    const boundaryNameHash = ethers.zeroPadValue(ethers.toBeHex(boundaryId), 32);
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      extraContextGraph: { contextGraphId: boundaryId, nameHash: boundaryNameHash },
+    });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
-    const statesByNameHashes = vi.spyOn(
-      (adapter as any).contextGraphAuthorityIndex,
-      'statesByNameHashes',
-    );
+    const view = vi.spyOn((adapter as any).contextGraphAuthorityIndex, 'view');
     const nameHashes = Array.from(
-      { length: 4_096 },
+      { length: Number(boundaryId) },
       (_, index) => ethers.zeroPadValue(ethers.toBeHex(index + 1), 32),
     );
-    nameHashes.push(NAME_HASH);
 
     await expect(reader.resolveFinalizedContextGraphIdsByNameHashes!(nameHashes))
-      .resolves.toEqual(new Map([[NAME_HASH, 9n]]));
-    expect(statesByNameHashes.mock.calls.map(([input]) => input.nameHashes.length))
-      .toEqual([4_096, 1]);
+      .resolves.toEqual(new Map([[boundaryNameHash, boundaryId]]));
+    expect(view).toHaveBeenCalledOnce();
     expect(evidence.headReads).toHaveLength(1);
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
@@ -1474,12 +1522,17 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await gate.entered;
     const survivor = reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(NAME_HASH);
     for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-    expect(harness.evidence.headReads).toHaveLength(2);
+    // The survivor waits for the in-flight read to settle instead of racing it.
+    expect(harness.evidence.headReads).toHaveLength(1);
 
     const sharedPageSignal = harness.evidence.indexPageSignals[0]!;
     firstAbort.abort(new Error('initiating snapshot waiter left'));
     await expect(first).rejects.toThrow('initiating snapshot waiter left');
     expect(sharedPageSignal.aborted).toBe(false);
+    // It inherits nothing from the initiator's abort: it runs its OWN read,
+    // which joins the physical page scan the index still owns.
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    expect(harness.evidence.headReads).toHaveLength(2);
 
     let idle = false;
     const drain = reader.whenIdle().then(() => { idle = true; });
@@ -1596,5 +1649,312 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       participantAgents: [OWNER, MEMBER],
     });
     expect(evidence.staticCalls).toEqual([]);
+  });
+});
+
+describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
+  const START_MS = 1_800_000_000_000;
+  const T = 6_000;
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  /** Give every block the chain time the production endpoint always reports. */
+  function makeTimedAdapter(
+    options: Parameters<typeof makeIndexedAuthorityAdapter>[0] = {},
+  ): IndexedAuthorityHarness {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(START_MS);
+    const harness = makeIndexedAuthorityAdapter(options);
+    const getBlock = harness.provider.getBlock;
+    harness.provider.getBlock = async (tag) => {
+      const block = await getBlock(tag);
+      return block === null ? null : { ...block, timestamp: Math.floor(Date.now() / 1_000) - 2 };
+    };
+    return harness;
+  }
+
+  const rpcReads = ({ evidence }: IndexedAuthorityHarness): number => (
+    evidence.headReads.length
+    + evidence.blockReads.length
+    + evidence.indexRanges.length
+    + evidence.staticCalls.length
+    + evidence.networkReads.length
+  );
+
+  it('answers the snapshot read and every index reader from one projection with zero RPC', async () => {
+    const harness = makeTimedAdapter();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    const served: string[] = [];
+    const options = {
+      onContextGraphAuthorityProjectionServed: ({ source }: { source: string }) => {
+        served.push(source);
+      },
+    };
+
+    const scanned = await harness.adapter.getContextGraphAuthoritySnapshot(9n, options);
+    const reads = rpcReads(harness);
+    expect(harness.evidence.headReads).toEqual([30]);
+
+    vi.setSystemTime(START_MS + T - 1);
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n, options))
+      .resolves.toEqual(scanned);
+    await expect(reader.readContextGraphAuthorityIndexSnapshots([authorityIndexId('9')], options))
+      .resolves.toEqual(new Map([['9', scanned]]));
+    await expect(reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')], options))
+      .resolves.toEqual(new Map([['9', expect.stringMatching(/^0x[0-9a-f]{64}$/u)]]));
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(NAME_HASH, options))
+      .resolves.toBe(9n);
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(NAME_HASH, options))
+      .resolves.toEqual(scanned);
+
+    expect(rpcReads(harness)).toBe(reads);
+    expect(served).toEqual(['scan', 'cache', 'cache', 'cache', 'cache', 'cache']);
+  });
+
+  it('rejects an already-cancelled warm read without touching chain or index RPC', async () => {
+    const harness = makeTimedAdapter();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    const reads = rpcReads(harness);
+    const reason = new Error('warm authority caller already left');
+    const signal = AbortSignal.abort(reason);
+
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n, { signal }))
+      .rejects.toBe(reason);
+    await expect(reader.readContextGraphAuthorityIndexRevisions(
+      [authorityIndexId('9')],
+      { signal },
+    )).rejects.toBe(reason);
+    expect(rpcReads(harness)).toBe(reads);
+  });
+
+  it('re-scans at T and only then observes authority the chain changed meanwhile', async () => {
+    const harness = makeTimedAdapter();
+    const before = await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    harness.advanceAuthorityHead();
+
+    vi.setSystemTime(START_MS + T - 1);
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toEqual(before);
+    vi.setSystemTime(START_MS + T);
+    const after = await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    expect(after.policyVersion).not.toBe(before.policyVersion);
+    expect(harness.evidence.headReads).toEqual([30, 35]);
+  });
+
+  it('serves a warm adapter projection as stale-cache only after a real refresh outage', async () => {
+    const harness = makeTimedAdapter();
+    const served: string[] = [];
+    const options = {
+      onContextGraphAuthorityProjectionServed: ({ source }: { source: string }) => {
+        served.push(source);
+      },
+    };
+    const warm = await harness.adapter.getContextGraphAuthoritySnapshot(9n, options);
+    const reads = rpcReads(harness);
+    (harness.adapter as any).readTipProvider = async () => {
+      throw new RpcEndpointsExhaustedError('authority provider pool exhausted');
+    };
+
+    vi.setSystemTime(START_MS + T);
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n, options))
+      .resolves.toEqual(warm);
+    expect(served).toEqual(['scan', 'stale-cache']);
+    // The failing adapter refresh never reaches a provider read in this
+    // fixture, so only the warm scan contributes evidence counters.
+    expect(rpcReads(harness)).toBe(reads);
+  });
+
+  it('honours an operator-configured chain.indexTickMs', async () => {
+    const harness = makeTimedAdapter({ indexTickMs: 1_000 });
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    vi.setSystemTime(START_MS + 999);
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(harness.evidence.headReads).toEqual([30]);
+    vi.setSystemTime(START_MS + 1_000);
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+  });
+
+  it('builds the same snapshot and revision from the cache as from a fresh scan of that head', async () => {
+    const cached = makeTimedAdapter();
+    await cached.adapter.getContextGraphAuthoritySnapshot(9n);
+    const reads = rpcReads(cached);
+    const fromCache = await cached.adapter.getContextGraphAuthoritySnapshot(9n);
+    const revisionFromCache = await cached.adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]);
+    expect(rpcReads(cached)).toBe(reads);
+
+    const fresh = makeIndexedAuthorityAdapter();
+    const fromScan = await fresh.adapter.getContextGraphAuthoritySnapshot(9n);
+    const revisionFromScan = await fresh.adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]);
+
+    expect(JSON.stringify(fromCache)).toBe(JSON.stringify(fromScan));
+    expect(Object.isFrozen(fromCache)).toBe(true);
+    expect([...revisionFromCache]).toEqual([...revisionFromScan]);
+  });
+
+  it('keeps the core refresh loop scanning every pass and feeding only the durable snapshot', async () => {
+    const harness = makeTimedAdapter();
+    const snapshots = harness.adapter.contextGraphAuthorityIndexSnapshots!;
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(harness.evidence.headReads).toEqual([30]);
+
+    await snapshots.refresh();
+    await snapshots.refresh();
+
+    // Never answered from the projection cache, even well inside T.
+    expect(harness.evidence.headReads).toEqual([30, 30, 30]);
+    await expect(snapshots.exportSnapshot({
+      scope: `${harness.adapter.deploymentId}:${GOVERNANCE}`,
+      deploymentBlockNumber: 7, minThroughBlockNumber: 7, maxThroughBlockNumber: 30,
+    })).resolves.toMatchObject({ checkpoint: { cursor: { throughBlockNumber: 30 } } });
+  });
+
+  it('drops the projection when the adapter invalidates its bound contracts', async () => {
+    const harness = makeTimedAdapter();
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    harness.adapter.invalidatePublishPreflightCache();
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+  });
+
+  it.each([
+    ['addContextGraphParticipantAgent', 'confirmed'],
+    ['removeContextGraphParticipantAgent', 'confirmed'],
+    ['addContextGraphParticipantAgent', 'lost its receipt'],
+  ] as const)('reads its own %s write back although T has not passed (%s)', async (method, outcome) => {
+    const harness = makeTimedAdapter();
+    const adapter = harness.adapter as any;
+    adapter.contracts.contextGraphs = {};
+    adapter.sendContractTransaction = async () => {
+      if (outcome !== 'confirmed') throw new Error('receipt lookup failed');
+      return { hash: `0x${'ab'.repeat(32)}`, blockNumber: 31, index: 0, status: 1 };
+    };
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    const write = adapter[method](9n, MEMBER);
+    await (outcome === 'confirmed'
+      ? expect(write).resolves.toMatchObject({ success: true })
+      : expect(write).rejects.toThrow('receipt lookup failed'));
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+  });
+
+  it.each([
+    ['duplicate', NAME_HASH, 'ambiguous'],
+    ['unique', LATE_NAME_HASH, '11'],
+  ] as const)(
+    'invalidates a warm projection after a %s-name Context Graph create',
+    async (_case, createdNameHash, expected) => {
+      const harness = makeTimedAdapter({ lateContextGraphNameHash: createdNameHash });
+      const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+      await expect(reader.resolveFinalizedContextGraphIdByNameHash!(NAME_HASH)).resolves.toBe(9n);
+
+      const adapter = harness.adapter as any;
+      adapter.contracts.contextGraphs = {};
+      adapter.contracts.contextGraphStorage.interface = {
+        parseLog: () => ({
+          name: 'ContextGraphCreated',
+          args: { contextGraphId: 11n },
+        }),
+      };
+      adapter.sendContractTransaction = async () => {
+        harness.advanceAuthorityHead();
+        return {
+          hash: `0x${'ab'.repeat(32)}`,
+          blockNumber: 31,
+          index: 0,
+          status: 1,
+          logs: [{ topics: [], data: '0x' }],
+        };
+      };
+
+      await expect(harness.adapter.createOnChainContextGraph({
+        accessPolicy: 1,
+        publishPolicy: 0,
+        nameHash: createdNameHash,
+      })).resolves.toMatchObject({ success: true, contextGraphId: 11n });
+
+      const read = reader.resolveFinalizedContextGraphIdByNameHash!(createdNameHash);
+      if (expected === 'ambiguous') {
+        await expect(read).rejects.toThrow('ambiguous across 2 finalized Context Graphs');
+      } else {
+        await expect(read).resolves.toBe(11n);
+      }
+      expect(harness.evidence.headReads).toEqual([30, 35]);
+      expect(harness.evidence.indexRanges.at(-1)).toEqual([31, 35]);
+    },
+  );
+
+  it('invalidates a warm projection when a Context Graph create loses its receipt', async () => {
+    const harness = makeTimedAdapter();
+    const adapter = harness.adapter as any;
+    adapter.contracts.contextGraphs = {};
+    adapter.sendContractTransaction = async () => { throw new Error('receipt lookup failed'); };
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    await expect(harness.adapter.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 }))
+      .rejects.toThrow('receipt lookup failed');
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+  });
+
+  it('rejects when the requested and scanned ContextGraphStorage addresses diverge', async () => {
+    const harness = makeTimedAdapter();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    (harness.adapter as any).contracts.contextGraphStorage.getAddress = async () => MEMBER;
+
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).rejects.toThrow(
+      'Context Graph authority contract changed during refresh',
+    );
+    await expect(reader.readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .rejects.toThrow('Context Graph authority contract changed during refresh');
+
+    expect(harness.evidence.headReads).toEqual([30, 30, 30]);
+  });
+
+  it('reports an id the projection does not contain as absent only after a fresh scan', async () => {
+    const harness = makeTimedAdapter();
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(404n))
+      .rejects.toThrow('Context Graph 404 has no finalized creation event');
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+    await expect(harness.adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexSnapshots([authorityIndexId('404')]))
+      .resolves.toEqual(new Map());
+    expect(harness.evidence.headReads).toEqual([30, 30, 30]);
+  });
+
+  it('reports name hashes absent from a warm projection only after a fresh scan', async () => {
+    const harness = makeTimedAdapter();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    expect(harness.evidence.headReads).toEqual([30, 30]);
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    expect(harness.evidence.headReads).toEqual([30, 30, 30]);
+  });
+
+  it('rejects an invalid chain.indexTickMs at construction', () => {
+    for (const indexTickMs of [0, 1.5, -6_000]) {
+      expect(() => new EVMChainAdapter({
+        rpcUrl: 'http://127.0.0.1:1',
+        hubAddress: GOVERNANCE,
+        privateKey: `0x${'11'.repeat(32)}`,
+        allowNoAdminSigner: true,
+        chainId: 'evm:31337',
+        localContextGraphAuthorityIndexStore: new MemoryAuthorityIndexStore(),
+        indexTickMs,
+      })).toThrow('chain.indexTickMs must be a positive integer');
+    }
   });
 });

@@ -97,7 +97,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -135,6 +135,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import {
+  isCoreHostedPublicCgRecorded,
+  resolveCoreHostedPublicCgLocalId,
+} from './core-hosted-public-cg-record-decision.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -428,9 +432,9 @@ import {
   MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -511,6 +515,12 @@ import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
 import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import { finalizedContextGraphSnapshotMismatchV1 } from
+  './internal/context-graph-authority/finalized-context-graph-binding.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
@@ -1869,7 +1879,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     }
 
-    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId).catch(() => null);
+    const allowedAgents = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.catchUpSigner,
+      () => this.getContextGraphAgentGateAddresses(contextGraphId),
+    ).catch(() => null);
     if (!allowedAgents || allowedAgents.length === 0) return null;
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
     for (const record of this.localAgents.values()) {
@@ -2234,7 +2247,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const requesterLower = requesterEoa.toLowerCase();
     let anyAuthorityFound = false;
     try {
-      const chainParticipants = await this.resolveOnChainParticipantAgents(req.contextGraphId);
+      const chainParticipants = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.chunkServe,
+        () => this.resolveOnChainParticipantAgents(req.contextGraphId),
+      );
       if (chainParticipants !== null) {
         anyAuthorityFound = true;
         if (chainParticipants.some((a) => a.toLowerCase() === requesterLower)) authOk = true;
@@ -2251,7 +2267,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (!authOk) {
       try {
-        const agentGate = await this.getContextGraphAgentGateAddresses(req.contextGraphId);
+        const agentGate = await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.chunkServe,
+          () => this.getContextGraphAgentGateAddresses(req.contextGraphId),
+        );
         if (agentGate !== null) {
           anyAuthorityFound = true;
           if (agentGate.some((a) => a.toLowerCase() === requesterLower)) authOk = true;
@@ -2665,10 +2684,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   async readCoreHostedPublicCgAccessPolicy(this: DKGAgent, onChainId: string): Promise<0 | 1 | null> {
     const numericId = BigInt(onChainId);
+    const readTimeoutMs = chainAuthorityReadBudgetsOf(this).requestTimeoutMs;
     const raceChainRead = async <T>(start: () => T | Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
-        timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
+        timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), readTimeoutMs);
         timer.unref?.();
       });
       let work: Promise<T>;
@@ -2691,7 +2711,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           this.log.warn(
             createOperationContext('system'),
             `recordCoreHostedPublicCg(${onChainId}): getContextGraphAccessPolicy timed out after ` +
-            `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating hosted CG access policy as UNKNOWN`,
+            `${readTimeoutMs}ms — treating hosted CG access policy as UNKNOWN`,
           );
           return null;
         }
@@ -2714,7 +2734,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.log.warn(
         createOperationContext('system'),
         `recordCoreHostedPublicCg(${onChainId}): isContextGraphActiveOnChain timed out after ` +
-        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — falling back to ACK-backed access policy read`,
+        `${readTimeoutMs}ms — falling back to ACK-backed access policy read`,
       );
     } catch (err) {
       this.log.warn(
@@ -2759,19 +2779,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (numeric <= 0n) return;
 
     const numericStr = numeric.toString();
-    // Discard the hint ONLY when it's empty or literally the on-chain numeric
-    // id (no information) — NOT merely because it's all-digits: a public CG's
-    // local cleartext id can be numeric (e.g. "1" is a valid contextGraphId
-    // elsewhere in the repo), and rejecting it would wrongly key the row under
-    // the on-chain id and miss the hosted KA after restart.
-    const cleartextHint = swmGraphId && swmGraphId !== numericStr
-      ? swmGraphId
-      : undefined;
-    const resolveLocalCgId = (): string =>
-      this.resolveLocalCgIdByOnChainId(numeric) ?? cleartextHint ?? numericStr;
-    const alreadyRecorded = (localCgId: string): boolean => {
-      const row = this.subscribedContextGraphs.get(localCgId);
-      return row?.coreHosted === true && row.onChainId === numericStr;
+    const resolveLocalCgId = () => {
+      const mappedLocalId = this.resolveLocalCgIdByOnChainId(numeric) ?? undefined;
+      // A Core that saw `ContextGraphCreated` before its first ACK holds a
+      // hash-keyed placeholder for this graph. The publisher's cleartext
+      // `swmGraphId` is proven to be that graph's id when its commitment is
+      // exactly the placeholder's name hash; host under the cleartext then,
+      // which also promotes the placeholder.
+      const placeholder = swmGraphId && swmGraphId !== numericStr
+        ? this.resolveWireOnlyContextGraphSubscription(swmGraphId)
+        : null;
+      return resolveCoreHostedPublicCgLocalId({
+        onChainId: numeric,
+        swmGraphId,
+        mappedLocalId,
+        mappedLocalIdIsNamePlaceholderOfHint: placeholder !== null
+          && placeholder.localId === mappedLocalId
+          && placeholder.subscription.onChainId === numericStr,
+      });
     };
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
@@ -2781,7 +2806,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // a live-then-policy read on its first observation, and an already-recorded
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
-    if (alreadyRecorded(resolveLocalCgId())) return;
+    if (isCoreHostedPublicCgRecorded(
+      this.subscribedContextGraphs.get(resolveLocalCgId()),
+      numericStr,
+    )) return;
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
@@ -2803,8 +2831,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Re-resolved after the await: the local mapping may have changed, and a
     // concurrent first ACK for the same CG may have recorded it meanwhile.
     const localCgId = resolveLocalCgId();
-    if (alreadyRecorded(localCgId)) return;
     const existing = this.subscribedContextGraphs.get(localCgId);
+    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return;
 
     let next: ContextGraphSub;
     if (existing) {
@@ -3186,10 +3214,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // not trust the persisted subscription bit as membership proof.
     const authorityRead = (async () => {
       try {
-        return await this.canReadContextGraph(localCgId, {
-          allowSubscriptionFallback: false,
-          signal,
-        });
+        return await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.exactAssetFetch,
+          () => this.canReadContextGraph(localCgId, {
+            allowSubscriptionFallback: false,
+            signal,
+          }),
+        );
       } finally {
         // A bounded caller may return while shared durable index work remains.
         // Keep that physical read in the VM lifecycle drain before releasing
@@ -3246,6 +3277,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           batchId: item.batchId,
           versionBlock: item.versionBlock,
           authorAddress: item.authorAddress,
+          // The public-authority consumer validates this lease after its last
+          // store/CG-gate await; stale evidence falls back to live reads.
+          versionSnapshot: Object.freeze({
+            ...item.versionSnapshot,
+            latestRoot: item.merkleRoot.slice(),
+          }),
+          signal,
         }, ctx);
         if (outcome === 'promoted') return 'materialized';
         if (outcome === 'already-confirmed' || outcome === 'stale-target') return 'present';
@@ -3318,6 +3356,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       scheduling = new VmReconcileSchedulingRuntime(
         (localCgId, source) => this.executeVmReconcileForCg(localCgId, source),
         (localCgId, err) => {
+          // Retired name-hash id: not a failure, nothing retries it
+          // (see supersedingContextGraphIdFor).
+          const supersedingId = this.supersedingContextGraphIdFor?.(localCgId);
+          if (supersedingId) {
+            this.log.debug(
+              createOperationContext('system'),
+              `VM reconcile for "${localCgId}" stopped: superseded by cleartext adoption of "${supersedingId}"`,
+            );
+            return;
+          }
           this.log.warn(
             createOperationContext('system'),
             `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
@@ -3346,6 +3394,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
+    // Retired name-hash id: it names no local graph any more, the answer target
+    // resolution would give without a chain read (see supersedingContextGraphIdFor).
+    if (this.supersedingContextGraphIdFor?.(localCgId)) throw new ContextGraphNotFoundError(localCgId);
     const physicalRun = (async (): Promise<ContextGraphReconcileResult> => {
       const target = await this.resolveVmReconcileTarget(
         localCgId,
@@ -3538,9 +3589,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Central defense for periodic, live-chain, and manual reconciliation.
     // Every dispatcher entry point converges here and must independently prove
     // read authority. Never let a persisted subscription authorize itself.
-    const authorityRead = this.canReadContextGraph(localCgId, {
-      allowSubscriptionFallback: false,
-    });
+    const authorityRead = withRpcUsageSite(
+      CG_AUTH_RPC_SITES.vmReconcile,
+      () => this.canReadContextGraph(localCgId, {
+        allowSubscriptionFallback: false,
+      }),
+    );
     // Cancellation releases the dispatcher worker, but an underlying store/RPC
     // read may ignore it. Keep that physical dependency in the shutdown drain.
     trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
@@ -3629,7 +3683,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const resolution = await raceVmReconcileAbort(
             this.resolveFinalizedContextGraphAuthorityTargetsV1(
               [localCgId],
-              { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+              evidence.agentResolverReadOptions(readSignal),
             ),
             signal,
           );
@@ -3644,12 +3698,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
             if (this.contextGraphAuthorityReaderCapability.status !== 'supported') {
               throw new Error('Finalized VM authority target has no snapshot reader');
             }
-            evidence.markRpcAttempt();
             snapshot = await raceVmReconcileAbort(
               this.contextGraphAuthorityReaderCapability.reader
                 .getContextGraphAuthoritySnapshot(
                   target.expectedOnChainId,
-                  { signal: readSignal },
+                  evidence.chainReadOptions(readSignal),
                 ),
               signal,
             );
@@ -3660,9 +3713,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (
             target.expectedOnChainId <= 0n
             || target.expectedOnChainId > ethers.MaxUint256
-            || snapshot.active !== true
-            || snapshot.contextGraphId !== expectedOnChainId
-            || this.contextGraphWireId(snapshot.nameHash) !== expectedNameHash
+            || finalizedContextGraphSnapshotMismatchV1(snapshot, {
+              onChainId: target.expectedOnChainId,
+              nameHash: expectedNameHash,
+            }) !== undefined
           ) {
             throw new Error(`Invalid finalized VM authority evidence for "${localCgId}"`);
           }
@@ -5586,11 +5640,97 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   clearRecentVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
     this.recentReconciledUals.deleteByPrefix(`${localCgId}\0`);
+    this.vmReconcileFinalizedSlotEvidence.deleteByPrefix(`${localCgId}\0`);
   }
 
   vmReconcileCacheKey(this: DKGAgent, localCgId: string, ual: string, merkleRoot: Uint8Array): string {
     const rootHex = Array.from(merkleRoot, (byte) => byte.toString(16).padStart(2, '0')).join('');
     return `${localCgId}\0${ual}#${rootHex}`;
+  }
+
+  /**
+   * Resolve the exact finalized height used by the adapter's coherent KA
+   * snapshot. Absent/invalid adapter depth disables the fast path rather than
+   * guessing at finality.
+   */
+  vmReconcileFinalizedBlockAtHead(
+    this: DKGAgent,
+    headBlock: number | undefined,
+  ): number | undefined {
+    if (!Number.isSafeInteger(headBlock) || headBlock === undefined || headBlock < 0) {
+      return undefined;
+    }
+    const confirmations = this.chain.getFinalityConfirmations?.();
+    if (!Number.isSafeInteger(confirmations) || confirmations === undefined || confirmations <= 0) {
+      return undefined;
+    }
+    const finalizedBlock = headBlock - confirmations + 1;
+    return finalizedBlock >= 0 ? finalizedBlock : undefined;
+  }
+
+  vmReconcileFinalizedSlotKey(
+    this: DKGAgent,
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+  ): string {
+    return `${localCgId}\0finalized-slot:${onChainCgId}:${ordinal}`;
+  }
+
+  async confirmAndRememberVmReconcileFinalizedSlot(
+    this: DKGAgent,
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+    finalizedBlock: number | undefined,
+    kaId: bigint,
+    merkleRoot: Uint8Array,
+    publisherAddress: string,
+  ): Promise<void> {
+    if (
+      finalizedBlock === undefined
+      || !this.chain.readKnowledgeAssetVersionSnapshot
+    ) return;
+    let snapshot: KnowledgeAssetVersionSnapshot | null | undefined;
+    try {
+      snapshot = await this.chain.readKnowledgeAssetVersionSnapshot(kaId);
+      if (
+        !snapshot
+        || snapshot.knowledgeAssetId !== kaId
+        || snapshot.blockNumber !== finalizedBlock
+        || typeof snapshot.blockHash !== 'string'
+        || !ethers.isHexString(snapshot.blockHash, 32)
+        || typeof snapshot.knowledgeAssetStorageAddress !== 'string'
+        || !ethers.isAddress(snapshot.knowledgeAssetStorageAddress)
+        || !Number.isSafeInteger(snapshot.knowledgeAssetStorageGeneration)
+        || snapshot.knowledgeAssetStorageGeneration! < 0
+        || snapshot.rootCount <= 0n
+        || !ethers.isHexString(snapshot.latestRoot, 32)
+        || !ethers.isAddress(snapshot.latestAuthor)
+        || merkleRoot.length !== 32
+        || !ethers.isAddress(snapshot.latestPublisher)
+        || !ethers.isAddress(publisherAddress)
+        || ethers.getAddress(snapshot.latestPublisher) === ethers.ZeroAddress
+        || ethers.getAddress(snapshot.latestAuthor) === ethers.ZeroAddress
+        || ethers.getAddress(publisherAddress) === ethers.ZeroAddress
+        || !ethers.getBytes(snapshot.latestRoot).every(
+          (byte, index) => byte === merkleRoot[index],
+        )
+        || ethers.getAddress(snapshot.latestPublisher) !== ethers.getAddress(publisherAddress)
+      ) return;
+    } catch {
+      // The successful reconciliation remains truthful; a failed validation
+      // merely withholds the same-finalized-block fast path.
+      return;
+    }
+    if (!snapshot) return;
+    this.vmReconcileFinalizedSlotEvidence.set(
+      this.vmReconcileFinalizedSlotKey(localCgId, onChainCgId, ordinal),
+      {
+        kaId,
+        snapshot: Object.freeze({ ...snapshot }),
+      },
+    );
   }
 
   vmReconcileCacheKeyPrefix(this: DKGAgent, cacheKey: string): string {
@@ -6335,7 +6475,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
           onChainCgId,
           {
             resolvePublicAccess: async (contextGraphId) => (
-              await this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx)
+              await withRpcUsageSite(
+                CG_AUTH_RPC_SITES.vmSizing,
+                // Sizing a recovery batch: this decides how much to READ, not
+                // who may. A bound stale by one index tick changes a batch
+                // size, and the next pass corrects it. Inert unless the
+                // operator enables `chain.boundedAuthorityReads`.
+                () => this.readLiveOnChainAccessPolicy(
+                  contextGraphId.toString(), ctx, { freshness: 'bounded' },
+                ),
+              )
             ) === 0,
             sizing: typeof readVmRecoveryUpdateContext === 'function'
               ? {
@@ -6491,9 +6640,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * latest on-chain merkle root + publisher, build the UAL, and ask the
    * finalization handler to promote the matching local SWM snapshot to VM
    * (verifying the CG binding from chain). When no local SWM matches, run an
-   * active core-first catch-up fetch and retry once. `headBlock` is reused as
-   * the materialization version AND echoed back as the cursor observation block
-   * (reorg gate). See {@link OrdinalOutcome} for the status contract.
+   * active core-first catch-up fetch and retry once. A successful result is
+   * validated against one coherent pinned version snapshot before it earns a
+   * same-finalized-block shortcut; a new block always reads again. `headBlock`
+   * remains the independent cursor observation for the reorg-depth gate. See
+   * {@link OrdinalOutcome} for the status contract.
    */
   async reconcileChainOrdinal(this: DKGAgent,
     localCgId: string,
@@ -6513,6 +6664,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let kaId: bigint;
     let merkleRoot: Uint8Array;
     let publisherAddress: string;
+    let finalizedSlotBlock: number | undefined;
     let ual: string;
     let cacheKey = '';
     try {
@@ -6522,15 +6674,49 @@ export class SwmHostModeMethods extends DKGAgentBase {
         : undefined;
       if (!storageAddr) return { status: 'skip' };
       ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+      finalizedSlotBlock = this.vmReconcileFinalizedBlockAtHead(headBlock);
+      if (finalizedSlotBlock !== undefined) {
+        const finalizedSlotKey = this.vmReconcileFinalizedSlotKey(
+          localCgId,
+          onChainCgId,
+          ordinal,
+        );
+        const evidence = this.vmReconcileFinalizedSlotEvidence.get(finalizedSlotKey);
+        if (evidence !== undefined) {
+          let current = false;
+          if (
+            evidence.kaId === kaId
+            && evidence.snapshot.blockNumber === finalizedSlotBlock
+            && typeof evidence.snapshot.knowledgeAssetStorageAddress === 'string'
+            && ethers.isAddress(storageAddr)
+            && ethers.isAddress(evidence.snapshot.knowledgeAssetStorageAddress)
+            && ethers.getAddress(storageAddr)
+              === ethers.getAddress(evidence.snapshot.knowledgeAssetStorageAddress)
+            && this.chain.knowledgeAssetVersionSnapshotIsCurrent
+          ) {
+            try {
+              current = await this.chain.knowledgeAssetVersionSnapshotIsCurrent(
+                kaId,
+                evidence.snapshot,
+              );
+            } catch {
+              // Optimization-only lease unavailable: preserve the unchanged live
+              // root/publisher/materialization path below.
+            }
+          }
+          if (options.isTargetCurrent && !options.isTargetCurrent()) {
+            return { status: 'skip' };
+          }
+          if (current) {
+            this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
+            return { status: 'already', blockNumber: headBlock! };
+          }
+          this.vmReconcileFinalizedSlotEvidence.delete(finalizedSlotKey);
+        }
+      }
+
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
       cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
-
-      // Recently reconciled (live-burst guard): treat as already-done so the
-      // cursor advances without redoing chain reads + an SWM scan.
-      if (this.recentReconciledUals.has(cacheKey)) {
-        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
-        return { status: 'already', blockNumber: versionBlock };
-      }
 
       if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
@@ -6704,37 +6890,68 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { status: 'skip' };
     }
 
+    // Cursor finality remains tied to this sweep's raw head observation. The
+    // pinned version block orders materialized metadata but must not shorten
+    // the independent reconciliation confirmation-depth gate.
+    const completionBlock = headBlock ?? 0;
     switch (outcome) {
       case 'promoted':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.recentReconciledUals.add(cacheKey);
+        await this.confirmAndRememberVmReconcileFinalizedSlot(
+          localCgId,
+          onChainCgId,
+          ordinal,
+          finalizedSlotBlock,
+          kaId,
+          merkleRoot,
+          publisherAddress,
+        );
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'promote', ordinal, kaId: kaId.toString(), ual,
         });
-        return { status: 'reconciled', blockNumber: versionBlock };
+        return { status: 'reconciled', blockNumber: completionBlock };
       case 'already-confirmed':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.recentReconciledUals.add(cacheKey);
+        await this.confirmAndRememberVmReconcileFinalizedSlot(
+          localCgId,
+          onChainCgId,
+          ordinal,
+          finalizedSlotBlock,
+          kaId,
+          merkleRoot,
+          publisherAddress,
+        );
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock };
+        return { status: 'already', blockNumber: completionBlock };
       case 'stale-target':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         // A newer root won; do not prune its cache/recent state.
         this.recentReconciledUals.add(cacheKey);
+        await this.confirmAndRememberVmReconcileFinalizedSlot(
+          localCgId,
+          onChainCgId,
+          ordinal,
+          finalizedSlotBlock,
+          kaId,
+          merkleRoot,
+          publisherAddress,
+        );
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock };
+        return { status: 'already', blockNumber: completionBlock };
       case 'no-swm':
         if (activeFetchRan && !activeFetchHadUsableResponse) {
           this.clearVmReconcileActiveFetchCooldown(localCgId);
@@ -6948,7 +7165,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let anyAuthoritySourceFound = false;
 
     try {
-      const chainParticipants = await this.resolveOnChainParticipantAgents(req.contextGraphId);
+      const chainParticipants = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.hostCatchUp,
+        () => this.resolveOnChainParticipantAgents(req.contextGraphId),
+      );
       if (chainParticipants !== null) {
         anyAuthoritySourceFound = true;
         if (chainParticipants.some((a) => a.toLowerCase() === requesterLower)) {
@@ -6978,7 +7198,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // chain-derived sets often miss recently-approved delegatees that
     // haven't been mirrored on chain yet.
     try {
-      const agentGate = await this.getContextGraphAgentGateAddresses(req.contextGraphId);
+      const agentGate = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.hostCatchUp,
+        () => this.getContextGraphAgentGateAddresses(req.contextGraphId),
+      );
       if (agentGate !== null) {
         anyAuthoritySourceFound = true;
         if (agentGate.some((a) => a.toLowerCase() === requesterLower)) {

@@ -6,6 +6,7 @@ import type { RegisteredContextGraphAuthorityUnavailableReason } from
 const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASON_REGISTRY = Object.freeze({
   'finalized-name-absence-unaccepted': true,
   'chain-name-binding-unavailable': true,
+  'authority-circuit-open': true,
   'local-chain-binding-unavailable': true,
   'local-existence-unavailable': true,
   'chain-access-policy-unavailable': true,

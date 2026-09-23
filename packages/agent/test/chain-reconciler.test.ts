@@ -4,6 +4,7 @@ import {
   VmReconcileSchedulingRuntime,
   VmReconcileDispatcher,
   RecentUalSet,
+  RecentReconcileEvidenceMap,
   type ChainReconcilerDeps,
   type OrdinalRecoveryTarget,
   type OrdinalOutcome,
@@ -1307,6 +1308,33 @@ describe('RecentUalSet', () => {
     expect(set.has('cg-a\0ual#01')).toBe(false);
     expect(set.has('cg-a\0ual#02')).toBe(false);
     expect(set.has('cg-b\0ual#01')).toBe(true);
+  });
+});
+
+describe('RecentReconcileEvidenceMap', () => {
+  it('expires stagnant-head evidence and evicts the oldest slot past the cap', () => {
+    let now = 1_000;
+    const evidence = new RecentReconcileEvidenceMap<number>(2, 50, () => now);
+    evidence.set('a', 1);
+    evidence.set('b', 2);
+    evidence.set('c', 3);
+    expect(evidence.get('a')).toBeUndefined();
+    expect(evidence.get('b')).toBe(2);
+
+    now = 1_050;
+    expect(evidence.get('b')).toBeUndefined();
+    expect(evidence.get('c')).toBeUndefined();
+  });
+
+  it('deletes all evidence owned by one context graph prefix', () => {
+    const evidence = new RecentReconcileEvidenceMap<number>();
+    evidence.set('cg-a\0slot:0', 1);
+    evidence.set('cg-a\0slot:1', 2);
+    evidence.set('cg-b\0slot:0', 3);
+    evidence.deleteByPrefix('cg-a\0');
+    expect(evidence.get('cg-a\0slot:0')).toBeUndefined();
+    expect(evidence.get('cg-a\0slot:1')).toBeUndefined();
+    expect(evidence.get('cg-b\0slot:0')).toBe(3);
   });
 });
 

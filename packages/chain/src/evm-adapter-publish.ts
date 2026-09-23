@@ -15,6 +15,7 @@ import { ethers, Wallet, Contract } from 'ethers';
 import type {
   BatchMintParams,
   BatchMintResult,
+  CanonicalFinalizationReceipt,
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
@@ -596,7 +597,13 @@ export class PublishMethods extends EVMChainAdapterBase {
         return { status: 'pending-awaiting-confirmation' };
       }
       if (receipt.status !== 1) return { status: 'reverted' };
-      return publish ? { status: 'confirmed', publish } : { status: 'unrecognized' };
+      if (!publish) return { status: 'unrecognized' };
+      const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, publish);
+      return {
+        status: 'confirmed',
+        publish,
+        ...(canonicalReceipt ? { canonicalReceipt } : {}),
+      };
     }
     // The SECOND step, paid only on this surface and only when there is no receipt — it is what
     // separates a transaction the node is holding from one it has never seen.
@@ -755,6 +762,48 @@ export class PublishMethods extends EVMChainAdapterBase {
     return { receipt, publish: v9 };
   }
 
+  /**
+   * Project the strict recovery receipt from the exact receipt/publish pair a
+   * caller already read. This is deliberately pure: the caller owns the live
+   * canonicality/finality gate, and an incomplete projection simply leaves
+   * the existing canonical-receipt fallback in place.
+   */
+  private projectCanonicalFinalizationReceipt(
+    receipt: ethers.TransactionReceipt,
+    parsedPublish: OnChainPublishResult,
+  ): CanonicalFinalizationReceipt | null {
+    if (
+      !parsedPublish.merkleRoot
+      || !parsedPublish.publisherAddress
+      || !Number.isSafeInteger(receipt.index)
+      || receipt.index < 0
+      || !receipt.blockHash
+    ) {
+      return null;
+    }
+    const kaId = parsedPublish.kaId ?? parsedPublish.batchId;
+    const startKAId = parsedPublish.startKAId ?? kaId;
+    const endKAId = parsedPublish.endKAId ?? kaId;
+    return {
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockHash: receipt.blockHash,
+      txIndex: receipt.index,
+      merkleRoot: parsedPublish.merkleRoot,
+      publisherAddress: parsedPublish.publisherAddress,
+      ...(parsedPublish.authorAddress
+        ? { authorAddress: parsedPublish.authorAddress }
+        : {}),
+      batchId: parsedPublish.batchId,
+      kaId,
+      startKAId,
+      endKAId,
+      ...(parsedPublish.knowledgeAssetsContract
+        ? { knowledgeAssetsContract: parsedPublish.knowledgeAssetsContract }
+        : {}),
+    };
+  }
+
   async resolveCanonicalFinalizationReceipt(
     txHash: string,
     options: CanonicalFinalizationReceiptReadOptions = {},
@@ -779,41 +828,11 @@ export class PublishMethods extends EVMChainAdapterBase {
       return { status: 'reorged' };
     }
 
-    const legacyPublish = parsedPublish;
-    if (
-      !legacyPublish
-      || !legacyPublish.merkleRoot
-      || !legacyPublish.publisherAddress
-      || !Number.isSafeInteger(receipt.index)
-      || receipt.index < 0
-      || !receipt.blockHash
-    ) {
-      return { status: 'rejected' };
-    }
-    const kaId = legacyPublish.kaId ?? legacyPublish.batchId;
-    const startKAId = legacyPublish.startKAId ?? kaId;
-    const endKAId = legacyPublish.endKAId ?? kaId;
-    return {
-      status: 'confirmed',
-      receipt: {
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-        blockHash: receipt.blockHash,
-        txIndex: receipt.index,
-        merkleRoot: legacyPublish.merkleRoot,
-        publisherAddress: legacyPublish.publisherAddress,
-        ...(legacyPublish.authorAddress
-          ? { authorAddress: legacyPublish.authorAddress }
-          : {}),
-        batchId: legacyPublish.batchId,
-        kaId,
-        startKAId,
-        endKAId,
-        ...(legacyPublish.knowledgeAssetsContract
-          ? { knowledgeAssetsContract: legacyPublish.knowledgeAssetsContract }
-          : {}),
-      },
-    };
+    if (!parsedPublish) return { status: 'rejected' };
+    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, parsedPublish);
+    return canonicalReceipt
+      ? { status: 'confirmed', receipt: canonicalReceipt }
+      : { status: 'rejected' };
   }
 
   async parseV10PublishReceipt(
@@ -863,9 +882,12 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.getBlockTimestamp(
+    // When the caller already checked receipt finality, naming this exact hash
+    // reuses that header timestamp; direct parsers safely fall through to RPC.
+    const blockTimestamp = await this.getFinalizedBlockTimestamp(
       receipt.blockNumber,
-      { ...options, blockHash: receipt.blockHash },
+      receipt.blockHash,
+      options,
     );
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
@@ -926,9 +948,12 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    const blockTimestamp = await this.getBlockTimestamp(
+    // When the caller already checked receipt finality, naming this exact hash
+    // reuses that header timestamp; direct parsers safely fall through to RPC.
+    const blockTimestamp = await this.getFinalizedBlockTimestamp(
       receipt.blockNumber,
-      { ...options, blockHash: receipt.blockHash },
+      receipt.blockHash,
+      options,
     );
 
     return {
