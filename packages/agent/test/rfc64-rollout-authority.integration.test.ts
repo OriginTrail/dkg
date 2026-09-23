@@ -7124,10 +7124,17 @@ describe('RFC-64 rollout authority integration', () => {
             policyEnvelope: policyEnvelope(),
             targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
           }],
+          retryIntervalMs: 1_000,
         },
       },
+      config: { syncContextGraphs: [] },
     });
+    // Subscribe only after the provider connection exists. Otherwise the first
+    // pass probes a provider it can only find through mDNS; where multicast is
+    // unavailable (e.g. macOS without Local Network access) that probe times
+    // out and admission backs the provider off for 15s.
     await connectBothWays(author, shadow);
+    shadow.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await vi.waitFor(() => {
       expect(shadow.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
         mode: 'shadow',

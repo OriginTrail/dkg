@@ -10,6 +10,7 @@ export type {
   PromoteJobState,
   PromoteLease,
   PromoteListFilter,
+  PromotePostCommitRecoveryEvent,
   PromoteRecoverySummary,
   PromoteRequest,
   PromoteResult,
