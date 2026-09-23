@@ -90,6 +90,7 @@ function createFakeAgent() {
     publishProfile: vi.fn(async () => undefined),
     ensureProfilePublished: vi.fn(async () => undefined),
     publishRelayRegistry: vi.fn(async () => undefined),
+    reconcileProfileNodeIdOnStartup: vi.fn(async () => null),
     ensureContextGraphLocal: vi.fn(async () => undefined),
     getSubscribedContextGraphs: vi.fn(() => new Map()),
     subscribeToContextGraph: vi.fn(),
@@ -230,5 +231,48 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
 
     const publisherRuntimeArg = mocks.startPublisherRuntimeWithOutcome.mock.calls[0]?.[0] as any;
     expect(publisherRuntimeArg.publicSnapshotStore).toBe(publicSnapshotStore);
+  });
+
+  // Profile nodeId -> libp2p peer id: the daemon schedules the agent's startup
+  // reconcile once (the agent itself decides core-only / legacy-only), and the
+  // `syncProfileNodeId: false` config switch turns it off entirely.
+  async function startWiringDaemon(extraConfig: Record<string, unknown>) {
+    vi.useFakeTimers();
+    mocks.createPublicSnapshotStore.mockReturnValue({
+      putSnapshot: vi.fn(),
+      getSnapshot: vi.fn(),
+      getSnapshotPage: vi.fn(),
+    });
+    await runDaemonInner(true, {
+      name: 'profile-node-id-wiring-test',
+      networkConfig: 'mainnet-gnosis',
+      listenPort: 0,
+      apiPort: 0,
+      bootstrapPeers: ['/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+      nodeRole: 'edge',
+      auth: { enabled: false },
+      promoteQueue: { enabled: false },
+      source: 'monorepo',
+      publisher: { enabled: true },
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
+      ...extraConfig,
+    } as any, Date.now(), resolveShutdownPolicy(undefined));
+    await vi.advanceTimersByTimeAsync(0);
+    return (await mocks.agentCreate.mock.results[0]!.value) as ReturnType<typeof createFakeAgent>;
+  }
+
+  it('schedules the Profile nodeId startup reconcile once by default', async () => {
+    const agent = await startWiringDaemon({});
+    expect(agent.reconcileProfileNodeIdOnStartup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not schedule the Profile nodeId reconcile when syncProfileNodeId is false', async () => {
+    const agent = await startWiringDaemon({ syncProfileNodeId: false });
+    expect(agent.reconcileProfileNodeIdOnStartup).not.toHaveBeenCalled();
   });
 });

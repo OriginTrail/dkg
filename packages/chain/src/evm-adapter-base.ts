@@ -42,6 +42,7 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import { selectorInDeployedCode } from './evm-selector-probe.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -467,22 +468,16 @@ function isKaHighWaterBareRevert(err: unknown): boolean {
 }
 
 /**
- * True iff the `getMaxKaNumberForAuthor(address)` selector appears as a
- * `PUSH4 <selector>` dispatcher entry in `code` (the resolved contract's
- * deployed runtime bytecode). A Solidity function dispatcher compares
- * `msg.sig` against each external selector via `PUSH4 <selector>` (opcode
- * `0x63`), so we match `63<selector>` rather than the bare 4 selector bytes —
- * a plain substring match would false-POSITIVE on the same 4 bytes appearing
- * inside an unrelated constant or the metadata blob, making a pre-10.0.4
- * contract look like it implements the view and wrongly rethrowing the
- * bare-revert path. Absence of the PUSH4 entry reliably signals the view is
- * not deployed (the pre-10.0.4 case) — for a DIRECT deployment. DKGKnowledgeAssets
- * is resolved straight from the Hub (not behind a proxy), so this probe sees the
- * real dispatcher; if it were ever proxied, the implementation's selectors would
- * not appear in the proxy bytecode (a proxying change MUST revisit this probe).
- * The selector is derived from the contract interface so it tracks the
- * signature; if it can't be derived we return false (treat as absent → fall
- * back, which is safe: the scan yields the correct high-water either way).
+ * True iff the `getMaxKaNumberForAuthor(address)` selector is a `PUSH4`
+ * dispatcher entry in `code` (the resolved contract's deployed runtime
+ * bytecode; see `selectorInDeployedCode`). A false positive would make a
+ * pre-10.0.4 contract look like it implements the view and wrongly rethrow the
+ * bare-revert path; absence signals the pre-10.0.4 case. DKGKnowledgeAssets is
+ * resolved straight from the Hub (not behind a proxy), so the probe sees the
+ * real dispatcher. The selector is derived from the contract interface so it
+ * tracks the signature; if it can't be derived we return false (treat as
+ * absent → fall back, which is safe: the scan yields the correct high-water
+ * either way).
  */
 function kaHighWaterViewSelectorInCode(storage: Contract, code: string): boolean {
   let selector: string | undefined;
@@ -492,9 +487,7 @@ function kaHighWaterViewSelectorInCode(storage: Contract, code: string): boolean
     selector = undefined;
   }
   if (!selector) return false;
-  // `63` = PUSH4 opcode; the 4 selector bytes must follow it to count as a real
-  // dispatcher entry (not a coincidental byte run elsewhere in the bytecode).
-  return code.toLowerCase().includes(`63${selector.toLowerCase().slice(2)}`);
+  return selectorInDeployedCode(code, selector);
 }
 
 /**

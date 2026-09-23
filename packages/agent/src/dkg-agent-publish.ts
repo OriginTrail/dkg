@@ -202,6 +202,7 @@ export interface ResolveAssertionAuthorOptions {
   selectedAuthorAgentAddress?: string;
 }
 import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
+import { profileNodeIdForNewProfile } from './profile-node-id-sync.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -7138,7 +7139,12 @@ export class PublishMethods extends DKGAgentBase {
     }
     this.profileProvisioningInFlight = true;
     try {
-      return await this.chain.ensureProfile({ nodeName: this.config.name });
+      // New profiles carry this node's libp2p peer id as their nodeId, so the
+      // chain maps the identity to a dialable peer (it used to be random bytes).
+      return await this.chain.ensureProfile({
+        nodeName: this.config.name,
+        nodeId: profileNodeIdForNewProfile(this.node.peerId.toString()),
+      });
     } finally {
       this.profileProvisioningInFlight = false;
     }
@@ -7157,7 +7163,10 @@ export class PublishMethods extends DKGAgentBase {
       identityId = await this.chain.getIdentityId();
       if (identityId === 0n && effectiveRole === 'core') {
         this.log.info(ctx, 'ensureIdentity: no on-chain identity, creating profile...');
-        identityId = await this.chain.ensureProfile({ nodeName: this.config.name });
+        identityId = await this.chain.ensureProfile({
+          nodeName: this.config.name,
+          nodeId: profileNodeIdForNewProfile(this.node.peerId.toString()),
+        });
         this.log.info(ctx, `ensureIdentity: profile created, identityId=${identityId}`);
       } else if (identityId === 0n) {
         return 0n;

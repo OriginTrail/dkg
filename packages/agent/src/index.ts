@@ -618,3 +618,15 @@ export {
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+// Profile nodeId <-> libp2p peer id sync (`dkg identity`, daemon startup reconcile).
+export {
+  describeProfileNodeIdSync,
+  profileNodeIdForNewProfile,
+  readProfileNodeIdStatus,
+  syncProfileNodeId,
+  type ProfileNodeIdState,
+  type ProfileNodeIdStatus,
+  type ProfileNodeIdSyncMode,
+  type ProfileNodeIdSyncOutcome,
+  type ProfileNodeIdSyncResult,
+} from './profile-node-id-sync.js';

@@ -105,8 +105,8 @@ describe('@unit Profile contract', function () {
     expect(await Profile.name()).to.equal('Profile');
   });
 
-  it('The contract is version "10.0.2"', async () => {
-    expect(await Profile.version()).to.equal('10.0.2');
+  it('The contract is version "10.1.0"', async () => {
+    expect(await Profile.version()).to.equal('10.1.0');
   });
 
   it('Create a profile with valid inputs, expect to pass', async () => {
@@ -233,6 +233,28 @@ describe('@unit Profile contract', function () {
     await expect(
       Profile.createProfile(accounts[1].address, [], 'Node 1', '0x', 1000),
     ).to.be.revertedWithCustomError(Profile, 'EmptyNodeId');
+  });
+
+  it('Cannot create a profile with a node ID over 64 bytes, and no identity is minted', async () => {
+    const oversize = hre.ethers.hexlify(hre.ethers.randomBytes(65));
+    const lastIdentityId = await IdentityStorage.lastIdentityId();
+
+    await expect(
+      Profile.createProfile(accounts[1].address, [], 'Node 1', oversize, 1000),
+    )
+      .to.be.revertedWithCustomError(Profile, 'NodeIdTooLong')
+      .withArgs(65, 64);
+
+    expect(await IdentityStorage.lastIdentityId()).to.equal(lastIdentityId);
+    expect(await IdentityStorage.getIdentityId(accounts[0].address)).to.equal(0n);
+    expect(await ProfileStorage.nodeIdsList(oversize)).to.equal(false);
+  });
+
+  it('Create a profile with a node ID of exactly 64 bytes, expect to pass', async () => {
+    const maxLength = hre.ethers.hexlify(hre.ethers.randomBytes(64));
+    await Profile.createProfile(accounts[1].address, [], 'Node 1', maxLength, 1000);
+    const identityId = await IdentityStorage.getIdentityId(accounts[0].address);
+    expect(await ProfileStorage.getNodeId(identityId)).to.equal(maxLength);
   });
 
   it('Cannot create a profile with node ID already taken, expect to fail', async () => {
@@ -670,6 +692,30 @@ describe('@unit Profile contract', function () {
           '0x',
         ),
       ).to.be.revertedWithCustomError(Profile, 'EmptyNodeId');
+    });
+
+    it('reverts NodeIdTooLong for a node id over 64 bytes and accepts exactly 64', async () => {
+      await seedBrickedIdentity();
+      const oversize = hre.ethers.hexlify(hre.ethers.randomBytes(65));
+
+      await expect(
+        Profile.connect(accounts[1]).recreateProfile(
+          accounts[0].address,
+          'Node 1',
+          oversize,
+        ),
+      )
+        .to.be.revertedWithCustomError(Profile, 'NodeIdTooLong')
+        .withArgs(65, 64);
+      expect(await ProfileStorage.profileExists(identityId1)).to.equal(false);
+
+      const maxLength = hre.ethers.hexlify(hre.ethers.randomBytes(64));
+      await Profile.connect(accounts[1]).recreateProfile(
+        accounts[0].address,
+        'Node 1',
+        maxLength,
+      );
+      expect(await ProfileStorage.getNodeId(identityId1)).to.equal(maxLength);
     });
 
     it('reverts NodeIdAlreadyExists when the node id is taken by another node', async () => {

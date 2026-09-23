@@ -28,6 +28,7 @@ library ProfileLib {
     error EmptyNodeId();
     error NodeNameAlreadyExists(string nodeName);
     error NodeIdAlreadyExists(bytes nodeId);
+    error NodeIdTooLong(uint256 length, uint256 maxLength);
     error OperatorFeeOutOfRange(uint16 operatorFee);
     error ZeroAsk();
     error AskUpdateOnCooldown(uint72 identityId, uint256 cooldownEnd);

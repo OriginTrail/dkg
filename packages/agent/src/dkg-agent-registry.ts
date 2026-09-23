@@ -388,6 +388,14 @@ import type { DKGAgent } from './dkg-agent.js';
 // The bounded-probe retry helper is co-located with its outcome model in the
 // confirmation module (imported here for the facade, not re-exported from index).
 import { confirmPcaAgentRegistration, type PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
+import {
+  describeProfileNodeIdSync,
+  readProfileNodeIdStatus,
+  syncProfileNodeId as syncProfileNodeIdForNode,
+  type ProfileNodeIdStatus,
+  type ProfileNodeIdSyncMode,
+  type ProfileNodeIdSyncResult,
+} from './profile-node-id-sync.js';
 
 // The single PCA capability boundary: narrows the optional
 // `chain.isPublishingConvictionAgent` into a bound boolean probe, or `null` when
@@ -1697,6 +1705,50 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async getIdentityWalletContracts(this: DKGAgent): Promise<IdentityWalletContracts | null> {
     if (typeof this.chain.getIdentityWalletContracts !== 'function') return null;
     return this.chain.getIdentityWalletContracts();
+  }
+
+  // ----- Profile nodeId (identity -> libp2p peer id) -----
+  // `null` = the chain adapter has no Profile nodeId surface (-> 503).
+
+  /** Where this node's on-chain Profile nodeId stands relative to its libp2p peer id. */
+  async getProfileNodeIdStatus(this: DKGAgent): Promise<ProfileNodeIdStatus | null> {
+    return readProfileNodeIdStatus({ chain: this.chain, peerId: this.node.peerId.toString() });
+  }
+
+  /**
+   * Point this node's on-chain Profile nodeId at its libp2p peer id. `manual`
+   * (the `dkg identity sync-node-id` command) overwrites any other value;
+   * `startup` only replaces a nodeId that is not a peer id.
+   */
+  async syncProfileNodeId(
+    this: DKGAgent,
+    mode: ProfileNodeIdSyncMode = 'manual',
+  ): Promise<ProfileNodeIdSyncResult | null> {
+    return syncProfileNodeIdForNode({ chain: this.chain, peerId: this.node.peerId.toString() }, mode);
+  }
+
+  /**
+   * The daemon's startup reconcile: once, best-effort, never throws. Core
+   * nodes only (edges have no identity). An older Profile contract is one
+   * info line, not a warning.
+   */
+  async reconcileProfileNodeIdOnStartup(this: DKGAgent): Promise<ProfileNodeIdSyncResult | null> {
+    if ((this.config.nodeRole ?? 'edge') !== 'core' || this.chain.chainId === 'none') return null;
+    const ctx = createOperationContext('system');
+    try {
+      const result = await this.syncProfileNodeId('startup');
+      if (result === null) {
+        this.log.info(ctx, 'Profile nodeId sync: the chain adapter has no Profile nodeId surface; skipping');
+        return null;
+      }
+      const line = `Profile nodeId sync: ${describeProfileNodeIdSync(result)}`;
+      if (result.outcome === 'taken' || result.outcome === 'skipped-other-peer') this.log.warn(ctx, line);
+      else this.log.info(ctx, line);
+      return result;
+    } catch (err) {
+      this.log.warn(ctx, `Profile nodeId sync failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   async requestBrowserWalletRpc(

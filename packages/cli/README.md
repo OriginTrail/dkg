@@ -294,6 +294,8 @@ modes auto-renewal can't recover from:
 | `dkg auth show` | Display the current API auth token |
 | `dkg auth rotate` | Generate a new API auth token |
 | `dkg wallet` | Show operational wallet addresses and balances |
+| `dkg identity node-id` | Show the on-chain Profile nodeId next to this node's libp2p peer id |
+| `dkg identity sync-node-id` | Set the on-chain Profile nodeId to this node's peer id (needs Profile >= 10.1.0) |
 | `dkg set-ask <amount>` | Set the node's on-chain ask (TRAC per KB·epoch) |
 | `dkg openclaw setup` | Install and configure the OpenClaw adapter |
 | `dkg llm [prompt...]` | Ground a local OpenAI-compatible model in the DKG MCP tools; no prompt starts interactive chat |
@@ -453,6 +455,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verifiable Memory trust operations
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
+- `GET /api/identity/node-id`, `POST /api/identity/node-id/sync` — on-chain Profile nodeId vs. this node's libp2p peer id
 - `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 

@@ -1,5 +1,6 @@
 import type {
   ChainAdapter,
+  EnsureProfileOptions,
   IdentityProof,
   ReservedRange,
   BatchMintParams,
@@ -31,7 +32,7 @@ export class NoChainAdapter implements ChainAdapter {
 
   async registerIdentity(_proof: IdentityProof): Promise<bigint> { noChain(); }
   async getIdentityId(): Promise<bigint> { return 0n; }
-  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> { noChain(); }
+  async ensureProfile(_options?: EnsureProfileOptions): Promise<bigint> { noChain(); }
   async reserveUALRange(_count: number): Promise<ReservedRange> { noChain(); }
   async batchMintKnowledgeAssets(_params: BatchMintParams): Promise<BatchMintResult> { noChain(); }
   async *listenForEvents(_filter: EventFilter): AsyncIterable<ChainEvent> { noChain(); }

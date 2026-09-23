@@ -2659,6 +2659,17 @@ async function runDaemonInnerWithStartupOwnership(
   }, 0);
   if (relayRegistryTimer.unref) relayRegistryTimer.unref();
 
+  // Profile nodeId -> this node's libp2p peer id, so peers can map an on-chain
+  // identity to a dialable peer. Core-only, once, best-effort and non-blocking
+  // (the agent method never throws): only a nodeId that is not a peer id is
+  // replaced, and a Profile older than 10.1.0 logs one info line.
+  if (config.syncProfileNodeId !== false) {
+    const profileNodeIdTimer = setTimeout(() => {
+      void agent.reconcileProfileNodeIdOnStartup();
+    }, 0);
+    if (profileNodeIdTimer.unref) profileNodeIdTimer.unref();
+  }
+
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const runChainDiscoveryScan = createChainDiscoveryScanRunner({

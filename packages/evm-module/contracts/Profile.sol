@@ -11,6 +11,7 @@ import {WhitelistStorage} from "./storage/WhitelistStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
+import {ShardingTable} from "./ShardingTable.sol";
 import {ShardingTableLib} from "./libraries/ShardingTableLib.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
@@ -63,7 +64,25 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // semantics make the prior "fail-fast at the entrypoint" rationale
     // moot. `OperationalWalletAlreadyPrimary` and
     // `OperationalWalletEqualsAdmin` are dropped from `IdentityLib`.
-    string private constant _VERSION = "10.0.2";
+    // Bumped 10.0.2 -> 10.1.0: adds `updateNodeId`, so an identity's profile
+    // `nodeId` can be re-pointed at the node's real libp2p peer id (the
+    // daemon used to write random bytes). A node already in the sharding
+    // table is re-positioned in the same transaction. Needs the Hub's
+    // `ShardingTable`, now resolved in `initialize()`. No storage contract
+    // changes: `ProfileStorage.setNodeId` already exists. Every nodeId
+    // Profile writes (`createProfile`, `recreateProfile`, `updateNodeId`)
+    // is now bounded at MAX_NODE_ID_LENGTH bytes.
+    string private constant _VERSION = "10.1.0";
+
+    /// @notice Upper bound on every nodeId Profile writes: `createProfile`,
+    ///         `recreateProfile` and `updateNodeId`. The canonical encoding is
+    ///         the UTF-8 bytes of the base58btc libp2p peer id string (V6/V8
+    ///         compatible): 46 bytes for RSA/ECDSA (sha256 multihash), 52 for
+    ///         Ed25519, 53 for secp256k1, and at most 61 for any
+    ///         identity-multihash key (<= 42-byte key). The legacy random
+    ///         nodeIds are 32 bytes. 64 bounds the bytes every
+    ///         `ShardingTable.getShardingTable()` reader downloads per node.
+    uint256 public constant MAX_NODE_ID_LENGTH = 64;
 
     Ask public askContract;
     Identity public identityContract;
@@ -81,6 +100,10 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // recreate-profile-recovery 0001 — read-only: recreateProfile checks the
     // recovered nodeId against any surviving sharding-table entry.
     ShardingTableStorage public shardingTableStorage;
+    // 10.1.0 — updateNodeId re-positions a ring member: the hash-ring position
+    // is sha256(nodeId), so the node is removed and re-inserted around the
+    // ProfileStorage write. Both calls are `onlyContracts` on ShardingTable.
+    ShardingTable public shardingTable;
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -115,6 +138,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         chronos = Chronos(hub.getContractAddress("Chronos"));
         convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
+        shardingTable = ShardingTable(hub.getContractAddress("ShardingTable"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -167,9 +191,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         if (ps.isNameTaken(nodeName)) {
             revert ProfileLib.NodeNameAlreadyExists(nodeName);
         }
-        if (nodeId.length == 0) {
-            revert ProfileLib.EmptyNodeId();
-        }
+        _checkNodeIdLength(nodeId);
         if (ps.nodeIdsList(nodeId)) {
             revert ProfileLib.NodeIdAlreadyExists(nodeId);
         }
@@ -259,9 +281,10 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         if (ps.isNameTaken(nodeName)) {
             revert ProfileLib.NodeNameAlreadyExists(nodeName);
         }
-        if (nodeId.length == 0) {
-            revert ProfileLib.EmptyNodeId();
-        }
+        // A ring member must repeat its cached nodeId (checked above), so the
+        // bound assumes every cached nodeId fits. It did on every live network
+        // when 10.1.0 was written: all nodeIds were 32 bytes.
+        _checkNodeIdLength(nodeId);
         if (ps.nodeIdsList(nodeId)) {
             revert ProfileLib.NodeIdAlreadyExists(nodeId);
         }
@@ -433,6 +456,80 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
             revert ProfileLib.ProfileDoesntExist(identityId);
         }
         profileStorage.setRelayCapable(identityId, relayCapable);
+    }
+
+    // =====================================================================
+    // 10.1.0 — updateNodeId: point an identity at its libp2p peer id.
+    //
+    // The daemon created profiles with a random 32-byte nodeId, so the chain
+    // has no identity -> peer mapping. This re-points the nodeId at the
+    // node's real peer id. Canonical encoding (what the node writes; the
+    // contract does not parse it): the UTF-8 bytes of the base58btc peer id
+    // string, which is what V6/V8 nodes wrote.
+    //
+    // ACCESS CONTROL — REVIEWER DECISION. `onlyIdentityOwner` (admin OR
+    // operational key), like updateAsk / updateRelayCapable, so an upgraded
+    // daemon can fix its own nodeId with its operational key. To make it
+    // admin-only, swap `onlyIdentityOwner` for `onlyAdmin` on the function
+    // below (nothing else changes) and flip the operational-key test.
+    //
+    // Unchanged value: a no-op (no event, no ring churn), not a revert, so a
+    // retried or concurrent reconcile tx is idempotent — the same convention
+    // as addOperationalWallets.
+    //
+    // Ring: the position is sha256(nodeId). A ring member is removed, its
+    // nodeId written, and re-inserted by binary search on the NEW nodeId in
+    // this transaction, so ShardingTableStorage's cached Node.nodeId and
+    // hashRingPosition keep matching ProfileStorage (recreateProfile's
+    // NodeIdShardingMismatch guard relies on that). Membership and
+    // nodesCount are unchanged, so Ask's active-set sums need no recompute.
+    // Worst case is two O(n) re-index passes (remove + insert).
+    //
+    // Uniqueness: ProfileStorage.setNodeId does not reject an id another
+    // identity holds, so `nodeIdsList` is checked here.
+    // =====================================================================
+
+    /// @notice Set the profile nodeId of `identityId`; a sharding-table member
+    ///         is re-positioned in the same transaction. No-op if unchanged.
+    /// @param identityId The identity whose profile nodeId changes.
+    /// @param nodeId The new nodeId: non-empty, at most MAX_NODE_ID_LENGTH
+    ///        bytes, and not held by another identity.
+    function updateNodeId(uint72 identityId, bytes calldata nodeId) external onlyIdentityOwner(identityId) {
+        ProfileStorage ps = profileStorage;
+
+        bytes memory currentNodeId = ps.getNodeId(identityId);
+        if (currentNodeId.length == 0) {
+            revert ProfileLib.ProfileDoesntExist(identityId);
+        }
+        _checkNodeIdLength(nodeId);
+        if (keccak256(nodeId) == keccak256(currentNodeId)) {
+            return;
+        }
+        if (ps.nodeIdsList(nodeId)) {
+            revert ProfileLib.NodeIdAlreadyExists(nodeId);
+        }
+
+        if (shardingTableStorage.nodeExists(identityId)) {
+            ShardingTable st = shardingTable;
+            st.removeNode(identityId);
+            ps.setNodeId(identityId, nodeId);
+            st.insertNode(identityId);
+        } else {
+            ps.setNodeId(identityId, nodeId);
+        }
+    }
+
+    /// @dev The nodeId rule shared by every write path (createProfile,
+    ///      recreateProfile, updateNodeId): non-empty and at most
+    ///      MAX_NODE_ID_LENGTH bytes. Uniqueness stays with each caller,
+    ///      because updateNodeId treats the identity's own value as a no-op.
+    function _checkNodeIdLength(bytes calldata nodeId) internal pure {
+        if (nodeId.length == 0) {
+            revert ProfileLib.EmptyNodeId();
+        }
+        if (nodeId.length > MAX_NODE_ID_LENGTH) {
+            revert ProfileLib.NodeIdTooLong(nodeId.length, MAX_NODE_ID_LENGTH);
+        }
     }
 
     function _checkIdentityOwner(uint72 identityId) internal view virtual {

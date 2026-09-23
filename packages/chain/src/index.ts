@@ -288,6 +288,13 @@ export {
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
 export {
+  PROFILE_NODE_ID_UPDATE_MIN_VERSION,
+  ProfileNodeIdTakenError,
+  ProfileNodeIdUpdateUnsupportedError,
+  isProfileNodeIdTakenError,
+  isProfileNodeIdUpdateUnsupportedError,
+} from './profile-node-id.js';
+export {
   DEFAULT_FINALITY_CONFIRMATIONS,
   MIN_RPC_RECEIPT_TIMEOUT_MS,
   RPC_RECEIPT_TIMEOUT_MS,

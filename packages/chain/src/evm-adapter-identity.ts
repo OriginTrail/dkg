@@ -10,14 +10,63 @@
  */
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
-import { ethers, type Contract } from 'ethers';
+import { ethers, type Contract, type Wallet } from 'ethers';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { enrichEvmError, errorCode } from './evm-adapter-errors.js';
+import { selectorInDeployedCode } from './evm-selector-probe.js';
+import {
+  PROFILE_NODE_ID_UPDATE_MIN_VERSION,
+  PROFILE_UPDATE_NODE_ID_SIGNATURE,
+  ProfileNodeIdTakenError,
+  normalizeProfileNodeId,
+  planProfileNodeIdUpdate,
+} from './profile-node-id.js';
 import type {
+  EnsureProfileOptions,
   IdentityProof,
   IdentityWalletContracts,
   OperationalWalletRegistrationResult,
+  ProfileNodeIdUpdateResult,
+  ProfileNodeIdUpdateSupport,
   TxResult,
 } from './chain-adapter.js';
+
+/** Profile reverts meaning "this key may not update this identity", not "bad input". */
+const PROFILE_NODE_ID_AUTH_ERRORS: ReadonlySet<string> = new Set([
+  'OnlyProfileAdminOrOperationalAddressesFunction',
+  'OnlyProfileAdminFunction',
+]);
+
+/**
+ * The custom error a contract call reverted with, decoded through the ABIs:
+ * ethers' decode against the called contract first, then the vendored ABIs
+ * (`enrichEvmError`), which covers errors raised on paths without the contract
+ * interface, such as gas estimation while signing. Null when nothing decodes.
+ */
+function decodedRevertName(err: unknown): string | null {
+  const name = (err as { revert?: { name?: unknown } } | null)?.revert?.name;
+  return typeof name === 'string' ? name : enrichEvmError(err);
+}
+
+/**
+ * Whether a failed `updateNodeId` send lost the race for its nodeId, i.e. the
+ * contract answered `NodeIdAlreadyExists`. A revert during gas estimation
+ * carries that answer; a transaction mined with status 0 carries none, so
+ * `replay` re-runs the call at the receipt's block to read it.
+ */
+async function lostNodeIdRace(err: unknown, replay: (blockTag: number) => Promise<unknown>): Promise<boolean> {
+  if (decodedRevertName(err) === 'NodeIdAlreadyExists') return true;
+  const receipt = (err as { receipt?: { status?: unknown; blockNumber?: unknown } } | null)?.receipt;
+  if (errorCode(err) !== 'CALL_EXCEPTION' || receipt?.status !== 0 || typeof receipt.blockNumber !== 'number') {
+    return false;
+  }
+  try {
+    await replay(receipt.blockNumber);
+    return false;
+  } catch (replayErr) {
+    return decodedRevertName(replayErr) === 'NodeIdAlreadyExists';
+  }
+}
 
 export class IdentityMethods extends EVMChainAdapterBase {
   /** Independent all-or-none browser capability for node-identity key rotation. */
@@ -302,6 +351,130 @@ export class IdentityMethods extends EVMChainAdapterBase {
     };
   }
 
+  // =====================================================================
+  // Profile nodeId (identity -> libp2p peer id). Profile >= 10.1.0 has
+  // updateNodeId; older deployments are feature-detected, not reverted into.
+  // Profile and ProfileStorage are resolved through the memoized Hub lookup
+  // on every call rather than the boot-bound handles, so a daemon that was
+  // already running when the Hub owner registered a new Profile uses it.
+  // =====================================================================
+
+  async getProfileNodeId(identityId?: bigint): Promise<string> {
+    await this.init();
+    const id = identityId ?? (await this.getIdentityId());
+    if (id === 0n) return '0x';
+    const profileStorage = await this.resolveContract('ProfileStorage');
+    const nodeId = await this.readContract<string>(profileStorage, 'profileStorage.getNodeId', 'getNodeId', id);
+    return ethers.hexlify(nodeId).toLowerCase();
+  }
+
+  async isProfileNodeIdTaken(nodeId: Uint8Array | string): Promise<boolean> {
+    await this.init();
+    const normalized = normalizeProfileNodeId(nodeId, 'isProfileNodeIdTaken');
+    const profileStorage = await this.resolveContract('ProfileStorage');
+    return Boolean(await this.readContract(
+      profileStorage, 'profileStorage.nodeIdsList', 'nodeIdsList', normalized,
+    ));
+  }
+
+  async getProfileNodeIdUpdateSupport(): Promise<ProfileNodeIdUpdateSupport> {
+    await this.init();
+    const profile = await this.resolveContract('Profile');
+    const profileAddress = ethers.getAddress(await profile.getAddress());
+    // The bytecode is the source of truth: a version string could be wrong
+    // on a custom deployment, and a static call of a missing function only
+    // yields an ambiguous bare revert.
+    const code = await this.readProvider('Profile getCode', (provider) => provider.getCode(profileAddress));
+    const selector = profile.interface.getFunction(PROFILE_UPDATE_NODE_ID_SIGNATURE)?.selector;
+    const supported = typeof code === 'string' && selector !== undefined && selectorInDeployedCode(code, selector);
+    let profileVersion: string | null = null;
+    try {
+      profileVersion = String(await this.readContract(profile, 'profile.version', 'version'));
+    } catch {
+      profileVersion = null;
+    }
+    return { supported, profileAddress, profileVersion, requiredVersion: PROFILE_NODE_ID_UPDATE_MIN_VERSION };
+  }
+
+  async updateProfileNodeId(
+    nodeId: Uint8Array | string,
+    options?: { identityId?: bigint },
+  ): Promise<ProfileNodeIdUpdateResult> {
+    await this.init();
+    const plan = await planProfileNodeIdUpdate(this, nodeId, options);
+    if (plan.kind === 'unchanged') return plan.result;
+    const { identityId, previousNodeId, nodeId: requested } = plan;
+
+    // Profile 10.1.0 accepts the operational key (onlyIdentityOwner); a
+    // deployment that made updateNodeId admin-only rejects it. Preflight each
+    // configured key with a static call, which also surfaces input reverts
+    // before any gas is spent, and send with the first key the contract takes.
+    const profile = await this.resolveContract('Profile');
+    const callUpdate = (from: string, blockTag?: number) => this.readProvider(
+      blockTag === undefined ? 'Profile.updateNodeId preflight' : 'Profile.updateNodeId revert replay',
+      (provider) => this.rebindContract(profile, provider)
+        .getFunction('updateNodeId')
+        .staticCall(identityId, requested, blockTag === undefined ? { from } : { from, blockTag }),
+    );
+    const candidates: Wallet[] = [this.signer];
+    if (this.adminSigner && this.adminSigner.address.toLowerCase() !== this.signer.address.toLowerCase()) {
+      candidates.push(this.adminSigner);
+    }
+    let signer: Wallet | undefined;
+    for (const candidate of candidates) {
+      try {
+        await callUpdate(candidate.address);
+        signer = candidate;
+        break;
+      } catch (err) {
+        const revertName = decodedRevertName(err);
+        // The pre-read above said the value was free, but the chain says it is
+        // taken: a lagging read, or another identity claimed it since.
+        if (revertName === 'NodeIdAlreadyExists') throw new ProfileNodeIdTakenError(requested);
+        if (revertName !== null && PROFILE_NODE_ID_AUTH_ERRORS.has(revertName)) continue;
+        throw err;
+      }
+    }
+    if (!signer) {
+      throw new Error(
+        `updateProfileNodeId: none of this node's keys (${candidates.map((c) => c.address).join(', ')}) ` +
+        `is allowed to update the nodeId of identity ${identityId}.`,
+      );
+    }
+
+    const sender = signer;
+    let receipt: ethers.TransactionReceipt;
+    try {
+      receipt = await this.sendContractTransaction(
+        profile,
+        'updateNodeId',
+        [identityId, requested],
+        sender,
+        'updateNodeId',
+      );
+    } catch (err) {
+      // Another identity claimed the value after the preflight: during gas
+      // estimation, or before this transaction was mined.
+      if (await lostNodeIdRace(err, (blockTag) => callUpdate(sender.address, blockTag))) {
+        throw new ProfileNodeIdTakenError(requested);
+      }
+      throw err;
+    }
+    return {
+      identityId,
+      previousNodeId,
+      nodeId: requested,
+      changed: true,
+      signer: signer.address,
+      tx: {
+        hash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        txIndex: receipt.index,
+        success: receipt.status === 1,
+      },
+    };
+  }
+
   /**
    * OT-RFC-39 view-only address to identityId lookup.
    *
@@ -314,7 +487,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     return this.readIdentityIdForAddress(address);
   }
 
-  async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
+  async ensureProfile(options?: EnsureProfileOptions): Promise<bigint> {
     await this.init();
 
     let identityId = await this.getIdentityId();
@@ -330,7 +503,25 @@ export class IdentityMethods extends EVMChainAdapterBase {
           'Cannot create profile: adminPrivateKey is required so the profile admin key is not lost.',
         );
       }
-      const nodeId = ethers.hexlify(ethers.randomBytes(32));
+      // The caller's nodeId is normally this node's libp2p peer id. If another
+      // identity already holds it (a libp2p key reused after a wallet reset,
+      // or a squatter), createProfile would revert NodeIdAlreadyExists, and
+      // the boot path treats that deterministic revert as permanent: the core
+      // would never get an identity. Fall back to a random nodeId instead and
+      // say so; the operator can re-point it later (`dkg identity sync-node-id`).
+      let nodeId = ethers.hexlify(ethers.randomBytes(32));
+      if (options?.nodeId !== undefined) {
+        const requested = normalizeProfileNodeId(options.nodeId, 'ensureProfile');
+        if (await this.isProfileNodeIdTaken(requested)) {
+          console.warn(
+            `[ensureProfile] nodeId ${requested} (this node's libp2p peer id) is already registered ` +
+            'to another identity; creating the profile with a random nodeId instead. Until that is ' +
+            'resolved, peers cannot map this identity to its libp2p peer (see "dkg identity node-id").',
+          );
+        } else {
+          nodeId = requested;
+        }
+      }
 
       const receipt = await this.sendContractTransaction(
         this.contracts.profile!,

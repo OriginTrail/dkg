@@ -1127,6 +1127,20 @@ export interface DkgConfig {
    */
   relayCapable?: boolean;
   /**
+   * Point the on-chain Profile nodeId at this node's libp2p peer id at
+   * startup (core nodes, once, best-effort). Peers use the nodeId to map an
+   * identity (a sharding-table member, an ACK signer) to a dialable peer;
+   * profiles created before the peer id was written carry random bytes.
+   *
+   * Only a nodeId that is not a peer id is replaced; a different valid peer
+   * id is left alone with a warning (`dkg identity sync-node-id` overrides).
+   * Needs Profile >= 10.1.0; on an older deployment this logs one info line
+   * and sends nothing. Sends one transaction with the operational key.
+   *
+   * Default: true. Set false to never touch the nodeId automatically.
+   */
+  syncProfileNodeId?: boolean;
+  /**
    * Agent-to-agent chat settings. Phase 1 (RFC: agent debug chat) only
    * uses the `acl` block, which controls who is allowed to send us
    * inbound chats over `/dkg/message/1.0.0`. Authentication is always
