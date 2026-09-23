@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withFileLock } from './file-lock.js';
+import { withFileLock } from '@origintrail-official/dkg-core';
 
 export interface PublisherWalletsConfig {
   wallets: Array<{

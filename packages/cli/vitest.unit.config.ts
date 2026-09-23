@@ -38,12 +38,10 @@ export default defineConfig({
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
-          // Home config writes: the shared file lock, atomic replace, and
-          // re-read-then-patch updates (no lost update, YAML stays YAML).
+          // Home config writes: re-read-then-patch updates through the shared
+          // core helper (no lost update, YAML stays YAML).
           'test/config-file-update.test.ts',
           'test/daemon-config-persistence.test.ts',
-          'test/durable-file-replace.test.ts',
-          'test/file-lock.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',

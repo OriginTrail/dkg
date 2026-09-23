@@ -5,7 +5,6 @@ import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origint
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
@@ -36,10 +35,15 @@ import {
   findPackageRepoDir,
   isDkgMonorepoRoot,
   hasErrorCode,
+  homeConfigLockPath,
+  homeConfigSources,
+  readHomeConfigSource,
   resolveDkgConfigHome,
   dkgAuthTokenPath,
   peerIdFromRelayAddress,
   SELECTABLE_SETUP_NETWORKS,
+  updateHomeConfigFile,
+  type HomeConfigSource,
 } from '@origintrail-official/dkg-core';
 import {
   resolveStorageAckTiming,
@@ -59,8 +63,6 @@ import {
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
-import { withFileLock } from './file-lock.js';
-import { replaceFileDurably } from './durable-file-replace.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -2402,36 +2404,25 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
  */
 export type DkgConfigFilePatch = (config: Partial<DkgConfig>) => void;
 
-const CONFIG_LOCK_TIMEOUT_MS = 10_000;
-
-/** A home config file and how to parse it. */
-interface ConfigFileSource {
-  path: string;
-  format: 'json' | 'yaml';
-  parse(text: string): unknown;
-}
-
 /** Immutable filesystem context for one selected local daemon home. */
 export class DkgHomeFiles {
   constructor(readonly home: string = dkgDir()) { Object.freeze(this); }
 
   get configPath(): string { return join(this.home, 'config.json'); }
   get configYamlPath(): string { return join(this.home, 'config.yaml'); }
-  get configLockPath(): string { return join(this.home, 'config.lock'); }
+  get configLockPath(): string { return homeConfigLockPath(this.home); }
   get pidPath(): string { return join(this.home, 'daemon.pid'); }
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
   /**
-   * The config files in precedence order: the first one that exists is the
+   * The config files in precedence order, as core's `homeConfigSources`
+   * defines them for the setup flows too: the first one that exists is the
    * source of truth for every read and write, and a home without either gets
    * the first on its first write.
    */
-  private get configSources(): readonly ConfigFileSource[] {
-    return [
-      { path: this.configPath, format: 'json', parse: (text) => JSON.parse(text) },
-      { path: this.configYamlPath, format: 'yaml', parse: (text) => yaml.load(text) },
-    ];
+  private get configSources(): readonly HomeConfigSource[] {
+    return homeConfigSources(this.home);
   }
 
   configExists(): boolean { return this.configSources.some(({ path }) => existsSync(path)); }
@@ -2442,54 +2433,20 @@ export class DkgHomeFiles {
   }
 
   async loadConfig(): Promise<DkgConfig> {
-    const source = await this.readConfigSource();
-    return source ? mergePersistedConfig(source.raw) : { ...DEFAULT_CONFIG };
+    const source = await readHomeConfigSource(this.home);
+    return source ? mergePersistedConfig(source.parse(source.text)) : { ...DEFAULT_CONFIG };
   }
 
   /**
-   * Apply `patch` under a lock the daemon and CLI share: re-read the file
-   * that is the source of truth, patch its object, and replace the file
-   * atomically in the same format. A patch that changes nothing writes
-   * nothing. Returns the path of that file. Every CLI and daemon write to the
-   * home config goes through here.
+   * Apply `patch` under the config lock the daemon, the CLI and the adapter
+   * setup flows share: re-read the file that is the source of truth, patch
+   * its object, and replace the file atomically in the same format. A patch
+   * that changes nothing writes nothing. Returns the path of that file. Every
+   * CLI and daemon write to the home config goes through here; the setup
+   * flows use the same core `updateHomeConfigFile`.
    */
   async updateConfigFile(patch: DkgConfigFilePatch): Promise<string> {
-    await mkdir(this.home, { recursive: true });
-    return withFileLock(this.configLockPath, async () => {
-      const source = await this.readConfigSource() ?? { ...this.configSources[0], raw: {} };
-      const config = configFileObject(source.raw, source.path);
-      const before = JSON.stringify(config, null, 2);
-      const result: unknown = patch(config);
-      if (typeof (result as PromiseLike<unknown> | undefined)?.then === 'function') {
-        Promise.resolve(result).catch(() => {});
-        throw new TypeError('A config file patch must be synchronous');
-      }
-      const after = JSON.stringify(config, null, 2);
-      if (after === before) return source.path;
-      // Serialize through JSON in both formats so YAML persists exactly what
-      // JSON would: undefined keys are dropped instead of failing the dump.
-      const content = source.format === 'yaml'
-        ? yaml.dump(JSON.parse(after), { noRefs: true, lineWidth: -1 })
-        : `${after}\n`;
-      await replaceFileDurably(source.path, content);
-      return source.path;
-    }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
-  }
-
-  /**
-   * Read and parse the source-of-truth config file, or undefined when the home
-   * has none. A file that cannot be read or parsed throws; only a missing one
-   * falls through to the next.
-   */
-  private async readConfigSource(): Promise<(ConfigFileSource & { raw: unknown }) | undefined> {
-    for (const source of this.configSources) {
-      try {
-        return { ...source, raw: source.parse(await readFile(source.path, 'utf-8')) };
-      } catch (err) {
-        if (!isEnoent(err)) throw err;
-      }
-    }
-    return undefined;
+    return (await updateHomeConfigFile<Partial<DkgConfig>>(this.home, patch)).path;
   }
 
   readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }
@@ -2535,15 +2492,6 @@ function mergePersistedConfig(raw: unknown): DkgConfig {
   const config = { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
   assertAuthorityIndexConfigPlacement(config);
   return config;
-}
-
-/** An empty config file holds an empty config; anything but an object is refused. */
-function configFileObject(raw: unknown, path: string): Partial<DkgConfig> {
-  if (raw === undefined || raw === null) return {};
-  if (typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new Error(`${path} does not contain a config object; refusing to update it`);
-  }
-  return raw as Partial<DkgConfig>;
 }
 
 function isEnoent(err: unknown): boolean {

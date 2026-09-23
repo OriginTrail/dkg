@@ -23,9 +23,19 @@ All notable changes to the DKG V10 node are documented here. The format is based
   now take a lock shared by the daemon and the CLI, re-read the file, change
   only the keys that command or setting owns, and replace the file atomically
   in its own format, keeping its permissions. A YAML config stays YAML, but
-  its comments are not kept when a write changes it. The `dkg openclaw`,
-  `dkg hermes` and `dkg mcp` setup commands still write `config.json` the old
-  way.
+  its comments are not kept when a write changes it.
+- **Setup commands no longer undo daemon settings, truncate the config or
+  hide a YAML config**: `dkg openclaw setup`, `dkg hermes setup` and
+  `dkg mcp setup` still rewrote the whole `config.json` with no lock and no
+  atomic replace. Run while the daemon was up, they could undo a settings
+  change made in the node UI, and a crash during the write could truncate the
+  file. On a node configured through `config.yaml`, `dkg openclaw setup` and
+  `dkg mcp setup --port`/`--name` created a `config.json` that took
+  precedence over it. Setup now writes through the same lock, re-read and
+  atomic replace as the daemon and the CLI, changes only the keys setup owns,
+  and keeps a YAML config in YAML. A config file that cannot be parsed now
+  stops setup with an error naming the file, where `dkg openclaw setup` and
+  `dkg mcp setup --port`/`--name` used to replace it with a new config.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which

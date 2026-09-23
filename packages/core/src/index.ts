@@ -343,11 +343,25 @@ export {
 } from './faucet-orchestration.js';
 export {
   ensureDkgNodeConfig,
+  readPersistedHomeConfig,
   readPersistedNetworkConfigName,
   type DkgNodeConfigOverrides,
   type DkgNodeNetworkConfig,
   type EnsureDkgNodeConfigOptions,
+  type EnsureDkgNodeConfigResult,
 } from './ensure-dkg-node-config.js';
+export { withFileLock, type FileLockOptions } from './file-lock.js';
+export {
+  homeConfigFilePath,
+  homeConfigLockPath,
+  homeConfigSources,
+  readHomeConfigSource,
+  updateHomeConfigFile,
+  type HomeConfigFile,
+  type HomeConfigFilePatch,
+  type HomeConfigFileUpdate,
+  type HomeConfigSource,
+} from './home-config-file.js';
 export {
   DEFAULT_SETUP_NETWORK,
   LEGACY_FALLBACK_NETWORK,

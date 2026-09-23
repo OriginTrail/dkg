@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, open, realpath, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { hasErrorCode } from '@origintrail-official/dkg-core';
+import { hasErrorCode } from './errors.js';
 
 // Windows fails a replacing rename while another handle (an antivirus scan,
 // the search indexer) has the target open. Those handles close quickly.

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { open, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { threadId } from 'node:worker_threads';
-import { hasErrorCode } from '@origintrail-official/dkg-core';
+import { hasErrorCode } from './errors.js';
 
 /** A lock this old is abandoned even when its pid is alive again: the pid was reused. */
 const LOCK_STALE_MS = 5 * 60 * 1000;
