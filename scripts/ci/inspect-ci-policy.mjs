@@ -28,7 +28,7 @@ async function githubRequest(endpoint, token) {
     },
   });
   if (!response.ok) {
-    throw new Error(`GitHub API ${endpoint} returned ${response.status}`);
+    throw Object.assign(new Error(`GitHub API ${endpoint} returned ${response.status}`), { status: response.status });
   }
   return response.json();
 }
@@ -160,18 +160,27 @@ export async function inspectCiPolicyFreshness({
   try {
     const controllerFiles = await Promise.all(CONTROLLER_POLICY_FILES.map(async (filePath) => {
       const endpoint = `repos/${repository}/contents/${filePath}`;
-      const [pinned, current] = await Promise.all([
-        requestJson(`${endpoint}?ref=${encodeURIComponent(pin)}`, token),
-        requestJson(`${endpoint}?ref=${encodeURIComponent(freshnessBranch)}`, token),
-      ]);
-      if (typeof pinned?.sha !== 'string' || typeof current?.sha !== 'string') {
-        throw new Error(`${filePath} contents response is missing a blob SHA`);
-      }
+      // A file missing at one ref (a controller file added after the pin) is
+      // drift to report, not an inspection error.
+      const blobSha = async (ref) => {
+        let contents;
+        try {
+          contents = await requestJson(`${endpoint}?ref=${encodeURIComponent(ref)}`, token);
+        } catch (error) {
+          if (error?.status === 404) return null;
+          throw error;
+        }
+        if (typeof contents?.sha !== 'string') {
+          throw new Error(`${filePath} contents response is missing a blob SHA`);
+        }
+        return contents.sha;
+      };
+      const [pinnedSha, currentSha] = await Promise.all([blobSha(pin), blobSha(freshnessBranch)]);
       return {
         path: filePath,
-        pinnedSha: pinned.sha,
-        currentSha: current.sha,
-        current: pinned.sha === current.sha,
+        pinnedSha,
+        currentSha,
+        current: pinnedSha !== null && pinnedSha === currentSha,
       };
     }));
     const driftedFiles = controllerFiles
