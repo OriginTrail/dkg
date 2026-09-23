@@ -406,6 +406,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     /** Authoritative numeric slot established by the admission owner. */
     onChainId?: string;
   }): ContextGraphSub {
+    // A name hash this node already resolved (and holds no row for) is the
+    // verified cleartext graph: never mint a second, empty identity for it.
+    const adoptedCleartextId = this.resolveContextGraphIdAlias?.(contextGraphId) ?? null;
+    if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
+    // Subscribing the cleartext of a graph held only by its name hash moves
+    // the subscription: nothing may keep running under the hash id.
+    this.retireLiveContextGraphNamePlaceholderFor?.(contextGraphId);
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {

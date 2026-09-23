@@ -2779,11 +2779,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (numeric <= 0n) return;
 
     const numericStr = numeric.toString();
-    const resolveLocalCgId = () => resolveCoreHostedPublicCgLocalId({
-      onChainId: numeric,
-      swmGraphId,
-      mappedLocalId: this.resolveLocalCgIdByOnChainId(numeric) ?? undefined,
-    });
+    const resolveLocalCgId = () => {
+      const mappedLocalId = this.resolveLocalCgIdByOnChainId(numeric) ?? undefined;
+      // A Core that saw `ContextGraphCreated` before its first ACK holds a
+      // hash-keyed placeholder for this graph. The publisher's cleartext
+      // `swmGraphId` is proven to be that graph's id when its commitment is
+      // exactly the placeholder's name hash; host under the cleartext then,
+      // which also promotes the placeholder.
+      const placeholder = swmGraphId && swmGraphId !== numericStr
+        ? this.resolveWireOnlyContextGraphSubscription(swmGraphId)
+        : null;
+      return resolveCoreHostedPublicCgLocalId({
+        onChainId: numeric,
+        swmGraphId,
+        mappedLocalId,
+        mappedLocalIdIsNamePlaceholderOfHint: placeholder !== null
+          && placeholder.localId === mappedLocalId
+          && placeholder.subscription.onChainId === numericStr,
+      });
+    };
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
     // StorageACK sign, so checking "already recorded" only after the liveness +
