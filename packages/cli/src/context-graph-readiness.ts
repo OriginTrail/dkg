@@ -487,6 +487,23 @@ export interface ContextGraphCatchupReadinessClassification {
 }
 
 /**
+ * A subscription known only by its on-chain name hash cannot sync anything
+ * under that id, whatever the peers answered: holders key the graph by its
+ * cleartext id. Report exactly that (with the next step) instead of a generic
+ * "retry" verdict. `identity` is the agent's note for the job's graph id;
+ * anything other than a hash-only note returns null and the ordinary
+ * classifier decides.
+ */
+export function classifyNameHashOnlyCatchup(
+  identity: { readonly state: string; readonly message: string } | null | undefined,
+): { jobStatus: 'unreachable'; error: string } | null {
+  if (identity?.state !== 'name-hash-only' && identity?.state !== 'name-hash-only-private') {
+    return null;
+  }
+  return { jobStatus: 'unreachable', error: identity.message };
+}
+
+/**
  * Canonical policy for converting one catch-up result into externally visible
  * subscription readiness. The HTTP route gathers live metadata and applies
  * the returned patches; all readiness decisions remain in this pure function.

@@ -109,4 +109,52 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       forceCatchup: true,
     });
   });
+
+  // Base-mainnet Context Graph #33 (2026-09-23): subscribing by the on-chain
+  // name hash used to print a success line and then sync nothing, silently.
+  const nameHash = '0x69a1d4a3500548577083af0be5c4376dcf171907ab7da012d25dc778ced894e3';
+
+  it('says plainly when the graph is known only by its name hash', async () => {
+    const message = 'Context Graph 0x69a1d4a3…94e3 is known only by its on-chain name hash; '
+      + 'waiting for a peer to reveal the cleartext id, or subscribe with the cleartext id.';
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: nameHash,
+      syncMode: 'always-on',
+      catchup: { status: 'queued', includeWorkspace: true, jobId: 'job-1' },
+      identity: { state: 'name-hash-only', nameHash, onChainId: '33', message },
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', nameHash, '--save']);
+
+    const output = logLines.join('\n');
+    expect(output).toContain(`Subscribed to context graph: ${nameHash}`);
+    expect(output).toContain(`Note: ${message}`);
+    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ contextGraphs: [nameHash] }));
+  });
+
+  it('subscribes and saves the verified cleartext id when the daemon resolved the hash', async () => {
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: 'acme-fun-facts',
+      syncMode: 'always-on',
+      catchup: { status: 'queued', includeWorkspace: true, jobId: 'job-2' },
+      identity: {
+        state: 'resolved',
+        nameHash,
+        onChainId: '33',
+        contextGraphId: 'acme-fun-facts',
+        message: 'Context Graph 0x69a1d4a3…94e3 resolves to "acme-fun-facts" (verified against the on-chain name hash); it syncs under that id.',
+      },
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', nameHash, '--save']);
+
+    const output = logLines.join('\n');
+    expect(output).toContain('Subscribed to context graph: acme-fun-facts');
+    expect(output).toContain('resolves to "acme-fun-facts"');
+    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphs: ['acme-fun-facts'],
+    }));
+  });
 });

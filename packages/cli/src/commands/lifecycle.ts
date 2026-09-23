@@ -350,6 +350,9 @@ program
       } else {
         console.log(`  Store:     ${backend}`);
       }
+      if ((s.contextGraphIdentity?.nameHashOnly ?? 0) > 0 && s.contextGraphIdentity?.message) {
+        console.log(`  Graphs:    ${s.contextGraphIdentity.message}`);
+      }
       if (client.controlPlaneWarning) console.warn(client.controlPlaneWarning);
     } catch (err) {
       console.error(toErrorMessage(err));
