@@ -35,6 +35,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
   and the cache is cleared once the restarted server is healthy, so a revived
   store stops showing `UNREACHABLE`.
 
+- **Random Sampling proof repair never fetched from a peer** (#2741): since
+  10.0.15, a Core challenged on a knowledge asset it did not hold skipped
+  every candidate peer and missed the proof, because the sync-protocol check
+  looked each peer up in the libp2p peer store by a string wrapper the store
+  rejects, so every peer looked unable to serve sync. Since 10.0.14 the same
+  check has also made durable recovery treat every peer it asked about as not
+  sync-capable. The peer ID is now parsed before the lookup.
+
 ## [10.0.18] - 2026-09-22
 
 Nodes for AI agents now run leaner and get up to speed in seconds. Edge nodes

@@ -9022,6 +9022,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     throw new NetworkAdmissionRejectedError(peerId);
   }
 
+  /**
+   * Sync-protocol readiness for one peer. Random Sampling exact repair,
+   * durable recovery and the CLI catch-up fallback pass a string-backed
+   * `{ toString }` wrapper, which the libp2p peer store rejects outright;
+   * `waitForPeerProtocol` canonicalizes it to a real PeerId and owns the
+   * abort contract.
+   */
   async waitForSyncProtocol(
     this: DKGAgent,
     pid: { toString(): string },
