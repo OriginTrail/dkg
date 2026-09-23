@@ -23,7 +23,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Documentation only | Planner and aggregate gates only |
 | `core` / `rdf-utils` | All downstream Node and real-EVM lanes (the browser E2E suite runs after merge) |
 | Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching `node-ui`, `graph-viz` or `cli` (the daemon HTTP API it drives); every other PR relies on its own lanes plus the CLI daemon tests and gets the suite after merge |
-| Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane, plus the Gate 0 and evidence harness paths: besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
+| Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane; the planner derives it once for every plan, whether a package, a `devnet/` harness or the Gate 0 paths selected the agent lane. Besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |

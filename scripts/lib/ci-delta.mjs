@@ -53,10 +53,10 @@ export function needsNodeTestArtifacts(plan) {
 // `ci:full` opts a PR in before merging.
 //
 // The Windows lifecycle job (rfc64-inventory-windows.yml) runs wherever the
-// agent lane does. Besides the SQLite persistence suites it runs the RFC-64
-// Gate 0 lifecycle and evidence harnesses, which start a real agent (agent,
-// core, chain, storage and their dependencies) and run on no Linux lane, so
-// every workspace in that closure selects it.
+// agent lane does; planCi derives that once for every plan rather than per
+// rule. Besides the SQLite persistence suites it runs the RFC-64 Gate 0
+// lifecycle and evidence harnesses, which start a real agent (agent, core,
+// chain, storage and their dependencies) and run on no Linux lane.
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
     lanes: [
@@ -64,7 +64,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
@@ -79,7 +78,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
@@ -94,7 +92,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
@@ -109,7 +106,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_supporting',
@@ -122,7 +118,6 @@ export const WORKSPACE_RULES = Object.freeze({
       'tornado_core',
       'tornado_publisher',
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -133,7 +128,6 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_publisher',
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'bura_query',
       'kosava_supporting',
@@ -145,7 +139,6 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: [
       'tornado_publisher',
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -155,7 +148,6 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/random-sampling': {
     lanes: [
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -165,7 +157,6 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/agent': {
     lanes: [
       'tornado_agent',
-      'tornado_agent_windows',
       'bura_cli',
       'kosava_supporting',
       'kosava_hardhat_plugins',
@@ -505,7 +496,7 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     // Windows lifecycle job, and agent code imports the Gate 0 evidence
     // helpers (packages/agent/devnet/rfc64-private-catalog).
     pattern: /^devnet\/(?:rfc64-persistence-lifecycle|_bootstrap)\//,
-    lanes: ['tornado_agent', 'tornado_agent_windows'],
+    lanes: ['tornado_agent'],
     reason: 'RFC-64 persistence harness runs in the agent and Windows lifecycle jobs',
   },
   {
@@ -827,6 +818,9 @@ export function planCi({
     buildChecks ||= route.buildChecks;
     reasons.push(...route.reasons);
   }
+
+  // The Windows lifecycle job follows the agent lane (see WORKSPACE_RULES).
+  if (lanes.tornado_agent) lanes.tornado_agent_windows = true;
 
   const deduplicatedReasons = [...new Set(reasons)];
   const runNode = buildChecks || NODE_LANES.some((lane) => lanes[lane]);

@@ -127,14 +127,14 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
 
 test('repository support paths route to the lanes that execute them', () => {
   for (const [filePath, expected] of [
-    ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent']],
+    ['devnet/rfc64-gate1-public-open/run.ts', ['tornado_blazegraph', 'tornado_agent', 'tornado_agent_windows']],
     ['devnet/rfc64-persistence-lifecycle/run.ts', ['tornado_agent', 'tornado_agent_windows']],
     ['devnet/_bootstrap/rfc64-evidence.test.ts', ['tornado_agent', 'tornado_agent_windows']],
-    ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent']],
-    ['devnet/suites.json', ['tornado_agent']],
+    ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent', 'tornado_agent_windows']],
+    ['devnet/suites.json', ['tornado_agent', 'tornado_agent_windows']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
-    ['devnet/v10-stress/automated.test.ts', ['tornado_agent']],
-    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent']],
+    ['devnet/v10-stress/automated.test.ts', ['tornado_agent', 'tornado_agent_windows']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent', 'tornado_agent_windows']],
     ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
     ['.github/oxlint-baseline.json', []],
@@ -173,14 +173,28 @@ test('the browser suite follows only the UI surface it drives on pull requests',
 test('the Windows lifecycle lane follows the agent dependency closure its harnesses load', () => {
   // The Windows job runs the SQLite persistence suites and the RFC-64 Gate 0
   // and evidence harnesses, which start a real agent and run on no Linux lane,
-  // so it must run wherever the agent lane does.
-  for (const [workspace, rule] of Object.entries(WORKSPACE_RULES)) {
-    if (rule.forceFull) continue;
-    assert.equal(
-      rule.lanes.includes('tornado_agent_windows'),
-      rule.lanes.includes('tornado_agent'),
-      workspace,
-    );
+  // so every plan that runs the agent lane runs it too: every workspace, every
+  // support area and every trigger path.
+  const windowsSelected = (filePath) => pullRequestPlan([change(filePath)]).lanes.tornado_agent_windows;
+  const probes = [
+    ...Object.keys(WORKSPACE_RULES)
+      .filter((workspace) => !WORKSPACE_RULES[workspace].forceFull)
+      .map((workspace) => `${workspace}/src/index.ts`),
+    'devnet/rfc64-gate1-public-open/run.ts',
+    'devnet/rfc64-persistence-lifecycle/verify.ts',
+    'devnet/_bootstrap/rfc64-evidence.ts',
+    'devnet/rfc64-runtime-provenance.mts',
+    'devnet/v10-stress/automated.test.ts',
+    'test-systems/storage-conformance.test.ts',
+    'bench/publish-async-get.bench.ts',
+    'tools/observability/lib/w1.mjs',
+    '.github/CODEOWNERS',
+    'blazegraph-image.json',
+    'packages/node-ui/src/ui/web3/identityWalletActions.ts',
+  ];
+  for (const filePath of probes) {
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.lanes.tornado_agent_windows, plan.lanes.tornado_agent, filePath);
   }
 
   // Derive the closure from what the harnesses actually import, so a new
@@ -213,14 +227,14 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
     }
   }
   for (const workspace of closure) {
-    assert.ok(WORKSPACE_RULES[workspace].lanes.includes('tornado_agent_windows'), workspace);
+    assert.ok(windowsSelected(`${workspace}/src/index.ts`), workspace);
   }
 
   // The Windows workflow's own push filter names the same packages.
   const windowsWorkflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/rfc64-inventory-windows.yml'), 'utf8'));
   for (const filter of windowsWorkflow.on.push.paths) {
     const workspace = filter.match(/^(packages\/[^/]+)\/\*\*$/)?.[1];
-    if (workspace) assert.ok(WORKSPACE_RULES[workspace].lanes.includes('tornado_agent_windows'), filter);
+    if (workspace) assert.ok(windowsSelected(`${workspace}/src/index.ts`), filter);
   }
 
   // Modules the harness loads, new or renamed persistence modules, and every
