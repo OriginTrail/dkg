@@ -147,7 +147,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'always-on',
       catchup: { status: 'queued', includeWorkspace: true, jobId: 'job-3' },
       identity: { state: 'name-hash-only', nameHash: gnosisHash, onChainId: '32', message: identityMessage },
-      onChainReference: { onChainId: '32', nameHash: gnosisHash, contextGraphId: gnosisHash, message: onChainMessage },
+      onChainReference: { onChainId: '32', message: onChainMessage },
     });
     vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
 
@@ -194,8 +194,6 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'always-on',
       onChainReference: {
         onChainId: '32',
-        nameHash: gnosisHash,
-        contextGraphId: 'gnosis-fun-facts',
         message: 'On-chain Context Graph #32 is "gnosis-fun-facts" (verified against its on-chain name hash).',
       },
     });

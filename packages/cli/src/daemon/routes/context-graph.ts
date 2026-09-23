@@ -1969,12 +1969,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const subscriptionTargetId: string = onChainTarget?.contextGraphId ?? requestedContextGraphId;
     const onChainReference = onChainTarget === undefined
       ? undefined
-      : {
-          onChainId: onChainTarget.onChainId,
-          nameHash: onChainTarget.nameHash,
-          contextGraphId: onChainTarget.contextGraphId,
-          message: describeContextGraphOnChainIdResolution(onChainTarget),
-        };
+      : { onChainId: onChainTarget.onChainId, message: describeContextGraphOnChainIdResolution(onChainTarget) };
 
     // A name hash this node already resolved subscribes its verified
     // cleartext graph; subscribing the literal hash again would create a
@@ -2039,8 +2034,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }).catch(() => null);
       if (resolved) contextGraphId = resolved;
     }
+    // Two notes answer two questions about the requested id: which graph an
+    // on-chain id named (`onChainReference`), and whether that graph's name
+    // is known yet (`identity`, the #2744 contract that catch-up status and
+    // the subscriptions list also carry).
     const identity = agent.describeContextGraphIdentity?.(subscriptionTargetId) ?? null;
-    const withIdentity = <T extends object>(body: T) => ({
+    const withResolutionNotes = <T extends object>(body: T) => ({
       ...body,
       ...(identity ? { identity } : {}),
       ...(onChainReference ? { onChainReference } : {}),
@@ -2077,7 +2076,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         // it needs no job-admission guard and produces no I8 point. A lifetime
         // promotion above is independently guarded because it is a mutation.
         recordCatchupRequest('deduped', shouldSyncSharedMemory);
-        return jsonResponse(res, 200, withIdentity({
+        return jsonResponse(res, 200, withResolutionNotes({
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
           catchup: {
@@ -2146,7 +2145,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           reusableDoneJob ? 'ready_replay' : 'ready_synthetic',
           shouldSyncSharedMemory,
         );
-        return jsonResponse(res, 200, withIdentity({
+        return jsonResponse(res, 200, withResolutionNotes({
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
           catchup: {
@@ -2370,7 +2369,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     });
 
     recordCatchupRequest('queued', shouldSyncSharedMemory);
-    return jsonResponse(res, 200, withIdentity({
+    return jsonResponse(res, 200, withResolutionNotes({
       subscribed: contextGraphId,
       syncMode: effectiveSyncMode,
       catchup: {

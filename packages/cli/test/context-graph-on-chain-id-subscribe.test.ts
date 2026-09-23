@@ -204,13 +204,11 @@ describe('subscribing a Context Graph by its on-chain numeric id', () => {
     expect(body).toMatchObject({
       subscribed: NAME_HASH,
       syncMode: 'on-demand',
-      onChainReference: {
-        onChainId: '32',
-        nameHash: NAME_HASH,
-        contextGraphId: NAME_HASH,
-        message: `On-chain Context Graph #32 is Context Graph ${SHORT_HASH} (its on-chain name hash).`,
-      },
       identity: { state: 'name-hash-only', nameHash: NAME_HASH, onChainId: '32', message: HASH_ONLY_MESSAGE },
+    });
+    expect(body.onChainReference).toEqual({
+      onChainId: '32',
+      message: `On-chain Context Graph #32 is Context Graph ${SHORT_HASH} (its on-chain name hash).`,
     });
     const rows = agent.getSubscribedContextGraphs();
     expect(rows.has('32')).toBe(false);
@@ -260,8 +258,6 @@ describe('subscribing a Context Graph by its on-chain numeric id', () => {
     expect(body.subscribed).toBe(CLEARTEXT);
     expect(body.onChainReference).toEqual({
       onChainId: '32',
-      nameHash: NAME_HASH,
-      contextGraphId: CLEARTEXT,
       message: 'On-chain Context Graph #32 is "gnosis-fun-facts" (verified against its on-chain name hash).',
     });
     expect(body).not.toHaveProperty('identity');

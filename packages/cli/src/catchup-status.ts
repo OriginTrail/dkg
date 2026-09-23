@@ -64,13 +64,10 @@ export interface CatchupContextGraphIdentity {
 
 /**
  * Present on a subscribe response when the request named an on-chain numeric
- * id (`32`, `#32`): the row that id resolved to (additive field).
+ * id (`32`, `#32`); `subscribed` carries the graph it named (additive field).
  */
 export interface ContextGraphOnChainReferenceNote {
   readonly onChainId: string;
-  readonly nameHash: string;
-  /** The row the id resolved to: the verified cleartext id, or the name hash. */
-  readonly contextGraphId: string;
   readonly message: string;
 }
 
