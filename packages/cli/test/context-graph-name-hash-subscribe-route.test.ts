@@ -353,25 +353,48 @@ describe('managing a subscription made by name hash', () => {
   });
 
   it('answers an agent-scoped token that may not read the graph as for a hash that keys nothing', async () => {
-    const refusals: Array<[string, () => Promise<AuthorityDecision>]> = [
-      ['denied', async () => ({ ...ALLOWED, outcome: 'denied', reason: 'not-a-member', onChainId: undefined })],
+    const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
+    const agent = nameHashAgent({
+      isResolved: () => true,
+      subscriptions,
+      authority: async () => ({ ...ALLOWED, outcome: 'denied', reason: 'not-a-member', onChainId: undefined }),
+    });
+    const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
+
+    const response = await route.unsubscribe(NAME_HASH);
+    expect(response).toEqual({
+      status: 200,
+      body: { unsubscribed: NAME_HASH, subscribed: false, coreHosted: false },
+    });
+    // Neither named nor stopped: the private graph's cleartext id stays unrevealed.
+    expect(JSON.stringify(response.body)).not.toContain(CLEARTEXT);
+    expect(agent.calls.authority).toEqual([CLEARTEXT]);
+    expect(agent.calls.unsubscribe).toEqual([NAME_HASH]);
+    expect(subscriptions.get(CLEARTEXT)).toMatchObject({ subscribed: true });
+  });
+
+  it('answers a retryable 503, not a success it did not perform, when the admission read cannot complete', async () => {
+    const outages: Array<[string, () => Promise<AuthorityDecision>]> = [
       ['unavailable', async () => ({ ...ALLOWED, outcome: 'unavailable', reason: 'rpc-down', onChainId: undefined })],
       ['a throw', async () => { throw new Error('authority read failed'); }],
     ];
-    for (const [label, refusal] of refusals) {
+    for (const [label, outage] of outages) {
       const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
-      const agent = nameHashAgent({ isResolved: () => true, subscriptions, authority: refusal });
+      const agent = nameHashAgent({ isResolved: () => true, subscriptions, authority: outage });
       const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
 
       const response = await route.unsubscribe(NAME_HASH);
       expect(response, label).toEqual({
-        status: 200,
-        body: { unsubscribed: NAME_HASH, subscribed: false, coreHosted: false },
+        status: 503,
+        body: {
+          error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          retryable: true,
+        },
       });
-      // Neither named nor stopped: the private graph's cleartext id stays unrevealed.
       expect(JSON.stringify(response.body), label).not.toContain(CLEARTEXT);
-      expect(agent.calls.authority, label).toEqual([CLEARTEXT]);
-      expect(agent.calls.unsubscribe, label).toEqual([NAME_HASH]);
+      // Nothing was stopped, and nothing claims it was.
+      expect(agent.calls.unsubscribe, label).toEqual([]);
       expect(subscriptions.get(CLEARTEXT), label).toMatchObject({ subscribed: true });
     }
   });
@@ -381,13 +404,16 @@ describe('managing a subscription made by name hash', () => {
       run: async () => unproductiveRound(),
       close: async () => undefined,
     } as any;
-    const decisions: Array<[string, () => Promise<AuthorityDecision>, number]> = [
-      ['allowed', async () => ALLOWED, 200],
-      ['denied', async () => ({ ...ALLOWED, outcome: 'denied', reason: 'not-a-member', onChainId: undefined }), 403],
-      ['unavailable', async () => ({ ...ALLOWED, outcome: 'unavailable', reason: 'rpc-down', onChainId: undefined }), 503],
-      ['a throw', async () => { throw new Error('authority read failed'); }, 503],
+    // Subscribe answers a refusal with 403; unsubscribe answers it as for an
+    // id that keys no row (200), so a refused caller learns nothing. An
+    // outage is a retryable 503 on both.
+    const decisions: Array<[string, () => Promise<AuthorityDecision>, number, number]> = [
+      ['allowed', async () => ALLOWED, 200, 200],
+      ['denied', async () => ({ ...ALLOWED, outcome: 'denied', reason: 'not-a-member', onChainId: undefined }), 403, 200],
+      ['unavailable', async () => ({ ...ALLOWED, outcome: 'unavailable', reason: 'rpc-down', onChainId: undefined }), 503, 503],
+      ['a throw', async () => { throw new Error('authority read failed'); }, 503, 503],
     ];
-    for (const [label, decision, subscribeStatus] of decisions) {
+    for (const [label, decision, subscribeStatus, unsubscribeStatus] of decisions) {
       const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
       const agent = nameHashAgent({ isResolved: () => true, subscriptions, authority: decision });
       const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
@@ -395,6 +421,7 @@ describe('managing a subscription made by name hash', () => {
       const subscribed = await route.subscribe(NAME_HASH);
       const unsubscribed = await route.unsubscribe(NAME_HASH);
       expect(subscribed.status, label).toBe(subscribeStatus);
+      expect(unsubscribed.status, label).toBe(unsubscribeStatus);
       // Unsubscribe follows the hash exactly when subscribe admitted the caller.
       expect(unsubscribed.body.unsubscribed === CLEARTEXT, label).toBe(subscribed.status === 200);
       // One admission read each, for the same graph, caller and options.

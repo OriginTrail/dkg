@@ -518,6 +518,11 @@ function catchupAuthorityUnavailableResponse(
   includeSharedMemory: boolean,
 ): void {
   recordCatchupRequest('authority_unavailable', includeSharedMemory);
+  return authorityUnavailableResponse(res);
+}
+
+/** The retryable 503 for an admission read that could not be completed. */
+function authorityUnavailableResponse(res: ServerResponse): void {
   return jsonResponse(
     res,
     503,
@@ -2337,19 +2342,24 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // hash is public on chain, but following it names the graph and stops its
     // subscription, so only a caller who could already read that graph
     // follows it: the node operator (who can list every subscription) or an
-    // agent the subscribe route would admit to the resolved id. Anyone else is
-    // answered exactly as for an id that keys no row.
+    // agent the subscribe route would admit to the resolved id. A caller that
+    // is refused is answered exactly as for an id that keys no row. An
+    // admission read that could not be completed gets the subscribe route's
+    // retryable 503: reporting an unsubscribe that did not happen would leave
+    // the graph syncing behind a success.
     let contextGraphId: string = requestedContextGraphId;
     const alias = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? null;
     if (alias !== null && alias !== requestedContextGraphId) {
       let mayFollowAlias = isNodeAdminCaller();
       if (!mayFollowAlias) {
+        let admission: Awaited<ReturnType<typeof readContextGraphSubscriptionAdmission>>;
         try {
-          const { authority } = await readContextGraphSubscriptionAdmission(agent, alias, requestAgentAddress);
-          mayFollowAlias = authority.outcome === 'allowed';
+          admission = await readContextGraphSubscriptionAdmission(agent, alias, requestAgentAddress);
         } catch {
-          mayFollowAlias = false;
+          return authorityUnavailableResponse(res);
         }
+        if (admission.authority.outcome === 'unavailable') return authorityUnavailableResponse(res);
+        mayFollowAlias = admission.authority.outcome === 'allowed';
       }
       if (mayFollowAlias) contextGraphId = alias;
     }
