@@ -514,22 +514,38 @@ function projectRfc64SelectedPublicSyncStatus(
  * Aggregate-only view of subscriptions this node knows only by their on-chain
  * name hash. `/api/status` is unauthenticated, so it never names the affected
  * graphs; the admin-only `GET /api/context-graph/subscriptions` has the rows.
+ * Those blocked by a conflicting binding are counted apart: no peer can
+ * unblock them, so "waiting for a peer" would be wrong advice.
  */
 export function summarizeContextGraphIdentityStatus(
   agent: DKGAgent,
-): { nameHashOnly: number; message?: string } {
+): { nameHashOnly: number; bindingConflicts?: number; message?: string } {
   let nameHashOnly = 0;
+  let bindingConflicts = 0;
   for (const [contextGraphId, subscription] of agent.getSubscribedContextGraphs?.() ?? []) {
     if (subscription?.subscribed !== true) continue;
-    const state = agent.describeContextGraphIdentity?.(contextGraphId)?.state;
-    if (state === 'name-hash-only' || state === 'name-hash-only-private') nameHashOnly += 1;
+    const identity = agent.describeContextGraphIdentity?.(contextGraphId);
+    if (identity?.state !== 'name-hash-only' && identity?.state !== 'name-hash-only-private') continue;
+    nameHashOnly += 1;
+    if (identity.bindingConflict === true) bindingConflicts += 1;
   }
   if (nameHashOnly === 0) return { nameHashOnly };
+  const graphs = (count: number) => `${count} subscribed Context Graph${count === 1 ? ' is' : 's are'} known only by `
+    + 'the on-chain name hash';
+  const waiting = nameHashOnly - bindingConflicts;
+  const parts: string[] = [];
+  if (waiting > 0) {
+    parts.push(`${graphs(waiting)} and cannot sync yet; waiting for a peer to reveal the cleartext id, `
+      + 'or subscribe with the cleartext id');
+  }
+  if (bindingConflicts > 0) {
+    parts.push(`${graphs(bindingConflicts)} and blocked by a conflicting binding: the cleartext id is already `
+      + 'bound to a different on-chain Context Graph on this node');
+  }
   return {
     nameHashOnly,
-    message: `${nameHashOnly} subscribed Context Graph${nameHashOnly === 1 ? ' is' : 's are'} known only by `
-      + 'the on-chain name hash and cannot sync yet; waiting for a peer to reveal the cleartext id, '
-      + 'or subscribe with the cleartext id (details: GET /api/context-graph/subscriptions).',
+    ...(bindingConflicts > 0 ? { bindingConflicts } : {}),
+    message: `${parts.join('. ')} (details: GET /api/context-graph/subscriptions).`,
   };
 }
 

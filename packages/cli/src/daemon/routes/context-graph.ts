@@ -483,12 +483,46 @@ function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: b
   );
 }
 
+/**
+ * The read-authority decision that admits a caller to a Context Graph's
+ * subscription. It is the single admission boundary for subscribe, and for
+ * unsubscribe when it follows a name hash to the cleartext id it resolves
+ * to, so the two routes cannot drift apart. The caller is the request's
+ * agent, or the node's default agent for a node-level token. The legacy
+ * subscription fallback stays off: a subscription cannot be its own
+ * authorization proof. Each route maps the decision itself; a throw is the
+ * route's to handle.
+ */
+async function readContextGraphSubscriptionAdmission(
+  agent: DKGAgent,
+  contextGraphId: string,
+  requestAgentAddress: string | undefined,
+): Promise<{
+  callerAgentAddress: string | undefined;
+  authority: Awaited<ReturnType<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>>;
+}> {
+  const callerAgentAddress = requestAgentAddress ?? agent.getDefaultAgentAddress();
+  const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+    callerAgentAddress,
+    allowSubscriptionFallback: false,
+    // This explicit admission boundary may spend a bounded cold lookup to
+    // populate the chain adapter's reverse name-hash index. Ordinary
+    // queries and restart rehydration retain the short fail-closed timeout.
+  });
+  return { callerAgentAddress, authority };
+}
+
 /** Fail closed without misreporting a transient authority outage as a denial. */
 function catchupAuthorityUnavailableResponse(
   res: ServerResponse,
   includeSharedMemory: boolean,
 ): void {
   recordCatchupRequest('authority_unavailable', includeSharedMemory);
+  return authorityUnavailableResponse(res);
+}
+
+/** The retryable 503 for an admission read that could not be completed. */
+function authorityUnavailableResponse(res: ServerResponse): void {
   return jsonResponse(
     res,
     503,
@@ -1914,16 +1948,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // cannot also serve as its authorization proof. Keep a permanent denial
     // distinct from transient authority unavailability at the HTTP boundary;
     // both fail closed and leave no subscription or catch-up-job side effect.
-    const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+    let callerAddr: string | undefined;
     let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphSubscriptionBootstrapAuthority>>;
     try {
-      readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-        callerAgentAddress: callerAddr,
-        allowSubscriptionFallback: false,
-        // This explicit admission boundary may spend a bounded cold lookup to
-        // populate the chain adapter's reverse name-hash index. Ordinary
-        // queries and restart rehydration retain the short fail-closed timeout.
-      });
+      ({ callerAgentAddress: callerAddr, authority: readAuthority } =
+        await readContextGraphSubscriptionAdmission(agent, contextGraphId, requestAgentAddress));
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
@@ -2309,9 +2338,31 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
     }
     // A name hash this node resolved no longer keys any row: its subscription
-    // moved to the verified cleartext id, which is what must be stopped.
-    const contextGraphId: string =
-      agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? requestedContextGraphId;
+    // moved to the verified cleartext id, which is what must be stopped. The
+    // hash is public on chain, but following it names the graph and stops its
+    // subscription, so only a caller who could already read that graph
+    // follows it: the node operator (who can list every subscription) or an
+    // agent the subscribe route would admit to the resolved id. A caller that
+    // is refused is answered exactly as for an id that keys no row. An
+    // admission read that could not be completed gets the subscribe route's
+    // retryable 503: reporting an unsubscribe that did not happen would leave
+    // the graph syncing behind a success.
+    let contextGraphId: string = requestedContextGraphId;
+    const alias = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? null;
+    if (alias !== null && alias !== requestedContextGraphId) {
+      let mayFollowAlias = isNodeAdminCaller();
+      if (!mayFollowAlias) {
+        let admission: Awaited<ReturnType<typeof readContextGraphSubscriptionAdmission>>;
+        try {
+          admission = await readContextGraphSubscriptionAdmission(agent, alias, requestAgentAddress);
+        } catch {
+          return authorityUnavailableResponse(res);
+        }
+        if (admission.authority.outcome === 'unavailable') return authorityUnavailableResponse(res);
+        mayFollowAlias = admission.authority.outcome === 'allowed';
+      }
+      if (mayFollowAlias) contextGraphId = alias;
+    }
     agent.unsubscribeFromContextGraph(contextGraphId);
     const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
     return jsonResponse(res, 200, {

@@ -325,11 +325,16 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
   }, 120_000);
 
   it('resolves from its own store first, reading the access policy from the chain', async () => {
+    const holderChain = await chainWithContextGraph33('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
     const edgeChain = await chainWithContextGraph33('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const holder = await startAgent('Holder33LocalStore', holderChain);
     const edge = await startAgent('Edge33LocalStore', edgeChain);
-    seedEdge(edge);
-    // Nothing cached: the resolver must prove the policy public itself.
-    edge.onChainAccessPolicyCache.delete(ON_CHAIN_ID);
+    // A connected peer that would answer, so "never asked a peer" below is a
+    // choice the resolver made, not the only thing it could do.
+    await seedHolder(holder, holderChain);
+    await connect(edge, holder);
+    expect(edge.contextGraphNameResolutionPeers()).toContain(holder.peerId);
+    await expect(edge.peerAdvertisesProtocol(holder.peerId, PROTOCOL_CONTEXT_GRAPH_NAME)).resolves.toBe(true);
     // The creator's public definition, already in this node's own ontology
     // graph (cores re-sync it to each other), next to another graph's.
     await edge.store.insert([
@@ -346,10 +351,17 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
         graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
       },
     ]);
+    // Subscribing wakes the background resolver on its next tick; the spies
+    // and the cleared policy are in place before it runs.
+    seedEdge(edge);
+    // Nothing cached: the resolver must prove the policy public itself.
+    edge.onChainAccessPolicyCache.delete(ON_CHAIN_ID);
     const asked = vi.spyOn(edge, 'askPeerForContextGraphName');
     const pulled = vi.spyOn(edge, 'pullPeerOntologyForContextGraphNames');
 
     expect(await edge.resolveContextGraphNameHashNow(NAME_HASH)).toBe(CLEARTEXT_ID);
+    expect(asked).not.toHaveBeenCalled();
+    expect(pulled).not.toHaveBeenCalled();
     expect(edge.getContextGraphNameResolutionStatus()).toContainEqual(expect.objectContaining({
       state: 'resolved',
       nameHash: NAME_HASH,
@@ -362,7 +374,11 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
       onChainId: ON_CHAIN_ID,
       onChainHash: NAME_HASH,
     });
-    expect(asked).not.toHaveBeenCalled();
-    expect(pulled).not.toHaveBeenCalled();
+    // The peer the resolver skipped would have answered.
+    await expect(edge.askPeerForContextGraphName(
+      holder.peerId,
+      { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID },
+      new AbortController().signal,
+    )).resolves.toBe(CLEARTEXT_ID);
   }, 120_000);
 });
