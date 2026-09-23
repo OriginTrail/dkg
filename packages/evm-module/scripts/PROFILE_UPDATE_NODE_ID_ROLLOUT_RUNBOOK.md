@@ -103,9 +103,13 @@ configured (`RPC_<NETWORK>`, and the key `utils/network.ts` reads for it).
    '
    ```
 
-   If it lists anything, stop. A ring member with a longer cached nodeId could
-   no longer `recreateProfile`; it has to `updateNodeId` to a shorter value
-   first, which also refreshes its ring entry.
+   If it lists anything, record those identities; the deploy can go ahead.
+   Nothing live breaks. The one path such a ring member loses is
+   `recreateProfile` (which must repeat its cached nodeId) after a
+   ProfileStorage redeploy, until it runs `updateNodeId` to a shorter value
+   after this deploy, which also refreshes its ring entry. An upgraded core's
+   startup reconcile does that by itself: a nodeId longer than 64 bytes is
+   never a peer id, so it counts as legacy and is replaced.
 
 2. Compile:
 
