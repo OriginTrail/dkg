@@ -69,12 +69,8 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
-import { parseIncludeStoreQuads } from '../../status-store-quads-wire.js';
-import {
-  getCachedExternalStoreQuads,
-  peekCachedExternalStoreQuads,
-  storeQuadsStatusFields,
-} from '../store-quads-cache.js';
+import { parseIncludeStoreQuads, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
+import { getCachedExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -669,14 +665,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
     const includeStoreQuads = parseIncludeStoreQuads(url.searchParams);
     const storeQuadsNow = Date.now();
-    // Projected at once, before the awaits below: `storeQuadsRefreshing` reads
-    // the in-flight count, which may settle meanwhile, and must describe the
-    // same moment as the count and age it accompanies.
-    const storeQuadsFields = storeQuadsStatusFields(reportsExternalStoreQuads
-      ? includeStoreQuads
+    // A local backend reports no count; the cache returns complete fields.
+    const storeQuadsFields: StoreQuadsStatusFields = !reportsExternalStoreQuads
+      ? { storeQuads: null }
+      : includeStoreQuads
         ? getCachedExternalStoreQuads(agent, storeQuadsNow)
-        : peekCachedExternalStoreQuads(storeQuadsNow)
-      : null);
+        : peekCachedExternalStoreQuads(storeQuadsNow);
     const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
