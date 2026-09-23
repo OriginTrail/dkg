@@ -2524,6 +2524,15 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   async stop(): Promise<void> {
+    // Codex review #2614 — fence the deferred restart-restore tail FIRST, and
+    // unconditionally: the flag stops the drain BETWEEN markers so it cannot
+    // wire a gossip topic (or rewrite a marker) into a node that is tearing
+    // down, and `initializeSwmHostModeStore` is reachable without `start()`.
+    // `this.started` is not usable as the fence itself — `start()` sets it
+    // AFTER `initializeSwmHostModeStore()`, so a drain that fires mid-start
+    // would read false. The promise joins `drains` below so teardown also does
+    // not race a marker that is already in flight.
+    this.swmHostModeRestoreDrainAborted = true;
     if (!this.started) return;
     this.peerSyncSession.close();
     // Cancelling a waiter alone does not retire the shared physical scan.
@@ -2579,6 +2588,7 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.hostModePruneTimer);
       this.hostModePruneTimer = null;
     }
+    const hostModeRestoreDrain = this.swmHostModeRestoreDrain;
     if (this.beaconReannounceTimer) {
       clearInterval(this.beaconReannounceTimer);
       this.beaconReannounceTimer = undefined;
@@ -2636,6 +2646,7 @@ export class DKGAgent extends DKGAgentBase {
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
+    if (hostModeRestoreDrain) drains.push(hostModeRestoreDrain);
 
     let retirement!: Promise<void>;
     retirement = Promise.allSettled(drains).then(() => {

@@ -444,6 +444,22 @@ describe('SwmHostModeStore', () => {
       expect(restored).toEqual(['curator/cg-host']);
     });
 
+    it('persists the numeric chain binding beside a host marker', async () => {
+      const wireId = `0x${'ab'.repeat(32)}`;
+      const first = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      await first.markHostModeSubscribed(wireId, { onChainId: '0042' });
+
+      const second = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      expect(await second.listHostModeSubscriptions()).toEqual([{
+        contextGraphId: wireId,
+        onChainId: '42',
+      }]);
+
+      await second.markHostModeUnsubscribed(wireId);
+      await second.markHostModeSubscribed(wireId);
+      expect(await second.listHostModeSubscriptions()).toEqual([{ contextGraphId: wireId }]);
+    });
+
     it('listHostModeSubscribedCgs returns only flagged CGs', async () => {
       const store = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
       await store.markHostModeSubscribed('curator/cg-a');
