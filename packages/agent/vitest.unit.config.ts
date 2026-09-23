@@ -193,6 +193,7 @@ export default defineConfig({
       "test/vm-reconcile-sweep.test.ts",
       "test/vm-reconcile-lifecycle-timer.test.ts",
       "test/core-fills-gap.test.ts",
+      "test/vm-promotion-gate.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-provider-policy.test.ts",
       "test/vm-recovery-microbatch-host.test.ts",

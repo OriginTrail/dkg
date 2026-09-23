@@ -129,6 +129,9 @@ import {
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
+  storageAckNotRetainedFilters,
+} from './storage-ack-retention.js';
+import {
   EVMChainAdapter,
   NoChainAdapter,
   buildKnowledgeAssetUal,
@@ -169,6 +172,9 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig,
+  STORAGE_ACK_LEDGER_GRAPH,
+  swmKaWriteLockKey,
+  withKeyedLocks,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -2873,6 +2879,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               normalizeContextGraphIdForChunkStore: (rawCgId: string) =>
                 this.canonicalChunkStoreCgIdOrNull(rawCgId),
               isCgCurated: (cgId: string) => this.resolveCgCurationForAck(cgId, ctx),
+              // StorageACK finality gate: a public ACK is signed only after
+              // this core durably commits to promote the KA into its VM.
+              ensureVmPromotion: (request) => this.ensureStorageAckVmPromotion(request),
+              // An update ACK waiting on the version it replaces: promote
+              // that version now so the publisher's retry is signed.
+              onPriorVersionAwaitingPromotion: (request) => this.promoteStorageAckPriorVersion(request),
+              readKnowledgeAssetRootCount: (kaUal, signal) =>
+                this.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
+              pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
               // Testnet dead-air fix: `isOperationalWalletRegistered` is a
               // LIVE chain read the handler runs on EVERY inbound StorageACK.
               // With the raw wiring, one degraded shared RPC made the lookup
@@ -2912,6 +2927,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 if (storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
                 storageACKProtocolRegistered = false;
+                this.storageAckHandlerRegistered = false;
                 // rc.9 PR-11: messenger.register stored the handler
                 // in the substrate's wrapper which delegates to
                 // router.register under the hood (see Messenger.register
@@ -2954,6 +2970,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
+                this.recordStorageAckDecline(details.code);
                 const syncPressure = getSyncBackpressureSnapshot(resolveAgentSyncGlobalBackpressure(this.config));
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
@@ -3008,13 +3025,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // having to round-trip it. Variadic + internal `seen` Set
               // dedups, so over-passing is cheap and order-independent.
               getSubscriptionSourceForCg: (cgId, swmGraphId) => {
-                // Phase D — this hook fires immediately before EVERY StorageACK
-                // sign (the universal pre-sign chokepoint across the plaintext /
-                // encrypted / chunked paths). Use it to record that this Core
-                // hosts the CG so the chain-driven VM reconciler fills its gaps
-                // across restarts. Best-effort + public-CG-gated inside the
-                // helper; never blocks or affects the (sync) provenance return.
-                this.trackCoreHostRecording(() => this.recordCoreHostedPublicCg(cgId, swmGraphId));
+                // Phase D core-hosted recording is no longer started here: the
+                // `ensureVmPromotion` finality gate records it durably BEFORE
+                // a public ACK is signed.
                 const wireFromCgId = cgId ? this.gossipWireIdFor(cgId) : undefined;
                 const wireFromSwmGraphId = swmGraphId && swmGraphId !== cgId
                   ? this.gossipWireIdFor(swmGraphId)
@@ -3061,6 +3074,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               return ackHandler.updateHandler(data, peerId);
             });
             storageACKProtocolRegistered = true;
+            this.storageAckHandlerRegistered = true;
             this.clearStorageACKRegistrationRetry();
             this.log.info(
               attemptCtx,
@@ -4220,6 +4234,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
       this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
+      // Cores also audit their StorageACK copies: backfill graphs ACKed while
+      // VM reconcile was off, and watch ACKed KAs that do not reach VM.
+      this.armVmPromotionAudit();
+    } else if ((this.config.nodeRole ?? 'edge') === 'core') {
+      // The StorageACK finality gate keys off this state: a core that cannot
+      // promote ACKed data to VM must not sign public ACKs at all.
+      this.log.warn(
+        ctx,
+        `Chain-driven VM reconciliation is OFF on this core ` +
+        `(${this.vmReconcileUnavailableReason() ?? 'unavailable'}): it will decline every public ` +
+        `StorageACK with CORE_VM_PROMOTION_DISABLED. Set vmReconcilerEnabled=true ` +
+        `(or unset DKG_VM_RECONCILER_ENABLED) to sign ACKs again.`,
+      );
     }
     // Fairness state belongs to this exact recurring owner. Recreating the
     // runtime resets it; no scheduler cursor leaks into durable subscription
@@ -9757,7 +9784,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncScoped?: boolean;
       isCurrent?: () => boolean;
       requireDurableMemberIntent: boolean;
-      operation: 'join approval' | 'chain discovery';
+      operation: 'join approval' | 'chain discovery' | 'core hosting';
     },
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
@@ -11264,12 +11291,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (ttl <= 0) return 0;
 
       const ctx = createOperationContext('share');
-      const cutoff = new Date(Date.now() - ttl).toISOString();
+      const now = Date.now();
+      const cutoff = new Date(now - ttl).toISOString();
+      // StorageACK copies this core signed and still owes to VM outlive the
+      // TTL (see storage-ack-retention.ts).
+      const storageAckRetentionCutoff = new Date(
+        now - Math.max(ttl, DKGAgentBase.STORAGE_ACK_RETENTION_MAX_MS),
+      ).toISOString();
       let totalDeleted = 0;
 
       try {
+        // A core grandfathers its pre-ledger ACK copies before anything can
+        // expire; until that succeeds every young `storage-ack-` copy is kept.
+        const ledgerReady = (this.config.nodeRole ?? 'edge') !== 'core'
+          || await this.ensureStorageAckLedgerReady();
         const graphManager = new GraphManager(this.store);
-        const contextGraphs = await graphManager.listContextGraphs();
+        // ACK copies can sit in namespaces with no local Context Graph
+        // declaration (a remap-flow `swmGraphId`); the ledger names them.
+        const contextGraphs = [...new Set([
+          ...await graphManager.listContextGraphs(),
+          ...await this.listStorageAckLedgerNamespaces(),
+        ])];
 
         for (const pid of contextGraphs) {
           let graphDeleted = 0;
@@ -11281,14 +11323,43 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // `…/_shared_memory_meta` bucket — expire every meta graph.
           const wsMetaGraphs = await listSharedMemoryMetaGraphs(this.store, pid);
 
+          // Graph-scoped KAs are confirmed in the root `_meta`, sub-graphs included.
+          const rootMetaGraph = contextGraphMetaUri(pid);
           for (const wsMetaGraph of wsMetaGraphs) {
             // Each meta graph describes exactly one SWM data bucket:
             // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
             const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
+            // The per-KA write lock the StorageACK handler and gossip apply
+            // take is keyed by namespace, sub-graph and UAL.
+            const namespacePrefix = `did:dkg:context-graph:${pid}/`;
+            const metaRest = wsMetaGraph.startsWith(namespacePrefix)
+              ? wsMetaGraph.slice(namespacePrefix.length)
+              : '_shared_memory_meta';
+            const wsSubGraphName = metaRest === '_shared_memory_meta'
+              ? undefined
+              : metaRest.slice(0, -'/_shared_memory_meta'.length);
+            const storageAckNotRetained = (
+              binding: string,
+              opVar: string,
+              tsVar: string,
+              suffix: string,
+            ): string => storageAckNotRetainedFilters({
+              rootMetaGraph,
+              metaGraph: wsMetaGraph,
+              binding,
+              opVar,
+              tsVar,
+              retentionCutoffIso: storageAckRetentionCutoff,
+              suffix,
+              ledgerReady,
+            });
 
             let wsGraphs: string[] | undefined;
             let ownershipKeys: string[] | undefined;
             for (;;) {
+              // Retained StorageACK copies are excluded inside the query, not
+              // skipped in the loop: skipped rows would come back in every
+              // batch and stall the no-progress guard below.
               const expiredOps = await this.store.query(
                 `SELECT DISTINCT ?op WHERE {
                 GRAPH <${wsMetaGraph}> {
@@ -11296,6 +11367,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   ?op <http://dkg.io/ontology/publishedAt> ?ts .
                   FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
                 }
+                ${storageAckNotRetained('', '?op', '?ts', 'Expired')}
               } LIMIT ${DKGAgentBase.SWM_CLEANUP_BATCH_SIZE}`,
                 { source: 'agent.swmCleanup.expiredOperations' },
               );
@@ -11365,11 +11437,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 if (scopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
                   const kaUal = v2Row?.['kaUal'];
                   const headSubject = kaUal ? `${kaUal}#dkg-swm-head` : '';
-                  if (headSubject && isSafeIri(headSubject)) {
+                  // Checked and torn down under the per-KA write lock, so an
+                  // ACK or share that repoints the head in between is never
+                  // deleted with the expired operation.
+                  if (kaUal && headSubject && isSafeIri(headSubject)) graphDeleted += await withKeyedLocks(
+                    this.writeLocks,
+                    [swmKaWriteLockKey(pid, wsSubGraphName, kaUal)],
+                    async (): Promise<number> => {
+                    let tornDown = 0;
                     // The head is owned by exactly one operation. Join on the
                     // dkg:shareOperationId literal (both rows are written by the
                     // same `lit()` serializer) so this op's expiry only tears the
-                    // head down when the head still references it.
+                    // head down when the head still references it — and never
+                    // while it is also the head of a retained StorageACK copy.
                     const headOwned = await this.store.query(
                       `SELECT ?assertionGraph WHERE {
                       GRAPH <${wsMetaGraph}> {
@@ -11377,6 +11457,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                         <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?opId .
                         OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
                       }
+                      ${storageAckNotRetained(`GRAPH <${wsMetaGraph}> {
+                          <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?aliasOpId .
+                          ?aliasOp <http://dkg.io/ontology/shareOperationId> ?aliasOpId ;
+                            <http://dkg.io/ontology/publishedAt> ?aliasTs .
+                          FILTER(?aliasOp != <${opUri}>)
+                        }`, '?aliasOp', '?aliasTs', 'Alias')}
                     } LIMIT 1`,
                       { source: 'agent.swmCleanup.currentHeadOwner' },
                     );
@@ -11385,12 +11471,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                       // the current-head subject with the operation.
                       const assertionGraph = headOwned.bindings[0]?.['assertionGraph'];
                       if (assertionGraph && isSafeIri(assertionGraph)) {
-                        graphDeleted += await this.store.deleteByPattern({ graph: assertionGraph });
+                        tornDown += await this.store.deleteByPattern({ graph: assertionGraph });
                         await this.store.dropGraph(assertionGraph);
                       }
-                      graphDeleted += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
+                      tornDown += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
                     }
-                  }
+                    return tornDown;
+                  });
                   const snapshotGraph = v2Row?.['snapshotGraph'];
                   if (snapshotGraph && isSafeIri(snapshotGraph)) {
                     graphDeleted += await this.store.deleteByPattern({ graph: snapshotGraph });
@@ -11402,6 +11489,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
                 graphDeleted += metaDeleted;
                 metadataDeleted += metaDeleted;
+                // The copy is gone, so is this core's signed-ACK record of it.
+                await this.store.deleteByPattern({ graph: STORAGE_ACK_LEDGER_GRAPH, subject: opUri });
 
                 for (const re of rootEntities) {
                   const ownerDeleted = await this.store.deleteByPattern({

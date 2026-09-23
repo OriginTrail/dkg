@@ -878,6 +878,7 @@ describe('private CG membership bootstrap recovery', () => {
       contextGraphSubscriptionStore: subscriptionStore,
       syncSharedMemoryOnConnect: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncOnConnectEnabled: false,
       durableSyncEnabled: false,
       rfc64CatalogActivation: { enabled: false },

@@ -463,10 +463,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       try {
         await agentA.start();
         agentA.subscribeToContextGraph(localCgId, { syncMode: 'on-demand' });
+        // The member subscription is bound to its on-chain graph: core
+        // hosting joins a bound row, and never binds an unbound one.
         agentA.markContextGraphSubscriptionState(localCgId, {
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
+          onChainId: '14',
         });
         (agentA as any).chain.getContextGraphAccessPolicy = async () => 0;
         (agentA as any).chain.isContextGraphActiveOnChain = async () => true;

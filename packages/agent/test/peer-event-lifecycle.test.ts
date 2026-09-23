@@ -22,6 +22,7 @@ describe('DKGAgent peer lifecycle integration', () => {
       dataDir,
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       rfc64PublicCatalogBootstrap: { retryIntervalMs: 0, acceptedPublicPolicies: [] },
     });
     const internal = asSyncOnConnectTestAgent(agent);

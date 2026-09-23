@@ -684,6 +684,7 @@ describe('Context Graph subscription authority retry', () => {
       // unrelated VM startup sweep from issuing another lookup and replacing
       // the resolver that represents the authority-recovery attempt.
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
@@ -761,6 +762,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const targetNameHash = agent.contextGraphNameCommitment(contextGraphId);
@@ -821,6 +823,7 @@ describe('Context Graph subscription authority retry', () => {
       contextGraphSubscriptionRehydrationEnabled: true,
       maxRehydratedContextGraphSubscriptions: 1,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const targetNameHash = agent.contextGraphNameCommitment(cappedContextGraphId);
@@ -901,6 +904,7 @@ describe('Context Graph subscription authority retry', () => {
       contextGraphSubscriptionRehydrationEnabled: true,
       maxRehydratedContextGraphSubscriptions: 1,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -971,6 +975,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -1046,6 +1051,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -1096,6 +1102,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     let targetPolicyAttempts = 0;
     vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
@@ -1229,6 +1236,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     const attempts: string[] = [];
     vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')

@@ -1929,6 +1929,7 @@ async function runDaemonInnerWithStartupOwnership(
     publicSnapshotStore,
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
+    vmReconcilerEnabled: config.vmReconcilerEnabled,
     syncReconcilerIntervalMs: config.syncReconcilerIntervalMs,
     syncStalenessThresholdMs: config.syncStalenessThresholdMs,
     syncBackoffBaseMs: config.syncBackoffBaseMs,
