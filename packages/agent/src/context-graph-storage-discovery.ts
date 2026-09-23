@@ -578,6 +578,32 @@ export interface OnChainContextGraphFacts {
 }
 
 /**
+ * Normalize one observation into facts: lowercase addresses and hash, an empty
+ * name hash as an opt-out, and null for every field the observation does not
+ * carry.
+ */
+export function onChainContextGraphFactsFromObservation(
+  observation: OnChainContextGraphObservation,
+): OnChainContextGraphFacts {
+  const publishPolicy = observation.publishPolicy ?? null;
+  return {
+    onChainId: observation.contextGraphId,
+    nameHash: typeof observation.nameHash === 'string' && observation.nameHash.length > 0
+      ? observation.nameHash.toLowerCase()
+      : null,
+    owner: observation.owner ? observation.owner.toLowerCase() : null,
+    accessPolicy: Number.isSafeInteger(observation.accessPolicy) ? observation.accessPolicy : null,
+    publishPolicy,
+    publishAuthority: publishPolicy === null
+      ? null
+      : observation.publishAuthority?.toLowerCase() ?? null,
+    createdAt: observation.createdAt ?? null,
+    active: observation.active ?? null,
+    observedAtBlock: observation.blockNumber,
+  };
+}
+
+/**
  * Merge one observation into the facts already known. The newer observation
  * (by block) wins field by field; a field it does not carry keeps the older
  * value. `nameHash`, `accessPolicy` and `createdAt` are write-once on chain,
