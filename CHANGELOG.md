@@ -16,7 +16,9 @@ All notable changes to the DKG V10 node are documented here. The format is based
   remembers the cap per provider so later reads start there, and fails over
   without splitting when a provider refuses history, archive or plan-limited
   ranges. The event lanes still page 9,000 blocks and advance their cursor
-  only after a whole page succeeds.
+  only after a whole page succeeds. A provider's refusal is quoted in these
+  errors with every URL reduced to its host, so an API key in a configured
+  RPC URL does not reach logs or error messages.
 - **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a
