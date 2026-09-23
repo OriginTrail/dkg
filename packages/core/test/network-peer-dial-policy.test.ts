@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   NETWORK_MISMATCH_DIAL_DENY_TTL_MS,
+  NETWORK_MISMATCH_INBOUND_REFUSAL_MS,
   NetworkPeerDialPolicy,
   peerIdFromRelayAddress,
 } from '../src/network-peer-dial-policy.js';
@@ -123,9 +124,9 @@ describe('NetworkPeerDialPolicy — circuit paths', () => {
 });
 
 describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
-  it('refuses outbound only, until the TTL expires', () => {
+  it('refuses outbound for the TTL and inbound only for the quarantine window', () => {
     let now = 1_000;
-    const mismatch = policy({ now: () => now, mismatchDenyTtlMs: 60_000 });
+    const mismatch = policy({ now: () => now, mismatchDenyTtlMs: 60_000, mismatchInboundRefusalMs: 10_000 });
     const gater = mismatch.connectionGater;
 
     expect(mismatch.denyAfterNetworkMismatch(PEER)).toBe(true);
@@ -134,15 +135,40 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     expect(gater.denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${PEER}`))).toBe(true);
     expect(gater.denyOutboundEncryptedConnection(id(PEER))).toBe(true);
     expect(gater.filterMultiaddrForPeer(id(PEER), id('/ip4/1.2.3.4/tcp/9090'))).toBe(false);
-    // A peer whose operator fixed its network config can still dial in and
-    // re-run the identity proof.
-    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
+    // Admission cannot re-verify a quarantined peer, so an inbound connection
+    // would only sit open (or be reused by relay discovery as a reservation).
+    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
 
-    now += 59_999;
+    now += 10_000;
+    // Quarantine over: a peer whose operator fixed its network config can dial
+    // in and re-run the identity proof, while we still do not dial it.
+    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
+    expect(gater.denyDialPeer(id(PEER))).toBe(true);
+
+    now += 49_999;
     expect(gater.denyDialPeer(id(PEER))).toBe(true);
     now += 1;
     expect(gater.denyDialPeer(id(PEER))).toBe(false);
     expect(mismatch.dialDenialReason(PEER)).toBeUndefined();
+  });
+
+  it('defaults the inbound refusal to the admission quarantine and caps it at the TTL', () => {
+    let now = 0;
+    const defaults = policy({ now: () => now });
+    defaults.denyAfterNetworkMismatch(PEER);
+    now = NETWORK_MISMATCH_INBOUND_REFUSAL_MS - 1;
+    expect(defaults.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
+    now = NETWORK_MISMATCH_INBOUND_REFUSAL_MS;
+    expect(defaults.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
+    expect(defaults.connectionGater.denyDialPeer(id(PEER))).toBe(true);
+
+    now = 0;
+    const shortTtl = policy({ now: () => now, mismatchDenyTtlMs: 1_000 });
+    shortTtl.denyAfterNetworkMismatch(PEER);
+    now = 999;
+    expect(shortTtl.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
+    now = 1_000;
+    expect(shortTtl.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
   });
 
   it('refreshes the TTL on a repeated rejection', () => {
@@ -185,10 +211,11 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     expect(mismatch.dialDenialReason(THIRD_PEER)).toBe('network-identity-mismatch');
   });
 
-  it('outlives the 5-minute admission quarantine by default', () => {
-    // A shorter window reopens dials while admission still short-circuits the
-    // peer as rejected, which leaves the redialed socket open.
+  it('aligns its windows with the 5-minute admission quarantine by default', () => {
+    // A shorter dial window reopens dials while admission still short-circuits
+    // the peer as rejected, which leaves the redialed socket open.
     expect(NETWORK_MISMATCH_DIAL_DENY_TTL_MS).toBeGreaterThanOrEqual(5 * 60_000);
+    expect(NETWORK_MISMATCH_INBOUND_REFUSAL_MS).toBe(5 * 60_000);
   });
 });
 

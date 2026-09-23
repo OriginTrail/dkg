@@ -1713,11 +1713,12 @@ export class DKGNode {
 
   /**
    * Refuse outbound connections to a peer that failed the network-identity
-   * proof, and stop storing its addresses, for a bounded TTL. Call this BEFORE
-   * closing the peer's connections: libp2p's reconnect queue reacts to the
-   * disconnect by redialing keep-alive-tagged peers. Returns false when
-   * transport isolation is inactive (not started, no `networkIdentity`) or the
-   * peer is exempt (this node or a configured relay).
+   * proof, and stop storing its addresses, for a bounded TTL; refuse its inbound
+   * connections for the admission quarantine. Call this BEFORE closing the
+   * peer's connections: libp2p's reconnect queue reacts to the disconnect by
+   * redialing keep-alive-tagged peers. Returns false when transport isolation
+   * is inactive (not started, no `networkIdentity`) or the peer is exempt (this
+   * node or a configured relay).
    */
   denyPeerAfterNetworkMismatch(peerId: string): boolean {
     return this.networkPeerDialPolicy?.denyAfterNetworkMismatch(peerId) ?? false;

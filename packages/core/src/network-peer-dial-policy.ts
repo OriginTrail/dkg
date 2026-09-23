@@ -13,6 +13,16 @@ import { parseCircuitRelayPeerIds } from './relay-path.js';
  */
 export const NETWORK_MISMATCH_DIAL_DENY_TTL_MS = 30 * 60_000;
 
+/**
+ * How long INBOUND connections from an identity-rejected peer are refused.
+ * Matches the admission quarantine (5 min): while it lasts, admission cannot
+ * re-verify the peer anyway — it short-circuits without probing or closing —
+ * so an accepted inbound connection would only sit open, and circuit-relay
+ * discovery could even reuse it as a reservation. Afterwards the peer may dial
+ * in again and re-run the proof, e.g. once its operator fixed its config.
+ */
+export const NETWORK_MISMATCH_INBOUND_REFUSAL_MS = 5 * 60_000;
+
 /** Upper bound on remembered identity-rejected peers; the oldest is evicted first. */
 export const NETWORK_MISMATCH_DIAL_DENY_MAX_PEERS = 1_024;
 
@@ -57,6 +67,8 @@ export interface NetworkPeerDialPolicyOptions {
   otherNetworkRelayPeerIds?: Iterable<string>;
   /** Defaults to {@link NETWORK_MISMATCH_DIAL_DENY_TTL_MS}. */
   mismatchDenyTtlMs?: number;
+  /** Defaults to {@link NETWORK_MISMATCH_INBOUND_REFUSAL_MS}; never longer than the TTL. */
+  mismatchInboundRefusalMs?: number;
   /** Defaults to {@link NETWORK_MISMATCH_DIAL_DENY_MAX_PEERS}. */
   maxMismatchDeniedPeers?: number;
   now?: () => number;
@@ -121,10 +133,11 @@ function positiveIntegerOr(value: number | undefined, fallback: number): number 
  *     inbound too, because circuit-relay discovery reuses an existing
  *     connection when it picks a reservation candidate, so an inbound
  *     connection from a foreign relay could otherwise become a reservation.
- *   - dynamic: peers that failed the network-identity proof, remembered for a
- *     bounded TTL in a bounded set and cleared as soon as they later pass it.
- *     Only outbound is refused, so a peer whose operator fixed its network
- *     config can dial back in and re-verify.
+ *   - dynamic: peers that failed the network-identity proof, remembered in a
+ *     bounded set and cleared as soon as they later pass it. Outbound is
+ *     refused for the TTL; inbound only for the admission quarantine, after
+ *     which a peer whose operator fixed its network config can dial back in
+ *     and re-verify.
  *
  * The node's configured relays and the node itself are always exempt.
  */
@@ -134,9 +147,10 @@ export class NetworkPeerDialPolicy {
   private readonly selfPeerId: string | undefined;
   private readonly configuredRelayPeerIds: ReadonlySet<string>;
   private readonly otherNetworkRelayPeerIds: ReadonlySet<string>;
-  /** Canonical peer id -> denial expiry (ms). Insertion order = oldest first. */
-  private readonly mismatchDenials = new Map<string, number>();
+  /** Canonical peer id -> denial expiries (ms). Insertion order = oldest first. */
+  private readonly mismatchDenials = new Map<string, { outboundUntil: number; inboundUntil: number }>();
   private readonly mismatchDenyTtlMs: number;
+  private readonly mismatchInboundRefusalMs: number;
   private readonly maxMismatchDeniedPeers: number;
   private readonly now: () => number;
   private readonly log: (message: string) => void;
@@ -152,6 +166,10 @@ export class NetworkPeerDialPolicy {
     if (this.selfPeerId) otherNetworkRelayPeerIds.delete(this.selfPeerId);
     this.otherNetworkRelayPeerIds = otherNetworkRelayPeerIds;
     this.mismatchDenyTtlMs = positiveIntegerOr(options.mismatchDenyTtlMs, NETWORK_MISMATCH_DIAL_DENY_TTL_MS);
+    this.mismatchInboundRefusalMs = Math.min(
+      positiveIntegerOr(options.mismatchInboundRefusalMs, NETWORK_MISMATCH_INBOUND_REFUSAL_MS),
+      this.mismatchDenyTtlMs,
+    );
     this.maxMismatchDeniedPeers = positiveIntegerOr(
       options.maxMismatchDeniedPeers,
       NETWORK_MISMATCH_DIAL_DENY_MAX_PEERS,
@@ -175,15 +193,20 @@ export class NetworkPeerDialPolicy {
   }
 
   /**
-   * Refuse outbound dials to a peer that failed the network-identity proof,
-   * for the mismatch TTL. Returns `false` (and records nothing) for an
-   * unparseable id or an exempt peer.
+   * Refuse outbound connections to a peer that failed the network-identity
+   * proof for the mismatch TTL, and inbound ones for the (shorter) quarantine
+   * window. Returns `false` (and records nothing) for an unparseable id or an
+   * exempt peer.
    */
   denyAfterNetworkMismatch(peerId: string): boolean {
     const canonical = tryCanonicalPeerIdString(peerId);
     if (!canonical || this.isExempt(canonical)) return false;
+    const now = this.now();
     this.mismatchDenials.delete(canonical);
-    this.mismatchDenials.set(canonical, this.now() + this.mismatchDenyTtlMs);
+    this.mismatchDenials.set(canonical, {
+      outboundUntil: now + this.mismatchDenyTtlMs,
+      inboundUntil: now + this.mismatchInboundRefusalMs,
+    });
     while (this.mismatchDenials.size > this.maxMismatchDeniedPeers) {
       const oldest = this.mismatchDenials.keys().next();
       if (oldest.done) break;
@@ -203,11 +226,22 @@ export class NetworkPeerDialPolicy {
   }
 
   private hasActiveMismatchDenial(peerId: string): boolean {
-    const expiresAt = this.mismatchDenials.get(peerId);
-    if (expiresAt === undefined) return false;
-    if (expiresAt > this.now()) return true;
+    const denial = this.mismatchDenials.get(peerId);
+    if (denial === undefined) return false;
+    if (denial.outboundUntil > this.now()) return true;
     this.mismatchDenials.delete(peerId);
     return false;
+  }
+
+  /** Why inbound connections from `peerId` are refused, or `undefined` if allowed. */
+  private inboundDenialReason(peerId: string): NetworkPeerDenialReason | undefined {
+    if (this.isExempt(peerId)) return undefined;
+    if (this.otherNetworkRelayPeerIds.has(peerId)) return 'other-network-relay';
+    if (!this.hasActiveMismatchDenial(peerId)) return undefined;
+    const denial = this.mismatchDenials.get(peerId);
+    return denial !== undefined && denial.inboundUntil > this.now()
+      ? 'network-identity-mismatch'
+      : undefined;
   }
 
   /**
@@ -265,8 +299,9 @@ export class NetworkPeerDialPolicy {
       },
       denyInboundEncryptedConnection: (peerId) => {
         const id = peerId.toString();
-        if (this.isExempt(id) || !this.otherNetworkRelayPeerIds.has(id)) return false;
-        this.logDenial('inbound', id, 'other-network-relay');
+        const reason = this.inboundDenialReason(id);
+        if (!reason) return false;
+        this.logDenial('inbound', id, reason);
         return true;
       },
       denyOutboundEncryptedConnection: (peerId) => this.denyOutbound(peerId.toString()),

@@ -127,7 +127,7 @@ describe('network peer isolation on real libp2p nodes', () => {
     expect(connectionsTo(foreignRelay, local.peerId)).toHaveLength(0);
   }, TEST_TIMEOUT_MS);
 
-  it('stops dialing an identity-rejected peer until it proves membership again', async () => {
+  it('refuses an identity-rejected peer until it proves membership again', async () => {
     const mismatched = await startNode();
     const local = await startNode({ networkIdentity: NETWORK_A });
     const mismatchedId = peerIdFromString(mismatched.peerId);
@@ -138,15 +138,19 @@ describe('network peer isolation on real libp2p nodes', () => {
     await local.libp2p.hangUp(mismatchedId);
 
     expect(await dialOutcome(local.libp2p.dial(mismatchedAddr))).toBe('DialDeniedError');
+    // During the admission quarantine an inbound connection could only sit
+    // open unverified, so it is refused as well.
+    await dialOutcome(mismatched.libp2p.dial(multiaddr(tcpAddr(local))));
+    await settle(500);
+    expect(connectionsTo(local, mismatched.peerId)).toHaveLength(0);
 
-    // Inbound stays open so a corrected peer can dial in and re-verify.
+    // Passing the identity proof lifts both directions.
+    local.clearPeerNetworkMismatchDenial(mismatched.peerId);
     expect(await dialOutcome(mismatched.libp2p.dial(multiaddr(tcpAddr(local))))).toBe('connected');
     await settle();
     expect(connectionsTo(local, mismatched.peerId).length).toBeGreaterThan(0);
     await local.libp2p.hangUp(mismatchedId);
     await settle();
-
-    local.clearPeerNetworkMismatchDenial(mismatched.peerId);
     expect(await dialOutcome(local.libp2p.dial(mismatchedAddr))).toBe('connected');
   }, TEST_TIMEOUT_MS);
 

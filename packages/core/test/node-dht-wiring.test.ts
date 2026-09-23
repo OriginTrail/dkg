@@ -121,8 +121,10 @@ describe('DKGNode DHT network identity wiring', () => {
     expect(gater.denyDialPeer(peer(REMOTE_PEER))).toBe(false);
     expect(node.denyPeerAfterNetworkMismatch(REMOTE_PEER)).toBe(true);
     expect(gater.denyDialPeer(peer(REMOTE_PEER))).toBe(true);
+    expect(gater.denyInboundEncryptedConnection(peer(REMOTE_PEER))).toBe(true);
     node.clearPeerNetworkMismatchDenial(REMOTE_PEER);
     expect(gater.denyDialPeer(peer(REMOTE_PEER))).toBe(false);
+    expect(gater.denyInboundEncryptedConnection(peer(REMOTE_PEER))).toBe(false);
     expect(node.denyPeerAfterNetworkMismatch(ACTIVE_RELAY_PEER)).toBe(false);
 
     await node.stop();
