@@ -16,6 +16,7 @@ import {
   selectedLanes,
   succeeded,
 } from './ci-plan-fixtures.mjs';
+import { importSpecifiers } from './load-graph.mjs';
 
 // The trusted controller: the plan-ci/assert-ci-results CLIs, their pinned
 // sparse checkout, and how the workflows wire planner outputs to jobs.
@@ -368,7 +369,7 @@ test('the trusted controller runs from a checkout of exactly its policy files', 
     fs.copyFileSync(path.join(REPO_ROOT, file), path.join(controllerRoot, file));
 
     const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
-    for (const [, specifier] of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)['"]([^'"]+)['"]/g)) {
+    for (const specifier of importSpecifiers(source)) {
       if (specifier.startsWith('node:')) continue;
       const resolved = path.posix.join(path.posix.dirname(file), specifier);
       assert.ok(

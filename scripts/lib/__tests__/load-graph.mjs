@@ -129,7 +129,7 @@ function builtPaths(file, source) {
 // export declarations, side-effect imports, import() of a string and
 // require(), but never a path that a comment or string only mentions; plus
 // URL_IMPORT.
-function importSpecifiers(code) {
+export function importSpecifiers(code) {
   return [
     ...ts.preProcessFile(code, true, true).importedFiles.map(({ fileName }) => fileName),
     ...[...code.matchAll(URL_IMPORT)].map(([, specifier]) => specifier),
