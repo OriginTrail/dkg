@@ -1,12 +1,25 @@
+import { toLibp2pPeerId } from './peer-id.js';
+
 function protocolReadinessAbortError(): DOMException {
   return new DOMException('Protocol readiness wait aborted', 'AbortError');
 }
 
-/** The AbortError every protocol-readiness wait rejects with once aborted. */
-export function throwIfProtocolReadinessAborted(signal?: AbortSignal): void {
+function throwIfProtocolReadinessAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw protocolReadinessAbortError();
 }
 
+/**
+ * Poll the libp2p peer store until `peer` advertises `protocol`, reading it
+ * up to `attempts` times, `delayMs` apart.
+ *
+ * The peer store answers only for a real libp2p `PeerId`, so `peer` is
+ * canonicalized first and a string-backed `{ toString }` wrapper is looked
+ * up by the PeerId it names. A value that is not a peer ID can never
+ * advertise the protocol and resolves `false` without a store read.
+ *
+ * An aborted `signal` rejects with an AbortError on every path: before the
+ * parse, before each read and during the delay between reads.
+ */
 export async function waitForPeerProtocol(
   peerStore: { get(peer: unknown): Promise<{ protocols: string[] }> },
   peer: { toString(): string },
@@ -15,10 +28,14 @@ export async function waitForPeerProtocol(
   delayMs: number,
   signal?: AbortSignal,
 ): Promise<boolean> {
+  throwIfProtocolReadinessAborted(signal);
+  const peerId = toLibp2pPeerId(peer);
+  if (peerId === undefined) return false;
+
   for (let attempt = 0; attempt < attempts; attempt++) {
     throwIfProtocolReadinessAborted(signal);
     try {
-      const peerInfo = await peerStore.get(peer as any);
+      const peerInfo = await peerStore.get(peerId);
       if (peerInfo.protocols.includes(protocol)) {
         return true;
       }
