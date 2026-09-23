@@ -60,12 +60,16 @@ export function needsNodeTestArtifacts(plan) {
 
 
 // The Playwright suite boots four real daemons and drives node-ui against
-// them (7 shards, ~45 runner-minutes). On pull requests it follows only the
-// UI surface it exercises: node-ui, its graph-viz dependency and the daemon
-// HTTP API in cli. Changes deeper in the stack are covered on PRs by their own
-// lanes plus bura_cli's daemon tests; the browser suite still runs for them on
-// every protected push, merge-queue candidate and nightly run (full CI), and
-// `ci:full` opts a PR in before merging.
+// them (7 shards, ~45 runner-minutes). On pull requests it follows the UI
+// surface it exercises (node-ui, its graph-viz dependency and the daemon HTTP
+// API in cli) and the packages its own harness code compiles against (core,
+// which packages/node-ui/e2e imports, and its dependency rdf-utils). The rest
+// of the runtime those daemons boot (agent, chain, storage, publisher, query,
+// adapters, ...; ci-delta-routing.test.mjs pins the list) is deliberately not
+// a PR trigger: its own lanes and bura_cli's daemon tests cover it on the PR,
+// and the browser suite still runs for it on every protected push,
+// merge-queue candidate and nightly run (full CI) and whenever `ci:full` opts
+// a PR in before merging.
 //
 // The Windows lifecycle job (rfc64-inventory-windows.yml) runs wherever the
 // agent lane does; planCi derives that once for every plan rather than per
@@ -82,6 +86,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
+      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -96,6 +101,7 @@ export const WORKSPACE_RULES = Object.freeze({
       'bura_cli',
       'bura_query',
       'kosava_node_ui',
+      'kosava_node_ui_e2e',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],

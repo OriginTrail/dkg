@@ -235,6 +235,7 @@ test('leaf and shared package snapshots include conservative downstream consumer
     'bura_cli',
     'bura_query',
     'kosava_node_ui',
+    'kosava_node_ui_e2e',
     'kosava_supporting',
     'kosava_hardhat_plugins',
   ]);

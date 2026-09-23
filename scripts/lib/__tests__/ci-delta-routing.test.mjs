@@ -10,9 +10,12 @@ import {
   REPO_ROOT,
   change,
   gateNeeds,
+  importedWorkspaceClosure,
   pullRequestPlan,
   selectedLanes,
+  sourceFiles,
   succeeded,
+  workspaceClosure,
 } from './ci-plan-fixtures.mjs';
 
 // Path routing: what individual changed paths select on pull requests -
@@ -184,17 +187,49 @@ test('repository support paths route to the lanes that execute them', () => {
   }
 });
 
-test('the browser suite follows only the UI surface it drives on pull requests', () => {
+test('the browser suite follows the UI surface and the packages its harness compiles against', () => {
+  // UI surface: node-ui, its graph-viz dependency and the daemon HTTP API in
+  // cli. Harness: the workspaces packages/node-ui/e2e imports, with their
+  // dependencies.
   const uiSurface = ['packages/cli', 'packages/graph-viz', 'packages/node-ui'];
+  const harness = importedWorkspaceClosure(sourceFiles('packages/node-ui/e2e'));
+  assert.ok(harness.has('packages/core'), 'the e2e helpers import dkg-core');
+  const triggers = new Set([...uiSurface, ...harness]);
   for (const [workspace, rule] of Object.entries(WORKSPACE_RULES)) {
     if (rule.forceFull) continue;
-    assert.equal(rule.lanes.includes('kosava_node_ui_e2e'), uiSurface.includes(workspace), workspace);
+    assert.equal(rule.lanes.includes('kosava_node_ui_e2e'), triggers.has(workspace), workspace);
   }
-  for (const filePath of ['packages/agent/src/agent.ts', 'packages/publisher/src/index.ts', 'packages/core/src/index.ts']) {
-    const plan = pullRequestPlan([change(filePath)]);
-    assert.equal(plan.lanes.kosava_node_ui_e2e, false, filePath);
+
+  // The deliberate exception: the rest of the runtime scripts/devnet.sh boots
+  // (the workspaces it starts and their dependencies). On the PR each runs its
+  // own lanes and bura_cli's daemon tests; the browser suite follows after
+  // merge. A new runtime dependency fails here until it is a trigger or listed.
+  const devnet = fs.readFileSync(path.join(REPO_ROOT, 'scripts/devnet.sh'), 'utf8');
+  const booted = workspaceClosure([...devnet.matchAll(/\$REPO_ROOT\/(packages\/[a-z0-9-]+)\//g)].map(([, workspace]) => workspace));
+  assert.ok(booted.has('packages/agent'), 'the devnet daemons run the agent');
+  const deferred = [...booted].filter((workspace) => !triggers.has(workspace) && !WORKSPACE_RULES[workspace].forceFull).sort();
+  assert.deepEqual(deferred, [
+    'packages/adapter-hermes',
+    'packages/adapter-openclaw',
+    'packages/adapter-prime-agent',
+    'packages/agent',
+    'packages/chain',
+    'packages/epcis',
+    'packages/http-utils',
+    'packages/local-llm',
+    'packages/mcp-dkg',
+    'packages/okf',
+    'packages/publisher',
+    'packages/query',
+    'packages/random-sampling',
+    'packages/storage',
+  ]);
+  for (const workspace of deferred) {
+    const plan = pullRequestPlan([change(`${workspace}/src/index.ts`)]);
+    assert.equal(plan.lanes.kosava_node_ui_e2e, false, workspace);
+    assert.equal(plan.lanes.bura_cli, true, `${workspace} keeps the CLI daemon tests on the PR`);
   }
-  for (const filePath of ['packages/node-ui/src/ui/pages/Dashboard.tsx', 'packages/cli/src/daemon/routes/context.ts', 'packages/graph-viz/src/index.ts']) {
+  for (const filePath of ['packages/node-ui/src/ui/pages/Dashboard.tsx', 'packages/cli/src/daemon/routes/context.ts', 'packages/core/src/constants.ts']) {
     assert.equal(pullRequestPlan([change(filePath)]).lanes.kosava_node_ui_e2e, true, filePath);
   }
   // Protected pushes, merge-queue candidates, nightly runs and `ci:full` keep it.
@@ -232,33 +267,11 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
 
   // Derive the closure from what the harnesses actually import, so a new
   // import or dependency cannot silently drop the lane.
-  const manifests = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
-    workspace,
-    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')),
-  ]));
-  const workspaceByName = new Map([...manifests].map(([workspace, manifest]) => [manifest.name, workspace]));
-  const harnessSources = [
-    ...fs.readdirSync(path.join(REPO_ROOT, 'devnet/rfc64-persistence-lifecycle'), { recursive: true })
-      .map((file) => path.join('devnet/rfc64-persistence-lifecycle', file)),
-    ...fs.readdirSync(path.join(REPO_ROOT, 'devnet/_bootstrap'))
-      .filter((file) => file.startsWith('rfc64-evidence'))
-      .map((file) => path.join('devnet/_bootstrap', file)),
-  ].filter((file) => /\.[cm]?tsx?$/.test(file) && !file.split(path.sep).includes('node_modules'))
-    .filter((file) => fs.statSync(path.join(REPO_ROOT, file)).isFile());
-  const queue = harnessSources.flatMap((file) => [
-    ...fs.readFileSync(path.join(REPO_ROOT, file), 'utf8').matchAll(/from '(@origintrail-official\/[a-z-]+)/g),
-  ].map(([, name]) => workspaceByName.get(name)).filter(Boolean));
-  assert.ok(queue.includes('packages/agent'), 'the Gate 0 harness starts a real agent');
-  const closure = new Set();
-  while (queue.length) {
-    const workspace = queue.shift();
-    if (closure.has(workspace)) continue;
-    closure.add(workspace);
-    const { dependencies = {}, devDependencies = {} } = manifests.get(workspace);
-    for (const name of Object.keys({ ...dependencies, ...devDependencies })) {
-      if (workspaceByName.has(name)) queue.push(workspaceByName.get(name));
-    }
-  }
+  const closure = importedWorkspaceClosure([
+    ...sourceFiles('devnet/rfc64-persistence-lifecycle'),
+    ...sourceFiles('devnet/_bootstrap').filter((file) => path.posix.basename(file).startsWith('rfc64-evidence')),
+  ]);
+  assert.ok(closure.has('packages/agent'), 'the Gate 0 harness starts a real agent');
   for (const workspace of closure) {
     assert.ok(windowsSelected(`${workspace}/src/index.ts`), workspace);
   }

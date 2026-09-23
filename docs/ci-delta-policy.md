@@ -21,8 +21,8 @@ CI whenever it cannot prove that a smaller plan is safe.
 | --- | --- |
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
 | Documentation only | Planner and aggregate gates only |
-| `core` / `rdf-utils` | All downstream Node and real-EVM lanes (the browser E2E suite runs after merge) |
-| Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching `node-ui`, `graph-viz` or `cli` (the daemon HTTP API it drives); every other PR relies on its own lanes plus the CLI daemon tests and gets the suite after merge |
+| `core` / `rdf-utils` | All downstream Node and real-EVM lanes, including the browser E2E suite (its harness imports `core`) |
+| Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching the UI surface it drives (`node-ui`, `graph-viz`, and `cli`, the daemon HTTP API) or a package its harness code imports (`core` and its dependency `rdf-utils`). The rest of the daemon runtime (`agent`, `chain`, `storage`, `publisher`, `query`, adapters and the other packages `cli` depends on) is a deliberate exception: those PRs run their own lanes plus the CLI daemon tests and get the suite after merge. `ci-delta-routing.test.mjs` derives both sets from the harness imports and `scripts/devnet.sh`, and pins the exception list |
 | Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane; the planner derives it once for every plan, whether a package, a `devnet/` harness or the Gate 0 paths selected the agent lane. Besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
@@ -58,9 +58,10 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   skipped.
 - Shared packages run conservative reverse consumers and explicit integrations;
   this includes undeclared edges such as committed EVM ABIs consumed by `chain`.
-  The most expensive system lane, real-node browser E2E, follows only the UI
-  surface it drives on PRs and runs in full on every protected-branch push,
-  merge-queue candidate and nightly run; `ci:full` opts a PR in before merging.
+  The most expensive system lane, real-node browser E2E, follows on PRs only
+  the UI surface it drives and the packages its harness imports, and runs in
+  full on every protected-branch push, merge-queue candidate and nightly run;
+  `ci:full` opts a PR in before merging.
   The Windows lifecycle job is not narrowed that way: its Gate 0 and evidence
   harnesses have no Linux equivalent, so it runs for the whole agent closure.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
