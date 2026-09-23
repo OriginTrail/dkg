@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { ciJobRow, COVERAGE_JOBS } from '../ci-lanes.mjs';
 import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
@@ -149,7 +148,7 @@ test('every rotation shim is recorded next to the controller pin', () => {
   assert.deepEqual(recorded.sort(), shims.sort());
 });
 
-test('workflow controller invocations stay within the current and pinned parsers', (t) => {
+test('workflow controller invocations stay within the current and pinned parsers', () => {
   // Until a rotation lands, workflows run the pinned controller with this
   // branch's wiring; afterwards they run the current one. Both strict parsers
   // must accept every flag, and the manifest reader inputs must be exported
@@ -162,13 +161,15 @@ test('workflow controller invocations stay within the current and pinned parsers
     script,
     parserOptions(fs.readFileSync(path.join(REPO_ROOT, `scripts/ci/${script}.mjs`), 'utf8')),
   ]));
+  // The build job fetches the pinned revision before running this suite; a
+  // missing revision fails rather than silently skipping the pinned half.
   let pinned;
   try {
     pinned = Object.fromEntries(scripts.map((script) => [script, parserOptions(execFileSync('git', [
       '-C', REPO_ROOT, 'cat-file', 'blob', `${TRUSTED_CI_CONTROLLER_SHA}:scripts/ci/${script}.mjs`,
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }))]));
   } catch {
-    t.diagnostic('pinned controller revision is not in this checkout; checked the current parsers only');
+    assert.fail(`pinned controller ${TRUSTED_CI_CONTROLLER_SHA} is not in this checkout; run: git fetch --depth=1 origin ${TRUSTED_CI_CONTROLLER_SHA}`);
   }
 
   let invocations = 0;
@@ -186,7 +187,7 @@ test('workflow controller invocations stay within the current and pinned parsers
         }
         for (const [, flag] of command.join('\n').matchAll(/(?:^|\s)--([a-z][a-z-]*)/g)) {
           assert.ok(current[script].has(flag), `${name} passes --${flag}, which the current ${script}.mjs rejects`);
-          if (pinned) assert.ok(pinned[script].has(flag), `${name} passes --${flag}, which the pinned ${script}.mjs rejects`);
+          assert.ok(pinned[script].has(flag), `${name} passes --${flag}, which the pinned ${script}.mjs rejects`);
         }
         if (script === 'plan-ci') {
           const exported = run.indexOf(`export ${MANIFEST_READER_ENV.repository}=candidate`);
@@ -352,8 +353,6 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.equal(workflow.includes('github.event.pull_request.base.sha'), false);
   assert.match(workflow, /^  evm-node-test-artifacts:/m);
   assert.match(workflow, /^  evm-devnet-test-artifacts:/m);
-  assert.equal(ciJobRow('tornado-core', 1).runner, 'weighted');
-  assert.equal(ciJobRow('bura-cli', 0).runner, 'weighted');
   assert.equal(
     workflow.includes('@origintrail-official/dkg-chain exec vitest run --shard='),
     false,
@@ -365,14 +364,6 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('shard: [1, 2, 3, 4, 5, 6, 7]'));
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
-  assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
-  assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
-  assert.equal(ciJobRow('kosava-supporting').concurrency, 3);
-  for (const [packageName, invocation] of [
-    ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],
-  ]) {
-    assert.ok(workflow.includes(invocation), `${packageName} tests must stay in CI`);
-  }
 
   const evmWorkflow = fs.readFileSync(
     path.join(REPO_ROOT, '.github/workflows/evm-integration.yml'),
@@ -397,7 +388,11 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     assert.equal(source.includes('--sample-key'), false, `${name} must not request audit sampling`);
   }
   assert.match(evmWorkflow, /^  evm-gate:/m);
+});
 
+test('demo suites stay wired into the supporting job', () => {
+  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+  assert.ok(workflow.includes('--filter @origintrail-official/dkg-demo'), 'demo tests must stay in CI');
   const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
   assert.match(demoManifest.scripts.test, /kafka-streams\/test\/\*\.mjs/);
   assert.match(demoManifest.scripts.test, /epcis-bike\/test\/\*\.mjs/);

@@ -101,10 +101,14 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     [{ ...manifest, pnpm: { overrides: {} } }, /changed pnpm$/],
     [{ ...manifest, engines: { node: '>=22' } }, /changed engines$/],
     [{ ...manifest, somethingNew: true }, /changed somethingNew$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, postinstall: 'node setup.js' } }, /install lifecycle scripts postinstall$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, prepare: 'node setup.js' } }, /install lifecycle scripts prepare$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, dependencies: 'node setup.js' } }, /install lifecycle scripts dependencies$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, 'pnpm:devPreinstall': 'node setup.js' } }, /install lifecycle scripts pnpm:devPreinstall$/],
+    // Every install-time hook the policy documents, plus any pnpm: hook.
+    ...[
+      'preinstall', 'install', 'postinstall', 'preprepare', 'prepare', 'postprepare',
+      'prepublish', 'dependencies', 'pnpm:devPreinstall', 'pnpm:futureHook',
+    ].map((hook) => [
+      { ...manifest, scripts: { ...manifest.scripts, [hook]: 'node setup.js' } },
+      new RegExp(`install lifecycle scripts ${hook}$`),
+    ]),
     [{ ...manifest, scripts: 'node setup.js' }, /scripts is not a JSON object$/],
   ]) {
     const plan = manifestPlan(head);
@@ -126,6 +130,30 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
   }
   assert.equal(manifestPlan(manifest, [change('package.json')]).mode, 'full', 'root manifest');
   assert.equal(manifestPlan(manifest, [change('devnet/v10-stress/package.json')]).mode, 'full', 'devnet workspace');
+});
+
+test('every pnpm workspace manifest is compared field by field or keeps full CI', () => {
+  // Manifests are install inputs. Package roots are compared field by field
+  // (see the test above); every other workspace pnpm installs - devnet
+  // suites, CLI test fixtures - must keep the full profile.
+  const { packages: globs } = parse(fs.readFileSync(path.join(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8'));
+  const directories = globs.flatMap((glob) => (glob.endsWith('/*')
+    ? fs.readdirSync(path.join(REPO_ROOT, glob.slice(0, -2)), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => `${glob.slice(0, -2)}/${entry.name}`)
+    : [glob]));
+  let checked = 0;
+  for (const directory of directories) {
+    const manifest = `${directory}/package.json`;
+    if (!fs.existsSync(path.join(REPO_ROOT, manifest)) || Object.hasOwn(WORKSPACE_RULES, directory)) continue;
+    assert.equal(pullRequestPlan([change(manifest)]).mode, 'full', manifest);
+    checked++;
+  }
+  assert.ok(checked >= 3, 'devnet suites and CLI fixtures are checked');
+  assert.match(
+    pullRequestPlan([change('packages/cli/test-fixtures/sample-kafka-plugin/package.json')]).reasons[0],
+    /^Nested workspace manifest changed/,
+  );
 });
 
 test('repository support paths route to the lanes that execute them', () => {
