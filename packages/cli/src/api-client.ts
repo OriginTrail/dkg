@@ -19,6 +19,7 @@ import {
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
+import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
@@ -2102,6 +2103,11 @@ export class ApiClient {
       curator?: string;
       accessPolicy?: string;
       callerInvolved?: boolean;
+      onChainId?: string;
+      /** `false` when the node knows the graph only by its on-chain name hash. */
+      nameKnown?: boolean;
+      /** Chain-public ContextGraphStorage facts (additive; absent on older daemons). */
+      onChain?: ContextGraphListOnChainView;
     }>;
   }> {
     return this.get('/api/context-graph/list');
