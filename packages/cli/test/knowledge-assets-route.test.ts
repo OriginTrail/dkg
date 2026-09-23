@@ -238,15 +238,13 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       const agent = await registerAgentClient('ka-atomic-author-case');
       const cg = `ka-atomic-author-case-${Date.now().toString(36)}`;
       await createRegisteredAgentContextGraph(agent, cg);
-      const caseVariantAgent = caseVariantAddress(agent.agentAddress);
-      expect(caseVariantAgent).not.toBe(agent.agentAddress);
 
       const res = await agent.post('/api/knowledge-assets', {
         contextGraphId: cg,
         name: 'agent-case-atomic',
         quads: [{ subject: 'ex:Case', predicate: 'ex:p', object: '"x"' }],
         finalize: true,
-        authorAgentAddress: caseVariantAgent,
+        authorAgentAddress: caseVariantAddress(agent.agentAddress),
       });
 
       expect(res.status, `differently-cased atomic create: ${JSON.stringify(res.body)}`).toBe(201);

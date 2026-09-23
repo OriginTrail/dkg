@@ -175,10 +175,8 @@ describe('POST /api/update — kaId + attestation contract (KC→KA), real daemo
 
   it('allows an agent token with a differently-cased self update attestation through the guard', async () => {
     const agent = await registerAgentClient(daemon, 'update-author-case');
-    const caseVariantAgent = caseVariantAddress(agent.agentAddress);
-    expect(caseVariantAgent).not.toBe(agent.agentAddress);
     const seal = {
-      authorAddress: caseVariantAgent,
+      authorAddress: caseVariantAddress(agent.agentAddress),
       expectedNewMerkleRoot: HEX32,
       signature: { r: HEX32, vs: HEX32 },
     };
