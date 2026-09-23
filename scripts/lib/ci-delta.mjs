@@ -761,53 +761,51 @@ export function parseNameStatusZ(buffer) {
 //   4. a path claimed only by PATH_TRIGGERS (blazegraph-image.json)
 //   5. anything else -> full CI
 // PATH_TRIGGERS add lanes and EVM scopes on top of whichever of 2-4 applies.
-// Returns { full: reason } or { lanes, evmScopes, buildChecks, reasons }.
+// Every decision has one shape, { full, lanes, evmScopes, buildChecks,
+// reasons }: `full` is the reason the path needs full CI (and the rest is
+// empty) or null when the other fields route it.
+const NONE = Object.freeze([]);
+const fullRoute = (reason) => ({ full: reason, lanes: NONE, evmScopes: NONE, buildChecks: false, reasons: NONE });
+
 function routePath(filePath, { modifiedFiles, readManifest }) {
-  if (isGlobalFullPath(filePath)) return { full: `Global CI input changed: ${filePath}` };
+  if (isGlobalFullPath(filePath)) return fullRoute(`Global CI input changed: ${filePath}`);
 
-  const triggers = pathTriggers(filePath);
-  const route = {
-    lanes: triggers.flatMap((trigger) => trigger.lanes),
-    evmScopes: triggers.flatMap((trigger) => trigger.evmScopes),
-    buildChecks: false,
-    reasons: triggers.map((trigger) => trigger.reason),
-  };
-
+  // The area that owns the path: its workspace rule, else a support route.
+  let area;
   const workspace = workspaceForPath(filePath);
   if (workspace) {
     const rule = WORKSPACE_RULES[workspace];
-    if (rule.forceFull) return { full: `Highest-risk workspace changed: ${workspace}` };
+    if (rule.forceFull) return fullRoute(`Highest-risk workspace changed: ${workspace}`);
+    const reasons = [];
     if (filePath === `${workspace}/package.json`) {
-      if (!modifiedFiles.has(filePath)) {
-        return { full: `Workspace manifest added, removed or moved: ${filePath}` };
-      }
+      if (!modifiedFiles.has(filePath)) return fullRoute(`Workspace manifest added, removed or moved: ${filePath}`);
       const manifestChange = classifyManifestChange(filePath, readManifest);
       if (!manifestChange.packageScoped) {
-        return { full: `Workspace manifest changed install inputs: ${manifestChange.detail}` };
+        return fullRoute(`Workspace manifest changed install inputs: ${manifestChange.detail}`);
       }
-      route.reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
+      reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
     } else if (filePath.endsWith('/package.json')) {
       // A manifest below a workspace root is its own pnpm workspace
       // (packages/cli/test-fixtures/*), so it is an install input too.
-      return { full: `Nested workspace manifest changed: ${filePath}` };
+      return fullRoute(`Nested workspace manifest changed: ${filePath}`);
     }
-    route.lanes.push(...rule.lanes);
-    route.evmScopes.push(...rule.evmScopes);
-    route.reasons.push(`${workspace} and its downstream consumers`);
-    return route;
+    reasons.push(`${workspace} and its downstream consumers`);
+    area = { lanes: rule.lanes, evmScopes: rule.evmScopes, buildChecks: false, reasons };
+  } else {
+    const supportRoute = supportPathRoute(filePath);
+    if (supportRoute?.full) return fullRoute(`${supportRoute.full}: ${filePath}`);
+    if (supportRoute) area = { lanes: supportRoute.lanes, evmScopes: NONE, buildChecks: true, reasons: [supportRoute.reason] };
   }
 
-  const supportRoute = supportPathRoute(filePath);
-  if (supportRoute?.full) return { full: `${supportRoute.full}: ${filePath}` };
-  if (supportRoute) {
-    route.lanes.push(...supportRoute.lanes);
-    route.buildChecks = true;
-    route.reasons.push(supportRoute.reason);
-    return route;
-  }
-
-  if (triggers.length) return route;
-  return { full: `Unclassified path changed: ${filePath}` };
+  const triggers = pathTriggers(filePath);
+  if (!area && triggers.length === 0) return fullRoute(`Unclassified path changed: ${filePath}`);
+  return {
+    full: null,
+    lanes: [...triggers.flatMap((trigger) => trigger.lanes), ...(area?.lanes ?? NONE)],
+    evmScopes: [...triggers.flatMap((trigger) => trigger.evmScopes), ...(area?.evmScopes ?? NONE)],
+    buildChecks: area?.buildChecks ?? false,
+    reasons: [...triggers.map((trigger) => trigger.reason), ...(area?.reasons ?? NONE)],
+  };
 }
 
 // Git name-status codes whose paths can be routed like ordinary edits: a
