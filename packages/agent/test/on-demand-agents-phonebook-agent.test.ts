@@ -12,6 +12,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import type { DurableSyncResult } from '../src/dkg-agent-types.js';
@@ -588,4 +589,58 @@ describe('onDemandAgentsPhonebookEnabled', () => {
     setEnv('DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT', '1');
     expect(gate({ started: true, config: {} })).toBe(false);
   });
+});
+
+describe('on-demand agents phonebook across stop()', () => {
+  it('stop() waits for an in-flight phonebook fetch to unwind before teardown', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PhonebookStopDrain',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let syncSignal: AbortSignal | undefined;
+    let syncSettledAt = 0;
+    // start() creates the fetcher on first use; give it these dependencies.
+    vi.spyOn(agent, 'createOnDemandAgentsPhonebookDeps').mockReturnValue({
+      isEnabled: () => true,
+      remoteCuratorWallet: () => OWNER,
+      isActiveSubscription: () => true,
+      phonebookHasWallet: async () => false,
+      readAccessPolicy: async () => 'public',
+      listConnectedPeers: () => [{ peerId: CORE, core: true }],
+      preparePeer: async () => true,
+      // Ignores the abort on purpose: stop() has to wait for it to settle.
+      syncAgentsFromPeer: async (_peerId, { signal }) => {
+        syncSignal = signal;
+        await held;
+        syncSettledAt = performance.now();
+        return { fetchedTriples: 0, insertedTriples: 0, complete: false };
+      },
+      countProfiles: async () => 0,
+      onCuratorsResolved: () => undefined,
+      logInfo: () => undefined,
+      logDebug: () => undefined,
+    });
+    await agent.start();
+    try {
+      agent.onDemandAgentsPhonebook().request(CG, 'subscribe');
+      await vi.waitFor(() => expect(syncSignal).toBeDefined(), { timeout: 5_000 });
+
+      let stoppedAt = 0;
+      const stopping = agent.stop().then(() => { stoppedAt = performance.now(); });
+      // Longer than a plain stop() takes, shorter than the shutdown drain bound.
+      await Promise.race([stopping, new Promise((resolve) => setTimeout(resolve, 3_000))]);
+      expect(syncSignal!.aborted).toBe(true);
+      expect(stoppedAt).toBe(0);
+
+      release();
+      await stopping;
+      expect(stoppedAt).toBeGreaterThanOrEqual(syncSettledAt);
+    } finally {
+      release();
+      await agent.stop().catch(() => undefined);
+    }
+  }, 30_000);
 });
