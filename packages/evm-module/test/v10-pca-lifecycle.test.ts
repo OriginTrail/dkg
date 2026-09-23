@@ -2711,6 +2711,36 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
         expect(await (Waiver as any).waivedCgCount(accountId)).to.equal(2n);
       });
 
+      // Review (#2735): the quota belongs to the PCA and is shared by its owner
+      // and every registered agent, so an agent can use it up with graphs the
+      // agent owns. Agents could already do that through PCA-curated graphs;
+      // the owner's control is the agent list (deregisterAgent / clearAgents).
+      it('the quota is SHARED: an agent that uses it up with open CGs leaves the owner\'s next CG charged', async () => {
+        const Params = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
+        const deposit = ethers.parseEther('25000');
+        await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(deposit); // 50k PCA → quota 2
+        const owner = accounts[1];
+        const agent = accounts[3];
+        const accountId = await createAccountFor(owner);
+        await NFT.connect(owner).registerAgent(accountId, agent.address);
+
+        await expect(createOpenCg(agent)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+        await expect(createOpenCg(agent)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+        const agentCgId = await CGS.getLatestContextGraphId();
+        // The agent's graphs belong to the agent and are not bound to the PCA.
+        expect(await CGS.getContextGraphOwner(agentCgId)).to.equal(agent.address);
+        expect(await CGS.getPublishAuthorityAccountId(agentCgId)).to.equal(0n);
+
+        // Quota used up → the owner's own PCA-curated CG pays the deposit.
+        await Token.mint(owner.address, deposit);
+        await Token.connect(owner).approve(await CGFacade.getAddress(), deposit);
+        const tx = await createPcaCg(owner, owner, accountId);
+        await expect(tx).to.emit(CGFacade, 'ContextGraphRegistrationDeposited');
+        await expect(tx).not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+        const Waiver = await hre.ethers.getContract('ContextGraphWaiverStorage');
+        expect(await (Waiver as any).waivedCgCount(accountId)).to.equal(2n);
+      });
+
       it('charges an OPEN CG when the agent\'s PCA has EXPIRED (the stale binding gives no waiver)', async () => {
         await setDeposit();
         const owner = accounts[1];

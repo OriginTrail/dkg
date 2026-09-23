@@ -276,12 +276,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
     ///      Resolved fresh via the Hub; fails CLOSED to 0 (charge the deposit)
     ///      on any resolution/call failure.
     function _creatorPcaAccountId() internal view returns (uint256) {
-        address nftAddr;
-        try hub.getContractAddress("DKGPublishingConvictionNFT") returns (address addr) {
-            nftAddr = addr;
-        } catch {
-            return 0;
-        }
+        address nftAddr = _tryResolveContract("DKGPublishingConvictionNFT");
         if (nftAddr == address(0)) return 0;
         try IDKGPublishingConvictionNFT(nftAddr).agentToAccountId(msg.sender) returns (uint256 accountId) {
             return accountId;
