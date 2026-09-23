@@ -1305,6 +1305,21 @@ describe('core VM-promotion guarantees', () => {
       })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
     });
 
+    it("binds the creator's own unbound subscription of a freshly registered graph from a verified ACK", async () => {
+      // The publishing node created and subscribed the graph before it was
+      // registered, so its member row has no on-chain id yet.
+      const internals = await boot();
+      internals.subscribedContextGraphs.set('public-cg', { subscribed: true });
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '42', swmGraphId: 'public-cg', operation: 'publish',
+      })).resolves.toEqual({ ok: true });
+
+      expect(internals.subscribedContextGraphs.get('public-cg')).toMatchObject({
+        subscribed: true, coreHosted: true, onChainId: '42',
+      });
+    });
+
     it("declines transiently until a brand-new graph's registration is visible, then binds", async () => {
       const internals = await boot();
       let registered = false;

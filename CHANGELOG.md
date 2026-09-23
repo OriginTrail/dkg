@@ -85,7 +85,9 @@ All notable changes to the DKG V10 node are documented here. The format is based
   on-chain name (or, for a graph without one, locally bound to it). A
   mismatch is declined finally, so one request cannot bind another graph's
   namespace; a name that cannot be confirmed yet (a brand-new graph whose
-  registration is not visible) is declined transiently. A namespace that reconciles a different live graph is never
+  registration is not visible) is declined transiently. Once verified, the
+  ACK also binds a local subscription of that name that has no on-chain id
+  yet (the creator of a freshly registered graph). A namespace that reconciles a different live graph is never
   rewritten by an ACK. A namespace whose persisted subscription row is dormant
   is declined transiently for up to 10 minutes while the dormancy can clear
   (authority retry, activation slot), then finally; with subscription

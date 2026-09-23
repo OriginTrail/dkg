@@ -2785,7 +2785,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     cgId: string,
     swmGraphId?: string,
-    options: { durable?: boolean; nudge?: boolean } = {},
+    options: {
+      durable?: boolean;
+      nudge?: boolean;
+      /**
+       * The caller verified on chain that this namespace names `cgId` (the
+       * StorageACK gate checks the committed name hash). A member row of the
+       * namespace that has no on-chain binding yet (a freshly registered
+       * graph) is then bound from the ACK instead of waiting for a binding.
+       */
+      namespaceVerified?: boolean;
+    } = {},
   ): Promise<CoreHostedPublicCgRecordOutcome> {
     if (this.coreHostRecordingsClosed) return 'closed';
     if (!this.vmReconcileEnabled()) return 'vm-reconcile-disabled';
@@ -2825,7 +2835,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return this.contextGraphSubscriptionDormancyById.has(localCgId) ? 'dormant' : undefined;
       }
       if (!existing.subscribed) return undefined;
-      if (existing.onChainId === undefined) return 'binding-pending';
+      if (existing.onChainId === undefined) {
+        return options.namespaceVerified === true || localCgId === numericStr ? undefined : 'binding-pending';
+      }
       return existing.onChainId === numericStr ? undefined : 'namespace-conflict';
     };
 

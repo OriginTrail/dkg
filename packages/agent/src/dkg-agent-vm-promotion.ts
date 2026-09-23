@@ -161,7 +161,8 @@ export class VmPromotionMethods extends DKGAgentBase {
           this.recordCoreHostedPublicCg(
             request.contextGraphId,
             request.swmGraphId,
-            { durable: true },
+            // The namespace binding was just verified on chain above.
+            { durable: true, namespaceVerified: true },
           ),
         ).finally(() => {
           if (this.storageAckVmPromotionFlights.get(flightKey) === started) {
