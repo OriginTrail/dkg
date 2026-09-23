@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { CI_LANES, WORKSPACE_OWNING_LANES } from '../ci-delta.mjs';
+import { parse } from 'yaml';
+import { CI_LANES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES } from '../ci-delta.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 import { REPO_ROOT, change, pullRequestPlan, selectedLanes } from './ci-plan-fixtures.mjs';
 
@@ -113,6 +114,30 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
   }
   assert.equal(manifestPlan(manifest, [change('package.json')]).mode, 'full', 'root manifest');
   assert.equal(manifestPlan(manifest, [change('devnet/v10-stress/package.json')]).mode, 'full', 'devnet workspace');
+});
+
+test('every pnpm workspace manifest is compared field by field or keeps full CI', () => {
+  // Manifests are install inputs. Package roots are compared field by field
+  // (see the test above); every other workspace pnpm installs - devnet
+  // suites, CLI test fixtures - must keep the full profile.
+  const { packages: globs } = parse(fs.readFileSync(path.join(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8'));
+  const directories = globs.flatMap((glob) => (glob.endsWith('/*')
+    ? fs.readdirSync(path.join(REPO_ROOT, glob.slice(0, -2)), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => `${glob.slice(0, -2)}/${entry.name}`)
+    : [glob]));
+  let checked = 0;
+  for (const directory of directories) {
+    const manifest = `${directory}/package.json`;
+    if (!fs.existsSync(path.join(REPO_ROOT, manifest)) || Object.hasOwn(WORKSPACE_RULES, directory)) continue;
+    assert.equal(pullRequestPlan([change(manifest)]).mode, 'full', manifest);
+    checked++;
+  }
+  assert.ok(checked >= 3, 'devnet suites and CLI fixtures are checked');
+  assert.match(
+    pullRequestPlan([change('packages/cli/test-fixtures/sample-kafka-plugin/package.json')]).reasons[0],
+    /^Nested workspace manifest changed/,
+  );
 });
 
 test('repository support paths route to the lanes that execute them', () => {

@@ -722,6 +722,10 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
         return { full: `Workspace manifest changed install inputs: ${manifestChange.detail}` };
       }
       route.reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
+    } else if (filePath.endsWith('/package.json')) {
+      // A manifest below a workspace root is its own pnpm workspace
+      // (packages/cli/test-fixtures/*), so it is an install input too.
+      return { full: `Nested workspace manifest changed: ${filePath}` };
     }
     route.lanes.push(...rule.lanes);
     route.evmScopes.push(...rule.evmScopes);
