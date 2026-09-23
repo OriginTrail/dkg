@@ -48,7 +48,7 @@ file names cannot alter the decision. For a modified workspace manifest it also
 reads both versions with `git cat-file blob` from the candidate checkout (data
 only; nothing from the candidate is executed); any read or parse failure keeps
 full CI. Its routing tables live in
-`scripts/lib/ci-delta.mjs` and are covered by table/snapshot-style tests in
+`scripts/lib/ci-routing.mjs`, next to the planner in `scripts/lib/ci-delta.mjs`, and are covered by table/snapshot-style tests in
 `scripts/lib/__tests__/`: `ci-delta.test.mjs` (planner policy),
 `ci-delta-routing.test.mjs` (path routing), `ci-controller.test.mjs` (trusted
 controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).

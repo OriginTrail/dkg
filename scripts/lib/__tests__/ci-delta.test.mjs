@@ -291,6 +291,7 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
     'scripts/ci/assert-ci-results.mjs',
     'scripts/lib/ci-delta.mjs',
     'scripts/lib/ci-results.mjs',
+    'scripts/lib/ci-routing.mjs',
     'scripts/unrelated-maintenance.mjs',
   ];
 

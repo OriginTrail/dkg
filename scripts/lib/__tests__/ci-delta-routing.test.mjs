@@ -632,7 +632,7 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
     assert.deepEqual(pullRequestPlan([change(filePath)]).evmScopes, [], filePath);
   }
 
-  // ci-delta.mjs cannot import the manifest (it runs from the four-file
+  // The planner cannot import the manifest (it runs from the
   // trusted-controller sparse checkout), so link the two copies from here:
   // every node-ui file the chain scope actually RUNS must also be a planner
   // trigger, and renaming or moving the journey fails here instead of
