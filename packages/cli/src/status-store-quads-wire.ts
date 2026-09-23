@@ -1,8 +1,8 @@
 /**
  * The external-store part of the GET /api/status wire contract (quad count and
- * reachability), defined once. The daemon route and ApiClient both import it,
- * so changing a status value, a field or a query spelling breaks the other
- * side's compile instead of drifting silently.
+ * reachability), and how fresh the count is kept, defined once. The daemon
+ * route and ApiClient both import it, so changing a status value, a field or a
+ * query spelling breaks the other side's compile instead of drifting silently.
  */
 
 /**
@@ -49,12 +49,31 @@ export interface StoreReachabilityFields {
 export interface StatusQueryOptions {
   /**
    * Refresh the cached count in the background, which costs a full-store
-   * COUNT at most once per daemon cache TTL.
+   * COUNT at most once per {@link STORE_QUADS_CACHE_TTL_MS}.
    */
   includeStoreQuads?: boolean;
   /** Check, with a cheap `ASK`, that the store answers at all. */
   probeStore?: boolean;
 }
+
+/**
+ * How long the daemon reuses a finished count, successful or failed: an
+ * `includeStoreQuads` request inside this window starts no COUNT, whoever
+ * sends it, so it caps how often any caller can make the daemon count.
+ */
+export const STORE_QUADS_CACHE_TTL_MS = 30_000;
+
+/**
+ * How old a successful count `dkg status` shows before it asks for a recount.
+ * A full-store COUNT can occupy a large store for seconds, and scripts or
+ * agents may run `dkg status` on a schedule. A failed or missing count it asks
+ * for on every run, which {@link STORE_QUADS_CACHE_TTL_MS} caps.
+ *
+ * Kept next to the TTL because the two only work together: this window must
+ * not be shorter than the TTL, or `dkg status` would ask for recounts that the
+ * daemon answers from its cache. status-command-store.test.ts pins that.
+ */
+export const STORE_QUADS_REFRESH_AFTER_MS = 10 * 60_000;
 
 /**
  * Option name -> query parameter name. `satisfies` makes the map total: an

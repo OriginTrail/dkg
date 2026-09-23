@@ -6,7 +6,11 @@
  * invalidates it without importing the route, which imports the supervisor.
  */
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import type { StoreQuadsStatus, StoreQuadsStatusFields } from '../status-store-quads-wire.js';
+import {
+  STORE_QUADS_CACHE_TTL_MS,
+  type StoreQuadsStatus,
+  type StoreQuadsStatusFields,
+} from '../status-store-quads-wire.js';
 import { parseRdfInt } from './metrics-queries.js';
 
 // Quad-count cache for external SPARQL backends. A full-store COUNT is not a
@@ -22,11 +26,8 @@ import { parseRdfInt } from './metrics-queries.js';
 // result carries its age, because ordinary polling never refreshes it.
 // Local backends bypass this entirely (file-bytes metric stays on the
 // metrics collector tick).
-// The TTL caps how often explicit requests can trigger a recount, whoever
-// sends them. How old a count a caller accepts is the caller's own policy:
-// `dkg status` asks for a recount once its count is ten minutes old
-// (STORE_QUADS_REFRESH_AFTER_MS in commands/lifecycle.ts).
-const STORE_QUADS_CACHE_TTL_MS = 30_000;
+// The cache TTL (STORE_QUADS_CACHE_TTL_MS) lives in the wire module, next to
+// `dkg status`'s refresh window, which must not be shorter than it.
 
 // The statuses come from the wire union, so renaming one there breaks the
 // daemon's compile instead of leaving a stale spelling here.

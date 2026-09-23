@@ -2,7 +2,12 @@ import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
-import type { StoreQuadsStatusFields, StoreReachability } from '../src/status-store-quads-wire.js';
+import {
+  STORE_QUADS_CACHE_TTL_MS,
+  STORE_QUADS_REFRESH_AFTER_MS,
+  type StoreQuadsStatusFields,
+  type StoreReachability,
+} from '../src/status-store-quads-wire.js';
 
 interface StoreFields {
   storeUrl?: string | null;
@@ -177,6 +182,12 @@ const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]>
 ];
 
 describe('dkg status external-store count requests', () => {
+  // A refresh window shorter than the daemon's cache TTL would make
+  // `dkg status` ask for recounts that the daemon answers from its cache.
+  it('waits at least the daemon cache TTL before asking to recount a successful count', () => {
+    expect(STORE_QUADS_REFRESH_AFTER_MS).toBeGreaterThanOrEqual(STORE_QUADS_CACHE_TTL_MS);
+  });
+
   it.each(REQUEST_CASES)('%s', async (_label, peek, requests) => {
     const { statusRequests } = await renderStatus(peek, {
       storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null,

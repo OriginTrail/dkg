@@ -30,7 +30,11 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
-import type { StoreQuadsStatusFields, StoreReachability } from '../status-store-quads-wire.js';
+import {
+  STORE_QUADS_REFRESH_AFTER_MS,
+  type StoreQuadsStatusFields,
+  type StoreReachability,
+} from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -135,14 +139,6 @@ export async function executeStopCommand(
 // A display threshold, deliberately independent of the daemon's cache TTL:
 // past it `dkg status` says how old the store count it prints is.
 const STORE_QUADS_SHOW_AGE_AFTER_MS = 60_000;
-// A full-store COUNT can occupy a large store for seconds, and scripts or
-// agents may run `dkg status` on a schedule, so a successful count is reused
-// until it is this old. This is `dkg status`'s own freshness policy, separate
-// from the daemon's 30 s cache TTL (STORE_QUADS_CACHE_TTL_MS in
-// daemon/store-quads-cache.ts), which only caps how often any caller can
-// trigger a recount. Keeping the policy with its only caller needs no wire
-// parameter; the cost is the plain status read before a refresh request.
-const STORE_QUADS_REFRESH_AFTER_MS = 10 * 60_000;
 
 /**
  * Whether `dkg status` should ask the daemon to refresh its store count, given
