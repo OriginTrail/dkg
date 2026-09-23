@@ -13,17 +13,20 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   createOperationContext,
   getMetrics,
+  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
+  storageAckLedgerMarkUpdate,
   xsdDateTimeLiteral,
   type StorageAckPriorVersionRequest,
   type StorageAckVmPromotionRequest,
   type StorageAckVmPromotionVerdict,
 } from '@origintrail-official/dkg-publisher';
 import { withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
-import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
+import { withOwnedRpcRequestContext, withRpcRequestContext } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { CoreHostedPublicCgRecordOutcome } from './core-hosted-public-cg-record-decision.js';
@@ -36,10 +39,14 @@ import {
   isStorageAckNamespace,
   knowledgeAssetIdFromUal,
   parseStorageAckLedgerCandidate,
+  storageAckAssetSubGraphsQuery,
   storageAckAuditCandidatesQuery,
-  storageAckLedgerEpochQuery,
   storageAckLedgerNamespacesQuery,
+  storageAckNamespaceSubGraphsQuery,
+  storageAckLedgerOrphansDeleteUpdate,
   storageAckLedgerOrphansQuery,
+  storageAckLedgerStateQuery,
+  storageAckPendingUpdatesQuery,
   storageAckNamespaceTargetsQuery,
   storageAckPromotedQuery,
   stripLiteral,
@@ -57,14 +64,32 @@ const STORAGE_ACK_LEDGER_ORPHAN_BATCH = 2_000;
 const STORAGE_ACK_TARGETS_PER_NAMESPACE = 4;
 /** A pending update is first checked this long after its ACK. */
 const PENDING_UPDATE_MIN_AGE_MS = 60_000;
-const PENDING_UPDATE_CANDIDATES = 64;
+/**
+ * A gap this long since a ledger-keeping version last ran means another
+ * version (a rollback) may have signed ACKs meanwhile: grandfather that window.
+ */
+const STORAGE_ACK_LEDGER_REGRANDFATHER_GAP_MS = 60 * 60_000;
 /** Concurrent per-asset promotions declined update ACKs may request. */
-const PRIOR_VERSION_PROMOTION_MAX_FLIGHTS = 16;
+/** Per-asset promotions requested by declined update ACKs that run at once. */
+const PRIOR_VERSION_PROMOTION_CONCURRENCY = 8;
+/** Further requests queue (single-flight per asset); beyond this they are left to the lanes. */
+const PRIOR_VERSION_PROMOTION_QUEUE_MAX = 512;
+/**
+ * A namespace whose persisted subscription row stays dormant this long for
+ * a reason that normally clears (authority retry, activation slot) is then
+ * declined finally rather than transiently, so publishers stop waiting on it.
+ */
+const STORAGE_ACK_DORMANT_TRANSIENT_MS = 10 * 60_000;
 const BACKOFF_BASE_MS = 60_000;
 const BACKOFF_MAX_MS = 24 * 60 * 60_000;
 const DECLINE_WINDOW_MINUTES = 60;
 
-type CopyClassification = 'landed' | 'absent' | 'unknown';
+/**
+ * `landed`: the chain's latest version is this copy's version, so it can be
+ * promoted. `superseded`: a later version landed; the copy can never be
+ * promoted as-is and is released. `absent`: the chain does not have it (yet).
+ */
+type CopyClassification = 'landed' | 'superseded' | 'absent' | 'unknown';
 
 export class VmPromotionMethods extends DKGAgentBase {
   /**
@@ -121,6 +146,8 @@ export class VmPromotionMethods extends DKGAgentBase {
     if (this.coreHostRecordingsClosed || (this.started && !this.vmReconcileRuntimeReady)) {
       return unavailable('VM reconciliation is not running on this core yet');
     }
+    const binding = await this.checkStorageAckNamespaceBinding(request);
+    if (binding !== undefined) return binding;
     let outcome: CoreHostedPublicCgRecordOutcome;
     try {
       // A burst of first ACKs for one graph shares a single liveness/policy
@@ -152,6 +179,10 @@ export class VmPromotionMethods extends DKGAgentBase {
       );
       return unavailable('core-hosted record unavailable');
     }
+    const localCgId = request.swmGraphId && request.swmGraphId !== request.contextGraphId
+      ? request.swmGraphId
+      : request.contextGraphId;
+    if (outcome !== 'dormant') this.storageAckDormantSince.delete(localCgId);
     switch (outcome) {
       case 'recorded':
       case 'already-recorded':
@@ -170,9 +201,24 @@ export class VmPromotionMethods extends DKGAgentBase {
         return unavailable('context graph liveness or access policy is unavailable');
       case 'persist-failed':
         return unavailable('core-hosted record could not be persisted');
-      case 'dormant':
-        this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
-        return unavailable('the graph subscription on this core is not active yet');
+      case 'dormant': {
+        // The persisted row is never overwritten from an ACK. Dormancy that
+        // clears on its own (authority retry, rolling activation slot) is
+        // transient for a while; anything else is final and says why.
+        const reason = this.contextGraphSubscriptionDormancyById.get(localCgId);
+        const now = Date.now();
+        const since = this.storageAckDormantSince.get(localCgId) ?? now;
+        this.storageAckDormantSince.set(localCgId, since);
+        const selfClearing = reason === 'authorityUnavailable' || reason === 'activationCap';
+        if (selfClearing && now - since < STORAGE_ACK_DORMANT_TRANSIENT_MS) {
+          if (reason === 'activationCap') this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+          return unavailable(`the graph subscription on this core is not active yet (${reason})`);
+        }
+        return disabled(
+          `the persisted subscription for "${localCgId}" is dormant on this core (${reason ?? 'unknown'})` +
+          (reason === 'rehydrationDisabled' ? '; subscription rehydration is disabled' : ''),
+        );
+      }
       case 'binding-pending':
         return unavailable('the graph subscription on this core has no on-chain binding yet');
       case 'closed':
@@ -316,39 +362,55 @@ export class VmPromotionMethods extends DKGAgentBase {
   }
 
   /**
-   * Make the signed-ACK ledger usable: record this node's ledger epoch on
-   * first use and grandfather every `storage-ack-` copy stored before it (one
-   * store-side INSERT, idempotent). Until it succeeds the TTL cleanup keeps
-   * every young `storage-ack-` copy.
+   * Make the signed-ACK ledger usable. The first time a store is used by a
+   * ledger-keeping version, every `storage-ack-` copy stored before now is
+   * grandfathered in one store-side INSERT, and the bound is persisted so
+   * later restarts skip it. If the node has not run a ledger-keeping version
+   * for over an hour (for example after a rollback), copies stored since it
+   * last ran are grandfathered too. Until this succeeds the TTL cleanup keeps
+   * every young `storage-ack-` copy; the promotion lanes do not wait for it.
    */
   async ensureStorageAckLedgerReady(this: DKGAgent): Promise<boolean> {
     if (this.storageAckLedgerReady) return true;
     if (this.storageAckLedgerReadyFlight) return this.storageAckLedgerReadyFlight;
     const flight = (async (): Promise<boolean> => {
       try {
-        const existing = await this.store.query(storageAckLedgerEpochQuery(), {
-          source: 'agent.storageAckLedger.epoch',
-          priority: 'background',
-        });
-        const recorded = existing.type === 'bindings' ? existing.bindings[0]?.['epoch'] : undefined;
-        let epochIso = recorded === undefined ? undefined : stripLiteral(recorded);
-        if (epochIso === undefined || !Number.isFinite(Date.parse(epochIso))) {
-          const epoch = new Date();
-          epochIso = epoch.toISOString();
-          await this.store.insert([{
-            subject: STORAGE_ACK_LEDGER_GRAPH,
-            predicate: LEDGER.epoch,
-            object: xsdDateTimeLiteral(epoch),
-            graph: STORAGE_ACK_LEDGER_GRAPH,
-          }], { source: 'agent.storageAckLedger.epoch', priority: 'background' });
-        }
         if (typeof this.store.update !== 'function') {
           throw new Error('the triple store cannot run SPARQL updates');
         }
-        await this.store.update(storageAckGrandfatherUpdate(epochIso), {
-          source: 'agent.storageAckLedger.grandfather',
+        const state = await this.store.query(storageAckLedgerStateQuery(), {
+          source: 'agent.storageAckLedger.state',
           priority: 'background',
         });
+        const row = state.type === 'bindings' ? state.bindings[0] : undefined;
+        const instant = (value: string | undefined): string | undefined => {
+          const iso = value === undefined ? undefined : stripLiteral(value);
+          return iso !== undefined && Number.isFinite(Date.parse(iso)) ? iso : undefined;
+        };
+        const through = instant(row?.['through']);
+        const lastSeen = instant(row?.['seen']) ?? through;
+        const now = new Date();
+        const options = { source: 'agent.storageAckLedger.grandfather', priority: 'background' as const };
+        let since: string | undefined | null = null;
+        if (through === undefined) {
+          since = undefined;
+        } else if (
+          lastSeen !== undefined
+          && now.getTime() - Date.parse(lastSeen) > STORAGE_ACK_LEDGER_REGRANDFATHER_GAP_MS
+        ) {
+          since = lastSeen;
+        }
+        if (since !== null) {
+          await this.store.update(storageAckGrandfatherUpdate(now.toISOString(), since), options);
+          await this.store.update(
+            storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.grandfatheredThrough, now),
+            options,
+          );
+        }
+        if (instant(row?.['epoch']) === undefined) {
+          await this.store.update(storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.epoch, now), options);
+        }
+        await this.store.update(storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, now), options);
         this.storageAckLedgerReady = true;
         this.vmPromotionAuditStatus.ledgerReady = true;
         return true;
@@ -365,6 +427,45 @@ export class VmPromotionMethods extends DKGAgentBase {
     })();
     this.storageAckLedgerReadyFlight = flight;
     return flight;
+  }
+
+  /**
+   * The sub-graph this core's StorageACK copy of an asset sits in, when its
+   * ledger names exactly one. Only cores keep a ledger.
+   */
+  async storageAckLedgerSubGraphName(
+    this: DKGAgent,
+    namespace: string,
+    kaUal: string,
+  ): Promise<string | undefined> {
+    if ((this.config.nodeRole ?? 'edge') !== 'core') return undefined;
+    try {
+      const result = await this.store.query(storageAckAssetSubGraphsQuery(namespace, kaUal), {
+        source: 'agent.storageAckLedger.assetSubGraph',
+      });
+      if (result.type !== 'bindings' || result.bindings.length !== 1) return undefined;
+      const value = result.bindings[0]?.['subGraph'];
+      const subGraphName = value === undefined ? undefined : stripLiteral(value);
+      return subGraphName !== undefined && validateSubGraphName(subGraphName).valid ? subGraphName : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Sub-graphs of a namespace that hold this core's StorageACK copies. */
+  async storageAckLedgerNamespaceSubGraphs(this: DKGAgent, namespace: string): Promise<string[]> {
+    if ((this.config.nodeRole ?? 'edge') !== 'core') return [];
+    try {
+      const result = await this.store.query(storageAckNamespaceSubGraphsQuery(namespace, 256), {
+        source: 'agent.storageAckLedger.namespaceSubGraphs',
+      });
+      if (result.type !== 'bindings') return [];
+      return result.bindings
+        .map((row) => (row['subGraph'] === undefined ? '' : stripLiteral(row['subGraph'])))
+        .filter((name) => name.length > 0 && validateSubGraphName(name).valid);
+    } catch {
+      return [];
+    }
   }
 
   /** Every SWM namespace that holds ledgered ACK copies. */
@@ -418,9 +519,9 @@ export class VmPromotionMethods extends DKGAgentBase {
     const startedAt = Date.now();
     const active = () => this.vmPromotionAuditActive();
     try {
-      if (!await this.ensureStorageAckLedgerReady()) {
-        throw new Error('StorageACK ledger is not ready');
-      }
+      // Rows the handler writes are valid without grandfathering, so the pass
+      // runs either way; only pre-ledger copies wait for it.
+      const ledgerReady = await this.ensureStorageAckLedgerReady();
       await this.pruneStorageAckLedgerOrphans();
       const backfill = await this.backfillCoreHostedStorageAckGraphs(startedAt, active);
       status.namespacesWithAckCopies = backfill.namespaces;
@@ -434,19 +535,30 @@ export class VmPromotionMethods extends DKGAgentBase {
       status.stalledOnChain = audit.stalled;
       status.notRegisteredOnChain = audit.absent;
       status.expiredUnregisteredCopies += audit.expired;
+      status.supersededCopies += audit.superseded;
       status.retriesTriggered += audit.reconciled;
       status.promotedByAudit += audit.promoted;
-      status.lastError = null;
+      status.lastError = ledgerReady ? null : 'StorageACK ledger is not ready (pre-ledger copies not grandfathered yet)';
+      if (ledgerReady) {
+        await this.store.update?.(
+          storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, new Date()),
+          { source: 'agent.storageAckLedger.seen', priority: 'background' },
+        );
+      }
       const metrics = getMetrics();
       metrics.vmPromotionStalledAcks.record(audit.stalled);
       if (backfill.recorded > 0) metrics.vmPromotionBackfillRecordedTotal.add(backfill.recorded);
       if (audit.reconciled > 0) metrics.vmPromotionRetriesTotal.add(audit.reconciled);
-      if (backfill.recorded > 0 || backfill.unresolved > 0 || audit.stalled > 0 || audit.expired > 0) {
+      if (
+        backfill.recorded > 0 || backfill.unresolved > 0 || audit.stalled > 0 || audit.expired > 0
+        || audit.superseded > 0
+      ) {
         this.log.info(
           ctx,
           `ACK promotion audit: namespaces=${backfill.namespaces} backfilled=${backfill.recorded} ` +
           `pending=${backfill.pending} unresolved=${backfill.unresolved} examined=${audit.examined} ` +
           `stale=${audit.stale} stalled=${audit.stalled} absent=${audit.absent} ` +
+          `superseded=${audit.superseded} ` +
           `expired=${audit.expired} reconciled=${audit.reconciled} promoted=${audit.promoted}`,
         );
       }
@@ -461,6 +573,13 @@ export class VmPromotionMethods extends DKGAgentBase {
 
   /** Drop ledger rows whose ACK copy was retired after promotion or expired. */
   async pruneStorageAckLedgerOrphans(this: DKGAgent): Promise<number> {
+    if (typeof this.store.update === 'function') {
+      await this.store.update(storageAckLedgerOrphansDeleteUpdate(), {
+        source: 'agent.storageAckLedger.orphans',
+        priority: 'background',
+      });
+      return 0;
+    }
     const result = await this.store.query(storageAckLedgerOrphansQuery(STORAGE_ACK_LEDGER_ORPHAN_BATCH), {
       source: 'agent.storageAckLedger.orphans',
     });
@@ -689,10 +808,13 @@ export class VmPromotionMethods extends DKGAgentBase {
     stalled: number;
     absent: number;
     expired: number;
+    superseded: number;
     reconciled: number;
     promoted: number;
   }> {
-    const totals = { examined: 0, stale: 0, stalled: 0, absent: 0, expired: 0, reconciled: 0, promoted: 0 };
+    const totals = {
+      examined: 0, stale: 0, stalled: 0, absent: 0, expired: 0, superseded: 0, reconciled: 0, promoted: 0,
+    };
     const pageSize = DKGAgentBase.VM_PROMOTION_AUDIT_PAGE_SIZE;
     const result = await this.store.query(storageAckAuditCandidatesQuery({
       after: this.vmPromotionAuditCursor,
@@ -727,7 +849,7 @@ export class VmPromotionMethods extends DKGAgentBase {
       const onChainId = this.storageAckCopyTarget(candidate);
       if (onChainId !== undefined && (
         reconcile.length >= DKGAgentBase.VM_PROMOTION_AUDIT_MAX_RECONCILES
-        || (!candidate.registered && chainChecks <= 0)
+        || chainChecks <= 0
       )) {
         exhausted = true;
         break;
@@ -736,19 +858,20 @@ export class VmPromotionMethods extends DKGAgentBase {
       totals.stale += 1;
       resumeAfter = candidate.operationSubject;
       if (onChainId === undefined) continue;
-      if (candidate.registered) {
-        totals.stalled += 1;
-        stalledNamespaces.set(candidate.namespace, candidate.kaUal);
-        reconcile.push({ candidate, onChainId });
-        continue;
-      }
+      // A registered copy is classified again too: a later version may have
+      // landed since, and then the copy can never be promoted as-is.
       chainChecks -= 1;
       const classification = await this.classifyStorageAckCopy(candidate, onChainId);
       if (classification === 'landed') {
-        await this.markStorageAckLedger(candidate.operationSubject, LEDGER.registeredAt, now);
+        if (!candidate.registered) {
+          await this.markStorageAckLedger(candidate.operationSubject, LEDGER.registeredAt, now);
+        }
         totals.stalled += 1;
         stalledNamespaces.set(candidate.namespace, candidate.kaUal);
         reconcile.push({ candidate, onChainId });
+      } else if (classification === 'superseded') {
+        await this.markStorageAckLedger(candidate.operationSubject, LEDGER.supersededAt, now);
+        totals.superseded += 1;
       } else if (classification === 'absent') {
         totals.absent += 1;
         if (await this.recordStorageAckAbsence(candidate, now, ttl)) totals.expired += 1;
@@ -797,42 +920,59 @@ export class VmPromotionMethods extends DKGAgentBase {
   async promotePendingStorageAckUpdates(
     this: DKGAgent,
     now = Date.now(),
-  ): Promise<{ checked: number; promoted: number }> {
-    const totals = { checked: 0, promoted: 0 };
-    if (!this.vmPromotionAuditActive() || !this.storageAckLedgerReady) return totals;
-    const result = await this.store.query(
-      `SELECT ?op ?namespace ?ka ?version ?signedAt ?target ?registered ?absentSeen WHERE {
-        GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
-          ?op <${LEDGER.operation}> "update" ;
-            <${LEDGER.signedAt}> ?signedAt ;
-            <${LEDGER.namespace}> ?namespace ;
-            <${LEDGER.kaUal}> ?ka ;
-            <${LEDGER.assertionVersion}> ?version .
-          OPTIONAL { ?op <${LEDGER.contextGraphId}> ?target }
-          OPTIONAL { ?op <${LEDGER.registeredAt}> ?registered }
-          OPTIONAL { ?op <${LEDGER.absentSeenAt}> ?absentSeen }
-          FILTER NOT EXISTS { ?op <${LEDGER.unregisteredAt}> ?unregistered }
-          FILTER(?signedAt < "${new Date(now - PENDING_UPDATE_MIN_AGE_MS).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-        }
-      } ORDER BY ?signedAt LIMIT ${PENDING_UPDATE_CANDIDATES}`,
-      { source: 'agent.vmPromotionUpdates.candidates' },
-    );
-    if (result.type !== 'bindings') return totals;
-    for (const row of result.bindings) {
-      if (totals.checked >= DKGAgentBase.VM_PROMOTION_UPDATE_MAX_CHECKS || !this.vmPromotionAuditActive()) break;
+  ): Promise<{ checked: number; promoted: number; superseded: number }> {
+    const totals = { checked: 0, promoted: 0, superseded: 0 };
+    if (!this.vmPromotionAuditActive()) return totals;
+    // Keyset rotation (like the audit): rows that are promoted, backing off or
+    // unresolvable are passed over cheaply, so they cannot hold the page.
+    const result = await this.store.query(storageAckPendingUpdatesQuery({
+      after: this.vmPromotionUpdateCursor,
+      signedBeforeIso: new Date(now - PENDING_UPDATE_MIN_AGE_MS).toISOString(),
+      limit: DKGAgentBase.VM_PROMOTION_UPDATE_PAGE_SIZE,
+    }), { source: 'agent.vmPromotionUpdates.candidates' });
+    const rows = result.type === 'bindings' ? result.bindings : [];
+    let resumeAfter = this.vmPromotionUpdateCursor;
+    let exhausted = false;
+    for (const row of rows) {
+      if (!this.vmPromotionAuditActive()) {
+        exhausted = true;
+        break;
+      }
       const candidate = parseStorageAckLedgerCandidate(row);
-      if (candidate === null) continue;
+      if (candidate === null) {
+        resumeAfter = row['op'] ?? resumeAfter;
+        continue;
+      }
       const backoff = this.vmPromotionUpdateBackoff.get(candidate.operationSubject);
-      if (backoff !== undefined && backoff.nextAttemptAt > now) continue;
+      if (backoff !== undefined && backoff.nextAttemptAt > now) {
+        resumeAfter = candidate.operationSubject;
+        continue;
+      }
       if (await this.isStorageAckCopyPromoted(candidate)) {
         this.vmPromotionUpdateBackoff.delete(candidate.operationSubject);
+        resumeAfter = candidate.operationSubject;
         continue;
       }
       const onChainId = this.storageAckCopyTarget(candidate);
-      if (onChainId === undefined) continue;
+      if (onChainId === undefined) {
+        resumeAfter = candidate.operationSubject;
+        continue;
+      }
+      if (totals.checked >= DKGAgentBase.VM_PROMOTION_UPDATE_MAX_CHECKS) {
+        exhausted = true;
+        break;
+      }
       totals.checked += 1;
+      resumeAfter = candidate.operationSubject;
+      const classification = await this.classifyStorageAckCopy(candidate, onChainId);
+      if (classification === 'superseded') {
+        await this.markStorageAckLedger(candidate.operationSubject, LEDGER.supersededAt, now);
+        this.vmPromotionUpdateBackoff.delete(candidate.operationSubject);
+        totals.superseded += 1;
+        continue;
+      }
       let promoted = false;
-      if (candidate.registered || await this.classifyStorageAckCopy(candidate, onChainId) === 'landed') {
+      if (classification === 'landed') {
         if (!candidate.registered) {
           await this.markStorageAckLedger(candidate.operationSubject, LEDGER.registeredAt, now);
         }
@@ -852,6 +992,7 @@ export class VmPromotionMethods extends DKGAgentBase {
         });
       }
     }
+    this.vmPromotionUpdateCursor = exhausted || rows.length >= DKGAgentBase.VM_PROMOTION_UPDATE_PAGE_SIZE ? resumeAfter : '';
     return totals;
   }
 
@@ -888,16 +1029,23 @@ export class VmPromotionMethods extends DKGAgentBase {
   ): Promise<CopyClassification> {
     const kaId = knowledgeAssetIdFromUal(candidate.kaUal);
     if (kaId === null) return 'unknown';
+    const byRootCount = (rootCount: bigint): CopyClassification => {
+      if (rootCount === candidate.assertionVersion) return 'landed';
+      return rootCount > candidate.assertionVersion ? 'superseded' : 'absent';
+    };
     try {
       if (candidate.assertionVersion > 1n) {
         const rootCount = await this.chain.getMerkleRootCount?.(kaId);
         if (typeof rootCount !== 'bigint') return 'unknown';
-        return rootCount >= candidate.assertionVersion ? 'landed' : 'absent';
+        return byRootCount(rootCount);
       }
       const readRegistration = this.chain.getKAContextGraphId;
       if (typeof readRegistration !== 'function') return 'unknown';
       const registeredTo = await readRegistration.call(this.chain, kaId);
-      if (registeredTo.toString() === onChainId) return 'landed';
+      if (registeredTo.toString() === onChainId) {
+        const rootCount = await this.chain.getMerkleRootCount?.(kaId);
+        return typeof rootCount === 'bigint' ? byRootCount(rootCount) : 'landed';
+      }
       if (registeredTo !== 0n) return 'absent';
       const rootCount = await this.chain.getMerkleRootCount?.(kaId);
       return rootCount === 0n ? 'absent' : 'unknown';
@@ -930,8 +1078,14 @@ export class VmPromotionMethods extends DKGAgentBase {
     return true;
   }
 
+  /** Set one timestamp on a ledger row in a single store update (no delete-then-insert window). */
   async markStorageAckLedger(this: DKGAgent, operationSubject: string, predicate: string, at: number): Promise<void> {
-    await this.store.deleteByPattern({ graph: STORAGE_ACK_LEDGER_GRAPH, subject: operationSubject, predicate });
+    if (typeof this.store.update === 'function') {
+      await this.store.update(storageAckLedgerMarkUpdate(operationSubject, predicate, new Date(at)), {
+        source: 'agent.storageAckLedger.mark',
+      });
+      return;
+    }
     await this.store.insert([{
       subject: operationSubject,
       predicate,
@@ -943,46 +1097,170 @@ export class VmPromotionMethods extends DKGAgentBase {
   /**
    * An update ACK was declined because the version it would replace is not in
    * this core's VM yet. That version is registered on chain (an update needs
-   * it), so promote it now with a per-asset reconcile in the background; the
-   * publisher's transient retry is then signed. One flight per asset, bounded
-   * overall; anything else is left to the audit.
+   * it), so promote it now with a per-asset reconcile. A publisher is waiting
+   * on this (about 31 s of retries on 10.0.18), so it runs in the foreground
+   * RPC class at authority admission priority and the normal store lane,
+   * ahead of the background catch-up walk. Single-flight per asset, a few at
+   * a time, the rest queued.
    */
   promoteStorageAckPriorVersion(this: DKGAgent, request: StorageAckPriorVersionRequest): void {
-    if (!this.vmPromotionAuditActive() || request.subGraphName !== undefined) return;
+    if (!this.vmPromotionAuditActive()) return;
     if (!isCanonicalOnChainContextGraphId(request.contextGraphId)) return;
     if (!isStorageAckNamespace(request.swmGraphId)) return;
+    if (request.subGraphName !== undefined && !validateSubGraphName(request.subGraphName).valid) return;
     let assertionVersion: bigint;
     try {
       assertionVersion = BigInt(request.assertionVersion);
     } catch {
       return;
     }
-    const key = `${request.swmGraphId}\0${request.kaUal}`;
-    if (
-      this.storageAckPriorVersionFlights.has(key)
-      || this.storageAckPriorVersionFlights.size >= PRIOR_VERSION_PROMOTION_MAX_FLIGHTS
-    ) {
+    const key = `${request.swmGraphId}\0${request.subGraphName ?? ''}\0${request.kaUal}`;
+    if (this.storageAckPriorVersionFlights.has(key) || this.storageAckPriorVersionQueue.has(key)) return;
+    if (this.storageAckPriorVersionQueue.size >= PRIOR_VERSION_PROMOTION_QUEUE_MAX) return;
+    this.storageAckPriorVersionQueue.set(key, {
+      candidate: {
+        operationSubject: '',
+        namespace: request.swmGraphId,
+        kaUal: request.kaUal,
+        assertionVersion,
+        signedAtMs: Date.now(),
+        contextGraphId: request.contextGraphId,
+        registered: true,
+        ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+      },
+      onChainId: request.contextGraphId,
+    });
+    this.drainStorageAckPriorVersionQueue();
+  }
+
+  drainStorageAckPriorVersionQueue(this: DKGAgent): void {
+    if (!this.vmPromotionAuditActive()) {
+      this.storageAckPriorVersionQueue.clear();
       return;
     }
-    const candidate: StorageAckLedgerCandidate = {
-      operationSubject: '',
-      namespace: request.swmGraphId,
-      kaUal: request.kaUal,
-      assertionVersion,
-      signedAtMs: Date.now(),
-      contextGraphId: request.contextGraphId,
-      registered: true,
-    };
-    const flight = this.runVmPromotionInBackground(
-      () => this.reconcileStorageAckCopy(candidate, request.contextGraphId),
-    )
-      .catch(() => false)
-      .finally(() => {
-        if (this.storageAckPriorVersionFlights.get(key) === flight) {
-          this.storageAckPriorVersionFlights.delete(key);
-        }
-      });
-    this.storageAckPriorVersionFlights.set(key, flight);
+    while (
+      this.storageAckPriorVersionFlights.size < PRIOR_VERSION_PROMOTION_CONCURRENCY
+      && this.storageAckPriorVersionQueue.size > 0
+    ) {
+      const [key, next] = this.storageAckPriorVersionQueue.entries().next().value as [
+        string,
+        { candidate: StorageAckLedgerCandidate; onChainId: string },
+      ];
+      this.storageAckPriorVersionQueue.delete(key);
+      const flight: Promise<unknown> = this.runStorageAckPriorVersionPromotion(
+        () => this.reconcileStorageAckCopy(next.candidate, next.onChainId),
+      )
+        .catch(() => false)
+        .finally(() => {
+          if (this.storageAckPriorVersionFlights.get(key) === flight) {
+            this.storageAckPriorVersionFlights.delete(key);
+          }
+          this.drainStorageAckPriorVersionQueue();
+        });
+      this.storageAckPriorVersionFlights.set(key, flight);
+    }
+  }
+
+  /** The lane a declined update's prior-version promotion runs in (see {@link promoteStorageAckPriorVersion}). */
+  runStorageAckPriorVersionPromotion<T>(this: DKGAgent, work: () => Promise<T>): Promise<T> {
+    const signal = this.vmReconcileLifecycleController?.signal;
+    return withOwnedRpcRequestContext(
+      { requestClass: 'foreground', admissionPriority: 'authority', ...(signal ? { signal } : {}) },
+      () => withDefaultStoreWorkPriority('normal', work),
+    );
+  }
+
+  /**
+   * The asset's on-chain Merkle-root count, for the handler's decision to
+   * release a held ACK copy. An asset registered to no graph has none.
+   */
+  async readStorageAckKnowledgeAssetRootCount(
+    this: DKGAgent,
+    kaUal: string,
+    signal?: AbortSignal,
+  ): Promise<bigint> {
+    const kaId = knowledgeAssetIdFromUal(kaUal);
+    if (kaId === null) throw new Error(`not a graph-scoped Knowledge Asset UAL: ${kaUal}`);
+    const readRegistration = this.chain.getKAContextGraphId;
+    const readRootCount = this.chain.getMerkleRootCount;
+    if (typeof readRegistration !== 'function' || typeof readRootCount !== 'function') {
+      throw new Error('the chain adapter cannot read Knowledge Asset versions');
+    }
+    return withRpcRequestContext({ admissionPriority: 'authority', ...(signal ? { signal } : {}) }, async () => {
+      if (await readRegistration.call(this.chain, kaId) === 0n) return 0n;
+      return readRootCount.call(this.chain, kaId);
+    });
+  }
+
+  /**
+   * The SWM namespace an ACK names must belong to the graph it is signed
+   * for, or one request could bind another graph's namespace to its own
+   * graph (and get that graph's ACKs declined, or its VM written). A numeric
+   * namespace must be the graph id itself; a cleartext one must be the
+   * graph's committed on-chain name, or, for a graph without one, a local
+   * binding to it.
+   */
+  async checkStorageAckNamespaceBinding(
+    this: DKGAgent,
+    request: StorageAckVmPromotionRequest,
+  ): Promise<StorageAckVmPromotionVerdict | undefined> {
+    const namespace = request.swmGraphId;
+    const cgId = request.contextGraphId;
+    if (namespace === undefined || namespace === '' || namespace === cgId) return undefined;
+    if (!isCanonicalOnChainContextGraphId(cgId)) return undefined;
+    const disabled = (message: string): StorageAckVmPromotionVerdict => ({
+      ok: false,
+      code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED,
+      message,
+    });
+    if (/^[0-9]+$/.test(namespace)) {
+      return disabled(`SWM graph id "${namespace}" names a different context graph than ${cgId}`);
+    }
+    const bindingKey = `${namespace}\0${cgId}`;
+    if (this.storageAckNamespaceBindings.has(bindingKey)) return undefined;
+    const row = this.subscribedContextGraphs.get(namespace);
+    if (row?.onChainId === cgId && (row.coreHosted === true || row.subscribed === true)) {
+      this.storageAckNamespaceBindings.add(bindingKey);
+      return undefined;
+    }
+    let committed: string | null = null;
+    const readNameHash = this.chain.getContextGraphNameHash;
+    if (typeof readNameHash === 'function') {
+      try {
+        committed = await withRpcRequestContext(
+          { admissionPriority: 'authority' },
+          () => readNameHash.call(this.chain, BigInt(cgId)),
+        );
+      } catch {
+        return {
+          ok: false,
+          code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
+          message: 'the on-chain name of the context graph could not be read',
+        };
+      }
+    }
+    if (typeof committed === 'string') {
+      if (committed.toLowerCase() === ethers.keccak256(ethers.toUtf8Bytes(namespace)).toLowerCase()) {
+        this.storageAckNamespaceBindings.add(bindingKey);
+        return undefined;
+      }
+      return disabled(`SWM graph id "${namespace}" is not the on-chain name of context graph ${cgId}`);
+    }
+    let local: string | null = row?.onChainId ?? null;
+    if (local === null) {
+      local = await this.getContextGraphOnChainId(namespace, {
+        source: 'agent.storageAckGate.namespaceBinding',
+      }).catch(() => null);
+    }
+    if (local === cgId) {
+      this.storageAckNamespaceBindings.add(bindingKey);
+      return undefined;
+    }
+    return disabled(
+      local === null
+        ? `cannot verify that "${namespace}" names context graph ${cgId}: the graph has no on-chain name and no local binding`
+        : `SWM graph id "${namespace}" is bound to context graph ${local} on this core, not ${cgId}`,
+    );
   }
 
   /**
@@ -1016,6 +1294,7 @@ export class VmPromotionMethods extends DKGAgentBase {
         kaId,
         batchId: kaId,
         versionBlock,
+        ...(candidate.subGraphName ? { subGraphName: candidate.subGraphName } : {}),
       }, ctx);
       if (outcome === 'promoted' || outcome === 'already-confirmed') {
         await this.store.flush?.({ priority: 'background', source: 'agent.vmPromotionAudit.flush' });

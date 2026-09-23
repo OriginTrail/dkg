@@ -140,6 +140,8 @@ interface StorageACKHandlerConfigCapture {
     swmGraphId?: string;
     operation: 'publish' | 'update';
   }) => Promise<{ ok: boolean; code?: string; message?: string }>;
+  onPriorVersionAwaitingPromotion?: (request: unknown) => void;
+  readKnowledgeAssetRootCount?: (kaUal: string, signal?: AbortSignal) => Promise<bigint>;
 }
 
 /**
@@ -1028,9 +1030,13 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       const gatedChain = chain as MockChainAdapter & {
         isContextGraphActiveOnChain: (id: bigint) => Promise<boolean>;
         getContextGraphAccessPolicy: (id: bigint) => Promise<number>;
+        getContextGraphNameHash: (id: bigint) => Promise<string | null>;
       };
       gatedChain.isContextGraphActiveOnChain = async () => true;
       gatedChain.getContextGraphAccessPolicy = async () => 0;
+      gatedChain.getContextGraphNameHash = async (id) => (
+        id === 42n ? ethers.keccak256(ethers.toUtf8Bytes('wired-public-cg')).toLowerCase() : null
+      );
       agent = await DKGAgent.create({
         name: 'ACKFinalityGateWiringTest',
         listenHost: '127.0.0.1',
@@ -1046,6 +1052,9 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
           typeof (captured as StorageACKHandlerConfigCapture).ensureVmPromotion === 'function',
       );
       expect(handlerConfig?.ensureVmPromotion).toBeTypeOf('function');
+      // The update path's prior-version nudge and chain-version read are wired too.
+      expect(handlerConfig?.onPriorVersionAwaitingPromotion).toBeTypeOf('function');
+      expect(handlerConfig?.readKnowledgeAssetRootCount).toBeTypeOf('function');
       return handlerConfig!.ensureVmPromotion!;
     }
 

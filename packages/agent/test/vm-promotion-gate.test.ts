@@ -14,10 +14,12 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, activeRpcRequestContext } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  PROTOCOL_STORAGE_ACK_V2,
+  PROTOCOL_STORAGE_UPDATE_ACK_V2,
   TypedEventBus,
   decodeStorageACK,
   encodePublishIntent,
@@ -38,12 +40,20 @@ import {
   StorageACKHandler,
   computeFlatKCMerkleLeafCountV10,
   computeFlatKCRootV10,
+  storageAckLedgerMarkUpdate,
+  swmKaWriteLockKey,
+  withKeyedLocks,
   generateKnowledgeAssetShareMetadata,
   storageAckLedgerEntryQuads,
   storeKnowledgeAssetWorkspaceHead,
   xsdDateTimeLiteral,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  activeDefaultStoreWorkPriority,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
@@ -75,7 +85,26 @@ type Chain = MockChainAdapter & {
   isContextGraphActiveOnChain: (id: bigint) => Promise<boolean>;
   getKAContextGraphId: (kaId: bigint) => Promise<bigint>;
   getMerkleRootCount: (kaId: bigint) => Promise<bigint>;
+  getContextGraphNameHash: (id: bigint) => Promise<string | null>;
 };
+
+/**
+ * On-chain names the tests' graphs committed (id -> name): the gate only
+ * binds an ACK namespace that is its graph's committed name.
+ */
+const COMMITTED_NAMES = new Map<bigint, string>([
+  [42n, 'public-cg'],
+  [43n, 'curated-cg'],
+  [45n, 'flaky-store-cg'],
+  [46n, 'dormant-cg'],
+  [48n, 'burst-cg'],
+  [55n, 'update-e2e-cg'],
+  [56n, 'sub-e2e-cg'],
+]);
+
+function nameHash(name: string): string {
+  return ethers.keccak256(ethers.toUtf8Bytes(name)).toLowerCase();
+}
 
 type AuditStatus = Record<string, number | string | boolean | null>;
 
@@ -111,6 +140,17 @@ interface Internals {
     assertionVersion: string;
   }): void;
   storageAckPriorVersionFlights: Map<string, Promise<unknown>>;
+  storageAckLedgerReady: boolean;
+  storageAckDormantSince: Map<string, number>;
+  contextGraphSubscriptionDormancyById: Map<string, string>;
+  writeLocks: Map<string, Promise<void>>;
+  readStorageAckKnowledgeAssetRootCount(kaUal: string, signal?: AbortSignal): Promise<bigint>;
+  reconcileChainOrdinal(
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+    headBlock: number | undefined,
+  ): Promise<{ status: string }>;
 }
 
 interface SeededCopy {
@@ -166,6 +206,10 @@ describe('core VM-promotion guarantees', () => {
     const internals = agent as unknown as Internals;
     internals.chain.isContextGraphActiveOnChain = async () => true;
     internals.chain.getContextGraphAccessPolicy = async () => 0;
+    internals.chain.getContextGraphNameHash = async (id) => {
+      const name = COMMITTED_NAMES.get(id);
+      return name === undefined ? null : nameHash(name);
+    };
     return internals;
   }
 
@@ -651,6 +695,7 @@ describe('core VM-promotion guarantees', () => {
       await internals.ensureStorageAckLedgerReady();
       await internals.recordCoreHostedPublicCg('55', 'watched-cg');
       internals.chain.getKAContextGraphId = async (id) => (id === kaId(10) ? 55n : 0n);
+      internals.chain.getMerkleRootCount = async (id) => (id === kaId(10) ? 1n : 0n);
       const reconciled: string[] = [];
       (internals as any).reconcileStorageAckCopy = async (candidate: { kaUal: string }) => {
         reconciled.push(candidate.kaUal);
@@ -764,6 +809,8 @@ describe('core VM-promotion guarantees', () => {
         isCgCurated: async () => false,
         ensureVmPromotion: (request) => internals.ensureStorageAckVmPromotion(request),
         onPriorVersionAwaitingPromotion: (request) => internals.promoteStorageAckPriorVersion(request),
+        readKnowledgeAssetRootCount: (kaUal, signal) =>
+          internals.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
       }, new TypedEventBus());
     }
 
@@ -881,6 +928,46 @@ describe('core VM-promotion guarantees', () => {
       expect(vm.values).not.toContain('"first"');
     });
 
+    it('releases an update copy the chain moved past, and then accepts the next update', async () => {
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const handler = realHandler(internals);
+      expect(isStorageACKDecline(await ack(handler, 'first', 1))).toBe(false);
+      landOnChain(internals, 'first', 1);
+      expect(await internals.reconcileStorageAckCopy({
+        operationSubject: 'unused', namespace: NAMESPACE, kaUal: ual(N), assertionVersion: 1n,
+        signedAtMs: 0, contextGraphId: TARGET, registered: true,
+      }, TARGET)).toBe(true);
+      expect(isStorageACKDecline(await ack(handler, 'second', 2))).toBe(false);
+      // v2 lands, then v3 lands through other cores before this one promotes v2.
+      landOnChain(internals, 'second', 2);
+      landOnChain(internals, 'third', 3);
+
+      const lane = await internals.promotePendingStorageAckUpdates(Date.now() + 2 * 60_000);
+
+      expect(lane).toMatchObject({ superseded: 1, promoted: 0 });
+      const released = await internals.store.query(`ASK { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+        ?op <${LEDGER.supersededAt}> ?at ; <${LEDGER.assertionVersion}> ?v . FILTER(?v = 2)
+      } }`);
+      expect(released).toMatchObject({ type: 'boolean', value: true });
+      // The copy no longer holds the head: v4 is signed straight away.
+      expect(isStorageACKDecline(await ack(handler, 'fourth', 4))).toBe(false);
+    });
+
+    it('releases a same-version copy that never landed when the publisher retries with new content', async () => {
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const handler = realHandler(internals);
+      expect(isStorageACKDecline(await ack(handler, 'first-attempt', 1))).toBe(false);
+
+      expect(isStorageACKDecline(await ack(handler, 'edited-retry', 1))).toBe(false);
+
+      // Once that version landed with some content, different content is refused.
+      landOnChain(internals, 'edited-retry', 1);
+      const late = await ack(handler, 'third-try', 1);
+      expect(late.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION);
+    });
+
     it('promotes the version an update waits on, so the publisher retry is signed', async () => {
       const internals = await boot();
       await internals.ensureStorageAckLedgerReady();
@@ -889,12 +976,453 @@ describe('core VM-promotion guarantees', () => {
       // v1 is on chain (an update requires it) but this core has not promoted it yet.
       landOnChain(internals, 'first', 1);
 
+      // The promotion a waiting publisher depends on runs ahead of the
+      // background catch-up: foreground RPC class at authority priority,
+      // normal store lane.
+      const lanes: Array<{ requestClass: string; admissionPriority?: string; store?: string }> = [];
+      const readRoot = internals.chain.getLatestMerkleRoot.bind(internals.chain);
+      internals.chain.getLatestMerkleRoot = async (id: bigint) => {
+        const rpc = activeRpcRequestContext();
+        lanes.push({
+          requestClass: rpc.requestClass,
+          ...(rpc.admissionPriority ? { admissionPriority: rpc.admissionPriority } : {}),
+          ...(activeDefaultStoreWorkPriority() ? { store: activeDefaultStoreWorkPriority() } : {}),
+        });
+        return readRoot(id);
+      };
+
       const declined = await ack(handler, 'second', 2);
       expect(declined.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
       await Promise.all(internals.storageAckPriorVersionFlights.values());
+      expect(lanes.length).toBeGreaterThan(0);
+      for (const lane of lanes) {
+        expect(lane).toEqual({ requestClass: 'foreground', admissionPriority: 'authority', store: 'normal' });
+      }
 
       expect((await vmState(internals.store)).values).toEqual(['"first"']);
       expect(isStorageACKDecline(await ack(handler, 'second', 2))).toBe(false);
     });
+  });
+
+  it('runs the update path through a started core\'s own StorageACK handler', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('otp:20430', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    const chainStubs = chain as unknown as Chain;
+    chainStubs.isContextGraphActiveOnChain = async () => true;
+    chainStubs.getContextGraphAccessPolicy = async () => 0;
+    chainStubs.getContextGraphNameHash = async (id) => (id === 55n ? nameHash('update-e2e-cg') : null);
+    agent = await DKGAgent.create({
+      name: 'StartedCoreUpdatePath',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ethers.Wallet.createRandom().privateKey,
+    });
+    await agent.start();
+    const internals = agent as unknown as Internals;
+    const handlers = (agent as unknown as {
+      messenger: { handlers: Map<string, (payload: Uint8Array, peerId: string) => Promise<Uint8Array>> };
+    }).messenger.handlers;
+    const publishAck = handlers.get(PROTOCOL_STORAGE_ACK_V2)!;
+    const updateAck = handlers.get(PROTOCOL_STORAGE_UPDATE_ACK_V2)!;
+    expect(publishAck).toBeTypeOf('function');
+    expect(updateAck).toBeTypeOf('function');
+    const n = 88;
+    const graphFor = (layer: MemoryLayer, version: number) => knowledgeAssetLayerGraphUri(
+      'update-e2e-cg', layer, createGraphKnowledgeAssetScope(ual(n), version),
+    );
+    const quadsFor = (value: string, layer: MemoryLayer, version: number): Quad[] => [{
+      subject: 'urn:entity:started', predicate: 'http://schema.org/name', object: `"${value}"`, graph: graphFor(layer, version),
+    }];
+    const wire = (quads: readonly Quad[]) => new TextEncoder().encode(
+      quads.map((q) => `<${q.subject}> <${q.predicate}> ${q.object} <${q.graph}> .`).join('\n'),
+    );
+    const v1 = quadsFor('first', MemoryLayer.SharedWorkingMemory, 1);
+    const published = decodeStorageACK(await publishAck(encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(v1, []),
+      contextGraphId: '55',
+      swmGraphId: 'update-e2e-cg',
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: wire(v1).length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      stagingQuads: wire(v1),
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(v1, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: ual(n),
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    }), 'publisher-peer'));
+    expect(published.declineMessage).toBeFalsy();
+    expect(isStorageACKDecline(published)).toBe(false);
+    (chain as unknown as {
+      __registerKC(input: { kaId: bigint; contextGraphId: bigint; merkleRootHex: string; chunks: [] }): void;
+    }).__registerKC({ kaId: kaId(n), contextGraphId: 55n, merkleRootHex: ethers.hexlify(computeFlatKCRootV10(v1, [])), chunks: [] });
+    const v2 = quadsFor('second', MemoryLayer.VerifiableMemory, 2);
+    const updateIntent = encodeUpdateIntent({
+      kaId: kaId(n).toString(),
+      contextGraphId: '55',
+      swmGraphId: 'update-e2e-cg',
+      preUpdateMerkleRootCount: 1,
+      newMerkleRoot: computeFlatKCRootV10(v2, []),
+      newByteSize: wire(v2).length,
+      newTokenAmount: '1000',
+      mintAmount: 0,
+      burnTokenIds: [],
+      newMerkleLeafCount: computeFlatKCMerkleLeafCountV10(v2, []),
+      publisherPeerId: 'publisher-peer',
+      stagingQuads: wire(v2),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: ual(n),
+      assertionVersion: '2',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    });
+
+    const first = decodeStorageACK(await updateAck(updateIntent, 'publisher-peer'));
+    expect(first.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    await Promise.all(internals.storageAckPriorVersionFlights.values());
+    const retried = decodeStorageACK(await updateAck(updateIntent, 'publisher-peer'));
+
+    expect(retried.declineMessage).toBeFalsy();
+    expect(isStorageACKDecline(retried)).toBe(false);
+    const ledgered = await internals.store.query(`ASK { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+      ?op <${LEDGER.operation}> "update" ; <${LEDGER.kaUal}> <${ual(n)}>
+    } }`);
+    expect(ledgered).toMatchObject({ type: 'boolean', value: true });
+  });
+
+  describe('sub-graph copies', () => {
+    const NAMESPACE = 'sub-e2e-cg';
+    const TARGET = '56';
+    const SUB = 'research';
+    const PEER = { toString: () => 'publisher-peer' };
+
+    function content(n: number, value: string, layer: MemoryLayer, version: number): Quad[] {
+      return [{
+        subject: `urn:entity:sub-${n}`,
+        predicate: 'http://schema.org/name',
+        object: `"${value}"`,
+        graph: knowledgeAssetLayerGraphUri(NAMESPACE, layer, createGraphKnowledgeAssetScope(ual(n), version), SUB),
+      }];
+    }
+
+    function wire(quads: readonly Quad[]): Uint8Array {
+      return new TextEncoder().encode(quads.map((quad) =>
+        `<${quad.subject}> <${quad.predicate}> ${quad.object} <${quad.graph}> .`).join('\n'));
+    }
+
+    function handlerFor(internals: Internals): StorageACKHandler {
+      return new StorageACKHandler(internals.store, {
+        nodeRole: 'core',
+        nodeIdentityId: 17n,
+        signerWallet: ethers.Wallet.createRandom(),
+        contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: 31337n,
+        kav10Address: '0x000000000000000000000000000000000000c10a',
+        isCgCurated: async () => false,
+        ensureVmPromotion: (request) => internals.ensureStorageAckVmPromotion(request),
+        onPriorVersionAwaitingPromotion: (request) => internals.promoteStorageAckPriorVersion(request),
+        readKnowledgeAssetRootCount: (kaUal, signal) =>
+          internals.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
+      }, new TypedEventBus());
+    }
+
+    async function ack(handler: StorageACKHandler, n: number, value: string, version: number) {
+      if (version === 1) {
+        const quads = content(n, value, MemoryLayer.SharedWorkingMemory, 1);
+        return decodeStorageACK(await handler.handler(encodePublishIntent({
+          merkleRoot: computeFlatKCRootV10(quads, []),
+          contextGraphId: TARGET,
+          swmGraphId: NAMESPACE,
+          subGraphName: SUB,
+          publisherPeerId: 'publisher-peer',
+          publicByteSize: wire(quads).length,
+          isPrivate: false,
+          kaCount: 1,
+          rootEntities: [],
+          stagingQuads: wire(quads),
+          merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: ual(n),
+          assertionVersion: '1',
+          publicTripleCount: 1,
+          privateTripleCount: 0,
+          accessPolicy: 'public',
+          allowedPeers: [],
+        }), PEER));
+      }
+      const quads = content(n, value, MemoryLayer.VerifiableMemory, version);
+      return decodeStorageACK(await handler.updateHandler(encodeUpdateIntent({
+        kaId: kaId(n).toString(),
+        contextGraphId: TARGET,
+        swmGraphId: NAMESPACE,
+        subGraphName: SUB,
+        preUpdateMerkleRootCount: version - 1,
+        newMerkleRoot: computeFlatKCRootV10(quads, []),
+        newByteSize: wire(quads).length,
+        newTokenAmount: '1000',
+        mintAmount: 0,
+        burnTokenIds: [],
+        newMerkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+        publisherPeerId: 'publisher-peer',
+        stagingQuads: wire(quads),
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: ual(n),
+        assertionVersion: String(version),
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+      }), PEER));
+    }
+
+    function landOnChain(internals: Internals, n: number, value: string, version: number): void {
+      const root = computeFlatKCRootV10(content(n, value, MemoryLayer.SharedWorkingMemory, version), []);
+      const chain = internals.chain as unknown as {
+        __registerKC(input: { kaId: bigint; contextGraphId: bigint; merkleRootHex: string; chunks: [] }): void;
+        collections: Map<bigint, { merkleRoot: Uint8Array; updateContext: { merkleRootsCount: bigint } }>;
+      };
+      if (version === 1) {
+        chain.__registerKC({ kaId: kaId(n), contextGraphId: BigInt(TARGET), merkleRootHex: ethers.hexlify(root), chunks: [] });
+        return;
+      }
+      const entry = chain.collections.get(kaId(n))!;
+      entry.merkleRoot = root;
+      entry.updateContext = { ...entry.updateContext, merkleRootsCount: BigInt(version) };
+    }
+
+    async function vmValues(store: TripleStore, n: number): Promise<string[]> {
+      const data = await store.query(`SELECT ?o WHERE { GRAPH <${knowledgeAssetLayerGraphUri(
+        NAMESPACE,
+        MemoryLayer.VerifiableMemory,
+        createGraphKnowledgeAssetScope(ual(n), 1),
+        SUB,
+      )}> { ?s ?p ?o } }`);
+      return data.type === 'bindings' ? data.bindings.map((row) => row['o']!) : [];
+    }
+
+    it('promotes a hosted-only sub-graph publish through the ordinal walk', async () => {
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const handler = handlerFor(internals);
+      expect(isStorageACKDecline(await ack(handler, 81, 'sub-publish', 1))).toBe(false);
+      landOnChain(internals, 81, 'sub-publish', 1);
+
+      await internals.reconcileChainOrdinal(NAMESPACE, BigInt(TARGET), 0, undefined);
+
+      expect(await vmValues(internals.store, 81)).toEqual(['"sub-publish"']);
+    });
+
+    it('promotes the prior version of a sub-graph update and then the update itself', async () => {
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const handler = handlerFor(internals);
+      expect(isStorageACKDecline(await ack(handler, 82, 'v1', 1))).toBe(false);
+      landOnChain(internals, 82, 'v1', 1);
+
+      const declined = await ack(handler, 82, 'v2', 2);
+      expect(declined.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      await Promise.all(internals.storageAckPriorVersionFlights.values());
+      expect(await vmValues(internals.store, 82)).toEqual(['"v1"']);
+
+      expect(isStorageACKDecline(await ack(handler, 82, 'v2', 2))).toBe(false);
+      landOnChain(internals, 82, 'v2', 2);
+      await expect(internals.promotePendingStorageAckUpdates(Date.now() + 2 * 60_000))
+        .resolves.toMatchObject({ promoted: 1 });
+      expect(await vmValues(internals.store, 82)).toEqual(['"v2"']);
+    });
+  });
+
+  describe('ACK namespace binding', () => {
+    it('refuses a numeric namespace that is another graph', async () => {
+      const internals = await boot();
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '42', swmGraphId: '57', operation: 'publish',
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      expect(internals.subscribedContextGraphs.has('57')).toBe(false);
+    });
+
+    it("refuses a name that is not the graph's committed on-chain name", async () => {
+      const internals = await boot();
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '42', swmGraphId: 'burst-cg', operation: 'publish',
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      expect(internals.subscribedContextGraphs.has('burst-cg')).toBe(false);
+    });
+
+    it('accepts a graph without a committed name only through a local binding', async () => {
+      const internals = await boot();
+      await internals.store.insert([{
+        subject: 'did:dkg:context-graph:locally-bound',
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        object: '"60"',
+        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      }]);
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '60', swmGraphId: 'locally-bound', operation: 'publish',
+      })).resolves.toEqual({ ok: true });
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '61', swmGraphId: 'unknown-name', operation: 'publish',
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+    });
+
+    it('declines transiently when the committed name cannot be read', async () => {
+      const internals = await boot();
+      internals.chain.getContextGraphNameHash = async () => { throw new Error('rpc down'); };
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '42', swmGraphId: 'public-cg', operation: 'publish',
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+    });
+  });
+
+  describe('dormant subscription rows', () => {
+    it('declines finally when rehydration is disabled', async () => {
+      const internals = await boot();
+      internals.contextGraphSubscriptionDormancyById.set('dormant-cg', 'rehydrationDisabled');
+
+      const verdict = await internals.ensureStorageAckVmPromotion({
+        contextGraphId: '46', swmGraphId: 'dormant-cg', operation: 'publish',
+      });
+
+      expect(verdict).toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      expect(verdict.message).toContain('rehydrationDisabled');
+    });
+
+    it('declines transiently for a while, then finally, when dormancy does not clear', async () => {
+      const internals = await boot();
+      internals.contextGraphSubscriptionDormancyById.set('dormant-cg', 'authorityUnavailable');
+      const request = { contextGraphId: '46', swmGraphId: 'dormant-cg', operation: 'publish' as const };
+
+      await expect(internals.ensureStorageAckVmPromotion(request))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+      internals.storageAckDormantSince.set('dormant-cg', Date.now() - 11 * 60_000);
+      await expect(internals.ensureStorageAckVmPromotion(request))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+    });
+  });
+
+  describe('pending-update lane and ledger readiness', () => {
+    it('pages past promoted rows so a new update is reached within a few runs', async () => {
+      setStatic('VM_PROMOTION_UPDATE_PAGE_SIZE', 2);
+      setStatic('VM_PROMOTION_UPDATE_MAX_CHECKS', 1);
+      const internals = await boot();
+      for (let n = 60; n < 66; n += 1) {
+        await seedCopy(internals.store, {
+          namespace: 'lane-cg', n, ageMs: 5 * 60_000, version: 2, confirmedVersion: 2, target: '55',
+        });
+      }
+      await seedCopy(internals.store, { namespace: 'lane-cg', n: 90, ageMs: 5 * 60_000, version: 2, target: '55' });
+      internals.chain.getMerkleRootCount = async () => 2n;
+      const reconciled: string[] = [];
+      (internals as any).reconcileStorageAckCopy = async (candidate: { kaUal: string }) => {
+        reconciled.push(candidate.kaUal);
+        return true;
+      };
+
+      for (let run = 0; run < 6 && reconciled.length === 0; run += 1) {
+        await internals.promotePendingStorageAckUpdates();
+      }
+
+      expect(reconciled).toEqual([ual(90)]);
+    });
+
+    it('promotes updates while pre-ledger copies are not grandfathered yet', async () => {
+      const internals = await boot();
+      internals.storageAckLedgerReady = false;
+      await seedCopy(internals.store, { namespace: 'lane-cg', n: 91, ageMs: 5 * 60_000, version: 2, target: '55' });
+      internals.chain.getMerkleRootCount = async () => 2n;
+      const reconciled: string[] = [];
+      (internals as any).reconcileStorageAckCopy = async (candidate: { kaUal: string }) => {
+        reconciled.push(candidate.kaUal);
+        return true;
+      };
+
+      await internals.promotePendingStorageAckUpdates();
+
+      expect(reconciled).toEqual([ual(91)]);
+    });
+
+    it('grandfathers once per store, and again only for a window another version may have run', async () => {
+      const internals = await boot();
+      const grandfatherRuns: string[] = [];
+      const update = internals.store.update!.bind(internals.store);
+      internals.store.update = (async (sparql: string, options?: unknown) => {
+        if (sparql.includes(`<${LEDGER.grandfathered}> true`)) grandfatherRuns.push(sparql);
+        return update(sparql, options as never);
+      }) as typeof internals.store.update;
+
+      await internals.ensureStorageAckLedgerReady();
+      internals.storageAckLedgerReady = false;
+      await internals.ensureStorageAckLedgerReady();
+      expect(grandfatherRuns).toHaveLength(1);
+
+      // The node last ran with a ledger two hours ago; meanwhile another
+      // version stored a copy without one. An older unledgered copy (synced
+      // long ago) is not in that window.
+      await internals.store.update!(storageAckLedgerMarkUpdate(
+        STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, new Date(Date.now() - 2 * HOUR),
+      ));
+      const duringRollback = await seedCopy(internals.store, { namespace: 'rollback-cg', n: 92, ageMs: HOUR, ledger: 'none' });
+      const longAgo = await seedCopy(internals.store, { namespace: 'rollback-cg', n: 93, ageMs: 3 * HOUR, ledger: 'none' });
+      internals.storageAckLedgerReady = false;
+      await internals.ensureStorageAckLedgerReady();
+
+      expect(grandfatherRuns).toHaveLength(2);
+      expect(await ledgerHas(internals.store, duringRollback.op, LEDGER.grandfathered)).toBe(true);
+      expect(await ledgerHas(internals.store, longAgo.op, LEDGER.grandfathered)).toBe(false);
+    });
+
+    it('releases a registered copy once a later version lands, and stops counting it as stalled', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: DAY });
+      await internals.ensureStorageAckLedgerReady();
+      await internals.recordCoreHostedPublicCg('55', 'released-cg');
+      const copy = await seedCopy(internals.store, {
+        namespace: 'released-cg', n: 94, ageMs: 2 * HOUR, version: 2, registered: true,
+      });
+      internals.chain.getMerkleRootCount = async () => 3n;
+
+      const status = await internals.runVmPromotionAudit();
+
+      expect(status).toMatchObject({ stalledOnChain: 0, supersededCopies: 1 });
+      expect(await ledgerHas(internals.store, copy.op, LEDGER.supersededAt)).toBe(true);
+    });
+  });
+
+  it('tears an expired head down only under the per-KA write lock', async () => {
+    const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+    await internals.ensureStorageAckLedgerReady();
+    await seedCopy(internals.store, { namespace: 'lock-cg', n: 95, ageMs: HOUR, ledger: 'none' });
+    const sources: string[] = [];
+    const query = internals.store.query.bind(internals.store);
+    internals.store.query = (async (sparql: string, options?: { source?: string }) => {
+      if (options?.source) sources.push(options.source);
+      return query(sparql, options as never);
+    }) as typeof internals.store.query;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const holder = withKeyedLocks(internals.writeLocks, [swmKaWriteLockKey('lock-cg', undefined, ual(95))], () => held);
+
+    const cleanup = internals.cleanupExpiredSharedMemory();
+    for (let i = 0; i < 100 && !sources.includes('agent.swmCleanup.graphScopedMetadata'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // A writer holding the lock (an ACK or share) is never interleaved with.
+    expect(sources).toContain('agent.swmCleanup.graphScopedMetadata');
+    expect(sources).not.toContain('agent.swmCleanup.currentHeadOwner');
+    release();
+    await holder;
+    await cleanup;
+    expect(sources).toContain('agent.swmCleanup.currentHeadOwner');
   });
 });

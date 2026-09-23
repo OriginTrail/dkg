@@ -176,6 +176,8 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig,
   STORAGE_ACK_LEDGER_GRAPH,
+  swmKaWriteLockKey,
+  withKeyedLocks,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -2878,6 +2880,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // An update ACK waiting on the version it replaces: promote
               // that version now so the publisher's retry is signed.
               onPriorVersionAwaitingPromotion: (request) => this.promoteStorageAckPriorVersion(request),
+              readKnowledgeAssetRootCount: (kaUal, signal) =>
+                this.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
               // Testnet dead-air fix: `isOperationalWalletRegistered` is a
               // LIVE chain read the handler runs on EVERY inbound StorageACK.
               // With the raw wiring, one degraded shared RPC made the lookup
@@ -11317,6 +11321,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // Each meta graph describes exactly one SWM data bucket:
             // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
             const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
+            // The per-KA write lock the StorageACK handler and gossip apply
+            // take is keyed by namespace, sub-graph and UAL.
+            const namespacePrefix = `did:dkg:context-graph:${pid}/`;
+            const metaRest = wsMetaGraph.startsWith(namespacePrefix)
+              ? wsMetaGraph.slice(namespacePrefix.length)
+              : '_shared_memory_meta';
+            const wsSubGraphName = metaRest === '_shared_memory_meta'
+              ? undefined
+              : metaRest.slice(0, -'/_shared_memory_meta'.length);
             // One FILTER NOT EXISTS per way a copy can be retained, each
             // spliced into the group that binds the operation variable.
             const storageAckNotRetained = (
@@ -11426,7 +11439,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 if (scopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
                   const kaUal = v2Row?.['kaUal'];
                   const headSubject = kaUal ? `${kaUal}#dkg-swm-head` : '';
-                  if (headSubject && isSafeIri(headSubject)) {
+                  // Checked and torn down under the per-KA write lock, so an
+                  // ACK or share that repoints the head in between is never
+                  // deleted with the expired operation.
+                  if (kaUal && headSubject && isSafeIri(headSubject)) graphDeleted += await withKeyedLocks(
+                    this.writeLocks,
+                    [swmKaWriteLockKey(pid, wsSubGraphName, kaUal)],
+                    async (): Promise<number> => {
+                    let tornDown = 0;
                     // The head is owned by exactly one operation. Join on the
                     // dkg:shareOperationId literal (both rows are written by the
                     // same `lit()` serializer) so this op's expiry only tears the
@@ -11453,12 +11473,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                       // the current-head subject with the operation.
                       const assertionGraph = headOwned.bindings[0]?.['assertionGraph'];
                       if (assertionGraph && isSafeIri(assertionGraph)) {
-                        graphDeleted += await this.store.deleteByPattern({ graph: assertionGraph });
+                        tornDown += await this.store.deleteByPattern({ graph: assertionGraph });
                         await this.store.dropGraph(assertionGraph);
                       }
-                      graphDeleted += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
+                      tornDown += await this.store.deleteByPattern({ graph: wsMetaGraph, subject: headSubject });
                     }
-                  }
+                    return tornDown;
+                  });
                   const snapshotGraph = v2Row?.['snapshotGraph'];
                   if (snapshotGraph && isSafeIri(snapshotGraph)) {
                     graphDeleted += await this.store.deleteByPattern({ graph: snapshotGraph });

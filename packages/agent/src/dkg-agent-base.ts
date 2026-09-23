@@ -1001,6 +1001,8 @@ export class DKGAgentBase {
   static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
   /** Per-asset VM reconciles one audit pass may run for landed copies. */
   static readonly VM_PROMOTION_AUDIT_MAX_RECONCILES = 16;
+  /** Ledgered update copies one pending-update run pages through (keyset). */
+  static readonly VM_PROMOTION_UPDATE_PAGE_SIZE = 64;
   /** Pending-update lane: chain reads and per-asset reconciles per run. */
   static readonly VM_PROMOTION_UPDATE_MAX_CHECKS = 8;
 
@@ -1191,6 +1193,15 @@ export class DKGAgentBase {
   protected readonly storageAckVmPromotionFlights = new Map<string, Promise<unknown>>();
   /** Per-asset promotions requested by declined update ACKs, one per asset. */
   protected readonly storageAckPriorVersionFlights = new Map<string, Promise<unknown>>();
+  /** Such promotions waiting for a slot. */
+  protected readonly storageAckPriorVersionQueue = new Map<string, {
+    candidate: import('./vm-promotion-audit.js').StorageAckLedgerCandidate;
+    onChainId: string;
+  }>();
+  /** `<namespace>\0<onChainId>` pairs whose ACK namespace binding this process verified. */
+  protected readonly storageAckNamespaceBindings = new Set<string>();
+  /** When the gate first declined a namespace for a dormant subscription row. */
+  protected readonly storageAckDormantSince = new Map<string, number>();
   /** Core ACK promotion audit (core-hosted backfill + promotion watchdog). */
   protected vmPromotionAuditStartupTimer: ReturnType<typeof setTimeout> | null = null;
   protected vmPromotionAuditTimer: ReturnType<typeof setInterval> | null = null;
@@ -1203,6 +1214,7 @@ export class DKGAgentBase {
   /** Keyset cursors: the backfill pages ledger namespaces, the audit ledger copies. */
   protected vmPromotionBackfillCursor = '';
   protected vmPromotionAuditCursor = '';
+  protected vmPromotionUpdateCursor = '';
   /** Pending-update promotion (fast lane, VM sweep cadence). */
   protected vmPromotionUpdateTimer: ReturnType<typeof setInterval> | null = null;
   protected vmPromotionUpdateInFlight: Promise<void> | null = null;

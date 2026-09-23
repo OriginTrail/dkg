@@ -4593,7 +4593,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   async collectVmReconcileSwmCandidateNamespaces(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmNamespace[]> {
     const graphManager = new GraphManager(this.store);
-    const subGraphNamespaces = (await graphManager.listSubGraphs(localCgId))
+    // `listSubGraphs` finds sub-graphs by their data or `_meta` graphs; a
+    // hosted-only core holds only `<cg>/<sub>/_shared_memory*` copies, which
+    // its StorageACK ledger names.
+    const subGraphs = [...new Set([
+      ...await graphManager.listSubGraphs(localCgId),
+      ...await this.storageAckLedgerNamespaceSubGraphs(localCgId),
+    ])];
+    const subGraphNamespaces = subGraphs
       .map((sg) => ({
         metaGraph: graphManager.sharedMemoryMetaUri(localCgId, sg),
         dataGraph: graphManager.sharedMemoryUri(localCgId, sg),
@@ -6818,6 +6825,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { status: 'skip' };
     }
     const fh = this.getOrCreateFinalizationHandler();
+    // A core that holds only its StorageACK copy of a sub-graph KA has no
+    // lifecycle or VM metadata naming the sub-graph; its ledger does.
+    const ledgerSubGraphName = await this.storageAckLedgerSubGraphName(localCgId, ual);
     const reconcileInput = {
       contextGraphId: localCgId,
       onChainCgId: onChainCgId.toString(),
@@ -6828,6 +6838,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // V10 context-graph inventory stores one packed KA per batch.
       batchId: kaId,
       versionBlock,
+      ...(ledgerSubGraphName ? { subGraphName: ledgerSubGraphName } : {}),
     };
 
     const targetMayMaterialize = async (): Promise<boolean> => {

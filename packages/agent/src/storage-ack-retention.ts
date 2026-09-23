@@ -57,6 +57,7 @@ function ledgeredAndOwed(input: RetentionConditionInput): string {
         <${LEDGER.kaUal}> ${ka} ;
         <${LEDGER.assertionVersion}> ${version} .
       FILTER NOT EXISTS { ${opVar} <${LEDGER.unregisteredAt}> ?storageAckUnregisteredAt${suffix} }
+      FILTER NOT EXISTS { ${opVar} <${LEDGER.supersededAt}> ?storageAckSupersededAt${suffix} }
     }
     FILTER NOT EXISTS {
       GRAPH <${rootMetaGraph}> {
@@ -113,11 +114,11 @@ export function storageAckRetainedByPrefix(input: Readonly<{
 
 /**
  * One store-side INSERT that grandfathers every `storage-ack-` copy stored
- * before `epochIso` into the ledger. Idempotent (skips ledgered copies) and
- * bounded by the epoch, so copies persisted later without a signature never
- * qualify.
+ * before `throughIso` (and, after a node ran a version without the ledger,
+ * after `sinceIso`) into the ledger. Idempotent (skips ledgered copies) and
+ * bounded, so copies persisted later without a signature never qualify.
  */
-export function storageAckGrandfatherUpdate(epochIso: string): string {
+export function storageAckGrandfatherUpdate(throughIso: string, sinceIso?: string): string {
   return `INSERT {
     GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
       ?op <${LEDGER.signedAt}> ?ts ;
@@ -127,6 +128,7 @@ export function storageAckGrandfatherUpdate(epochIso: string): string {
         <${LEDGER.assertionVersion}> ?version ;
         <${LEDGER.operation}> ?operation ;
         <${LEDGER.grandfathered}> true .
+      ?op <${LEDGER.subGraphName}> ?subGraph .
     }
   } WHERE {
     GRAPH ?meta {
@@ -135,8 +137,10 @@ export function storageAckGrandfatherUpdate(epochIso: string): string {
         <${DKG}kaUal> ?ka ;
         <${DKG}assertionVersion> ?version ;
         <${DKG}publishedAt> ?ts .
+      OPTIONAL { ?op <${DKG}subGraphName> ?subGraph }
       FILTER(STRSTARTS(STR(?opId), "${STORAGE_ACK_SHARE_OPERATION_ID_PREFIX}"))
-      FILTER(?ts < "${epochIso}"^^<${XSD_DATE_TIME}>)
+      FILTER(?ts < "${throughIso}"^^<${XSD_DATE_TIME}>)${sinceIso === undefined ? '' : `
+      FILTER(?ts >= "${sinceIso}"^^<${XSD_DATE_TIME}>)`}
     }
     FILTER(STRENDS(STR(?meta), "/_shared_memory_meta"))
     FILTER NOT EXISTS { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { ?op <${LEDGER.signedAt}> ?signedAt } }

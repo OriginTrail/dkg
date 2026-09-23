@@ -15,6 +15,7 @@ import {
   createGraphKnowledgeAssetScope,
   isSafeIri,
   sparqlString,
+  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
   STORAGE_ACK_LEDGER_GRAPH,
@@ -53,6 +54,8 @@ export interface VmPromotionAuditStatus {
   notRegisteredOnChain: number;
   /** Copies stamped chain-absent (twice, past the TTL) since start. */
   expiredUnregisteredCopies: number;
+  /** Copies released since start because the chain moved past their version. */
+  supersededCopies: number;
   /** Per-asset VM reconciles the audit ran for landed copies since start. */
   retriesTriggered: number;
   /** Of those, how many promoted (or found already) the asset. */
@@ -75,6 +78,7 @@ export function createVmPromotionAuditStatus(): VmPromotionAuditStatus {
     stalledOnChain: 0,
     notRegisteredOnChain: 0,
     expiredUnregisteredCopies: 0,
+    supersededCopies: 0,
     retriesTriggered: 0,
     promotedByAudit: 0,
   };
@@ -91,12 +95,23 @@ export interface StorageAckLedgerCandidate {
   readonly contextGraphId?: string;
   readonly registered: boolean;
   readonly absentSeenAtMs?: number;
+  /** Sub-graph holding the copy; absent for the namespace's root graph. */
+  readonly subGraphName?: string;
 }
 
-export function storageAckLedgerEpochQuery(): string {
-  return `SELECT ?epoch WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
-    <${STORAGE_ACK_LEDGER_GRAPH}> <${LEDGER.epoch}> ?epoch
+/** The node-local ledger state: epoch, grandfathering bound, last seen running. */
+export function storageAckLedgerStateQuery(): string {
+  return `SELECT ?epoch ?through ?seen WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+    OPTIONAL { <${STORAGE_ACK_LEDGER_GRAPH}> <${LEDGER.epoch}> ?epoch }
+    OPTIONAL { <${STORAGE_ACK_LEDGER_GRAPH}> <${LEDGER.grandfatheredThrough}> ?through }
+    OPTIONAL { <${STORAGE_ACK_LEDGER_GRAPH}> <${LEDGER.seenAt}> ?seen }
   } } LIMIT 1`;
+}
+
+/** Ledger rows the promotion lanes no longer act on. */
+function releasedFilters(opVar: string): string {
+  return `FILTER NOT EXISTS { ${opVar} <${LEDGER.unregisteredAt}> ?unregistered }
+      FILTER NOT EXISTS { ${opVar} <${LEDGER.supersededAt}> ?superseded }`;
 }
 
 /** Keyset page of ledger namespaces after `after` (exclusive). */
@@ -125,7 +140,7 @@ export function storageAckAuditCandidatesQuery(input: Readonly<{
   signedBeforeIso: string;
   limit: number;
 }>): string {
-  return `SELECT ?op ?namespace ?ka ?version ?signedAt ?target ?registered ?absentSeen WHERE {
+  return `SELECT ?op ?namespace ?ka ?version ?signedAt ?target ?registered ?absentSeen ?subGraph WHERE {
     GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
       ?op <${LEDGER.signedAt}> ?signedAt ;
         <${LEDGER.namespace}> ?namespace ;
@@ -134,11 +149,56 @@ export function storageAckAuditCandidatesQuery(input: Readonly<{
       OPTIONAL { ?op <${LEDGER.contextGraphId}> ?target }
       OPTIONAL { ?op <${LEDGER.registeredAt}> ?registered }
       OPTIONAL { ?op <${LEDGER.absentSeenAt}> ?absentSeen }
-      FILTER NOT EXISTS { ?op <${LEDGER.unregisteredAt}> ?unregistered }
+      OPTIONAL { ?op <${LEDGER.subGraphName}> ?subGraph }
+      ${releasedFilters('?op')}
       FILTER(?signedAt < "${input.signedBeforeIso}"^^<${XSD_DATE_TIME}>)
       FILTER(STR(?op) > ${sparqlString(input.after)})
     }
   } ORDER BY ?op LIMIT ${input.limit}`;
+}
+
+/**
+ * Keyset page (by operation IRI, after `after`) of ledgered update copies
+ * signed before `signedBeforeIso` that the pending-update lane still owes.
+ */
+export function storageAckPendingUpdatesQuery(input: Readonly<{
+  after: string;
+  signedBeforeIso: string;
+  limit: number;
+}>): string {
+  return `SELECT ?op ?namespace ?ka ?version ?signedAt ?target ?registered ?absentSeen ?subGraph WHERE {
+    GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+      ?op <${LEDGER.operation}> "update" ;
+        <${LEDGER.signedAt}> ?signedAt ;
+        <${LEDGER.namespace}> ?namespace ;
+        <${LEDGER.kaUal}> ?ka ;
+        <${LEDGER.assertionVersion}> ?version .
+      OPTIONAL { ?op <${LEDGER.contextGraphId}> ?target }
+      OPTIONAL { ?op <${LEDGER.registeredAt}> ?registered }
+      OPTIONAL { ?op <${LEDGER.absentSeenAt}> ?absentSeen }
+      OPTIONAL { ?op <${LEDGER.subGraphName}> ?subGraph }
+      ${releasedFilters('?op')}
+      FILTER(?signedAt < "${input.signedBeforeIso}"^^<${XSD_DATE_TIME}>)
+      FILTER(STR(?op) > ${sparqlString(input.after)})
+    }
+  } ORDER BY ?op LIMIT ${input.limit}`;
+}
+
+/** Sub-graphs holding ledgered copies of one asset in one namespace. */
+export function storageAckAssetSubGraphsQuery(namespace: string, kaUal: string): string {
+  return `SELECT DISTINCT ?subGraph WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+    ?op <${LEDGER.kaUal}> <${kaUal}> ;
+      <${LEDGER.namespace}> ${sparqlString(namespace)} ;
+      <${LEDGER.subGraphName}> ?subGraph .
+  } } LIMIT 2`;
+}
+
+/** Sub-graphs of one namespace that hold ledgered copies. */
+export function storageAckNamespaceSubGraphsQuery(namespace: string, limit: number): string {
+  return `SELECT DISTINCT ?subGraph WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+    ?op <${LEDGER.namespace}> ${sparqlString(namespace)} ;
+      <${LEDGER.subGraphName}> ?subGraph .
+  } } ORDER BY ?subGraph LIMIT ${limit}`;
 }
 
 /** Whether the namespace's VM holds the asset at `version` or later. */
@@ -156,6 +216,18 @@ export function storageAckLedgerOrphansQuery(limit: number): string {
     GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { ?op <${LEDGER.metaGraph}> ?meta }
     FILTER NOT EXISTS { GRAPH ?meta { ?op <${DKG}shareOperationId> ?operationId } }
   } LIMIT ${limit}`;
+}
+
+/**
+ * The same orphans, removed in one store-side update, so a copy re-written
+ * between a select and a delete can never lose its fresh ledger row.
+ */
+export function storageAckLedgerOrphansDeleteUpdate(): string {
+  return `DELETE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { ?op ?p ?o } }
+  WHERE {
+    GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { ?op <${LEDGER.metaGraph}> ?meta ; ?p ?o }
+    FILTER NOT EXISTS { GRAPH ?meta { ?op <${DKG}shareOperationId> ?operationId } }
+  }`;
 }
 
 export function parseStorageAckLedgerCandidate(
@@ -181,6 +253,8 @@ export function parseStorageAckLedgerCandidate(
   const absentSeenAtMs = row['absentSeen'] === undefined
     ? undefined
     : Date.parse(stripLiteral(row['absentSeen']));
+  const subGraphName = row['subGraph'] === undefined ? undefined : stripLiteral(row['subGraph']);
+  if (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid) return null;
   return {
     operationSubject,
     namespace,
@@ -190,6 +264,7 @@ export function parseStorageAckLedgerCandidate(
     ...(target && isCanonicalOnChainContextGraphId(target) ? { contextGraphId: target } : {}),
     registered: row['registered'] !== undefined,
     ...(absentSeenAtMs !== undefined && Number.isFinite(absentSeenAtMs) ? { absentSeenAtMs } : {}),
+    ...(subGraphName ? { subGraphName } : {}),
   };
 }
 
