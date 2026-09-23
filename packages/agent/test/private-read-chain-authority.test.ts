@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   MockChainAdapter,
+  type ChainAdapter,
   type ContextGraphAuthorityProjectionServedEvidence,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -1964,9 +1965,12 @@ describe('private read authorization uses the on-chain participant roster', () =
   // The roster a registered participant mutation reads is its idempotence
   // filter: a `remove` of an agent it does not list and an `add` of one it
   // does send no transaction. Each lane installs a roster source that lags the
-  // chain; the mutation must still send exactly what the chain roster calls for.
+  // chain, and proves through a read allowed to consume that source that the
+  // lag is really installed; the mutation must still send exactly what the
+  // chain roster calls for.
   it.each<readonly [
     string,
+    Parameters<DKGAgent['resolveRegisteredContextGraphAuthority']>[1],
     (input: {
       agent: DKGAgent;
       chain: MockChainAdapter;
@@ -1974,25 +1978,30 @@ describe('private read authorization uses the on-chain participant roster', () =
       onChainId: bigint;
     }) => (roster: readonly string[]) => void,
   ]>([
-    ['the roster cache', ({ agent: target, chain, onChainId }) => {
+    ['the roster cache', { allowCachedRoster: true }, ({ agent: target, chain, onChainId }) => {
       // Without the single live read the policy read carries no roster, so a
       // resolver allowed to use the cache answers from it.
-      Reflect.set(chain, 'getContextGraphLiveAuthority', undefined);
-      const cache = Reflect.get(target, 'onChainParticipantAgentsCache') as Map<string, string[]>;
+      const liveRead: Pick<ChainAdapter, 'getContextGraphLiveAuthority'> = chain;
+      liveRead.getContextGraphLiveAuthority = undefined;
+      const { onChainParticipantAgentsCache: cache } = target as unknown as {
+        onChainParticipantAgentsCache: Map<string, string[]>;
+      };
       return (roster) => {
         cache.set(onChainId.toString(), [...roster]);
       };
     }],
-    ['the finalized authority projection', ({ agent: target, chain, contextGraphId, onChainId }) => (
-      (roster) => {
+    [
+      'the finalized authority projection',
+      { authorityReadMode: 'finalized-index' },
+      ({ agent: target, chain, contextGraphId, onChainId }) => (roster) => {
         installFinalizedAuthorityReader(chain, finalizedAuthoritySnapshot(
           onChainId,
           target.contextGraphNameCommitment(contextGraphId),
           { accessPolicy: 1, participantAgents: [...roster] },
         ));
-      }
-    )],
-    ['a bounded (index-served) live read', ({ chain }) => {
+      },
+    ],
+    ['a bounded (index-served) live read', { freshness: 'bounded' }, ({ chain }) => {
       let indexedRoster: readonly string[] | undefined;
       const readLiveAuthority = chain.getContextGraphLiveAuthority.bind(chain);
       vi.spyOn(chain, 'getContextGraphLiveAuthority').mockImplementation(async (id, options) => {
@@ -2007,6 +2016,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     }],
   ])('sends the participant transactions the chain roster calls for when %s lags it', async (
     _lane,
+    laggingRead,
     installLaggingRoster,
   ) => {
     const contextGraphId = 'registered-private-live-mutation-roster';
@@ -2032,6 +2042,17 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     const onChainId = BigInt(registration.onChainId);
     const setLaggingRoster = installLaggingRoster({ agent, chain, contextGraphId, onChainId });
+    const laggingRosterHasMember = async (target: DKGAgent): Promise<boolean> => {
+      const authority = await target.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        laggingRead,
+      );
+      if (authority.kind !== 'private') {
+        throw new Error(`lagging read returned a ${authority.kind} authority`);
+      }
+      return authority.participantAgents
+        .some((address) => address.toLowerCase() === member.toLowerCase());
+    };
 
     await agent.inviteAgentToContextGraph(contextGraphId, member, owner);
     const rosterWithMember = await chain.getContextGraphParticipantAgents(onChainId);
@@ -2042,6 +2063,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     // The lagging source has not seen the addition: read from it, the member
     // is "not present" and the removal is silently dropped.
     setLaggingRoster(rosterWithMember.filter((address) => address !== member));
+    expect(await laggingRosterHasMember(agent)).toBe(false);
     await agent.removeAgentFromContextGraph(contextGraphId, member, owner);
     expect(removeParticipant).toHaveBeenCalledTimes(1);
     expect(removeParticipant).toHaveBeenCalledWith(onChainId, member);
@@ -2051,6 +2073,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     // Nor the removal: read from it, the member is "already present" and the
     // re-add is silently dropped.
     setLaggingRoster([...rosterWithoutMember, member]);
+    expect(await laggingRosterHasMember(agent)).toBe(true);
     await agent.inviteAgentToContextGraph(contextGraphId, member, owner);
     expect(addParticipant).toHaveBeenCalledTimes(1);
     expect(addParticipant).toHaveBeenCalledWith(onChainId, member);
