@@ -105,7 +105,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -322,6 +322,7 @@ import {
 } from '../prime-agent.js';
 
 import type { RequestContext } from './context.js';
+import { actorFromRequestContext } from './context.js';
 
 /**
  * Prime Agent is the one integration whose "is it there" answer is not derivable
@@ -404,6 +405,9 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     path,
     requestAgentAddress,
   } = ctx;
+  // Connecting or updating an integration rewrites node config and can run its
+  // setup, so it requires a node-level admin token.
+  const isNodeAdminCaller = (): boolean => canAdministerNode(actorFromRequestContext(ctx).authentication);
 
 
   // GET /api/local-agent-integrations — generic local agent registry/status surface
@@ -424,6 +428,11 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
 
   // POST /api/local-agent-integrations/connect — upsert/connect an integration
   if (req.method === 'POST' && path === '/api/local-agent-integrations/connect') {
+    if (!isNodeAdminCaller()) {
+      return jsonResponse(res, 403, {
+        error: 'POST /api/local-agent-integrations/connect requires a node-level admin token; agent-scoped tokens cannot connect local agent integrations.',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
@@ -479,6 +488,11 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
 
   // PUT /api/local-agent-integrations/:id — partial update for stored integration state
   if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
+    if (!isNodeAdminCaller()) {
+      return jsonResponse(res, 403, {
+        error: 'PUT /api/local-agent-integrations/:id requires a node-level admin token; agent-scoped tokens cannot update local agent integrations.',
+      });
+    }
     const id = path.slice('/api/local-agent-integrations/'.length);
     if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
     if (normalizeIntegrationId(id) === 'local-llm') {

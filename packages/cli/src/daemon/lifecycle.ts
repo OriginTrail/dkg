@@ -79,7 +79,7 @@ import {
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
@@ -203,6 +203,7 @@ import {
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
+import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
   decodeVmReconcileNegativeRow,
@@ -218,7 +219,7 @@ import {
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
-import { authenticateHttpRequest, loadTokens } from '../auth.js';
+import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -322,7 +323,6 @@ import {
 } from './shutdown-wait.js';
 import {
   resolveNameToPeerId,
-  jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
@@ -330,12 +330,10 @@ import {
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
-  SMALL_BODY_BYTES,
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
   buildImportFileResponse,
   unregisteredSubGraphError,
-  readBody,
   readBodyBuffer,
   buildCorsAllowlist,
   resolveCorsOrigin,
@@ -3670,50 +3668,15 @@ async function runDaemonInnerWithStartupOwnership(
       }
 
       // Shared memory (workspace) TTL settings — V10 and legacy routes
-      if (
-        req.method === "GET" &&
-        (reqUrl.pathname === "/api/settings/shared-memory-ttl" ||
-          reqUrl.pathname === "/api/settings/workspace-ttl")
-      ) {
-        const ttlMs =
-          resolveSharedMemoryTtlMs(config) ?? 30 * 24 * 60 * 60 * 1000;
-        return jsonResponse(res, 200, {
-          ttlMs,
-          ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000)),
-        });
-      }
-      if (
-        req.method === "PUT" &&
-        (reqUrl.pathname === "/api/settings/shared-memory-ttl" ||
-          reqUrl.pathname === "/api/settings/workspace-ttl")
-      ) {
-        try {
-          const bodyStr = await readBody(req, SMALL_BODY_BYTES);
-          const { ttlDays } = JSON.parse(bodyStr ?? "{}") as {
-            ttlDays?: number;
-          };
-          if (
-            typeof ttlDays !== "number" ||
-            !Number.isFinite(ttlDays) ||
-            ttlDays < 0
-          ) {
-            return jsonResponse(res, 400, {
-              error: "ttlDays must be a finite non-negative number",
-            });
-          }
-          const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
-          config.sharedMemoryTtlMs = ttlMs;
-          config.workspaceTtlMs = ttlMs;
-          agent.setSharedMemoryTtlMs(ttlMs);
-          await saveConfig(config);
-          return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
-        } catch (err: any) {
-          if (err instanceof PayloadTooLargeError) throw err;
-          return jsonResponse(res, 500, {
-            error: err.message ?? "Failed to update shared memory TTL",
-          });
-        }
-      }
+      if (await handleSharedMemoryTtlSettingsRequest({
+        req,
+        res,
+        pathname: reqUrl.pathname,
+        authentication,
+        config,
+        setSharedMemoryTtlMs: (ttlMs) => agent.setSharedMemoryTtlMs(ttlMs),
+        saveConfig,
+      })) return;
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI).
       // The dashboard shell is served with the node-operator token only for a
@@ -3744,7 +3707,7 @@ async function runDaemonInnerWithStartupOwnership(
       // handler (below) so it only fires after rate-limit, admission, and auth
       // have accepted the request — a rejected/unauthenticated request cannot
       // open the store-metrics gate.
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, uiToken, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, uiToken, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark(), canAdministerNode(authentication));
       if (handled) return;
 
       await handleRequest({

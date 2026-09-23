@@ -153,7 +153,7 @@ function makeCtx(path: string, agent: ReturnType<typeof makeAgentMock>) {
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication: requestAuthentication({ kind: 'nodeOperator' }),
     requestAgentAddress: 'did:dkg:agent:test',
     emitMemoryGraphChanged: () => {},
   };

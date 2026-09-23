@@ -54,6 +54,7 @@ import {
 import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
   '../src/daemon/routes/rfc64-status-contract.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
 
@@ -1879,6 +1880,7 @@ describe('/api/status selected overlay details', () => {
         rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: { ensureIdentity: async () => { throw err; } },
+        authentication: requestAuthentication({ kind: 'nodeOperator' }),
         nodeVersion: '0.0.0-test',
         nodeCommit: '',
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },

@@ -606,8 +606,14 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, stats);
   }
 
-  // POST /api/publisher/cancel
+  // POST /api/publisher/cancel — node-admin only: it cancels any job in the
+  // node's queue by id, whichever agent submitted it.
   if (req.method === "POST" && path === "/api/publisher/cancel") {
+    if (!canAdministerNode(authentication)) {
+      return jsonResponse(res, 403, {
+        error: 'POST /api/publisher/cancel requires a node-level admin token; agent-scoped tokens cannot cancel publisher jobs.',
+      });
+    }
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const jobId = parsed.jobId as string | undefined;
@@ -646,8 +652,14 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     });
   }
 
-  // POST /api/publisher/clear
+  // POST /api/publisher/clear — node-admin only: it bulk-clears every job with
+  // the given status across the node's queue.
   if (req.method === "POST" && path === "/api/publisher/clear") {
+    if (!canAdministerNode(authentication)) {
+      return jsonResponse(res, 403, {
+        error: 'POST /api/publisher/clear requires a node-level admin token; agent-scoped tokens cannot clear publisher jobs.',
+      });
+    }
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const status = parsed.status as string | undefined;

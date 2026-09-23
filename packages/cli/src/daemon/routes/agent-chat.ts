@@ -451,8 +451,15 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   } = actor;
 
 
-  // POST /api/agent/register — register a new agent on this node
+  // POST /api/agent/register — register a new agent on this node. Node-admin
+  // only: registration mints a new API token (and, for custodial agents, a
+  // node-held key), which is an operator decision.
   if (req.method === "POST" && path === "/api/agent/register") {
+    if (!canAdministerNode(authentication)) {
+      return jsonResponse(res, 403, {
+        error: 'POST /api/agent/register requires a node-level admin token; agent-scoped tokens cannot register agents.',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
     const { name, publicKey, framework } = parsed;
