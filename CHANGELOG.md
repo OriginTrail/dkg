@@ -4,8 +4,36 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Upgrading
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Chain-driven VM reconciliation has its own switch, `vmReconcilerEnabled` (env `DKG_VM_RECONCILER_ENABLED`, default on) | `syncReconcilerEnabled: false` / `DKG_SYNC_RECONCILER_ENABLED=0` now only stops the periodic peer-sync reconciler. A Core that set it (every Base mainnet Core has since the 2026-07-16 containment) resumes promoting acknowledged public data to Verifiable Memory on upgrade | None to restore promotion. Keep `syncReconcilerEnabled` as it is if peer-sync containment is still wanted. Do not set `vmReconcilerEnabled: false` on a Core |
+| **Cores with VM reconcile disabled will decline all storage ACKs** for public Context Graphs | A Core signs a public StorageACK (publish or update) only once its VM reconciler is running and the graph is durably recorded as core-hosted; otherwise it declines with `CORE_VM_PROMOTION_DISABLED` (configuration) or `CORE_VM_PROMOTION_UNAVAILABLE` (transient). Curated catalog ACKs are unaffected | After the upgrade, check that `GET /api/status` reports `vmPromotion.storageAckGate: "signing"`; the startup log warns when a Core cannot promote to VM |
+| Graphs acknowledged while VM reconcile was off are backfilled | A few minutes after start the Core records every public graph holding its StorageACK copies as core-hosted, and the reconciler then promotes each Knowledge Asset the chain registered to it, filling what this Core never held from peers. On mainnet Cores this is a catch-up of tens of thousands of assets | Upgrade Cores one at a time. Follow progress in `vmPromotion.audit` and the `chain-promote` log lines |
+
 ### Fixed
 
+- **Cores promote the data they acknowledge to Verifiable Memory again**: since
+  10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
+  reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that
+  had switched the peer-sync reconciler off, as every Base mainnet Core did in
+  the 2026-07-16 containment, stopped recording public graphs as core-hosted
+  and stopped the VM reconcile sweep. Its acknowledged copies stayed in Shared
+  Working Memory and reached Verifiable Memory only through finalization
+  gossip, and only on Cores subscribed to the graph. Random sampling reads
+  only Verifiable Memory, so those Cores could not prove the Knowledge Assets.
+  VM reconciliation now has its own switch, and the peer-sync switch no longer
+  affects it.
+- **The SWM TTL no longer deletes an acknowledged copy before promotion**: the
+  30-day shared-memory cleanup keeps a StorageACK copy whose Knowledge Asset
+  is not confirmed in VM, including the SWM head it shares with an expiring
+  alias operation. The copy expires normally once the asset is promoted, once
+  the ACK promotion audit proves the chain never registered it (checked only
+  after the TTL, since an ACK can still belong to a publish in flight), or at
+  the latest 90 days after the ACK (`DKG_STORAGE_ACK_RETENTION_MAX_MS`). ACK
+  signatures carry no on-chain deadline, so the ceiling bounds copies of
+  publishes that never landed.
 - **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a
@@ -16,6 +44,56 @@ All notable changes to the DKG V10 node are documented here. The format is based
   requested as `storeQuadsStatus: "not-requested"` and one in progress as
   `"pending"` instead of omitting the status, and adds `storeQuadsAgeMs`, the
   age of the cached count, which ordinary polling still never refreshes.
+
+### Changed
+
+- **The StorageACK is a finality gate**: a Core signs a public StorageACK only
+  when the acknowledged data is guaranteed to reach its Verifiable Memory. It
+  must have verified the data (and, for a graph-scoped publish, stored it with
+  its SWM head), its chain-driven VM reconciliation must be enabled and
+  running, and the graph must be durably recorded as core-hosted before the
+  signature. The core-hosted record is awaited and written through the strict
+  subscription-store path, once per graph, instead of being started after
+  signing. New decline codes: `CORE_VM_PROMOTION_UNAVAILABLE` is retried by
+  publishers like other transient declines; `CORE_VM_PROMOTION_DISABLED` is
+  permanent for the request. Older publishers treat both as terminal
+  declines with a reason.
+- **What an ACK guarantees for curated graphs**: a Core never receives a
+  curated graph's plaintext, so there is nothing to promote. A curated catalog
+  ACK guarantees that the Core verified the graph is curated on chain, rebuilt
+  the catalog commitment, and durably stored it in `<cg>/_catalog`, which is
+  what random sampling proves for curated Knowledge Assets. It does not
+  attest that the Core holds the private payload, and it does not depend on
+  VM reconciliation.
+
+### Added
+
+- **ACK promotion audit on Cores** (every 15 minutes,
+  `DKG_VM_PROMOTION_AUDIT_INTERVAL_MS`): one store query finds every graph
+  holding StorageACK copies; public graphs not yet core-hosted are recorded
+  (at most 32 per pass, resolved through the finalized authority index and
+  the gate's access-policy check, so curated graphs stay excluded); and copies
+  still not in VM 30 minutes after their ACK
+  (`DKG_VM_PROMOTION_STALL_THRESHOLD_MS`) are checked on chain, at most 32
+  reads per pass and 8 per graph, starting at a different graph each pass.
+  An asset registered to its graph but not promoted is logged
+  as `VM promotion watchdog`, its graph's reconcile is re-triggered, and it is
+  counted in the `dkg.vm_promotion.stalled_acks` gauge; the
+  `dkg.vm_promotion.backfill_recorded_total` and
+  `dkg.vm_promotion.retries_total` counters track the backfill and retries.
+- **`GET /api/status`** reports `syncLifecycle.vmReconcilerEnabled` next to
+  `syncReconcilerEnabled`, and a `vmPromotion` block with the effective
+  VM-reconcile state, the reason it is unavailable, `storageAckGate`
+  (`signing`, `starting`, `declining`, `not-core`), the number of core-hosted
+  graphs, and the last audit.
+
+### Known limitations
+
+- A public update ACK has the same prerequisites as a publish ACK, but a Core
+  promotes an updated version only when it receives it through update gossip
+  or durable VM sync: chain-driven reconciliation walks registrations and an
+  update adds none. Core-hosted graphs a Core is not subscribed to do not yet
+  receive updated versions in VM.
 
 ## [10.0.18] - 2026-09-22
 

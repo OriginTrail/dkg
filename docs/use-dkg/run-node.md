@@ -186,6 +186,81 @@ TOKEN=$(dkg auth show)
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
 ```
 
+## Core VM Promotion And The StorageACK Finality Gate
+
+A Core signs a StorageACK only when it can guarantee the acknowledged data
+reaches its Verifiable Memory (VM). Before signing an ACK for a public Context
+Graph (publish or update) it must have verified the data (and, for a
+graph-scoped publish, stored it together with its SWM head); its chain-driven
+VM reconciliation must be enabled and running; and it must have durably
+recorded the graph as core-hosted, so the reconciler promotes every Knowledge
+Asset the chain registers to that graph, across restarts. If any of these
+fails it declines:
+
+| Decline code | Meaning | Publisher behavior |
+| --- | --- | --- |
+| `CORE_VM_PROMOTION_UNAVAILABLE` | VM reconciliation is still starting or stopping, or the graph's liveness, access policy or core-hosted record could not be read or written right now | Retries this core with backoff |
+| `CORE_VM_PROMOTION_DISABLED` | VM reconciliation is switched off, the chain adapter cannot run it, or a curated graph was sent on the public ACK path | Moves on to other cores |
+
+Chain-driven VM reconciliation has its own switch, on by default:
+
+```json
+{
+  "vmReconcilerEnabled": true
+}
+```
+
+`DKG_VM_RECONCILER_ENABLED` overrides `config.json` (accepted values: `1`,
+`true`, `yes`, `on`, `enabled` and `0`, `false`, `no`, `off`, `disabled`;
+anything else is ignored). **A Core with VM reconciliation off declines every
+public StorageACK.** `syncReconcilerEnabled` / `DKG_SYNC_RECONCILER_ENABLED`
+only control the periodic peer-sync reconciler and never switch VM
+reconciliation off.
+
+Curated (private) Context Graphs never reach a Core as plaintext, so there is
+nothing to promote. A curated ACK guarantees that the Core independently
+verified the graph is curated on chain, rebuilt the publisher's catalog
+commitment, and durably stored it in `<cg>/_catalog`, the artifact random
+sampling proves for curated Knowledge Assets. It does not attest that the Core
+holds the private payload, and it does not depend on VM reconciliation.
+
+A public update ACK has the same prerequisites, but a Core promotes an updated
+version only when it receives it through update gossip or durable VM sync:
+chain-driven reconciliation walks registrations, and an update adds none.
+
+`GET /api/status` reports the effective switches under `syncLifecycle`
+(`syncReconcilerEnabled`, `vmReconcilerEnabled`) and the Core's state under
+`vmPromotion`, including `storageAckGate` (`signing`, `starting`, `declining`
+or `not-core`) and the last ACK promotion audit.
+
+### ACK promotion audit
+
+A Core with VM reconciliation on runs an audit a few minutes after startup and
+then every 15 minutes (`DKG_VM_PROMOTION_AUDIT_INTERVAL_MS`):
+
+- **Backfill.** It finds every graph holding StorageACK copies and records the
+  public ones as core-hosted, through the same access-policy check as the
+  gate; curated graphs stay excluded. This covers graphs acknowledged while VM
+  reconciliation was off. The reconciler then promotes only Knowledge Assets
+  the chain actually registered; copies of publishes that never landed are
+  left to retention.
+- **Watchdog.** It samples copies still not in VM 30 minutes after their ACK
+  (`DKG_VM_PROMOTION_STALL_THRESHOLD_MS`) and checks a bounded number of them
+  on chain per pass. A Knowledge Asset registered to its graph but not
+  promoted is logged as `VM promotion watchdog: ...`, its graph's reconcile is
+  re-triggered, and it is counted in `vmPromotion.audit.stalledOnChain` and
+  the `dkg.vm_promotion.stalled_acks` gauge.
+
+### Retention of StorageACK copies
+
+The shared-memory TTL cleanup keeps a StorageACK copy whose Knowledge Asset is
+not confirmed in VM. The copy expires normally once the Knowledge Asset is
+promoted (twin retirement removes it), once the audit proves the chain never
+registered it (checked only after the SWM TTL, since an older ACK can still
+belong to a publish in flight), or at the latest 90 days after the ACK
+(`DKG_STORAGE_ACK_RETENTION_MAX_MS`). ACK signatures carry no on-chain
+deadline, so this ceiling bounds copies whose absence has not been proven yet.
+
 ## Private shared-memory recovery time budget
 
 `DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS` sets the elapsed-time allowance for one
