@@ -229,4 +229,199 @@ describe('ContextGraphNameResolver', () => {
     expect(resolver.entryFor(NAME_HASH)).toMatchObject({ attempts: 1 });
     expect(await resolver.resolveNow(TARGET)).toBeUndefined();
   });
+
+  it('falls through to peers when the local store cannot be read', async () => {
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.findLocalCandidates = async () => { throw new Error('store closed'); };
+    expect(await resolverFor(state).resolveNow(TARGET))
+      .toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT, source: 'peer-protocol' });
+  });
+
+  it('adopts every pending hash that one ontology pull answers', async () => {
+    const OTHER = 'acme-trivia';
+    const OTHER_HASH = ethers.keccak256(ethers.toUtf8Bytes(OTHER)).toLowerCase();
+    const OTHER_TARGET: ContextGraphNameTarget = { nameHash: OTHER_HASH, onChainId: '34' };
+    const state = harness({ peers: [] });
+    state.targets = [TARGET, OTHER_TARGET];
+    const adoptedHashes = new Set<string>();
+    state.deps.isTargetCurrent = (target) => !adoptedHashes.has(target.nameHash);
+    state.deps.adopt = async (target, contextGraphId, source) => {
+      adoptedHashes.add(target.nameHash);
+      state.adopted.push({ contextGraphId, source });
+      return true;
+    };
+    const resolver = resolverFor(state);
+    await resolver.resolveNow(TARGET);
+    await resolver.resolveNow(OTHER_TARGET);
+    expect(resolver.entryFor(OTHER_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'no-peers' });
+
+    const requestedHashes: string[][] = [];
+    state.deps.listPeers = () => ['old-core'];
+    state.deps.peerSupportsNameProtocol = async () => false;
+    state.deps.pullPeerOntology = async (peerId, nameHashes) => {
+      state.pulled.push(peerId);
+      requestedHashes.push([...nameHashes]);
+      return new Map([[NAME_HASH, CLEARTEXT], [OTHER_HASH, OTHER]]);
+    };
+    expect(await resolver.resolveNow(TARGET)).toMatchObject({ state: 'resolved', source: 'peer-ontology' });
+    // One pull, for both hashes, resolved both.
+    expect(state.pulled).toEqual(['old-core']);
+    expect(requestedHashes).toEqual([[NAME_HASH, OTHER_HASH]]);
+    expect(resolver.entryFor(OTHER_HASH))
+      .toMatchObject({ state: 'resolved', contextGraphId: OTHER, source: 'peer-ontology' });
+    expect(state.adopted).toEqual([
+      { contextGraphId: CLEARTEXT, source: 'peer-ontology' },
+      { contextGraphId: OTHER, source: 'peer-ontology' },
+    ]);
+  });
+});
+
+describe('ContextGraphNameResolver: callers with a deadline', () => {
+  it('returns the finished entry to a caller that waits with a signal', async () => {
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    expect(await resolverFor(state).resolveNow(TARGET, { signal: new AbortController().signal }))
+      .toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT, source: 'peer-protocol' });
+  });
+
+  it('answers a caller that stops waiting with what is known, and finishes the attempt anyway', async () => {
+    let release: (() => void) | undefined;
+    const state = harness({ peers: ['holder'], protocols: { holder: true } });
+    state.deps.askPeer = async (peerId) => {
+      state.asked.push(peerId);
+      if (state.asked.length === 1) return null;
+      await new Promise<void>((resolve) => { release = resolve; });
+      return CLEARTEXT;
+    };
+    const resolver = resolverFor(state);
+    expect(await resolver.resolveNow(TARGET)).toMatchObject({ state: 'pending', attempts: 1 });
+
+    // A caller whose budget is already spent (the subscribe route's timeout)
+    // gets the current entry at once; the attempt it started keeps running.
+    expect(await resolver.resolveNow(TARGET, { signal: AbortSignal.abort() }))
+      .toMatchObject({ state: 'pending', attempts: 1 });
+    await waitFor(() => release !== undefined);
+
+    // A caller that gives up mid-attempt is answered without waiting for it.
+    const giveUp = new AbortController();
+    const waiting = resolver.resolveNow(TARGET, { signal: giveUp.signal });
+    giveUp.abort();
+    expect(await waiting).toMatchObject({ state: 'pending', attempts: 1 });
+
+    release!();
+    await waitFor(() => resolver.entryFor(NAME_HASH)?.state === 'resolved');
+    // The abandoned attempt did the work; nobody asked twice for it.
+    expect(state.asked).toEqual(['holder', 'holder']);
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+  });
+
+  it('answers a waiting caller when the resolver stops mid-attempt', async () => {
+    const state = harness({ peers: ['holder'], protocols: { holder: true } });
+    state.deps.askPeer = (peerId, _target, signal) => {
+      state.asked.push(peerId);
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    };
+    const resolver = resolverFor(state);
+    const waiting = resolver.resolveNow(TARGET, { signal: new AbortController().signal });
+    await waitFor(() => state.asked.length === 1);
+    resolver.stop();
+    await expect(waiting).resolves.toBeUndefined();
+    expect(state.adopted).toEqual([]);
+  });
+});
+
+describe('ContextGraphNameResolver: background passes', () => {
+  it('coalesces requests made during a pass into one more pass, which respects the backoff', async () => {
+    vi.useFakeTimers();
+    let release: (() => void) | undefined;
+    let passes = 0;
+    const state = harness({ peers: ['slow'], protocols: { slow: true } });
+    const listTargets = state.deps.listTargets;
+    state.deps.listTargets = () => {
+      passes += 1;
+      return listTargets();
+    };
+    state.deps.askPeer = async (peerId) => {
+      state.asked.push(peerId);
+      await new Promise<void>((resolve) => { release = resolve; });
+      return null;
+    };
+    const resolver = resolverFor(state, { retryBaseMs: 60_000 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(release).toBeDefined();
+
+    // Identify churn while the pass is blocked on a slow peer.
+    resolver.request();
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(passes).toBe(1);
+
+    release!();
+    await vi.advanceTimersByTimeAsync(0);
+    // Exactly one follow-up pass; it found the hash inside its retry backoff.
+    expect(passes).toBe(2);
+    expect(state.asked).toEqual(['slow']);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', attempts: 1 });
+  });
+
+  it('logs a failed pass and recovers on the next request', async () => {
+    const debug: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let failNext = true;
+    const listTargets = state.deps.listTargets;
+    state.deps = {
+      ...state.deps,
+      listTargets: () => {
+        if (failNext) {
+          failNext = false;
+          throw new Error('subscription table busy');
+        }
+        return listTargets();
+      },
+      log: { info: () => undefined, debug: (message) => { debug.push(message); } },
+    };
+    const resolver = resolverFor(state);
+    resolver.request();
+    await waitFor(() => debug.some((line) => line.includes('name resolution pass failed: subscription table busy')));
+    expect(resolver.entryFor(NAME_HASH)).toBeUndefined();
+    resolver.request();
+    await waitFor(() => resolver.entryFor(NAME_HASH)?.state === 'resolved');
+  });
+
+  it('bounds remembered asks, forgetting the oldest first', async () => {
+    const peers = Array.from({ length: 4_097 }, (_, index) => `peer-${index}`);
+    const state = harness({ peers, protocols: Object.fromEntries(peers.map((peer) => [peer, true])) });
+    // One wide attempt fills the memory past its bound (real attempts ask 8).
+    const resolver = resolverFor(state, { maxPeersPerAttempt: peers.length });
+    await resolver.resolveNow(TARGET);
+    expect(state.asked).toHaveLength(4_097);
+
+    // Identify updates within every peer's ask cooldown: the newest ask is
+    // still remembered, the oldest fell out of the bounded memory.
+    resolver.onPeerUpdated('peer-4096');
+    await waitFor(() => attemptsOf(resolver) === 2);
+    resolver.onPeerUpdated('peer-0');
+    await waitFor(() => attemptsOf(resolver) === 3);
+    expect(state.asked.slice(4_097)).toEqual(['peer-0']);
+  });
+
+  it('bounds remembered resolutions, forgetting the oldest first', async () => {
+    const ids = Array.from({ length: 257 }, (_, index) => `acme-graph-${index}`);
+    const byHash = new Map(ids.map((id) => [ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase(), id]));
+    const targets = [...byHash.keys()].map((nameHash, index) => ({ nameHash, onChainId: String(index + 1) }));
+    const state = harness({});
+    state.targets = targets;
+    state.deps.isTargetCurrent = () => true;
+    state.deps.findLocalCandidates = async (target) => [byHash.get(target.nameHash)!];
+    const resolver = resolverFor(state);
+    for (const target of targets) {
+      expect(await resolver.resolveNow(target)).toMatchObject({ state: 'resolved', source: 'local-store' });
+    }
+    expect(resolver.entriesSnapshot()).toHaveLength(256);
+    expect(resolver.entryFor(targets[0]!.nameHash)).toBeUndefined();
+    expect(resolver.entryFor(targets[1]!.nameHash)).toMatchObject({ contextGraphId: 'acme-graph-1' });
+    expect(resolver.entryFor(targets[256]!.nameHash)).toMatchObject({ contextGraphId: 'acme-graph-256' });
+  });
 });

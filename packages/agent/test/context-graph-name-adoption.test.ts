@@ -3,14 +3,16 @@
  * by its on-chain name hash (Base-mainnet Context Graph #33, 2026-09-23), and
  * the restart contract for a `--save`d hash subscription.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
 } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
+import { PROTOCOL_CONTEXT_GRAPH_NAME } from '../src/context-graph-name-protocol.js';
 import {
   contextGraphNameHashOnlyMessage,
   partitionSupersededContextGraphNamePlaceholders,
@@ -39,6 +41,7 @@ function recordingStore(rows: ContextGraphSubscriptionRecord[] = []): RecordingS
 
 let agent: DKGAgent | null = null;
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (agent) await agent.stop().catch(() => undefined);
   agent = null;
 });
@@ -189,13 +192,85 @@ describe('adopting a verified cleartext id', () => {
     const internals = await boot();
     subscribeByNameHash(internals);
     internals.setContextGraphSubscription(CLEARTEXT, { subscribed: false, synced: false, onChainId: '99' });
+    // Re-assert the placeholder (its creation event replayed, say): the reverse
+    // index points at it again, so only the slot guard stands in the way.
+    internals.setContextGraphSubscription(NAME_HASH, { ...internals.subscribedContextGraphs.get(NAME_HASH) });
+    expect(internals.contextGraphNamePlaceholder(NAME_HASH)).not.toBeNull();
+    const warn = vi.spyOn(internals.log, 'warn');
     await expect(internals.adoptVerifiedContextGraphCleartext(
       { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID },
       CLEARTEXT,
       'peer-protocol',
     )).resolves.toBe(false);
-    expect(internals.subscribedContextGraphs.get(NAME_HASH)).toMatchObject({ onChainId: ON_CHAIN_ID });
+    expect(warn.mock.calls.some(([, message]) => String(message).includes(`Not adopting "${CLEARTEXT}"`))).toBe(true);
+    expect(internals.subscribedContextGraphs.get(NAME_HASH)).toMatchObject({ onChainId: ON_CHAIN_ID, subscribed: true });
     expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: '99' });
+  });
+
+  it('merges a core-hosted placeholder into an existing cleartext row and reconciles it', async () => {
+    const store = recordingStore();
+    const internals = await boot({ store });
+    // An operator's on-demand cleartext row, not bound on-chain yet...
+    internals.setContextGraphSubscription(CLEARTEXT, { subscribed: true, synced: false, syncMode: 'on-demand' });
+    // ...and a hosting record for the same graph, seen only by its name hash.
+    internals.setContextGraphSubscription(NAME_HASH, {
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+      onChainId: ON_CHAIN_ID,
+      onChainHash: NAME_HASH,
+    });
+    await waitFor(() => store.saved.some((row) => row.id === NAME_HASH));
+    expect(internals.contextGraphNameResolutionTargets()).toEqual([{ nameHash: NAME_HASH, onChainId: ON_CHAIN_ID }]);
+    const reconciled: string[] = [];
+    internals.vmReconcileScheduling = { triggerLive: (id: string) => { reconciled.push(id); } };
+
+    await expect(internals.adoptVerifiedContextGraphCleartext(
+      { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID },
+      CLEARTEXT,
+      'peer-ontology',
+    )).resolves.toBe(true);
+    expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
+    // The operator's own settings stay; the binding and the hosting obligation join them.
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({
+      subscribed: true,
+      syncMode: 'on-demand',
+      coreHosted: true,
+      onChainId: ON_CHAIN_ID,
+      onChainHash: NAME_HASH,
+    });
+    expect(internals.wireIdToLocalCgId.get(NAME_HASH)).toBe(CLEARTEXT);
+    // Nothing was subscribed under the hash, so the VM reconcile starts at once.
+    expect(reconciled).toEqual([CLEARTEXT]);
+    await waitFor(() => store.deleted.includes(NAME_HASH));
+  });
+
+  it('lets a later answer adopt after an earlier adoption failed', async () => {
+    const internals = await boot();
+    subscribeByNameHash(internals);
+    vi.spyOn(internals, 'unsubscribeFromContextGraph')
+      .mockImplementationOnce(() => { throw new Error('gossip layer restarting'); });
+    const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
+    const first = internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol');
+    const second = internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    await expect(first).rejects.toThrow('gossip layer restarting');
+    await expect(second).resolves.toBe(true);
+    expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ subscribed: true, onChainHash: NAME_HASH });
+  });
+
+  it('retires the durable rows of a subscribed placeholder that any cleartext writer promotes', async () => {
+    const store = recordingStore();
+    const internals = await boot({ store });
+    subscribeByNameHash(internals);
+    await waitFor(() => store.saved.some((row) => row.id === NAME_HASH));
+    const deleteMember = vi.spyOn(internals, 'deleteContextGraphMember');
+    // A writer that names the cleartext id directly (a join, a hosting record).
+    internals.setContextGraphSubscription(CLEARTEXT, { subscribed: true, synced: false, syncMode: 'always-on' });
+    expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: ON_CHAIN_ID, onChainHash: NAME_HASH });
+    expect(deleteMember).toHaveBeenCalledWith(NAME_HASH, 'node', internals.peerId);
+    await waitFor(() => store.deleted.includes(NAME_HASH));
   });
 
   it('never mints a second identity when the adopted hash is subscribed again', async () => {
@@ -260,6 +335,22 @@ describe('restart with a saved name-hash subscription', () => {
     expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ subscribed: true, onChainHash: NAME_HASH });
     expect(internals.resolveContextGraphIdAlias(NAME_HASH)).toBe(CLEARTEXT);
     // config.contextGraphs still lists the hash; the sync scope resolves it.
+    expect(internals.config.syncContextGraphs).toEqual([CLEARTEXT]);
+  });
+
+  it('keeps syncing the cleartext id when the superseded hash row cannot be dropped', async () => {
+    const store = recordingStore([hashRow, cleartextRow]);
+    store.delete = async () => { throw new Error('disk full'); };
+    const internals = await boot({ store, syncContextGraphs: [NAME_HASH] });
+    const warn = vi.spyOn(internals.log, 'warn');
+    await internals.rehydrateContextGraphSubscriptions(null);
+
+    expect(warn.mock.calls.some(([, message]) =>
+      String(message).includes('Failed to drop superseded name-hash subscription row')
+      && String(message).includes('disk full'))).toBe(true);
+    // The next start tries again; this one still runs one identity only.
+    expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ subscribed: true, onChainHash: NAME_HASH });
     expect(internals.config.syncContextGraphs).toEqual([CLEARTEXT]);
   });
 
@@ -367,6 +458,43 @@ describe('name responder on the agent', () => {
       .resolves.toBe(false);
   });
 
+  it('fails closed when the chain proof itself errors', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    internals.subscribeToContextGraph(CLEARTEXT, { onChainId: ON_CHAIN_ID });
+    vi.spyOn(internals, 'isContextGraphPublicOnChain').mockRejectedValue(new Error('rpc unavailable'));
+    await expect(internals.isContextGraphPublicForNameReveal(CLEARTEXT, new AbortController().signal))
+      .resolves.toBe(false);
+  });
+
+  it('proves a public graph once, then answers from memory', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    internals.subscribeToContextGraph(CLEARTEXT, { onChainId: ON_CHAIN_ID });
+    const proof = vi.spyOn(internals, 'isContextGraphPublicOnChain');
+    for (let request = 0; request < 3; request += 1) {
+      await expect(internals.isContextGraphPublicForNameReveal(CLEARTEXT, new AbortController().signal))
+        .resolves.toBe(true);
+    }
+    expect(proof).toHaveBeenCalledTimes(1);
+  });
+
+  it('remembers a bounded number of verdicts, forgetting the oldest first', async () => {
+    const internals = await boot();
+    const proof = vi.spyOn(internals, 'isContextGraphPublicOnChain').mockResolvedValue(false);
+    const ids = Array.from({ length: 4_097 }, (_, index) => `acme-graph-${index}`);
+    for (const id of ids) internals.subscribedContextGraphs.set(id, { subscribed: false, synced: false });
+    try {
+      for (const id of ids) await internals.isContextGraphPublicForNameReveal(id, new AbortController().signal);
+      expect(proof).toHaveBeenCalledTimes(4_097);
+      // A recent refusal is answered from memory; the oldest was evicted.
+      await internals.isContextGraphPublicForNameReveal(ids[4_096], new AbortController().signal);
+      expect(proof).toHaveBeenCalledTimes(4_097);
+      await internals.isContextGraphPublicForNameReveal(ids[0], new AbortController().signal);
+      expect(proof).toHaveBeenCalledTimes(4_098);
+    } finally {
+      for (const id of ids) internals.subscribedContextGraphs.delete(id);
+    }
+  });
+
   it('refuses when the bound public slot does not commit this id', async () => {
     // A stale local binding (a chain reset, a reused slot) points at a public
     // slot that commits no name, or another name. That proves nothing about
@@ -380,5 +508,134 @@ describe('name responder on the agent', () => {
       await agent!.stop();
       agent = null;
     }
+  });
+});
+
+describe('resolver dependencies on the agent', () => {
+  const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
+  const live = () => new AbortController().signal;
+  // The vocabulary nodes write, not a copy of the code under test.
+  const RDF_TYPE = DKG_ONTOLOGY.RDF_TYPE;
+  const CONTEXT_GRAPH_TYPE = DKG_ONTOLOGY.DKG_CONTEXT_GRAPH;
+  const ON_CHAIN_ID_PREDICATE = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+  const SERVED_PREDICATE = 'https://dkg.origintrail.io/skill#contextGraphsServed';
+  const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+  const PEER = '12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA';
+
+  it('reads the fixed access policy from the chain when it is not cached, then caches it', async () => {
+    const publicAgent = await boot({ accessPolicy: 0 });
+    expect(publicAgent.onChainAccessPolicyCache.has(ON_CHAIN_ID)).toBe(false);
+    await expect(publicAgent.classifyContextGraphNamePolicy(target, live())).resolves.toBe('public');
+    expect(publicAgent.onChainAccessPolicyCache.get(ON_CHAIN_ID)).toBe(0);
+    await agent!.stop();
+    agent = null;
+
+    const privateAgent = await boot({ accessPolicy: 1 });
+    await expect(privateAgent.classifyContextGraphNamePolicy(target, live())).resolves.toBe('private');
+    privateAgent.chain.getContextGraphAccessPolicy = async () => { throw new Error('must not be read again'); };
+    await expect(privateAgent.classifyContextGraphNamePolicy(target, live())).resolves.toBe('private');
+  });
+
+  it('fails closed on an unreadable or unexpected access policy', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => { throw new Error('rpc timeout'); };
+    await expect(internals.classifyContextGraphNamePolicy(target, live())).resolves.toBe('unknown');
+    internals.chain.getContextGraphAccessPolicy = async () => 2;
+    await expect(internals.classifyContextGraphNamePolicy(target, live())).resolves.toBe('unknown');
+    internals.chain.getContextGraphAccessPolicy = undefined;
+    await expect(internals.classifyContextGraphNamePolicy(target, live())).resolves.toBe('unknown');
+    expect(internals.onChainAccessPolicyCache.has(ON_CHAIN_ID)).toBe(false);
+  });
+
+  it('finds the cleartext id in its own ontology graph, by on-chain id first', async () => {
+    const internals = await boot();
+    await internals.store.insert([
+      // Another graph's definition is read and discarded.
+      { graph: ONTOLOGY_GRAPH, subject: 'did:dkg:context-graph:acme-other', predicate: RDF_TYPE, object: CONTEXT_GRAPH_TYPE },
+      { graph: ONTOLOGY_GRAPH, subject: `did:dkg:context-graph:${CLEARTEXT}`, predicate: ON_CHAIN_ID_PREDICATE, object: '"33"' },
+    ]);
+    await expect(internals.findLocalContextGraphNameCandidates(target, live())).resolves.toEqual([CLEARTEXT]);
+  });
+
+  it('finds the cleartext id that a gossiped agent profile serves', async () => {
+    const internals = await boot();
+    await internals.store.insert([{
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS),
+      subject: `did:dkg:agent:${PEER}`,
+      predicate: SERVED_PREDICATE,
+      object: `"${CLEARTEXT}"`,
+    }]);
+    await expect(internals.findLocalContextGraphNameCandidates(target, live())).resolves.toEqual([CLEARTEXT]);
+  });
+
+  it('finds nothing when no local row matches the hash, and survives a failing query', async () => {
+    const internals = await boot();
+    await internals.store.insert([
+      { graph: ONTOLOGY_GRAPH, subject: 'did:dkg:context-graph:acme-other', predicate: RDF_TYPE, object: CONTEXT_GRAPH_TYPE },
+    ]);
+    await expect(internals.findLocalContextGraphNameCandidates(target, live())).resolves.toEqual([]);
+
+    await internals.store.insert([
+      { graph: ONTOLOGY_GRAPH, subject: `did:dkg:context-graph:${CLEARTEXT}`, predicate: RDF_TYPE, object: CONTEXT_GRAPH_TYPE },
+    ]);
+    const query = vi.spyOn(internals.store, 'query').mockRejectedValueOnce(new Error('query budget exhausted'));
+    await expect(internals.findLocalContextGraphNameCandidates(target, live())).resolves.toEqual([CLEARTEXT]);
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads protocol support from the identify record, and knows nothing about unknown peers', async () => {
+    const internals = await boot();
+    const records = new Map<string, string[]>([[PEER, [PROTOCOL_CONTEXT_GRAPH_NAME]]]);
+    internals.node.libp2p.peerStore = {
+      get: async (peerId: { toString(): string }) => {
+        const protocols = records.get(peerId.toString());
+        if (protocols === undefined) throw new Error('Not Found');
+        return { protocols };
+      },
+    };
+    await expect(internals.peerAdvertisesProtocol(PEER, PROTOCOL_CONTEXT_GRAPH_NAME)).resolves.toBe(true);
+    await expect(internals.peerAdvertisesProtocol(PEER, '/dkg/10.0.0/sync')).resolves.toBe(false);
+    records.set(PEER, []); // identify still pending
+    await expect(internals.peerAdvertisesProtocol(PEER, PROTOCOL_CONTEXT_GRAPH_NAME)).resolves.toBeUndefined();
+    records.delete(PEER);
+    await expect(internals.peerAdvertisesProtocol(PEER, PROTOCOL_CONTEXT_GRAPH_NAME)).resolves.toBeUndefined();
+  });
+
+  it('never pulls the ontology of a peer that network admission refuses', async () => {
+    const internals = await boot();
+    internals.peerAdvertisesProtocol = async () => true;
+    internals.ensurePeerAdmittedForRecovery = async () => false;
+    const fetch = vi.spyOn(internals, 'fetchSyncPages');
+    await expect(internals.pullPeerOntologyForContextGraphNames(PEER, [NAME_HASH], live())).resolves.toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('scans a pulled ontology in memory; an incomplete scan that found nothing proves nothing', async () => {
+    const internals = await boot();
+    internals.peerAdvertisesProtocol = async () => true;
+    internals.ensurePeerAdmittedForRecovery = async () => true;
+    const definition = {
+      graph: ONTOLOGY_GRAPH,
+      subject: `did:dkg:context-graph:${CLEARTEXT}`,
+      predicate: RDF_TYPE,
+      object: CONTEXT_GRAPH_TYPE,
+    };
+    internals.fetchSyncPages = async () => ({ quads: [definition], completed: false });
+    await expect(internals.pullPeerOntologyForContextGraphNames(PEER, [NAME_HASH], live()))
+      .resolves.toEqual(new Map([[NAME_HASH, CLEARTEXT]]));
+    internals.fetchSyncPages = async () => ({ quads: [], completed: false });
+    await expect(internals.pullPeerOntologyForContextGraphNames(PEER, [NAME_HASH], live())).resolves.toBeNull();
+    internals.fetchSyncPages = async () => ({ quads: [], completed: true });
+    await expect(internals.pullPeerOntologyForContextGraphNames(PEER, [NAME_HASH], live())).resolves.toEqual(new Map());
+  });
+
+  it('treats a failed ontology pull as no answer, unless the resolver is stopping', async () => {
+    const internals = await boot();
+    internals.peerAdvertisesProtocol = async () => true;
+    internals.ensurePeerAdmittedForRecovery = async () => true;
+    internals.fetchSyncPages = async () => { throw new Error('stream reset'); };
+    await expect(internals.pullPeerOntologyForContextGraphNames(PEER, [NAME_HASH], live())).resolves.toBeNull();
+    await expect(internals.pullPeerOntologyForContextGraphNames(PEER, [NAME_HASH], AbortSignal.abort()))
+      .rejects.toThrow('stream reset');
   });
 });

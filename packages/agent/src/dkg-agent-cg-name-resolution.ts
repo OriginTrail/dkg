@@ -19,6 +19,7 @@
  */
 
 import {
+  DKG_ONTOLOGY,
   PROTOCOL_SYNC,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
@@ -68,10 +69,11 @@ const CONTEXT_GRAPH_NAME_LOCAL_SCAN_MAX_ROWS = 10_000;
 const MAX_REMEMBERED_REVEAL_VERDICTS = 4_096;
 const REVEAL_REFUSAL_MEMO_MS = 60_000;
 
+/** The vocabulary the ontology graph and agent profiles are written in. */
 const SERVED_PREDICATE = 'https://dkg.origintrail.io/skill#contextGraphsServed';
-const CONTEXT_GRAPH_TYPE = 'http://dkg.io/ontology/ContextGraph';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const ON_CHAIN_ID_PREDICATE = 'http://dkg.io/ontology/ContextGraphOnChainId';
+const CONTEXT_GRAPH_TYPE = DKG_ONTOLOGY.DKG_CONTEXT_GRAPH;
+const RDF_TYPE = DKG_ONTOLOGY.RDF_TYPE;
+const ON_CHAIN_ID_PREDICATE = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
 const CONTEXT_GRAPH_SUBJECT_PREFIX = 'did:dkg:context-graph:';
 
 /** Operator-facing identity of a subscription that is (or was) hash-only. */
@@ -405,9 +407,8 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     source: ContextGraphNameSource,
   ): Promise<boolean> {
     const adoptions = stateOf(this).adoptions;
-    const previous = adoptions.get(target.nameHash) ?? Promise.resolve(false);
-    const run = previous
-      .catch(() => false)
+    // Wait for the previous adoption of this hash to settle, whatever its outcome.
+    const run = Promise.allSettled([adoptions.get(target.nameHash)])
       .then(() => this.adoptVerifiedContextGraphCleartextOnce(target, contextGraphId, source))
       .finally(() => {
         if (adoptions.get(target.nameHash) === run) adoptions.delete(target.nameHash);
@@ -451,33 +452,18 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     // promotion below.
     if (wasSubscribed) this.unsubscribeFromContextGraph(target.nameHash, { persist: true });
 
-    if (cleartextRow === undefined) {
-      this.setContextGraphSubscription(contextGraphId, {
-        syncMode,
-        subscribed: false,
-        synced: false,
-        onChainId: target.onChainId,
-        onChainHash: target.nameHash,
-        ...(wasCoreHosted ? { coreHosted: true } : {}),
-      });
-    } else {
-      // An explicit cleartext row already exists: keep it, carry the hosting
-      // obligation across, and retire the placeholder.
-      this.setContextGraphSubscription(contextGraphId, {
-        ...cleartextRow,
-        onChainId: target.onChainId,
-        onChainHash: target.nameHash,
-        ...(wasCoreHosted ? { coreHosted: true } : {}),
-      });
-      if (this.contextGraphNamePlaceholder(target.nameHash) !== null) {
-        this.retireContextGraphNamePlaceholder(target.nameHash, hashRow);
-      }
-    }
-    if (this.contextGraphNamePlaceholder(target.nameHash) !== null) {
-      // The canonical promotion declined (a concurrent writer changed the
-      // row). Nothing was merged; the resolver will retry.
-      return false;
-    }
+    // Promote through the canonical setter. The placeholder is the reverse
+    // index's target for keccak256(utf8(contextGraphId)) and is bound to the
+    // same on-chain id, so the setter adopts it as this id's wire-only row and
+    // retires it in memory and durably. An explicit cleartext row that
+    // already exists keeps its own settings and gains the binding; the
+    // hosting obligation carries across either way.
+    this.setContextGraphSubscription(contextGraphId, {
+      ...(cleartextRow ?? { syncMode, subscribed: false, synced: false }),
+      onChainId: target.onChainId,
+      onChainHash: target.nameHash,
+      ...(wasCoreHosted ? { coreHosted: true } : {}),
+    });
 
     // Restart sync under the cleartext id: the connected-peer catch-up first,
     // then the chain-driven VM reconcile for anything still missing. They are
@@ -517,13 +503,6 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const placeholder = this.contextGraphNamePlaceholder(nameHash);
     if (placeholder === null || placeholder.subscription.subscribed !== true) return;
     this.unsubscribeFromContextGraph(nameHash, { persist: true });
-  }
-
-  /** Remove a superseded placeholder in memory and durably. */
-  retireContextGraphNamePlaceholder(this: DKGAgent, nameHash: string, row: ContextGraphSub): void {
-    this.deleteContextGraphSubscription(nameHash);
-    if (this.wireIdToLocalCgId.get(nameHash) === nameHash) this.wireIdToLocalCgId.delete(nameHash);
-    this.retireDurableContextGraphSubscription(nameHash, row);
   }
 
   /**

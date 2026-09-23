@@ -146,6 +146,21 @@ describe('context-graph-name responder', () => {
     expect(await ask(handler, hashOf(PUBLIC_ID))).toEqual({ version: 1, status: 'not-found' });
   });
 
+  it('fails closed, with the ordinary refusal, when the local lookup throws', async () => {
+    let policyReads = 0;
+    const handler = createContextGraphNameRequestHandler({
+      lookupLocalContextGraphId: () => { throw new Error('subscription table unavailable'); },
+      isPublicContextGraph: async () => { policyReads += 1; return true; },
+    });
+    const answer = await handler(encodeContextGraphNameRequest(hashOf(PUBLIC_ID)));
+    const unknownAnswer = await createContextGraphNameRequestHandler(source({}))(
+      encodeContextGraphNameRequest(hashOf(PUBLIC_ID)),
+    );
+    expect(decodeContextGraphNameResponse(answer)).toEqual({ version: 1, status: 'not-found' });
+    expect(Buffer.from(answer).equals(Buffer.from(unknownAnswer))).toBe(true);
+    expect(policyReads).toBe(0);
+  });
+
   it('rejects malformed requests without a lookup', async () => {
     let lookups = 0;
     const handler = createContextGraphNameRequestHandler({
