@@ -1,18 +1,12 @@
-/** Route-plugins live-daemon E2E: spawns one daemon with the sample-fixture plugins and asserts HTTP behaviour.
- *  Patterned after `daemon-http-behavior-extra.test.ts` (edge-role node, no profile registration). */
+/** Route-plugins live-daemon E2E: spawns two daemons (async publisher off and on) with the sample-fixture plugins and
+ *  asserts HTTP behaviour. The shared live-daemon harness lets each daemon bind port 0 and reads the port from its api.port. */
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { createServer, type AddressInfo } from 'node:net';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
-import { ethers } from 'ethers';
-import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
+import { startLiveDaemon, stopLiveDaemon, type LiveDaemon } from '../helpers/live-daemon.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CLI_ENTRY = join(__dirname, '..', '..', 'dist', 'cli.js');
 const FIXTURE_DIR = resolvePath(
   __dirname,
   '..',
@@ -24,283 +18,26 @@ const FIXTURE_DIR = resolvePath(
 const ECHO_FIXTURE = join(FIXTURE_DIR, 'index.js');
 const THROW_FIXTURE = join(FIXTURE_DIR, 'throwing.js');
 
-interface Daemon {
-  home: string;
-  apiPort: number;
-  listenPort: number;
-  child: ChildProcess;
-  token: string;
-  exitCode?: number | null;
-  signal?: NodeJS.Signals | null;
-}
+let daemon: LiveDaemon | undefined;
+let publisherDaemon: LiveDaemon | undefined;
 
-// A probed port is free again once the probe closes, so the OS can offer it
-// twice. Remembering every port handed out keeps all daemons' ports distinct.
-const allocatedPorts = new Set<number>();
-
-async function allocatePort(): Promise<number> {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const probe = createServer();
-    // libp2p binds 0.0.0.0; a port free there is also free for the API on 127.0.0.1.
-    const port = await new Promise<number>((resolve, reject) => {
-      probe.once('error', reject);
-      probe.listen(0, '0.0.0.0', () => resolve((probe.address() as AddressInfo).port));
-    });
-    await new Promise<void>((resolve) => probe.close(() => resolve()));
-    if (!allocatedPorts.has(port)) {
-      allocatedPorts.add(port);
-      return port;
-    }
-  }
-  throw new Error('Could not allocate a port that no other daemon in this file uses');
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function writeDaemonConfig(
-  home: string,
-  apiPort: number,
-  listenPort: number,
-  publisherEnabled: boolean,
-): Promise<void> {
-  const { rpcUrl, hubAddress } = getSharedContext();
-  await writeFile(
-    join(home, 'config.json'),
-    JSON.stringify({
-      name: 'plugin-routes-e2e',
-      apiPort,
-      listenPort,
-      apiHost: '127.0.0.1',
-      nodeRole: 'edge',
-      relay: 'none',
-      auth: { enabled: true },
-      store: {
-        backend: 'oxigraph-worker',
-        options: { path: join(home, 'store.nq') },
-      },
-      chain: {
-        type: 'evm',
-        rpcUrl,
-        hubAddress,
-        chainId: 'evm:31337',
-      },
-      contextGraphs: [],
-      routePlugins: [ECHO_FIXTURE, THROW_FIXTURE],
-      ...(publisherEnabled ? { publisher: { enabled: true } } : {}),
-    }),
-  );
-  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-  await writeFile(
-    join(home, 'wallets.json'),
-    JSON.stringify({
-      wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }],
-    }, null, 2) + '\n',
-    { mode: 0o600 },
-  );
-  if (publisherEnabled) {
-    await writeFile(
-      join(home, 'publisher-wallets.json'),
-      JSON.stringify({
-        wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }],
-      }, null, 2) + '\n',
-      { mode: 0o600 },
-    );
-  }
-}
-
-class DaemonExitedEarly extends Error {
-  // portConflict: the daemon logged EADDRINUSE for its own API or libp2p port.
-  constructor(message: string, readonly portConflict: boolean) {
-    super(message);
-  }
-}
-
-async function startDaemon(publisherEnabled = false): Promise<Daemon> {
-  if (!existsSync(CLI_ENTRY)) {
-    throw new Error(
-      `CLI not built at ${CLI_ENTRY}. Run "pnpm --filter @origintrail-official/dkg build" first.`,
-    );
-  }
+beforeAll(async () => {
+  // Route-plugin loading is fail-soft, so a missing fixture would otherwise show up as confusing 404s.
   if (!existsSync(ECHO_FIXTURE) || !existsSync(THROW_FIXTURE)) {
     throw new Error(`Sample route-plugin fixtures missing under ${FIXTURE_DIR}`);
   }
-  try {
-    return await launchDaemon(publisherEnabled);
-  } catch (err) {
-    // Each port was free when probed, but another process can bind it before
-    // the daemon does. That race ends in EADDRINUSE; retry it once on new ports.
-    if (!(err instanceof DaemonExitedEarly) || !err.portConflict) throw err;
-    // Report the lost race even when the retry passes, and keep it if the retry fails.
-    console.warn(`Retrying the daemon start on new ports after a port conflict.\n${err.message}`);
-    return launchDaemon(publisherEnabled).catch((retryErr: Error) => {
-      throw new Error(`${retryErr.message}\n--- first attempt (port conflict) ---\n${err.message}`);
-    });
-  }
-}
-
-async function launchDaemon(publisherEnabled: boolean): Promise<Daemon> {
-  const home = await mkdtemp(join(tmpdir(), 'dkg-plugin-routes-e2e-'));
-  const apiPort = await allocatePort();
-  const listenPort = await allocatePort();
-  await writeDaemonConfig(home, apiPort, listenPort, publisherEnabled);
-
-  // Pipe daemon stdio to a file so startup failures (port bind, plugin load, chain init) surface in error messages.
-  const stdioLog = join(home, 'daemon-stdio.log');
-  const logHandle = await open(stdioLog, 'a');
-  const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
-    env: {
-      ...process.env,
-      DKG_HOME: home,
-      DKG_API_PORT: String(apiPort),
-      DKG_NO_BLUE_GREEN: '1',
-      DKG_DISABLE_TELEMETRY: '1',
-    },
-    stdio: ['ignore', logHandle.fd, logHandle.fd],
-  });
-
-  const readDaemonStdioTail = async (n = 80): Promise<string> => {
-    try {
-      const buf = await readFile(stdioLog, 'utf-8');
-      const lines = buf.split('\n');
-      return lines.slice(-n).join('\n').trim();
-    } catch {
-      return '<could not read daemon stdio log>';
-    }
-  };
-
-  const exited = (): boolean => child.exitCode !== null || child.signalCode !== null;
-  // An API port conflict is logged only to daemon.log, a libp2p one only to stdio.
-  const exitedEarly = async (): Promise<DaemonExitedEarly> => {
-    const daemonLog = await readFile(join(home, 'daemon.log'), 'utf-8').catch(() => '<could not read daemon.log>');
-    const stdio = await readFile(stdioLog, 'utf-8').catch(() => '');
-    // Scan both whole logs, not the tails. Node reports a lost bind as
-    // "listen EADDRINUSE: address already in use <host>:<port>".
-    const portConflict = new RegExp(`EADDRINUSE.*:(?:${apiPort}|${listenPort})\\b`).test(`${stdio}\n${daemonLog}`);
-    return new DaemonExitedEarly(
-      `Daemon exited early (code=${child.exitCode}, signal=${child.signalCode}).\n` +
-      `--- daemon stdio tail ---\n${await readDaemonStdioTail()}\n` +
-      `--- daemon.log tail ---\n${daemonLog.split('\n').slice(-40).join('\n').trim()}`,
-      portConflict,
-    );
-  };
-
-  const daemon: Daemon = {
-    home,
-    apiPort,
-    listenPort,
-    child,
-    token: '',
-  };
-  child.once('exit', (code, signal) => {
-    daemon.exitCode = code;
-    daemon.signal = signal;
-  });
-
-  // afterAll can't reach our resources until we return — clean up on throw so a flaky startup doesn't leak the daemon / port.
-  try {
-    for (let i = 0; i < 90; i++) {
-      // Cover signal-exit too: `exitCode === null` with `signalCode !== null` means the daemon was killed mid-startup.
-      if (exited()) throw await exitedEarly();
-      let ok = false;
-      try {
-        ok = (await fetch(`http://127.0.0.1:${apiPort}/api/status`)).ok;
-      } catch {
-        /* not ready yet */
-      }
-      // /api/status needs no token, so a daemon already on this port answers it
-      // too. auth.token appears before this daemon listens and api.port only
-      // after it has bound the port; with a live child they prove the 200 is ours.
-      if (ok) {
-        if (exited()) throw await exitedEarly();
-        if (existsSync(join(home, 'auth.token')) && existsSync(join(home, 'api.port'))) break;
-      }
-      await sleep(500);
-      if (i === 89) {
-        const tail = await readDaemonStdioTail();
-        throw new Error(
-          `Daemon did not become ready within 45s.\n--- daemon stdio tail ---\n${tail}`,
-        );
-      }
-    }
-    // Close the parent's handle; the child still owns its dup'd fd so the log keeps growing until daemon exit.
-    await logHandle.close();
-
-    const raw = await readFile(join(home, 'auth.token'), 'utf-8');
-    const token = raw
-      .split('\n')
-      .map((l) => l.trim())
-      .find((l) => l.length > 0 && !l.startsWith('#'));
-    if (!token) throw new Error('No auth token found in auth.token');
-    daemon.token = token;
-
-    if (publisherEnabled) {
-      for (let i = 0; i < 60; i += 1) {
-        const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
-        const body = await res.json().catch(() => ({})) as {
-          asyncPublisher?: { available?: boolean; reason?: string };
-        };
-        if (body.asyncPublisher?.available === true) break;
-        if (body.asyncPublisher?.reason !== 'publisher_starting') {
-          throw new Error(
-            `Async publisher failed readiness: ${body.asyncPublisher?.reason ?? res.status}`,
-          );
-        }
-        await sleep(100);
-        if (i === 59) throw new Error('Async publisher did not become ready in time');
-      }
-    }
-
-    return daemon;
-  } catch (err) {
-    // Both fields null = still alive; signal-exits leave exitCode null but set signalCode.
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
-      await Promise.race([
-        new Promise<void>((resolve) => child.once('exit', () => resolve())),
-        sleep(5_000),
-      ]);
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGKILL');
-      }
-    }
-    await logHandle.close().catch(() => {});
-    await rm(home, { recursive: true, force: true }).catch(() => {});
-    throw err;
-  }
-}
-
-async function stopDaemon(d: Daemon | null): Promise<void> {
-  if (!d) return;
-  if (d.child.exitCode === null) {
-    const exited = new Promise<void>((resolve) => {
-      d.child.once('exit', () => resolve());
-    });
-    d.child.kill('SIGTERM');
-    await Promise.race([exited, sleep(10_000)]);
-    if (d.child.exitCode === null) d.child.kill('SIGKILL');
-  }
-  await rm(d.home, { recursive: true, force: true }).catch(() => {});
-}
-
-let daemon: Daemon | null = null;
-let publisherDaemon: Daemon | null = null;
-
-beforeAll(async () => {
-  daemon = await startDaemon();
-  publisherDaemon = await startDaemon(true);
+  const extraConfig = { routePlugins: [ECHO_FIXTURE, THROW_FIXTURE] };
+  daemon = await startLiveDaemon({ extraConfig });
+  publisherDaemon = await startLiveDaemon({ publisherEnabled: true, extraConfig });
 }, 90_000);
 
 afterAll(async () => {
-  await stopDaemon(daemon);
-  await stopDaemon(publisherDaemon);
-  daemon = null;
-  publisherDaemon = null;
+  await stopLiveDaemon(daemon);
+  await stopLiveDaemon(publisherDaemon);
 }, 20_000);
 
 function urlFor(path: string, target = daemon): string {
-  return `http://127.0.0.1:${target!.apiPort}${path}`;
+  return `${target!.base}${path}`;
 }
 
 describe('Route plugins — live daemon E2E', () => {
