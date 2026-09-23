@@ -79,6 +79,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   or `DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT=1`) skips it. The kill switch
   is `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`,
   which wins over config.
+- **Warm-core pinning (`DKG_WARM_CORE_CONNECTIONS=1`) no longer pins a
+  core-role profile that has no operational wallet**: profiles are unsigned,
+  and such a profile cannot be checked against the ShardingTable, so it is
+  now denied, as a failed membership read already was. When the chain cannot
+  answer at all, the phonebook role still decides.
 
 ## [10.0.18] - 2026-09-22
 

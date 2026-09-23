@@ -5583,12 +5583,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const getIdentityIdForAddress = this.chain.getIdentityIdForAddress?.bind(this.chain);
     const isShardingTableMember = this.chain.isShardingTableMember?.bind(this.chain);
     if (!getIdentityIdForAddress || !isShardingTableMember) return true; // gate unavailable
-    // A legacy/mixed-version core profile may not carry an operational wallet.
-    // Discovery elsewhere supports profiles without `agentAddress`, so treat
-    // its absence as "gate unavailable" (fall back to phonebook nodeRole)
-    // rather than a hard denial — otherwise the warm set can collapse to zero
-    // in a network with healthy but pre-agentAddress cores.
-    if (!agentAddress) return true; // gate unavailable for this profile
+    // Profiles are unsigned: a `nodeRole='core'` profile without an
+    // operational wallet cannot be checked against the ShardingTable, so it is
+    // as unverifiable as a failed read and is not pinned. Every profile this
+    // codebase publishes carries `agentAddress`; on Base mainnet (2026-09-23)
+    // 62 of 63 core-role profiles did, and the one that did not was pinned and
+    // then failed its dial on every tick.
+    if (!agentAddress) return false;
     try {
       const identityId = await getIdentityIdForAddress(agentAddress);
       if (identityId === 0n) return false;
