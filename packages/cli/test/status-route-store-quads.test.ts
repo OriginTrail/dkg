@@ -896,6 +896,30 @@ describe('/api/status store reachability check', () => {
     }
   });
 
+  it('starts the count of a combined request even when the check finds the store unreachable', async () => {
+    // The two flags are independent: the count starts at once, without
+    // waiting for the check, and fails like any count against a store that
+    // is down, so the next poll reports that failure. `dkg status` checks
+    // first and asks for a count only when the store answered.
+    const reads: string[] = [];
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      reads.push(isAsk(sparql) ? 'ASK' : 'COUNT');
+      throw new Error('connect ECONNREFUSED 127.0.0.1:9');
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}/api/status?includeStoreQuads=true&probeStore=true`);
+      expect(await response.json()).toMatchObject({
+        storeQuadsStatus: 'pending',
+        storeReachability: 'unreachable',
+      });
+      expect(reads).toEqual(['COUNT', 'ASK']);
+      expect((await fetchStatus(baseUrl)).body).toMatchObject({ storeQuadsStatus: 'unreachable' });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it('runs one ASK for concurrent requests', async () => {
     const answer = deferred<unknown>();
     const bothArrived = deferred<void>();

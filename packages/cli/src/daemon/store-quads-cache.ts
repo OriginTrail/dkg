@@ -39,9 +39,9 @@ type StoreQuadsCacheEntry =
   | { status: Unreachable; fetchedAt: number };
 
 let storeQuadsCache: StoreQuadsCacheEntry | null = null;
-// The running count, if any. Only the count that still holds this marker may
-// publish its result: see requestExternalStoreQuads().
-let storeQuadsInflight: Promise<void> | null = null;
+// The running count's token, if any. Only the count whose token is still here
+// may publish its result: see requestExternalStoreQuads().
+let storeQuadsInflight: symbol | null = null;
 
 /**
  * Drop cached quad counts. The managed Oxigraph calls this when its child goes
@@ -115,18 +115,19 @@ export function requestExternalStoreQuads(
   now: number,
 ): StoreQuadsStatusFields {
   if (!isStoreQuadsCacheFresh(now) && !storeQuadsInflight) {
-    // A count that lost the marker to an invalidation (the managed Oxigraph
-    // went down or came back up), or to a newer count started after one,
-    // neither writes the cache nor clears the marker: typically a failure
-    // while the store was going down or recovering, its result would report
-    // the healthy store as unreachable. The callback runs asynchronously,
-    // after `refresh` holds the marker.
-    const refresh: Promise<void> = countStoreQuads(agent).then((result) => {
-      if (storeQuadsInflight !== refresh) return;
+    // Each count holds its own token in the marker from before it starts. A
+    // count whose token was replaced, by an invalidation (the managed
+    // Oxigraph went down or came back up) or by a newer count started after
+    // one, neither writes the cache nor clears the marker: typically a
+    // failure while the store was going down or recovering, its result would
+    // report the healthy store as unreachable.
+    const token = Symbol('store quad count');
+    storeQuadsInflight = token;
+    void countStoreQuads(agent).then((result) => {
+      if (storeQuadsInflight !== token) return;
       storeQuadsCache = result;
       storeQuadsInflight = null;
     });
-    storeQuadsInflight = refresh;
   }
   return peekCachedExternalStoreQuads(now);
 }

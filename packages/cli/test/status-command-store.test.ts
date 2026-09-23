@@ -156,6 +156,18 @@ const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]>
   ['a store that gave this run\'s check no answer as not responding, not unreachable', {
     storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 120_000, storeReachability: 'no-answer',
   }, 'NOT RESPONDING'],
+  ['a store that failed this run\'s check as unreachable while a count is running', {
+    storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null, storeReachability: 'unreachable',
+  }, 'UNREACHABLE'],
+  ['a store that failed this run\'s check as unreachable when no count was requested', {
+    storeQuads: null, storeQuadsStatus: 'not-requested', storeQuadsAgeMs: null, storeReachability: 'unreachable',
+  }, 'UNREACHABLE'],
+  ['a store that gave this run\'s check no answer as not responding while a count is running', {
+    storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null, storeReachability: 'no-answer',
+  }, 'NOT RESPONDING'],
+  ['a store that gave this run\'s check no answer as not responding when no count was requested', {
+    storeQuads: null, storeQuadsStatus: 'not-requested', storeQuadsAgeMs: null, storeReachability: 'no-answer',
+  }, 'NOT RESPONDING'],
   ['a failed count of a store that answers as a failed count, not an outage', {
     storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeReachability: 'reachable',
   }, 'reachable, count failed (checked 2m 5s ago)'],
@@ -201,17 +213,28 @@ describe('dkg status external-store count requests', () => {
     expect(storeLine).toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — 66 quads (checked 11m 40s ago)');
   });
 
-  it('keeps this run\'s reachability when it renders the refreshed count', async () => {
-    const { storeLine } = await renderStatus(
-      {
-        storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeReachability: 'reachable',
-      },
-      { storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeQuadsRefreshing: true },
-    );
+  // The count request makes no check, so its response cannot replace this
+  // run's, whatever it says about reachability.
+  it.each([undefined, 'unreachable', 'no-answer'] as const)(
+    'keeps this run\'s reachability when it renders the refreshed count (the refresh reports %s)',
+    async (refreshReachability) => {
+      const { storeLine } = await renderStatus(
+        {
+          storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeReachability: 'reachable',
+        },
+        {
+          storeQuads: null,
+          storeQuadsStatus: 'unreachable',
+          storeQuadsAgeMs: 125_000,
+          storeQuadsRefreshing: true,
+          storeReachability: refreshReachability,
+        },
+      );
 
-    expect(storeLine)
-      .toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — reachable, count failed (checked 2m 5s ago), refreshing');
-  });
+      expect(storeLine)
+        .toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — reachable, count failed (checked 2m 5s ago), refreshing');
+    },
+  );
 });
 
 describe('dkg status external-store rendering', () => {

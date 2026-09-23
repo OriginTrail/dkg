@@ -30,7 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
-import type { StoreQuadsStatusFields, StoreReachabilityFields } from '../status-store-quads-wire.js';
+import type { StoreQuadsStatusFields, StoreReachability } from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -161,6 +161,14 @@ function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
   return typeof s.storeQuadsAgeMs !== 'number' || s.storeQuadsAgeMs >= STORE_QUADS_REFRESH_AFTER_MS;
 }
 
+/** What `dkg status` prints from. */
+interface DkgStatusReading {
+  /** The daemon's status: the count request's response when one was answered. */
+  status: DaemonStatusResponse;
+  /** This run's reachability check, which only the first request makes. */
+  storeReachability: StoreReachability | undefined;
+}
+
 /**
  * The status `dkg status` prints. Every run checks, cheaply, that the store
  * answers at all; the costly full-store COUNT is asked for only when the
@@ -169,16 +177,15 @@ function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
  * so if the second fails (the daemon restarting between the two, say), the
  * first is printed.
  */
-async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DaemonStatusResponse> {
-  const plain = await client.status({ probeStore: true });
-  const storeAnswered = plain.storeReachability !== 'unreachable' && plain.storeReachability !== 'no-answer';
-  if (!plain.storeUrl || !storeAnswered || !shouldRefreshStoreQuads(plain)) return plain;
+async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DkgStatusReading> {
+  const probed = await client.status({ probeStore: true });
+  const reading: DkgStatusReading = { status: probed, storeReachability: probed.storeReachability };
+  const storeAnswered = reading.storeReachability !== 'unreachable' && reading.storeReachability !== 'no-answer';
+  if (!probed.storeUrl || !storeAnswered || !shouldRefreshStoreQuads(probed)) return reading;
   try {
-    const refreshed = await client.status({ includeStoreQuads: true });
-    // The count fields come from the refresh; reachability is this run's check.
-    return { ...refreshed, storeReachability: plain.storeReachability };
+    return { ...reading, status: await client.status({ includeStoreQuads: true }) };
   } catch {
-    return plain;
+    return reading;
   }
 }
 
@@ -188,9 +195,12 @@ async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DaemonS
  * reports `storeQuadsStatus` says what a missing count means; only an older
  * daemon that omits it keeps the legacy reading of `null` as unreachable.
  */
-function formatStoreState(s: StoreQuadsStatusFields & StoreReachabilityFields): string {
-  if (s.storeReachability === 'unreachable') return 'UNREACHABLE';
-  if (s.storeReachability === 'no-answer') return 'NOT RESPONDING';
+function formatStoreState(
+  s: StoreQuadsStatusFields,
+  storeReachability: StoreReachability | undefined,
+): string {
+  if (storeReachability === 'unreachable') return 'UNREACHABLE';
+  if (storeReachability === 'no-answer') return 'NOT RESPONDING';
   const status = s.storeQuadsStatus;
   if (status === 'pending') return 'CHECKING';
   if (status === 'not-requested') return 'NOT CHECKED';
@@ -207,7 +217,7 @@ function formatStoreState(s: StoreQuadsStatusFields & StoreReachabilityFields): 
   if (status === 'unreachable') {
     // A store that answered this run's check is up even if the last count
     // failed; a COUNT can time out on a large store that answers an ASK.
-    return s.storeReachability === 'reachable'
+    return storeReachability === 'reachable'
       ? `reachable, count failed${age}${refreshing}`
       : `UNREACHABLE${age}${refreshing}`;
   }
@@ -386,7 +396,7 @@ program
   .action(async () => {
     try {
       const client = await ApiClient.connect({ allowConfigFallback: true });
-      const s = await readDkgStatus(client);
+      const { status: s, storeReachability } = await readDkgStatus(client);
       const uptime = formatUptime(s.uptimeMs);
       console.log(`  Node:      ${s.name}`);
       console.log(`  Role:      ${s.nodeRole ?? 'edge'}`);
@@ -404,7 +414,7 @@ program
       // renders as CHECKING (see formatStoreState).
       const backend = s.storeBackend ?? 'oxigraph-worker';
       if (s.storeUrl) {
-        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${formatStoreState(s)}`);
+        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${formatStoreState(s, storeReachability)}`);
       } else {
         console.log(`  Store:     ${backend}`);
       }
