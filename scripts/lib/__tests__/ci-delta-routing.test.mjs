@@ -123,8 +123,10 @@ test('repository support paths route to the lanes that execute them', () => {
     ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent']],
     ['devnet/suites.json', ['tornado_agent']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
+    ['RELEASE_PROCESS.md', ['bura_cli']],
     ['devnet/v10-stress/automated.test.ts', ['tornado_agent']],
-    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent', 'bura_cli']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_agent', 'bura_cli']],
     ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
     ['.github/oxlint-baseline.json', []],
@@ -172,10 +174,11 @@ test('each changed path gets one routing decision with a fixed precedence', () =
 });
 
 test('support routes include every package lane that imports from them', () => {
-  // A package file importing something outside the workspaces (bench/,
+  // A package file referencing something outside the workspaces (bench/,
   // devnet/, test-systems/, tools/) makes that package's lane a CI consumer
   // of it, so a change there must select the lane; full CI covers the rest.
-  const importPattern = /(?:\bfrom\s*|\bimport\s*\(\s*)['"]((?:\.\.\/)+[^'"]+)['"]/g;
+  // References are static and dynamic imports and `new URL(...)` module paths.
+  const importPattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bnew\s+URL\(\s*)['"]((?:\.\.\/)+[^'"]+)['"]/g;
   const skipped = new Set(['node_modules', 'dist', 'dist-ui', 'coverage']);
   const sourceFiles = (directory) => fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true })
     .flatMap((entry) => {

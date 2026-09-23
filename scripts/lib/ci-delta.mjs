@@ -423,7 +423,12 @@ function hasDocumentationExtension(filePath) {
   return DOCUMENTATION_EXTENSIONS.has(extension);
 }
 
+// Documents that package tests read and assert on; they are test inputs, so
+// they route through SUPPORT_PATH_ROUTES instead of the docs-only profile.
+const DOCUMENTS_READ_BY_TESTS = new Set(['RELEASE_PROCESS.md']);
+
 function isDocumentationOnlyPath(filePath) {
+  if (DOCUMENTS_READ_BY_TESTS.has(filePath)) return false;
   if (
     filePath === 'LICENSE'
     || filePath === 'SECURITY.md'
@@ -478,6 +483,12 @@ function isGlobalFullPath(filePath) {
 // have their own workflow).
 const SUPPORT_PATH_ROUTES = Object.freeze([
   {
+    // packages/cli/test/markitdown-binaries.test.ts asserts its wording.
+    pattern: /^RELEASE_PROCESS\.md$/,
+    lanes: ['bura_cli'],
+    reason: 'the CLI release tests assert the release process document',
+  },
+  {
     pattern: /^devnet\/rfc64-gate1-public-open\//,
     lanes: ['tornado_agent', 'tornado_blazegraph'],
     reason: 'RFC-64 Gate 1 harness runs in the agent and Blazegraph lanes',
@@ -488,6 +499,13 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     pattern: /^devnet\/(?:rfc64-persistence-lifecycle|_bootstrap)\//,
     lanes: ['tornado_agent'],
     reason: 'RFC-64 persistence harness runs in the agent lifecycle jobs',
+  },
+  {
+    // The CLI's harness-only `rfc64-gate2-adapter` command loads
+    // adapter-process.ts from here, and agent fixtures import its runtime hooks.
+    pattern: /^devnet\/rfc64-gate2-multi-asset-completeness\//,
+    lanes: ['tornado_agent', 'bura_cli'],
+    reason: 'RFC-64 Gate 2 harness is loaded by the CLI and agent fixtures',
   },
   {
     // Devnet harnesses are built on the agent, and agent tests, fixtures and
