@@ -12,7 +12,7 @@
  *      was off (public only, idempotently, without starving on unresolvable
  *      graphs) and watches ledgered copies that do not reach VM.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter, activeRpcRequestContext } from '@origintrail-official/dkg-chain';
 import {
@@ -1126,6 +1126,14 @@ describe('core VM-promotion guarantees', () => {
       ?op <${LEDGER.operation}> "update" ; <${LEDGER.kaUal}> <${ual(n)}>
     } }`);
     expect(ledgered).toMatchObject({ type: 'boolean', value: true });
+
+    // Stopping waits (bounded) for promotion work still in flight.
+    let drained = false;
+    (internals as unknown as { vmPromotionUpdateInFlight: Promise<void> }).vmPromotionUpdateInFlight =
+      new Promise<void>((resolve) => setTimeout(() => { drained = true; resolve(); }, 20));
+    await agent!.stop();
+    agent = null;
+    expect(drained).toBe(true);
   });
 
   describe('sub-graph copies', () => {
@@ -1381,6 +1389,210 @@ describe('core VM-promotion guarantees', () => {
       expect(internals.subscribedContextGraphs.has(nameHash('public-cg'))).toBe(false);
       expect(internals.subscribedContextGraphs.get('public-cg')).toMatchObject({ coreHosted: true, onChainId: '42' });
     });
+  });
+
+  describe('gate, audit and lane edge paths', () => {
+    function ledgerRow(op: string, fields: Record<string, string>): Quad[] {
+      return Object.entries(fields).map(([predicate, object]) => ({
+        subject: op, predicate, object, graph: STORAGE_ACK_LEDGER_GRAPH,
+      }));
+    }
+
+    it('maps an invalid graph id and a failing core-hosted record to declines', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+
+      await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '0', operation: 'publish' }))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      internals.recordCoreHostedPublicCg = async () => { throw new Error('store down'); };
+      await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '42', swmGraphId: 'public-cg', operation: 'publish' }))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+    });
+
+    it('checks a name without a committed hash against local bindings, failing closed on a read error', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      internals.getContextGraphOnChainId = async (name: string) => (name === 'bound-elsewhere' ? '99' : null);
+
+      await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '63', swmGraphId: 'bound-elsewhere', operation: 'publish' }))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      internals.getContextGraphOnChainId = async () => { throw new Error('ontology unavailable'); };
+      await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '64', swmGraphId: 'unreadable', operation: 'publish' }))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+    });
+
+    it('arms the audit and the update lane on their timers, and clears them', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      const audits: number[] = [];
+      const updates: number[] = [];
+      internals.runVmPromotionAudit = async () => { audits.push(Date.now()); return {}; };
+      internals.runPendingStorageAckUpdates = async () => { updates.push(Date.now()); };
+      vi.useFakeTimers();
+      try {
+        internals.armVmPromotionAudit();
+        vi.advanceTimersByTime(7 * 60_000);
+        expect(audits.length).toBeGreaterThanOrEqual(1);
+        vi.advanceTimersByTime(DKGAgentBase.VM_PROMOTION_AUDIT_INTERVAL_MS);
+        expect(audits.length).toBeGreaterThanOrEqual(2);
+        expect(updates.length).toBeGreaterThanOrEqual(1);
+        internals.clearVmPromotionAuditTimers();
+        const settled = audits.length;
+        vi.advanceTimersByTime(2 * DKGAgentBase.VM_PROMOTION_AUDIT_INTERVAL_MS);
+        expect(audits.length).toBe(settled);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('works on a store without SPARQL updates: keeps young copies, prunes and marks row by row', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: 60_000 }) as Internals & Record<string, any>;
+      const copy = await seedCopy(internals.store, { namespace: 'no-update-cg', n: 120, ageMs: HOUR });
+      const orphanOp = 'urn:dkg:share:no-update-cg:storage-ack-gone';
+      await internals.store.insert(ledgerRow(orphanOp, {
+        [LEDGER.signedAt]: xsdDateTimeLiteral(new Date()),
+        [LEDGER.metaGraph]: copy.metaGraph,
+      }));
+      const update = internals.store.update;
+      (internals.store as any).update = undefined;
+      try {
+        await expect(internals.ensureStorageAckLedgerReady()).resolves.toBe(false);
+        // Not ready: every young `storage-ack-` copy is kept.
+        await internals.cleanupExpiredSharedMemory();
+        expect(await count(internals.store, copy.metaGraph, copy.op)).toBeGreaterThan(0);
+        await expect(internals.pruneStorageAckLedgerOrphans()).resolves.toBe(1);
+        await internals.markStorageAckLedger(copy.op, LEDGER.registeredAt, Date.now());
+        expect(await ledgerHas(internals.store, copy.op, LEDGER.registeredAt)).toBe(true);
+      } finally {
+        (internals.store as any).update = update;
+      }
+    });
+
+    it('records an audit failure without throwing', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      internals.pruneStorageAckLedgerOrphans = async () => { throw new Error('store down'); };
+
+      const status = await internals.runVmPromotionAudit();
+
+      expect(status.lastError).toBe('store down');
+    });
+
+    it('backfills a numeric namespace by its own id and backs off one it cannot resolve', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      internals.chain.getKAContextGraphId = async () => 0n;
+      await seedCopy(internals.store, { namespace: '77', n: 121, ageMs: 60_000, ledger: 'none' });
+      await seedCopy(internals.store, { namespace: 'unresolvable-name', n: 122, ageMs: 60_000, ledger: 'none' });
+      await internals.ensureStorageAckLedgerReady();
+
+      const status = await internals.runVmPromotionAudit();
+
+      expect(internals.subscribedContextGraphs.get('77')).toMatchObject({ coreHosted: true, onChainId: '77' });
+      expect(status).toMatchObject({ unresolvedGraphs: 1 });
+    });
+
+    it('lists the sub-graphs a namespace holds ledgered copies in', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      await internals.store.insert(ledgerRow('urn:dkg:share:sub-list-cg:op-1', {
+        [LEDGER.namespace]: '"sub-list-cg"',
+        [LEDGER.subGraphName]: '"research"',
+      }));
+
+      await expect(internals.storageAckLedgerNamespaceSubGraphs('sub-list-cg')).resolves.toEqual(['research']);
+      internals.store.query = async () => { throw new Error('store down'); };
+      await expect(internals.storageAckLedgerNamespaceSubGraphs('sub-list-cg')).resolves.toEqual([]);
+      await expect(internals.storageAckLedgerSubGraphName('sub-list-cg', ual(1))).resolves.toBeUndefined();
+    });
+
+    it('passes over malformed, promoted, backed-off and targetless rows in both lanes', async () => {
+      setStatic('VM_PROMOTION_UPDATE_MAX_CHECKS', 1);
+      const internals = await boot({ sharedMemoryTtlMs: DAY }) as Internals & Record<string, any>;
+      await internals.ensureStorageAckLedgerReady();
+      const old = new Date(Date.now() - 2 * HOUR);
+      // A row with a version the lanes cannot read.
+      await internals.store.insert(ledgerRow('urn:dkg:share:edge-cg:storage-ack-bad', {
+        [LEDGER.signedAt]: xsdDateTimeLiteral(old),
+        [LEDGER.namespace]: '"edge-cg"',
+        [LEDGER.kaUal]: ual(130),
+        [LEDGER.assertionVersion]: '"zero"',
+        [LEDGER.operation]: '"update"',
+      }));
+      // Promoted already; not a graph-scoped UAL; and one with no target at all.
+      await seedCopy(internals.store, { namespace: 'edge-cg', n: 131, ageMs: 2 * HOUR, version: 2, confirmedVersion: 2 });
+      await internals.store.insert(ledgerRow('urn:dkg:share:edge-cg:storage-ack-notaual', {
+        [LEDGER.signedAt]: xsdDateTimeLiteral(old),
+        [LEDGER.namespace]: '"edge-cg"',
+        [LEDGER.kaUal]: 'urn:not-a-ual:1',
+        [LEDGER.assertionVersion]: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        [LEDGER.operation]: '"update"',
+        [LEDGER.contextGraphId]: '"55"',
+      }));
+      await internals.store.insert(ledgerRow('urn:dkg:share:targetless-cg:storage-ack-x', {
+        [LEDGER.signedAt]: xsdDateTimeLiteral(old),
+        [LEDGER.namespace]: '"targetless-cg"',
+        [LEDGER.kaUal]: ual(132),
+        [LEDGER.assertionVersion]: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        [LEDGER.operation]: '"update"',
+      }));
+      await seedCopy(internals.store, { namespace: 'edge-cg', n: 133, ageMs: 2 * HOUR, version: 2 });
+      internals.chain.getMerkleRootCount = async () => 1n;
+
+      const first = await internals.promotePendingStorageAckUpdates();
+      const second = await internals.promotePendingStorageAckUpdates();
+      const audit = await internals.runVmPromotionAudit();
+
+      // Only chain-checkable rows spend the one-check budget; nothing promotes.
+      expect(first.checked + second.checked).toBeGreaterThan(0);
+      expect(first.promoted + second.promoted).toBe(0);
+      expect(audit.auditedCopies).toBeGreaterThan(0);
+      await internals.runPendingStorageAckUpdates();
+    });
+
+    it('resolves a copy target from the namespace row when the ledger has none', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      internals.subscribedContextGraphs.set('hosted-name', { subscribed: false, coreHosted: true, onChainId: '70' });
+      const candidate = {
+        operationSubject: 'op', namespace: 'hosted-name', kaUal: ual(140), assertionVersion: 1n,
+        signedAtMs: 0, registered: false,
+      };
+
+      expect(internals.storageAckCopyTarget(candidate)).toBe('70');
+      expect(internals.storageAckCopyTarget({ ...candidate, namespace: '71' })).toBe('71');
+      expect(internals.storageAckCopyTarget({ ...candidate, namespace: 'unknown' })).toBeUndefined();
+      await expect(internals.classifyStorageAckCopy({ ...candidate, kaUal: 'urn:not-a-ual:1' }, '70'))
+        .resolves.toBe('unknown');
+    });
+
+    it('handles prior-version requests it cannot run, a failing reconcile, and shutdown', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      internals.promoteStorageAckPriorVersion({
+        contextGraphId: '55', swmGraphId: 'update-e2e-cg', kaUal: ual(150), assertionVersion: 'not-a-version',
+      });
+      expect(internals.storageAckPriorVersionQueue.size + internals.storageAckPriorVersionFlights.size).toBe(0);
+      internals.chain.getLatestMerkleRoot = async () => { throw new Error('rpc down'); };
+      internals.promoteStorageAckPriorVersion({
+        contextGraphId: '55', swmGraphId: 'update-e2e-cg', kaUal: ual(151), assertionVersion: '1',
+      });
+      await Promise.all(internals.storageAckPriorVersionFlights.values());
+      expect(internals.storageAckPriorVersionFlights.size).toBe(0);
+      internals.storageAckPriorVersionQueue.set('queued', { candidate: {}, onChainId: '55' });
+      internals.coreHostRecordingsClosed = true;
+      internals.drainStorageAckPriorVersionQueue();
+      expect(internals.storageAckPriorVersionQueue.size).toBe(0);
+    });
+
+    it('refuses a chain-version read it cannot make', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      await expect(internals.readStorageAckKnowledgeAssetRootCount('urn:not-a-ual:1')).rejects.toThrow();
+      internals.chain.getKAContextGraphId = undefined;
+      await expect(internals.readStorageAckKnowledgeAssetRootCount(ual(160))).rejects.toThrow(/cannot read/);
+    });
+
+    it('treats an unreadable liveness as live and an unrecorded row as not persisted', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      await expect(internals.isCoreHostedGraphStillLive('not-a-number')).resolves.toBe(false);
+      internals.chain.isContextGraphActiveOnChain = async () => { throw new Error('rpc down'); };
+      await expect(internals.isCoreHostedGraphStillLive('5')).resolves.toBe(true);
+      await expect(internals.persistCoreHostedPublicCgStrict('never-recorded', '5', internals.coreHostRecordingGeneration))
+        .resolves.toBe('persist-failed');
+    });
+
   });
 
   describe('dormant subscription rows', () => {
