@@ -252,6 +252,8 @@ export interface ResolveKnowledgeAssetWorkspaceHeadParams {
   readonly contextGraphId: string;
   readonly kaUal: string;
   readonly subGraphName?: string;
+  /** Store lane, source label and cancellation for the head read. */
+  readonly queryOptions?: Parameters<TripleStore['query']>[1];
 }
 
 /**
@@ -613,6 +615,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     `{ <${assertSafeIri(subject)}> ?p ?o . BIND(<${assertSafeIri(subject)}> AS ?s) } UNION ` +
     `{ <${assertSafeIri(subject)}> <${DKG}shareOperationId> ?id . ` +
     `?op <${DKG}shareOperationId> ?id ; ?p ?o . BIND(?op AS ?s) } } }`,
+    ...(params.queryOptions === undefined ? [] : [params.queryOptions]),
   );
   if (acquisition.type !== 'bindings') {
     throw new Error(

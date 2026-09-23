@@ -74,7 +74,11 @@ interface Harness {
 
 function harness(
   gate: StorageACKHandlerConfig['ensureVmPromotion'],
-  options: { curated?: boolean; store?: OxigraphStore } = {},
+  options: {
+    curated?: boolean;
+    store?: OxigraphStore;
+    rootCount?: (kaUal: string) => Promise<bigint>;
+  } = {},
 ): Harness {
   const store = options.store ?? new OxigraphStore();
   const wallet = ethers.Wallet.createRandom();
@@ -92,6 +96,7 @@ function harness(
     ensureVmPromotion: gate,
     onDecline: (details) => { declines.push(details); },
     onPriorVersionAwaitingPromotion: (request) => { priorVersions.push({ ...request }); },
+    ...(options.rootCount ? { readKnowledgeAssetRootCount: options.rootCount } : {}),
   }, new TypedEventBus());
   return { wallet, store, handler, signMessage, declines, priorVersions };
 }
@@ -194,6 +199,20 @@ async function ledgerRows(store: OxigraphStore): Promise<Array<Record<string, st
     }
   } ORDER BY ?version`);
   return result.type === 'bindings' ? result.bindings as Array<Record<string, string>> : [];
+}
+
+async function supersededRows(store: OxigraphStore): Promise<string[]> {
+  const result = await store.query(`SELECT ?op WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+    ?op <${LEDGER.supersededAt}> ?at
+  } }`);
+  return result.type === 'bindings' ? result.bindings.map((row) => row['op']!) : [];
+}
+
+async function swmValues(store: OxigraphStore): Promise<string[]> {
+  const result = await store.query(
+    `SELECT ?o WHERE { GRAPH <${layerGraph(MemoryLayer.SharedWorkingMemory, 1)}> { ?s ?p ?o } }`,
+  );
+  return result.type === 'bindings' ? result.bindings.map((row) => row['o']!) : [];
 }
 
 async function markPromoted(store: OxigraphStore, version: number): Promise<void> {
@@ -363,6 +382,139 @@ describe('StorageACK VM-promotion finality gate', () => {
       expect(stale.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION);
       expect(await head(h.store)).toMatchObject({ assertionVersion: '2' });
     });
+  });
+
+  describe('held copies the core no longer owes', () => {
+    it('replaces a same-version copy it signed that never landed, and releases the old ledger row', async () => {
+      const h = harness(async () => OK, { rootCount: async () => 0n });
+      await signedPublish(h, 'first-attempt');
+      const [firstRow] = await ledgerRows(h.store);
+
+      const retry = decodeStorageACK(await h.handler.handler(publishIntent('edited-retry').bytes, PEER));
+
+      expect(isStorageACKDecline(retry)).toBe(false);
+      expect(await swmValues(h.store)).toEqual(['"edited-retry"']);
+      expect(await supersededRows(h.store)).toEqual([firstRow!['op']]);
+      expect(await ledgerRows(h.store)).toHaveLength(2);
+    });
+
+    it('still refuses different content once that version landed on chain', async () => {
+      const h = harness(async () => OK, { rootCount: async () => 1n });
+      await signedPublish(h, 'landed');
+
+      const other = decodeStorageACK(await h.handler.handler(publishIntent('too-late').bytes, PEER));
+
+      expect(other.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION);
+      expect(await swmValues(h.store)).toEqual(['"landed"']);
+    });
+
+    it('declines transiently when it cannot read the chain version', async () => {
+      const h = harness(async () => OK, {
+        rootCount: async () => { throw new Error('rpc down'); },
+      });
+      await signedPublish(h, 'first-attempt');
+
+      const retry = decodeStorageACK(await h.handler.handler(publishIntent('edited-retry').bytes, PEER));
+
+      expect(retry.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(await swmValues(h.store)).toEqual(['"first-attempt"']);
+    });
+
+    it('always replaces a head it never signed', async () => {
+      // A copy written without a signature here (an ungated write, standing
+      // in for a synced or gossiped copy) has no ledger row.
+      const unsigned = harness(undefined);
+      const first = decodeStorageACK(await unsigned.handler.handler(publishIntent('not-signed-here').bytes, PEER));
+      expect(isStorageACKDecline(first)).toBe(false);
+      expect(await ledgerRows(unsigned.store)).toHaveLength(0);
+      const h = harness(async () => OK, { store: unsigned.store });
+
+      const ack = decodeStorageACK(await h.handler.handler(publishIntent('acked').bytes, PEER));
+
+      expect(isStorageACKDecline(ack)).toBe(false);
+      expect(await swmValues(h.store)).toEqual(['"acked"']);
+    });
+
+    it('replaces a held version the chain has already moved past, without waiting for it', async () => {
+      const h = harness(async () => OK, { rootCount: async () => 2n });
+      await signedPublish(h, 'v1');
+
+      // v2 landed through other cores; this core is asked for v3.
+      const ack = decodeStorageACK(await h.handler.updateHandler(updateIntent('v3', { version: 3 }).bytes, PEER));
+
+      expect(isStorageACKDecline(ack)).toBe(false);
+      expect(h.priorVersions).toEqual([]);
+      expect(await head(h.store)).toMatchObject({ assertionVersion: '3' });
+      expect(await supersededRows(h.store)).toHaveLength(1);
+    });
+
+    it('still waits for a held version that is the chain\'s latest', async () => {
+      const h = harness(async () => OK, { rootCount: async () => 1n });
+      await signedPublish(h, 'v1');
+
+      const ack = decodeStorageACK(await h.handler.updateHandler(updateIntent('v3', { version: 3 }).bytes, PEER));
+
+      expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(h.priorVersions).toHaveLength(1);
+      expect(await supersededRows(h.store)).toEqual([]);
+    });
+  });
+
+  it('reads the head in the reserved ACK lane under the ACK deadline', async () => {
+    const h = harness(async () => OK);
+    const seen: Array<{ priority?: string; signal?: AbortSignal }> = [];
+    const query = h.store.query.bind(h.store);
+    h.store.query = (async (sparql: string, options?: { source?: string; priority?: string; signal?: AbortSignal }) => {
+      if (options?.source === 'storage-ack.persistGraphScoped.headCheck') seen.push(options);
+      return query(sparql, options as never);
+    }) as typeof h.store.query;
+
+    await signedPublish(h, 'v1');
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ priority: 'ack' });
+    expect(seen[0]!.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('records the sub-graph of a sub-graph copy in its ledger row', async () => {
+    const h = harness(async () => OK);
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const quads = [{
+      subject: 'urn:asset:gated',
+      predicate: 'urn:p:value',
+      object: '"in-sub-graph"',
+      graph: knowledgeAssetLayerGraphUri(SWM_GRAPH_ID, MemoryLayer.SharedWorkingMemory, scope, 'research'),
+    }];
+    const bytes = new TextEncoder().encode(
+      quads.map((q) => `<${q.subject}> <${q.predicate}> ${q.object} <${q.graph}> .`).join('\n'),
+    );
+
+    const ack = decodeStorageACK(await h.handler.handler(encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(quads, []),
+      contextGraphId: CG_ID,
+      swmGraphId: SWM_GRAPH_ID,
+      subGraphName: 'research',
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: bytes.length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      stagingQuads: bytes,
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    }), PEER));
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+    const row = await h.store.query(`ASK { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+      ?op <${LEDGER.subGraphName}> "research"
+    } }`);
+    expect(row).toMatchObject({ type: 'boolean', value: true });
   });
 
   describe('public updates', () => {

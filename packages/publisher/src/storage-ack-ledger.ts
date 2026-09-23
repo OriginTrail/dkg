@@ -42,8 +42,20 @@ export const STORAGE_ACK_LEDGER_PREDICATES = Object.freeze({
   absentSeenAt: `${DKG}storageAckAbsentSeenAt`,
   /** Second, later absence observation past the SWM TTL: the copy may expire. */
   unregisteredAt: `${DKG}storageAckUnregisteredAt`,
+  /**
+   * The chain moved past this copy (a later version landed, or this copy was
+   * replaced before it landed): it can no longer be promoted as-is, so the
+   * core no longer owes it and it may expire.
+   */
+  supersededAt: `${DKG}storageAckSupersededAt`,
+  /** Sub-graph of the copy, when it is not in the namespace's root graph. */
+  subGraphName: `${DKG}storageAckSubGraphName`,
   /** Node-local: when this node started keeping the ledger. */
   epoch: `${DKG}storageAckLedgerEpoch`,
+  /** Node-local: copies stored before this instant are grandfathered. */
+  grandfatheredThrough: `${DKG}storageAckGrandfatheredThrough`,
+  /** Node-local: last time a ledger-keeping version of the node was running. */
+  seenAt: `${DKG}storageAckLedgerSeenAt`,
 });
 
 export interface StorageAckLedgerEntry {
@@ -55,6 +67,7 @@ export interface StorageAckLedgerEntry {
   readonly assertionVersion: string | number | bigint;
   readonly operation: 'publish' | 'update';
   readonly signedAt: Date;
+  readonly subGraphName?: string;
 }
 
 export function xsdDateTimeLiteral(date: Date): string {
@@ -88,5 +101,54 @@ export function storageAckLedgerEntryQuads(entry: StorageAckLedgerEntry): Quad[]
       graph,
     },
     { subject, predicate: p.operation, object: lit(entry.operation), graph },
+    ...(entry.subGraphName
+      ? [{ subject, predicate: p.subGraphName, object: lit(entry.subGraphName), graph }]
+      : []),
   ];
+}
+
+function ntriple(quad: Quad): string {
+  const object = quad.object.startsWith('"') ? quad.object : `<${quad.object}>`;
+  return `<${quad.subject}> <${quad.predicate}> ${object} .`;
+}
+
+/**
+ * One atomic SPARQL update that (re)records a signed ACK: it replaces every
+ * row of the operation except `registeredAt`, so a re-signed copy keeps what
+ * the audit already proved and there is no window without a ledger row.
+ */
+export function storageAckLedgerRecordUpdate(entry: StorageAckLedgerEntry): string {
+  const graph = STORAGE_ACK_LEDGER_GRAPH;
+  const inserts = storageAckLedgerEntryQuads(entry).map(ntriple).join('\n      ');
+  return `DELETE { GRAPH <${graph}> { <${entry.operationSubject}> ?p ?o } }
+  INSERT { GRAPH <${graph}> {
+      ${inserts}
+  } }
+  WHERE { OPTIONAL { GRAPH <${graph}> {
+    <${entry.operationSubject}> ?p ?o .
+    FILTER(?p != <${STORAGE_ACK_LEDGER_PREDICATES.registeredAt}>)
+  } } }`;
+}
+
+/** One atomic update that sets a single timestamp predicate of a ledger row. */
+export function storageAckLedgerMarkUpdate(operationSubject: string, predicate: string, at: Date): string {
+  const graph = STORAGE_ACK_LEDGER_GRAPH;
+  return `DELETE { GRAPH <${graph}> { <${operationSubject}> <${predicate}> ?old } }
+  INSERT { GRAPH <${graph}> { <${operationSubject}> <${predicate}> ${xsdDateTimeLiteral(at)} } }
+  WHERE { OPTIONAL { GRAPH <${graph}> { <${operationSubject}> <${predicate}> ?old } } }`;
+}
+
+/**
+ * Of these share operations, the ones this core signed and still owes: in
+ * the ledger and neither released as chain-absent nor superseded.
+ */
+export function storageAckOwedOperationsQuery(operationSubjects: readonly string[]): string {
+  const values = operationSubjects.map((op) => `<${op}>`).join(' ');
+  const p = STORAGE_ACK_LEDGER_PREDICATES;
+  return `SELECT DISTINCT ?op WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+    VALUES ?op { ${values} }
+    ?op <${p.signedAt}> ?signedAt .
+    FILTER NOT EXISTS { ?op <${p.unregisteredAt}> ?unregistered }
+    FILTER NOT EXISTS { ?op <${p.supersededAt}> ?superseded }
+  } }`;
 }

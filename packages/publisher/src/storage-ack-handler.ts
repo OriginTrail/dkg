@@ -62,12 +62,18 @@ import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import {
   storeKnowledgeAssetWorkspaceHead,
   tryResolveKnowledgeAssetWorkspaceHead,
+  type KnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import {
   STORAGE_ACK_LEDGER_GRAPH,
+  STORAGE_ACK_LEDGER_PREDICATES,
   storageAckLedgerEntryQuads,
+  storageAckLedgerRecordUpdate,
+  storageAckOwedOperationsQuery,
+  xsdDateTimeLiteral,
   type StorageAckLedgerEntry,
 } from './storage-ack-ledger.js';
+import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
@@ -526,6 +532,13 @@ export interface StorageACKHandlerConfig {
    * promote it right away and the publisher's transient retry then succeeds.
    */
   onPriorVersionAwaitingPromotion?: (request: StorageAckPriorVersionRequest) => void;
+  /**
+   * The Knowledge Asset's on-chain Merkle-root count (its latest landed
+   * version). Lets a gated core release a held ACK copy the chain has moved
+   * past, or that never landed, instead of refusing every later request.
+   * Without it such copies hold the head (the pre-hook behaviour).
+   */
+  readKnowledgeAssetRootCount?: (kaUal: string, signal?: AbortSignal) => Promise<bigint>;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -1041,7 +1054,7 @@ export class StorageACKHandler {
       : undefined;
 
     const persist = async () => this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
-      const conflict = await this.checkAckCopyAgainstHead({
+      const verdict = await this.checkAckCopyAgainstHead({
         cgId,
         swmGraphId,
         scope: graphPublish.scope,
@@ -1052,7 +1065,7 @@ export class StorageACKHandler {
         privateMerkleRoot: incomingPrivateRoot,
         signal,
       });
-      if (conflict !== undefined) return conflict;
+      if ('decline' in verdict) return verdict.decline;
       const companion = graphPublish.subGraphName === undefined
         ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
             contextGraphId: swmGraphId,
@@ -1090,9 +1103,11 @@ export class StorageACKHandler {
         { graph: metaGraph, subject: operationSubject },
         ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', signal),
       );
+      // Once the operation rows are deleted the re-insert must finish, or a
+      // re-ACK would leave the head pointing at missing rows: no deadline here.
       await this.store.insert(
         metadata,
-        ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta', signal),
+        ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta'),
       );
       // The current-head pointer is a delete/insert pair. Once that commit tail
       // starts it must finish (including flush), even if the ACK deadline has
@@ -1108,6 +1123,7 @@ export class StorageACKHandler {
         subGraphName: graphPublish.subGraphName,
         queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
       });
+      await this.supersedeLedgerOperations(verdict.supersede);
       await this.store.flush?.(
         ackStoreOptions('storage-ack.persistGraphScoped.flush'),
       );
@@ -1137,14 +1153,11 @@ export class StorageACKHandler {
         assertionVersion: graphPublish.scope.assertionVersion,
         operation: BigInt(graphPublish.scope.assertionVersion) > 1n ? 'update' : 'publish',
         signedAt: new Date(),
+        ...(graphPublish.subGraphName ? { subGraphName: graphPublish.subGraphName } : {}),
       },
     };
   }
 
-  /**
-   * The ACK-copy counterpart of the SWM gossip monotonicity gate. Returns a
-   * decline when the copy must not replace the current head, or undefined.
-   */
   private notifyPriorVersionAwaitingPromotion(request: StorageAckPriorVersionRequest): void {
     const hook = this.config.onPriorVersionAwaitingPromotion;
     if (!hook) return;
@@ -1155,6 +1168,72 @@ export class StorageACKHandler {
     }
   }
 
+  /**
+   * The share operations behind a head that this core signed and still owes
+   * (ledgered, neither chain-absent nor superseded). Only such a copy can hold
+   * the head against another request; any other head is replaceable.
+   */
+  private async owedHeadOperations(
+    swmGraphId: string,
+    head: KnowledgeAssetWorkspaceHead,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const operations = [...new Set(head.operationAliases.map(
+      (alias) => workspaceOperationSubject(swmGraphId, alias.shareOperationId),
+    ))];
+    if (operations.length === 0) return [];
+    const result = await this.store.query(
+      storageAckOwedOperationsQuery(operations),
+      ackStoreOptions('storage-ack.persistGraphScoped.owedHead', signal),
+    );
+    if (result.type !== 'bindings') return [];
+    return result.bindings
+      .map((row) => row['op'])
+      .filter((op): op is string => typeof op === 'string' && op.length > 0);
+  }
+
+  /**
+   * The asset's on-chain Merkle-root count (its latest landed version), or
+   * `count: undefined` when no chain view is wired. A failed read is a
+   * transient decline: the ACK must not be decided on a guess.
+   */
+  private async readRootCountOrDecline(
+    cgId: string,
+    kaUal: string,
+    signal?: AbortSignal,
+  ): Promise<{ count: bigint | undefined } | { decline: Uint8Array }> {
+    const read = this.config.readKnowledgeAssetRootCount;
+    if (!read) return { count: undefined };
+    try {
+      return { count: await read(kaUal, signal) };
+    } catch (err) {
+      if (isACKHandlerDeadlineAbort(err)) throw err;
+      if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+      return {
+        decline: this.declineTemporarilyUnavailable(cgId, 'chain version lookup unavailable', err),
+      };
+    }
+  }
+
+  /**
+   * The ACK-copy counterpart of the SWM gossip monotonicity gate, run under
+   * the per-KA write lock before the copy is written. Returns a decline when
+   * the copy must not replace the current head, and otherwise the owed ledger
+   * rows the replacement supersedes.
+   *
+   * Only a copy this core signed and still owes can hold the head: any other
+   * head (a gossip draft, a synced copy, a copy already released) is replaced.
+   * Against an owed copy:
+   *   - an older version is refused (CONFLICTING_KA_ASSERTION, as gossip does);
+   *   - the same version with different content is refused only once that
+   *     version has landed on chain, when the request cannot land either.
+   *     Before that the held copy is replaced: a retry after a failed round
+   *     reuses the version, and holding it would lock the asset for a TTL;
+   *   - a newer version replaces it once the held version is in this
+   *     namespace's VM, or at once when the chain has already moved past the
+   *     held version (it can no longer be promoted as-is). Otherwise the core
+   *     declines transiently and asks for the held version to be promoted.
+   */
   private async checkAckCopyAgainstHead(input: {
     cgId: string;
     swmGraphId: string;
@@ -1165,46 +1244,64 @@ export class StorageACKHandler {
     privateTripleCount: number;
     privateMerkleRoot?: string;
     signal?: AbortSignal;
-  }): Promise<Uint8Array | undefined> {
+  }): Promise<{ decline: Uint8Array } | { supersede: readonly string[] }> {
+    const replace = { supersede: [] as readonly string[] };
     const resolution = await tryResolveKnowledgeAssetWorkspaceHead({
       store: this.store,
       graphManager: this.graphManager,
       contextGraphId: input.swmGraphId,
       kaUal: input.scope.ual,
       subGraphName: input.subGraphName,
+      queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.headCheck', input.signal),
     });
-    if (resolution.status === 'missing') return undefined;
+    if (resolution.status === 'missing') return replace;
     if (resolution.status === 'corrupt') {
       // The gossip path defers the same way: the sync lane repairs the head.
-      return this.encodeDecline(
-        input.cgId,
-        STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
-        'SWM head for this Knowledge Asset is being repaired',
-        { hookMessage: `corrupt SWM head for ${input.scope.ual}: ${resolution.error.message}` },
-      );
+      return {
+        decline: this.encodeDecline(
+          input.cgId,
+          STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+          'SWM head for this Knowledge Asset is being repaired',
+          { hookMessage: `corrupt SWM head for ${input.scope.ual}: ${resolution.error.message}` },
+        ),
+      };
     }
     const head = resolution.head;
     const incomingVersion = BigInt(input.scope.assertionVersion);
     const currentVersion = BigInt(head.assertionVersion);
-    if (incomingVersion < currentVersion) {
-      return this.encodeDecline(
-        input.cgId,
-        STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION,
-        `stale assertion version ${incomingVersion}: this core holds version ${currentVersion}`,
-      );
+    if (
+      incomingVersion === currentVersion
+      && head.publicQuadsDigest === input.publicDigest
+      && head.publicTripleCount === input.publicTripleCount
+      && head.privateTripleCount === input.privateTripleCount
+      && head.privateMerkleRoot?.toLowerCase() === input.privateMerkleRoot
+    ) {
+      return replace;
     }
-    if (incomingVersion === currentVersion) {
-      const sameContent = head.publicQuadsDigest === input.publicDigest
-        && head.publicTripleCount === input.publicTripleCount
-        && head.privateTripleCount === input.privateTripleCount
-        && head.privateMerkleRoot?.toLowerCase() === input.privateMerkleRoot;
-      return sameContent
-        ? undefined
-        : this.encodeDecline(
+    const owed = await this.owedHeadOperations(input.swmGraphId, head, input.signal);
+    if (owed.length === 0) return replace;
+    if (incomingVersion < currentVersion) {
+      return {
+        decline: this.encodeDecline(
           input.cgId,
           STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION,
-          `assertion version ${incomingVersion} is already bound to different content on this core`,
-        );
+          `stale assertion version ${incomingVersion}: this core holds version ${currentVersion}`,
+        ),
+      };
+    }
+    if (incomingVersion === currentVersion) {
+      const landed = await this.readRootCountOrDecline(input.cgId, input.scope.ual, input.signal);
+      if ('decline' in landed) return landed;
+      if (landed.count === undefined || landed.count >= currentVersion) {
+        return {
+          decline: this.encodeDecline(
+            input.cgId,
+            STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION,
+            `assertion version ${incomingVersion} is already bound to different content on this core`,
+          ),
+        };
+      }
+      return { supersede: owed };
     }
     // An update replaces the per-KA SWM graph, which is not versioned. Only do
     // that once the older version is in this namespace's VM, so an update
@@ -1217,7 +1314,14 @@ export class StorageACKHandler {
       } }`,
       ackStoreOptions('storage-ack.persistGraphScoped.priorVersionPromoted', input.signal),
     );
-    if (promoted.type === 'boolean' && promoted.value) return undefined;
+    if (promoted.type === 'boolean' && promoted.value) return replace;
+    if (incomingVersion > currentVersion + 1n) {
+      // The request skips a version, so a later version may have landed
+      // without this core. Its held copy can then never be promoted as-is.
+      const chain = await this.readRootCountOrDecline(input.cgId, input.scope.ual, input.signal);
+      if ('decline' in chain) return chain;
+      if (chain.count !== undefined && chain.count > currentVersion) return { supersede: owed };
+    }
     this.notifyPriorVersionAwaitingPromotion({
       contextGraphId: input.cgId,
       swmGraphId: input.swmGraphId,
@@ -1225,28 +1329,53 @@ export class StorageACKHandler {
       assertionVersion: currentVersion.toString(),
       ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
     });
-    return this.declineVmPromotionUnavailable(
-      input.cgId,
-      `version ${currentVersion} of this Knowledge Asset is still awaiting promotion on this core`,
+    return {
+      decline: this.declineVmPromotionUnavailable(
+        input.cgId,
+        `version ${currentVersion} of this Knowledge Asset is still awaiting promotion on this core`,
+      ),
+    };
+  }
+
+  /** Release ledger rows whose copy a newer write replaced (see {@link checkAckCopyAgainstHead}). */
+  private async supersedeLedgerOperations(operations: readonly string[]): Promise<void> {
+    if (operations.length === 0) return;
+    const at = xsdDateTimeLiteral(new Date());
+    await this.store.insert(
+      operations.map((operation) => ({
+        subject: operation,
+        predicate: STORAGE_ACK_LEDGER_PREDICATES.supersededAt,
+        object: at,
+        graph: STORAGE_ACK_LEDGER_GRAPH,
+      })),
+      ackStoreOptions('storage-ack.ledger.supersede'),
     );
   }
 
-  /** Record, immediately before the signature, that this core signs this ACK copy. */
+  /**
+   * Record, immediately before the signature, that this core signs this ACK
+   * copy. One atomic update keeps the row's `registeredAt` and leaves no
+   * window without a row; like the head write, it is not tied to the ACK
+   * deadline once started.
+   */
   private async recordSignedAckOrDecline(
     cgId: string,
     entry: StorageAckLedgerEntry,
     signal?: AbortSignal,
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
     const result = await this.runStoreOpOrDecline(cgId, async () => {
-      await deleteByPatternWithoutCount(
-        this.store,
-        { graph: STORAGE_ACK_LEDGER_GRAPH, subject: entry.operationSubject },
-        ackStoreOptions('storage-ack.ledger.delete', signal),
-      );
-      await this.store.insert(
-        storageAckLedgerEntryQuads({ ...entry, signedAt: new Date() }),
-        ackStoreOptions('storage-ack.ledger.insert', signal),
-      );
+      const signed = { ...entry, signedAt: new Date() };
+      if (typeof this.store.update === 'function') {
+        await this.store.update(
+          storageAckLedgerRecordUpdate(signed),
+          ackStoreOptions('storage-ack.ledger.record'),
+        );
+      } else {
+        await this.store.insert(
+          storageAckLedgerEntryQuads(signed),
+          ackStoreOptions('storage-ack.ledger.insert'),
+        );
+      }
       await this.store.flush?.(ackStoreOptions('storage-ack.ledger.flush'));
     }, signal);
     return result.ok ? { ok: true } : result;

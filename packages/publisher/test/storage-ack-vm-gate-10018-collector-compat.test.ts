@@ -126,6 +126,103 @@ describe('10.0.18 ACK collector against a starting 10.0.19 core', () => {
     expect(gateCalls()).toBe(3);
   });
 
+  it('keeps retrying an update while the core promotes the version it replaces', async () => {
+    const store = new OxigraphStore();
+    const scopeGraph = (layer: MemoryLayer, version: number) => knowledgeAssetLayerGraphUri(
+      SWM_GRAPH_ID, layer, createGraphKnowledgeAssetScope(UAL, version),
+    );
+    const nquads = (quads: Array<{ subject: string; predicate: string; object: string; graph: string }>) =>
+      new TextEncoder().encode(quads.map((q) => `<${q.subject}> <${q.predicate}> ${q.object} <${q.graph}> .`).join('\n'));
+    let nudges = 0;
+    const handler = new StorageACKHandler(store, {
+      nodeRole: 'core',
+      nodeIdentityId: 17n,
+      signerWallet: ethers.Wallet.createRandom(),
+      contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: CHAIN_ID,
+      kav10Address: KAV10,
+      isCgCurated: async () => false,
+      ensureVmPromotion: async () => ({ ok: true }),
+      // The core promotes the held version after the publisher's second try.
+      onPriorVersionAwaitingPromotion: () => {
+        nudges += 1;
+        if (nudges !== 2) return;
+        void store.insert([
+          { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: `did:dkg:context-graph:${SWM_GRAPH_ID}/_meta` },
+          {
+            subject: UAL,
+            predicate: 'http://dkg.io/ontology/assertionVersion',
+            object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+            graph: `did:dkg:context-graph:${SWM_GRAPH_ID}/_meta`,
+          },
+        ]);
+      },
+    }, new TypedEventBus());
+    const v1 = [{ subject: 'urn:asset:compat', predicate: 'urn:p:value', object: '"v1"', graph: scopeGraph(MemoryLayer.SharedWorkingMemory, 1) }];
+    const collector = new ACKCollector({
+      gossipPublish: async () => {},
+      sleep: async () => {},
+      sendP2P: async (_peerId, protocol, data) => (
+        protocol.includes('update')
+          ? handler.updateHandler(data, { toString: () => 'publisher-peer' })
+          : handler.handler(data, { toString: () => 'publisher-peer' })
+      ),
+      getConnectedCorePeers: () => ['core-10-0-19'],
+      verifyIdentity: async () => true,
+      log: () => {},
+    });
+    await collector.collect({
+      merkleRoot: computeFlatKCRootV10(v1, []),
+      contextGraphId: BigInt(CG_ID),
+      contextGraphIdStr: CG_ID,
+      swmGraphId: SWM_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: BigInt(nquads(v1).length),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      chainId: CHAIN_ID,
+      kav10Address: KAV10,
+      stagingQuads: nquads(v1),
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(v1, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+      requiredACKs: 1,
+    });
+    const v2 = [{ subject: 'urn:asset:compat', predicate: 'urn:p:value', object: '"v2"', graph: scopeGraph(MemoryLayer.VerifiableMemory, 2) }];
+
+    const result = await collector.collectUpdate({
+      kaId: (BigInt(AUTHOR) << 96n) | 7n,
+      contextGraphId: BigInt(CG_ID),
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: computeFlatKCRootV10(v2, []),
+      newByteSize: BigInt(nquads(v2).length),
+      newTokenAmount: 1000n,
+      mintAmount: 0n,
+      burnTokenIds: [],
+      newMerkleLeafCount: computeFlatKCMerkleLeafCountV10(v2, []),
+      chainId: CHAIN_ID,
+      kav10Address: KAV10,
+      publisherPeerId: 'publisher-peer',
+      requiredACKs: 1,
+      swmGraphId: SWM_GRAPH_ID,
+      stagingQuads: nquads(v2),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '2',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    });
+
+    expect(result.acks).toHaveLength(1);
+    expect(nudges).toBe(2);
+  });
+
   it('drops the core at once on the final refusal of a core with VM reconcile disabled', async () => {
     const { collect, sends } = scenario([{
       ok: false,

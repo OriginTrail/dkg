@@ -33,6 +33,11 @@ export function withDefaultStoreWorkPriority<T>(priority: StoreWorkPriority, fn:
   return defaultStoreWorkPriority.run(priority, fn);
 }
 
+/** The ambient default lane in effect here, if a caller set one. */
+export function activeDefaultStoreWorkPriority(): StoreWorkPriority | undefined {
+  return defaultStoreWorkPriority.getStore();
+}
+
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   ackInflight: number;
   healthInflight: number;

@@ -89,6 +89,7 @@ export {
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
   withDefaultStoreWorkPriority,
+  activeDefaultStoreWorkPriority,
   DEFAULT_STORE_QUEUE_LIMIT,
   DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
   type StorePrioritySchedulerSnapshot,

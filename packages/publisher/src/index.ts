@@ -203,6 +203,9 @@ export {
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES,
   storageAckLedgerEntryQuads,
+  storageAckLedgerMarkUpdate,
+  storageAckLedgerRecordUpdate,
+  storageAckOwedOperationsQuery,
   xsdDateTimeLiteral,
   type StorageAckLedgerEntry,
 } from './storage-ack-ledger.js';
