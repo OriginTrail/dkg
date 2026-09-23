@@ -388,41 +388,12 @@ import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-ad
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 import {
   commitRegisteredParticipantMutation,
+  LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
   prepareRegisteredParticipantMutation,
   type PreparedRegisteredParticipantMutation,
 } from './registered-context-graph-participant-mutation.js';
-import type { RegisteredContextGraphAuthority } from
-  './registered-context-graph-authority.js';
 
 /* eslint-disable @typescript-eslint/no-this-alias */
-
-type RegisteredParticipantMutationRpcSite =
-  | typeof CG_AUTH_RPC_SITES.memberAdd
-  | typeof CG_AUTH_RPC_SITES.memberRemove;
-
-/**
- * The authority read behind a registered participant mutation's idempotence
- * filter, and the one both memberAdd and memberRemove must use: its roster
- * decides whether a transaction is sent at all (see
- * `prepareRegisteredParticipantMutation`). Every option that decides where
- * the answer comes from is pinned here rather than left to a default, so no
- * default can route this read to the roster cache, the finalized authority
- * projection or a bounded (index-served) current-state read.
- */
-function resolveLiveParticipantMutationAuthority(
-  agent: DKGAgent,
-  contextGraphId: string,
-  site: RegisteredParticipantMutationRpcSite,
-): Promise<RegisteredContextGraphAuthority> {
-  return withRpcUsageSite(
-    site,
-    () => agent.resolveRegisteredContextGraphAuthority(contextGraphId, {
-      allowCachedRoster: false,
-      authorityReadMode: 'live-current',
-      freshness: 'live',
-    }),
-  );
-}
 
 interface ContextGraphAgentInviteMutationPlan {
   contextGraphId: string;
@@ -2136,11 +2107,14 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: candidateChainAgents,
       chain: this.chain,
+      // This roster decides whether a transaction is sent, not merely when.
       rosterFreshness: 'live',
-      resolveAuthority: () => resolveLiveParticipantMutationAuthority(
-        this,
-        contextGraphId,
+      resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberAdd,
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
+        ),
       ),
     });
 
@@ -2368,11 +2342,17 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: [normalizedAgentAddress],
       chain: this.chain,
+      // A roster behind the chain here does not delay the revocation, it
+      // cancels it: the agent is filtered out as "not present", no transaction
+      // is sent, and it stays on the chain roster while local state records a
+      // removal. See `prepareRegisteredParticipantMutation`.
       rosterFreshness: 'live',
-      resolveAuthority: () => resolveLiveParticipantMutationAuthority(
-        this,
-        contextGraphId,
+      resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberRemove,
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
+        ),
       ),
     });
     await commitRegisteredParticipantMutation({
