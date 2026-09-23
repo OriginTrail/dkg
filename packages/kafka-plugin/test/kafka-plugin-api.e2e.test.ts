@@ -3,6 +3,8 @@ import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { cp, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -36,16 +38,10 @@ const REC1_OP_ADDRESS = '0x90F79bf6EB2c4f870365E785982E1f101E93b906';
 interface Daemon {
   home: string;
   apiPort: number;
-  listenPort: number;
   child: ChildProcess;
   token: string;
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
-}
-const API_PORT_BASE = 22000;
-const LISTEN_PORT_BASE = 23000;
-function uniquePort(base: number): number {
-  return base + Math.floor(Math.random() * 1000);
 }
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -111,20 +107,18 @@ interface DaemonOpts {
   bootstrapPeers?: string[];
   wallet?: { address: string; privateKey: string };
 }
-async function writeDaemonConfig(
-  home: string,
-  apiPort: number,
-  listenPort: number,
-  opts: DaemonOpts,
-): Promise<void> {
+async function writeDaemonConfig(home: string, opts: DaemonOpts): Promise<void> {
   const { rpcUrl, hubAddress } = getSharedContext();
   const wallet = opts.wallet ?? { address: CORE_OP_ADDRESS, privateKey: HARDHAT_KEYS.CORE_OP };
   await writeFile(
     join(home, 'config.json'),
     JSON.stringify({
       name: opts.pluginPath ? 'kafka-plugin-e2e' : 'kafka-plugin-ack-core-e2e',
-      apiPort,
-      listenPort,
+      // Port 0: the OS picks both ports when the daemon binds them, so no other
+      // process can take them first. The API port is read back from api.port;
+      // peers get the libp2p address from /api/status.
+      apiPort: 0,
+      listenPort: 0,
       apiHost: '127.0.0.1',
       nodeRole: opts.nodeRole ?? 'edge',
       relay: 'none',
@@ -153,6 +147,52 @@ async function writeDaemonConfig(
   await writeFile(join(home, 'wallets.json'), walletEntry, { mode: 0o600 });
   await writeFile(join(home, 'publisher-wallets.json'), walletEntry, { mode: 0o600 });
 }
+// The daemon logs some startup failures only to daemon.log and others only to
+// stdio, so a failed start reports both tails.
+async function daemonStartError(home: string, summary: string): Promise<Error> {
+  const logTail = async (file: string, lines: number): Promise<string> => {
+    try {
+      return (await readFile(join(home, file), 'utf-8')).split('\n').slice(-lines).join('\n').trim();
+    } catch {
+      return `<could not read ${file}>`;
+    }
+  };
+  return new Error(
+    `${summary}\n` +
+    `--- daemon stdio tail ---\n${await logTail('daemon-stdio.log', 80)}\n` +
+    `--- daemon.log tail ---\n${await logTail('daemon.log', 40)}`,
+  );
+}
+// The daemon writes api.port only after its API server has bound, so a 200 on
+// that port comes from this daemon and not from some other listener.
+async function probeDaemonApi(home: string): Promise<number | undefined> {
+  const apiPort = Number((await readFile(join(home, 'api.port'), 'utf-8').catch(() => '')).trim());
+  if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65_535) return undefined;
+  try {
+    // A listener that accepts but never answers must not stall the startup deadline.
+    const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`, { signal: AbortSignal.timeout(1_000) });
+    return res.ok ? apiPort : undefined;
+  } catch {
+    return undefined;
+  }
+}
+async function waitForDaemonApi(home: string, child: ChildProcess, timeoutMs = 45_000): Promise<number> {
+  const exited = (): boolean => child.exitCode !== null || child.signalCode !== null;
+  const earlyExitError = (): Promise<Error> =>
+    daemonStartError(home, `Daemon exited early (code=${child.exitCode}, signal=${child.signalCode}).`);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (exited()) throw await earlyExitError();
+    const apiPort = await probeDaemonApi(home);
+    if (apiPort !== undefined) {
+      if (exited()) throw await earlyExitError();
+      return apiPort;
+    }
+    await sleep(500);
+  }
+  if (exited()) throw await earlyExitError();
+  throw await daemonStartError(home, `Daemon did not become ready within ${timeoutMs / 1000}s.`);
+}
 async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
   if (opts.pluginPath) await ensureKafkaPluginFixtures();
   if (!existsSync(CLI_ENTRY)) {
@@ -164,52 +204,28 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
     await ensureFixtureEntrypoint(dirname(dirname(opts.pluginPath)), opts.pluginPath);
   }
   const home = await mkdtemp(join(tmpdir(), 'dkg-kafka-plugin-e2e-'));
-  const apiPort = uniquePort(API_PORT_BASE);
-  const listenPort = uniquePort(LISTEN_PORT_BASE);
-  await writeDaemonConfig(home, apiPort, listenPort, opts);
-  const stdioLog = join(home, 'daemon-stdio.log');
-  const logHandle = await open(stdioLog, 'a');
+  await writeDaemonConfig(home, opts);
+  const logHandle = await open(join(home, 'daemon-stdio.log'), 'a');
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    DKG_HOME: home,
+    DKG_NO_BLUE_GREEN: '1',
+    DKG_DISABLE_TELEMETRY: '1',
+  };
+  // Clients read DKG_API_PORT before api.port, so an inherited value would name
+  // another daemon's port.
+  delete env.DKG_API_PORT;
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
-    env: {
-      ...process.env,
-      DKG_HOME: home,
-      DKG_API_PORT: String(apiPort),
-      DKG_NO_BLUE_GREEN: '1',
-      DKG_DISABLE_TELEMETRY: '1',
-    },
+    env,
     stdio: ['ignore', logHandle.fd, logHandle.fd],
   });
-  const tail = async (n = 80): Promise<string> => {
-    try {
-      const buf = await readFile(stdioLog, 'utf-8');
-      return buf.split('\n').slice(-n).join('\n').trim();
-    } catch {
-      return '<could not read daemon stdio log>';
-    }
-  };
-  const daemon: Daemon = { home, apiPort, listenPort, child, token: '' };
+  const daemon: Daemon = { home, apiPort: 0, child, token: '' };
   child.once('exit', (code, signal) => {
     daemon.exitCode = code;
     daemon.signal = signal;
   });
   try {
-    for (let i = 0; i < 90; i++) {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(
-          `Daemon exited early (code=${child.exitCode}, signal=${child.signalCode}).\n--- daemon stdio tail ---\n${await tail()}`,
-        );
-      }
-      try {
-        const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
-        if (res.ok) break;
-      } catch { /* not ready yet */ }
-      await sleep(500);
-      if (i === 89) {
-        throw new Error(
-          `Daemon did not become ready within 45s.\n--- daemon stdio tail ---\n${await tail()}`,
-        );
-      }
-    }
+    daemon.apiPort = await waitForDaemonApi(home, child);
     await logHandle.close();
     const raw = await readFile(join(home, 'auth.token'), 'utf-8');
     const token = raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#'));
@@ -218,7 +234,7 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
     if (opts.pluginPath) {
       let lastPublisherProbe = '';
       for (let i = 0; i < 40; i++) {
-        const probe = await fetch(`http://127.0.0.1:${apiPort}/api/kafka/streams/register`, {
+        const probe = await fetch(`http://127.0.0.1:${daemon.apiPort}/api/kafka/streams/register`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: '{}',
@@ -227,9 +243,9 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
         lastPublisherProbe = await probe.text().catch(() => '<could not read publisher readiness probe body>');
         await sleep(500);
         if (i === 39) {
-          throw new Error(
-            `Publisher runtime did not become ready within 20s (last probe=${lastPublisherProbe}).\n` +
-            `--- daemon stdio tail ---\n${await tail()}`,
+          throw await daemonStartError(
+            home,
+            `Publisher runtime did not become ready within 20s (last probe=${lastPublisherProbe}).`,
           );
         }
       }
@@ -583,6 +599,93 @@ describe('StorageACK topology readiness', () => {
     }
   });
 });
+describe('daemon API readiness', () => {
+  // Stand-ins for a daemon child: one that never writes api.port, and one that
+  // binds port 0, writes the port to api.port and answers every request.
+  const idleChild = (): ChildProcess =>
+    spawn(process.execPath, ['-e', 'setInterval(() => {}, 1_000)'], { stdio: 'ignore' });
+  const fakeDaemon = (home: string): ChildProcess => spawn(process.execPath, ['-e', `
+    const server = require('node:http').createServer((_req, res) => res.end('{}'));
+    server.listen(0, '127.0.0.1', () => require('node:fs').writeFileSync(
+      require('node:path').join(process.env.DKG_HOME, 'api.port'), String(server.address().port)));
+  `], { env: { ...process.env, DKG_HOME: home }, stdio: 'ignore' });
+  const killChild = async (child: ChildProcess): Promise<void> => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    child.kill('SIGKILL');
+    await exited;
+  };
+  let foreignRequests = 0;
+  const foreign = createHttpServer((_req, res) => {
+    foreignRequests++;
+    res.end('{}');
+  });
+  beforeAll(async () => {
+    await new Promise<void>((resolve) => foreign.listen(0, '127.0.0.1', resolve));
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve) => foreign.close(() => resolve()));
+  });
+
+  it('never takes a 200 from a listener the daemon did not name in api.port', async () => {
+    const idleHome = await mkdtemp(join(tmpdir(), 'dkg-kafka-readiness-'));
+    const daemonHome = await mkdtemp(join(tmpdir(), 'dkg-kafka-readiness-'));
+    const idle = idleChild();
+    const daemon = fakeDaemon(daemonHome);
+    const requestsBefore = foreignRequests;
+    try {
+      await expect(waitForDaemonApi(idleHome, idle, 1_500)).rejects.toThrow('Daemon did not become ready within 1.5s');
+      const apiPort = await waitForDaemonApi(daemonHome, daemon, 10_000);
+      expect(apiPort).toBe(Number(await readFile(join(daemonHome, 'api.port'), 'utf-8')));
+      expect(apiPort).not.toBe((foreign.address() as AddressInfo).port);
+      expect(foreignRequests).toBe(requestsBefore);
+    } finally {
+      await Promise.all([killChild(idle), killChild(daemon)]);
+      await rm(idleHome, { recursive: true, force: true });
+      await rm(daemonHome, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('bounds each status probe so a listener that never answers cannot stall startup', async () => {
+    const held: Socket[] = [];
+    const silent = createTcpServer((socket) => {
+      socket.on('error', () => {});
+      held.push(socket);
+    });
+    await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+    const home = await mkdtemp(join(tmpdir(), 'dkg-kafka-readiness-'));
+    await writeFile(join(home, 'api.port'), String((silent.address() as AddressInfo).port));
+    const idle = idleChild();
+    const started = Date.now();
+    try {
+      await expect(waitForDaemonApi(home, idle, 1_000)).rejects.toThrow('Daemon did not become ready within 1s');
+      expect(held.length).toBeGreaterThan(0);
+      // An unbounded fetch would wait minutes for response headers.
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      await killChild(idle);
+      for (const socket of held) socket.destroy();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('reports the stdio and daemon.log tails when the daemon exits during startup', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dkg-kafka-readiness-'));
+    await writeFile(join(home, 'daemon-stdio.log'), 'stdio: libp2p failed to start\n');
+    await writeFile(join(home, 'daemon.log'), 'daemon.log: API server failed to start\n');
+    const child = spawn(process.execPath, ['-e', 'process.exit(3)'], { stdio: 'ignore' });
+    try {
+      const error = await waitForDaemonApi(home, child, 10_000).catch((err: unknown) => err);
+      expect(String(error)).toContain('Daemon exited early (code=3, signal=null)');
+      expect(String(error)).toContain('stdio: libp2p failed to start');
+      expect(String(error)).toContain('daemon.log: API server failed to start');
+    } finally {
+      await killChild(child);
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
 describe('kafka-plugin live daemon E2E — bare baseline', () => {
   let core: Daemon | null = null;
   let daemon: Daemon | null = null;
@@ -599,6 +702,16 @@ describe('kafka-plugin live daemon E2E — bare baseline', () => {
     daemon = null;
     core = null;
   }, 20_000);
+  it('reaches each daemon on the API port that daemon bound', async () => {
+    const [coreStatus, edgeStatus] = await Promise.all([daemonStatus(core!), daemonStatus(daemon!)]);
+    expect(coreStatus.nodeRole).toBe('core');
+    expect(edgeStatus.nodeRole).toBe('edge');
+    expect(edgeStatus.peerId).not.toBe(coreStatus.peerId);
+    for (const d of [core!, daemon!]) {
+      expect(Number(await readFile(join(d.home, 'api.port'), 'utf-8'))).toBe(d.apiPort);
+      expect(JSON.parse(await readFile(join(d.home, 'config.json'), 'utf-8'))).toMatchObject({ apiPort: 0, listenPort: 0 });
+    }
+  });
   it('POST /api/kafka/streams/register accepts a stream registration with 202 + captureID', async () => {
     const res = await authed(daemon!, 'POST', '/api/kafka/streams/register', BARE_BODY);
     if (res.status !== 202) {
