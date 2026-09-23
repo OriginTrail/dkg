@@ -113,13 +113,16 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
   }
 
   const publisherManifest = [change('packages/publisher/package.json')];
-  for (const readManifest of [
-    undefined,
-    () => { throw new Error('missing blob'); },
-    () => '{ not json',
-    () => '[]',
+  for (const [readManifest, reason] of [
+    [undefined, /contents are unavailable to the planner$/],
+    [() => { throw new Error('missing blob\nfatal: details'); }, /could not be read and parsed: missing blob$/],
+    [() => '{ not json', /could not be read and parsed: .*JSON/],
+    [() => '[]', /is not a JSON object$/],
   ]) {
-    assert.equal(pullRequestPlan(publisherManifest, { readManifest }).mode, 'full', String(readManifest));
+    const plan = pullRequestPlan(publisherManifest, { readManifest });
+    assert.equal(plan.mode, 'full', String(readManifest));
+    assert.match(plan.reasons[0], /^Workspace manifest could not be compared: packages\/publisher\/package\.json /);
+    assert.match(plan.reasons[0], reason);
   }
   assert.equal(manifestPlan(manifest, [change('package.json')]).mode, 'full', 'root manifest');
   assert.equal(manifestPlan(manifest, [change('devnet/v10-stress/package.json')]).mode, 'full', 'devnet workspace');

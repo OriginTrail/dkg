@@ -601,34 +601,34 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// Compares the base and head copies of a modified workspace manifest. Any
-// missing reader, unreadable side or unparseable JSON fails closed.
+// Compares the base and head copies of a modified workspace manifest and
+// returns { outcome, detail }: 'package-scoped' routes to the workspace,
+// 'install-inputs' and 'uncomparable' keep full CI. Any missing reader,
+// unreadable side or malformed JSON is uncomparable, and its detail keeps the
+// underlying error so a fail-closed plan explains itself.
 function classifyManifestChange(filePath, readManifest) {
-  if (typeof readManifest !== 'function') {
-    return { packageScoped: false, detail: `${filePath} contents are unavailable to the planner` };
-  }
+  const uncomparable = (detail) => ({ outcome: 'uncomparable', detail: `${filePath} ${detail}` });
+  if (typeof readManifest !== 'function') return uncomparable('contents are unavailable to the planner');
   let before;
   let after;
   try {
     before = JSON.parse(readManifest('base', filePath));
     after = JSON.parse(readManifest('head', filePath));
-  } catch {
-    return { packageScoped: false, detail: `${filePath} could not be read and compared` };
+  } catch (error) {
+    return uncomparable(`could not be read and parsed: ${String(error?.message ?? error).split('\n')[0]}`);
   }
-  if (!isPlainObject(before) || !isPlainObject(after)) {
-    return { packageScoped: false, detail: `${filePath} is not a JSON object` };
-  }
+  if (!isPlainObject(before) || !isPlainObject(after)) return uncomparable('is not a JSON object');
 
   const changedFields = [...new Set([...Object.keys(before), ...Object.keys(after)])]
     .filter((field) => !isDeepStrictEqual(before[field], after[field]))
     .sort();
   const installFields = changedFields.filter((field) => !PACKAGE_SCOPED_MANIFEST_FIELDS.has(field));
   if (installFields.length) {
-    return { packageScoped: false, detail: `${filePath} changed ${installFields.join(', ')}` };
+    return { outcome: 'install-inputs', detail: `${filePath} changed ${installFields.join(', ')}` };
   }
   const scripts = { before: before.scripts ?? {}, after: after.scripts ?? {} };
   if (!isPlainObject(scripts.before) || !isPlainObject(scripts.after)) {
-    return { packageScoped: false, detail: `${filePath} scripts is not a JSON object` };
+    return uncomparable('scripts is not a JSON object');
   }
   const lifecycleScripts = [...new Set([...Object.keys(scripts.before), ...Object.keys(scripts.after)])]
     .filter((name) => isInstallLifecycleScript(name))
@@ -636,12 +636,12 @@ function classifyManifestChange(filePath, readManifest) {
     .sort();
   if (lifecycleScripts.length) {
     return {
-      packageScoped: false,
+      outcome: 'install-inputs',
       detail: `${filePath} changed install lifecycle scripts ${lifecycleScripts.join(', ')}`,
     };
   }
   return {
-    packageScoped: true,
+    outcome: 'package-scoped',
     detail: `${filePath} changed ${changedFields.join(', ') || 'formatting only'}`,
   };
 }
@@ -707,11 +707,10 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
       if (!modifiedFiles.has(filePath)) {
         return { full: `Workspace manifest added, removed or moved: ${filePath}` };
       }
-      const manifestChange = classifyManifestChange(filePath, readManifest);
-      if (!manifestChange.packageScoped) {
-        return { full: `Workspace manifest changed install inputs: ${manifestChange.detail}` };
-      }
-      route.reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
+      const { outcome, detail } = classifyManifestChange(filePath, readManifest);
+      if (outcome === 'install-inputs') return { full: `Workspace manifest changed install inputs: ${detail}` };
+      if (outcome !== 'package-scoped') return { full: `Workspace manifest could not be compared: ${detail}` };
+      route.reasons.push(`Package-scoped manifest change: ${detail}`);
     }
     route.lanes.push(...rule.lanes);
     route.evmScopes.push(...rule.evmScopes);
