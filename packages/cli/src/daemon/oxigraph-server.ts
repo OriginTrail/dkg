@@ -47,7 +47,7 @@ import {
   createOxigraphLaunchStrategy,
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
-import { invalidateExternalStoreQuadsCache } from './routes/status.js';
+import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
 import {
   readCgroupOomSnapshot,
   readCgroupOomKill,

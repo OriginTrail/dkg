@@ -8,10 +8,8 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
-import {
-  handleStatusRoutes,
-  invalidateExternalStoreQuadsCache,
-} from '../src/daemon/routes/status.js';
+import { handleStatusRoutes } from '../src/daemon/routes/status.js';
+import { invalidateExternalStoreQuadsCache } from '../src/daemon/store-quads-cache.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
 const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
@@ -187,6 +185,29 @@ describe('/api/status external-store quad count', () => {
         });
       }
       expect(queryCalls).toBe(0);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it.each([
+    ['true', true],
+    ['1', true],
+    ['false', false],
+    ['0', false],
+    ['yes', false],
+  ])('treats includeStoreQuads=%s as a count request: %s', async (spelling, requestsCount) => {
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return COUNT_123;
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}/api/status?includeStoreQuads=${spelling}`);
+      const body = await response.json() as StatusBody;
+      expect(body.storeQuadsStatus).toBe(requestsCount ? 'pending' : 'not-requested');
+      expect(queryCalls).toBe(requestsCount ? 1 : 0);
     } finally {
       await closeServer(server);
     }
