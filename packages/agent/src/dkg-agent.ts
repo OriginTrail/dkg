@@ -2030,8 +2030,9 @@ export class DKGAgent extends DKGAgentBase {
       id: string;
       name: string;
       source: 'ontology' | 'meta';
-      onChainId?: string;
+      binding?: { onChainId: string; onChainHash: string };
     }>();
+    let unprovenClaims = 0;
 
     const collectEntries = (
       rows: Record<string, string>[],
@@ -2045,18 +2046,24 @@ export class DKGAgent extends DKGAgentBase {
 
         const existing = discoveredEntries.get(id);
         const rowName = row['name'] ? stripLiteral(row['name']) : undefined;
-        const candidateOnChainId = row['onChainId']
+        // An `OnChainId` row is a claim, not a binding: the ontology graph is
+        // shared by every network and deployment, and one Base edge held three
+        // definitions claiming #33. Keep only a claim this chain proves, with
+        // the name hash it proves, so the row is bound exactly as a chain lane
+        // would bind it.
+        const claimedOnChainId = row['onChainId']
           ? stripLiteral(row['onChainId'])
           : undefined;
-        const rowOnChainId = isCanonicalAuthoritativeContextGraphId(candidateOnChainId)
-          ? candidateOnChainId
-          : undefined;
+        const proven = claimedOnChainId === undefined
+          ? null
+          : this.provenOnChainContextGraphClaim(id, claimedOnChainId);
+        if (claimedOnChainId !== undefined && proven === null) unprovenClaims++;
         const ontologyWins = existing?.source === 'meta' && source === 'ontology';
         discoveredEntries.set(id, {
           id,
           name: rowName ?? existing?.name ?? id,
           source: !existing || ontologyWins ? source : existing.source,
-          onChainId: rowOnChainId ?? existing?.onChainId,
+          binding: proven ?? existing?.binding,
         });
       }
     };
@@ -2111,7 +2118,11 @@ export class DKGAgent extends DKGAgentBase {
       collectEntries(metaResult.bindings as Record<string, string>[], 'meta');
     }
 
-    this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
+    this.log.debug(
+      ctx,
+      `Discovery scan found ${discoveredEntries.size} CG(s) in store`
+        + `${unprovenClaims > 0 ? `; ignored ${unprovenClaims} on-chain id claim(s) this chain does not prove` : ''}`,
+    );
 
     // Private classification is needed only to restore the SWM scope of an
     // already-active member. Newly catalogued rows do not need a per-row store
@@ -2128,19 +2139,29 @@ export class DKGAgent extends DKGAgentBase {
     );
     const curatedById = new Map(curatedResults);
 
+    // A definition for a graph this node wants but holds only by its name hash
+    // (`dkg subscribe <hash>`, or a Core's hosted row) is that graph's verified
+    // cleartext id. Adopt it as the name-hash resolver would, so the
+    // subscription moves to the cleartext id. Recording it below first would
+    // let the canonical setter retire the hash-keyed row and drop the
+    // subscription with it.
+    for (const { id } of discoveredEntries.values()) {
+      await this.adoptWantedContextGraphNamePlaceholder(id);
+    }
+
     // Recording and the temporary Core auto-subscribe bridge are synchronous.
     // Defer only this narrow producer burst so every discovered row enters one
     // immutable finalized responsibility batch regardless of scan duration.
     const releaseResponsibilityBatch =
       this.beginRfc64ScheduledCatalogResponsibilityBatchV1();
     try {
-      for (const { id, name, source, onChainId } of discoveredEntries.values()) {
+      for (const { id, name, source, binding } of discoveredEntries.values()) {
         const existing = this.subscribedContextGraphs.get(id);
         if (existing) {
           // Enrich an existing active/hosted record and persist the binding. The
           // central recorder deliberately does not reactivate an existing
           // unsubscribed row, preserving explicit unsubscribe semantics.
-          this.recordDiscoveredContextGraph(id, { name, onChainId });
+          this.recordDiscoveredContextGraph(id, { name, ...binding });
           const current = this.subscribedContextGraphs.get(id) ?? existing;
           // A restart re-seeds `subscribedContextGraphs` from persisted state but
           // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
@@ -2186,7 +2207,7 @@ export class DKGAgent extends DKGAgentBase {
 
         const recorded = this.recordDiscoveredContextGraph(
           id,
-          { name, onChainId },
+          { name, ...binding },
           {
             // A persisted row left dormant during restart must not be
             // reactivated when the same definition is found in Oxigraph
@@ -2393,6 +2414,19 @@ export class DKGAgent extends DKGAgentBase {
       }
       this.retireStaleOnChainContextGraphPlaceholder(previous, ctx);
     }
+    // The chain now says what this id commits: drop any binding it refutes
+    // (ontology claims bound unchecked by older versions, persisted by Cores),
+    // before it can make the id look known or answer a reverse lookup.
+    if (nameHash !== null) {
+      const cleared = this.clearRefutedOnChainContextGraphBindings(contextGraphId, nameHash);
+      if (cleared.length > 0) {
+        this.log.info(
+          ctx,
+          `Cleared on-chain id ${contextGraphId} from ${cleared.length} Context Graph(s) whose id it does not commit: `
+            + cleared.map((id) => JSON.stringify(id.slice(0, 64))).join(', '),
+        );
+      }
+    }
     const knownBefore = previous !== undefined
       || this.seenOnChainIds.has(contextGraphId)
       || [...this.subscribedContextGraphs.values()].some((s) => s.onChainId === contextGraphId);
@@ -2480,11 +2514,22 @@ export class DKGAgent extends DKGAgentBase {
     return { isNew: !knownBefore, changed };
   }
 
-  /** The local row already bound to exactly this name hash and on-chain id. */
+  /**
+   * The local row already bound to exactly this name hash and on-chain id. A
+   * row bound to the id without recording the hash (by an older path, or by
+   * the route admitting a subscribe) still goes through the setter, or the
+   * hash never resolves to it and `dkg subscribe <hash>` mints a second row.
+   */
   private onChainContextGraphBoundLocalId(nameHash: string, onChainId: string): string | null {
-    const localId = this.wireIdToLocalCgId.get(this.contextGraphWireId(nameHash));
+    const wireId = this.contextGraphWireId(nameHash);
+    const localId = this.wireIdToLocalCgId.get(wireId);
     if (localId === undefined) return null;
-    return this.subscribedContextGraphs.get(localId)?.onChainId === onChainId ? localId : null;
+    const sub = this.subscribedContextGraphs.get(localId);
+    return sub?.onChainId === onChainId
+      && sub.onChainHash !== undefined
+      && this.contextGraphWireId(sub.onChainHash) === wireId
+      ? localId
+      : null;
   }
 
   /**

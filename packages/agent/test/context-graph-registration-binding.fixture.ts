@@ -125,6 +125,9 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     chain,
     rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64SwmRecoveryRuntimeV1,
+    // What this node read from its own chain, per on-chain id. Empty unless a
+    // scenario proves a slot (see `proveOnChainSlot`).
+    onChainContextGraphFacts: new Map<string, { nameHash: string | null }>(),
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
     localContextGraphProvenance: {
       created: new Set<string>(),
@@ -190,4 +193,18 @@ export function getOnChainId(
   options?: { signal?: AbortSignal },
 ): Promise<string | null> {
   return fixture.agent.getContextGraphOnChainId(requestedId, options);
+}
+
+/**
+ * Record that this node's chain commits `nameHash` at `onChainId`, as storage
+ * enumeration or the live event would. An ontology `OnChainId` claim counts
+ * only for a slot proven this way (the fixture commits `LOCAL_ID` to
+ * `NAME_HASH`).
+ */
+export function proveOnChainSlot(
+  fixture: ReturnType<typeof selectedFixture>,
+  onChainId: string,
+  nameHash: string = NAME_HASH,
+): void {
+  fixture.agent.onChainContextGraphFacts.set(onChainId, { nameHash });
 }

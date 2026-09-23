@@ -26,7 +26,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { MOCK_DEFAULT_SIGNER, MockChainAdapter } from '@origintrail-official/dkg-chain';
 
-import { DKGAgent } from '../src/index.js';
+import {
+  DKGAgent,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+} from '../src/index.js';
 
 const keccak = (id: string) => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 
@@ -101,6 +105,7 @@ afterEach(async () => {
 async function startAgent(
   chain: MockChainAdapter,
   nodeRole: 'edge' | 'core' = 'edge',
+  store?: ContextGraphSubscriptionStore,
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: `OntologyClaims${nodeRole}`,
@@ -108,11 +113,23 @@ async function startAgent(
     nodeRole,
     chainAdapter: chain,
     rfc64CatalogActivation: { enabled: false },
+    ...(store ? { contextGraphSubscriptionStore: store } : {}),
   });
   agents.push(agent);
   await agent.start();
   await agent.awaitInitialChainPoll();
   return agent;
+}
+
+/** A durable subscription store holding what an earlier version persisted. */
+function memorySubscriptionStore(rows: ContextGraphSubscriptionRecord[]) {
+  const records = new Map(rows.map((record) => [record.id, { ...record }]));
+  const store: ContextGraphSubscriptionStore = {
+    loadAll: async () => [...records.values()].map((record) => ({ ...record })),
+    save: async (record) => { records.set(record.id, { ...record }); },
+    delete: async (contextGraphId) => { records.delete(contextGraphId); },
+  };
+  return { store, records };
 }
 
 /** What `DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT=1` left in the local store. */
@@ -321,5 +338,121 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     for (const id of REFUTED) await expect(agent.getContextGraphOnChainId(id), id).resolves.toBeNull();
     // The claim on #34 no longer makes the curated slot look already known.
     expect(nudge).toHaveBeenCalledWith(keccak(PRIVATE_34), expect.anything());
+  });
+
+  it('subscribes the cleartext by hash before any chain lane reached the slot, and enumeration then records its hash', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    await syncOntologyClaims(agent);
+    await agent.discoverContextGraphsFromStore();
+    // No chain facts yet: every claim is unproven, so nothing is bound.
+    expect(row(agent, REAL_ID)?.onChainId).toBeUndefined();
+    expect(row(agent, 'baseball')?.onChainId).toBeUndefined();
+
+    const { contextGraphId, identity } = await subscribeByNameHash(agent, NAME_HASH);
+
+    // The hash names the definition this node already holds: no row is keyed
+    // by the hash string, whose identity would be keccak256 of that string.
+    expect(contextGraphId).toBe(REAL_ID);
+    expect(identity).toMatchObject({ state: 'resolved', nameHash: NAME_HASH, contextGraphId: REAL_ID });
+    expect(row(agent, NAME_HASH)).toBeUndefined();
+    // Admitted from its local public definition, as a subscribe by the
+    // cleartext id would be; the chain binding follows from enumeration.
+    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true });
+
+    await agent.discoverContextGraphsFromStorage();
+    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+    expect(row(agent, NAME_HASH)).toBeUndefined();
+    expect(agent.resolveContextGraphIdAlias(NAME_HASH)).toBe(REAL_ID);
+    expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+  });
+
+  it('moves a subscription made by hash to the cleartext id once the definition arrives', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    await agent.discoverContextGraphsFromStorage();
+    const first = await subscribeByNameHash(agent, NAME_HASH);
+    expect(first.identity).toMatchObject({ state: 'name-hash-only', nameHash: NAME_HASH, onChainId: '33' });
+    expect(row(agent, NAME_HASH)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+
+    await syncOntologyClaims(agent);
+    await agent.discoverContextGraphsFromStore();
+
+    // Recording the definition alone would promote the hash row without its
+    // subscription; adoption carries it across.
+    expect(row(agent, NAME_HASH)).toBeUndefined();
+    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+    expect(agent.describeContextGraphIdentity(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: REAL_ID });
+    expectOnlyProvenBindings(agent);
+  });
+
+  it('does not let a failed adoption stop the discovery pass', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    await agent.discoverContextGraphsFromStorage();
+    await subscribeByNameHash(agent, NAME_HASH);
+    vi.spyOn(agent, 'adoptVerifiedContextGraphCleartext').mockRejectedValue(new Error('adoption failed'));
+
+    await expect(agent.adoptWantedContextGraphNamePlaceholder(REAL_ID)).resolves.toBe(false);
+    await expect(agent.adoptWantedContextGraphNamePlaceholder('baseball')).resolves.toBe(false);
+  });
+
+  it('clears bindings an earlier version persisted from refuted claims, and keeps the proven ones', async () => {
+    const hostedClaim = 'hosted-claim-33';
+    const { store, records } = memorySubscriptionStore([
+      // What a Core persisted after binding every claim (#1611 bridge).
+      { id: 'baseball', subscribed: true, synced: false, onChainId: '33', syncScoped: false },
+      { id: 'pr68-open-test', subscribed: true, synced: false, onChainId: '33', syncScoped: false },
+      { id: hostedClaim, subscribed: false, synced: false, onChainId: '33', coreHosted: true, syncScoped: false },
+      // The graph #33 names, bound without its hash.
+      { id: REAL_ID, subscribed: true, synced: false, onChainId: '33', syncScoped: false },
+      // `dkg subscribe 33` on an older version: retired as a whole elsewhere.
+      { id: '33', subscribed: true, synced: false, onChainId: '33', syncScoped: false },
+    ]);
+    const agent = await startAgent(await baseShapedChain(), 'core', store);
+    expect(row(agent, 'baseball')?.onChainId).toBe('33');
+
+    await agent.discoverContextGraphsFromStorage();
+
+    for (const id of ['baseball', 'pr68-open-test', hostedClaim]) {
+      expect(row(agent, id)?.onChainId, id).toBeUndefined();
+      expect(records.get(id)?.onChainId, id).toBeUndefined();
+    }
+    expect(row(agent, hostedClaim)).toMatchObject({ coreHosted: true });
+    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
+    expect(row(agent, '33')).toMatchObject({ onChainId: '33' });
+    // Hosting and proof repair resolve #33 to the graph it names.
+    expect(agent.resolveLocalCgIdByOnChainId(33n)).toBe(REAL_ID);
+    expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+  });
+
+  it('answers the ontology on-chain id read only for a claim this chain proves', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    const graph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const claim = (id: string, onChainId: string) => ({
+      subject: contextGraphDataGraphUri(id),
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${onChainId}"`,
+      graph,
+    });
+    // Two networks' claims for one id, one of them this chain's.
+    await agent.store.insert([claim('twice-claimed', '91'), claim('twice-claimed', '12'), claim('baseball', '33')]);
+    const facts = (agent as unknown as { onChainContextGraphFacts: Map<string, unknown> }).onChainContextGraphFacts;
+    facts.set('12', {
+      onChainId: '12',
+      nameHash: keccak('twice-claimed'),
+      owner: null,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      createdAt: null,
+      active: true,
+      observedAtBlock: 1,
+    });
+
+    await expect(agent.getContextGraphOnChainId('twice-claimed')).resolves.toBe('12');
+    await expect(agent.resolveContextGraphOnChainIdBinding('twice-claimed'))
+      .resolves.toEqual({ onChainId: '12', provenance: 'ontology' });
+    // No facts for #33 yet, and #33 commits another name anyway.
+    await expect(agent.getContextGraphOnChainId('baseball')).resolves.toBeNull();
+    expect(agent.provenOnChainContextGraphClaim('twice-claimed', '012')).toBeNull();
+    expect(agent.provenOnChainContextGraphClaim('twice-claimed', '91')).toBeNull();
   });
 });

@@ -70,6 +70,26 @@ interface AgentInternals {
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   store: TripleStore;
+  onChainContextGraphFacts: Map<string, unknown>;
+}
+
+/**
+ * Record that this node's chain commits `contextGraphId`'s name hash at
+ * `onChainId`, as storage enumeration or the live event would. An ontology
+ * OnChainId quad binds only a slot proven this way.
+ */
+function proveOnChainSlot(internals: AgentInternals, onChainId: string, contextGraphId: string): void {
+  internals.onChainContextGraphFacts.set(onChainId, {
+    onChainId,
+    nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+    owner: null,
+    accessPolicy: 0,
+    publishPolicy: 1,
+    publishAuthority: null,
+    createdAt: null,
+    active: true,
+    observedAtBlock: 1,
+  });
 }
 
 function finalizedVmSnapshot(
@@ -452,6 +472,8 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
 
     const LOCAL = 'gh1098-presub';
     const ONCHAIN = '4242';
+    // Another network's graph, claiming an id this node's chain never proved.
+    const UNPROVEN = 'gh1098-other-network';
 
     // The publisher broadcasts the CG's OnChainId quad on the ontology topic at
     // publish time (durable _meta sync also delivers it). Seed it — this is the
@@ -461,10 +483,19 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
       object: `"${ONCHAIN}"`,
       graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    }, {
+      subject: `did:dkg:context-graph:${UNPROVEN}`,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: '"4243"',
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
     }]);
+    // The quad is a claim: it binds because this node's chain commits LOCAL's
+    // name hash at that id.
+    proveOnChainSlot(internals, ONCHAIN, LOCAL);
 
     // The #1098 state: a pre-subscribed member CG with NO onChainId bound.
     internals.subscribedContextGraphs.set(LOCAL, { subscribed: true });
+    internals.subscribedContextGraphs.set(UNPROVEN, { subscribed: true });
 
     const { dispatcher, triggered } = targetDispatcher(internals);
 
@@ -478,6 +509,8 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     // — no longer skipped by the `!onChainId` guard — triggered its reconcile.
     expect(internals.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe(ONCHAIN);
     expect(triggered).toEqual([`periodic:${LOCAL}`]);
+    // An unproven claim binds nothing and reconciles nothing.
+    expect(internals.subscribedContextGraphs.get(UNPROVEN)?.onChainId).toBeUndefined();
   });
 
   it('does not self-prime or reconcile CG 0 from empty or malformed ontology ids', async () => {
@@ -1514,6 +1547,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(CG_HIT, { subscribed: true });
     internals.subscribedContextGraphs.set(CG_MISS_A, { subscribed: true });
     internals.subscribedContextGraphs.set(CG_MISS_B, { subscribed: true });
+    // This node's chain commits each graph's name hash at its claimed id.
+    proveOnChainSlot(internals, ON_HIT, CG_HIT);
+    proveOnChainSlot(internals, ON_MISS_A, CG_MISS_A);
+    proveOnChainSlot(internals, ON_MISS_B, CG_MISS_B);
 
     const { dispatcher, triggered } = targetDispatcher(internals);
 

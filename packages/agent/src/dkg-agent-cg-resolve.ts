@@ -3021,7 +3021,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         ...(accessPolicy ? { accessPolicy } : {}),
         createdAt: meta.createdAt ?? r.createdAt,
         isSystem: meta.isSystem || r.isSystem,
-        onChainId: meta.onChainId ?? r.onChainId,
+        // The projection copies the `OnChainId` triple from the shared ontology
+        // graph, which holds every network's claims: show it only when this
+        // chain proves it, else the row's own binding.
+        onChainId: (meta.onChainId !== undefined
+          && this.provenOnChainContextGraphClaim(r.id, meta.onChainId) !== null
+          ? meta.onChainId
+          : undefined) ?? r.onChainId,
       };
     });
     rows = projectedRows.map((entry) => {

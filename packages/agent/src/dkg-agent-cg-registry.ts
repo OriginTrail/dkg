@@ -402,6 +402,8 @@ import {
 } from './context-graph-registration-read-plan.js';
 
 const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
+/** Ontology `ContextGraphOnChainId` claims read for one subject: one per network is plenty. */
+const ONTOLOGY_ON_CHAIN_ID_CLAIMS_READ_MAX = 16;
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
 export type ContextGraphRegistrationBinding =
@@ -1509,22 +1511,107 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     );
     if (currentBinding !== undefined) return currentBinding;
 
+    // The ontology graph holds every creator's claim from every network, so a
+    // subject can carry several. Only the one this chain proves counts.
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } `
+        + `LIMIT ${ONTOLOGY_ON_CHAIN_ID_CLAIMS_READ_MAX}`,
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',
       },
     );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-    const value = result.bindings[0]?.['id'];
-    if (typeof value !== 'string') return null;
-    const onChainId = value.replace(/^"|"$/g, '');
-    return isCanonicalAuthoritativeContextGraphId(onChainId)
-      ? { onChainId, provenance: 'ontology' }
+    if (result.type !== 'bindings') return null;
+    for (const binding of result.bindings) {
+      const value = binding['id'];
+      if (typeof value !== 'string') continue;
+      const proven = this.provenOnChainContextGraphClaim(contextGraphId, value.replace(/^"|"$/g, ''));
+      if (proven !== null) return { onChainId: proven.onChainId, provenance: 'ontology' };
+    }
+    return null;
+  }
+
+  /**
+   * The binding an off-chain claim names, when this node's own chain proves
+   * it; otherwise null.
+   *
+   * An off-chain statement that a Context Graph id is on-chain id N is a
+   * claim. The `ontology` system graph is shared by every network and
+   * deployment, so it carries every creator's `dkg:ContextGraphOnChainId`
+   * from every chain. A claim holds only when slot N on this chain commits
+   * the id's name commitment, keccak256(utf8(id)): the check the policy read
+   * and random sampling already apply to a local binding. The committed hash
+   * is one this node read from its own chain (storage enumeration, the live
+   * event tail, or the enumeration checkpoint), so no RPC is spent here. A
+   * slot this node has no facts for, including one this chain does not have,
+   * proves nothing.
+   */
+  provenOnChainContextGraphClaim(
+    this: DKGAgent,
+    contextGraphId: string,
+    claimedOnChainId: string,
+  ): { onChainId: string; onChainHash: string } | null {
+    if (!isCanonicalAuthoritativeContextGraphId(claimedOnChainId)) return null;
+    // `?.`: shared read paths also run on the partial agents unit fixtures build.
+    const committed = this.onChainContextGraphFacts?.get(claimedOnChainId)?.nameHash;
+    if (typeof committed !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(committed)) return null;
+    return this.contextGraphIdCommitsTo(contextGraphId, committed)
+      ? { onChainId: claimedOnChainId, onChainHash: committed.toLowerCase() }
       : null;
+  }
+
+  /**
+   * Whether `nameHash` is this local id's on-chain name commitment: the
+   * keccak of a cleartext id, or the id itself for a row keyed by its wire id
+   * (`localContextGraphIdMatchesCommittedNameHash`, through the agent's own
+   * commitment derivation).
+   */
+  contextGraphIdCommitsTo(this: DKGAgent, contextGraphId: string, nameHash: string): boolean {
+    const committed = nameHash.toLowerCase();
+    return this.contextGraphNameCommitment(contextGraphId) === committed
+      || (this.isWireIdKeyedSubscription(contextGraphId) && contextGraphId.toLowerCase() === committed);
+  }
+
+  /**
+   * Clear every binding to `onChainId` that this chain refutes, now that the
+   * slot's committed name hash is known. Returns the ids it unbound.
+   *
+   * Store discovery used to bind every ontology claim unchecked, and a Core
+   * auto-subscribes what it discovers and persists the binding, so upgraded
+   * nodes restore other networks' graphs under this chain's ids. Such a
+   * binding can only fail: RFC-64 rejects its evidence as an invalid
+   * identity, a reverse lookup of the id can return it instead of the graph
+   * the slot names, and every authority read of it fails closed as a stale
+   * mapping. A row is refuted when neither keccak256(utf8(id)) nor the
+   * commitment it records is the slot's hash. Name-hash rows (a placeholder,
+   * or a row keyed by the committed hash itself) follow their own lifecycle
+   * and are never touched here, nor is a row keyed by the bare number: that
+   * is a `dkg subscribe N` row, which the on-chain id resolver retires as a
+   * whole while it is still bound to N.
+   */
+  clearRefutedOnChainContextGraphBindings(
+    this: DKGAgent,
+    onChainId: string,
+    committedNameHash: string,
+  ): string[] {
+    const committed = committedNameHash.toLowerCase();
+    const refuted: string[] = [];
+    for (const [localId, sub] of this.subscribedContextGraphs) {
+      if (sub.onChainId !== onChainId || localId === onChainId) continue;
+      if (localId.toLowerCase() === committed || this.isWireIdKeyedSubscription(localId)) continue;
+      if (sub.onChainHash !== undefined && this.contextGraphWireId(sub.onChainHash) === committed) continue;
+      if (this.contextGraphIdCommitsTo(localId, committed)) continue;
+      refuted.push(localId);
+    }
+    for (const localId of refuted) {
+      const sub = this.subscribedContextGraphs.get(localId);
+      if (sub === undefined) continue;
+      this.forceClearVmReconcileStateForContextGraph(localId);
+      this.setContextGraphSubscription(localId, { ...sub, onChainId: undefined, lastReconciledOrdinal: 0 });
+    }
+    return refuted;
   }
 
   /**

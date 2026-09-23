@@ -274,10 +274,10 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
   }
 
   /**
-   * The verified cleartext id this node already adopted for a hash-shaped id,
-   * or null. A row keyed by the literal id wins, so a hash-shaped cleartext id
-   * is never redirected. Durable rows count even while dormant, so the
-   * rehydration kill-switch does not break a `--save`d hash entry.
+   * The verified cleartext id this node holds for a hash-shaped id, or null.
+   * A row keyed by the literal id wins, so a hash-shaped cleartext id is never
+   * redirected. Durable rows count even while dormant, so the rehydration
+   * kill-switch does not break a `--save`d hash entry.
    */
   resolveContextGraphIdAlias(this: DKGAgent, contextGraphId: string): string | null {
     const nameHash = normalizeContextGraphNameHash(contextGraphId);
@@ -285,8 +285,8 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     if (this.subscribedContextGraphs.has(contextGraphId) || this.subscribedContextGraphs.has(nameHash)) {
       return null;
     }
-    const live = this.liveAdoptedContextGraphNameRow(nameHash);
-    if (live !== null) return live.contextGraphId;
+    const local = this.localContextGraphNamePreimage(nameHash);
+    if (local !== null) return local;
     const persisted = stateOf(this).persistedAliases.get(nameHash);
     return persisted !== undefined && verifyContextGraphNameCandidate(persisted, nameHash) === persisted
       ? persisted
@@ -350,6 +350,51 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
       || verifyContextGraphNameCandidate(mapped, nameHash) !== mapped
     ) return null;
     return { contextGraphId: mapped, subscription };
+  }
+
+  /**
+   * The cleartext row this node holds for a name hash: the row the reverse
+   * index maps the hash to, whose id is the hash's keccak preimage and which
+   * records no other commitment. Unlike a live adoption it may not be bound
+   * yet: a definition learned from the ontology graph before any chain lane
+   * reached its slot is still the graph the hash names, so subscribing by the
+   * hash must subscribe it rather than mint a second, empty row keyed by the
+   * hash (whose identity would be keccak256 of the hash string).
+   */
+  localContextGraphNamePreimage(this: DKGAgent, nameHash: string): string | null {
+    const mapped = this.wireIdToLocalCgId.get(nameHash);
+    if (mapped === undefined || mapped === nameHash) return null;
+    const subscription = this.subscribedContextGraphs.get(mapped);
+    if (
+      subscription === undefined
+      || (subscription.onChainHash !== undefined && this.contextGraphWireId(subscription.onChainHash) !== nameHash)
+    ) return null;
+    return verifyContextGraphNameCandidate(mapped, nameHash) === mapped ? mapped : null;
+  }
+
+  /**
+   * Adopt a cleartext id learned from the local store (a synced ontology
+   * definition) for the name-hash row it verifies, when the node wants that
+   * row (subscribed or hosted) and holds no row under the cleartext id yet.
+   * Adoption moves the member intent to the cleartext id and restarts sync
+   * there. Returns whether it adopted. Never throws.
+   */
+  async adoptWantedContextGraphNamePlaceholder(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    if (this.subscribedContextGraphs.has(contextGraphId)) return false;
+    const target = this.contextGraphNameTargetFor(this.contextGraphNameCommitment(contextGraphId));
+    if (target === null) return false;
+    const placeholder = this.subscribedContextGraphs.get(target.nameHash);
+    if (placeholder?.subscribed !== true && placeholder?.coreHosted !== true) return false;
+    try {
+      return await this.adoptVerifiedContextGraphCleartext(target, contextGraphId, 'local-store');
+    } catch (error: unknown) {
+      this.log.debug(
+        createOperationContext('system'),
+        `Adopting "${contextGraphId}" from the local store for ${target.nameHash.slice(0, 18)}… failed: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   /** Remember durable aliases (called by rehydration with every persisted row). */
