@@ -2284,9 +2284,10 @@ describe('resolveApprovalPolicy (YAML/JSON config → runtime ApprovalPolicy)', 
 
   it('warns only when replenishing relies on the changed implicit ceiling', () => {
     const warning = approvalPolicyMigrationWarning({ mode: 'replenishing' });
-    expect(warning).toContain('10.0.17');
     expect(warning).toContain('20x the triggering publish cost');
     expect(warning).toContain('legacy flat 1000 TRAC ceiling');
+    expect(warning).toContain('targetAllowance explicitly to retain a flat ceiling');
+    expect(warning).toContain('targetAllowanceMultiple to keep relative sizing');
     expect(approvalPolicyMigrationWarning({
       mode: 'replenishing',
       refillBelowFraction: 0.25,

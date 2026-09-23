@@ -894,6 +894,7 @@ Configuration (defaults shown):
 
 ```yaml
 chain:
+  finalityConfirmations: 1         # the node's finality depth; 1 = head, no reorg buffer
   approvalPolicy:
     mode: per-publish              # per-publish | replenishing | unlimited
     targetAllowanceMultiple: 20    # replenishing: integer >= 1
@@ -909,7 +910,7 @@ In `replenishing`, `target = publishCost × targetAllowanceMultiple` and `thresh
 
 Only repeated sharp price increases approach per-publish gas: at the defaults, each publish rising roughly 10× above the one that last set the ceiling can require another approval. A wide spread alone does not; after an expensive refill, alternating or descending cheaper publishes continue using its larger allowance. One expensive outlier can therefore leave much more standing exposure than usual.
 
-Set string-valued `targetAllowance` for an absolute TRAC ceiling; it overrides the multiple and preserves legacy explicit configs. In 10.0.17, a mode-only `replenishing` config instead changes from the former implicit 1000 TRAC ceiling to relative 20× sizing and emits a startup warning. Mode shorthand such as `approvalPolicy: unlimited` is accepted, but use the object form for sizing fields.
+Set string-valued `targetAllowance` for an absolute TRAC ceiling; it overrides the multiple and preserves legacy explicit configs. A mode-only `replenishing` config, which used to mean an implicit flat 1000 TRAC ceiling, now uses relative 20× sizing and logs a startup warning. Mode shorthand such as `approvalPolicy: unlimited` is accepted, but use the object form for sizing fields.
 
 The policy never approves less than the immediate publish floor. `refillBelowFraction` must be within `[0, 1]`; `1` refills every publish, while `0` waits until the publish floor is breached. A zero-cost CG uses the on-chain 1 wei-TRAC floor, so default `replenishing` approves 20 wei-TRAC once and, because nothing is spent, does not approve again.
 

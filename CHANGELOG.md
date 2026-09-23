@@ -4,6 +4,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Upgrading from 10.0.18
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Mode-only `replenishing` approval configs use a relative ceiling | When `chain.approvalPolicy.mode` is `replenishing` and neither sizing field is set, the implicit ceiling changes from a flat 1000 TRAC to 20 times the triggering publish cost. This can lower or raise the standing allowance depending on publish cost; startup emits a warning for this exact legacy shape | Set `targetAllowance: '1000000000000000000000'` to retain the former flat 1000 TRAC ceiling, or set `targetAllowanceMultiple` explicitly to adopt relative sizing |
+
 ### Fixed
 
 - **Random Sampling resolves the challenged Context Graph by its chain name
@@ -196,7 +202,6 @@ registry changes are required.**
 | Shared RPC admission is enabled by default | A node is capped at 10 requests/s by default; background RFC-64 work receives at most 20% of that sustained capacity, while foreground publishing and control operations can use the full process budget | Keep the defaults initially. Tune `chain.rpcRequestBudget` only from measured provider capacity and node telemetry |
 | Registry discovery is live-first and resumable | New Context Graph registrations remain current while historical verification advances in bounded background slices instead of replaying the full registry after restart | No migration action. Preserve the node data directory so both live and repair checkpoints survive restart |
 | RFC-64 rollout controls are restart-stable | Omission still selects `catalog`; operators can instead choose a legacy default, per-CG `shadow` or `catalog` overrides, or a global kill switch | Leave the block omitted for the normal RFC-64 default. Use bounded overrides only for staged rollout or rollback |
-| Mode-only `replenishing` approval configs use a relative ceiling | When `chain.approvalPolicy.mode` is `replenishing` and neither sizing field is set, the implicit ceiling changes from a flat 1000 TRAC to 20 times the triggering publish cost. This can lower or raise the standing allowance depending on publish cost; startup emits a warning for this exact legacy shape | Set `targetAllowance: '1000000000000000000000'` to retain the former flat 1000 TRAC ceiling, or set `targetAllowanceMultiple` explicitly to adopt relative sizing |
 | Daemon SQLite advances to schema v36 | One opaque authority-index checkpoint is stored per physical deployment scope | No manual migration is required; normal daemon startup performs the schema upgrade |
 
 ### Added

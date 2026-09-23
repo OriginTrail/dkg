@@ -1451,8 +1451,9 @@ export function resolveApprovalPolicy(
 
 /**
  * Operator-visible migration warning for the one replenishing-policy shape
- * whose meaning changes in 10.0.17. An explicit absolute target preserves the
- * legacy ceiling; an explicit multiple opts into the new relative ceiling.
+ * whose meaning changed when relative sizing replaced the flat 1000 TRAC
+ * default. An explicit absolute target preserves the legacy ceiling; an
+ * explicit multiple opts into the new relative ceiling.
  */
 export function approvalPolicyMigrationWarning(
   policy: ApprovalPolicyConfig | undefined,
@@ -1467,9 +1468,10 @@ export function approvalPolicyMigrationWarning(
   const legacyTrac = DEFAULT_REPLENISH_TARGET_ALLOWANCE / (10n ** 18n);
   return (
     '[warn] chain.approvalPolicy mode=replenishing has no targetAllowance or '
-    + `targetAllowanceMultiple. In 10.0.17 this uses ${DEFAULT_REPLENISH_TARGET_MULTIPLE}x `
+    + `targetAllowanceMultiple, so it now approves ${DEFAULT_REPLENISH_TARGET_MULTIPLE}x `
     + `the triggering publish cost instead of the legacy flat ${legacyTrac.toString()} TRAC `
-    + 'ceiling. Set chain.approvalPolicy.targetAllowance explicitly to retain a flat ceiling.'
+    + 'ceiling. Set chain.approvalPolicy.targetAllowance explicitly to retain a flat ceiling, '
+    + 'or targetAllowanceMultiple to keep relative sizing.'
   );
 }
 
