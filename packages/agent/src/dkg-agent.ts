@@ -1500,6 +1500,7 @@ export class DKGAgent extends DKGAgentBase {
       announceAddresses: config.announceAddresses,
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
+      otherNetworkRelays: config.otherNetworkRelays,
       enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,
       privateKey: keypair.secretKey,
       nodeRole,
