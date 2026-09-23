@@ -210,8 +210,14 @@ test('repository workflows expose one canonical protected-history controller pin
   ]);
   assert.equal(result.ref, CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 4);
-  assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/plan-ci.mjs'));
-  assert.equal(CONTROLLER_POLICY_FILES.length, 4);
+  // The security-reviewed controller boundary, file by file.
+  assert.deepEqual([...CONTROLLER_POLICY_FILES].sort(), [
+    'scripts/ci/assert-ci-results.mjs',
+    'scripts/ci/plan-ci.mjs',
+    'scripts/lib/ci-delta.mjs',
+    'scripts/lib/ci-results.mjs',
+    'scripts/lib/ci-routing.mjs',
+  ]);
   assert.equal(CONTROLLER_POLICY_FILES.includes('scripts/ci/inspect-ci-policy.mjs'), false);
   assert.equal(
     CONTROLLER_POLICY_FILES.includes('scripts/ci/enforce-zizmor-sarif.mjs'),

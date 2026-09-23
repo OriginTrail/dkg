@@ -105,6 +105,7 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
       - name: Compute fail-closed CI plan
         id: plan
@@ -1582,6 +1583,7 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
       - name: Require selected Windows lifecycle tests
         env:

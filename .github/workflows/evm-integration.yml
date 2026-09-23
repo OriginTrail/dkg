@@ -48,6 +48,7 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
       - name: Compute fail-closed EVM plan
         id: plan
@@ -212,6 +213,7 @@ jobs:
             scripts/ci/assert-ci-results.mjs
             scripts/lib/ci-delta.mjs
             scripts/lib/ci-results.mjs
+            scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
       - name: Verify selected EVM scopes completed
         env:
