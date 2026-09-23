@@ -773,6 +773,44 @@ describe('dkg status against the status route', () => {
       await closeServer(server);
     }
   });
+
+  it('shows a store that never answers the check as NOT RESPONDING, without a count', async () => {
+    let counts = 0;
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      if (isAsk(sparql)) return new Promise<unknown>(() => {});
+      counts += 1;
+      return COUNT_66;
+    });
+
+    try {
+      // The daemon waits five seconds for the check, and the CLI waits for it.
+      expect(await runStatusCommand(baseUrl)).toMatch(/— NOT RESPONDING$/m);
+      expect(counts).toBe(0);
+    } finally {
+      await closeServer(server);
+    }
+  }, 30_000);
+
+  it('shows a store that answers but whose count failed as reachable, count failed', async () => {
+    let counts = 0;
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      if (isAsk(sparql)) return ASK_TRUE;
+      counts += 1;
+      throw new Error('COUNT timed out');
+    });
+
+    try {
+      expect(await runStatusCommand(baseUrl)).toContain('— CHECKING');
+      await nextTick();
+
+      // The next run asks again for the failed count; the daemon still has
+      // the failure cached, so no second COUNT starts.
+      expect(await runStatusCommand(baseUrl)).toMatch(/— reachable, count failed$/m);
+      expect(counts).toBe(1);
+    } finally {
+      await closeServer(server);
+    }
+  });
 });
 
 describe('/api/status store reachability check', () => {

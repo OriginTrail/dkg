@@ -141,6 +141,25 @@ describe('probeExternalStore', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('keeps each store\'s probe apart: another store is asked, and answers, on its own', async () => {
+    const stalled = deferred<unknown>();
+    const first = agentAnswering(() => stalled.promise);
+    const second = agentAnswering(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:7890');
+    });
+
+    await expect(probeExternalStore(first.agent, 10)).resolves.toBe('no-answer');
+    // The first store's probe is still running; the second store gets its own.
+    await expect(probeExternalStore(second.agent, 10)).resolves.toBe('unreachable');
+    expect(first.calls).toHaveLength(1);
+    expect(second.calls).toHaveLength(1);
+
+    // The first store's late answer is its own: the second store still fails.
+    stalled.resolve({ type: 'boolean', value: true });
+    await expect(probeExternalStore(first.agent, 10)).resolves.toBe('reachable');
+    await expect(probeExternalStore(second.agent, 10)).resolves.toBe('unreachable');
+  });
+
   it('runs one probe for concurrent callers', async () => {
     const answer = deferred<unknown>();
     const { agent, calls } = agentAnswering(() => answer.promise);
