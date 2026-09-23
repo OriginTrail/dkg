@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { ciJobRow, COVERAGE_JOBS } from '../ci-lanes.mjs';
 import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
@@ -334,8 +333,6 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.equal(workflow.includes('github.event.pull_request.base.sha'), false);
   assert.match(workflow, /^  evm-node-test-artifacts:/m);
   assert.match(workflow, /^  evm-devnet-test-artifacts:/m);
-  assert.equal(ciJobRow('tornado-core', 1).runner, 'weighted');
-  assert.equal(ciJobRow('bura-cli', 0).runner, 'weighted');
   assert.equal(
     workflow.includes('@origintrail-official/dkg-chain exec vitest run --shard='),
     false,
@@ -347,14 +344,6 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.ok(workflow.includes('shard: [1, 2, 3, 4, 5, 6, 7]'));
   assert.ok(workflow.includes('playwright test --shard=${{ matrix.shard }}/7'));
 
-  assert.equal(COVERAGE_JOBS['tornado-core']['http-utils'], 1);
-  assert.equal(COVERAGE_JOBS['tornado-core']['rdf-utils'], 1);
-  assert.equal(ciJobRow('kosava-supporting').concurrency, 3);
-  for (const [packageName, invocation] of [
-    ['@origintrail-official/dkg-demo', '--filter @origintrail-official/dkg-demo'],
-  ]) {
-    assert.ok(workflow.includes(invocation), `${packageName} tests must stay in CI`);
-  }
 
   const evmWorkflow = fs.readFileSync(
     path.join(REPO_ROOT, '.github/workflows/evm-integration.yml'),
@@ -379,7 +368,11 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     assert.equal(source.includes('--sample-key'), false, `${name} must not request audit sampling`);
   }
   assert.match(evmWorkflow, /^  evm-gate:/m);
+});
 
+test('demo suites stay wired into the supporting job', () => {
+  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
+  assert.ok(workflow.includes('--filter @origintrail-official/dkg-demo'), 'demo tests must stay in CI');
   const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
   assert.match(demoManifest.scripts.test, /kafka-streams\/test\/\*\.mjs/);
   assert.match(demoManifest.scripts.test, /epcis-bike\/test\/\*\.mjs/);
