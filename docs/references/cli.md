@@ -137,7 +137,10 @@ itself never becomes a subscription. An id that does not exist, a deactivated
 graph, a graph without a name hash, and a private graph are refused with the
 reason. `--save` stores the name hash or the verified id, not the number. A
 `#` needs quoting in most shells, and `32` alone still means the existing
-subscription literally named "32" if there is one.
+subscription literally named "32" if there is one. `POST
+/api/context-graph/unsubscribe` and `dkg context-graph catchup-status` accept
+the same on-chain ids; unsubscribing one that is not subscribed on the node
+answers 404 `CONTEXT_GRAPH_NOT_SUBSCRIBED`.
 
 Core nodes temporarily retain automatic subscription for newly discovered
 graphs because they are responsible for Storage ACK custody and the independent
