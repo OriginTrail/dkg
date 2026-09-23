@@ -94,6 +94,8 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+  contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -1510,16 +1512,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     );
     if (currentBinding !== undefined) return currentBinding;
 
-    // The ontology graph holds every creator's claim from every network, so a
-    // subject can carry any number of them. Only a claim this chain proves
+    // The durable RDF binding: ontology for a public graph, the graph's own
+    // `_meta` for a curated one (reported with the same provenance). Both are
+    // claims: the ontology graph holds every creator's from every network,
+    // so a subject can carry any number of them, and `_meta` receives what
+    // earlier builds left in the ontology. Only a claim this chain proves
     // counts, so ask for exactly those: how many other claims exist cannot
     // push the proven one out of the answer.
     const provenIds = this.provenOnChainIdsFor(contextGraphId);
     if (provenIds.length === 0) return null;
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } `
+      `SELECT ?id WHERE { `
+        + `VALUES ?g { <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> <${contextGraphMetaGraphUri(contextGraphId)}> } `
+        + `GRAPH ?g { <${contextGraphDataGraphUri(contextGraphId)}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?id } `
         + `FILTER(STR(?id) IN (${provenIds.map((id) => sparqlString(id)).join(', ')})) } LIMIT 1`,
       {
         signal: options.signal,
@@ -2345,14 +2350,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const gm = new GraphManager(this.store);
     gm.assertNewContextGraphId(opts.id);
     const contextGraphUri = contextGraphDataGraphUri(opts.id);
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
     // Curated CGs write definition triples to _meta so they stay invisible
     // to other nodes that sync ONTOLOGY. Open CGs go to ONTOLOGY for
     // network-wide discovery.
-    const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
+    const defGraph = contextGraphMetadataHomeGraph(opts.id, { curated: opts.curated === true });
 
     // No creator/curator triples here — bootstrap is a subscriber-style
     // path. Ownership is established only when a node explicitly calls
