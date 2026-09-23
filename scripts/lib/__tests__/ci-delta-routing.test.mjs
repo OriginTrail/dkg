@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { CI_LANES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, planCi } from '../ci-delta.mjs';
+import { CI_LANES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, needsSharedBuild, planCi } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS, validatePrimaryResults } from '../ci-results.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 import {
@@ -181,7 +181,7 @@ test('repository support paths route to the lanes that execute them', () => {
   ]) {
     const plan = pullRequestPlan([change(filePath)]);
     assert.equal(plan.mode, 'delta', filePath);
-    assert.equal(plan.runNode, true, `${filePath} still needs the shared build checks`);
+    assert.equal(needsSharedBuild(plan), true, `${filePath} still needs the shared build checks`);
     assert.deepEqual(selectedLanes(plan), expected, filePath);
     assert.deepEqual(plan.evmScopes, [], filePath);
   }
@@ -326,7 +326,7 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
   // checks; full plans always include the lane.
   const harness = pullRequestPlan([change('devnet/rfc64-persistence-lifecycle/verify.ts')]);
   assert.deepEqual(selectedLanes(harness), ['tornado_agent', 'tornado_agent_windows']);
-  assert.equal(harness.runNode, true);
+  assert.equal(needsSharedBuild(harness), true);
   assert.equal(planCi({ eventName: 'push' }).lanes.tornado_agent_windows, true);
 });
 

@@ -66,11 +66,13 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   harnesses have no Linux equivalent, so it runs for the whole agent closure.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
-  selected job was accidentally skipped, failed, or was cancelled. The primary
-  gate also requires the shared build to run exactly when a Node lane needs it
-  or the plan explicitly declares `buildChecks` (repository paths whose only CI
-  consumer is the build job's own checks), so a plan that forgot its lanes
-  cannot pass on the build alone.
+  selected job was accidentally skipped, failed, or was cancelled. The shared
+  build is required when a Node lane needs it or the plan declares
+  `buildChecks` (repository paths whose only CI consumer is the build job's own
+  checks). One function, `needsSharedBuild`, decides this for both the build
+  job's `run_node` condition and the primary gate, so the two cannot disagree;
+  a delta plan that selects no lane and no build checks fails closed to full
+  CI.
 - CI controller changes use a two-phase rollout. The controller implementation
   lands first while every workflow remains pinned to an immutable SHA already
   present on protected `main` or `testnet-canary` history. Only a follow-up PR

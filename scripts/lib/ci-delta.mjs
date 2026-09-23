@@ -37,8 +37,9 @@ export const SELF_BUILDING_LANES = Object.freeze(['tornado_agent_windows', 'bura
 const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
 
 // Whether a plan must run the shared build job: a selected lane consumes its
-// outputs, or the plan declared the build job's own repository checks. The
-// planner derives runNode from it and the aggregate gate checks against it.
+// outputs, or the plan declared the build job's own repository checks. This is
+// the only derivation: githubOutputsForPlan emits the build job's run_node
+// condition from it and the aggregate gate requires the build from it.
 export function needsSharedBuild(plan) {
   return plan.buildChecks === true || NODE_LANES.some((lane) => plan.lanes?.[lane] === true);
 }
@@ -418,7 +419,6 @@ function fullPlan({
   return {
     mode: 'full',
     fullCi: true,
-    runNode: true,
     buildChecks: false,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
@@ -840,7 +840,6 @@ export function planCi({
     return {
       mode: 'docs-only',
       fullCi: false,
-      runNode: false,
       buildChecks: false,
       abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
       lanes: emptyLanes(),
@@ -884,16 +883,13 @@ export function planCi({
   if (lanes.tornado_agent) lanes.tornado_agent_windows = true;
 
   const deduplicatedReasons = [...new Set(reasons)];
-  const runNode = needsSharedBuild({ lanes, buildChecks });
-  const selfBuildingLane = SELF_BUILDING_LANES.some((lane) => lanes[lane]);
-  if (!runNode && !selfBuildingLane && !lanes.contracts && evmScopes.size === 0) {
+  if (!buildChecks && !CI_LANES.some((lane) => lanes[lane]) && evmScopes.size === 0) {
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
   }
 
   return {
     mode: 'delta',
     fullCi: false,
-    runNode,
     buildChecks,
     abiFreshnessRelevant: solidityRelevance.abiFreshnessRelevant,
     lanes,
@@ -908,7 +904,6 @@ export function githubOutputsForPlan(plan) {
   const gatePlan = {
     mode: plan.mode,
     fullCi: plan.fullCi,
-    runNode: plan.runNode,
     buildChecks: plan.buildChecks,
     abiFreshnessRelevant: plan.abiFreshnessRelevant,
     lanes: plan.lanes,
@@ -916,7 +911,7 @@ export function githubOutputsForPlan(plan) {
   };
   return {
     full_ci: String(plan.fullCi),
-    run_node: String(plan.runNode),
+    run_node: String(needsSharedBuild(plan)),
     node_test_artifacts: String(needsNodeTestArtifacts(plan)),
     abi_freshness: String(plan.abiFreshnessRelevant),
     ...Object.fromEntries(CI_LANES.map((lane) => [lane, String(plan.lanes[lane])])),
