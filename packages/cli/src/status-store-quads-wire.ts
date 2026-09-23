@@ -25,6 +25,8 @@ export interface StoreQuadsStatusFields {
   storeQuadsStatus?: StoreQuadsStatus;
   /** Age of the cached result on the daemon's clock; null when there is none or it is unknown. */
   storeQuadsAgeMs?: number | null;
+  /** Whether a count is running in the background, to replace the reported result. */
+  storeQuadsRefreshing?: boolean;
 }
 
 const INCLUDE_STORE_QUADS_PARAM = 'includeStoreQuads';

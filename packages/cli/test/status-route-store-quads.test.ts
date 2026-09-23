@@ -77,6 +77,9 @@ function nextTick(): Promise<void> {
 async function startStatusServer(
   query: () => Promise<unknown>,
   store: StoreConfig = SPARQL_HTTP_STORE,
+  // Yield to the event loop inside the route, as the real status blocks do
+  // with I/O, so a count can settle between the snapshot and the reply.
+  { yieldBeforeReply = false }: { yieldBeforeReply?: boolean } = {},
 ): Promise<{
   server: Server;
   baseUrl: string;
@@ -109,6 +112,14 @@ async function startStatusServer(
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
+        ...(yieldBeforeReply
+          ? {
+              getFinalizationRecoveryHealth: async () => {
+                await nextTick();
+                return { available: false };
+              },
+            }
+          : {}),
       },
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
@@ -131,6 +142,7 @@ interface StatusBody {
   storeQuads: number | null;
   storeQuadsStatus?: string;
   storeQuadsAgeMs?: number | null;
+  storeQuadsRefreshing?: boolean;
 }
 
 async function fetchStatus(baseUrl: string, includeStoreQuads = false): Promise<{
@@ -181,6 +193,7 @@ describe('/api/status external-store quad count', () => {
             storeQuads: null,
             storeQuadsStatus: 'not-requested',
             storeQuadsAgeMs: null,
+            storeQuadsRefreshing: false,
           },
         });
       }
@@ -239,7 +252,12 @@ describe('/api/status external-store quad count', () => {
       expect(immediate).not.toBe(timeout);
       expect(immediate).toMatchObject({
         status: 200,
-        body: { storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null },
+        body: {
+          storeQuads: null,
+          storeQuadsStatus: 'pending',
+          storeQuadsAgeMs: null,
+          storeQuadsRefreshing: true,
+        },
       });
       expect(queryCalls).toBe(1);
     } finally {
@@ -265,6 +283,7 @@ describe('/api/status external-store quad count', () => {
         storeQuads: null,
         storeQuadsStatus: 'pending',
         storeQuadsAgeMs: null,
+        storeQuadsRefreshing: true,
       });
       expect(queryCalls).toBe(1);
 
@@ -272,7 +291,11 @@ describe('/api/status external-store quad count', () => {
       await nextTick();
 
       const settled = await fetchStatus(baseUrl);
-      expect(settled.body).toMatchObject({ storeQuads: 66, storeQuadsStatus: 'ready' });
+      expect(settled.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsStatus: 'ready',
+        storeQuadsRefreshing: false,
+      });
       expect(queryCalls).toBe(1);
     } finally {
       countResult.resolve({ type: 'bindings', bindings: [] });
@@ -367,6 +390,36 @@ describe('/api/status external-store quad count', () => {
     }
   });
 
+  it('reports a recount it started as refreshing even when the count settles before the reply', async () => {
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return COUNT_66;
+    }, SPARQL_HTTP_STORE, { yieldBeforeReply: true });
+    const countedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(countedAt);
+
+    try {
+      await fetchStatus(baseUrl, true);
+      await nextTick();
+      expect(queryCalls).toBe(1);
+
+      // Past the cache TTL: this request starts a recount, which settles while
+      // the route is still building the rest of the reply.
+      clock.mockReturnValue(countedAt + 60_000);
+      const requested = await fetchStatus(baseUrl, true);
+      expect(queryCalls).toBe(2);
+      expect(requested.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsStatus: 'ready',
+        storeQuadsAgeMs: 60_000,
+        storeQuadsRefreshing: true,
+      });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it('omits count status and age for a local backend, even when a count is requested', async () => {
     let queryCalls = 0;
     const { server, baseUrl } = await startStatusServer(async () => {
@@ -379,6 +432,7 @@ describe('/api/status external-store quad count', () => {
         expect(response.body).toMatchObject({ storeUrl: null, storeQuads: null });
         expect(response.body).not.toHaveProperty('storeQuadsStatus');
         expect(response.body).not.toHaveProperty('storeQuadsAgeMs');
+        expect(response.body).not.toHaveProperty('storeQuadsRefreshing');
       }
       expect(queryCalls).toBe(0);
     } finally {
@@ -415,6 +469,7 @@ describe('/api/status external-store quad count', () => {
       expect(fresh.body.storeQuadsStatus).toBe('ready');
       expect(fresh.body.storeQuadsAgeMs).toBeGreaterThanOrEqual(0);
       expect(fresh.body.storeQuadsAgeMs).toBeLessThan(30_000);
+      expect(fresh.body.storeQuadsRefreshing).toBe(false);
       expect(queryCalls).toBe(1);
 
       const staleNow = Date.now() + 30_001;
@@ -428,6 +483,8 @@ describe('/api/status external-store quad count', () => {
       expect(firstStale.body.storeQuadsStatus).toBe('ready');
       expect(secondStale.body.storeQuadsStatus).toBe('ready');
       expect(firstStale.body.storeQuadsAgeMs).toBeGreaterThanOrEqual(30_001);
+      expect(firstStale.body.storeQuadsRefreshing).toBe(true);
+      expect(secondStale.body.storeQuadsRefreshing).toBe(true);
       expect(queryCalls).toBe(2);
 
       staleRefresh.reject(new Error('store unavailable'));
@@ -437,6 +494,7 @@ describe('/api/status external-store quad count', () => {
       expect(afterFailure.body.storeQuads).toBeNull();
       expect(afterFailure.body.storeQuadsStatus).toBe('unreachable');
       expect(afterFailure.body.storeQuadsAgeMs).toBe(0);
+      expect(afterFailure.body.storeQuadsRefreshing).toBe(false);
       expect(queryCalls).toBe(2);
     } finally {
       firstCount.resolve({ type: 'bindings', bindings: [] });
@@ -513,11 +571,14 @@ describe('dkg status against the status route', () => {
       expect(queryCalls).toBe(1);
 
       clock.mockReturnValue(countedAt + 9 * 60_000);
-      expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 9m 0s ago)');
+      const nineMinutes = await runStatusCommand(baseUrl);
+      expect(nineMinutes).toContain('— 66 quads (checked 9m 0s ago)');
+      expect(nineMinutes).not.toContain('refreshing');
       expect(queryCalls).toBe(1);
 
+      // The daemon answers with the count it has while the recount runs.
       clock.mockReturnValue(countedAt + 10 * 60_000);
-      expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 10m 0s ago)');
+      expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 10m 0s ago), refreshing');
       expect(queryCalls).toBe(2);
     } finally {
       await closeServer(server);

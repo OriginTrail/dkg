@@ -669,11 +669,14 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
     const includeStoreQuads = parseIncludeStoreQuads(url.searchParams);
     const storeQuadsNow = Date.now();
-    const storeQuadsSnapshot = reportsExternalStoreQuads
+    // Projected at once, before the awaits below: `storeQuadsRefreshing` reads
+    // the in-flight count, which may settle meanwhile, and must describe the
+    // same moment as the count and age it accompanies.
+    const storeQuadsFields = storeQuadsStatusFields(reportsExternalStoreQuads
       ? includeStoreQuads
         ? getCachedExternalStoreQuads(agent, storeQuadsNow)
         : peekCachedExternalStoreQuads(storeQuadsNow)
-      : null;
+      : null);
     const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
@@ -760,7 +763,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // `storeQuadsStatus` says what a null count means ('not-requested',
       // 'pending', 'unreachable'); `storeQuadsAgeMs` is how old the cached
       // result is, since ordinary polling never refreshes it.
-      ...storeQuadsStatusFields(storeQuadsSnapshot),
+      ...storeQuadsFields,
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =

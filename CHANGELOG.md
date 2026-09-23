@@ -13,13 +13,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
   `dkg status` now requests a count itself (`?includeStoreQuads=true`) when
   none is cached, the last one failed, or the cached one is at least ten
   minutes old, so running it on a schedule against a healthy store starts at
-  most one full-store count per ten minutes. It shows `CHECKING` while the
-  first count runs and says how old a count is once it is more than a minute
-  old. `/api/status` reports a count nobody has requested as
-  `storeQuadsStatus: "not-requested"` and one in progress as `"pending"`
-  instead of omitting the status, and adds `storeQuadsAgeMs`, the age of the
-  cached count (null when unknown), which ordinary polling still never
-  refreshes.
+  most one full-store count per ten minutes. That bound needs a daemon that
+  reports the count's age: against a 10.0.7 to 10.0.18 daemon every run asks,
+  limited by that daemon's 30-second cache. It shows `CHECKING` while the
+  first count runs, says how old a count is once it is more than a minute
+  old, and marks a count that is being refreshed. `/api/status` reports a
+  count nobody has requested as `storeQuadsStatus: "not-requested"` and one
+  in progress as `"pending"` instead of omitting the status. It adds
+  `storeQuadsAgeMs`, the age of the cached count (null when unknown), which
+  ordinary polling still never refreshes, and `storeQuadsRefreshing`, true
+  while a count runs in the background.
 
 ## [10.0.18] - 2026-09-22
 
