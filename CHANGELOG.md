@@ -76,7 +76,9 @@ All notable changes to the DKG V10 node are documented here. The format is based
   remembers the cap per provider so later reads start there, and fails over
   without splitting when a provider refuses history, archive or plan-limited
   ranges. The event lanes still page 9,000 blocks and advance their cursor
-  only after a whole page succeeds.
+  only after a whole page succeeds. A provider's refusal is quoted in these
+  errors with every URL reduced to its host, so an API key in a configured
+  RPC URL does not reach logs or error messages.
 - **A curated StorageACK stores only a genuine catalog**: a Core that
   acknowledges a curated publish or update now requires the inline catalog to
   be exactly the graph's catalog entry, as the publisher's own partition

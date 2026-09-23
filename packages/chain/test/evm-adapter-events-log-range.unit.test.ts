@@ -238,3 +238,70 @@ describe('listenForEvents on the default Base RPC set', () => {
     expect(set.primary.logRanges()).toEqual([[HEAD - 1_000, HEAD]]);
   });
 });
+
+describe('listenForEvents keeps configured RPC URLs out of errors and logs', () => {
+  it('reports a non-JSON HTTP refusal from key-bearing endpoints by host only', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Two configured endpoints with keys in path and query. Fake values only.
+    const urls = [
+      'https://base-mainnet.rpc-provider.test/v2/FAKE-KEY-0123456789abcdef?apikey=FAKE-QUERY-KEY-1',
+      'https://base-backup.rpc-provider.test/FAKE-KEY-fedcba9876543210',
+    ];
+    // A gateway's HTML page, not JSON-RPC: ethers then embeds the full
+    // request URL in its own error message.
+    const archivePage = {
+      httpStatus: 403,
+      contentType: 'text/html',
+      rawBody: '<html><body><h1>403 Forbidden</h1>'
+        + '<p>Archive requests require an API key on this endpoint.</p></body></html>',
+    } as const;
+    const endpoints = urls.map((url) => fakeLogRpc({
+      url,
+      head: () => HEAD,
+      logs: () => LOGS,
+      refuse: () => archivePage,
+    }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapter: any = new EVMChainAdapter({
+      rpcUrl: urls[0]!,
+      rpcUrls: urls.slice(1),
+      privateKey: DEPLOYER_PK,
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'base:8453',
+      staticNetwork: false,
+    });
+    for (const unused of adapter.providers as ethers.JsonRpcProvider[]) unused.destroy();
+    adapter.providers = endpoints.map((endpoint) => endpoint.provider);
+    adapter.initialized = true;
+    adapter.init = async () => { adapter.initialized = true; };
+    adapter.contracts = {
+      contextGraphStorage: new ethers.Contract(CG_STORAGE, cgInterface, endpoints[0]!.provider),
+    };
+    const from = HEAD - 20_000 + 1;
+
+    const err = await collect(adapter as EVMChainAdapter, from, from + 8_999).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toContain(
+      'read failed on all configured RPC endpoints '
+        + '(base-mainnet.rpc-provider.test, base-backup.rpc-provider.test)',
+    );
+    expect(message).toContain(
+      `eth_getLogs [${from}, ${from + 8_999}] is beyond the history, archive or plan limit `
+        + 'at base-backup.rpc-provider.test: server response 403 Forbidden',
+    );
+    const printed = [...log.mock.calls, ...warn.mock.calls]
+      .map((call) => call.map(String).join(' '))
+      .join('\n');
+    for (const text of [message, printed]) {
+      expect(text).not.toMatch(/FAKE-KEY|FAKE-QUERY|\/v2\/|apikey=/);
+    }
+    // A history refusal costs each endpoint one request: never a split storm.
+    expect(endpoints.map((endpoint) => endpoint.logRanges())).toEqual([
+      [[from, from + 8_999]],
+      [[from, from + 8_999]],
+    ]);
+  });
+});

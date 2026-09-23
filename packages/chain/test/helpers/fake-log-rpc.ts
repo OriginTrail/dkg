@@ -27,6 +27,8 @@ export interface FakeRpcLog {
 /** How the endpoint answers one eth_getLogs, instead of serving logs. */
 export type FakeLogRpcRefusal =
   | { readonly rpcError: { readonly code: number; readonly message: string }; readonly httpStatus?: number }
+  /** An HTTP error whose body is not JSON-RPC at all (a gateway's HTML or text page). */
+  | { readonly rawBody: string; readonly httpStatus: number; readonly contentType?: string }
   | { readonly networkError: string };
 
 export interface FakeLogRpcRequest {
@@ -116,6 +118,14 @@ export function fakeLogRpc(options: FakeLogRpcOptions): FakeLogRpc {
     const refusal = options.refuse?.({ fromBlock, toBlock, head });
     if (refusal !== undefined) {
       if ('networkError' in refusal) throw new TypeError(refusal.networkError);
+      if ('rawBody' in refusal) {
+        return {
+          statusCode: refusal.httpStatus,
+          statusMessage: STATUS_TEXT[refusal.httpStatus] ?? 'Status',
+          headers: { 'content-type': refusal.contentType ?? 'text/plain' },
+          body: new TextEncoder().encode(refusal.rawBody),
+        };
+      }
       return respond(refusal.httpStatus ?? 200, {
         jsonrpc: '2.0',
         id: payload.id,

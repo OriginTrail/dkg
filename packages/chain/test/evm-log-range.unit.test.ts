@@ -44,9 +44,9 @@ const ALCHEMY_RESPONSE_SIZE = 'Log response size exceeded. You can make eth_getL
   + 'in the response.';
 
 /** The error ethers raises for one refused eth_getLogs, built by ethers itself. */
-async function ethersRefusal(refusal: FakeLogRpcRefusal): Promise<unknown> {
+async function ethersRefusal(refusal: FakeLogRpcRefusal, url = 'https://rpc.example'): Promise<unknown> {
   const rpc = fakeLogRpc({
-    url: 'https://rpc.example',
+    url,
     head: () => HEAD,
     refuse: () => refusal,
   });
@@ -568,6 +568,122 @@ describe('readAdaptiveEvmLogRange', () => {
     expect((err as Error).message).toBe(
       'eth_getLogs [1, 2] is beyond the history, archive or plan limit at the provider: '
         + 'Archive requests require a personal token',
+    );
+  });
+});
+
+describe('readAdaptiveEvmLogRange keeps configured RPC URLs out of its errors and logs', () => {
+  // A configured endpoint with a key in its path and its query. Fake values
+  // only; the shape is what operators paste from a provider dashboard.
+  const KEYED_URL = 'https://base-mainnet.rpc-provider.test/v2/FAKE-KEY-0123456789abcdef'
+    + '?apikey=FAKE-QUERY-KEY-fedcba';
+  const HOST = 'base-mainnet.rpc-provider.test';
+  const LEAK = /FAKE-KEY|FAKE-QUERY|\/v2\/|apikey=/;
+
+  /** The raw ethers error for one refused request, and the reader's error for the same range. */
+  async function refusedRead(refusal: FakeLogRpcRefusal, fromBlock: number, toBlock: number) {
+    const rpc = fakeLogRpc({ url: KEYED_URL, head: () => HEAD, refuse: () => refusal });
+    const read = (from: number, to: number) => rpc.provider.getLogs({ fromBlock: from, toBlock: to });
+    try {
+      const raw = await read(fromBlock, toBlock).catch((e: unknown) => e);
+      const err = await readAdaptiveEvmLogRange({ provider: rpc.provider, read, fromBlock, toBlock })
+        .catch((e: unknown) => e);
+      return { raw, err };
+    } finally {
+      rpc.provider.destroy();
+    }
+  }
+
+  it.each([
+    [
+      'an HTML 403 page refusing archive blocks',
+      {
+        httpStatus: 403,
+        contentType: 'text/html',
+        rawBody: '<html><head><title>403 Forbidden</title></head><body><h1>Forbidden</h1>'
+          + '<p>Archive requests require an API key on this endpoint.</p></body></html>',
+      },
+      1,
+      2_000,
+      'is beyond the history, archive or plan limit',
+    ],
+    [
+      'a text 400 refusing even one block',
+      { httpStatus: 400, rawBody: 'block range too large' },
+      7,
+      7,
+      'is refused even as a single block',
+    ],
+  ] as const)('reduces the request URL in %s to its host', async (_name, refusal, from, to, detail) => {
+    const { raw, err } = await refusedRead(refusal, from, to);
+
+    // The shape that leaked: for a body that is not JSON, ethers puts the full
+    // request URL (key included) in its own message, which the reader quoted.
+    expect((raw as Error).message).toContain(KEYED_URL);
+    expect(err).toBeInstanceOf(EvmLogRangeUnavailableError);
+    const message = (err as Error).message;
+    expect(message).not.toMatch(LEAK);
+    expect(message).toContain(
+      `eth_getLogs [${from}, ${to}] ${detail} at ${HOST}: server response ${refusal.httpStatus}`,
+    );
+    expect(message).toContain(`"requestUrl": "${HOST}"`);
+    // The provider's own error stays attached, unchanged, for diagnosis.
+    expect((err as { cause?: { code?: unknown } }).cause?.code).toBe('SERVER_ERROR');
+  });
+
+  it('logs a span cap learned from a non-JSON refusal by host only', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const rpc = fakeLogRpc({
+      url: KEYED_URL,
+      head: () => HEAD,
+      refuse: ({ fromBlock, toBlock }) => (
+        toBlock - fromBlock + 1 > 2_000
+          ? { httpStatus: 400, rawBody: 'eth_getLogs is limited to a 2,000 range' }
+          : undefined
+      ),
+    });
+    try {
+      await readAdaptiveEvmLogRange({
+        provider: rpc.provider,
+        read: (from, to) => rpc.provider.getLogs({ fromBlock: from, toBlock: to }),
+        fromBlock: 1,
+        toBlock: 4_000,
+      });
+      expect(rpc.logRanges()).toEqual([[1, 4_000], [1, 2_000], [2_001, 4_000]]);
+      expect(log.mock.calls.map((call) => call.map(String).join(' '))).toEqual([
+        `[chain] eth_getLogs span cap for ${HOST}: 2000 blocks (stated by the provider); `
+          + 'later log reads start at this span',
+      ]);
+    } finally {
+      rpc.provider.destroy();
+    }
+  });
+
+  it('classifies JSON-RPC refusals from a key-bearing endpoint exactly as before', async () => {
+    const cases: ReadonlyArray<readonly [FakeLogRpcRefusal, unknown]> = [
+      [BASE_SPAN_CAP_REFUSAL, { kind: 'span', maxBlocks: 2_000 }],
+      [{ ...BASE_SPAN_CAP_REFUSAL, httpStatus: 400 }, { kind: 'span', maxBlocks: 2_000 }],
+      [PUBLICNODE_ARCHIVE_REFUSAL, { kind: 'depth' }],
+      [{ ...PUBLICNODE_ARCHIVE_REFUSAL, httpStatus: 400 }, { kind: 'depth' }],
+      [DRPC_FREE_PLAN_REFUSAL, { kind: 'depth' }],
+    ];
+    for (const [refusal, expected] of cases) {
+      const err = await ethersRefusal(refusal, KEYED_URL);
+      expect(classifyEvmLogRangeLimitError(err, 9_000)).toEqual(expected);
+    }
+  });
+
+  it('quotes a JSON-RPC refusal in the provider\'s words, with any URL in them reduced to its host', async () => {
+    const drpc = await refusedRead(DRPC_FREE_PLAN_REFUSAL, 1, 2_000);
+    expect((drpc.err as Error).message).toBe(
+      `eth_getLogs [1, 2000] is beyond the history, archive or plan limit at ${HOST}: `
+        + 'ranges over 10000 blocks are not supported on free plan',
+    );
+
+    const publicnode = await refusedRead(PUBLICNODE_ARCHIVE_REFUSAL, 1, 2_000);
+    expect((publicnode.err as Error).message).toBe(
+      `eth_getLogs [1, 2000] is beyond the history, archive or plan limit at ${HOST}: `
+        + 'Archive requests require a personal token. Get one at: www.allnodes.com',
     );
   });
 });

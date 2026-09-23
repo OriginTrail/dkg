@@ -143,6 +143,23 @@ const PLAN_PATTERN = new RegExp([
 /** Any URL in error text (the request URL ethers embeds, a provider's sign-up link). */
 const URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/\S+/g;
 
+/**
+ * A URL as it appears inside a message, in any case: it ends at whitespace, a
+ * quote or an angle bracket, so the URL ethers quotes in its JSON detail
+ * (`"requestUrl": "https://…"`) is matched without the closing quote.
+ */
+const MESSAGE_URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+
+/**
+ * Every URL in `text` reduced to its host (`rpcHost`, the host-only rule the
+ * RPC failover logs follow). A configured RPC URL can carry an API key in its
+ * path or query, and ethers embeds the full request URL in the message of an
+ * HTTP-level error, so no URL may leave the reader except as a host.
+ */
+function hostOnly(text: string): string {
+  return text.replace(MESSAGE_URL_PATTERN, (url) => rpcHost(url));
+}
+
 function parseBlockCount(digits: string, thousands: string | undefined): number | undefined {
   const value = Number(digits.replace(/[,_]/g, '')) * (thousands === undefined ? 1 : 1_000);
   return Number.isSafeInteger(value) && value >= 1 ? value : undefined;
@@ -233,7 +250,9 @@ function providerHost(provider: object): string {
 /**
  * The provider's own words: the JSON-RPC `{ code, message }` ethers nests
  * under `error`, or the body of an HTTP-level refusal. Falls back to the
- * error's own message.
+ * error's own message — for a refusal whose body is not JSON, ethers' message,
+ * which embeds the full request URL. Every URL is reduced to its host either
+ * way, before the text is shortened.
  */
 function providerMessage(err: unknown): string {
   const seen = new Set<unknown>();
@@ -254,8 +273,9 @@ function providerMessage(err: unknown): string {
     }
     return undefined;
   };
-  const found = visit(err, 0)
-    ?? (err instanceof Error ? err.message : collectEvmErrorText(err));
+  const found = hostOnly(
+    visit(err, 0) ?? (err instanceof Error ? err.message : collectEvmErrorText(err)),
+  );
   return found.length > 300 ? `${found.slice(0, 300)}…` : found;
 }
 
