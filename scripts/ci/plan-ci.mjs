@@ -24,9 +24,8 @@ const { values } = parseArgs({
 
 if (!values.event) throw new Error('--event is required');
 
-const changeEntries = values['changes-z']
-  ? parseNameStatusZ(fs.readFileSync(values['changes-z']))
-  : [];
+const changes = values['changes-z'] ? fs.readFileSync(values['changes-z']) : Buffer.alloc(0);
+const changeEntries = parseNameStatusZ(changes);
 const labels = JSON.parse(values['labels-json']) ?? [];
 if (!Array.isArray(labels) || labels.some((label) => typeof label !== 'string')) {
   throw new TypeError('--labels-json must contain a JSON string array');
@@ -35,11 +34,15 @@ if (!Array.isArray(labels) || labels.some((label) => typeof label !== 'string'))
 // The workflow exports the candidate checkout and the two diffed commits as
 // environment variables (not flags, which an older pinned controller would
 // reject). Reading blobs is data-only: `git cat-file blob` applies no
-// filters and runs nothing from the merge candidate. The pair must be what
-// the workflow diffs, the checked-out candidate and its first parent; without
-// that, or without all three variables, the planner receives no reader and
-// every workspace manifest edit stays full.
-function manifestReaderFromEnvironment(environment) {
+// filters and runs nothing from the merge candidate. The head must be the
+// checked-out candidate, the base its first parent, and the change list being
+// routed exactly their `git diff --name-status -z`, as the workflows compute
+// it; otherwise, or without all three variables, the planner receives no
+// reader and every workspace manifest edit stays full. This keeps the
+// comparison consistent with the routed diff. It cannot defend against a
+// pull-request workflow that rewrites all of its own inputs, which could
+// narrow the plan without the reader; workflow edits route to full CI.
+function manifestReaderFromEnvironment(environment, routedChanges) {
   const repository = environment[MANIFEST_READER_ENV.repository];
   const commits = {
     base: environment[MANIFEST_READER_ENV.base],
@@ -54,6 +57,12 @@ function manifestReaderFromEnvironment(environment) {
   ).trim();
   try {
     if (revision('HEAD') !== commits.head || revision(`${commits.head}^1`) !== commits.base) return undefined;
+    const diff = execFileSync(
+      'git',
+      ['-C', repository, 'diff', '--name-status', '-z', commits.base, commits.head],
+      { maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    if (!diff.equals(routedChanges)) return undefined;
   } catch {
     return undefined;
   }
@@ -68,7 +77,7 @@ const plan = planCi({
   eventName: values.event,
   changeEntries,
   labels,
-  readManifest: manifestReaderFromEnvironment(process.env),
+  readManifest: manifestReaderFromEnvironment(process.env, changes),
 });
 
 if (values['github-output']) {
