@@ -25,6 +25,7 @@ import {
 import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { relocatePrivateContextGraphMetadata } from '../src/context-graph-metadata-relocation.js';
+import { replaceContextGraphMetadataFact } from '../src/context-graph-metadata-fact.js';
 
 const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 const ON_CHAIN_ID = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
@@ -251,6 +252,84 @@ function registrationGossip(bindings: ReadonlyArray<readonly [string, string]>):
     publisherSignatureVs: new Uint8Array(0),
   });
 }
+
+describe('each metadata writer follows the same placement', () => {
+  it('replaces a fact in the graphs it writes and clears it from ontology', async () => {
+    const id = '0xabc/replaced-fact';
+    const store = (await createAgent('replace-fact')).agent.store;
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await store.insert([bindingQuad(id, '1'), bindingQuad(id, '2', metaGraph)]);
+    const extra: Quad = {
+      subject: contextGraphDataGraphUri(id),
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
+      object: '"0xhash"',
+      graph: metaGraph,
+    };
+
+    await replaceContextGraphMetadataFact(store, id, {
+      predicate: ON_CHAIN_ID,
+      object: '"3"',
+      graphs: [metaGraph],
+      alsoInsert: [extra],
+    });
+
+    const rows = await store.query(`
+      SELECT ?g ?p ?o WHERE { GRAPH ?g { <${contextGraphDataGraphUri(id)}> ?p ?o } }
+    `);
+    expect(rows.type === 'bindings' ? rows.bindings.map((row) => `${row['g']} ${row['p']} ${row['o']}`).sort() : [])
+      .toEqual([
+        `${metaGraph} ${ON_CHAIN_ID} "3"`,
+        `${metaGraph} ${extra.predicate} "0xhash"`,
+      ].sort());
+  });
+
+  it('reconciles a late registration into _meta only for a curated graph, and into both for a public one', async () => {
+    const { agent, chain, ownerAddress } = await createAgent('reconcile-placement');
+    const createOnChain = chain.createOnChainContextGraph.bind(chain);
+    const ambiguous = new Error('receipt lookup failed after broadcast');
+    (agent as unknown as { registerContextGraphOnChain: unknown }).registerContextGraphOnChain =
+      vi.fn(async (params: Parameters<MockChainAdapter['createOnChainContextGraph']>[0]) => {
+        await createOnChain(params);
+        throw ambiguous;
+      });
+    await agent.createContextGraph({
+      id: 'reconciled-curated',
+      name: 'Late',
+      accessPolicy: 1,
+      allowedAgents: [ownerAddress],
+      callerAgentAddress: ownerAddress,
+    });
+    await agent.createContextGraph({ id: 'reconciled-public', name: 'Late open', callerAgentAddress: ownerAddress });
+
+    for (const id of ['reconciled-curated', 'reconciled-public']) {
+      await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress })).rejects.toBe(ambiguous);
+    }
+    const curated = await agent.registerContextGraph('reconciled-curated', { callerAgentAddress: ownerAddress });
+    const open = await agent.registerContextGraph('reconciled-public', { callerAgentAddress: ownerAddress });
+
+    expect(await ontologyRowsAbout(agent, 'reconciled-curated')).toEqual([]);
+    expect(await metaOnChainId(agent, 'reconciled-curated')).toBe(curated.onChainId);
+    expect(await ontologyRowsAbout(agent, 'reconciled-public')).toContain(`${ON_CHAIN_ID} "${open.onChainId}"`);
+    expect(await metaOnChainId(agent, 'reconciled-public')).toBe(open.onChainId);
+  });
+
+  it('chain discovery writes only the home graph: _meta for a curator’s curated graph, ontology for a public one', async () => {
+    const { agent, chain } = await createAgent('chain-placement');
+    const curator = '0x2222222222222222222222222222222222222222';
+    (agent as unknown as { defaultAgentAddress: string }).defaultAgentAddress = curator;
+    (chain as unknown as { listContextGraphsFromChain: unknown }).listContextGraphsFromChain = async () => ([
+      { contextGraphId: '601', name: 'chain-curated', creator: curator, accessPolicy: 1, blockNumber: 1, metadataRevealed: true },
+      { contextGraphId: '602', name: 'chain-public', creator: curator, accessPolicy: 0, blockNumber: 2, metadataRevealed: true },
+    ]);
+
+    await agent.discoverContextGraphsFromChain();
+
+    expect(await ontologyRowsAbout(agent, 'chain-curated')).toEqual([]);
+    expect(await metaOnChainId(agent, 'chain-curated')).toBe('601');
+    expect(await ontologyRowsAbout(agent, 'chain-public')).toEqual([`${ON_CHAIN_ID} "602"`]);
+    expect(await metaOnChainId(agent, 'chain-public')).toBeUndefined();
+  });
+});
 
 describe('durable on-chain id binding lookup', () => {
   it('reads the ontology copy, falls back to _meta, and prefers ontology when both exist', async () => {

@@ -95,6 +95,7 @@ import {
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
   contextGraphOnChainIdBindingQuery,
+  contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -2219,14 +2220,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const gm = new GraphManager(this.store);
     gm.assertNewContextGraphId(opts.id);
     const contextGraphUri = contextGraphDataGraphUri(opts.id);
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
     // Curated CGs write definition triples to _meta so they stay invisible
     // to other nodes that sync ONTOLOGY. Open CGs go to ONTOLOGY for
     // network-wide discovery.
-    const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
+    const defGraph = contextGraphMetadataHomeGraph(opts.id, { curated: opts.curated === true });
 
     // No creator/curator triples here — bootstrap is a subscriber-style
     // path. Ownership is established only when a node explicitly calls

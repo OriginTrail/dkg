@@ -21,6 +21,7 @@ import {
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   contextGraphOnChainIdBindingQuery,
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+  contextGraphMetadataHomeGraph,
   type OntologyBindingSlotClass,
   deriveCuratorDidFromCgId,
   MemoryLayer,
@@ -102,7 +103,7 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   isAllocatableKaAuthorV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import {
   normalizeContextGraphDiscoveryScan,
@@ -294,6 +295,7 @@ import {
   relocatePrivateContextGraphMetadata,
   type ContextGraphMetadataRelocationResult,
 } from './context-graph-metadata-relocation.js';
+import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -2884,33 +2886,21 @@ export class DKGAgent extends DKGAgentBase {
 
         // Persist the on-chain ID durably so the publisher's VM registration
         // guard can find it via RDF (it has no access to the in-memory
-        // subscribedContextGraphs map). A public graph's binding goes to the
-        // ontology graph; a curated graph's (only its curator gets here) stays
-        // in its own `_meta`, like the rest of its metadata.
-        const cgUri = contextGraphDataGraphUri(binding.name);
-        const ontoGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-        const bindingGraph = Number(p.accessPolicy) === 1
-          ? contextGraphMetaGraphUri(binding.name)
-          : ontoGraph;
+        // subscribedContextGraphs map). Only the metadata home gets it:
+        // ontology for a public graph, its own `_meta` for a curated one (only
+        // its curator gets here). A graph found on chain isn't held here, and
+        // any `_meta` row would make the relocation treat it as held.
         // Single-valued binding guard (RS heal): on-chain id is immutable; clear
         // any prior value so the cgId resolver / heal never read a multi-valued
         // (LIMIT-1-nondeterministic) binding.
         // Keep this durable write before in-memory catalogue mutation: cursor
         // pages are acked after this function returns, and an in-memory onChainId
         // alone must not make a retry skip the RDF binding.
-        for (const graph of new Set([ontoGraph, bindingGraph])) {
-          await deleteByPatternWithoutCount(this.store, {
-            graph,
-            subject: cgUri,
-            predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
-          });
-        }
-        await this.store.insert([{
-          subject: cgUri,
+        await replaceContextGraphMetadataFact(this.store, binding.name, {
           predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
           object: `"${binding.onChainId}"`,
-          graph: bindingGraph,
-        }]);
+          graphs: [contextGraphMetadataHomeGraph(binding.name, { curated: Number(p.accessPolicy) === 1 })],
+        });
 
         await this.recordDiscoveredContextGraphStrict(binding.name, {
           name: binding.name,
