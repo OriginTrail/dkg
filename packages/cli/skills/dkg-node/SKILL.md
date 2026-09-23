@@ -762,7 +762,7 @@ and does not promote, finalize, or publish.
 - `GET /api/connections` — transport details
 - `GET /api/wallets/balances` — TRAC and ETH balances
 - `GET /api/chain/rpc-health` (PUBLIC) — RPC health
-- `GET /api/identity` — node identity (DID, identity ID)
+- `GET /api/identity` — node identity (DID, identity ID). `GET /api/identity/node-id` shows the on-chain Profile `nodeId` next to this node's libp2p peer id (`state`: `in-sync`, `legacy` random bytes, `other-peer`, `no-profile`); `POST /api/identity/node-id/sync` (no body, node-admin token) sets it to the peer id via `Profile.updateNodeId` (Profile >= 10.1.0) and answers `200 { outcome, message, status, txHash }`. CLI: `dkg identity node-id` / `dkg identity sync-node-id`.
 - `GET /api/host/info` — OS-level host details for UI flows that need real absolute paths (no `~`). Returns `{ homedir, hostname, username, platform, defaultWorkspaceParent }`. `defaultWorkspaceParent` probes `~/code`, `~/dev`, `~/projects` in order and falls back to `homedir`. Auth-required because `hostname` and `username` can be identifying; does not expose anything sensitive beyond that.
 - `GET /api/events` — SSE stream for real-time notifications (`text/event-stream`). Emits `join_request`, `join_approved`, `project_synced` events with a `: heartbeat` comment every 30 s. Use it to watch for inbound invitations and project sync completions without polling.
 - 🚧 `GET /api/agent/profile` — your agent profile *(planned)*

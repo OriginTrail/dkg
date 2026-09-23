@@ -336,6 +336,7 @@ import { handleEpcisRoutes } from './routes/epcis.js';
 import { handlePcaRoutes } from './routes/pca.js';
 import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
 import { handleIdentityWalletRoutes } from './routes/identity-wallets.js';
+import { handleIdentityNodeIdRoutes } from './routes/identity-node-id.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
@@ -438,6 +439,8 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   await handleOperationalWalletRoutes(ctx);
   if (res.writableEnded) return;
   await handleIdentityWalletRoutes(ctx);
+  if (res.writableEnded) return;
+  await handleIdentityNodeIdRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleNotificationRoutes(ctx);

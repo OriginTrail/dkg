@@ -237,6 +237,9 @@ export default defineConfig({
           'test/chain-discovery-scan-mode.test.ts',
           'test/chain-discovery-scan-storage.test.ts',
           'test/context-graph-list-cli.test.ts',
+          // Profile nodeId <-> peer id: route (mocked agent) and command (mocked ApiClient).
+          'test/daemon-identity-node-id-routes.test.ts',
+          'test/identity-command.test.ts',
           'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved

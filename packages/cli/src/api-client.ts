@@ -31,6 +31,7 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import type { ProfileNodeIdStatusWire, ProfileNodeIdSyncWire } from './profile-node-id-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
@@ -1391,6 +1392,16 @@ export class ApiClient {
     blockNumber: number;
   }> {
     return this.del(`/api/operational-wallets/${encodeURIComponent(address)}`);
+  }
+
+  /** This node's on-chain Profile nodeId next to its libp2p peer id. */
+  async getProfileNodeIdStatus(): Promise<ProfileNodeIdStatusWire> {
+    return this.get('/api/identity/node-id');
+  }
+
+  /** Point the on-chain Profile nodeId at this node's libp2p peer id (node-admin token). */
+  async syncProfileNodeId(): Promise<ProfileNodeIdSyncWire> {
+    return this.post('/api/identity/node-id/sync', {});
   }
 
   /** List a local agent's workspace encryption keys (public fields only). */
