@@ -27,6 +27,7 @@ export {
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
+  SqliteContextGraphStorageDiscoveryStore,
 } from './chain-cursor-stores.js';
 
 export { SqliteProtocolOutboxStore, type SqliteProtocolOutboxStoreOptions } from './protocol-outbox-store.js';

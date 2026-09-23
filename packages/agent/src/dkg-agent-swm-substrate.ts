@@ -213,6 +213,7 @@ import {
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
@@ -406,6 +407,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     /** Authoritative numeric slot established by the admission owner. */
     onChainId?: string;
   }): ContextGraphSub {
+    // A name hash this node already resolved (and holds no row for) is the
+    // verified cleartext graph: never mint a second, empty identity for it.
+    const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
+    if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
+    // Subscribing the cleartext of a graph held only by its name hash moves
+    // the subscription: nothing may keep running under the hash id.
+    this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {
@@ -540,7 +548,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    */
   unsubscribeFromContextGraph(this: DKGAgent,
     contextGraphId: string,
-    options?: { persist?: boolean; updateRehydrationStatus?: boolean },
+    options?: {
+      persist?: boolean;
+      updateRehydrationStatus?: boolean;
+      /** The cleartext id that supersedes this name-hash id (adoption). */
+      supersededBy?: string;
+    },
   ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
@@ -606,7 +619,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
     this.log.info(
       createOperationContext('system'),
-      `Unsubscribed from "${contextGraphId}" (coreHosted=${existing.coreHosted === true}); live gossip dropped, chain reconcile path retained if hosting`,
+      options?.supersededBy === undefined
+        ? `Unsubscribed from "${contextGraphId}" (coreHosted=${existing.coreHosted === true}); live gossip dropped, chain reconcile path retained if hosting`
+        : `Retired name-hash subscription "${contextGraphId}": superseded by cleartext adoption of "${options.supersededBy}"`,
     );
   }
 
@@ -692,6 +707,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
+    // Retired name-hash id: skip. It shares the wire topic and host-mode key
+    // with the cleartext row, and a topic-wide unsubscribe here would drop
+    // that row's handler (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) {
+      this.log.debug(
+        createOperationContext('system'),
+        `SWM gossip reconcile for "${contextGraphId}" skipped: superseded by cleartext adoption of "${supersedingId}"`,
+      );
+      return;
+    }
     // Reconcile is the membership boundary; rebuild this CG's policy view
     // before deciding whether to keep or drop the SWM subscription.
     this.contextGraphMetaProjection.markDirty(contextGraphId);
@@ -1208,8 +1234,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * known path in the real libp2p API, which would make this
    * predicate return false for peers we DO have cached addresses
    * for — dropping legitimate substrate targets. We parse with
-   * `peerIdFromString` first; on parse failure (malformed
-   * gossipsub entry) the catch returns false (safe drop).
+   * `toLibp2pPeerId` first; on parse failure (malformed
+   * gossipsub entry) we fall back to the connected-peer check.
    *
    * Pre-start: if libp2p hasn't booted, `getPeers()` throws →
    * caught → return false → substrate target set is empty →
@@ -1234,11 +1260,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // "connected ⇒ dialable" semantics for them so existing
       // integration tests that stub gossip subscribers with
       // these short ids keep working.
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      let pid: ReturnType<typeof peerIdFromString>;
-      try {
-        pid = peerIdFromString(peerId);
-      } catch {
+      const pid = toLibp2pPeerId(peerId);
+      if (pid === undefined) {
         return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
       }
 

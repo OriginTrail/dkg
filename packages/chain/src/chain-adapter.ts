@@ -807,6 +807,65 @@ export interface ContextGraphRegistryScanCursorStore {
   repairAudit?: ContextGraphRegistryRepairAuditStore;
 }
 
+// ----- ContextGraphStorage id enumeration (historical Context Graph discovery) -----
+
+/**
+ * Chain-public facts for one ContextGraphStorage slot, all read at the same
+ * anchor block by {@link ChainAdapter.readContextGraphStorageRange}.
+ */
+export interface ContextGraphStorageEntry {
+  /** Positive decimal ContextGraphStorage id. */
+  readonly contextGraphId: string;
+  /**
+   * Current ERC-721 owner, lowercase. This is the creator unless the graph's
+   * ownership token was transferred after creation.
+   */
+  readonly owner: string;
+  /** `false` once the graph was deactivated on chain. Mutable. */
+  readonly active: boolean;
+  /** Creation time in unix seconds (`block.timestamp` at creation). */
+  readonly createdAt: number;
+  /** 0 = public, 1 = private (curated access). Write-once on chain. */
+  readonly accessPolicy: number;
+  /** 0 = curated (only the publish authority), 1 = open. Mutable. */
+  readonly publishPolicy: number;
+  /** Lowercase publish authority, or null for the zero address. Mutable. */
+  readonly publishAuthority: string | null;
+  /**
+   * Curator-committed name hash (lowercase bytes32), or null when the curator
+   * opted out at creation. Write-once on chain.
+   */
+  readonly nameHash: string | null;
+}
+
+export interface ContextGraphStorageRangeOptions extends ChainReadOptions {
+  /** First ContextGraphStorage id to read (>= 1). */
+  readonly fromId: bigint;
+  /** Maximum number of ids this call may read (>= 1). */
+  readonly maxIds: number;
+}
+
+/** One bounded, block-pinned slice of the ContextGraphStorage id space. */
+export interface ContextGraphStorageRange {
+  /** Lowercase ContextGraphStorage address the range was read from. */
+  readonly storageAddress: string;
+  /** The finality-anchor block every read in this range was pinned to. */
+  readonly anchorBlockNumber: number;
+  readonly anchorBlockHash: string;
+  /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
+  readonly latestId: bigint;
+  /**
+   * Entries in ascending id order for `[fromId, nextId)`. An id the chain
+   * proves nonexistent (`ERC721NonexistentToken`) is omitted, not an error.
+   */
+  readonly entries: readonly ContextGraphStorageEntry[];
+  /**
+   * The first id this call did NOT read. Equals `fromId` when `fromId` is
+   * already above `latestId`, so a caller's cursor never moves past the chain.
+   */
+  readonly nextId: bigint;
+}
+
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
 /**
@@ -1643,6 +1702,23 @@ export interface ChainAdapter {
     scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
     /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
     hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    /**
+     * Whether a ContextGraphNameRegistry is registered in the Hub. The registry
+     * is archived; when it is absent the `NameClaimed` scans above return
+     * nothing, and historical discovery relies on
+     * {@link readContextGraphStorageRange} instead.
+     */
+    hasContextGraphNameRegistry?(): Promise<boolean>;
+    /**
+     * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
+     * `getLatestContextGraphId()`) with view calls pinned to one block: the
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are
+     * sequential, so this enumerates every Context Graph that exists on chain
+     * without event logs or archive state. Stateless: callers own any cursor.
+     */
+    readContextGraphStorageRange?(
+      options: ContextGraphStorageRangeOptions,
+    ): Promise<ContextGraphStorageRange>;
     /**
      * Resolve one graph's current policy and roster at a stable finalized
      * anchor. Optional for NoChain and legacy adapters; default RFC-64 callers

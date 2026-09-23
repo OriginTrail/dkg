@@ -1154,10 +1154,28 @@ class WorkerCatchupRunner implements CatchupRunner {
         ]);
         await agent.primeCatchupConnections();
 
+        const connectedPeers = [...new Map<string, { toString(): string }>(
+          agent.node.libp2p.getConnections().map((connection: any) => [connection.remotePeer.toString(), connection.remotePeer]),
+        ).values()];
+        // Same admission predicate as the in-process catch-up
+        // (`syncContextGraphFromConnectedPeers`): a still-open connection to a
+        // peer that failed the network-identity proof (another DKG network's
+        // relay, say) must not become a sync peer. Filtering here also keeps
+        // such a peer out of the prioritized curator/SWM-provider slots below.
+        const admittedPeers: Array<{ toString(): string }> = [];
+        if (typeof agent.ensurePeerAdmittedForRecovery === 'function') {
+          const ctx = createOperationContext('sync');
+          for (const peer of connectedPeers) {
+            if (await agent.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
+              admittedPeers.push(peer);
+            }
+          }
+        } else {
+          admittedPeers.push(...connectedPeers);
+        }
+
         const selectedPeerIds = agent.selectCatchupPeers(
-          [...new Map(
-            agent.node.libp2p.getConnections().map((connection: any) => [connection.remotePeer.toString(), connection.remotePeer]),
-          ).values()],
+          admittedPeers,
           preferredPeerId,
           isPrivateContextGraph,
         ).map((peer: { toString(): string }) => peer.toString());

@@ -209,6 +209,7 @@ import {
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
@@ -388,6 +389,7 @@ import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-ad
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 import {
   commitRegisteredParticipantMutation,
+  LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
   prepareRegisteredParticipantMutation,
   type PreparedRegisteredParticipantMutation,
 } from './registered-context-graph-participant-mutation.js';
@@ -684,9 +686,8 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     // Store peer allowlist for curated CGs (with validation)
     if (opts.allowedPeers && opts.allowedPeers.length > 0) {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
       for (const peer of opts.allowedPeers) {
-        try { peerIdFromString(peer); } catch {
+        if (toLibp2pPeerId(peer) === undefined) {
           throw new Error(`Invalid peer ID in allowedPeers: "${peer}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
         }
         quads.push({
@@ -1847,10 +1848,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     const ctx = createOperationContext('system');
 
     // Validate peer ID format (libp2p Ed25519 base58btc, e.g. 12D3KooW…)
-    try {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      peerIdFromString(peerId);
-    } catch {
+    if (toLibp2pPeerId(peerId) === undefined) {
       throw new Error(`Invalid peer ID format: "${peerId}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
     }
 
@@ -2107,14 +2105,12 @@ export class ContextGraphMethods extends DKGAgentBase {
       agentAddresses: candidateChainAgents,
       chain: this.chain,
       // This roster decides whether a transaction is sent, not merely when.
-      // `allowCachedRoster` is passed explicitly so a future default cannot
-      // quietly hand the idempotence filter a projection to read.
       rosterFreshness: 'live',
       resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberAdd,
         () => this.resolveRegisteredContextGraphAuthority(
           contextGraphId,
-          { allowCachedRoster: false },
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
         ),
       ),
     });
@@ -2352,7 +2348,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         CG_AUTH_RPC_SITES.memberRemove,
         () => this.resolveRegisteredContextGraphAuthority(
           contextGraphId,
-          { allowCachedRoster: false },
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
         ),
       ),
     });

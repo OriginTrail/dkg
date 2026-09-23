@@ -9,7 +9,13 @@ import {
   type ContextGraphAuthorityIndexBootstrap,
   type ContextGraphAuthorityIndexSnapshots,
 } from '@origintrail-official/dkg-chain';
-import { DEFAULT_GENESIS_ID, Logger, computeNetworkId, type LogRecord } from '@origintrail-official/dkg-core';
+import {
+  DEFAULT_GENESIS_ID,
+  Logger,
+  PROTOCOL_NETWORK_IDENTITY,
+  computeNetworkId,
+  type LogRecord,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { resolveAuthorityIndexConfig } from '../src/authority-index-config.js';
@@ -209,10 +215,25 @@ describe('authority index snapshot production wiring', () => {
 
   it('keeps network admission on the bootstrap protocol even for a pinned reachable core', async () => {
     const core = await startAgent('ForeignSnapshotCore', 'core', capability(), 'gnosis-mainnet');
+    // Both nodes probe each other on connect, and the first rejection closes the
+    // connection. If the core rejects first, the edge's in-flight probe ends
+    // without a response and stays retryable instead of quarantined. Park the
+    // core's reciprocal probe until the edge's fetch settles, so the edge always
+    // receives the core's identity proof before the core can disconnect it.
+    const edgeFetchSettled = Promise.withResolvers<void>();
+    const coreSend = core.agent.router.send.bind(core.agent.router);
+    vi.spyOn(core.agent.router, 'send').mockImplementation(async (peerId, protocolId, data, options) => {
+      if (protocolId === PROTOCOL_NETWORK_IDENTITY) await edgeFetchSettled.promise;
+      return coreSend(peerId, protocolId, data, options);
+    });
     const edge = await startAgent('SnapshotEdgeAdmission', 'edge');
 
-    await expect(snapshotClient(edge.agent, core.agent).fetchSnapshot(request))
-      .rejects.toThrow('No configured trusted core supplied a usable authority index snapshot');
+    try {
+      await expect(snapshotClient(edge.agent, core.agent).fetchSnapshot(request))
+        .rejects.toThrow('No configured trusted core supplied a usable authority index snapshot');
+    } finally {
+      edgeFetchSettled.resolve();
+    }
 
     expect(core.snapshots.exportSnapshot).not.toHaveBeenCalled();
     expect(edge.agent.networkAdmission.snapshot().verifiedPeerIds).not.toContain(core.agent.peerId);

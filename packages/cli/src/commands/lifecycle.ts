@@ -29,7 +29,12 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
-import { ApiClient } from '../api-client.js';
+import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
+import {
+  STORE_QUADS_REFRESH_AFTER_MS,
+  type StoreQuadsStatusFields,
+  type StoreReachability,
+} from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -129,6 +134,126 @@ export async function executeStopCommand(
     dependencies.log('Daemon stopping...');
   });
   return reportDaemonShutdownResult(result, dependencies);
+}
+
+// A display threshold, deliberately independent of the daemon's cache TTL:
+// past it `dkg status` says how old the store count it prints is.
+const STORE_QUADS_SHOW_AGE_AFTER_MS = 60_000;
+
+/**
+ * Whether `dkg status` should ask the daemon to refresh its store count, given
+ * a plain status response. A count that is running, or a successful one
+ * younger than STORE_QUADS_REFRESH_AFTER_MS, is shown as it is. Anything else
+ * is re-checked (the daemon's cache TTL still limits the COUNTs): no count yet,
+ * a failure (so a revived store stops showing UNREACHABLE), an old or unknown
+ * age, and daemons that report no status or age. So the ten-minute bound holds
+ * only for daemons that report `storeQuadsAgeMs`: against 10.0.7 to 10.0.18
+ * every run asks, capped by that daemon's own 30 s cache, because treating an
+ * ageless count as fresh would show the first count it ever cached forever.
+ */
+function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
+  if (s.storeQuadsStatus === 'pending') return false;
+  if (s.storeQuadsStatus !== 'ready') return true;
+  return typeof s.storeQuadsAgeMs !== 'number' || s.storeQuadsAgeMs >= STORE_QUADS_REFRESH_AFTER_MS;
+}
+
+/** What `dkg status` prints from. */
+interface DkgStatusReading {
+  /**
+   * The daemon's status, without a reachability field: the count request's
+   * response when one was answered (that request makes no check), otherwise
+   * the check's response with its result moved to `storeReachability`.
+   */
+  status: Omit<DaemonStatusResponse, 'storeReachability'>;
+  /** This run's reachability check, which only the first request makes. */
+  storeReachability: StoreReachability | undefined;
+}
+
+/**
+ * Whether this run's check allows asking for a count: the store answered it,
+ * or no check was made (a daemon without it, or a local store). A store that
+ * failed the check or gave no answer gets no COUNT, and neither does a result
+ * only a newer daemon sends.
+ */
+function checkAllowsCount(storeReachability: StoreReachability | undefined): boolean {
+  return storeReachability === undefined || storeReachability === 'reachable';
+}
+
+/**
+ * The status `dkg status` prints. Every run checks, cheaply, that the store
+ * answers at all; the costly full-store COUNT is asked for only when the
+ * cached count needs it (shouldRefreshStoreQuads) and the store answered that
+ * check. The count request is best effort: the first response is complete,
+ * so if the second fails (the daemon restarting between the two, say), the
+ * first is printed.
+ */
+async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DkgStatusReading> {
+  const { storeReachability, ...probed } = await client.status({ probeStore: true });
+  const reading: DkgStatusReading = { status: probed, storeReachability };
+  if (!probed.storeUrl || !checkAllowsCount(storeReachability) || !shouldRefreshStoreQuads(probed)) {
+    return reading;
+  }
+  try {
+    return { ...reading, status: await client.status({ includeStoreQuads: true }) };
+  } catch {
+    return reading;
+  }
+}
+
+/** How old a cached count is, when that is worth saying. */
+function describeCountAge(ageMs: number | null | undefined): string | undefined {
+  // A cached result reports a null age only when the daemon's clock stepped
+  // back past it; older daemons send no age at all.
+  if (ageMs === null) return 'age unknown';
+  if (typeof ageMs === 'number' && ageMs >= STORE_QUADS_SHOW_AGE_AFTER_MS) {
+    return `checked ${formatUptime(ageMs)} ago`;
+  }
+  return undefined;
+}
+
+/**
+ * The state part of the `dkg status` store line. This run's reachability
+ * check outranks the cached count, which may be minutes old: a store that
+ * failed it shows as UNREACHABLE alone, and one that gave no answer in time as
+ * NOT RESPONDING next to its last successful count. A daemon that reports
+ * `storeQuadsStatus` says what a missing count means; only an older daemon
+ * that omits it keeps the legacy reading of `null` as unreachable.
+ */
+function formatStoreState(
+  s: StoreQuadsStatusFields,
+  storeReachability: StoreReachability | undefined,
+): string {
+  if (storeReachability === 'unreachable') return 'UNREACHABLE';
+  const countAge = describeCountAge(s.storeQuadsAgeMs);
+  if (storeReachability === 'no-answer') {
+    // No answer in time says the store, or the daemon's queue for it, is
+    // slow, not that it is down, so its last count still shows.
+    if (s.storeQuadsStatus !== 'ready' || typeof s.storeQuads !== 'number') return 'NOT RESPONDING';
+    const lastCount = [
+      `last count ${s.storeQuads.toLocaleString()} quads`,
+      ...(countAge === undefined ? [] : [countAge]),
+      ...(s.storeQuadsRefreshing === true ? ['refreshing'] : []),
+    ];
+    return `NOT RESPONDING (${lastCount.join(', ')})`;
+  }
+  const status = s.storeQuadsStatus;
+  if (status === 'pending') return 'CHECKING';
+  if (status === 'not-requested') return 'NOT CHECKED';
+  const age = countAge === undefined ? '' : ` (${countAge})`;
+  // The daemon answers a refresh request with the result it already has while
+  // the new count runs, so say that this one is about to be replaced.
+  const refreshing = s.storeQuadsRefreshing === true ? ', refreshing' : '';
+  if (status === 'unreachable') {
+    // A store that answered this run's check is up even if the last count
+    // failed; a COUNT can time out on a large store that answers an ASK.
+    return storeReachability === 'reachable'
+      ? `reachable, count failed${age}${refreshing}`
+      : `UNREACHABLE${age}${refreshing}`;
+  }
+  if (typeof s.storeQuads === 'number') return `${s.storeQuads.toLocaleString()} quads${age}${refreshing}`;
+  // A status this CLI does not know comes from a newer daemon, for which a
+  // null count no longer implies an unreachable store.
+  return status === undefined ? 'UNREACHABLE' : 'UNKNOWN';
 }
 
 export function registerLifecycleCommands(program: Command): void {
@@ -300,7 +425,7 @@ program
   .action(async () => {
     try {
       const client = await ApiClient.connect({ allowConfigFallback: true });
-      const s = await client.status();
+      const { status: s, storeReachability } = await readDkgStatus(client);
       const uptime = formatUptime(s.uptimeMs);
       console.log(`  Node:      ${s.name}`);
       console.log(`  Role:      ${s.nodeRole ?? 'edge'}`);
@@ -313,20 +438,17 @@ program
       // Backend visibility: local backends print just the name (file
       // bytes are graphed via /api/dashboard); external backends print
       // backend + endpoint + quad count, falling back to a clear
-      // "unreachable" signal when the daemon couldn't talk to the
-      // remote store. A new daemon marks the initial background count
-      // as pending so it renders as CHECKING; absent that marker, null
-      // retains its legacy unreachable meaning for older daemons.
+      // "unreachable" signal when the store fails this run's reachability
+      // check. The first request on a cold daemon starts the count and
+      // renders as CHECKING (see formatStoreState).
       const backend = s.storeBackend ?? 'oxigraph-worker';
       if (s.storeUrl) {
-        const quads = s.storeQuadsStatus === 'pending'
-          ? 'CHECKING'
-          : s.storeQuads == null
-            ? 'UNREACHABLE'
-            : `${s.storeQuads.toLocaleString()} quads`;
-        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${quads}`);
+        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${formatStoreState(s, storeReachability)}`);
       } else {
         console.log(`  Store:     ${backend}`);
+      }
+      if ((s.contextGraphIdentity?.nameHashOnly ?? 0) > 0 && s.contextGraphIdentity?.message) {
+        console.log(`  Graphs:    ${s.contextGraphIdentity.message}`);
       }
       if (client.controlPlaneWarning) console.warn(client.controlPlaneWarning);
     } catch (err) {
