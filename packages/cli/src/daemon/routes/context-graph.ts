@@ -70,6 +70,7 @@ import {
   DKGAgent,
   describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  type ContextGraphOnChainIdRefusal,
   type ContextGraphOnChainIdResolution,
   type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
@@ -504,8 +505,6 @@ function catchupAuthorityUnavailableResponse(
   );
 }
 
-type UnresolvedOnChainIdResolution = Exclude<ContextGraphOnChainIdResolution, { kind: 'direct' | 'resolved' }>;
-
 /** How the subscribe route answers an on-chain id that names nothing subscribable. */
 const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
   'not-found': { status: 404, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_NOT_FOUND', result: 'bad_request' },
@@ -515,7 +514,7 @@ const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
   private: { status: 403, code: 'CONTEXT_GRAPH_PRIVATE', result: 'forbidden' },
   unavailable: { status: 503, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_UNAVAILABLE', result: 'authority_unavailable' },
 } as const satisfies Record<
-  UnresolvedOnChainIdResolution['kind'],
+  ContextGraphOnChainIdRefusal['kind'],
   { status: number; code: string; result: 'bad_request' | 'forbidden' | 'authority_unavailable' }
 >;
 
@@ -526,7 +525,7 @@ const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
  */
 function unresolvedOnChainIdResponse(
   res: ServerResponse,
-  resolution: UnresolvedOnChainIdResolution,
+  resolution: ContextGraphOnChainIdRefusal,
   includeSharedMemory: boolean,
 ): void {
   const { status, code, result } = UNRESOLVED_ON_CHAIN_ID_RESPONSES[resolution.kind];
@@ -1945,20 +1944,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // cleartext id, or the hash-keyed row discovery staged) before anything
     // else: a subscription keyed by the number would derive its gossip
     // topics and wire id from keccak256("32") and sync nothing.
-    let onChainResolution: ContextGraphOnChainIdResolution | null;
+    let onChainResolution: ContextGraphOnChainIdResolution;
     try {
-      onChainResolution = await agent.resolveContextGraphOnChainIdReference?.(requestedContextGraphId) ?? null;
+      onChainResolution = await agent.resolveContextGraphOnChainIdReference?.(requestedContextGraphId)
+        ?? { kind: 'as-given' };
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
-    if (
-      onChainResolution !== null
-      && onChainResolution.kind !== 'direct'
-      && onChainResolution.kind !== 'resolved'
-    ) {
+    if (onChainResolution.kind !== 'as-given' && onChainResolution.kind !== 'resolved') {
       return unresolvedOnChainIdResponse(res, onChainResolution, shouldSyncSharedMemory);
     }
-    const onChainTarget = onChainResolution?.kind === 'resolved' ? onChainResolution : undefined;
+    const onChainTarget = onChainResolution.kind === 'resolved' ? onChainResolution : undefined;
     const subscriptionTargetId: string = onChainTarget?.contextGraphId ?? requestedContextGraphId;
     const onChainReference = onChainTarget === undefined
       ? undefined

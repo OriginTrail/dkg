@@ -17,8 +17,12 @@ describe('catch-up status by on-chain id', () => {
     jobs: new Map(),
     latestByContextGraph: new Map(Object.entries(entries)),
   });
+  /** An agent whose lookup finds `row` for on-chain id 32 and nothing else. */
   const agentKnowing = (row: { contextGraphId: string; nameHash: string } | null) => ({
-    localContextGraphIdForOnChainId: (onChainId: string) => (onChainId === '32' ? row : null),
+    lookupContextGraphOnChainIdReference: (reference: string) => {
+      if (reference !== '32' && reference !== '#32') return { kind: 'as-given' };
+      return row === null ? { kind: 'not-held', onChainId: '32' } : { kind: 'held', onChainId: '32', ...row };
+    },
   }) as unknown as DKGAgent;
 
   it('finds the job of the graph the id names, under its cleartext id or its name hash', () => {
@@ -40,8 +44,12 @@ describe('catch-up status by on-chain id', () => {
 });
 
 describe('configured on-chain ids when the resolver fails', () => {
-  it('never lets a resolver failure subscribe the number, and leaves other ids alone', async () => {
-    const resolve = vi.fn(async () => { throw new Error('boom'); });
+  it('fails closed for an id whose resolution throws, and leaves the others alone', async () => {
+    // The resolver reports its own failures, so a throw is a defect.
+    const resolve = vi.fn(async (reference: string) => {
+      if (reference === '32') throw new Error('boom');
+      return { kind: 'as-given' };
+    });
     const agent = {
       getSubscribedContextGraphs: () => new Map(),
       resolveContextGraphOnChainIdReference: resolve,
@@ -49,8 +57,8 @@ describe('configured on-chain ids when the resolver fails', () => {
     const log: string[] = [];
     await expect(resolveConfiguredOnChainContextGraphIds(agent, ['32', 'acme'], (line) => log.push(line)))
       .resolves.toEqual(['acme']);
-    expect(log).toEqual(['Context graph "32" could not be resolved as an on-chain id (boom) — not subscribing it']);
-    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(log).toEqual(['Context graph "32" could not be resolved (boom) — not subscribing it']);
+    expect(resolve).toHaveBeenCalledTimes(2);
 
     // An agent without the resolver (an older build) keeps the ids as given.
     await expect(resolveConfiguredOnChainContextGraphIds({} as DKGAgent, ['32'], () => {})).resolves.toEqual(['32']);

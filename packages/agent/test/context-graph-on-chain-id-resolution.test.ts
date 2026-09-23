@@ -163,11 +163,71 @@ describe('resolving an on-chain Context Graph id', () => {
     }
     expect(read).not.toHaveBeenCalled();
     expect(rowIds(agent)).not.toContain('32');
-    expect(agent.localContextGraphIdForOnChainId('32')).toEqual({ contextGraphId: NAME_HASH, nameHash: NAME_HASH });
-    expect(agent.localContextGraphIdForOnChainId('77')).toBeNull();
     // Not an on-chain id: callers use it as given.
-    await expect(agent.resolveContextGraphOnChainIdReference('acme')).resolves.toBeNull();
-    await expect(agent.resolveContextGraphOnChainIdReference(NAME_HASH)).resolves.toBeNull();
+    for (const reference of ['acme', NAME_HASH, '032', '#0', undefined, { id: 32 }]) {
+      await expect(agent.resolveContextGraphOnChainIdReference(reference)).resolves.toEqual({ kind: 'as-given' });
+    }
+  });
+
+  it('looks up the row an on-chain id names without reading the chain', async () => {
+    const chain = await chainWithGraph32();
+    const agent = await startAgent(chain);
+    await agent.discoverContextGraphsFromStorage();
+    const read = vi.spyOn(chain, 'readContextGraphStorageRange');
+
+    for (const reference of ['32', '#32', 32]) {
+      expect(agent.lookupContextGraphOnChainIdReference(reference)).toEqual({
+        kind: 'held',
+        onChainId: '32',
+        contextGraphId: NAME_HASH,
+        nameHash: NAME_HASH,
+      });
+    }
+    // A graph this node holds no row for is not read from the chain either.
+    expect(agent.lookupContextGraphOnChainIdReference('#77')).toEqual({ kind: 'not-held', onChainId: '77' });
+    for (const reference of ['acme', NAME_HASH, '#', 0]) {
+      expect(agent.lookupContextGraphOnChainIdReference(reference)).toEqual({ kind: 'as-given' });
+    }
+    // A subscription keyed by the bare number wins; `#` never keys a row.
+    agent.subscribeToContextGraph('32', { syncMode: 'on-demand' });
+    expect(agent.lookupContextGraphOnChainIdReference('32')).toEqual({ kind: 'as-given' });
+    expect(agent.lookupContextGraphOnChainIdReference('#32')).toMatchObject({ kind: 'held', contextGraphId: NAME_HASH });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('finds the row by its own bound commitment when no chain facts are loaded yet', async () => {
+    const agent = await startAgent(await chainWithGraph32());
+    await agent.resolveContextGraphOnChainIdReference('#32');
+    // A restart before discovery reached the id: the durable row is back, the facts are not.
+    internals(agent).onChainContextGraphFacts.delete('32');
+    expect(agent.lookupContextGraphOnChainIdReference('#32')).toEqual({
+      kind: 'held',
+      onChainId: '32',
+      contextGraphId: NAME_HASH,
+      nameHash: NAME_HASH,
+    });
+
+    await agent.adoptVerifiedContextGraphCleartext({ nameHash: NAME_HASH, onChainId: '32' }, CLEARTEXT, 'local');
+    internals(agent).onChainContextGraphFacts.delete('32');
+    expect(agent.lookupContextGraphOnChainIdReference('#32')).toMatchObject({ kind: 'held', contextGraphId: CLEARTEXT });
+    // A row that is bound elsewhere, or not bound at all, is not taken for it.
+    expect(agent.lookupContextGraphOnChainIdReference('#31')).toEqual({ kind: 'not-held', onChainId: '31' });
+  });
+
+  it('reports a failure while resolving as unavailable instead of throwing', async () => {
+    const agent = await startAgent(await chainWithGraph32());
+    await agent.discoverContextGraphsFromStorage();
+    // The staged row is gone, so resolving stages it again, and that fails.
+    agent.deleteContextGraphSubscription(NAME_HASH);
+    internals(agent).wireIdToLocalCgId.delete(NAME_HASH);
+    vi.spyOn(agent, 'stageOnChainContextGraphBindingFromNameHash').mockImplementation(() => {
+      throw new Error('store is closed');
+    });
+    await expect(agent.resolveContextGraphOnChainIdReference('#32')).resolves.toEqual({
+      kind: 'unavailable',
+      onChainId: '32',
+      detail: 'store is closed',
+    });
   });
 
   it('reads an id discovery has not reached yet and stages its row the way discovery does', async () => {
@@ -214,7 +274,12 @@ describe('resolving an on-chain Context Graph id', () => {
       contextGraphId: CLEARTEXT,
       private: false,
     });
-    expect(agent.localContextGraphIdForOnChainId('32')).toEqual({ contextGraphId: CLEARTEXT, nameHash: NAME_HASH });
+    expect(agent.lookupContextGraphOnChainIdReference('#32')).toEqual({
+      kind: 'held',
+      onChainId: '32',
+      contextGraphId: CLEARTEXT,
+      nameHash: NAME_HASH,
+    });
   });
 
   it('says an id does not exist, and what the latest id is', async () => {
@@ -288,7 +353,7 @@ describe('resolving an on-chain Context Graph id', () => {
     // A graph literally named "32", unbound: nothing proves it is not one.
     agent.subscribeToContextGraph('32', { syncMode: 'on-demand' });
 
-    await expect(agent.resolveContextGraphOnChainIdReference('32')).resolves.toEqual({ kind: 'direct', onChainId: '32' });
+    await expect(agent.resolveContextGraphOnChainIdReference('32')).resolves.toEqual({ kind: 'as-given' });
     await expect(agent.resolveContextGraphOnChainIdReference('#32')).resolves.toMatchObject({
       kind: 'resolved',
       contextGraphId: NAME_HASH,
@@ -306,7 +371,7 @@ describe('resolving an on-chain Context Graph id', () => {
       detail: 'RPC timed out',
     });
     subscribeTheNumber(agent);
-    await expect(agent.resolveContextGraphOnChainIdReference('32')).resolves.toEqual({ kind: 'direct', onChainId: '32' });
+    await expect(agent.resolveContextGraphOnChainIdReference('32')).resolves.toEqual({ kind: 'as-given' });
   });
 
   it('treats an id below the latest one that reads as missing as a lagging backend, not as nonexistent', async () => {
@@ -336,9 +401,11 @@ describe('resolving an on-chain Context Graph id', () => {
 
     // With no chain at all, a bare number is only a name.
     const chainless = await startAgent(undefined);
-    await expect(chainless.resolveContextGraphOnChainIdReference('32')).resolves.toBeNull();
+    await expect(chainless.resolveContextGraphOnChainIdReference('32')).resolves.toEqual({ kind: 'as-given' });
     await expect(chainless.resolveContextGraphOnChainIdReference('#32'))
       .resolves.toEqual({ kind: 'unsupported', onChainId: '32' });
+    expect(chainless.lookupContextGraphOnChainIdReference('32')).toEqual({ kind: 'as-given' });
+    expect(chainless.lookupContextGraphOnChainIdReference('#32')).toEqual({ kind: 'not-held', onChainId: '32' });
   });
 
   it('stages the row again when it was pruned, and refuses a name hash another on-chain id holds', async () => {
@@ -399,7 +466,7 @@ describe('a subscription keyed by the number, left by the pre-fix subscribe path
     subscribeTheNumber(hosting);
     const row = hosting.getSubscribedContextGraphs().get('32')!;
     internals(hosting).subscribedContextGraphs.set('32', { ...row, coreHosted: true });
-    await expect(hosting.resolveContextGraphOnChainIdReference('32')).resolves.toEqual({ kind: 'direct', onChainId: '32' });
+    await expect(hosting.resolveContextGraphOnChainIdReference('32')).resolves.toEqual({ kind: 'as-given' });
     expect(hosting.isNumericContextGraphAlias('32', { ...row, coreHosted: true }, NAME_HASH)).toBe(false);
   });
 

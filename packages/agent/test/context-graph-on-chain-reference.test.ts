@@ -46,7 +46,6 @@ describe('on-chain Context Graph id messages', () => {
       private: false,
       retiredNumericSubscription: { contextGraphId: '32', subscribed: true, syncMode: 'always-on' },
     })).toMatch(/Retired the subscription keyed "32", which could never sync\.$/);
-    expect(say({ kind: 'direct', onChainId: '32' })).toContain("write '#32' for on-chain Context Graph 32");
   });
 
   it('says what is wrong with an id that names nothing subscribable, never "retry" unless a read failed', () => {

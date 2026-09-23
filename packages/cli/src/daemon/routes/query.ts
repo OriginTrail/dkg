@@ -57,7 +57,7 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets, parseContextGraphOnChainIdReference } from '@origintrail-official/dkg-agent';
+import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
@@ -427,11 +427,10 @@ export function latestCatchupJobIdFor(
 ): string | undefined {
   const direct = catchupTracker.latestByContextGraph.get(contextGraphId);
   if (direct !== undefined) return direct;
-  const reference = parseContextGraphOnChainIdReference(contextGraphId);
-  const local = reference === null ? null : agent.localContextGraphIdForOnChainId?.(reference.onChainId) ?? null;
-  if (local === null) return undefined;
-  return catchupTracker.latestByContextGraph.get(local.contextGraphId)
-    ?? catchupTracker.latestByContextGraph.get(local.nameHash);
+  const lookup = agent.lookupContextGraphOnChainIdReference?.(contextGraphId);
+  if (lookup?.kind !== 'held') return undefined;
+  return catchupTracker.latestByContextGraph.get(lookup.contextGraphId)
+    ?? catchupTracker.latestByContextGraph.get(lookup.nameHash);
 }
 
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {

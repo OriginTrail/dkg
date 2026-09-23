@@ -73,7 +73,6 @@ import {
   DKGAgent,
   describeContextGraphOnChainIdResolution,
   loadOpWallets,
-  parseContextGraphOnChainIdReference,
   KaNumberAllocator,
   planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
@@ -1046,21 +1045,19 @@ export async function resolveConfiguredOnChainContextGraphIds(
   const contextGraphIds: string[] = [];
   for (const contextGraphId of [...configured, ...numericSubscriptions]) {
     const isConfigured = configured.has(contextGraphId);
-    if (parseContextGraphOnChainIdReference(contextGraphId) === null) {
-      if (isConfigured) contextGraphIds.push(contextGraphId);
-      continue;
-    }
-    let resolution: ContextGraphOnChainIdResolution | null;
+    let resolution: ContextGraphOnChainIdResolution;
     try {
-      resolution = await agent.resolveContextGraphOnChainIdReference?.(contextGraphId, { signal }) ?? null;
+      resolution = await agent.resolveContextGraphOnChainIdReference?.(contextGraphId, { signal })
+        ?? { kind: 'as-given' };
     } catch (error) {
+      // The resolver reports its own failures; a throw is a defect, so fail closed.
       log(
-        `Context graph "${contextGraphId}" could not be resolved as an on-chain id `
+        `Context graph "${contextGraphId}" could not be resolved `
         + `(${error instanceof Error ? error.message : String(error)}) — not subscribing it`,
       );
       continue;
     }
-    if (resolution === null || resolution.kind === 'direct') {
+    if (resolution.kind === 'as-given') {
       if (isConfigured) contextGraphIds.push(contextGraphId);
       continue;
     }

@@ -44,27 +44,58 @@ export function parseContextGraphOnChainIdReference(value: unknown): ContextGrap
   return isCanonicalAuthoritativeContextGraphId(digits) ? { onChainId: digits, explicit } : null;
 }
 
-/** What an on-chain id resolved to. */
-export type ContextGraphOnChainIdResolution =
-  /** A subscription keyed by the literal bare number exists and is not a proven alias: it wins. */
-  | { readonly kind: 'direct'; readonly onChainId: string }
-  | {
-      readonly kind: 'resolved';
-      readonly onChainId: string;
-      readonly nameHash: string;
-      /** The row this node keeps for the graph: its verified cleartext id, or the name hash. */
-      readonly contextGraphId: string;
-      /** The graph is private (curated access); only then can this node hold its cleartext as a member. */
-      readonly private: boolean;
-      /** A subscription keyed by the bare number that this resolution retired. */
-      readonly retiredNumericSubscription?: RetiredNumericContextGraphSubscription;
-    }
+/**
+ * Use the input as given: it is not an on-chain id, it is a bare number that
+ * keys a subscription the chain does not prove wrong, or the node has no
+ * chain (a bare number is then just a name).
+ */
+export interface ContextGraphIdAsGiven {
+  readonly kind: 'as-given';
+}
+
+/** An on-chain id and the row this node keeps for its graph. */
+export interface ResolvedContextGraphOnChainId {
+  readonly kind: 'resolved';
+  readonly onChainId: string;
+  readonly nameHash: string;
+  /** The row this node keeps for the graph: its verified cleartext id, or the name hash. */
+  readonly contextGraphId: string;
+  /** The graph is private (curated access); only then can this node hold its cleartext as a member. */
+  readonly private: boolean;
+  /** A subscription keyed by the bare number that this resolution retired. */
+  readonly retiredNumericSubscription?: RetiredNumericContextGraphSubscription;
+}
+
+/** Why an on-chain id cannot be subscribed. */
+export type ContextGraphOnChainIdRefusal =
   | { readonly kind: 'not-found'; readonly onChainId: string; readonly latestId: string }
   | { readonly kind: 'inactive'; readonly onChainId: string }
   | { readonly kind: 'no-name-hash'; readonly onChainId: string }
   | { readonly kind: 'private'; readonly onChainId: string }
   | { readonly kind: 'unavailable'; readonly onChainId: string; readonly detail: string }
   | { readonly kind: 'unsupported'; readonly onChainId: string };
+
+/** What a subscription request's id resolved to. */
+export type ContextGraphOnChainIdResolution =
+  | ContextGraphIdAsGiven
+  | ResolvedContextGraphOnChainId
+  | ContextGraphOnChainIdRefusal;
+
+/**
+ * What an id names among the rows this node already keeps, without reading
+ * the chain: for unsubscribing and for status lookups.
+ */
+export type ContextGraphOnChainIdLookup =
+  | ContextGraphIdAsGiven
+  | {
+      readonly kind: 'held';
+      readonly onChainId: string;
+      /** The row this node keeps for the graph: its verified cleartext id, or the name hash. */
+      readonly contextGraphId: string;
+      readonly nameHash: string;
+    }
+  /** An on-chain id this node keeps no row for. */
+  | { readonly kind: 'not-held'; readonly onChainId: string };
 
 /** The member intent a retired numeric subscription carried. */
 export interface RetiredNumericContextGraphSubscription {
@@ -78,12 +109,11 @@ function shortHash(nameHash: string): string {
 }
 
 /** One operator-facing sentence per outcome, shared by the API, the CLI and startup logs. */
-export function describeContextGraphOnChainIdResolution(resolution: ContextGraphOnChainIdResolution): string {
+export function describeContextGraphOnChainIdResolution(
+  resolution: ResolvedContextGraphOnChainId | ContextGraphOnChainIdRefusal,
+): string {
   const id = `#${resolution.onChainId}`;
   switch (resolution.kind) {
-    case 'direct':
-      return `"${resolution.onChainId}" is an existing subscription key on this node; it is used as given `
-        + `(write '${id}' for on-chain Context Graph ${resolution.onChainId}).`;
     case 'resolved': {
       const graph = resolution.contextGraphId === resolution.nameHash
         ? `On-chain Context Graph ${id} is Context Graph ${shortHash(resolution.nameHash)} (its on-chain name hash).`
