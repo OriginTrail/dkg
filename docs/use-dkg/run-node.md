@@ -189,18 +189,33 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
 ## Core VM Promotion And The StorageACK Finality Gate
 
 A Core signs a StorageACK only when it can guarantee the acknowledged data
-reaches its Verifiable Memory (VM). Before signing an ACK for a public Context
-Graph (publish or update) it must have verified the data (and, for a
-graph-scoped publish, stored it together with its SWM head); its chain-driven
-VM reconciliation must be enabled and running; and it must have durably
-recorded the graph as core-hosted, so the reconciler promotes every Knowledge
-Asset the chain registers to that graph, across restarts. If any of these
-fails it declines:
+reaches its Verifiable Memory (VM). For a public Context Graph (publish or
+update) it verifies the data, checks that its chain-driven VM reconciliation
+is enabled and running, and durably records the graph as core-hosted in the
+namespace it stores the copy in, so the reconciler promotes every Knowledge
+Asset the chain registers to that graph, across restarts. Only then does it
+store the copy with its SWM head, record it in a node-local ledger of signed
+ACKs, and sign. A declined request stores nothing.
 
-| Decline code | Meaning | Publisher behavior |
+| Decline on the wire | When | Publisher behavior |
 | --- | --- | --- |
-| `CORE_VM_PROMOTION_UNAVAILABLE` | VM reconciliation is still starting or stopping, or the graph's liveness, access policy or core-hosted record could not be read or written right now | Retries this core with backoff |
-| `CORE_VM_PROMOTION_DISABLED` | VM reconciliation is switched off, the chain adapter cannot run it, or a curated graph was sent on the public ACK path | Moves on to other cores |
+| `CORE_TEMPORARILY_UNAVAILABLE`, message `VM promotion unavailable: ...` | The Core cannot commit right now: VM reconciliation is starting or stopping, the graph's liveness, access policy or core-hosted record could not be read or written, its persisted subscription row is dormant, or (for an update) the version being replaced is not in VM yet | Retries this Core with backoff (every deployed publisher, 10.0.18 included) |
+| `CORE_VM_PROMOTION_DISABLED` | VM reconciliation is switched off, the chain adapter cannot run it, the namespace already reconciles a different live graph, a curated graph was sent on the public path, or the intent is not graph-scoped (see below) | Moves on to other Cores |
+| `CONFLICTING_KA_ASSERTION` | The Core already holds this Knowledge Asset with different content at the same assertion version, or at a newer version | Moves on to other Cores |
+
+Logs, the `dkg.storage_ack.declines_total` metric and `/api/status` label the
+transient case `CORE_VM_PROMOTION_UNAVAILABLE`; on the wire it travels as
+`CORE_TEMPORARILY_UNAVAILABLE` because publishers before 10.0.19 treat any
+code they do not know as final.
+
+**Legacy requests.** A Core declines public StorageACK requests that are not
+graph-scoped (no `kaUal` / `assertionVersion` envelope) with
+`CORE_VM_PROMOTION_DISABLED`: it cannot keep a copy of such a publish that it
+could later promote. Every default publish and update path has sent
+graph-scoped requests since 10.0.7. Raw-lift jobs queued before 10.0.7 (or
+restored with the legacy raw-lift import) and `publishFromSharedMemory` called
+without `contentScopeVersion` still send legacy requests and can no longer
+collect ACKs from 10.0.19 Cores.
 
 Chain-driven VM reconciliation has its own switch, on by default:
 
@@ -217,6 +232,14 @@ public StorageACK.** `syncReconcilerEnabled` / `DKG_SYNC_RECONCILER_ENABLED`
 only control the periodic peer-sync reconciler and never switch VM
 reconciliation off.
 
+**Updates.** A Core stores a public update as its own ACK copy, replacing the
+Knowledge Asset's SWM copy, only once the version it replaces is in its VM.
+Until then it declines the update transiently and promotes that version at
+once (it is on chain, since an update requires it), so the publisher's retry
+is normally signed within seconds. After the update lands on chain, a
+pending-update lane that runs with every VM sweep (`DKG_VM_RECONCILE_INTERVAL_MS`,
+default 60 s, at most 8 chain checks per run) promotes the new version.
+
 Curated (private) Context Graphs never reach a Core as plaintext, so there is
 nothing to promote. A curated ACK guarantees that the Core independently
 verified the graph is curated on chain, rebuilt the publisher's catalog
@@ -224,42 +247,63 @@ commitment, and durably stored it in `<cg>/_catalog`, the artifact random
 sampling proves for curated Knowledge Assets. It does not attest that the Core
 holds the private payload, and it does not depend on VM reconciliation.
 
-A public update ACK has the same prerequisites, but a Core promotes an updated
-version only when it receives it through update gossip or durable VM sync:
-chain-driven reconciliation walks registrations, and an update adds none.
-
 `GET /api/status` reports the effective switches under `syncLifecycle`
 (`syncReconcilerEnabled`, `vmReconcilerEnabled`) and the Core's state under
-`vmPromotion`, including `storageAckGate` (`signing`, `starting`, `declining`
-or `not-core`) and the last ACK promotion audit.
+`vmPromotion`:
+
+| Field | Meaning |
+| --- | --- |
+| `storageAckGate` | `ready` (the gate would commit now), `starting`, `declining` (VM reconciliation off or unavailable) or `not-core` |
+| `storageAckHandler` | `registered` when the Core is serving StorageACK requests, `not-registered` when it is not (for example, no ACK signer), `not-core` |
+| `storageAckDeclinesLastHour` | StorageACK declines per reason over the last hour |
+| `coreHostedGraphs` | Graphs recorded as core-hosted |
+| `audit` | The last ACK promotion audit (below) |
 
 ### ACK promotion audit
 
-A Core with VM reconciliation on runs an audit a few minutes after startup and
-then every 15 minutes (`DKG_VM_PROMOTION_AUDIT_INTERVAL_MS`):
+A Core with VM reconciliation on runs an audit 1 to 6 minutes after startup
+and then every 15 minutes (`DKG_VM_PROMOTION_AUDIT_INTERVAL_MS`). It runs in
+the background chain-RPC class and store lane, like the VM reconcile walk.
 
-- **Backfill.** It finds every graph holding StorageACK copies and records the
-  public ones as core-hosted, through the same access-policy check as the
-  gate; curated graphs stay excluded. This covers graphs acknowledged while VM
-  reconciliation was off. The reconciler then promotes only Knowledge Assets
-  the chain actually registered; copies of publishes that never landed are
-  left to retention.
-- **Watchdog.** It samples copies still not in VM 30 minutes after their ACK
-  (`DKG_VM_PROMOTION_STALL_THRESHOLD_MS`) and checks a bounded number of them
-  on chain per pass. A Knowledge Asset registered to its graph but not
-  promoted is logged as `VM promotion watchdog: ...`, its graph's reconcile is
-  re-triggered, and it is counted in `vmPromotion.audit.stalledOnChain` and
-  the `dkg.vm_promotion.stalled_acks` gauge.
+- **Backfill.** It pages through the namespaces in the signed-ACK ledger and
+  records the public ones as core-hosted, at most 32 per pass, through the
+  same access-policy check as the gate; curated graphs stay excluded. This
+  covers graphs acknowledged while VM reconciliation was off. A namespace it
+  cannot resolve backs off, and the pages behind it still get their turn. The
+  reconciler then promotes only Knowledge Assets the chain actually
+  registered; copies of publishes that never landed are left to retention.
+  The catch-up can be throttled with `DKG_VM_RECONCILE_CONCURRENCY` (graphs
+  at once, default 2) and `DKG_VM_RECONCILE_ORDINAL_CONCURRENCY`
+  (registrations per graph at once, default 5).
+- **Watchdog.** It rotates through ledgered copies still not in VM 30 minutes
+  after their ACK (`DKG_VM_PROMOTION_STALL_THRESHOLD_MS`), spending at most 32
+  chain reads and 16 per-asset reconciles per pass and resuming where the
+  previous pass stopped. A Knowledge Asset registered on chain but not
+  promoted is marked registered, promoted with a per-asset reconcile, logged
+  as `VM promotion watchdog: ...` and counted in
+  `vmPromotion.audit.stalledOnChain` and the `dkg.vm_promotion.stalled_acks`
+  gauge.
 
 ### Retention of StorageACK copies
 
-The shared-memory TTL cleanup keeps a StorageACK copy whose Knowledge Asset is
-not confirmed in VM. The copy expires normally once the Knowledge Asset is
-promoted (twin retirement removes it), once the audit proves the chain never
-registered it (checked only after the SWM TTL, since an older ACK can still
-belong to a publish in flight), or at the latest 90 days after the ACK
-(`DKG_STORAGE_ACK_RETENTION_MAX_MS`). ACK signatures carry no on-chain
-deadline, so this ceiling bounds copies whose absence has not been proven yet.
+The shared-memory TTL cleanup keeps every ledgered copy (one this Core signed,
+or stored before the upgrade) whose Knowledge Asset is not confirmed in VM at
+that version or later. Declined requests, copies synced from peers and gossip
+operations that happen to use the `storage-ack-` prefix are not in the ledger
+and expire as before. A ledgered copy leaves retention, and the ordinary TTL
+applies, when:
+
+- its Knowledge Asset is confirmed in VM at that version or later;
+- the audit found it absent on chain twice, at least one audit interval apart
+  and both after the SWM TTL (an ACK may still belong to a publish in
+  flight); or
+- it is older than 90 days (`DKG_STORAGE_ACK_RETENTION_MAX_MS`) and the audit
+  never saw it registered on chain. A copy seen registered is kept until it is
+  promoted.
+
+An ACK signature carries no on-chain deadline and does not name the Knowledge
+Asset id, so the absence check is conservative evidence rather than proof; the
+reference publisher never submits ACKs that late.
 
 ## Private shared-memory recovery time budget
 
