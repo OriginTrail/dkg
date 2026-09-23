@@ -155,6 +155,8 @@ describe('DKGNode DHT network identity wiring', () => {
     await node.start();
 
     const gater = mocks.createLibp2p.mock.calls[0][0].connectionGater;
+    // Exactly the pre-#2740 hook set, nothing the isolation policy adds.
+    expect(Object.keys(gater).sort()).toEqual(['denyDialMultiaddr', 'denyInboundRelayedConnection']);
     expect(gater.denyDialPeer).toBeUndefined();
     expect(gater.denyInboundEncryptedConnection).toBeUndefined();
     expect(gater.denyOutboundEncryptedConnection).toBeUndefined();
@@ -181,6 +183,8 @@ describe('DKGNode DHT network identity wiring', () => {
     await node.start();
 
     const gater = mocks.createLibp2p.mock.calls[0][0].connectionGater;
+    // Exactly the pre-#2740 hook set, nothing the isolation policy adds.
+    expect(Object.keys(gater).sort()).toEqual(['denyDialMultiaddr', 'denyInboundRelayedConnection']);
     expect(gater.denyDialPeer).toBeUndefined();
     expect(gater.denyInboundEncryptedConnection).toBeUndefined();
     expect(gater.denyOutboundEncryptedConnection).toBeUndefined();

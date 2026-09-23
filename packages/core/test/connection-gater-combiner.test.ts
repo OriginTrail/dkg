@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { combineConnectionGaters } from '../src/connection-gater-combiner.js';
+import { CONNECTION_GATER_HOOK_POLICY, combineConnectionGaters } from '../src/connection-gater-combiner.js';
 
 const peer = { toString: () => 'peer' } as any;
 const addr = { toString: () => '/ip4/1.2.3.4/tcp/9090' } as any;
@@ -49,6 +49,37 @@ describe('combineConnectionGaters', () => {
     expect(gater.denyDialPeer).toBeUndefined();
     expect(gater.filterMultiaddrForPeer).toBeUndefined();
     expect(combineConnectionGaters([])).toEqual({});
+  });
+
+  it('takes each hook\'s rule from the declared policy table, not from its name', () => {
+    // Every libp2p hook has an explicit rule; only the address filter ANDs.
+    const keepIfAll = Object.entries(CONNECTION_GATER_HOOK_POLICY)
+      .filter(([, policy]) => policy === 'keep-if-all')
+      .map(([name]) => name);
+    expect(keepIfAll).toEqual(['filterMultiaddrForPeer']);
+    for (const [name, policy] of Object.entries(CONNECTION_GATER_HOOK_POLICY)) {
+      if (name !== 'filterMultiaddrForPeer') expect(policy, name).toBe('deny-if-any');
+    }
+
+    // deny-if-any on a non-dial hook: one refusal is enough.
+    const gater = combineConnectionGaters([
+      { denyInboundRelayReservation: () => false },
+      { denyInboundRelayReservation: () => true },
+    ]);
+    expect(gater.denyInboundRelayReservation!(peer)).toBe(true);
+  });
+
+  it('reads only declared hooks, including inherited ones, and ignores other members', () => {
+    class Policy {
+      readonly denied = new Set(['peer']);
+      denyDialPeer(peerId: { toString(): string }): boolean {
+        return this.denied.has(peerId.toString());
+      }
+    }
+    const gater = combineConnectionGaters([new Policy(), { notAHook: () => true } as any]);
+
+    expect(Object.keys(gater)).toEqual(['denyDialPeer']);
+    expect(gater.denyDialPeer!(peer)).toBe(true);
   });
 
   it('calls method-style hooks with their own fragment as `this`', () => {

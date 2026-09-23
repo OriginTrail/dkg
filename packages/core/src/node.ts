@@ -1500,7 +1500,7 @@ export class DKGNode {
     // absent without a network identity (or with the peer-isolation kill
     // switch off), so such a node keeps exactly the flap guard's hooks and
     // libp2p's defaults for the rest, including its store-every-address filter.
-    return combineConnectionGaters([activeRelayGater, networkPeerGater, flapGater]) as ConnectionGater;
+    return combineConnectionGaters([activeRelayGater, networkPeerGater, flapGater]);
   }
 
   /**
