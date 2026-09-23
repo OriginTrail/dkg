@@ -88,4 +88,66 @@ describe('DKGNode DHT network identity wiring', () => {
 
     await node.stop();
   });
+
+  it('installs the other-network dial policy hooks alongside the relay gater', async () => {
+    const { DKGNode } = await import('../src/node.js');
+    const node = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [`/ip4/1.2.3.4/tcp/9090/p2p/${ACTIVE_RELAY_PEER}`],
+      otherNetworkRelays: [
+        `/ip4/5.6.7.8/tcp/9090/p2p/${FOREIGN_RELAY_PEER}`,
+        // Another network lists our configured relay: it must stay dialable.
+        `/ip4/1.2.3.4/tcp/9090/p2p/${ACTIVE_RELAY_PEER}`,
+        '/ip4/9.9.9.9/tcp/9090/p2p/PEER_ID_SOLARIS',
+      ],
+      networkIdentity: { networkId: 'shared-genesis', genesisId: 'base-testnet' },
+    });
+
+    await node.start();
+
+    const gater = mocks.createLibp2p.mock.calls[0][0].connectionGater;
+    const peer = (id: string) => ({ toString: () => id });
+    expect(gater.denyDialPeer(peer(FOREIGN_RELAY_PEER))).toBe(true);
+    expect(gater.denyDialPeer(peer(ACTIVE_RELAY_PEER))).toBe(false);
+    expect(gater.denyInboundEncryptedConnection(peer(FOREIGN_RELAY_PEER))).toBe(true);
+    expect(gater.denyOutboundEncryptedConnection(peer(FOREIGN_RELAY_PEER))).toBe(true);
+    // libp2p hands this hook to the peer store unbound.
+    const { filterMultiaddrForPeer } = gater;
+    expect(filterMultiaddrForPeer(peer(FOREIGN_RELAY_PEER), '/ip4/5.6.7.8/tcp/9090')).toBe(false);
+    expect(filterMultiaddrForPeer(peer(REMOTE_PEER), '/ip4/5.6.7.9/tcp/9090')).toBe(true);
+
+    // The agent's rejection hook reaches the same live gater.
+    expect(gater.denyDialPeer(peer(REMOTE_PEER))).toBe(false);
+    expect(node.denyPeerAfterNetworkMismatch(REMOTE_PEER)).toBe(true);
+    expect(gater.denyDialPeer(peer(REMOTE_PEER))).toBe(true);
+    expect(gater.denyInboundEncryptedConnection(peer(REMOTE_PEER))).toBe(true);
+    node.clearPeerNetworkMismatchDenial(REMOTE_PEER);
+    expect(gater.denyDialPeer(peer(REMOTE_PEER))).toBe(false);
+    expect(gater.denyInboundEncryptedConnection(peer(REMOTE_PEER))).toBe(false);
+    expect(node.denyPeerAfterNetworkMismatch(ACTIVE_RELAY_PEER)).toBe(false);
+
+    await node.stop();
+    expect(node.denyPeerAfterNetworkMismatch(REMOTE_PEER)).toBe(false);
+  });
+
+  it('leaves the gater unchanged without a network identity', async () => {
+    const { DKGNode } = await import('../src/node.js');
+    const node = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      otherNetworkRelays: [`/ip4/5.6.7.8/tcp/9090/p2p/${FOREIGN_RELAY_PEER}`],
+    });
+
+    await node.start();
+
+    const gater = mocks.createLibp2p.mock.calls[0][0].connectionGater;
+    expect(gater.denyDialPeer).toBeUndefined();
+    expect(gater.denyInboundEncryptedConnection).toBeUndefined();
+    expect(gater.denyOutboundEncryptedConnection).toBeUndefined();
+    expect(gater.filterMultiaddrForPeer).toBeUndefined();
+    expect(node.denyPeerAfterNetworkMismatch(REMOTE_PEER)).toBe(false);
+
+    await node.stop();
+  });
 });

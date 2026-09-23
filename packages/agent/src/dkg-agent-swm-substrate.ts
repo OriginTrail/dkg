@@ -406,6 +406,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     /** Authoritative numeric slot established by the admission owner. */
     onChainId?: string;
   }): ContextGraphSub {
+    // A name hash this node already resolved (and holds no row for) is the
+    // verified cleartext graph: never mint a second, empty identity for it.
+    const adoptedCleartextId = this.resolveContextGraphIdAlias?.(contextGraphId) ?? null;
+    if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
+    // Subscribing the cleartext of a graph held only by its name hash moves
+    // the subscription: nothing may keep running under the hash id.
+    this.retireLiveContextGraphNamePlaceholderFor?.(contextGraphId);
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {
@@ -540,7 +547,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    */
   unsubscribeFromContextGraph(this: DKGAgent,
     contextGraphId: string,
-    options?: { persist?: boolean; updateRehydrationStatus?: boolean },
+    options?: {
+      persist?: boolean;
+      updateRehydrationStatus?: boolean;
+      /** The cleartext id that supersedes this name-hash id (adoption). */
+      supersededBy?: string;
+    },
   ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
@@ -606,7 +618,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
     this.log.info(
       createOperationContext('system'),
-      `Unsubscribed from "${contextGraphId}" (coreHosted=${existing.coreHosted === true}); live gossip dropped, chain reconcile path retained if hosting`,
+      options?.supersededBy === undefined
+        ? `Unsubscribed from "${contextGraphId}" (coreHosted=${existing.coreHosted === true}); live gossip dropped, chain reconcile path retained if hosting`
+        : `Retired name-hash subscription "${contextGraphId}": superseded by cleartext adoption of "${options.supersededBy}"`,
     );
   }
 
@@ -692,6 +706,18 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
+    // A name-hash id adopted under its cleartext id shares the graph's wire
+    // topic and host-mode key with the cleartext row, which owns both now. A
+    // reconcile queued for the retired id must not touch either: its
+    // topic-wide unsubscribe would drop the cleartext row's handler.
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) {
+      this.log.debug(
+        createOperationContext('system'),
+        `SWM gossip reconcile for "${contextGraphId}" skipped: superseded by cleartext adoption of "${supersedingId}"`,
+      );
+      return;
+    }
     // Reconcile is the membership boundary; rebuild this CG's policy view
     // before deciding whether to keep or drop the SWM subscription.
     this.contextGraphMetaProjection.markDirty(contextGraphId);

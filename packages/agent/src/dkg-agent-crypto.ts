@@ -224,6 +224,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import { SyncTargetSupersededError } from './sync/error-tags.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -1014,6 +1015,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     opCtx?: OperationContext,
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    // A name-hash id adopted under its verified cleartext id names the same
+    // graph; answer for the cleartext row instead of re-hashing the hash.
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) return this.resolveFinalizedOnChainAccessPolicyState(supersedingId, opCtx);
     const trimmed = contextGraphId.trim();
     let onChainId: string | null = null;
     let resolvedFromLocalCg = false;
@@ -1204,6 +1209,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       slotBindingMode?: PublicPolicySlotBindingMode;
     } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    // A name-hash id adopted under its verified cleartext id names the same
+    // graph; answer for the cleartext row instead of re-hashing the hash
+    // (which would read as a stale mapping and fail closed).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) return this.resolveOnChainAccessPolicyState(supersedingId, opCtx, options);
     const trimmed = contextGraphId.trim();
 
     // Resolve a CANDIDATE on-chain id. Local-id resolution is authoritative
@@ -1364,6 +1374,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
+    // Sync that captured a name-hash id before this node adopted its cleartext
+    // id stands down: it must not write under the retired id, and it is not a
+    // stale mapping or a mismatching peer asset either.
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) throw new SyncTargetSupersededError(contextGraphId, supersedingId);
     return this.localCgMatchesOnChainSlot(
       contextGraphId,
       onChainId,

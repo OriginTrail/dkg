@@ -21,7 +21,13 @@ import {
   planBoundedGraphScopedDurableBatch,
   type GraphScopedDurableManifestPlan,
 } from '../durable-integrity.js';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
+import {
+  didSyncPeerRespond,
+  isSyncBackoffWorthyError,
+  isSyncPermanentRejection,
+  isSyncTargetSupersededError,
+  isSyncTransportFailure,
+} from '../error-tags.js';
 import {
   createDurableSyncAccumulator,
   finalizeDurableSyncCompletion,
@@ -1532,6 +1538,13 @@ async function runDurableSyncWithBudget(
     } catch (pidErr) {
       markDurableTerminalBoundary(accumulator, false);
       endPhase();
+      if (isSyncTargetSupersededError(pidErr)) {
+        // The node adopted this name-hash id's cleartext id mid-sync. Nothing
+        // was written under the retired id, and it is no fault of the peer.
+        logDebug(ctx, `Sync for context graph "${pid}" from ${remotePeerId} stopped: ${pidErr.message}`);
+        if (signal?.aborted) break;
+        continue;
+      }
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (
         proofOnlyChallengeFetch

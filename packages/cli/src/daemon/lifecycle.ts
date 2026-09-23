@@ -122,6 +122,7 @@ import {
   loadResolvedNetworkConfig,
   resolveAutoUpdateConfig,
   resolveChainConfig,
+  resolveOtherNetworkRelays,
   dkgDir,
   writeApiPort,
   removeApiPort,
@@ -1035,7 +1036,17 @@ export async function bootstrapConfiguredContextGraphs(input: {
   log: (message: string) => void;
 }): Promise<void> {
   const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
-  const configuredContextGraphIds = new Set(input.configuredContextGraphIds);
+  // A `--save`d on-chain name hash that this node already resolved subscribes
+  // its verified cleartext graph. The durable cleartext row re-proves the
+  // commitment offline, so the operator's config file is never rewritten.
+  const configuredContextGraphIds = new Set([...input.configuredContextGraphIds].map((contextGraphId) => {
+    const alias = input.agent.resolveContextGraphIdAlias?.(contextGraphId) ?? null;
+    if (alias === null) return contextGraphId;
+    input.log(
+      `Configured context graph ${contextGraphId} resolves to "${alias}" (verified name hash) — subscribing the cleartext id`,
+    );
+    return alias;
+  }));
   const networkDefaultContextGraphIds = new Set(input.networkDefaultContextGraphIds);
   const localBootstrapContextGraphIds = new Set([
     ...networkDefaultContextGraphIds,
@@ -1686,6 +1697,21 @@ async function runDaemonInnerWithStartupOwnership(
     }
   }
 
+  // Transport-level network isolation: the node refuses to dial, store or
+  // accept the relays of every OTHER bundled network (testnet refuses mainnet
+  // relays exactly as mainnet refuses testnet ones). Our own effective
+  // relayPeers are always exempt.
+  const otherNetworkRelays = resolveOtherNetworkRelays({
+    activeNetworkName: selectedNetworkConfig,
+    activeNetwork: network,
+    localRelayPeers: relayPeers,
+  });
+  if (otherNetworkRelays.relays.length > 0) {
+    log(
+      `Network isolation: refusing connections to ${otherNetworkRelays.relays.length} relay peer(s) of other DKG networks (${otherNetworkRelays.networkNames.join(", ")})`,
+    );
+  }
+
   if (
     !relayPeers?.length &&
     !config.bootstrapPeers?.length &&
@@ -1843,6 +1869,7 @@ async function runDaemonInnerWithStartupOwnership(
     // `relayPeers` may carry operator transport relays, which never become
     // snapshot trust, and `relay: "none"` means no relay is contacted at all.
     networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
+    otherNetworkRelays: otherNetworkRelays.relays,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,

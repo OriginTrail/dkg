@@ -6,6 +6,7 @@ import type { CatchupJobResult } from '../catchup-runner.js';
 import type { Rfc64SelectedSwmGraphSyncStatus } from '@origintrail-official/dkg-agent';
 import {
   toLegacyCatchupJobState,
+  type CatchupContextGraphIdentity,
   type CatchupJobState,
   type CatchupStatusResponse,
 } from '../catchup-status.js';
@@ -22,6 +23,8 @@ export interface CatchupJob {
   finishedAt?: number;
   result?: CatchupJobResult;
   error?: string;
+  /** The verified cleartext id the job continued under (name-hash requests). */
+  resolvedContextGraphId?: string;
 }
 
 export interface CatchupTracker {
@@ -34,6 +37,7 @@ export type CatchupGraphSyncStatus = Rfc64SelectedSwmGraphSyncStatus;
 export function toCatchupStatusResponse(
   job: CatchupJob,
   graphSync?: CatchupGraphSyncStatus,
+  identity?: CatchupContextGraphIdentity | null,
 ): CatchupStatusResponse {
   return {
     jobId: job.jobId,
@@ -50,5 +54,9 @@ export function toCatchupStatusResponse(
     ...(job.result === undefined ? {} : { result: job.result }),
     ...(job.error === undefined ? {} : { error: job.error }),
     ...(graphSync === undefined ? {} : { graphSync }),
+    ...(job.resolvedContextGraphId === undefined
+      ? {}
+      : { resolvedContextGraphId: job.resolvedContextGraphId }),
+    ...(identity == null ? {} : { identity }),
   };
 }

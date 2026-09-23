@@ -71,6 +71,9 @@ export default defineConfig({
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
+          // Subscribing by an on-chain name hash (Base #33): route, catch-up
+          // text and the public status summary. Pure handler, no hardhat.
+          'test/context-graph-name-hash-subscribe-route.test.ts',
           'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output

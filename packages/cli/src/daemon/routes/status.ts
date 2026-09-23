@@ -605,6 +605,29 @@ function projectRfc64SelectedPublicSyncStatus(
   };
 }
 
+/**
+ * Aggregate-only view of subscriptions this node knows only by their on-chain
+ * name hash. `/api/status` is unauthenticated, so it never names the affected
+ * graphs; the admin-only `GET /api/context-graph/subscriptions` has the rows.
+ */
+export function summarizeContextGraphIdentityStatus(
+  agent: DKGAgent,
+): { nameHashOnly: number; message?: string } {
+  let nameHashOnly = 0;
+  for (const [contextGraphId, subscription] of agent.getSubscribedContextGraphs?.() ?? []) {
+    if (subscription?.subscribed !== true) continue;
+    const state = agent.describeContextGraphIdentity?.(contextGraphId)?.state;
+    if (state === 'name-hash-only' || state === 'name-hash-only-private') nameHashOnly += 1;
+  }
+  if (nameHashOnly === 0) return { nameHashOnly };
+  return {
+    nameHashOnly,
+    message: `${nameHashOnly} subscribed Context Graph${nameHashOnly === 1 ? ' is' : 's are'} known only by `
+      + 'the on-chain name hash and cannot sync yet; waiting for a peer to reveal the cleartext id, '
+      + 'or subscribe with the cleartext id (details: GET /api/context-graph/subscriptions).',
+  };
+}
+
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -920,6 +943,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // public SWM scope terminal. The harness knows its generated CG is public
       // and uses this exact requested-scope projection as its no-spend preflight.
       rfc64SelectedPublicSync,
+      contextGraphIdentity: summarizeContextGraphIdentityStatus(agent),
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),

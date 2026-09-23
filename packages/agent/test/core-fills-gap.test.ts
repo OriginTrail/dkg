@@ -21,6 +21,7 @@
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
 // implementation, records every argument tuple on `.calls`, and returns the
@@ -287,6 +288,7 @@ async function seedSwmSnapshotInSubGraph(
 describe('Phase D — recordCoreHostedPublicCg', () => {
   let agent: DKGAgent | null = null;
   const saved: ContextGraphSubscriptionRecord[] = [];
+  const deleted: string[] = [];
 
   afterEach(async () => {
     vi.useRealTimers();
@@ -295,6 +297,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       agent = null;
     }
     saved.length = 0;
+    deleted.length = 0;
   });
 
   async function boot(): Promise<AgentInternals> {
@@ -305,7 +308,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       contextGraphSubscriptionStore: {
         loadAll: async () => [],
         save: async (record) => { saved.push(record); },
-        delete: async () => undefined,
+        delete: async (id) => { deleted.push(id); },
       },
     });
     stubNode(agent);
@@ -586,6 +589,76 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       onChainId: '5',
     });
     expect(internals.subscribedContextGraphs.get('5')).toBeUndefined();
+  });
+
+  describe('when ContextGraphCreated staged a name-hash placeholder first (Base #33)', () => {
+    const cleartext = 'acme-fun-facts';
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
+
+    /** Durable writes are queued asynchronously; wait for them, not for a fixed time. */
+    async function waitForCondition(check: () => boolean): Promise<void> {
+      const deadline = Date.now() + 5_000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error('condition not met in time');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+
+    async function bootWithPlaceholder(): Promise<AgentInternals & Record<string, any>> {
+      const internals = await boot() as AgentInternals & Record<string, any>;
+      internals.chain.getContextGraphAccessPolicy = async () => 0;
+      expect(internals.stageOnChainContextGraphBindingFromNameHash(nameHash, '7')).toBe(nameHash);
+      return internals;
+    }
+
+    it('hosts under the cleartext swmGraphId whose commitment is the placeholder hash', async () => {
+      const internals = await bootWithPlaceholder();
+
+      await internals.recordCoreHostedPublicCg('7', cleartext);
+
+      expect(internals.subscribedContextGraphs.get(cleartext)).toMatchObject({
+        coreHosted: true,
+        subscribed: false,
+        onChainId: '7',
+        onChainHash: nameHash,
+      });
+      expect(internals.subscribedContextGraphs.has(nameHash)).toBe(false);
+      expect(internals.resolveLocalCgIdByOnChainId(7n)).toBe(cleartext);
+      expect(saved.find((row) => row.id === cleartext)).toMatchObject({ coreHosted: true, onChainHash: nameHash });
+    });
+
+    it('self-heals a hosted row trapped under the hash by an earlier release', async () => {
+      const internals = await bootWithPlaceholder();
+      // 10.0.18 recorded the hosting obligation under the placeholder.
+      internals.setContextGraphSubscription(nameHash, {
+        ...internals.subscribedContextGraphs.get(nameHash),
+        syncMode: 'always-on',
+        coreHosted: true,
+      });
+      await waitForCondition(() => saved.some((row) => row.id === nameHash && row.coreHosted === true));
+
+      await internals.recordCoreHostedPublicCg('7', cleartext);
+
+      expect(internals.subscribedContextGraphs.has(nameHash)).toBe(false);
+      expect(internals.subscribedContextGraphs.get(cleartext)).toMatchObject({ coreHosted: true, onChainId: '7' });
+      // The durable hash row is gone too, or restart would resurrect the trap.
+      await waitForCondition(() => deleted.includes(nameHash));
+    });
+
+    it('keeps the placeholder when the hint is not the committed name', async () => {
+      const internals = await bootWithPlaceholder();
+
+      // Rows are keyed by the namespace holding the ACK copy; a namespace that
+      // is not the graph's committed name is refused (the StorageACK gate
+      // declines such a request before any copy exists), and the placeholder
+      // is left for name resolution to adopt.
+      await expect(internals.recordCoreHostedPublicCg('7', 'somebody-elses-name'))
+        .resolves.toBe('namespace-conflict');
+
+      expect(internals.subscribedContextGraphs.get(nameHash)).toMatchObject({ onChainId: '7' });
+      expect(internals.subscribedContextGraphs.get(nameHash)?.coreHosted).toBeUndefined();
+      expect(internals.subscribedContextGraphs.has('somebody-elses-name')).toBe(false);
+    });
   });
 
   it('does NOT mark a CURATED CG (Cores host curated as opaque ciphertext, not VM)', async () => {

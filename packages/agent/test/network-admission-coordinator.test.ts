@@ -94,6 +94,8 @@ function buildCoordinator(input: {
   quarantineCooldownMs?: number;
   maxProbeBackoffEntries?: number;
   now?: () => number;
+  onPeerRejected?: (peerId: string) => void;
+  onPeerVerified?: (peerId: string) => void;
 }) {
   const admission = new NetworkAdmissionService({
     networkId: input.identity?.networkId,
@@ -122,6 +124,8 @@ function buildCoordinator(input: {
     }],
     deletePeerFromPeerStore,
     cleanupRejectedPeerState,
+    ...(input.onPeerRejected !== undefined ? { onPeerRejected: input.onPeerRejected } : {}),
+    ...(input.onPeerVerified !== undefined ? { onPeerVerified: input.onPeerVerified } : {}),
     ...(input.probeTimeoutMs !== undefined ? { probeTimeoutMs: input.probeTimeoutMs } : {}),
   });
 
@@ -871,5 +875,79 @@ describe('NetworkAdmissionCoordinator', () => {
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).resolves.toBe(false);
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses transport dials to a rejected peer before closing its connections', async () => {
+    // 2026-09-23 Base mainnet: a rejected testnet relay was re-dialed ~0.2s
+    // after its connection closed. The dial refusal must be in place before
+    // the disconnect, which is what libp2p's reconnect queue reacts to.
+    const order: string[] = [];
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      onPeerRejected: (peerId) => order.push(`deny-dial:${peerId}`),
+      onPeerVerified: (peerId) => order.push(`verified:${peerId}`),
+    });
+    fixture.close.mockImplementation(() => { order.push('close'); });
+    fixture.deletePeerFromPeerStore.mockImplementation(async () => { order.push('forget'); });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+
+    expect(order).toEqual([`deny-dial:${REMOTE_PEER_ID}`, 'close', 'forget']);
+  });
+
+  it('lifts the transport dial refusal when a peer passes the identity proof', async () => {
+    const onPeerVerified = vi.fn();
+    const onPeerRejected = vi.fn();
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe, onPeerRejected, onPeerVerified });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(true);
+
+    expect(onPeerVerified).toHaveBeenCalledWith(REMOTE_PEER_ID);
+    expect(onPeerRejected).not.toHaveBeenCalled();
+  });
+
+  it('keeps the admission verdict when a transport hook throws', async () => {
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      onPeerRejected: () => { throw new Error('node not started'); },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(fixture.close).toHaveBeenCalledTimes(1);
   });
 });

@@ -56,6 +56,9 @@ export function resolveCoreHostedPublicCgLocalId(input: Readonly<{
   const onChainId = input.onChainId.toString();
   // An all-numeric local Context Graph id is still a valid cleartext hint.
   // Only the empty string and the on-chain id itself carry no information.
+  // A chain-discovered name-hash placeholder of the same graph (#2744) is not
+  // a separate namespace: writing the row under the verified cleartext id
+  // makes the canonical setter adopt and retire the placeholder.
   return input.swmGraphId && input.swmGraphId !== onChainId
     ? input.swmGraphId
     : onChainId;

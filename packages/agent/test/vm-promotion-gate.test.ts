@@ -1284,6 +1284,45 @@ describe('core VM-promotion guarantees', () => {
     });
   });
 
+  describe('name-hash placeholders (#2744)', () => {
+    /** A Core that saw ContextGraphCreated first holds the graph under its name hash, hosted by an earlier release. */
+    async function bootWithHostedPlaceholder(): Promise<Internals & Record<string, any>> {
+      const internals = await boot() as Internals & Record<string, any>;
+      const hash = nameHash('public-cg');
+      expect(internals.stageOnChainContextGraphBindingFromNameHash(hash, '42')).toBe(hash);
+      internals.setContextGraphSubscription(hash, {
+        ...internals.subscribedContextGraphs.get(hash),
+        syncMode: 'always-on',
+        coreHosted: true,
+      });
+      return internals;
+    }
+
+    it('adopts the placeholder when the gate records the verified cleartext namespace', async () => {
+      const internals = await bootWithHostedPlaceholder();
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '42', swmGraphId: 'public-cg', operation: 'publish',
+      })).resolves.toEqual({ ok: true });
+
+      expect(internals.subscribedContextGraphs.has(nameHash('public-cg'))).toBe(false);
+      expect(internals.subscribedContextGraphs.get('public-cg')).toMatchObject({
+        coreHosted: true, onChainId: '42', onChainHash: nameHash('public-cg'),
+      });
+    });
+
+    it('adopts the placeholder when the backfill records a cleartext namespace holding ACK copies', async () => {
+      const internals = await bootWithHostedPlaceholder();
+      await internals.ensureStorageAckLedgerReady();
+      await seedCopy(internals.store, { namespace: 'public-cg', n: 97, ageMs: 0, target: '42' });
+
+      await internals.runVmPromotionAudit();
+
+      expect(internals.subscribedContextGraphs.has(nameHash('public-cg'))).toBe(false);
+      expect(internals.subscribedContextGraphs.get('public-cg')).toMatchObject({ coreHosted: true, onChainId: '42' });
+    });
+  });
+
   describe('dormant subscription rows', () => {
     it('declines finally when rehydration is disabled', async () => {
       const internals = await boot();

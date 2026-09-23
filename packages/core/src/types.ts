@@ -44,6 +44,13 @@ export interface DKGNodeConfig {
   relayPeers?: string[];
   /** Active network identity used to isolate DHT, GossipSub, and relay wire paths. */
   networkIdentity?: DkgNetworkIdentity;
+  /**
+   * Relay multiaddrs (or bare peer ids) declared by the OTHER DKG networks
+   * bundled with this build. With a `networkIdentity`, the node refuses to dial
+   * these peers, store their addresses, or accept their connections. Peers in
+   * `relayPeers` are always exempt. Ignored without a `networkIdentity`.
+   */
+  otherNetworkRelays?: readonly string[];
   /** Enable circuit relay server on this node (for nodes with public IPs). */
   enableRelayServer?: boolean;
   /**

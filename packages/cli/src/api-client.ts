@@ -31,6 +31,7 @@ import {
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import type {
+  CatchupContextGraphIdentity,
   CatchupStatusResponse,
   CatchupStatusWireResponse,
 } from './catchup-status.js';
@@ -386,6 +387,14 @@ export interface DaemonStatusResponse {
     /** Requested scheduling scope; runtime classification still chooses the lane. */
     requestedContextGraphs: string[];
     catalogBackedContextGraphs: string[];
+  };
+  /**
+   * Subscriptions known only by their on-chain name hash (aggregate only;
+   * the admin subscription list names them). Absent on older daemons.
+   */
+  contextGraphIdentity?: {
+    nameHashOnly: number;
+    message?: string;
   };
   chain?: {
     chainId: string | null;
@@ -1733,6 +1742,8 @@ export class ApiClient {
         includeWorkspace: boolean;
         jobId: string;
       };
+    /** Present when the requested id is (or was) known only by its on-chain name hash. */
+    identity?: CatchupContextGraphIdentity;
   }> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,

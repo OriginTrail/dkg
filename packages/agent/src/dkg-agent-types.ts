@@ -1482,6 +1482,13 @@ export interface DKGAgentConfig {
    * history; the daemon passes none for `relay: "none"`.
    */
   networkRelays?: readonly string[];
+  /**
+   * Relay multiaddrs declared by the OTHER DKG networks bundled with this
+   * build (the daemon derives them from network/*.json). With a network
+   * identity the node refuses to dial these peers, store their addresses or
+   * accept their connections; `relayPeers` always win.
+   */
+  otherNetworkRelays?: readonly string[];
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**

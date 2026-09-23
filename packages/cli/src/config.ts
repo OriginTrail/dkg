@@ -37,6 +37,7 @@ import {
   hasErrorCode,
   resolveDkgConfigHome,
   dkgAuthTokenPath,
+  peerIdFromRelayAddress,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
 import {
@@ -1964,6 +1965,61 @@ export function loadNetworkRegistryFromRoots(
   }
 
   return registry;
+}
+
+type NetworkRelayIdentity = Partial<Pick<NetworkConfig, 'networkId' | 'genesisId' | 'relays'>>;
+
+export interface OtherNetworkRelays {
+  /** Relay multiaddrs of the other bundled networks, one per distinct peer id. */
+  relays: string[];
+  /** Sorted names of the bundled networks those relays belong to. */
+  networkNames: string[];
+}
+
+/**
+ * Relays declared by the bundled network configs OTHER than the active one:
+ * peers this node must never dial (`DKGNodeConfig.otherNetworkRelays`), in
+ * both directions — a testnet node derives the mainnet relays exactly as a
+ * mainnet node derives the testnet ones.
+ *
+ * An entry counts as the active network when its name, networkId or genesisId
+ * matches, so a renamed copy of the active overlay is never "other". Relays
+ * whose peer id the active network or the node's effective relay set (config
+ * relay, preferred relays) also lists are dropped, as are unparseable ids such
+ * as the `PEER_ID_*` placeholders of a pre-deployment network.
+ */
+export function resolveOtherNetworkRelays(input: {
+  activeNetworkName: string;
+  activeNetwork: NetworkRelayIdentity | null | undefined;
+  localRelayPeers?: readonly string[];
+  registry?: Readonly<Record<string, NetworkRelayIdentity>>;
+}): OtherNetworkRelays {
+  const active = input.activeNetwork;
+  if (!active) return { relays: [], networkNames: [] };
+  const registry = input.registry ?? loadBundledNetworkRegistry();
+  const localPeerIds = new Set<string>();
+  for (const address of [...(active.relays ?? []), ...(input.localRelayPeers ?? [])]) {
+    const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+    if (peerId) localPeerIds.add(peerId);
+  }
+
+  const seen = new Set<string>();
+  const relays: string[] = [];
+  const networkNames = new Set<string>();
+  for (const name of Object.keys(registry).sort()) {
+    const network = registry[name];
+    if (!network || name === input.activeNetworkName) continue;
+    if (network.networkId && network.networkId === active.networkId) continue;
+    if (network.genesisId && network.genesisId === active.genesisId) continue;
+    for (const address of Array.isArray(network.relays) ? network.relays : []) {
+      const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+      if (!peerId || localPeerIds.has(peerId) || seen.has(peerId)) continue;
+      seen.add(peerId);
+      relays.push(address.trim());
+      networkNames.add(name);
+    }
+  }
+  return { relays, networkNames: [...networkNames] };
 }
 
 /**
