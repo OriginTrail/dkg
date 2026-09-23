@@ -10177,12 +10177,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         { persist: false, updateRehydrationStatus: false },
       ),
       trackSync: (contextGraphId) => this.trackSyncContextGraph(contextGraphId),
-      subscribe: (contextGraphId) => this.subscribeToContextGraph(contextGraphId, {
-        trackSyncScope: false,
-        persist: false,
-        syncMode: 'always-on',
-        agentsPhonebookTrigger: 'startup',
-      }),
+      subscribe: (contextGraphId) => {
+        const installed = this.adoptAndInstallContextGraphSubscription(contextGraphId, {
+          trackSyncScope: false,
+          persist: false,
+          syncMode: 'always-on',
+        });
+        // A restored subscription asks for the phonebook as a startup trigger,
+        // not a subscribe.
+        this.requestOnDemandAgentsPhonebook(installed.contextGraphId, 'startup');
+      },
       persistMembership: (contextGraphId) => {
         this.persistLocalNodeMembership(contextGraphId, 'rehydrated-subscription');
       },

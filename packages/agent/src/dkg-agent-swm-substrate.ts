@@ -398,35 +398,56 @@ import {
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
+/** Options for subscribing this node to one context graph. */
+export interface ContextGraphSubscribeOptions {
+  trackSyncScope?: boolean;
+  persist?: boolean;
+  deferSharedMemoryGossipSubscribe?: boolean;
+  syncMode?: 'on-demand' | 'always-on';
+  /** Authoritative numeric slot established by the admission owner. */
+  onChainId?: string;
+}
+
 export class SwmSubstrateMethods extends DKGAgentBase {
-  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: {
-    trackSyncScope?: boolean;
-    persist?: boolean;
-    deferSharedMemoryGossipSubscribe?: boolean;
-    syncMode?: 'on-demand' | 'always-on';
-    /** Authoritative numeric slot established by the admission owner. */
-    onChainId?: string;
-    /** Label for an on-demand `agents` phonebook fetch this subscribe may start. */
-    agentsPhonebookTrigger?: 'subscribe' | 'startup';
-  }): ContextGraphSub {
-    // A name hash this node already resolved (and holds no row for) is the
-    // verified cleartext graph: never mint a second, empty identity for it.
-    const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
-    if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
-    // Subscribing the cleartext of a graph held only by its name hash moves
-    // the subscription: nothing may keep running under the hash id.
-    this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
-    const subscription = this.installContextGraphSubscription(contextGraphId, options);
+  subscribeToContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: ContextGraphSubscribeOptions,
+  ): ContextGraphSub {
+    const installed = this.adoptAndInstallContextGraphSubscription(contextGraphId, options);
     // The row is installed, so the phonebook check sees the subscription it
     // qualifies against. An Edge keeps no durable `agents` phonebook, so the
     // curator tier of a public wallet-scoped graph cannot reach its owner's
     // holders: ask for one bounded fetch. The request is O(1) and does its
     // checks detached.
-    this.requestOnDemandAgentsPhonebook(
+    this.requestOnDemandAgentsPhonebook(installed.contextGraphId, 'subscribe');
+    return installed.subscription;
+  }
+
+  /**
+   * Subscribe without asking for the on-demand `agents` phonebook: alias
+   * adoption, then the install. Returns the id actually subscribed. A caller
+   * that subscribes for another reason (startup rehydration) asks for the
+   * phonebook itself, under its own trigger.
+   */
+  adoptAndInstallContextGraphSubscription(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: ContextGraphSubscribeOptions,
+  ): { contextGraphId: string; subscription: ContextGraphSub } {
+    // A name hash this node already resolved (and holds no row for) is the
+    // verified cleartext graph: never mint a second, empty identity for it.
+    const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
+    if (adoptedCleartextId !== null) {
+      return this.adoptAndInstallContextGraphSubscription(adoptedCleartextId, options);
+    }
+    // Subscribing the cleartext of a graph held only by its name hash moves
+    // the subscription: nothing may keep running under the hash id.
+    this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
+    return {
       contextGraphId,
-      options?.agentsPhonebookTrigger ?? 'subscribe',
-    );
-    return subscription;
+      subscription: this.installContextGraphSubscription(contextGraphId, options),
+    };
   }
 
   /**
@@ -436,7 +457,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   protected installContextGraphSubscription(
     this: DKGAgent,
     contextGraphId: string,
-    options?: Parameters<SwmSubstrateMethods['subscribeToContextGraph']>[1],
+    options?: ContextGraphSubscribeOptions,
   ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
