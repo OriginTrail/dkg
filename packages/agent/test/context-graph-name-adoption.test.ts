@@ -3,10 +3,16 @@
  * by its on-chain name hash (Base-mainnet Context Graph #33, 2026-09-23), and
  * the restart contract for a `--save`d hash subscription.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  SYSTEM_CONTEXT_GRAPHS,
+  contextGraphDataGraphUri,
+  createOperationContext,
+} from '@origintrail-official/dkg-core';
+import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -426,6 +432,218 @@ describe('operator-facing identity', () => {
     expect(internals.contextGraphNameResolutionTargets()).toEqual([
       { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID },
     ]);
+  });
+});
+
+/**
+ * Base-mainnet canary, Context Graph #34 (2026-09-23): work that captured the
+ * hash id before adoption kept running afterwards. Its identity checks
+ * re-hashed the hash as if it were cleartext ("local mapping is STALE",
+ * "name-bound elsewhere") and a reconcile pass ended as "queue is closed for
+ * node shutdown". Each case below is such a straggler.
+ */
+describe('retiring the hash id after adoption (Base #34 canary)', () => {
+  const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
+  const MISLEADING = [/STALE/, /node shutdown/, /name-bound elsewhere/, /not authori[sz]ed|unauthori[sz]ed/];
+
+  function messages(spy: MockInstance): string[] {
+    return spy.mock.calls.map(([, message]) => String(message));
+  }
+
+  function misleadingWarningsAbout(warn: MockInstance, id: string): string[] {
+    return messages(warn).filter((message) =>
+      message.includes(id) && MISLEADING.some((pattern) => pattern.test(message)));
+  }
+
+  it('answers policy reads for the retired hash as the cleartext graph, and never fails closed', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    subscribeByNameHash(internals);
+    // The live placeholder is not superseded; its wire-keyed proof holds.
+    expect(internals.supersedingContextGraphIdFor(NAME_HASH)).toBeNull();
+    await expect(internals.isContextGraphPublicOnChain(NAME_HASH)).resolves.toBe(true);
+    await expect(internals.requireLocalCgMatchesOnChainSlot(NAME_HASH, ON_CHAIN_ID)).resolves.toBe(true);
+
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    const warn = vi.spyOn(internals.log, 'warn');
+    expect(internals.supersedingContextGraphIdFor(NAME_HASH)).toBe(CLEARTEXT);
+    await expect(internals.isContextGraphPublicOnChain(CLEARTEXT)).resolves.toBe(true);
+    await expect(internals.isContextGraphPublicOnChain(NAME_HASH)).resolves.toBe(true);
+    await expect(internals.resolveOnChainAccessPolicyState(NAME_HASH)).resolves.toBe(0);
+    await expect(internals.resolveFinalizedOnChainAccessPolicyState(NAME_HASH)).resolves.toBe(0);
+    expect(misleadingWarningsAbout(warn, NAME_HASH)).toEqual([]);
+  });
+
+  it('stops sync keyed by the retired hash instead of writing under it', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    subscribeByNameHash(internals);
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    const warn = vi.spyOn(internals.log, 'warn');
+    // The durable-sync and exact-fetch identity proof gates writes: it must
+    // neither pass (data would land under the retired id) nor blame a stale
+    // mapping or the peer's asset.
+    const proof = internals.requireLocalCgMatchesOnChainSlot(NAME_HASH, ON_CHAIN_ID);
+    await expect(proof).rejects.toBeInstanceOf(SyncTargetSupersededError);
+    await expect(proof).rejects.toMatchObject({
+      name: 'AbortError',
+      contextGraphId: NAME_HASH,
+      supersededBy: CLEARTEXT,
+    });
+    // The cleartext id proves the same slot.
+    await expect(internals.requireLocalCgMatchesOnChainSlot(CLEARTEXT, ON_CHAIN_ID)).resolves.toBe(true);
+    expect(misleadingWarningsAbout(warn, NAME_HASH)).toEqual([]);
+  });
+
+  it('reports an RFC-64 authority refresh for the retired hash as superseded', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    subscribeByNameHash(internals);
+    // The refresh a scheduler batched for the hash before adoption: finalized
+    // evidence for slot 33, whose committed name is the hash itself.
+    const snapshot = await internals.chain.getContextGraphAuthoritySnapshot(BigInt(ON_CHAIN_ID));
+    expect(snapshot.nameHash).toBe(NAME_HASH);
+    const request = {
+      kind: 'finalized-evidence',
+      evidence: { contextGraphAuthorityIndexId: ON_CHAIN_ID, batchTargetIds: [ON_CHAIN_ID], snapshot },
+    };
+    // A running catalog service on a trusted network, so the refresh reaches
+    // the name check the canary failed.
+    vi.spyOn(internals, 'rfc64PublicCatalogServiceV1', 'get').mockReturnValue({});
+    internals.config.networkIdentity = { ...internals.config.networkIdentity, chainId: 'mock:31337' };
+
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    await expect(internals.reconcileRfc64CatalogAccessAuthorityV1(NAME_HASH, undefined, request))
+      .resolves.toBeNull();
+  });
+
+  it('ends a VM reconcile in flight for the hash quietly, and reconciles the cleartext id', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    subscribeByNameHash(internals);
+    const scheduling = internals.ensureVmReconcileScheduling();
+    const triggered = vi.spyOn(scheduling, 'triggerLive');
+    const warn = vi.spyOn(internals.log, 'warn');
+    const debug = vi.spyOn(internals.log, 'debug');
+    let entered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const resolveTarget = internals.resolveVmReconcileTarget.bind(internals);
+    vi.spyOn(internals, 'resolveVmReconcileTarget').mockImplementation(async (...args: unknown[]) => {
+      // Resolve the pass's target while the placeholder is live, as on the
+      // canary, then hold the pass there until adoption has landed.
+      const resolved = await resolveTarget(...args);
+      if (args[0] === NAME_HASH) {
+        entered = true;
+        await gate;
+      }
+      return resolved;
+    });
+
+    // The pass the hash subscription started is in flight when adoption lands.
+    scheduling.triggerLive(NAME_HASH);
+    await waitFor(() => entered);
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    release();
+    await scheduling.waitForIdle(NAME_HASH);
+
+    expect(messages(warn).filter((message) => message.includes(NAME_HASH))).toEqual([]);
+    expect(messages(debug)).toContain(
+      `VM reconcile for "${NAME_HASH}" stopped: superseded by cleartext adoption of "${CLEARTEXT}"`,
+    );
+    // Work continues under the cleartext id.
+    await waitFor(() => triggered.mock.calls.some(([id]) => id === CLEARTEXT));
+  });
+
+  it('drops a reconcile queued for the hash before adoption without resolving a target', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    subscribeByNameHash(internals);
+    const scheduling = internals.ensureVmReconcileScheduling();
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    const warn = vi.spyOn(internals.log, 'warn');
+    const debug = vi.spyOn(internals.log, 'debug');
+    const resolveTarget = vi.spyOn(internals, 'resolveVmReconcileTarget');
+
+    scheduling.triggerLive(NAME_HASH);
+    await scheduling.waitForIdle(NAME_HASH);
+
+    expect(resolveTarget.mock.calls.filter(([id]) => id === NAME_HASH)).toEqual([]);
+    expect(messages(warn).filter((message) => message.includes(NAME_HASH))).toEqual([]);
+    expect(messages(debug)).toContain(
+      `VM reconcile for "${NAME_HASH}" stopped: superseded by cleartext adoption of "${CLEARTEXT}"`,
+    );
+  });
+
+  it('skips SWM work queued for the hash, before any authorization check', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    subscribeByNameHash(internals);
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    const warn = vi.spyOn(internals.log, 'warn');
+    const authorize = vi.spyOn(internals, 'canUseSharedMemoryForContextGraph');
+
+    const plan = await internals.planSharedMemorySyncContextGraphs(
+      undefined,
+      [NAME_HASH],
+      createOperationContext('sync'),
+    );
+    expect(plan.targets.map(({ contextGraphId }: { contextGraphId: string }) => contextGraphId)).toEqual([]);
+    await internals.reconcileSharedMemoryGossipSubscription(NAME_HASH);
+
+    expect(authorize.mock.calls.filter(([id]) => id === NAME_HASH)).toEqual([]);
+    expect(internals.sharedMemoryGossipRegistered.has(NAME_HASH)).toBe(false);
+    expect(misleadingWarningsAbout(warn, NAME_HASH)).toEqual([]);
+  });
+
+  it('logs the retirement of the hash subscription with its reason', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    subscribeByNameHash(internals);
+    const info = vi.spyOn(internals.log, 'info');
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-ontology');
+    expect(messages(info)).toContain(
+      `Retired name-hash subscription "${NAME_HASH}": superseded by cleartext adoption of "${CLEARTEXT}"`,
+    );
+    expect(messages(info).filter((message) => message.startsWith(`Unsubscribed from "${NAME_HASH}"`))).toEqual([]);
+  });
+
+  it('keeps a private graph private under its retired hash', async () => {
+    const internals = await boot({ accessPolicy: 1 });
+    expect(internals.stageOnChainContextGraphBindingFromNameHash(NAME_HASH, ON_CHAIN_ID)).toBe(NAME_HASH);
+    internals.onChainAccessPolicyCache.set(ON_CHAIN_ID, 1);
+    internals.subscribeToContextGraph(NAME_HASH);
+    // A curator's cleartext id, adopted without any peer revealing it.
+    await internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'local-store');
+    expect(internals.supersedingContextGraphIdFor(NAME_HASH)).toBe(CLEARTEXT);
+    await expect(internals.isContextGraphPublicOnChain(NAME_HASH)).resolves.toBe(false);
+    await expect(internals.isContextGraphPublicOnChain(CLEARTEXT)).resolves.toBe(false);
+  });
+
+  it('keeps every fail-closed path for hashes it has not adopted', async () => {
+    const internals = await boot({ accessPolicy: 0 });
+    const warn = vi.spyOn(internals.log, 'warn');
+    // Unknown hash: nothing supersedes it and it is not public.
+    const unknownHash = ethers.keccak256(ethers.toUtf8Bytes('someone-elses-graph')).toLowerCase();
+    expect(internals.supersedingContextGraphIdFor(unknownHash)).toBeNull();
+    await expect(internals.isContextGraphPublicOnChain(unknownHash)).resolves.toBe(false);
+
+    // A genuinely stale mapping: a wire-keyed row bound to a slot that commits
+    // another name still fails closed, with its diagnostic.
+    const staleHash = ethers.keccak256(ethers.toUtf8Bytes('reused-slot')).toLowerCase();
+    internals.setContextGraphSubscription(staleHash, {
+      subscribed: false,
+      synced: false,
+      onChainId: ON_CHAIN_ID,
+      onChainHash: staleHash,
+    });
+    expect(internals.supersedingContextGraphIdFor(staleHash)).toBeNull();
+    await expect(internals.isContextGraphPublicOnChain(staleHash)).resolves.toBe(false);
+    expect(messages(warn).some((message) => message.includes(staleHash) && message.includes('STALE'))).toBe(true);
+
+    // A hash-shaped cleartext id is its own graph.
+    const hashShaped = `0x${'cd'.repeat(32)}`;
+    internals.setContextGraphSubscription(hashShaped, { subscribed: false, synced: false });
+    expect(internals.supersedingContextGraphIdFor(hashShaped)).toBeNull();
+
+    // A cleartext row that carries the hash but is not bound on-chain proves
+    // no slot: it stays an alias for subscribe, never a policy answer.
+    internals.setContextGraphSubscription(CLEARTEXT, { subscribed: false, synced: false, onChainHash: NAME_HASH });
+    expect(internals.resolveContextGraphIdAlias(NAME_HASH)).toBe(CLEARTEXT);
+    expect(internals.supersedingContextGraphIdFor(NAME_HASH)).toBeNull();
   });
 });
 

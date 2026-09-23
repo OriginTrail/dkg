@@ -5198,6 +5198,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
+      // Supersession before authorization: a name-hash id this node adopted
+      // under its cleartext id must not sync (or write) under the retired id,
+      // even though policy reads now answer for the graph it names.
+      const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+      if (supersedingId) {
+        this.log.debug(
+          ctx,
+          `Skipping SWM sync for "${contextGraphId}": superseded by cleartext adoption of "${supersedingId}"`,
+        );
+        continue;
+      }
       const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
       const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,

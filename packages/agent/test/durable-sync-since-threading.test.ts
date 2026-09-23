@@ -23,6 +23,7 @@ import {
   type UalOnlyExactAssetSelection,
 } from '../src/sync/exact-assets.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
+import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -473,6 +474,34 @@ describe('exact-asset rolling-upgrade filter', () => {
     expect(authenticateChallengePinnedAsset).toHaveBeenCalledTimes(6);
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
     expect(detailed.result.insertedTriples).toBe(0);
+  });
+
+  it('stops quietly for a Context Graph id superseded mid-sync and syncs the rest', async () => {
+    // A name-hash id this node adopted under its cleartext id while the sync
+    // for it was in flight (Base #34 canary).
+    const retired = `0x${'b9'.repeat(32)}`;
+    const warnings: string[] = [];
+    const debugs: string[] = [];
+    const { context, calls } = makeContext({ contextGraphIds: [retired, 'mfacts'] });
+    const fetchPage = context.fetchSyncPages;
+    context.fetchSyncPages = async (request) => {
+      if (request.contextGraphId === retired) {
+        throw new SyncTargetSupersededError(retired, 'acme-fun-facts');
+      }
+      return fetchPage(request);
+    };
+    context.logWarn = (_ctx, message) => { warnings.push(message); };
+    context.logDebug = (_ctx, message) => { debugs.push(message); };
+
+    const summary = await runDurableSync(context);
+
+    expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+    expect(debugs).toContain(
+      `Sync for context graph "${retired}" from peerR stopped: `
+      + `Context Graph ${retired} was superseded by cleartext adoption of "acme-fun-facts"`,
+    );
+    expect(calls.some(({ contextGraphId }) => contextGraphId === 'mfacts')).toBe(true);
+    expect(summary.diagnostics?.backoffWorthyFailures ?? 0).toBe(0);
   });
 
   it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {

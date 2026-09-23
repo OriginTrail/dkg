@@ -281,19 +281,51 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     if (this.subscribedContextGraphs.has(contextGraphId) || this.subscribedContextGraphs.has(nameHash)) {
       return null;
     }
-    const mapped = this.wireIdToLocalCgId.get(nameHash);
-    if (mapped !== undefined && mapped !== nameHash) {
-      const row = this.subscribedContextGraphs.get(mapped);
-      if (
-        row?.onChainHash !== undefined
-        && this.contextGraphWireId(row.onChainHash) === nameHash
-        && verifyContextGraphNameCandidate(mapped, nameHash) === mapped
-      ) return mapped;
-    }
+    const live = this.liveAdoptedContextGraphNameRow(nameHash);
+    if (live !== null) return live.contextGraphId;
     const persisted = stateOf(this).persistedAliases.get(nameHash);
     return persisted !== undefined && verifyContextGraphNameCandidate(persisted, nameHash) === persisted
       ? persisted
       : null;
+  }
+
+  /**
+   * The cleartext id that superseded a retired name-hash id, or null. Work
+   * that captured the hash before adoption (a reconcile pass, a sync, an
+   * authority refresh) uses this to stand down, and policy reads use it to
+   * answer for the graph the hash names. Only a live adoption counts: no row
+   * is keyed by the hash, a cleartext row carries it as `onChainHash`,
+   * keccak256(utf8(cleartext)) equals it, and that row is bound on-chain.
+   * A placeholder, an unknown hash or a hash-shaped cleartext id is never
+   * superseded, so their fail-closed paths are untouched.
+   */
+  supersedingContextGraphIdFor(this: DKGAgent, contextGraphId: string): string | null {
+    const nameHash = normalizeContextGraphNameHash(contextGraphId);
+    if (nameHash === null) return null;
+    if (this.subscribedContextGraphs.has(contextGraphId) || this.subscribedContextGraphs.has(nameHash)) {
+      return null;
+    }
+    const live = this.liveAdoptedContextGraphNameRow(nameHash);
+    return live !== null && live.subscription.onChainId !== undefined ? live.contextGraphId : null;
+  }
+
+  /**
+   * The live cleartext row the reverse index holds for a name hash, when it
+   * carries that hash as `onChainHash` and is its verified preimage.
+   */
+  liveAdoptedContextGraphNameRow(
+    this: DKGAgent,
+    nameHash: string,
+  ): { contextGraphId: string; subscription: ContextGraphSub } | null {
+    const mapped = this.wireIdToLocalCgId.get(nameHash);
+    if (mapped === undefined || mapped === nameHash) return null;
+    const subscription = this.subscribedContextGraphs.get(mapped);
+    if (
+      subscription?.onChainHash === undefined
+      || this.contextGraphWireId(subscription.onChainHash) !== nameHash
+      || verifyContextGraphNameCandidate(mapped, nameHash) !== mapped
+    ) return null;
+    return { contextGraphId: mapped, subscription };
   }
 
   /** Remember durable aliases (called by rehydration with every persisted row). */
@@ -450,7 +482,9 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     // Drop the live subscription keyed by the hash (its gossip topics, sync
     // scope and durable member row). The row itself stays for the canonical
     // promotion below.
-    if (wasSubscribed) this.unsubscribeFromContextGraph(target.nameHash, { persist: true });
+    if (wasSubscribed) {
+      this.unsubscribeFromContextGraph(target.nameHash, { persist: true, supersededBy: contextGraphId });
+    }
 
     // Promote through the canonical setter. The placeholder is the reverse
     // index's target for keccak256(utf8(contextGraphId)) and is bound to the
@@ -502,7 +536,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const nameHash = this.contextGraphNameCommitment(contextGraphId);
     const placeholder = this.contextGraphNamePlaceholder(nameHash);
     if (placeholder === null || placeholder.subscription.subscribed !== true) return;
-    this.unsubscribeFromContextGraph(nameHash, { persist: true });
+    this.unsubscribeFromContextGraph(nameHash, { persist: true, supersededBy: contextGraphId });
   }
 
   /**
