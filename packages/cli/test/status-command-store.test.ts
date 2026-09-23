@@ -10,8 +10,9 @@ interface StoreFields {
   storeQuadsAgeMs?: number | null;
 }
 
-async function renderStatus(store: StoreFields): Promise<{
+async function renderStatus(store: StoreFields, extra: Partial<DaemonStatusResponse> = {}): Promise<{
   storeLine: string | undefined;
+  graphsLine: string | undefined;
   statusRequests: unknown[][];
 }> {
   const lines: string[] = [];
@@ -33,6 +34,7 @@ async function renderStatus(store: StoreFields): Promise<{
         storeBackend: 'sparql-http',
         storeUrl: 'http://127.0.0.1:9999/query',
         ...store,
+        ...extra,
       };
     },
   } as never);
@@ -44,6 +46,7 @@ async function renderStatus(store: StoreFields): Promise<{
     await program.parseAsync(['node', 'dkg', 'status']);
     return {
       storeLine: lines.find((line) => line.includes('Store:')),
+      graphsLine: lines.find((line) => line.includes('Graphs:')),
       statusRequests,
     };
   } finally {
@@ -100,5 +103,28 @@ describe('dkg status external-store rendering', () => {
     const { storeLine } = await renderStatus(store);
 
     expect(storeLine).toBe(`  Store:     sparql-http (http://127.0.0.1:9999/query) — ${rendered}`);
+  });
+});
+
+describe('dkg status name-hash-only subscriptions', () => {
+  const READY: StoreFields = { storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 0 };
+
+  it('prints the daemon\'s summary when a subscription is known only by its name hash', async () => {
+    const { graphsLine } = await renderStatus(READY, {
+      contextGraphIdentity: { nameHashOnly: 2, message: '2 subscribed Context Graphs are known only by the on-chain name hash' },
+    });
+
+    expect(graphsLine).toBe('  Graphs:    2 subscribed Context Graphs are known only by the on-chain name hash');
+  });
+
+  it.each([
+    ['none are', { contextGraphIdentity: { nameHashOnly: 0 } }],
+    ['a count comes without a message', { contextGraphIdentity: { nameHashOnly: 1 } }],
+    ['an older daemon sends no summary', {}],
+  ] as Array<[string, Partial<DaemonStatusResponse>]>)('prints no Graphs line when %s', async (_label, extra) => {
+    const { graphsLine, storeLine } = await renderStatus(READY, extra);
+
+    expect(storeLine).toBeDefined();
+    expect(graphsLine).toBeUndefined();
   });
 });
