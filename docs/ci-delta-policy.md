@@ -31,7 +31,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Deletion, rename or copy | Routed by every old and new path, like edits |
 | Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
 | Several workspaces | Union of their rules |
-| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that execute them: `devnet/` the agent lane (the Gate 1 harness also Blazegraph), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone |
+| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that load them: `devnet/` the agent lane (the Gate 1 and persistence harnesses also Blazegraph; the Gate 2 adapter the CLI starts, the shared `rfc64-runtime-*` modules and the CP2 batch planning it imports also the CLI lane), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone. A routing test follows package and CI-job references through support-to-support imports and fails when a lane that loads a file is missing |
 | More than 100 production files | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
 | Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |

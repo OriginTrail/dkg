@@ -497,8 +497,10 @@ function isGlobalFullPath(filePath) {
 // Repository areas outside the package workspaces, in first-match order. An
 // entry with `full` keeps full CI with its own reason (the CI control plane,
 // unknown workflow paths, devnet install inputs). Every other entry selects
-// the lanes that actually execute the area in CI (ci.yml and its reusable
-// workflows) plus the shared build job's own checks (`buildChecks`): its lint,
+// the lanes that actually load the area in CI (a CI job running it, or a
+// package referencing it, directly or through another support file; the
+// routing tests follow those imports) plus the shared build job's own checks
+// (`buildChecks`): its lint,
 // repository-script tests and test-inventory checks cover these files, and for
 // routes with no lanes they are the only CI consumer (the suites are manual or
 // have their own workflow).
@@ -535,24 +537,26 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     reason: 'RFC-64 Gate 1 harness runs in the agent and Blazegraph lanes',
   },
   {
-    // Gate 0 persistence evidence and the evidence bootstrap run in the
-    // Windows lifecycle job, and agent code imports the Gate 0 evidence
-    // helpers (packages/agent/devnet/rfc64-private-catalog).
-    pattern: /^devnet\/(?:rfc64-persistence-lifecycle|_bootstrap)\//,
-    lanes: ['tornado_agent'],
-    reason: 'RFC-64 persistence harness runs in the agent and Windows lifecycle jobs',
+    // Agent code imports the Gate 0 evidence helpers, and the Gate 1 rollout
+    // tests, which the agent and Blazegraph jobs run, load its process
+    // lifecycle.
+    pattern: /^devnet\/rfc64-persistence-lifecycle\//,
+    lanes: ['tornado_agent', 'tornado_blazegraph'],
+    reason: 'RFC-64 persistence harness is loaded by agent code and the Gate 1 rollout tests',
   },
   {
     // The CLI's harness-only `rfc64-gate2-adapter` command loads
-    // adapter-process.ts from here, and agent fixtures import its runtime hooks.
-    pattern: /^devnet\/rfc64-gate2-multi-asset-completeness\//,
+    // adapter-process.ts, which imports the shared rfc64-runtime-* modules and
+    // the CP2 batch planning; agent fixtures import the Gate 2 runtime hooks.
+    pattern: /^devnet\/(?:rfc64-gate2-multi-asset-completeness\/|rfc64-cp2-private-swm-vm-recovery\/|rfc64-runtime-[^/]+$)/,
     lanes: ['tornado_agent', 'bura_cli'],
-    reason: 'RFC-64 Gate 2 harness is loaded by the CLI and agent fixtures',
+    reason: 'RFC-64 Gate 2 adapter (started by the CLI) and the modules it loads',
   },
   {
     // Devnet harnesses are built on the agent, and agent tests, fixtures and
-    // packages/agent/devnet import several of them (shared rfc64-runtime-*
-    // modules, the Gate 0 evidence helpers, the Gate 2 runtime hooks).
+    // packages/agent/devnet import several of them. The Gate 0 lifecycle and
+    // evidence harnesses (rfc64-persistence-lifecycle, _bootstrap) run in the
+    // Windows job, which follows the agent lane.
     pattern: /^devnet\//,
     lanes: ['tornado_agent'],
     reason: 'devnet harnesses are imported by agent tests and fixtures',
