@@ -2355,6 +2355,9 @@ async function runDaemonInnerWithStartupOwnership(
   // complete catch-up from v10.0.6's clean-empty false-ready state. Migrate
   // once before the API becomes available: private/unconfirmed rows retry,
   // while confirmed public rows retain their historical empty-CG semantics.
+  // It stays on the critical path so no readiness answer is served from a
+  // half-migrated row, and is bounded (per-row deadline plus a pass budget)
+  // so a slow chain read cannot hold the API closed.
   await migrateLegacyContextGraphReadiness({
     agent,
     store: dashDb,
