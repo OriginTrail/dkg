@@ -12,7 +12,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
-import { baseDefaultRpcSet, type FakeRpcLog } from './helpers/fake-log-rpc.js';
+import {
+  BASE_SPAN_CAP_REFUSAL,
+  baseDefaultRpcSet,
+  fakeLogRpc,
+  type FakeLogRpcRequest,
+  type FakeRpcLog,
+} from './helpers/fake-log-rpc.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const CG_STORAGE = '0x1B37447CC735Ab8Ac29f057c8874087Fe9A98154';
@@ -38,7 +44,42 @@ function createdLog(blockNumber: number, contextGraphId: bigint): FakeRpcLog {
 
 const LOGS = [createdLog(HEAD - 17_000, 7n), createdLog(HEAD - 12_500, 8n)];
 
+/** `KA_HIGH_WATER_PAGE_TIMEOUT_MS` in evm-adapter-base.ts: one request's deadline. */
+const PAGE_REQUEST_TIMEOUT_MS = 15_000;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function makeAdapter(providers: ethers.JsonRpcProvider[]): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const adapter: any = new EVMChainAdapter({
+    rpcUrl: 'https://mainnet.base.org',
+    rpcUrls: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'],
+    privateKey: DEPLOYER_PK,
+    hubAddress: '0x0000000000000000000000000000000000000001',
+    chainId: 'base:8453',
+    staticNetwork: false,
+  });
+  for (const unused of adapter.providers as ethers.JsonRpcProvider[]) unused.destroy();
+  adapter.providers = providers;
+  return adapter;
+}
+
+/** mainnet.base.org's 2,000-block span cap, answering each eth_getLogs after `delay`. */
+function slowCappedPrimary(delay: (request: FakeLogRpcRequest) => Promise<void>) {
+  return fakeLogRpc({
+    url: 'https://mainnet.base.org',
+    head: () => HEAD,
+    logs: () => LOGS,
+    delay,
+    refuse: ({ fromBlock, toBlock }) => (toBlock - fromBlock + 1 > 2_000 ? BASE_SPAN_CAP_REFUSAL : undefined),
+  });
+}
+
+const ids = (logs: ReadonlyArray<ethers.EventLog | ethers.Log>) => (
+  logs.map((log) => (log as ethers.EventLog).args.contextGraphId)
+);
+
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -46,17 +87,7 @@ describe('queryEventLogsPage on the default Base RPC set', () => {
   it('skips the depth-limited backups after one request each and fits the page to the primary', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const set = baseDefaultRpcSet({ head: () => HEAD, logs: () => LOGS });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const adapter: any = new EVMChainAdapter({
-      rpcUrl: 'https://mainnet.base.org',
-      rpcUrls: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'],
-      privateKey: DEPLOYER_PK,
-      hubAddress: '0x0000000000000000000000000000000000000001',
-      chainId: 'base:8453',
-      staticNetwork: false,
-    });
-    for (const unused of adapter.providers as ethers.JsonRpcProvider[]) unused.destroy();
-    adapter.providers = [set.primary.provider, set.publicnode.provider, set.drpc.provider];
+    const adapter = makeAdapter([set.primary.provider, set.publicnode.provider, set.drpc.provider]);
     const storage = new ethers.Contract(CG_STORAGE, cgInterface, set.primary.provider);
     // Freshest-first, as `resolveLogScanHead` orders them: the backups can
     // report the higher head and so be tried before the primary.
@@ -109,5 +140,82 @@ describe('queryEventLogsPage on the default Base RPC set', () => {
     ]);
     expect(set.drpc.logRanges()).toEqual([[lo, hi]]);
     expect(set.publicnode.logRanges()).toEqual([[lo, hi]]);
+  });
+
+  it('gives each physical request of a split page its own deadline, not one for the page', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Healthy but slow: 4s per request, so the refusal and the five fitted
+    // requests take 24s — past one 15s deadline for the whole page.
+    const primary = slowCappedPrimary(() => new Promise((resolve) => { setTimeout(resolve, 4_000); }));
+    // An archive backup that serves any range: asked only if the primary fails.
+    const backup = fakeLogRpc({ url: 'https://archive.example', head: () => HEAD, logs: () => LOGS });
+    const adapter = makeAdapter([primary.provider, backup.provider]);
+    const storage = new ethers.Contract(CG_STORAGE, cgInterface, primary.provider);
+    const scanProviders = [
+      { provider: primary.provider, backendHead: HEAD },
+      { provider: backup.provider, backendHead: HEAD },
+    ];
+    const lo = HEAD - 18_000;
+    const hi = lo + 8_999;
+
+    let settled = false;
+    const pending = adapter.queryEventLogsPage(
+      storage, storage.filters.ContextGraphCreated(), lo, hi, scanProviders, new Map(), 'test page',
+    ).finally(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(PAGE_REQUEST_TIMEOUT_MS + 1_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const page = await pending;
+
+    expect(page.provider).toBe(primary.provider);
+    expect(ids(page.logs)).toEqual([7n, 8n]);
+    expect(primary.logRanges()).toHaveLength(6);
+    expect(backup.logRanges()).toEqual([]);
+  });
+
+  it('fails a hung request over after its own deadline and hands the server back as preferred', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const lo = HEAD - 18_000;
+    const hi = lo + 8_999;
+    // The third fitted request never answers.
+    const primary = slowCappedPrimary(({ fromBlock }) => (
+      fromBlock === lo + 4_000 ? new Promise<void>(() => {}) : Promise.resolve()
+    ));
+    const backup = fakeLogRpc({ url: 'https://archive.example', head: () => HEAD, logs: () => LOGS });
+    const adapter = makeAdapter([primary.provider, backup.provider]);
+    const storage = new ethers.Contract(CG_STORAGE, cgInterface, primary.provider);
+    const scanProviders = [
+      { provider: primary.provider, backendHead: HEAD },
+      { provider: backup.provider, backendHead: HEAD },
+    ];
+
+    const pending = adapter.queryEventLogsPage(
+      storage, storage.filters.ContextGraphCreated(), lo, hi, scanProviders, new Map(), 'test page',
+    );
+    await vi.advanceTimersByTimeAsync(PAGE_REQUEST_TIMEOUT_MS - 1_000);
+    expect(backup.logRanges()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const page = await pending;
+
+    expect(page.provider).toBe(backup.provider);
+    expect(ids(page.logs)).toEqual([7n, 8n]);
+    expect(primary.logRanges()).toEqual([
+      [lo, hi], [lo, lo + 1_999], [lo + 2_000, lo + 3_999], [lo + 4_000, lo + 5_999],
+    ]);
+    expect(backup.logRanges()).toEqual([[lo, hi]]);
+
+    // The backup that served is handed back as `preferred`: the next page
+    // starts there, and the primary is not asked again.
+    primary.requests.length = 0;
+    const next = adapter.queryEventLogsPage(
+      storage, storage.filters.ContextGraphCreated(), hi + 1, hi + 9_000, scanProviders, new Map(),
+      'test page', page.provider,
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await next).provider).toBe(backup.provider);
+    expect(primary.logRanges()).toEqual([]);
+    expect(backup.logRanges()).toEqual([[lo, hi], [hi + 1, hi + 9_000]]);
   });
 });
