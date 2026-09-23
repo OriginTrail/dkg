@@ -669,6 +669,10 @@ jobs:
       - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      # The Windows inventory leg skips the POSIX symlink and 0600 cases.
+      - name: "RFC-64 Gate 0 lifecycle harness unit tests (POSIX)"
+        if: matrix.gate1
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:unit
       - name: "RFC-64 rollout transition certificate (Oxigraph)"
         if: matrix.gate1
         run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts

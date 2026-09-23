@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
 
@@ -41,6 +42,7 @@ test('Windows groups retain every original test selector exactly once', () => {
 
 const scripts = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).scripts;
 const prefix = 'test:gate0:rfc64-persistence-lifecycle';
+const unitFiles = ['evidence', 'process-lifecycle', 'verifier'].map((name) => `devnet/rfc64-persistence-lifecycle/${name}.test.ts`);
 
 test('canonical scripts retain developer build/generate/verify composition', () => {
   assert.equal(scripts[prefix], `pnpm run ${prefix}:generate && pnpm run ${prefix}:verify`);
@@ -48,6 +50,21 @@ test('canonical scripts retain developer build/generate/verify composition', () 
   assert.match(scripts[`${prefix}:build`], /--filter @origintrail-official\/dkg-agent\.\.\./);
   assert.match(scripts[`${prefix}:build`], /--filter '!@origintrail-official\/dkg-evm-module'/);
   assert.equal(scripts[`${prefix}:generate:only`], 'node --experimental-sqlite --import tsx devnet/rfc64-persistence-lifecycle/run.ts');
+  assert.equal(scripts[`${prefix}:unit`], `node --import tsx --test ${unitFiles.join(' ')}`);
+});
+
+test('the required unit route matches the existing unit files and also runs on Linux', () => {
+  // `node --test` silently skips a missing path while any other listed path exists.
+  for (const file of unitFiles) assert.ok(existsSync(new URL(`../../../${file}`, import.meta.url)), file);
+  const routes = JSON.parse(readFileSync(new URL('../../../test-policy/test-routes.json', import.meta.url), 'utf8'));
+  const route = routes.find((entry) => entry.command === `pnpm ${prefix}:unit`);
+  assert.equal(route.cadence, 'required');
+  const harness = readdirSync(new URL('../../../devnet/rfc64-persistence-lifecycle/', import.meta.url))
+    .map((name) => `devnet/rfc64-persistence-lifecycle/${name}`);
+  assert.deepEqual(harness.filter((file) => path.posix.matchesGlob(file, route.pattern)).sort(), unitFiles);
+  // Windows skips the POSIX-only cases; the Linux Gate 1 agent shard runs them.
+  const posix = ciWorkflow.jobs['tornado-agent'].steps.find((step) => step.run === `pnpm ${prefix}:unit`);
+  assert.equal(posix?.if, 'matrix.gate1');
 });
 
 test('each matrix leg builds once and only inventory runs named evidence steps', () => {
@@ -70,9 +87,8 @@ test('each matrix leg builds once and only inventory runs named evidence steps',
   assert.equal(job.steps.filter((step) => step.if).length, evidence.length);
   assert.ok(evidence.every((step) => step.name && !step['continue-on-error']));
   assert.ok(job.steps.indexOf(build) < job.steps.indexOf(evidence[0]));
-  assert.equal(evidence[4]['timeout-minutes'], 20);
+  assert.equal(evidence.find((step) => step.run === `pnpm ${prefix}:generate:only`)['timeout-minutes'], 20);
   for (const group of job.strategy.matrix.include) {
-    const selected = group.evidence ? evidence : [];
-    assert.equal(selected.length, group.group === 'inventory' ? 7 : 0);
+    assert.equal(Boolean(group.evidence), group.group === 'inventory');
   }
 });
