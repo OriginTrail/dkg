@@ -28,7 +28,7 @@ afterEach(async () => {
   while (agents.length > 0) await agents.pop()!.stop().catch(() => {});
 });
 
-async function gnosisShapedChain(): Promise<MockChainAdapter> {
+async function gnosisShapedChain(accessPolicy: 0 | 1 = 0): Promise<MockChainAdapter> {
   const chain = new MockChainAdapter();
   (chain as unknown as { getBlockNumber: () => Promise<number> }).getBlockNumber =
     async () => (chain as unknown as { nextBlock: number }).nextBlock - 1;
@@ -39,7 +39,7 @@ async function gnosisShapedChain(): Promise<MockChainAdapter> {
       nameHash: ethers.keccak256(ethers.toUtf8Bytes(`other-graph-${id}`)),
     } as never);
   }
-  await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 0, nameHash: NAME_HASH } as never);
+  await chain.createOnChainContextGraph({ accessPolicy, publishPolicy: 0, nameHash: NAME_HASH } as never);
   for (let i = 0; i < BEYOND_LIVE_LOOKBACK_BLOCKS; i++) chain.advanceBlock();
   return chain;
 }
@@ -188,5 +188,15 @@ describe('configured on-chain Context Graph ids at start', () => {
       + '(RPC timed out); retry once the chain RPC responds.',
     );
     expect(subscribedIds(unreadable.agent)).toEqual([]);
+  }, 120_000);
+
+  it('skips a configured private graph this node holds only by its name hash', async () => {
+    const { agent, log } = await start(await gnosisShapedChain(1), memorySubscriptionStore().store, ['#32']);
+    expect(log).toContain(
+      'Configured context graph "#32" is not subscribed: Context Graph #32 is private (curated access): '
+      + 'only its members can subscribe. Ask its curator for an invitation and the Context Graph id, '
+      + 'then subscribe with that id.',
+    );
+    expect(subscribedIds(agent)).toEqual([]);
   }, 120_000);
 });

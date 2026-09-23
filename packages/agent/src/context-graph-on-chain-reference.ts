@@ -66,7 +66,11 @@ export interface ResolvedContextGraphOnChainId {
   readonly retiredNumericSubscription?: RetiredNumericContextGraphSubscription;
 }
 
-/** Why an on-chain id cannot be subscribed. */
+/**
+ * Why an on-chain id cannot be subscribed. `private` is decided from a
+ * resolved graph by {@link refusesPrivateContextGraphByOnChainId}; the
+ * resolver reports every other refusal itself.
+ */
 export type ContextGraphOnChainIdRefusal =
   | { readonly kind: 'not-found'; readonly onChainId: string; readonly latestId: string }
   | { readonly kind: 'inactive'; readonly onChainId: string }
@@ -79,7 +83,7 @@ export type ContextGraphOnChainIdRefusal =
 export type ContextGraphOnChainIdResolution =
   | ContextGraphIdAsGiven
   | ResolvedContextGraphOnChainId
-  | ContextGraphOnChainIdRefusal;
+  | Exclude<ContextGraphOnChainIdRefusal, { kind: 'private' }>;
 
 /**
  * What an id names among the rows this node already keeps, without reading
@@ -96,6 +100,24 @@ export type ContextGraphOnChainIdLookup =
     }
   /** An on-chain id this node keeps no row for. */
   | { readonly kind: 'not-held'; readonly onChainId: string };
+
+/**
+ * The one rule for a private graph named by its on-chain id. Peers never
+ * reveal a private graph's cleartext id, so a node that holds only its name
+ * hash has nothing anyone can subscribe, and refuses every caller. A node
+ * that holds the cleartext id (a member, or the curator) refuses a caller
+ * whose read authority is denied, with the same answer, so that caller
+ * cannot tell which case applied. `admission` is the caller's read-authority
+ * outcome for the resolved row, and is omitted where no caller is involved
+ * (start-up configuration is the operator's own intent).
+ */
+export function refusesPrivateContextGraphByOnChainId(
+  resolution: ResolvedContextGraphOnChainId,
+  admission?: 'allowed' | 'denied' | 'unavailable',
+): boolean {
+  return resolution.private
+    && (resolution.contextGraphId === resolution.nameHash || admission === 'denied');
+}
 
 /** The member intent a retired numeric subscription carried. */
 export interface RetiredNumericContextGraphSubscription {

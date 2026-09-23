@@ -4,7 +4,9 @@ import { ethers } from 'ethers';
 import {
   describeContextGraphOnChainIdResolution,
   parseContextGraphOnChainIdReference,
-  type ContextGraphOnChainIdResolution,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphOnChainIdRefusal,
+  type ResolvedContextGraphOnChainId,
 } from '../src/index.js';
 
 const NAME_HASH = ethers.keccak256(ethers.toUtf8Bytes('gnosis-fun-facts')).toLowerCase();
@@ -30,8 +32,41 @@ describe('on-chain Context Graph id syntax', () => {
   });
 });
 
+describe('the private rule for an on-chain id', () => {
+  const resolved = (contextGraphId: string, isPrivate: boolean): ResolvedContextGraphOnChainId => ({
+    kind: 'resolved',
+    onChainId: '32',
+    nameHash: NAME_HASH,
+    contextGraphId,
+    private: isPrivate,
+  });
+
+  it('refuses everyone when the node holds only the name hash of a private graph', () => {
+    for (const admission of [undefined, 'allowed', 'denied', 'unavailable'] as const) {
+      expect(refusesPrivateContextGraphByOnChainId(resolved(NAME_HASH, true), admission)).toBe(true);
+    }
+  });
+
+  it('lets the caller\'s read authority decide when the node holds the cleartext id', () => {
+    expect(refusesPrivateContextGraphByOnChainId(resolved('gnosis-fun-facts', true), 'denied')).toBe(true);
+    expect(refusesPrivateContextGraphByOnChainId(resolved('gnosis-fun-facts', true), 'allowed')).toBe(false);
+    expect(refusesPrivateContextGraphByOnChainId(resolved('gnosis-fun-facts', true), 'unavailable')).toBe(false);
+    expect(refusesPrivateContextGraphByOnChainId(resolved('gnosis-fun-facts', true))).toBe(false);
+  });
+
+  it('never refuses a public graph', () => {
+    for (const contextGraphId of [NAME_HASH, 'gnosis-fun-facts']) {
+      for (const admission of [undefined, 'allowed', 'denied', 'unavailable'] as const) {
+        expect(refusesPrivateContextGraphByOnChainId(resolved(contextGraphId, false), admission)).toBe(false);
+      }
+    }
+  });
+});
+
 describe('on-chain Context Graph id messages', () => {
-  const say = (resolution: ContextGraphOnChainIdResolution) => describeContextGraphOnChainIdResolution(resolution);
+  const say = (resolution: ResolvedContextGraphOnChainId | ContextGraphOnChainIdRefusal) => (
+    describeContextGraphOnChainIdResolution(resolution)
+  );
 
   it('names the graph an id resolved to, and a retired numeric subscription', () => {
     expect(say({ kind: 'resolved', onChainId: '32', nameHash: NAME_HASH, contextGraphId: NAME_HASH, private: false }))

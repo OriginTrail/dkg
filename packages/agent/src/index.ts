@@ -219,6 +219,7 @@ export {
 export {
   describeContextGraphOnChainIdResolution,
   parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
   type ContextGraphIdAsGiven,
   type ContextGraphOnChainIdLookup,
   type ContextGraphOnChainIdReference,

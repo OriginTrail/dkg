@@ -70,6 +70,7 @@ import {
   DKGAgent,
   describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  refusesPrivateContextGraphByOnChainId,
   type ContextGraphOnChainIdRefusal,
   type ContextGraphOnChainIdResolution,
   type ContextGraphSyncMode,
@@ -1999,17 +2000,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (readAuthority.outcome === 'unavailable') {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
+    // A private graph named by its on-chain id: one decision, with one answer
+    // whether or not this node holds its cleartext id.
+    if (onChainTarget && refusesPrivateContextGraphByOnChainId(onChainTarget, readAuthority.outcome)) {
+      return unresolvedOnChainIdResponse(
+        res,
+        { kind: 'private', onChainId: onChainTarget.onChainId },
+        shouldSyncSharedMemory,
+      );
+    }
     if (readAuthority.outcome === 'denied') {
-      // Reached by its on-chain id, a private graph is refused alike whether
-      // or not this node holds its cleartext id, so a caller who may not read
-      // it cannot tell which.
-      if (onChainTarget?.private === true) {
-        return unresolvedOnChainIdResponse(
-          res,
-          { kind: 'private', onChainId: onChainTarget.onChainId },
-          shouldSyncSharedMemory,
-        );
-      }
       recordCatchupRequest('forbidden', shouldSyncSharedMemory);
       return jsonResponse(res, 403, {
         error: callerAddr

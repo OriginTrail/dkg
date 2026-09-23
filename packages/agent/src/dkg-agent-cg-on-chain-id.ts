@@ -188,10 +188,8 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
         detail: `its name hash ${nameHash.slice(0, 18)}… is bound to another on-chain id on this node`,
       };
     }
-    // Peers never reveal a private graph's id, so without the cleartext a
-    // non-member has nothing to subscribe. A member (or the creator) already
-    // holds the cleartext row; the caller's read-authority check decides then.
-    if (facts?.accessPolicy === 1 && local.contextGraphId === nameHash) return { kind: 'private', onChainId };
+    // A private graph resolves like any other; whether it may be subscribed
+    // by its on-chain id is refusesPrivateContextGraphByOnChainId's decision.
     return {
       kind: 'resolved',
       onChainId,

@@ -73,6 +73,7 @@ import {
   DKGAgent,
   describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  refusesPrivateContextGraphByOnChainId,
   KaNumberAllocator,
   planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
@@ -1062,8 +1063,11 @@ export async function resolveConfiguredOnChainContextGraphIds(
       continue;
     }
     const label = isConfigured ? 'Configured context graph' : 'Context graph subscription';
-    if (resolution.kind !== 'resolved') {
-      log(`${label} "${contextGraphId}" is not subscribed: ${describeContextGraphOnChainIdResolution(resolution)}`);
+    if (resolution.kind !== 'resolved' || refusesPrivateContextGraphByOnChainId(resolution)) {
+      const refusal = resolution.kind === 'resolved'
+        ? { kind: 'private' as const, onChainId: resolution.onChainId }
+        : resolution;
+      log(`${label} "${contextGraphId}" is not subscribed: ${describeContextGraphOnChainIdResolution(refusal)}`);
       continue;
     }
     if (!isConfigured && resolution.retiredNumericSubscription?.subscribed !== true) continue;

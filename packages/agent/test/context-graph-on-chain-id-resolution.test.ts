@@ -15,8 +15,10 @@ import { MOCK_DEFAULT_SIGNER, MockChainAdapter } from '@origintrail-official/dkg
 
 import {
   DKGAgent,
+  refusesPrivateContextGraphByOnChainId,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type ResolvedContextGraphOnChainId,
 } from '../src/index.js';
 
 const CLEARTEXT = 'gnosis-fun-facts';
@@ -333,19 +335,30 @@ describe('resolving an on-chain Context Graph id', () => {
     expect(rowIds(agent)).not.toContain('32');
   });
 
-  it('tells a non-member that a private graph needs membership, and lets a member through', async () => {
+  it('resolves a private graph like any other and leaves the refusal to the one private rule', async () => {
     const chain = await chainWithGraph32({ accessPolicy: 1 });
     const agent = await startAgent(chain);
-    await expect(agent.resolveContextGraphOnChainIdReference('#32')).resolves.toEqual({ kind: 'private', onChainId: '32' });
-
-    // A member (or the curator) holds the cleartext row; its read-authority
-    // check then decides who may subscribe.
-    await agent.adoptVerifiedContextGraphCleartext({ nameHash: NAME_HASH, onChainId: '32' }, CLEARTEXT, 'local');
-    await expect(agent.resolveContextGraphOnChainIdReference('#32')).resolves.toMatchObject({
+    const hashOnly = await agent.resolveContextGraphOnChainIdReference('#32');
+    expect(hashOnly).toEqual({
       kind: 'resolved',
-      contextGraphId: CLEARTEXT,
+      onChainId: '32',
+      nameHash: NAME_HASH,
+      contextGraphId: NAME_HASH,
       private: true,
     });
+    // Holding only the name hash, nobody can subscribe it by number.
+    for (const admission of [undefined, 'allowed', 'denied', 'unavailable'] as const) {
+      expect(refusesPrivateContextGraphByOnChainId(hashOnly as ResolvedContextGraphOnChainId, admission)).toBe(true);
+    }
+
+    // A member (or the curator) holds the cleartext row; its caller's read
+    // authority decides.
+    await agent.adoptVerifiedContextGraphCleartext({ nameHash: NAME_HASH, onChainId: '32' }, CLEARTEXT, 'local');
+    const member = await agent.resolveContextGraphOnChainIdReference('#32') as ResolvedContextGraphOnChainId;
+    expect(member).toMatchObject({ kind: 'resolved', contextGraphId: CLEARTEXT, private: true });
+    expect(refusesPrivateContextGraphByOnChainId(member, 'denied')).toBe(true);
+    expect(refusesPrivateContextGraphByOnChainId(member, 'allowed')).toBe(false);
+    expect(refusesPrivateContextGraphByOnChainId(member)).toBe(false);
   });
 
   it('keeps a literal subscription key "32" that the chain does not prove wrong, unless #32 is written', async () => {
