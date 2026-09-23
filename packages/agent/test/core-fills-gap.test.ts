@@ -65,7 +65,7 @@ import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js'
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
   registerContextGraph(id: string, opts?: { callerAgentAddress?: string }): Promise<{ onChainId: string; txHash?: string }>;
-  recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
+  recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<string>;
   reconcileChainOrdinal(
     localCgId: string,
     onChainCgId: bigint,
@@ -484,10 +484,12 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   it('stops accepting and drains core-host recordings deterministically', async () => {
     const internals = await boot();
-    let startedAfterClose = false;
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
     (internals as any).coreHostRecordingsClosed = true;
-    (internals as any).trackCoreHostRecording(async () => { startedAfterClose = true; });
-    expect(startedAfterClose).toBe(false);
+    await expect(internals.recordCoreHostedPublicCg('47')).resolves.toBe('closed');
+    expect(getContextGraphAccessPolicy.calls).toHaveLength(0);
+    expect(internals.subscribedContextGraphs.has('47')).toBe(false);
 
     (internals as any).coreHostRecordingsClosed = false;
     const recordings = (internals as any).coreHostRecordings as Set<Promise<void>>;

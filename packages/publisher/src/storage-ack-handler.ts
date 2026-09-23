@@ -415,6 +415,34 @@ function formatStorePressureSnapshot(snapshot: StorePressureSnapshot | undefined
     `normalQueued=${snapshot.normalQueued} backgroundQueued=${snapshot.backgroundQueued}`;
 }
 
+/**
+ * One public StorageACK the handler is about to sign: the data (and, for a
+ * graph-scoped publish, its SWM head) is stored and verified.
+ */
+export interface StorageAckVmPromotionRequest {
+  /** Numeric on-chain Context Graph id signed into the ACK digest. */
+  readonly contextGraphId: string;
+  /** Cleartext SWM graph id when the publisher supplied one. */
+  readonly swmGraphId?: string;
+  readonly operation: 'publish' | 'update';
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * The finality gate's answer. `ok` means this core has durably committed to
+ * carry the Knowledge Asset into its Verifiable Memory once the publish or
+ * update finalizes on chain; anything else is a decline, never a signature.
+ */
+export type StorageAckVmPromotionVerdict =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly code:
+        | typeof STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE
+        | typeof STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED;
+      readonly message: string;
+    };
+
 export interface StorageACKHandlerConfig {
   nodeRole: 'core' | 'edge';
   nodeIdentityId: bigint;
@@ -441,6 +469,27 @@ export interface StorageACKHandlerConfig {
   workspaceWriteLocks?: Map<string, Promise<void>>;
   /** Atomic negative-completeness witness for root graph-scoped ACK writes. */
   resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
+  /**
+   * StorageACK finality gate for PUBLIC ACKs (publish and update). Awaited
+   * immediately before signing, after the data is verified and stored and the
+   * signer is confirmed; the handler signs only on `{ ok: true }` and turns
+   * any other verdict (or a throw) into a CORE_VM_PROMOTION_* decline. The
+   * agent answers `ok` only when its chain-driven VM reconciliation is on and
+   * running and the graph is durably recorded as core-hosted, so the ACKed
+   * Knowledge Asset reaches this core's Verifiable Memory after the chain
+   * finalizes it.
+   *
+   * Curated (encrypted-payload) ACKs never reach this hook: a core never
+   * holds curated plaintext to promote. Their equivalent guarantee is the
+   * verified `<cg>/_catalog` commitment the handler flushes before signing,
+   * which is exactly what random sampling proves for curated KAs.
+   *
+   * DKGAgent always wires this. An embedding that omits it signs public ACKs
+   * without any VM-promotion guarantee (the pre-gate behaviour).
+   */
+  ensureVmPromotion?: (
+    request: StorageAckVmPromotionRequest,
+  ) => Promise<StorageAckVmPromotionVerdict>;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -1041,6 +1090,47 @@ export class StorageACKHandler {
   }
 
   /**
+   * Run the StorageACK finality gate for a public ACK, so the publish and
+   * update handlers decline identically:
+   *   - `{ ok: true }`           → the core committed to promote the KA to
+   *     its VM (or no gate is wired): SIGN.
+   *   - `{ ok: false, decline }` → the gate's CORE_VM_PROMOTION_* verdict; a
+   *     THROWN gate is the transient CORE_VM_PROMOTION_UNAVAILABLE. Never sign.
+   */
+  private async checkVmPromotionOrDecline(
+    request: StorageAckVmPromotionRequest,
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    const gate = this.config.ensureVmPromotion;
+    if (!gate) return { ok: true };
+    let verdict: StorageAckVmPromotionVerdict;
+    try {
+      verdict = await gate(request);
+    } catch (err) {
+      if (isACKHandlerDeadlineAbort(err)) throw err;
+      if (isACKHandlerDeadlineAbortSignal(request.signal)) throw request.signal!.reason;
+      // An unanswered gate is not a commitment: never sign on it.
+      const wireMessage = 'VM promotion commitment unavailable';
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          request.contextGraphId,
+          STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
+          wireMessage,
+          { hookMessage: `${wireMessage}: ${err instanceof Error ? err.message : String(err)}` },
+        ),
+      };
+    }
+    if (verdict.ok === true) return { ok: true };
+    const code = verdict.code === STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED
+      ? STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED
+      : STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE;
+    return {
+      ok: false,
+      decline: this.encodeDecline(request.contextGraphId, code, verdict.message),
+    };
+  }
+
+  /**
    * Run the signer-registration gate, centralizing the three-way outcome the
    * publish + update handlers all need:
    *   - `{ ok: true }`            → signer confirmed (or no hook wired): SIGN.
@@ -1448,6 +1538,9 @@ export class StorageACKHandler {
         'curated StorageACK signer is not confirmed on-chain as an operational wallet',
       );
       if (!curatedSignerGate.ok) return curatedSignerGate.decline;
+      // No VM-promotion gate here: the core never receives curated plaintext.
+      // What this ACK guarantees is the catalog commitment verified and
+      // flushed to `<cg>/_catalog` above, the artifact random sampling proves.
 
       const signature = ethers.Signature.from(
         await this.config.signerWallet.signMessage(digest),
@@ -1789,6 +1882,15 @@ export class StorageACKHandler {
       'StorageACK signer is not confirmed on-chain as an operational wallet',
     );
     if (!signerGate.ok) return signerGate.decline;
+    // Finality gate: sign only once this core has committed to carry the KA
+    // into its Verifiable Memory after the publish finalizes.
+    const promotionGate = await this.checkVmPromotionOrDecline({
+      contextGraphId: cgId,
+      ...(swmGraphId !== cgId ? { swmGraphId } : {}),
+      operation: 'publish',
+      ...(signal ? { signal } : {}),
+    });
+    if (!promotionGate.ok) return promotionGate.decline;
 
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
@@ -2287,6 +2389,17 @@ export class StorageACKHandler {
       'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
     );
     if (!updateSignerGate.ok) return updateSignerGate.decline;
+    // Finality gate for public updates, as for publishes. A curated update's
+    // guarantee is the catalog commitment verified and persisted above.
+    if (intent.isEncryptedPayload !== true) {
+      const updatePromotionGate = await this.checkVmPromotionOrDecline({
+        contextGraphId: cgId,
+        ...(swmGraphId !== cgId ? { swmGraphId } : {}),
+        operation: 'update',
+        ...(signal ? { signal } : {}),
+      });
+      if (!updatePromotionGate.ok) return updatePromotionGate.decline;
+    }
 
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),

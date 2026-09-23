@@ -540,9 +540,10 @@ export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
 }
 
 /** Effective activation of chain-driven VM reconciliation: core-hosted
- * recording, the KA-registered nudge, and the VM reconcile sweep. Same
- * precedence as every other switch here: environment, then config, then the
- * default (on). */
+ * recording, the KA-registered nudge, and the VM reconcile sweep. A core's
+ * StorageACK finality gate keys off this switch, so a core with it off
+ * declines every StorageACK. Same precedence as every other switch here:
+ * environment, then config, then the default (on). */
 export function resolveVmReconcilerEnabled(configValue?: boolean): boolean {
   return resolveBooleanSwitch(
     configValue,

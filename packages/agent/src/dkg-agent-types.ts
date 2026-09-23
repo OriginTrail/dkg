@@ -1533,7 +1533,8 @@ export interface DKGAgentConfig {
   /**
    * Switch for chain-driven VM reconciliation (core-hosted recording, the
    * KA-registered nudge and the VM reconcile sweep). Env
-   * DKG_VM_RECONCILER_ENABLED wins; default on.
+   * DKG_VM_RECONCILER_ENABLED wins; default on. A core with it off declines
+   * every StorageACK, because it could not promote the ACKed data to VM.
    */
   vmReconcilerEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */

@@ -125,6 +125,26 @@ export const STORAGE_ACK_DECLINE_CODES = {
    * WITH a reason, which is still strictly better than dead air.
    */
   CORE_TEMPORARILY_UNAVAILABLE: 'CORE_TEMPORARILY_UNAVAILABLE',
+  /**
+   * StorageACK finality gate: the core stored and verified the data but
+   * cannot yet commit to carrying it into its Verifiable Memory once the
+   * publish finalizes, so it refuses to sign. For a public graph that means
+   * its chain-driven VM reconciliation is still starting, or the durable
+   * core-hosted record for the graph (or the graph's access policy needed
+   * to take it) could not be written or read just now; for a curated graph,
+   * that its host-mode coverage is not active yet. Transient — these clear
+   * once startup completes or the store/RPC recovers.
+   */
+  CORE_VM_PROMOTION_UNAVAILABLE: 'CORE_VM_PROMOTION_UNAVAILABLE',
+  /**
+   * StorageACK finality gate: this core can never carry the data into VM
+   * in its current configuration — its operator switched chain-driven VM
+   * reconciliation off (`vmReconcilerEnabled: false` /
+   * `DKG_VM_RECONCILER_ENABLED=0`), its chain adapter lacks the reads the
+   * reconciler needs, or (curated graphs) SWM host mode is unavailable.
+   * Permanent: the publisher deselects this core for the request.
+   */
+  CORE_VM_PROMOTION_DISABLED: 'CORE_VM_PROMOTION_DISABLED',
 } as const;
 
 export type StorageACKDeclineCode =
@@ -156,6 +176,10 @@ export const TRANSIENT_STORAGE_ACK_DECLINE_CODES: ReadonlySet<string> = new Set<
   // keeps a briefly-degraded core in the quorum pool instead of
   // deselecting it on the first blip.
   STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+  // Finality gate: a core still starting its VM reconciler, or one whose
+  // hosting record hit a store/RPC blip, can sign seconds later. The
+  // configuration-level refusal (CORE_VM_PROMOTION_DISABLED) stays permanent.
+  STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
 ]);
 
 /** True iff `code` names a decline the publisher should retry rather than treat as permanent. */

@@ -138,6 +138,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import {
   isCoreHostedPublicCgRecorded,
   resolveCoreHostedPublicCgLocalId,
+  type CoreHostedPublicCgRecordOutcome,
 } from './core-hosted-public-cg-record-decision.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -2755,28 +2756,36 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Phase D (Cores fill their own gaps) — invoked from the StorageACK
-   * pre-sign hook. When this Core signs an ACK for a PUBLIC CG it becomes a
-   * storage node for it; mark the CG `coreHosted` (persisted) so the
+   * Phase D (Cores fill their own gaps) — the StorageACK finality gate awaits
+   * this before a Core signs an ACK for a PUBLIC CG: signing makes the Core a
+   * storage node for it, so mark the CG `coreHosted` (persisted) so the
    * chain-driven VM reconciler runs for it across restarts even without a
    * member subscription. A Core that was offline during the *next* publish
    * then learns the missed KA from chain on restart and pulls it core-first.
    *
-   * Public-only by design: curated CGs are hosted as opaque ciphertext, which
-   * a Core cannot promote to plaintext VM — their coverage stays on the
-   * host-mode reconciler + LU-11 chunk-backfill path. Best-effort + idempotent.
+   * Public-only by design: a Core never receives a curated CG's plaintext, so
+   * there is nothing to promote to VM; its curated obligation is the verified
+   * `<cg>/_catalog` the catalog ACK persists. Idempotent. With
+   * `durable`, `recorded`/`already-recorded` also mean the host-only row has
+   * been written through the strict subscription-store path; `nudge: false`
+   * leaves the first reconcile to the periodic sweep (historical backfill).
    */
-  async recordCoreHostedPublicCg(this: DKGAgent, cgId: string, swmGraphId?: string): Promise<void> {
-    if (this.coreHostRecordingsClosed) return;
-    if (!this.vmReconcileEnabled()) return;
+  async recordCoreHostedPublicCg(
+    this: DKGAgent,
+    cgId: string,
+    swmGraphId?: string,
+    options: { durable?: boolean; nudge?: boolean } = {},
+  ): Promise<CoreHostedPublicCgRecordOutcome> {
+    if (this.coreHostRecordingsClosed) return 'closed';
+    if (!this.vmReconcileEnabled()) return 'vm-reconcile-disabled';
     const recordingGeneration = this.coreHostRecordingGeneration;
     let numeric: bigint;
     try {
       numeric = BigInt(cgId);
     } catch {
-      return; // non-numeric id can't be reconciled against the chain ordinal list
+      return 'invalid-id'; // non-numeric id can't be reconciled against the chain ordinal list
     }
-    if (numeric <= 0n) return;
+    if (numeric <= 0n) return 'invalid-id';
 
     const numericStr = numeric.toString();
     const resolveLocalCgId = () => resolveCoreHostedPublicCgLocalId({
@@ -2784,6 +2793,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       swmGraphId,
       mappedLocalId: this.resolveLocalCgIdByOnChainId(numeric) ?? undefined,
     });
+    const alreadyRecorded = (localCgId: string) => options.durable === true
+      ? this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
+      : Promise.resolve('already-recorded' as const);
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
     // StorageACK sign, so checking "already recorded" only after the liveness +
@@ -2792,17 +2804,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // a live-then-policy read on its first observation, and an already-recorded
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
+    const earlyLocalCgId = resolveLocalCgId();
     if (isCoreHostedPublicCgRecorded(
-      this.subscribedContextGraphs.get(resolveLocalCgId()),
+      this.subscribedContextGraphs.get(earlyLocalCgId),
       numericStr,
-    )) return;
+    )) return alreadyRecorded(earlyLocalCgId);
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
     // this specific CG registration is live enough for host tracking.
     const policy = await this.readCoreHostedPublicCgAccessPolicy(numericStr);
-    if (this.coreHostRecordingGeneration !== recordingGeneration) return;
-    if (policy !== 0) return; // curated / unknown / not-live — not the public VM-promote path
+    if (this.coreHostRecordingGeneration !== recordingGeneration) return 'closed';
+    if (policy === 1) return 'curated'; // not the public VM-promote path
+    if (policy !== 0) return 'policy-unknown'; // unknown / not-live right now
 
     // Pick the local CG id to key the host-only record under. Prefer an
     // existing local mapping; otherwise use the publisher-supplied cleartext
@@ -2818,7 +2832,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // concurrent first ACK for the same CG may have recorded it meanwhile.
     const localCgId = resolveLocalCgId();
     const existing = this.subscribedContextGraphs.get(localCgId);
-    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return;
+    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded(localCgId);
 
     let next: ContextGraphSub;
     if (existing) {
@@ -2844,32 +2858,56 @@ export class SwmHostModeMethods extends DKGAgentBase {
       createOperationContext('system'),
       `Phase D: marked public cg=${numericStr} as core-hosted (will chain-reconcile to VM across restarts)`,
     );
+    const outcome = options.durable === true
+      ? await this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
+      : 'recorded';
     // Nudge a reconcile now so the first hosted publish lands promptly; the
     // periodic sweep is the safety net.
-    if (this.vmReconcileScheduling) void this.vmReconcileScheduling.triggerLive(localCgId);
+    if (options.nudge !== false && this.vmReconcileScheduling) {
+      void this.vmReconcileScheduling.triggerLive(localCgId);
+    }
+    return outcome === 'already-recorded' ? 'recorded' : outcome;
   }
 
-  trackCoreHostRecording(this: DKGAgent, start: () => Promise<void>): void {
-    if (this.coreHostRecordingsClosed) return;
-    let recording: Promise<void>;
-    try {
-      recording = start();
-    } catch (err) {
-      this.log.warn(
-        createOperationContext('system'),
-        `Phase D: recordCoreHostedPublicCg failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return;
+  /**
+   * Write a core-hosted row through the strict subscription-store path, once
+   * per (graph, on-chain id) and process. The ordinary setter persists in the
+   * background and only logs a failed write, which is not enough for a row a
+   * StorageACK signature depends on. A concurrent writer replacing the row
+   * between snapshot and write is retried against the current row.
+   */
+  async persistCoreHostedPublicCgStrict(
+    this: DKGAgent,
+    localCgId: string,
+    onChainId: string,
+    recordingGeneration: number,
+  ): Promise<'already-recorded' | 'persist-failed' | 'closed'> {
+    const durableKey = `${localCgId}\0${onChainId}`;
+    if (this.coreHostedDurableRecords.has(durableKey)) return 'already-recorded';
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (this.coreHostRecordingGeneration !== recordingGeneration) return 'closed';
+      if (!isCoreHostedPublicCgRecorded(this.subscribedContextGraphs.get(localCgId), onChainId)) {
+        return 'persist-failed';
+      }
+      try {
+        await this.persistContextGraphSubscriptionProjectionStrict({
+          contextGraphId: localCgId,
+          requireDurableMemberIntent: false,
+          operation: 'core hosting',
+        });
+        this.coreHostedDurableRecords.add(durableKey);
+        return 'already-recorded';
+      } catch (err) {
+        lastError = err;
+      }
     }
-    const tracked = recording.catch((err) => {
-      this.log.warn(
-        createOperationContext('system'),
-        `Phase D: recordCoreHostedPublicCg failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }).finally(() => {
-      this.coreHostRecordings.delete(tracked);
-    });
-    this.coreHostRecordings.add(tracked);
+    this.log.warn(
+      createOperationContext('system'),
+      `Phase D: could not persist core-hosted cg=${onChainId} ("${localCgId}"): ` +
+      `${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    );
+    return 'persist-failed';
   }
 
   async drainCoreHostRecordings(this: DKGAgent): Promise<void> {

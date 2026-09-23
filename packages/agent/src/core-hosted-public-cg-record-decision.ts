@@ -2,6 +2,26 @@
 
 import type { ContextGraphSub } from './dkg-agent-types.js';
 
+/**
+ * What one attempt to record a public Context Graph as core-hosted achieved.
+ * Only `recorded` and `already-recorded` mean the chain-driven VM reconciler
+ * will sweep the graph; when the caller asked for durability they also mean
+ * the host-only row is in the subscription store.
+ */
+export type CoreHostedPublicCgRecordOutcome =
+  | 'recorded'
+  | 'already-recorded'
+  /** The on-chain access policy is curated: not the public VM path. */
+  | 'curated'
+  /** Liveness or access policy could not be established right now. */
+  | 'policy-unknown'
+  | 'invalid-id'
+  | 'vm-reconcile-disabled'
+  /** Shutdown started, or a restart superseded this attempt. */
+  | 'closed'
+  /** The row is in memory but the strict store write failed. */
+  | 'persist-failed';
+
 /** Resolve the durable local identity used for one hosted public Context Graph. */
 export function resolveCoreHostedPublicCgLocalId(input: Readonly<{
   onChainId: bigint;

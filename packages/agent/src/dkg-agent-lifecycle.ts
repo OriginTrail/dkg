@@ -129,6 +129,7 @@ import {
   reconcileFinalizedSwmTwin,
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
+import { storageAckRetentionProtectedConditions } from './storage-ack-retention.js';
 import {
   EVMChainAdapter,
   NoChainAdapter,
@@ -2866,6 +2867,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               normalizeContextGraphIdForChunkStore: (rawCgId: string) =>
                 this.canonicalChunkStoreCgIdOrNull(rawCgId),
               isCgCurated: (cgId: string) => this.resolveCgCurationForAck(cgId, ctx),
+              // StorageACK finality gate: a public ACK is signed only after
+              // this core durably commits to promote the KA into its VM.
+              ensureVmPromotion: (request) => this.ensureStorageAckVmPromotion(request),
               // Testnet dead-air fix: `isOperationalWalletRegistered` is a
               // LIVE chain read the handler runs on EVERY inbound StorageACK.
               // With the raw wiring, one degraded shared RPC made the lookup
@@ -3001,13 +3005,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // having to round-trip it. Variadic + internal `seen` Set
               // dedups, so over-passing is cheap and order-independent.
               getSubscriptionSourceForCg: (cgId, swmGraphId) => {
-                // Phase D — this hook fires immediately before EVERY StorageACK
-                // sign (the universal pre-sign chokepoint across the plaintext /
-                // encrypted / chunked paths). Use it to record that this Core
-                // hosts the CG so the chain-driven VM reconciler fills its gaps
-                // across restarts. Best-effort + public-CG-gated inside the
-                // helper; never blocks or affects the (sync) provenance return.
-                this.trackCoreHostRecording(() => this.recordCoreHostedPublicCg(cgId, swmGraphId));
+                // Phase D core-hosted recording is no longer started here: the
+                // `ensureVmPromotion` finality gate records it durably BEFORE
+                // a public ACK is signed.
                 const wireFromCgId = cgId ? this.gossipWireIdFor(cgId) : undefined;
                 const wireFromSwmGraphId = swmGraphId && swmGraphId !== cgId
                   ? this.gossipWireIdFor(swmGraphId)
@@ -4291,6 +4291,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
       this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
+      // Cores also audit their StorageACK copies: backfill graphs ACKed while
+      // VM reconcile was off, and watch ACKed KAs that do not reach VM.
+      this.armVmPromotionAudit();
+    } else if ((this.config.nodeRole ?? 'edge') === 'core') {
+      // The StorageACK finality gate keys off this state: a core that cannot
+      // promote ACKed data to VM must not sign public ACKs at all.
+      this.log.warn(
+        ctx,
+        `Chain-driven VM reconciliation is OFF on this core ` +
+        `(${this.vmReconcileUnavailableReason() ?? 'unavailable'}): it will decline every public ` +
+        `StorageACK with CORE_VM_PROMOTION_DISABLED. Set vmReconcilerEnabled=true ` +
+        `(or unset DKG_VM_RECONCILER_ENABLED) to sign ACKs again.`,
+      );
     }
     // Fairness state belongs to this exact recurring owner. Recreating the
     // runtime resets it; no scheduler cursor leaks into durable subscription
@@ -9771,7 +9784,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncScoped?: boolean;
       isCurrent?: () => boolean;
       requireDurableMemberIntent: boolean;
-      operation: 'join approval' | 'chain discovery';
+      operation: 'join approval' | 'chain discovery' | 'core hosting';
     },
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
@@ -11255,7 +11268,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (ttl <= 0) return 0;
 
       const ctx = createOperationContext('share');
-      const cutoff = new Date(Date.now() - ttl).toISOString();
+      const now = Date.now();
+      const cutoff = new Date(now - ttl).toISOString();
+      // StorageACK copies whose KA is not in VM yet outlive the TTL, up to a
+      // hard ceiling (see storage-ack-retention.ts).
+      const storageAckRetentionCutoff = new Date(
+        now - Math.max(ttl, DKGAgentBase.STORAGE_ACK_RETENTION_MAX_MS),
+      ).toISOString();
       let totalDeleted = 0;
 
       try {
@@ -11272,14 +11291,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // `…/_shared_memory_meta` bucket — expire every meta graph.
           const wsMetaGraphs = await listSharedMemoryMetaGraphs(this.store, pid);
 
+          // Graph-scoped KAs are confirmed in the root `_meta`, sub-graphs included.
+          const rootMetaGraph = contextGraphMetaUri(pid);
           for (const wsMetaGraph of wsMetaGraphs) {
             // Each meta graph describes exactly one SWM data bucket:
             // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
             const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
+            const storageAckRetained = (opVar: string, tsVar: string, suffix: string) =>
+              storageAckRetentionProtectedConditions({
+                metaGraph: wsMetaGraph,
+                rootMetaGraph,
+                opVar,
+                tsVar,
+                retentionCutoffIso: storageAckRetentionCutoff,
+                suffix,
+              });
 
             let wsGraphs: string[] | undefined;
             let ownershipKeys: string[] | undefined;
             for (;;) {
+              // Retained StorageACK copies are excluded inside the query, not
+              // skipped in the loop: skipped rows would come back in every
+              // batch and stall the no-progress guard below.
               const expiredOps = await this.store.query(
                 `SELECT DISTINCT ?op WHERE {
                 GRAPH <${wsMetaGraph}> {
@@ -11287,6 +11320,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   ?op <http://dkg.io/ontology/publishedAt> ?ts .
                   FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
                 }
+                FILTER NOT EXISTS { ${storageAckRetained('?op', '?ts', 'Expired')} }
               } LIMIT ${DKGAgentBase.SWM_CLEANUP_BATCH_SIZE}`,
                 { source: 'agent.swmCleanup.expiredOperations' },
               );
@@ -11360,13 +11394,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     // The head is owned by exactly one operation. Join on the
                     // dkg:shareOperationId literal (both rows are written by the
                     // same `lit()` serializer) so this op's expiry only tears the
-                    // head down when the head still references it.
+                    // head down when the head still references it — and never
+                    // while it is also the head of a retained StorageACK copy.
                     const headOwned = await this.store.query(
                       `SELECT ?assertionGraph WHERE {
                       GRAPH <${wsMetaGraph}> {
                         <${opUri}> <http://dkg.io/ontology/shareOperationId> ?opId .
                         <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?opId .
                         OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
+                      }
+                      FILTER NOT EXISTS {
+                        GRAPH <${wsMetaGraph}> {
+                          <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?aliasOpId .
+                          ?aliasOp <http://dkg.io/ontology/shareOperationId> ?aliasOpId ;
+                            <http://dkg.io/ontology/publishedAt> ?aliasTs .
+                          FILTER(?aliasOp != <${opUri}>)
+                        }
+                        ${storageAckRetained('?aliasOp', '?aliasTs', 'Alias')}
                       }
                     } LIMIT 1`,
                       { source: 'agent.swmCleanup.currentHeadOwner' },

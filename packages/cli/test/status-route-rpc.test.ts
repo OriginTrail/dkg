@@ -1405,6 +1405,24 @@ describe('/api/status effective sync lifecycle switches', () => {
     ));
     expect(overridden.body.syncLifecycle.vmReconcilerEnabled).toBe(true);
   });
+
+  it('reports the agent VM promotion state and omits it for agents without it', async () => {
+    const vmPromotion = {
+      vmReconcilerEnabled: false,
+      vmReconcileActive: false,
+      unavailableReason: 'switched off (vmReconcilerEnabled=false or DKG_VM_RECONCILER_ENABLED)',
+      runtimeReady: true,
+      storageAckGate: 'declining',
+      coreHostedGraphs: 0,
+      audit: { lastRunAt: null, stalledOnChain: 0 },
+    };
+    const reported = await requestStatusWithAgent({ getVmPromotionStatus: () => vmPromotion });
+    expect(reported.body.vmPromotion).toEqual(vmPromotion);
+
+    const legacy = await requestStatusWithAgent({});
+    expect(legacy.status).toBe(200);
+    expect(legacy.body).not.toHaveProperty('vmPromotion');
+  });
 });
 
 describe('daemon subscription rehydration lifecycle', () => {

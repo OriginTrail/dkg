@@ -780,7 +780,7 @@ export interface DkgConfig {
   /**
    * Chain-driven VM reconciliation (core-hosted recording, KA-registered
    * nudge, VM reconcile sweep). Env DKG_VM_RECONCILER_ENABLED wins; default
-   * on.
+   * on. A core with it off declines every StorageACK.
    */
   vmReconcilerEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */

@@ -439,6 +439,7 @@ import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import { LocalContextGraphProvenance } from './local-context-graph-provenance.js';
+import { createVmPromotionAuditStatus, type VmPromotionAuditStatus } from './vm-promotion-audit.js';
 import {
   resolveChainAuthorityReadBudgets,
   type ChainAuthorityReadBudgets,
@@ -965,6 +966,33 @@ export class DKGAgentBase {
 
   /** Maximum expired SWM operations selected in one cleanup batch. */
   static readonly SWM_CLEANUP_BATCH_SIZE = 250;
+  /**
+   * Hard ceiling on how long the SWM TTL cleanup keeps a StorageACK copy
+   * whose Knowledge Asset never reached this core's VM (default 90 days,
+   * three mainnet epochs). The ACK promotion audit expires such a copy sooner
+   * once the chain proves the KA was never registered; this bound covers
+   * copies it has not proven yet. ACK signatures carry no chain deadline.
+   */
+  static readonly STORAGE_ACK_RETENTION_MAX_MS = readPositiveSafeIntegerEnv(
+    'DKG_STORAGE_ACK_RETENTION_MAX_MS',
+    90 * 24 * 60 * 60_000,
+  );
+  /** Period of the ACK promotion audit (core-hosted backfill + watchdog). */
+  static readonly VM_PROMOTION_AUDIT_INTERVAL_MS = readPositiveSafeIntegerEnv(
+    'DKG_VM_PROMOTION_AUDIT_INTERVAL_MS',
+    15 * 60_000,
+  );
+  /** An ACKed KA not in VM this long after its ACK is reported as stalled. */
+  static readonly VM_PROMOTION_STALL_THRESHOLD_MS = readPositiveSafeIntegerEnv(
+    'DKG_VM_PROMOTION_STALL_THRESHOLD_MS',
+    30 * 60_000,
+  );
+  /** Graphs one audit pass may record as core-hosted (bounded RPC). */
+  static readonly VM_PROMOTION_AUDIT_MAX_RECORDS = 32;
+  /** Per-KA chain registration reads one audit pass may spend. */
+  static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
+  /** Of those, at most this many per graph, so one backlog cannot starve the rest. */
+  static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS_PER_GRAPH = 8;
 
   /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
@@ -1134,15 +1162,32 @@ export class DKGAgentBase {
       snapshot: KnowledgeAssetVersionSnapshot;
     }>();
   /**
-   * In-flight core-hosted recordings launched from the synchronous StorageACK
-   * pre-sign hook. Tracked so rejections are logged and graceful stop() can
-   * flush the host-only `coreHosted` flag before teardown.
+   * In-flight core-hosted recordings awaited by the StorageACK finality gate
+   * and the ACK promotion audit. Tracked so graceful stop() can flush the
+   * host-only `coreHosted` flag before teardown.
    */
   protected readonly coreHostRecordings = new Set<Promise<void>>();
   /** Stop-time gate: once true, ACK hooks must not start new core-host writes. */
   protected coreHostRecordingsClosed = false;
   /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
   protected coreHostRecordingGeneration = 0;
+  /**
+   * `<localCgId>\0<onChainId>` keys whose core-hosted row this process has
+   * written through the strict subscription-store path. The StorageACK
+   * finality gate pays that write once per graph, not once per ACK.
+   */
+  protected readonly coreHostedDurableRecords = new Set<string>();
+  /** One in-flight finality-gate recording per graph, shared by concurrent ACKs. */
+  protected readonly storageAckVmPromotionFlights = new Map<string, Promise<unknown>>();
+  /** Core ACK promotion audit (core-hosted backfill + promotion watchdog). */
+  protected vmPromotionAuditStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  protected vmPromotionAuditTimer: ReturnType<typeof setInterval> | null = null;
+  protected vmPromotionAuditInFlight: Promise<void> | null = null;
+  protected readonly vmPromotionAuditStatus: VmPromotionAuditStatus = createVmPromotionAuditStatus();
+  /** Discovered graphs whose backfill concluded (recorded or ineligible) in this process. */
+  protected readonly vmPromotionBackfillSettled = new Set<string>();
+  /** Rotates the watchdog's first graph so no graph monopolizes the chain-read budget. */
+  protected vmPromotionAuditRotation = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<
     string,
