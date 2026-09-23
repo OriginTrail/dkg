@@ -2245,7 +2245,8 @@ export interface ChainAdapter {
    * the admin key). Returns `changed: false` without a transaction when the
    * value is already set. Throws `ProfileNodeIdUpdateUnsupportedError` when
    * the deployed Profile lacks `updateNodeId`, and `ProfileNodeIdTakenError`
-   * when another identity holds `nodeId`.
+   * when another identity holds `nodeId`, including one that claimed it after
+   * this call checked (the contract's `NodeIdAlreadyExists` revert).
    */
   updateProfileNodeId?(
     nodeId: Uint8Array | string,

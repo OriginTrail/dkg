@@ -140,6 +140,81 @@ describe('EVMChainAdapter — Profile nodeId (real Hardhat)', () => {
     await expect(receiver.updateProfileNodeId!(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
   });
 
+  describe('losing the race for a peer id to another identity', () => {
+    const receiverAddress = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+
+    it('reports taken when the pre-read is stale: the preflight gets NodeIdAlreadyExists', async () => {
+      const provider = createProvider();
+      const core = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const receiver = createEVMAdapter(HARDHAT_KEYS.REC1_OP);
+      await core.updateProfileNodeId!(PEER_NODE_ID);
+      // A lagging endpoint serves the pre-read: the value looks free.
+      vi.spyOn(receiver, 'isProfileNodeIdTaken').mockResolvedValue(false);
+      const before = await receiver.getProfileNodeId!();
+      const nonce = await provider.getTransactionCount(receiverAddress);
+
+      await expect(receiver.updateProfileNodeId!(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+      expect(await provider.getTransactionCount(receiverAddress)).toBe(nonce);
+      await expect(receiver.getProfileNodeId!()).resolves.toBe(before);
+    });
+
+    it('reports taken when the claim lands between the preflight and the send (gas estimation)', async () => {
+      const provider = createProvider();
+      const core = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const receiver = createEVMAdapter(HARDHAT_KEYS.REC1_OP) as any;
+      const send = receiver.sendContractTransaction.bind(receiver);
+      vi.spyOn(receiver, 'sendContractTransaction').mockImplementation(async (...args: any[]) => {
+        if (args[1] === 'updateNodeId') await core.updateProfileNodeId!(PEER_NODE_ID);
+        return send(...args);
+      });
+      const nonce = await provider.getTransactionCount(receiverAddress);
+
+      await expect(receiver.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+      expect(await provider.getTransactionCount(receiverAddress)).toBe(nonce);
+    });
+
+    it('reports taken when the claim lands after signing: the update is mined with status 0', async () => {
+      const provider = createProvider();
+      const core = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const receiver = createEVMAdapter(HARDHAT_KEYS.REC1_OP) as any;
+      const before = await receiver.getProfileNodeId();
+      const nonce = await provider.getTransactionCount(receiverAddress);
+
+      // Sign while the value is free (gas is estimated then), let the claim
+      // land, then put the signed update in the mempool and mine it. Automine
+      // is off for the broadcast because Hardhat simulates on
+      // eth_sendRawTransaction while automining and rejects the tx instead of
+      // mining a status-0 receipt.
+      const sign = receiver.populateAndSignAcrossProviders.bind(receiver);
+      vi.spyOn(receiver, 'populateAndSignAcrossProviders').mockImplementation(async (...args: any[]) => {
+        const signed = await sign(...args);
+        if (args[1] === 'updateNodeId') {
+          await core.updateProfileNodeId!(PEER_NODE_ID);
+          await provider.send('evm_setAutomine', [false]);
+        }
+        return signed;
+      });
+      const broadcast = receiver.broadcastSignedTransactionWithFailover.bind(receiver);
+      vi.spyOn(receiver, 'broadcastSignedTransactionWithFailover').mockImplementation(async (...args: any[]) => {
+        await broadcast(...args);
+        if (args[2] === 'updateNodeId') {
+          await provider.send('evm_mine', []).catch(() => undefined);
+          await provider.send('evm_setAutomine', [true]);
+        }
+      });
+
+      try {
+        await expect(receiver.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+      } finally {
+        await provider.send('evm_setAutomine', [true]);
+      }
+      // The update was mined and reverted; the nodeId is unchanged.
+      expect(await provider.getTransactionCount(receiverAddress)).toBe(nonce + 1);
+      await expect(receiver.getProfileNodeId()).resolves.toBe(before);
+      await expect(core.getProfileNodeId!()).resolves.toBe(PEER_NODE_ID);
+    });
+  });
+
   it('creates new profiles with the peer id, and with a random nodeId when it is taken', async () => {
     const fresh = await freshNodeAdapter();
     const identityId = await fresh.ensureProfile({

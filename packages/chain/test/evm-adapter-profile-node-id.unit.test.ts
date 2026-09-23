@@ -76,6 +76,26 @@ function customErrorRevert(name: string): Error {
   });
 }
 
+/** A revert as ethers surfaces it from gas estimation while signing: raw revert data, nothing decoded. */
+function rawDataRevert(name: string, args: unknown[]): Error {
+  return Object.assign(new Error('execution reverted (unknown custom error)'), {
+    code: 'CALL_EXCEPTION',
+    action: 'estimateGas',
+    data: profileInterface.encodeErrorResult(name, args),
+    reason: null,
+    revert: null,
+  });
+}
+
+/** What the adapter's receipt wait throws for a transaction mined with status 0: no revert data. */
+function minedRevert(blockNumber: number): Error {
+  const hash = '0x' + 'cd'.repeat(32);
+  return Object.assign(new Error(`updateNodeId tx ${hash} was mined but reverted (status=0)`), {
+    code: 'CALL_EXCEPTION',
+    receipt: { hash, blockNumber, status: 0 },
+  });
+}
+
 interface AdapterOptions {
   identityId?: bigint;
   currentNodeId?: string;
@@ -83,8 +103,10 @@ interface AdapterOptions {
   code?: string;
   version?: string | Error;
   admin?: boolean;
-  /** Preflight outcome per `from` address; resolves by default. */
-  preflight?: (from: string) => Promise<unknown>;
+  /** Static-call outcome per `from` address (and `blockTag` for a replay); resolves by default. */
+  preflight?: (from: string, blockTag?: number) => Promise<unknown>;
+  /** Makes sendContractTransaction fail with this error. */
+  sendError?: unknown;
 }
 
 function makeAdapter(opts: AdapterOptions = {}) {
@@ -133,14 +155,19 @@ function makeAdapter(opts: AdapterOptions = {}) {
   };
   a.readProvider = async (_label: string, fn: (p: unknown) => Promise<unknown>) => fn(provider);
 
-  const preflights: Array<{ fn: string; args: unknown[]; from: string }> = [];
+  const preflights: Array<{ fn: string; args: unknown[]; from: string; blockTag?: number }> = [];
   a.rebindContract = (_contract: unknown, _runner: unknown) => ({
     getFunction: (fn: string) => ({
       staticCall: async (...args: unknown[]) => {
-        const overrides = args[args.length - 1] as { from: string };
-        calls.push('preflight');
-        preflights.push({ fn, args: args.slice(0, -1), from: overrides.from });
-        return opts.preflight ? opts.preflight(overrides.from) : undefined;
+        const overrides = args[args.length - 1] as { from: string; blockTag?: number };
+        calls.push(overrides.blockTag === undefined ? 'preflight' : `replay@${overrides.blockTag}`);
+        preflights.push({
+          fn,
+          args: args.slice(0, -1),
+          from: overrides.from,
+          ...(overrides.blockTag === undefined ? {} : { blockTag: overrides.blockTag }),
+        });
+        return opts.preflight ? opts.preflight(overrides.from, overrides.blockTag) : undefined;
       },
     }),
   });
@@ -149,6 +176,7 @@ function makeAdapter(opts: AdapterOptions = {}) {
   a.sendContractTransaction = async (contract: any, method: string, args: unknown[], signer: any) => {
     calls.push(`send:${method}`);
     sends.push({ contract: contract.__name, method, args, signer: signer.address });
+    if (opts.sendError !== undefined) throw opts.sendError;
     return {
       hash: '0x' + 'ab'.repeat(32),
       blockNumber: 12,
@@ -336,6 +364,87 @@ describe('updateProfileNodeId', () => {
     await expect(a.updateProfileNodeId('not-hex')).rejects.toThrow(/bytes or 0x-prefixed hex/);
     expect(reads).toEqual([]);
     expect(sends).toEqual([]);
+  });
+});
+
+// The pre-read said the nodeId was free, but another identity holds it by the
+// time the contract checks: a lagging read, or a claim that landed since.
+describe('updateProfileNodeId lost race for the nodeId', () => {
+  it('maps a NodeIdAlreadyExists preflight revert to ProfileNodeIdTakenError, sending nothing', async () => {
+    const { a, calls, sends } = makeAdapter({
+      preflight: async () => { throw customErrorRevert('NodeIdAlreadyExists'); },
+    });
+    const error = await a.updateProfileNodeId(PEER_NODE_ID).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ProfileNodeIdTakenError);
+    expect((error as ProfileNodeIdTakenError).nodeId).toBe(PEER_NODE_ID);
+    // The operational key passed the access check, so the admin key is not tried.
+    expect(calls.filter((call) => call === 'preflight')).toHaveLength(1);
+    expect(sends).toEqual([]);
+  });
+
+  it('maps a NodeIdAlreadyExists revert from gas estimation, decoded from the raw revert data', async () => {
+    const { a, calls } = makeAdapter({ sendError: rawDataRevert('NodeIdAlreadyExists', [PEER_NODE_ID]) });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+    expect(calls.slice(-2)).toEqual(['preflight', 'send:updateNodeId']);
+  });
+
+  it('maps a transaction mined with status 0 when replaying it at its block answers NodeIdAlreadyExists', async () => {
+    const { a, preflights } = makeAdapter({
+      sendError: minedRevert(21),
+      preflight: async (_from, blockTag) => {
+        if (blockTag === 21) throw customErrorRevert('NodeIdAlreadyExists');
+      },
+    });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+    expect(preflights).toEqual([
+      { fn: 'updateNodeId', args: [7n, PEER_NODE_ID], from: OPERATIONAL },
+      { fn: 'updateNodeId', args: [7n, PEER_NODE_ID], from: OPERATIONAL, blockTag: 21 },
+    ]);
+  });
+
+  it('replays the mined revert from the key that sent it', async () => {
+    const { a, preflights } = makeAdapter({
+      sendError: minedRevert(21),
+      preflight: async (from, blockTag) => {
+        if (from === OPERATIONAL) throw customErrorRevert('OnlyProfileAdminFunction');
+        if (blockTag === 21) throw customErrorRevert('NodeIdAlreadyExists');
+      },
+    });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+    expect(preflights.map((call) => [call.from, call.blockTag])).toEqual([
+      [OPERATIONAL, undefined],
+      [ADMIN, undefined],
+      [ADMIN, 21],
+    ]);
+  });
+
+  it('rethrows a mined revert whose replay does not answer NodeIdAlreadyExists', async () => {
+    const replays: Array<() => Promise<unknown>> = [
+      async () => undefined, // the call would succeed now
+      async () => { throw customErrorRevert('ShardingTableIsFull'); },
+      async () => { throw new Error('header not found'); }, // the endpoint cannot serve that block
+    ];
+    for (const replay of replays) {
+      const mined = minedRevert(21);
+      const { a } = makeAdapter({
+        sendError: mined,
+        preflight: async (_from, blockTag) => (blockTag === undefined ? undefined : replay()),
+      });
+      await expect(a.updateProfileNodeId(PEER_NODE_ID)).rejects.toBe(mined);
+    }
+  });
+
+  it('rethrows other send failures without a replay', async () => {
+    const failures = [
+      customErrorRevert('ShardingTableIsFull'),
+      Object.assign(new Error('missing revert data'), { code: 'CALL_EXCEPTION' }),
+      Object.assign(new Error('nonce has already been used'), { code: 'NONCE_EXPIRED' }),
+    ];
+    for (const failure of failures) {
+      const { a, calls } = makeAdapter({ sendError: failure });
+      await expect(a.updateProfileNodeId(PEER_NODE_ID)).rejects.toBe(failure);
+      expect(calls.some((call) => call.startsWith('replay@'))).toBe(false);
+    }
   });
 });
 

@@ -12,11 +12,12 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, type Contract, type Wallet } from 'ethers';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
-import { enrichEvmError } from './evm-adapter-errors.js';
+import { enrichEvmError, errorCode } from './evm-adapter-errors.js';
 import { selectorInDeployedCode } from './evm-selector-probe.js';
 import {
   PROFILE_NODE_ID_UPDATE_MIN_VERSION,
   PROFILE_UPDATE_NODE_ID_SIGNATURE,
+  ProfileNodeIdTakenError,
   normalizeProfileNodeId,
   planProfileNodeIdUpdate,
 } from './profile-node-id.js';
@@ -35,6 +36,37 @@ const PROFILE_NODE_ID_AUTH_ERRORS: ReadonlySet<string> = new Set([
   'OnlyProfileAdminOrOperationalAddressesFunction',
   'OnlyProfileAdminFunction',
 ]);
+
+/**
+ * The custom error a contract call reverted with, decoded through the ABIs:
+ * ethers' decode against the called contract first, then the vendored ABIs
+ * (`enrichEvmError`), which covers errors raised on paths without the contract
+ * interface, such as gas estimation while signing. Null when nothing decodes.
+ */
+function decodedRevertName(err: unknown): string | null {
+  const name = (err as { revert?: { name?: unknown } } | null)?.revert?.name;
+  return typeof name === 'string' ? name : enrichEvmError(err);
+}
+
+/**
+ * Whether a failed `updateNodeId` send lost the race for its nodeId, i.e. the
+ * contract answered `NodeIdAlreadyExists`. A revert during gas estimation
+ * carries that answer; a transaction mined with status 0 carries none, so
+ * `replay` re-runs the call at the receipt's block to read it.
+ */
+async function lostNodeIdRace(err: unknown, replay: (blockTag: number) => Promise<unknown>): Promise<boolean> {
+  if (decodedRevertName(err) === 'NodeIdAlreadyExists') return true;
+  const receipt = (err as { receipt?: { status?: unknown; blockNumber?: unknown } } | null)?.receipt;
+  if (errorCode(err) !== 'CALL_EXCEPTION' || receipt?.status !== 0 || typeof receipt.blockNumber !== 'number') {
+    return false;
+  }
+  try {
+    await replay(receipt.blockNumber);
+    return false;
+  } catch (replayErr) {
+    return decodedRevertName(replayErr) === 'NodeIdAlreadyExists';
+  }
+}
 
 export class IdentityMethods extends EVMChainAdapterBase {
   /** Independent all-or-none browser capability for node-identity key rotation. */
@@ -378,6 +410,12 @@ export class IdentityMethods extends EVMChainAdapterBase {
     // configured key with a static call, which also surfaces input reverts
     // before any gas is spent, and send with the first key the contract takes.
     const profile = await this.resolveContract('Profile');
+    const callUpdate = (from: string, blockTag?: number) => this.readProvider(
+      blockTag === undefined ? 'Profile.updateNodeId preflight' : 'Profile.updateNodeId revert replay',
+      (provider) => this.rebindContract(profile, provider)
+        .getFunction('updateNodeId')
+        .staticCall(identityId, requested, blockTag === undefined ? { from } : { from, blockTag }),
+    );
     const candidates: Wallet[] = [this.signer];
     if (this.adminSigner && this.adminSigner.address.toLowerCase() !== this.signer.address.toLowerCase()) {
       candidates.push(this.adminSigner);
@@ -385,17 +423,15 @@ export class IdentityMethods extends EVMChainAdapterBase {
     let signer: Wallet | undefined;
     for (const candidate of candidates) {
       try {
-        await this.readProvider(
-          'Profile.updateNodeId preflight',
-          (provider) => this.rebindContract(profile, provider)
-            .getFunction('updateNodeId')
-            .staticCall(identityId, requested, { from: candidate.address }),
-        );
+        await callUpdate(candidate.address);
         signer = candidate;
         break;
       } catch (err) {
-        const revertName = (err as { revert?: { name?: unknown } }).revert?.name ?? enrichEvmError(err);
-        if (typeof revertName === 'string' && PROFILE_NODE_ID_AUTH_ERRORS.has(revertName)) continue;
+        const revertName = decodedRevertName(err);
+        // The pre-read above said the value was free, but the chain says it is
+        // taken: a lagging read, or another identity claimed it since.
+        if (revertName === 'NodeIdAlreadyExists') throw new ProfileNodeIdTakenError(requested);
+        if (revertName !== null && PROFILE_NODE_ID_AUTH_ERRORS.has(revertName)) continue;
         throw err;
       }
     }
@@ -406,13 +442,24 @@ export class IdentityMethods extends EVMChainAdapterBase {
       );
     }
 
-    const receipt = await this.sendContractTransaction(
-      profile,
-      'updateNodeId',
-      [identityId, requested],
-      signer,
-      'updateNodeId',
-    );
+    const sender = signer;
+    let receipt: ethers.TransactionReceipt;
+    try {
+      receipt = await this.sendContractTransaction(
+        profile,
+        'updateNodeId',
+        [identityId, requested],
+        sender,
+        'updateNodeId',
+      );
+    } catch (err) {
+      // Another identity claimed the value after the preflight: during gas
+      // estimation, or before this transaction was mined.
+      if (await lostNodeIdRace(err, (blockTag) => callUpdate(sender.address, blockTag))) {
+        throw new ProfileNodeIdTakenError(requested);
+      }
+      throw err;
+    }
     return {
       identityId,
       previousNodeId,
