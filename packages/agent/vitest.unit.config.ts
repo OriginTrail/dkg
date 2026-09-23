@@ -34,6 +34,7 @@ export default defineConfig({
       "test/bounded-curator-discovery.test.ts",
       "test/discovery-peer-pagination.test.ts",
       "test/ack-candidate-pool.test.ts",
+      "test/profile-node-id-sync.test.ts",
       "test/e2e-dht-dial.test.ts",
       "test/generic-sql-source.test.ts",
       "test/sqlite-module-loader.test.ts",
