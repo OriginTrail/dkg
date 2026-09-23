@@ -2309,9 +2309,29 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
     }
     // A name hash this node resolved no longer keys any row: its subscription
-    // moved to the verified cleartext id, which is what must be stopped.
-    const contextGraphId: string =
-      agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? requestedContextGraphId;
+    // moved to the verified cleartext id, which is what must be stopped. The
+    // hash is public on chain, but following it names the graph and stops its
+    // subscription, so only a caller who could already read that graph
+    // follows it: the node operator (who can list every subscription) or an
+    // agent the subscribe route would admit to the resolved id. Anyone else is
+    // answered exactly as for an id that keys no row.
+    let contextGraphId: string = requestedContextGraphId;
+    const alias = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? null;
+    if (alias !== null && alias !== requestedContextGraphId) {
+      let mayFollowAlias = isNodeAdminCaller();
+      if (!mayFollowAlias) {
+        try {
+          const readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(alias, {
+            callerAgentAddress: requestAgentAddress ?? agent.getDefaultAgentAddress(),
+            allowSubscriptionFallback: false,
+          });
+          mayFollowAlias = readAuthority.outcome === 'allowed';
+        } catch {
+          mayFollowAlias = false;
+        }
+      }
+      if (mayFollowAlias) contextGraphId = alias;
+    }
     agent.unsubscribeFromContextGraph(contextGraphId);
     const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
     return jsonResponse(res, 200, {
