@@ -36,7 +36,7 @@ export const TEST_LANE_METADATA = Object.freeze({
 });
 
 /** Vitest groups per controller lane. Lanes without groups run bespoke jobs
- * (live Blazegraph, arm64 image, Windows lifecycle, browser E2E).
+ * (live Blazegraph, arm64 image, browser E2E).
  * Agent subdivisions come from its existing timing/overhead policy, without a second count.
  */
 const LANE_GROUPS = {
