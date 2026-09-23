@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
+  GitHubApiError,
   inspectCiPolicyFreshness,
   inspectCiPolicyProtections,
   parseCiPolicyArguments,
@@ -210,8 +211,14 @@ test('repository workflows expose one canonical protected-history controller pin
   ]);
   assert.equal(result.ref, CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 4);
-  assert.ok(CONTROLLER_POLICY_FILES.includes('scripts/ci/plan-ci.mjs'));
-  assert.equal(CONTROLLER_POLICY_FILES.length, 4);
+  // The security-reviewed controller boundary, file by file.
+  assert.deepEqual([...CONTROLLER_POLICY_FILES].sort(), [
+    'scripts/ci/assert-ci-results.mjs',
+    'scripts/ci/plan-ci.mjs',
+    'scripts/lib/ci-delta.mjs',
+    'scripts/lib/ci-results.mjs',
+    'scripts/lib/ci-routing.mjs',
+  ]);
   assert.equal(CONTROLLER_POLICY_FILES.includes('scripts/ci/inspect-ci-policy.mjs'), false);
   assert.equal(
     CONTROLLER_POLICY_FILES.includes('scripts/ci/enforce-zizmor-sarif.mjs'),
@@ -378,6 +385,57 @@ test('protection inspection excludes controller freshness acquisition', async ()
     requestedEndpoints.filter((endpoint) => endpoint.includes('/rulesets/')).sort(),
     ['repos/OriginTrail/dkg/rulesets/1', 'repos/OriginTrail/dkg/rulesets/2'],
   );
+
+  // A controller file the pin predates is reported as drift, not an error;
+  // any other failure still errors the check.
+  const [addedLater] = CONTROLLER_POLICY_FILES.slice(-1);
+  const pinnedRef = `ref=${encodeURIComponent(inspection.controller.pin)}`;
+  const withNewFile = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) {
+        throw new GitHubApiError(endpoint, 404);
+      }
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(withNewFile.checks.freshness.status, 'fail');
+  assert.deepEqual(withNewFile.checks.freshness.details.driftedFiles, [addedLater]);
+  const unreachable = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes('/contents/')) throw new GitHubApiError(endpoint, 500);
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(unreachable.checks.freshness.status, 'error');
+  const lookalike = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) throw Object.assign(new Error('not an API response'), { status: 404 });
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(lookalike.checks.freshness.status, 'error', 'only a GitHub API 404 means the file is missing');
+  // The same drift through the real request helper and GitHub's own 404.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const endpoint = String(url).replace('https://api.github.com/', '');
+    if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) {
+      return new Response('{"message":"Not Found"}', { status: 404 });
+    }
+    return new Response(JSON.stringify(await requestJson(endpoint)), { status: 200 });
+  };
+  try {
+    const throughFetch = await inspectCiPolicyFreshness({ inspection, token: 'test-token' });
+    assert.equal(throughFetch.checks.freshness.status, 'fail');
+    assert.deepEqual(throughFetch.checks.freshness.details.driftedFiles, [addedLater]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('effective policy inspection reads every rules page and rejects malformed pages', async () => {

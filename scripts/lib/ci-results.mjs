@@ -1,7 +1,13 @@
-import { CI_LANES, EVM_SCOPES, NODE_EVM_LANES, needsNodeTestArtifacts } from './ci-delta.mjs';
+import {
+  CI_LANES,
+  EVM_SCOPES,
+  NODE_EVM_LANES,
+  PRIMARY_LANE_JOBS,
+  needsNodeTestArtifacts,
+  needsSharedBuild,
+} from './ci-delta.mjs';
 
-import { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
-export { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
+export { PRIMARY_LANE_JOBS } from './ci-delta.mjs';
 
 function checkNoFailedJobs(needs, errors) {
   for (const [job, state] of Object.entries(needs)) {
@@ -31,9 +37,10 @@ function checkPlanShape(plan, eventName, errors) {
   if (
     typeof plan.fullCi !== 'boolean'
     || typeof plan.runNode !== 'boolean'
+    || typeof plan.buildChecks !== 'boolean'
     || typeof plan.abiFreshnessRelevant !== 'boolean'
   ) {
-    errors.push('CI plan fullCi/runNode/abiFreshnessRelevant flags must be booleans');
+    errors.push('CI plan fullCi/runNode/buildChecks/abiFreshnessRelevant flags must be booleans');
   }
   if (plan.lanes?.contracts && !plan.abiFreshnessRelevant) {
     errors.push('CI plan cannot select Solidity without ABI freshness');
@@ -101,11 +108,12 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
     errors,
   );
 
-  const selectedNodeLane = Object.keys(PRIMARY_LANE_JOBS)
-    .filter((lane) => lane !== 'bura_blazegraph_arm64')
-    .some((lane) => plan.lanes?.[lane]);
-  if (selectedNodeLane !== Boolean(plan.runNode)) {
-    errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes`);
+  // runNode must match the planner's shared-build rule: a lane that consumes
+  // the build, or the build job's declared repository checks (lint,
+  // repository-script tests, test inventory). A build without either is a
+  // plan that forgot its lanes.
+  if (Boolean(plan.runNode) !== needsSharedBuild(plan)) {
+    errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes (buildChecks=${plan.buildChecks})`);
   }
 
   return errors;
