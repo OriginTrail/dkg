@@ -20,6 +20,7 @@ import { ethers, Interface } from 'ethers';
 import { encodeProfileNodeIdHex } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { selectorInDeployedCode } from '../src/evm-selector-probe.js';
 import {
   PROFILE_NODE_ID_UPDATE_MIN_VERSION,
   ProfileNodeIdTakenError,
@@ -27,7 +28,6 @@ import {
   isProfileNodeIdTakenError,
   isProfileNodeIdUpdateUnsupportedError,
   normalizeProfileNodeId,
-  selectorInDeployedCode,
 } from '../src/profile-node-id.js';
 
 const OPERATIONAL_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'; // hardhat #0

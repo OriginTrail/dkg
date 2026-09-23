@@ -2,8 +2,8 @@
 
 /**
  * Profile nodeId support shared by the EVM and mock adapters: input
- * normalization, the `updateNodeId` feature probe, and the typed errors that
- * callers map to operator messages and HTTP statuses.
+ * normalization, the `updateNodeId` probe signature, and the typed errors
+ * that callers map to operator messages and HTTP statuses.
  *
  * The canonical nodeId is the UTF-8 bytes of the node's base58btc libp2p peer
  * id (`encodeProfileNodeId` in dkg-core). The adapters take nodeIds as bytes
@@ -35,19 +35,6 @@ export function normalizeProfileNodeId(nodeId: Uint8Array | string, label: strin
     throw new Error(`${label}: nodeId is ${length} bytes; the maximum is ${PROFILE_NODE_ID_MAX_LENGTH}`);
   }
   return hex.toLowerCase();
-}
-
-/**
- * True iff `selector` appears as a `PUSH4 <selector>` dispatcher entry in the
- * deployed runtime bytecode `code`. Matching `63<selector>` rather than the
- * bare 4 bytes avoids false positives from the same bytes inside a constant
- * or the metadata blob. Profile is resolved straight from the Hub (not a
- * proxy), so its own dispatcher is what this sees. Same probe as the
- * DKGKnowledgeAssets high-water view detection in evm-adapter-base.ts.
- */
-export function selectorInDeployedCode(code: string, selector: string): boolean {
-  if (!/^0x[0-9a-fA-F]{8}$/.test(selector)) return false;
-  return code.toLowerCase().includes(`63${selector.toLowerCase().slice(2)}`);
 }
 
 /** The Hub's Profile has no `updateNodeId` (older than Profile 10.1.0). */

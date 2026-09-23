@@ -13,13 +13,13 @@ import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, type Contract, type Wallet } from 'ethers';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
+import { selectorInDeployedCode } from './evm-selector-probe.js';
 import {
   PROFILE_NODE_ID_UPDATE_MIN_VERSION,
   PROFILE_UPDATE_NODE_ID_SIGNATURE,
   ProfileNodeIdTakenError,
   ProfileNodeIdUpdateUnsupportedError,
   normalizeProfileNodeId,
-  selectorInDeployedCode,
 } from './profile-node-id.js';
 import type {
   EnsureProfileOptions,
