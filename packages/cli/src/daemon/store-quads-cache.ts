@@ -45,9 +45,10 @@ let storeQuadsCache: StoreQuadsCacheEntry | null = null;
 let storeQuadsInflight: Promise<void> | null = null;
 
 /**
- * Drop cached quad counts (e.g. when the managed Oxigraph child exits). A count
- * already running cannot be cancelled, so it loses the in-flight marker
- * instead, and its result is discarded when it settles.
+ * Drop cached quad counts. The managed Oxigraph calls this when its child goes
+ * down and again when it is healthy after a restart. A count already running
+ * cannot be cancelled, so it loses the in-flight marker instead, and its
+ * result is discarded when it settles.
  */
 export function invalidateExternalStoreQuadsCache(): void {
   storeQuadsCache = null;
@@ -106,10 +107,11 @@ export function getCachedExternalStoreQuads(
   const currentSnapshot: StoreQuadsSnapshot = cached ?? { status: 'pending' };
   if (!storeQuadsInflight) {
     // A count that lost the marker to an invalidation (the managed Oxigraph
-    // went down), or to a newer count started after one, neither writes the
-    // cache nor clears the marker: typically a failure against the dying
-    // server, its result would report the revived store as unreachable. The
-    // callback runs asynchronously, after `refresh` holds the marker.
+    // went down or came back up), or to a newer count started after one,
+    // neither writes the cache nor clears the marker: typically a failure
+    // while the store was going down or recovering, its result would report
+    // the healthy store as unreachable. The callback runs asynchronously,
+    // after `refresh` holds the marker.
     const refresh: Promise<void> = countStoreQuads(agent).then((result) => {
       if (storeQuadsInflight !== refresh) return;
       storeQuadsCache = result;

@@ -28,6 +28,11 @@ import {
   createManagedOxigraphSparqlStoreV1,
 } from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
+import {
+  getCachedExternalStoreQuads,
+  invalidateExternalStoreQuadsCache,
+  peekCachedExternalStoreQuads,
+} from '../src/daemon/store-quads-cache.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
 import { OXIGRAPH_VERSION } from '../src/daemon/oxigraph-binary.js';
@@ -310,6 +315,39 @@ describe('startOxigraphServer (real child processes)', () => {
       expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
     } finally {
       await handle.stop();
+    }
+  });
+
+  it('drops a store count that failed while the child was recovering once it is healthy again', async () => {
+    const port = await freePort();
+    // A long restart backoff keeps the respawn well behind the count below.
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 500,
+      restartBackoffMaxMs: 500,
+    }));
+    const recoveringAgent = {
+      store: {
+        query: async () => {
+          throw new Error('Managed Oxigraph is recovering; query was not started');
+        },
+      },
+    } as unknown as Parameters<typeof getCachedExternalStoreQuads>[0];
+    try {
+      process.kill(await fetchPid(port), 'SIGKILL');
+      for (let i = 0; i < 100 && !handle.getRecoveryState().recovering; i++) await sleep(10);
+      expect(handle.getRecoveryState().recovering).toBe(true);
+
+      // `dkg status` asks for a count during the outage, and it fails.
+      getCachedExternalStoreQuads(recoveringAgent, Date.now());
+      await sleep(0);
+      expect(peekCachedExternalStoreQuads(Date.now())).toMatchObject({ status: 'unreachable' });
+
+      for (let i = 0; i < 100 && handle.getRecoveryState().recovering; i++) await sleep(50);
+      expect(handle.getRecoveryState().recovering).toBe(false);
+      expect(peekCachedExternalStoreQuads(Date.now())).toEqual({ status: 'not-requested' });
+    } finally {
+      await handle.stop();
+      invalidateExternalStoreQuadsCache();
     }
   });
 
