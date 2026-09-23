@@ -77,6 +77,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
   without splitting when a provider refuses history, archive or plan-limited
   ranges. The event lanes still page 9,000 blocks and advance their cursor
   only after a whole page succeeds.
+- **A curated StorageACK stores only a genuine catalog**: a Core that
+  acknowledges a curated publish or update now requires the inline catalog to
+  be exactly the graph's catalog entry, as the publisher's own partition
+  defines it: every triple on the Context Graph's DID (under its on-chain id
+  or the SWM graph id the request names), with catalog predicates only and
+  `rdf:type` only of a catalog class. Anything else is declined with
+  `CATALOG_ROOT_MISMATCH`. Before, a matching root was enough, so a publisher
+  could have a Core store arbitrary triples, on any subject, in its public
+  `<cg>/_catalog`. The Core also stores the catalog only after every other
+  check and the signer check have passed, so a declined request no longer
+  changes it.
 - **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a

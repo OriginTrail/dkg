@@ -43,6 +43,8 @@ import {
   computeCatalogRoot,
   catalogCommittedLeaves,
   contextGraphCatalogUri,
+  contextGraphDataUri,
+  partitionCatalogQuads,
   isSwmMerkleExcludedQuad,
   STORAGE_ACK_MAX_STAGING_BYTES,
   createGraphKnowledgeAssetScope,
@@ -333,6 +335,16 @@ function catalogRootForAckDigest(root: Uint8Array | undefined): Uint8Array {
     throw new Error(`catalogRoot must be 32 bytes, got ${root.length}`);
   }
   return root;
+}
+
+/**
+ * A curated inline catalog whose commitment this core has verified, held
+ * until the request's last gate has passed and only then persisted.
+ */
+interface VerifiedCuratedCatalog {
+  /** `<cg>/_catalog`, already checked by `assertSafeIri`. */
+  readonly graph: string;
+  readonly quads: Quad[];
 }
 
 function normalizePrivateMerkleRoots(
@@ -938,20 +950,121 @@ export class StorageACKHandler {
     }
   }
 
-  /** Persist a verified public catalog under the shared store-error boundary. */
+  /**
+   * An inline curated catalog must be exactly a catalog partition: every quad
+   * on the Context Graph's own DID (under the target on-chain id, or the SWM
+   * graph id the intent names), one subject throughout, only catalog
+   * predicates, and `rdf:type` only with a catalog class. This is the
+   * publisher's own partition rule (`partitionCatalogQuads`). Without it a
+   * publisher could commit arbitrary triples, on any subject, into this
+   * core's public `<cg>/_catalog`. Returns the decline, or undefined.
+   */
+  private declineUnlessCatalogPartition(
+    cgId: string,
+    swmGraphId: string | undefined,
+    parsedCatalog: readonly Quad[],
+    label: string,
+  ): Uint8Array | undefined {
+    const allowedSubjects = new Set<string>([contextGraphDataUri(cgId)]);
+    if (swmGraphId && swmGraphId.length > 0) allowedSubjects.add(contextGraphDataUri(swmGraphId));
+    const subject = parsedCatalog[0]?.subject;
+    if (subject === undefined || !allowedSubjects.has(subject)) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+        `${label}: inline catalog subject is not this Context Graph's DID`,
+      );
+    }
+    const { otherQuads } = partitionCatalogQuads(parsedCatalog, subject);
+    if (otherQuads.length > 0) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+        `${label}: inline catalog carries ${otherQuads.length} quad(s) outside the catalog partition ` +
+          `(another subject, a non-catalog predicate, or a non-catalog rdf:type)`,
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Verify a curated inline catalog against the publisher's claimed
+   * commitment. The publish and the update ACK share this, so the two cannot
+   * accept or reject the same catalog differently. The catalog must be
+   * exactly this Context Graph's catalog partition, and the committed
+   * leaf-set rebuilt from it (post-publish stamps stripped, the definition
+   * the producer and the prover both use) must reproduce the claimed leaf
+   * count and root. Nothing is persisted here: the caller persists the
+   * returned catalog only after its signer gate has passed. An unsafe
+   * `<cg>/_catalog` IRI is a malformed request (stream reset), so it throws.
+   */
+  private verifyCuratedCatalogCommitment(
+    cgId: string,
+    swmGraphId: string | undefined,
+    stagingQuads: Uint8Array,
+    claimed: { root: Uint8Array; leafCount: number },
+    label: 'curated ACK' | 'curated UPDATE ACK',
+  ): { ok: true; catalog: VerifiedCuratedCatalog } | { ok: false; decline: Uint8Array } {
+    const parsedCatalog = parseSimpleNQuads(new TextDecoder().decode(stagingQuads));
+    const partitionDecline = this.declineUnlessCatalogPartition(cgId, swmGraphId, parsedCatalog, label);
+    if (partitionDecline) return { ok: false, decline: partitionDecline };
+    const committedLeaves = catalogCommittedLeaves(parsedCatalog);
+    if (committedLeaves.length === 0) {
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+          `${label}: inline catalog parsed to zero committed leaves`,
+        ),
+      };
+    }
+    const rebuilt = computeCatalogRoot(committedLeaves);
+    if (rebuilt.leafCount !== claimed.leafCount) {
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+          `${label} leaf-count mismatch: rebuilt ${rebuilt.leafCount} catalog leaves ` +
+            `but publisher claims ${claimed.leafCount}`,
+        ),
+      };
+    }
+    if (!bytesEqual(rebuilt.root, claimed.root)) {
+      return {
+        ok: false,
+        decline: this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+          `${label} root mismatch: rebuilt catalog root=${ethers.hexlify(rebuilt.root).slice(0, 18)}... ` +
+            `does not match publisher claim=${ethers.hexlify(claimed.root).slice(0, 18)}...`,
+        ),
+      };
+    }
+    const graph = contextGraphCatalogUri(cgId);
+    assertSafeIri(graph);
+    return { ok: true, catalog: { graph, quads: parsedCatalog } };
+  }
+
+  /**
+   * Persist a verified public catalog to `<cg>/_catalog` (CLEAR/REPLACE) under
+   * the shared store-error boundary, so this core can serve it (the §7 facet
+   * open-serve) and the prover can rebuild the same root. A failing store
+   * returns the transient decline so the publisher retries once it recovers.
+   */
   private async persistCatalogOrDecline(
     cgId: string,
-    catalogGraph: string,
-    parsedCatalog: Quad[],
+    catalog: VerifiedCuratedCatalog,
     signal?: AbortSignal,
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
     // Malformed terms are a bad request, not a store outage — validate BEFORE
     // the store wrapper so they reset the stream instead of being mislabeled
     // as a transient decline (see assertPersistQuadTermsSafe).
-    assertPersistQuadTermsSafe(parsedCatalog);
+    assertPersistQuadTermsSafe(catalog.quads);
     const result = await this.runStoreOpOrDecline(
       cgId,
-      () => replaceCatalogQuads(this.store, catalogGraph, parsedCatalog, signal),
+      () => replaceCatalogQuads(this.store, catalog.graph, catalog.quads, signal),
       signal,
     );
     return result.ok ? { ok: true } : result;
@@ -1813,49 +1926,18 @@ export class StorageACKHandler {
         );
       }
 
-      // Independently rebuild the catalog commitment over the inline catalog
-      // via the SHARED definition (post-publish stamps stripped) so the core's
-      // rebuilt root is byte-identical to the producer's committed root AND the
-      // prover's later rebuild. DECLINE on any disagreement.
-      const parsedCatalog = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
-      const committedLeaves = catalogCommittedLeaves(parsedCatalog);
-      if (committedLeaves.length === 0) {
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-          'curated ACK: inline catalog parsed to zero committed leaves',
-        );
-      }
-      const rebuilt = computeCatalogRoot(committedLeaves);
-      if (rebuilt.leafCount !== claimedCatalogLeafCount) {
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-          `curated ACK leaf-count mismatch: rebuilt ${rebuilt.leafCount} catalog leaves ` +
-          `but publisher claims ${claimedCatalogLeafCount}`,
-        );
-      }
-      if (!bytesEqual(rebuilt.root, claimedCatalogRoot)) {
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-          `curated ACK root mismatch: rebuilt catalog root=${ethers.hexlify(rebuilt.root).slice(0, 18)}... ` +
-          `does not match publisher claim=${ethers.hexlify(claimedCatalogRoot).slice(0, 18)}...`,
-        );
-      }
-
-      // Root verified — persist the public catalog to `<cg>/_catalog` so this
-      // core can serve it (the §7 facet open-serve) and the prover can later
-      // rebuild the SAME root for curated proving. CLEAR/REPLACE the subjects.
-      // `assertSafeIri` stays OUTSIDE the persist helper below: an unsafe graph
-      // IRI is a malformed-request condition (stream reset), not a store outage.
-      // A failing store (worker restarting, 'store is closed') instead returns
-      // the transient decline so the publisher retries once the store recovers
-      // rather than bucketing us as no_response after a stream reset.
-      const catalogGraph = contextGraphCatalogUri(cgId);
-      assertSafeIri(catalogGraph);
-      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
-      if (!persistedCatalog.ok) return persistedCatalog.decline;
+      // Independently rebuild and verify the catalog commitment. The verified
+      // catalog is persisted to `<cg>/_catalog` only after every remaining
+      // check and the signer gate below, so a request this core declines
+      // never changes its public catalog.
+      const verifiedCatalog = this.verifyCuratedCatalogCommitment(
+        cgId,
+        swmGraphIdForCuration,
+        intent.stagingQuads,
+        { root: claimedCatalogRoot, leafCount: claimedCatalogLeafCount },
+        'curated ACK',
+      );
+      if (!verifiedCatalog.ok) return verifiedCatalog.decline;
 
       // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
       if (intent.kaCount !== 1) {
@@ -1922,8 +2004,11 @@ export class StorageACKHandler {
       );
       if (!curatedSignerGate.ok) return curatedSignerGate.decline;
       // No VM-promotion gate here: the core never receives curated plaintext.
-      // What this ACK guarantees is the catalog commitment verified and
-      // flushed to `<cg>/_catalog` above, the artifact random sampling proves.
+      // What this ACK guarantees is the catalog commitment verified above and
+      // persisted to `<cg>/_catalog` below, the artifact random sampling proves.
+
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedCatalog.catalog, signal);
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
 
       const signature = ethers.Signature.from(
         await this.config.signerWallet.signMessage(digest),
@@ -2453,6 +2538,8 @@ export class StorageACKHandler {
     let persistUpdateCopy:
       | (() => Promise<{ ok: true; ledger: StorageAckLedgerEntry } | { ok: false; decline: Uint8Array }>)
       | undefined;
+    // A curated update's verified catalog, persisted only once the signer gate passed.
+    let verifiedUpdateCatalog: VerifiedCuratedCatalog | undefined;
     if (intent.isEncryptedPayload === true) {
       const swmGraphIdForCuration = intent.swmGraphId && intent.swmGraphId.length > 0
         ? intent.swmGraphId
@@ -2527,47 +2614,18 @@ export class StorageACKHandler {
             `curated UPDATE ACK requires a positive newCatalogLeafCount; got ${claimedCatalogLeafCount}`,
           );
         }
-        // Rebuild over the SHARED committed-leaf definition (post-publish stamps
-        // stripped) so the rebuilt root is byte-identical to the producer's
-        // committed root AND the prover's later rebuild. DECLINE on disagreement.
-        const parsedCatalog = parseSimpleNQuads(
-          new TextDecoder().decode(intent.stagingQuads),
+        // Rebuild and verify the commitment exactly as the publish path does.
+        // The rotated catalog is REPLACE-persisted to `<cg>/_catalog` only
+        // after every remaining check and the signer gate below.
+        const verified = this.verifyCuratedCatalogCommitment(
+          cgId,
+          swmGraphIdForCuration,
+          intent.stagingQuads,
+          { root: intent.newCatalogRoot, leafCount: claimedCatalogLeafCount },
+          'curated UPDATE ACK',
         );
-        const committedLeaves = catalogCommittedLeaves(parsedCatalog);
-        if (committedLeaves.length === 0) {
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-            'curated UPDATE ACK: inline catalog parsed to zero committed leaves',
-          );
-        }
-        const rebuilt = computeCatalogRoot(committedLeaves);
-        if (rebuilt.leafCount !== claimedCatalogLeafCount) {
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-            `curated UPDATE ACK leaf-count mismatch: rebuilt ${rebuilt.leafCount} catalog leaves ` +
-            `but publisher claims ${claimedCatalogLeafCount}`,
-          );
-        }
-        if (!bytesEqual(rebuilt.root, intent.newCatalogRoot)) {
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
-            `curated UPDATE ACK root mismatch: rebuilt catalog root=${ethers.hexlify(rebuilt.root).slice(0, 18)}... ` +
-            `does not match publisher claim=${ethers.hexlify(intent.newCatalogRoot).slice(0, 18)}...`,
-          );
-        }
-        // Root verified — REPLACE-persist the updated public catalog to
-        // `<cg>/_catalog` so this core serves + later proves the rotated root.
-        // `assertSafeIri` stays OUTSIDE the persist helper: an unsafe IRI is
-        // malformed-request territory (stream reset), not a store outage. A
-        // store outage during the persist returns the same transient decline
-        // as the publish handler's catalog persist (shared helper).
-        const catalogGraph = contextGraphCatalogUri(cgId);
-        assertSafeIri(catalogGraph);
-        const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
-        if (!persistedCatalog.ok) return persistedCatalog.decline;
+        if (!verified.ok) return verified.decline;
+        verifiedUpdateCatalog = verified.catalog;
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
@@ -2828,7 +2886,7 @@ export class StorageACKHandler {
     );
     if (!updateSignerGate.ok) return updateSignerGate.decline;
     // Finality gate for public updates, as for publishes. A curated update's
-    // guarantee is the catalog commitment verified and persisted above.
+    // guarantee is the catalog commitment verified above and persisted below.
     if (intent.isEncryptedPayload !== true) {
       const updatePromotionGate = await this.checkVmPromotionOrDecline({
         contextGraphId: cgId,
@@ -2837,6 +2895,10 @@ export class StorageACKHandler {
         ...(signal ? { signal } : {}),
       });
       if (!updatePromotionGate.ok) return updatePromotionGate.decline;
+    }
+    if (verifiedUpdateCatalog) {
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedUpdateCatalog, signal);
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
     }
     if (persistUpdateCopy) {
       const persisted = await persistUpdateCopy();
