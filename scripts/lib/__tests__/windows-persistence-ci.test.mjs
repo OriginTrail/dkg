@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { parse } from 'yaml';
 import { isTestSurface, routeFor } from '../test-inventory-surface.mjs';
@@ -53,21 +53,22 @@ test('canonical scripts retain developer build/generate/verify composition', () 
   assert.equal(scripts[`${prefix}:unit`], `node --import tsx --test ${unitFiles.join(' ')}`);
 });
 
-test('the required unit route owns exactly the existing unit files and also runs on Linux', () => {
-  // `node --test` silently skips a missing path while any other listed path exists.
-  for (const file of unitFiles) assert.ok(existsSync(new URL(`../../../${file}`, import.meta.url)), file);
+test('the required unit route owns every Gate 0 harness test and also runs on Linux', () => {
   const routes = JSON.parse(readFileSync(new URL('../../../test-policy/test-routes.json', import.meta.url), 'utf8'));
   const route = routes.find((entry) => entry.command === `pnpm ${prefix}:unit`);
+  assert.ok(route, `expected a test route for pnpm ${prefix}:unit`);
   assert.equal(route.lane, 'inventory-windows');
   assert.equal(route.cadence, 'required');
-  // The first matching route wins, so no earlier route (such as devnet/**) may shadow these files.
-  const owned = readdirSync(new URL('../../../devnet/rfc64-persistence-lifecycle/', import.meta.url))
-    .map((name) => `devnet/rfc64-persistence-lifecycle/${name}`).filter(isTestSurface)
-    .filter((file) => routeFor(file, routes) === route);
-  assert.deepEqual(owned.sort(), [...unitFiles].sort());
-  // Windows skips the POSIX-only cases; the Linux Gate 1 agent shard runs them.
+  // Every harness test must be a unit file; this also catches a missing one,
+  // which `node --test` silently skips while any other listed path exists.
+  const harnessTests = readdirSync(new URL('../../../devnet/rfc64-persistence-lifecycle/', import.meta.url))
+    .map((name) => `devnet/rfc64-persistence-lifecycle/${name}`).filter(isTestSurface);
+  assert.deepEqual(harnessTests.sort(), [...unitFiles].sort());
+  // The first matching route wins, so no earlier route (such as devnet/**) may shadow them.
+  for (const file of unitFiles) assert.equal(routeFor(file, routes), route, file);
+  // Windows skips the POSIX-only cases; the Linux RFC-64 sidecar shard runs them.
   const posix = ciWorkflow.jobs['tornado-agent'].steps.find((step) => step.run === `pnpm ${prefix}:unit`);
-  assert.equal(posix?.if, 'matrix.gate1');
+  assert.equal(posix?.if, 'matrix.rfc64Sidecars');
 });
 
 test('each matrix leg builds once and only inventory runs named evidence steps', () => {
