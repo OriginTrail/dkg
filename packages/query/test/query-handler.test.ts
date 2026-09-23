@@ -526,6 +526,30 @@ describe('QueryHandler', () => {
         'peer-1',
       );
       expect(response.status).toBe('ACCESS_DENIED');
+      expect(response.error).toContain('did:dkg:ual:ka-3');
+      expect(response.error).not.toContain(PRIVATE_CG);
+    });
+
+    it('ENTITY_BY_UAL denials keep their own reason and name only the requested UAL', async () => {
+      const deps = { isContextGraphPublic: async () => false };
+      const allowList = new QueryHandler(fakeEngine(PRIVATE_CG), {
+        defaultPolicy: 'deny',
+        contextGraphs: { [PRIVATE_CG]: { policy: 'allowList', allowedPeers: ['peer-2'] } },
+      }, deps);
+      const lookupTypes = new QueryHandler(fakeEngine(PRIVATE_CG), {
+        defaultPolicy: 'deny',
+        contextGraphs: { [PRIVATE_CG]: { policy: 'public', allowedLookupTypes: ['ENTITY_TRIPLES'] } },
+      }, deps);
+      const request = makeRequest({ lookupType: 'ENTITY_BY_UAL', contextGraphId: undefined, ual: 'did:dkg:ual:ka-5' });
+
+      await expect(allowList.handle(request, 'peer-1')).resolves.toMatchObject({
+        status: 'ACCESS_DENIED',
+        error: 'Your peer ID is not in the allow list',
+      });
+      await expect(lookupTypes.handle(request, 'peer-1')).resolves.toMatchObject({
+        status: 'UNSUPPORTED_LOOKUP',
+        error: "Lookup type 'ENTITY_BY_UAL' is not allowed for knowledge asset 'did:dkg:ual:ka-5'",
+      });
     });
 
     it('ENTITY_BY_UAL fast-deny is preserved when no resolver is wired and nothing is public', async () => {

@@ -85,9 +85,47 @@ export interface ContextGraphMetadataRelocationResult {
   readonly unclassified: number;
 }
 
-interface OntologyRow {
+export interface OntologyRow {
   readonly predicate: string;
   readonly object: string;
+}
+
+/** What happens to a candidate's ontology rows; `unproven` keeps them for a later pass. */
+export type RelocationVerdict = 'remove' | 'keep' | 'unproven';
+
+/**
+ * The verdict local facts give, or the on-chain ids whose slots decide it. A
+ * candidate goes when its own policy is private, when ontology holds its
+ * private definition, or when ontology holds only its name.
+ */
+export function localRelocationVerdict(
+  localPolicy: 'private' | 'public' | null,
+  ontologyRows: readonly OntologyRow[],
+): RelocationVerdict | { readonly onChainIds: readonly string[] } {
+  if (localPolicy === 'public') return 'keep';
+  if (
+    localPolicy === 'private'
+    || ontologyRows.some((row) => (
+      row.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY
+      && stripLiteral(row.object).trim().toLowerCase() === 'private'
+    ))
+    || ontologyRows.every((row) => row.predicate === DKG_ONTOLOGY.SCHEMA_NAME)
+  ) {
+    return 'remove';
+  }
+  const onChainIds = ontologyRows
+    .filter((row) => row.predicate === CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE)
+    .map((row) => stripLiteral(row.object).trim());
+  return onChainIds.length === 0 ? 'keep' : { onChainIds };
+}
+
+/**
+ * A bare binding goes only when a slot it names is proven curated. A slot
+ * proven neither way keeps it for a later pass.
+ */
+export function slotRelocationVerdict(slotClasses: readonly OntologyBindingSlotClass[]): RelocationVerdict {
+  if (slotClasses.includes('curated')) return 'remove';
+  return slotClasses.every((slotClass) => slotClass === 'public') ? 'keep' : 'unproven';
 }
 
 interface Candidate {
@@ -205,33 +243,22 @@ export async function relocatePrivateContextGraphMetadata(
 
     const { ontologyRows, held } = candidate;
     const localPolicy = held ? await deps.localAccessPolicy(contextGraphId) : null;
-    if (localPolicy === 'public') continue;
-
-    let remove = localPolicy === 'private'
-      || ontologyRows.some((row) => (
-        row.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY
-        && stripLiteral(row.object).trim().toLowerCase() === 'private'
-      ))
-      || ontologyRows.every((row) => row.predicate === DKG_ONTOLOGY.SCHEMA_NAME);
-    if (!remove) {
-      const onChainIds = ontologyRows
-        .filter((row) => row.predicate === CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE)
-        .map((row) => stripLiteral(row.object).trim());
-      if (onChainIds.length === 0 || !deps.classifyOnChainSlot) continue;
-      let anyUnproven = false;
-      for (const onChainId of onChainIds) {
-        const slotClass = await classifySlot(onChainId);
-        if (slotClass === 'curated') {
-          remove = true;
-          break;
-        }
-        if (slotClass !== 'public') anyUnproven = true;
+    const local = localRelocationVerdict(localPolicy, ontologyRows);
+    let verdict: RelocationVerdict;
+    if (typeof local === 'string') {
+      verdict = local;
+    } else if (deps.classifyOnChainSlot) {
+      const slotClasses: OntologyBindingSlotClass[] = [];
+      for (const onChainId of local.onChainIds) {
+        slotClasses.push(await classifySlot(onChainId));
+        if (slotClasses.at(-1) === 'curated') break;
       }
-      if (!remove) {
-        if (anyUnproven) unclassified += 1;
-        continue;
-      }
+      verdict = slotRelocationVerdict(slotClasses);
+    } else {
+      verdict = 'keep';
     }
+    if (verdict === 'unproven') unclassified += 1;
+    if (verdict !== 'remove') continue;
 
     const activities = ontologyRows
       .filter((row) => row.predicate === DKG_ONTOLOGY.PROV_GENERATED_BY)

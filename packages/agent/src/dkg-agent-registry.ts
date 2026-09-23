@@ -505,15 +505,14 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // and don't need to be re-advertised in every profile.
     //
     // `isPrivateContextGraph` is false when no policy is known yet, so a graph
-    // must also have a definition to be advertised. A graph without one (a
-    // joiner still waiting for its curator's `_meta`, or one known only from a
-    // bare on-chain binding) has no known policy yet.
+    // is advertised only when its policy is proven public: by a definition, or
+    // by a bound slot the chain proves public (a Core's chain discoveries). A
+    // joiner still waiting for its curator's `_meta` has no proven policy.
     const publicServed: string[] = [];
     for (const [id, sub] of this.subscribedContextGraphs) {
       if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
       if (!sub.subscribed) continue;
-      if (!(await this.getCgMeta(id)).declared) continue;
-      if (await this.isPrivateContextGraph(id)) continue;
+      if (await this.contextGraphAccessPolicyState(id, { onChainId: sub.onChainId }) !== 'public') continue;
       publicServed.push(id);
     }
 

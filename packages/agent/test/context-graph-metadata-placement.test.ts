@@ -24,7 +24,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
-import { relocatePrivateContextGraphMetadata } from '../src/context-graph-metadata-relocation.js';
+import {
+  localRelocationVerdict,
+  relocatePrivateContextGraphMetadata,
+  slotRelocationVerdict,
+} from '../src/context-graph-metadata-relocation.js';
 import { replaceContextGraphMetadataFact } from '../src/context-graph-metadata-fact.js';
 import {
   ONTOLOGY_BINDING_SLOT_RECHECK_MS,
@@ -726,11 +730,22 @@ describe('store discovery on a Core with a bare on-chain binding', () => {
     expect(capturedProfile?.contextGraphsServed ?? []).not.toContain(id);
   });
 
-  it('activates a public graph whose bare binding arrived before its definition', async () => {
+  it('activates a public graph from a bare binding once the chain proves its slot public', async () => {
     const id = '0x1111111111111111111111111111111111111111/binding-first';
     const { agent, chain } = await createAgent('core-binding-first', { nodeRole: 'core' });
     const slot = await createOnChain(chain, 0);
     await agent.store.insert([bindingQuad(id, slot)]);
+
+    await agent.discoverContextGraphsFromStore();
+
+    expect(agent.subscribedContextGraphs.get(id)).toMatchObject({ subscribed: true, onChainId: slot });
+  });
+
+  it('activates a bare binding it couldn’t classify once its definition arrives', async () => {
+    const id = '0x1111111111111111111111111111111111111111/definition-later';
+    const { agent, chain } = await createAgent('core-definition-later', { nodeRole: 'core' });
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockRejectedValue(new Error('rpc down'));
+    await agent.store.insert([bindingQuad(id, '9')]);
 
     await agent.discoverContextGraphsFromStore();
     expect(agent.subscribedContextGraphs.get(id)?.subscribed).not.toBe(true);
@@ -826,6 +841,32 @@ describe('agent profile contextGraphsServed', () => {
     await agent.publishProfile();
 
     expect(capturedProfile?.contextGraphsServed).toEqual(['profile-public']);
+  });
+
+  it('advertises a Core’s chain-discovered public graph known only by its binding, not a curated one', async () => {
+    const { agent, chain } = await createAgent('profile-chain-discovered', { nodeRole: 'core' });
+    const publicSlot = await createOnChain(chain, 0);
+    const curatedSlot = await createOnChain(chain, 1);
+    (chain as unknown as { listContextGraphsFromChain: unknown }).listContextGraphsFromChain = async () => ([
+      { contextGraphId: publicSlot, name: 'chain-found-public', creator: '0x3333333333333333333333333333333333333333', accessPolicy: 0, blockNumber: 1, metadataRevealed: true },
+    ]);
+    await agent.discoverContextGraphsFromChain();
+    // A subscription bound to a curated slot, with no definition here either.
+    agent.subscribeToContextGraph('bound-to-curated', { syncMode: 'always-on' });
+    agent.recordDiscoveredContextGraph('bound-to-curated', { name: 'bound-to-curated', onChainId: curatedSlot });
+    let capturedProfile: Record<string, unknown> | undefined;
+    (agent as unknown as { profileManager: { publishProfile: unknown } }).profileManager.publishProfile =
+      async (profile: Record<string, unknown>) => {
+        capturedProfile = profile;
+        return { status: 'confirmed', kaId: 1, kaManifest: [] };
+      };
+    (agent as unknown as { broadcastPublish: unknown }).broadcastPublish = async () => undefined;
+
+    expect(agent.subscribedContextGraphs.get('chain-found-public')?.subscribed).toBe(true);
+    expect(agent.subscribedContextGraphs.get('bound-to-curated')).toMatchObject({ subscribed: true, onChainId: curatedSlot });
+    await agent.publishProfile();
+
+    expect(capturedProfile?.contextGraphsServed).toEqual(['chain-found-public']);
   });
 });
 
@@ -947,9 +988,9 @@ describe('ontology gossip bindings', () => {
       '12D3KooWRegistrar',
     );
 
-    expect(policyReads.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(policyReads).toHaveBeenCalledTimes(4);
     const stored = await Promise.all(slots.map((_, index) => lookupBinding(agent.store, `0xabc/many-${index}`)));
-    expect(stored.filter((value) => value !== undefined).length).toBeLessThanOrEqual(4);
+    expect(stored).toEqual([...slots.slice(0, 4), undefined, undefined]);
   });
 });
 
@@ -1021,4 +1062,28 @@ describe('relocation at startup', () => {
       await agent.stop().catch(() => {});
     }
   }, 30_000);
+});
+
+describe('relocation verdicts', () => {
+  const binding = { predicate: ON_CHAIN_ID, object: '"5"' };
+  const name = { predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Notes"' };
+
+  it('decides from local facts before asking the chain', () => {
+    expect(localRelocationVerdict('public', [binding])).toBe('keep');
+    expect(localRelocationVerdict('private', [binding])).toBe('remove');
+    expect(localRelocationVerdict(null, [
+      { predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"Private"' },
+      binding,
+    ])).toBe('remove');
+    expect(localRelocationVerdict(null, [name])).toBe('remove');
+    expect(localRelocationVerdict(null, [{ predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"' }])).toBe('keep');
+    expect(localRelocationVerdict(null, [binding, name])).toEqual({ onChainIds: ['5'] });
+  });
+
+  it('removes a bare binding only for a slot proven curated', () => {
+    expect(slotRelocationVerdict(['public'])).toBe('keep');
+    expect(slotRelocationVerdict(['public', 'curated'])).toBe('remove');
+    expect(slotRelocationVerdict(['inactive'])).toBe('unproven');
+    expect(slotRelocationVerdict(['public', 'unknown'])).toBe('unproven');
+  });
 });

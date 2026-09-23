@@ -2082,6 +2082,33 @@ export class DKGAgent extends DKGAgentBase {
     return this.ontologyBindingSlots.classify(onChainId);
   }
 
+  /**
+   * What this node can prove about a graph's access policy. `private` comes
+   * from its local policy or a bound slot the chain proves curated. `public`
+   * needs evidence: a local definition, or a bound slot the chain proves
+   * public. Anything else is `unknown`, for example a joiner still waiting
+   * for its curator's `_meta`. Unlike `isPrivateContextGraph`, an unknown
+   * policy doesn't read as public, so only a `public` answer may make a graph
+   * visible to peers (profile advertising, Core auto-activation).
+   *
+   * `declared` defaults to the graph's own metadata projection. With
+   * `readChain: false` only slot verdicts already known count, so the call
+   * makes no chain read.
+   */
+  async contextGraphAccessPolicyState(
+    contextGraphId: string,
+    evidence: { readonly declared?: boolean; readonly onChainId?: string; readonly readChain?: boolean } = {},
+  ): Promise<'private' | 'public' | 'unknown'> {
+    if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
+    if (evidence.declared ?? (await this.getCgMeta(contextGraphId)).declared) return 'public';
+    if (evidence.onChainId === undefined) return 'unknown';
+    const slotClass = evidence.readChain === false
+      ? this.knownOntologyBindingSlotClass(evidence.onChainId)
+      : await this.classifyOntologyBindingSlot(evidence.onChainId);
+    if (slotClass === 'curated') return 'private';
+    return slotClass === 'public' ? 'public' : 'unknown';
+  }
+
   async discoverContextGraphsFromStore(): Promise<number> {
     const existingPass = this.contextGraphStoreDiscoveryInFlight;
     if (existingPass !== undefined) return existingPass;
@@ -2268,11 +2295,18 @@ export class DKGAgent extends DKGAgentBase {
           continue;
         }
 
-        if (!hasDefinition && (this.config.nodeRole ?? 'edge') === 'core') {
-          // A bare binding carries no access policy: activating it would host
-          // and advertise a graph whose policy is unknown, and recording it
+        if (
+          !hasDefinition
+          && (this.config.nodeRole ?? 'edge') === 'core'
+          // Only verdicts the relocation above already reached count, so
+          // this pass stays within its chain read budget.
+          && await this.contextGraphAccessPolicyState(id, { declared: false, onChainId, readChain: false }) !== 'public'
+        ) {
+          // A bare binding carries no access policy of its own. Activating
+          // it before the chain proves its slot public would host and
+          // advertise a graph whose policy is unknown, and recording it
           // inactive would leave a row the later definition can't activate.
-          // Wait for the definition.
+          // Wait for the definition or the chain's answer.
           continue;
         }
 
