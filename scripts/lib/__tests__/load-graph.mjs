@@ -4,6 +4,7 @@
 // own tests pin the forms it follows and the ones it cannot see.
 import fs from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import { WORKSPACE_RULES } from '../ci-delta.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 
@@ -61,10 +62,17 @@ function sourcePath(target) {
   ].find(isRepoFile) ?? target;
 }
 
+// Module loads come from TypeScript's import scanner (importSpecifiers).
+// The forms below are matched as text instead, so each has blind spots:
+// a path assembled at run time (a template literal, a variable, a call other
+// than resolve/join, a base other than the file's own directory, require()
+// under another name) is out of reach, and `import { type X }` still counts
+// as a load. The scanner tests pin what they see and what they cannot.
 const RELATIVE = String.raw`['"]((?:\.\.?\/)+[^'"]+)['"]`;
-const MODULE_LOAD = new RegExp(String.raw`(?:\bfrom\s*|\bimport\s*(?:\(\s*(?:new\s+URL\(\s*)?)?|\brequire\s*\(\s*)` + RELATIVE, 'g');
+// import(new URL('./x.js', import.meta.url)): not a string specifier, so
+// TypeScript's scanner does not report it.
+const URL_IMPORT = new RegExp(String.raw`\bimport\s*\(\s*new\s+URL\(\s*` + RELATIVE, 'g');
 const URL_PATH = new RegExp(String.raw`(?:\bnew\s+URL\(\s*|\brequire\.resolve\s*\(\s*)` + RELATIVE, 'g');
-const PACKAGE_IMPORT = /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
 const REPO_PATH_LITERAL = /['"]((?:[\w@.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)['"]/g;
 // Files that list the paths a lane runs or reads: tests, and test-runner configs.
 const TEST_FILE = /(?:^|\/)(?:test|tests|test-live|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:vitest|playwright)[\w.-]*\.config\.[cm]?[jt]s$/;
@@ -93,7 +101,7 @@ function builtPaths(file, source) {
     for (const [, alias] of specifiers.matchAll(/\b(?:resolve|join)\s+as\s+([\w$]+)/g)) helpers.push(alias);
   }
   const pathJoin = new RegExp(
-    String.raw`(?:\b(?:const|let)\s+([\w$]+)\s*=\s*)?(?:\bpath\.(?:posix\.)?)?\b(?:${helpers.join('|')})\(\s*([\w$]+|import\.meta\.dirname)\s*((?:,\s*(?:'[^']*'|"[^"]*"))+)\s*\)`,
+    String.raw`(?:\b(?:const|let)\s+([\w$]+)\s*=\s*)?(?:\bpath\.(?:posix\.)?)?\b(?:${helpers.join('|')})\(\s*([\w$]+|import\.meta\.dirname)\s*((?:,\s*(?:'[^']*'|"[^"]*"))+)\s*,?\s*\)`,
     'g',
   );
   const bases = new Map([['__dirname', directory], ['import.meta.dirname', directory]]);
@@ -116,6 +124,18 @@ function builtPaths(file, source) {
     .map(([, , base, text]) => joined(base, text));
 }
 
+// The module specifiers `code` loads, read with TypeScript's import scanner
+// (ts.preProcessFile, as test-fixture-inputs.mjs reads imports): import and
+// export declarations, side-effect imports, import() of a string and
+// require(), but never a path that a comment or string only mentions; plus
+// URL_IMPORT.
+function importSpecifiers(code) {
+  return [
+    ...ts.preProcessFile(code, true, true).importedFiles.map(({ fileName }) => fileName),
+    ...[...code.matchAll(URL_IMPORT)].map(([, specifier]) => specifier),
+  ];
+}
+
 // What `file` (repo-relative, with `source` as its contents) loads by path:
 // - `modules`: relative imports (side-effect `import './x.js'` included),
 //   dynamic imports, `import(new URL(...))` and CommonJS require(), whose own
@@ -133,7 +153,10 @@ export function loadReferences(file, source) {
   const code = source.replace(TYPE_ONLY_IMPORT, '');
   const walks = /\b(?:readdir|opendir)(?:Sync)?\(/.test(code);
   const relative = (specifier) => path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
-  const modules = [...new Set([...code.matchAll(MODULE_LOAD)].map(([, specifier]) => sourcePath(relative(specifier))))]
+  const specifiers = importSpecifiers(code);
+  const modules = [...new Set(specifiers
+    .filter((specifier) => /^\.\.?\//.test(specifier))
+    .map((specifier) => sourcePath(relative(specifier))))]
     .filter((target) => !outsideSources(target));
   const literals = (TEST_FILE.test(file) ? [...code.matchAll(REPO_PATH_LITERAL)] : [])
     .map(([, literal]) => literal)
@@ -146,7 +169,9 @@ export function loadReferences(file, source) {
   return {
     modules,
     paths: [...new Set(paths)].filter((target) => !modules.includes(target) && target !== file),
-    packages: [...new Set([...code.matchAll(PACKAGE_IMPORT)].map(([, name]) => name))],
+    packages: [...new Set(specifiers
+      .map((specifier) => specifier.match(/^@origintrail-official\/[a-z0-9-]+/)?.[0])
+      .filter(Boolean))],
   };
 }
 

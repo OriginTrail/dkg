@@ -329,7 +329,8 @@ test('demo suites stay wired into the supporting job', () => {
 test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
   // The load-closure guard sees only what loadReferences recognises, so its
   // reach is pinned here: each form below resolves to the named file, and the
-  // comment mention and the run-time path deliberately resolve to nothing.
+  // comment mentions (even one shaped like an import) and the run-time path
+  // deliberately resolve to nothing.
   const references = loadReferences('packages/node-ui/test/example.test.ts', [
     "import { api } from '../src/ui/api.js';",
     "import type { RequestContext } from '../../cli/src/daemon/routes/context.js';",
@@ -341,6 +342,7 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     'for (const entry of readdirSync(CLI_SRC)) void entry;',
     "const census = ['packages/agent/src/dkg-agent-join.ts'];",
     '// `packages/cli/src/keystore.ts` is only mentioned here.',
+    "// import { retired } from '../src/ui/retired.js';",
     "import { contextGraphDataUri } from '@origintrail-official/dkg-core';",
     'const late = readFileSync(`${root}/${name}`);',
   ].join('\n'));
@@ -372,12 +374,14 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     "const RULES = resolve(import.meta.dirname, '..', '..', 'rdf-utils', 'package.json');",
     "const ROOT = fileURLToPath(new URL('../../../', import.meta.url));",
     "const BLAZEGRAPH = join(ROOT, 'blazegraph-image.json');",
+    "const MANIFEST = join(\n  import.meta.dirname,\n  '..',\n  'package.json',\n);",
   ].join('\n'));
   assert.deepEqual(other.modules, ['packages/kafka-plugin/src/index.ts']);
   assert.deepEqual(other.paths.sort(), [
     'blazegraph-image.json',
     'packages/cli/src/cli.ts',
     'packages/cli/test-fixtures/sample-kafka-plugin/src/index.ts',
+    'packages/kafka-plugin/package.json',
     'packages/rdf-utils/package.json',
   ]);
   // A bare side-effect import loads its module, relative or by package name.
