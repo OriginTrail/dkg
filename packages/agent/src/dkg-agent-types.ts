@@ -1487,9 +1487,17 @@ export interface DKGAgentConfig {
    * Relay multiaddrs declared by the OTHER DKG networks bundled with this
    * build (the daemon derives them from network/*.json). With a network
    * identity the node refuses to dial these peers, store their addresses or
-   * accept their connections; `relayPeers` always win.
+   * accept their connections. `relayPeers` win over this static list only: a
+   * `relayPeers` entry that fails the network-identity proof is refused like
+   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
    */
   otherNetworkRelays?: readonly string[];
+  /**
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
+   * Default true; false is the operator kill switch, leaving other networks'
+   * peers to network admission alone.
+   */
+  networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**

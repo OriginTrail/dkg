@@ -223,6 +223,7 @@ import { resolveOutboxDrainerOptions } from './p2p/outbox-drainer.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
+  MAX_IDENTITY_PROBE_CONCURRENCY,
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
@@ -2383,9 +2384,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       cleanupRejectedPeerState: (peerId) => this.clearNetworkRejectedPeerState(peerId),
       // Transport half of the verdict: stop libp2p (kad-dht, relay discovery,
-      // reconnect queue) from redialing a peer of another network, and lift
-      // that as soon as the peer proves it belongs to this one.
-      onPeerRejected: (peerId) => { this.node.denyPeerAfterNetworkMismatch(peerId); },
+      // reconnect queue) from redialing a peer of another network for exactly
+      // the quarantine just applied, and lift that as soon as the peer proves
+      // it belongs to this one.
+      onPeerRejected: (peerId, quarantineMs) => { this.node.denyPeerAfterNetworkMismatch(peerId, quarantineMs); },
       onPeerVerified: (peerId) => { this.node.clearPeerNetworkMismatchDenial(peerId); },
       log: this.log,
     });
@@ -7960,6 +7962,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
+   * The live connections' remote peers (one per peer id, in connection order)
+   * that pass network admission: the catch-up candidate set. A still-open
+   * connection to a peer that failed the network-identity proof (another DKG
+   * network's relay, say) must never become a sync peer. Both catch-up runners
+   * (in-process and the CLI worker bridge) select from this one predicate.
+   * Uncached peers are probed with bounded concurrency; a failed probe drops
+   * the peer from this round.
+   */
+  async listAdmittedConnectedPeers(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Promise<Array<{ toString(): string }>> {
+    const connectedPeers = [...new Map<string, { toString(): string }>(
+      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+    ).values()];
+    const admitted = await mapWithConcurrency(
+      connectedPeers,
+      MAX_IDENTITY_PROBE_CONCURRENCY,
+      (peer) => this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer'),
+    );
+    return connectedPeers.filter((_peer, index) => admitted[index]);
+  }
+
+  /**
    * Catch up a single context graph from currently connected peers that advertise
    * the sync protocol. Useful after runtime subscribe so historical data is
    * backfilled immediately (not only future gossip messages).
@@ -8006,15 +8032,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       await this.primeCatchupConnections();
 
-      const connectedPeers = [...new Map(
-        this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
-      ).values()];
-      const admittedConnectedPeers: Array<{ toString(): string }> = [];
-      for (const peer of connectedPeers) {
-        if (await this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
-          admittedConnectedPeers.push(peer);
-        }
-      }
+      const admittedConnectedPeers = await this.listAdmittedConnectedPeers(ctx);
       const orderedPeers = this.selectCatchupPeers(
         admittedConnectedPeers,
         preferredPeerId,

@@ -34,6 +34,24 @@ const CLI_ENTRY = join(__dirname, '..', '..', 'dist', 'cli.js');
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The same address in another letter case, so a guard has to compare it
+ * case-insensitively. Returns upper case, or lower case when the EIP-55
+ * checksum already has every hex letter in upper case (about 1 in 4,000
+ * addresses). These are the two spellings EIP-55 accepts without a checksum;
+ * inverting each letter's case instead gives a bad checksum, which
+ * `ethers.isAddress` rejects. Throws for an address with no hex letters,
+ * which has no other spelling.
+ */
+export function caseVariantAddress(address: string): string {
+  const upperCase = `0x${address.slice(2).toUpperCase()}`;
+  const variant = upperCase === address ? address.toLowerCase() : upperCase;
+  if (variant === address) {
+    throw new Error(`${address} has no hex letters, so it has no other letter case`);
+  }
+  return variant;
+}
+
 export interface LiveDaemon {
   home: string;
   apiPort: number;

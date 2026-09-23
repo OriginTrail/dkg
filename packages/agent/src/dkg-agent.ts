@@ -1514,6 +1514,7 @@ export class DKGAgent extends DKGAgentBase {
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
       otherNetworkRelays: config.otherNetworkRelays,
+      networkPeerIsolation: config.networkPeerIsolation,
       enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,
       privateKey: keypair.secretKey,
       nodeRole,

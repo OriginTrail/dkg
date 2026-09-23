@@ -160,4 +160,16 @@ describe('network peer isolation on real libp2p nodes', () => {
 
     expect(await dialOutcome(plain.libp2p.dial(multiaddr(tcpAddr(relay))))).toBe('connected');
   }, TEST_TIMEOUT_MS);
+
+  it('keeps the legacy behaviour when the operator turns peer isolation off', async () => {
+    const relay = await startNode({ enableRelayServer: true });
+    const local = await startNode({
+      networkIdentity: NETWORK_A,
+      otherNetworkRelays: [tcpAddr(relay)],
+      networkPeerIsolation: false,
+    });
+
+    expect(await dialOutcome(local.libp2p.dial(multiaddr(tcpAddr(relay))))).toBe('connected');
+    expect(local.denyPeerAfterNetworkMismatch(relay.peerId)).toBe(false);
+  }, TEST_TIMEOUT_MS);
 });
