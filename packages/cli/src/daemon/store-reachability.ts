@@ -20,7 +20,7 @@ import type { StoreReachability } from '../status-store-quads-wire.js';
 const STORE_PROBE_WAIT_MS = 5_000;
 
 // Keyed by store, so each store has at most one probe running.
-const runningProbes = new WeakMap<object, Promise<StoreReachability>>();
+const runningProbes = new WeakMap<DKGAgent['store'], Promise<StoreReachability>>();
 
 function runProbe(agent: DKGAgent): Promise<StoreReachability> {
   return Promise.resolve()
@@ -47,7 +47,7 @@ export async function probeExternalStore(
   agent: DKGAgent,
   waitMs: number = STORE_PROBE_WAIT_MS,
 ): Promise<StoreReachability> {
-  const store = agent.store as object;
+  const store = agent.store;
   let probe = runningProbes.get(store);
   if (probe === undefined) {
     const started = runProbe(agent);

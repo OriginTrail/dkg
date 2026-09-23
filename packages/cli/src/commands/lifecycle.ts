@@ -29,7 +29,7 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
-import { ApiClient } from '../api-client.js';
+import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
 import type { StoreQuadsStatusFields, StoreReachabilityFields } from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -159,6 +159,27 @@ function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
   if (s.storeQuadsStatus === 'pending') return false;
   if (s.storeQuadsStatus !== 'ready') return true;
   return typeof s.storeQuadsAgeMs !== 'number' || s.storeQuadsAgeMs >= STORE_QUADS_REFRESH_AFTER_MS;
+}
+
+/**
+ * The status `dkg status` prints. Every run checks, cheaply, that the store
+ * answers at all; the costly full-store COUNT is asked for only when the
+ * cached count needs it (shouldRefreshStoreQuads) and the store answered that
+ * check. The count request is best effort: the first response is complete,
+ * so if the second fails (the daemon restarting between the two, say), the
+ * first is printed.
+ */
+async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DaemonStatusResponse> {
+  const plain = await client.status({ probeStore: true });
+  const storeAnswered = plain.storeReachability !== 'unreachable' && plain.storeReachability !== 'no-answer';
+  if (!plain.storeUrl || !storeAnswered || !shouldRefreshStoreQuads(plain)) return plain;
+  try {
+    const refreshed = await client.status({ includeStoreQuads: true });
+    // The count fields come from the refresh; reachability is this run's check.
+    return { ...refreshed, storeReachability: plain.storeReachability };
+  } catch {
+    return plain;
+  }
 }
 
 /**
@@ -365,21 +386,7 @@ program
   .action(async () => {
     try {
       const client = await ApiClient.connect({ allowConfigFallback: true });
-      // Every run checks, cheaply, that the store answers at all. The costly
-      // full-store COUNT is asked for only when the cached count is missing,
-      // failed or old, and not while the store fails that check.
-      let s = await client.status({ probeStore: true });
-      const storeAnswered = s.storeReachability !== 'unreachable' && s.storeReachability !== 'no-answer';
-      if (s.storeUrl && storeAnswered && shouldRefreshStoreQuads(s)) {
-        // Best effort: the plain response is complete, so if this request
-        // fails (the daemon restarting between the two, say) print that one.
-        try {
-          const refreshed = await client.status({ includeStoreQuads: true });
-          s = { ...refreshed, storeReachability: s.storeReachability };
-        } catch {
-          // Keep the plain response.
-        }
-      }
+      const s = await readDkgStatus(client);
       const uptime = formatUptime(s.uptimeMs);
       console.log(`  Node:      ${s.name}`);
       console.log(`  Role:      ${s.nodeRole ?? 'edge'}`);

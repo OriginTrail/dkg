@@ -683,6 +683,42 @@ describe('/api/status store reachability check', () => {
     }
   });
 
+  it.each([
+    ['true', true],
+    ['1', true],
+    ['false', false],
+    ['yes', false],
+  ])('treats probeStore=%s as a reachability request: %s', async (spelling, probes) => {
+    const queries: string[] = [];
+    const { server, baseUrl } = await startStatusServer(async (sparql) => {
+      queries.push(sparql);
+      return ASK_TRUE;
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}/api/status?probeStore=${spelling}`);
+      const body = await response.json() as StatusBody;
+      expect(body.storeReachability).toBe(probes ? 'reachable' : undefined);
+      expect(queries).toEqual(probes ? ['ASK { ?s ?p ?o }'] : []);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('replies no-answer within its five-second bound for a store that never answers', async () => {
+    const { server, baseUrl } = await startStatusServer(() => new Promise<unknown>(() => {}));
+    const startedAt = performance.now();
+
+    try {
+      expect((await fetchProbed(baseUrl)).storeReachability).toBe('no-answer');
+      const waitedMs = performance.now() - startedAt;
+      expect(waitedMs).toBeGreaterThanOrEqual(4_900);
+      expect(waitedMs).toBeLessThan(15_000);
+    } finally {
+      await closeServer(server);
+    }
+  }, 30_000);
+
   it('reports a store whose ASK fails as unreachable', async () => {
     const { server, baseUrl } = await startStatusServer(async () => {
       throw new Error('connect ECONNREFUSED 127.0.0.1:9');

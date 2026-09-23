@@ -29,6 +29,12 @@ export interface StoreQuadsStatusFields {
   storeQuadsRefreshing?: boolean;
 }
 
+// Every boolean flag of this contract accepts `true` and the legacy `1`.
+function isFlagSet(params: URLSearchParams, name: string): boolean {
+  const value = params.get(name);
+  return value === 'true' || value === '1';
+}
+
 const INCLUDE_STORE_QUADS_PARAM = 'includeStoreQuads';
 
 /**
@@ -39,8 +45,7 @@ export const INCLUDE_STORE_QUADS_QUERY = `${INCLUDE_STORE_QUADS_PARAM}=true`;
 
 /** Whether a status request asked for a count refresh. */
 export function parseIncludeStoreQuads(params: URLSearchParams): boolean {
-  const value = params.get(INCLUDE_STORE_QUADS_PARAM);
-  return value === 'true' || value === '1';
+  return isFlagSet(params, INCLUDE_STORE_QUADS_PARAM);
 }
 
 /**
@@ -63,5 +68,5 @@ export const PROBE_STORE_QUERY = `${PROBE_STORE_PARAM}=true`;
 
 /** Whether a status request asked for a reachability check. */
 export function parseProbeStore(params: URLSearchParams): boolean {
-  return params.get(PROBE_STORE_PARAM) === 'true';
+  return isFlagSet(params, PROBE_STORE_PARAM);
 }
