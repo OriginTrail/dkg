@@ -71,7 +71,6 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
-  saveConfig,
   loadNetworkConfig,
   dkgDir,
   writePid,

@@ -147,13 +147,13 @@ describe('writeDkgConfig', () => {
   // §3.S1 step 4). After the agent-agnostic field-level merge moved to
   // dkg-core's `ensureDkgNodeConfig`, OpenClaw's `writeDkgConfig` MUST keep
   // running `migrateLegacyOpenClawTransport` + the `openclawAdapter`/
-  // `openclawChannel` deletes + `pruneNetworkPinnedDefaults` BEFORE delegating
-  // to `ensureDkgNodeConfig`. If a future refactor flipped the order:
-  //   - Migration after merge: the `...existing` spread inside
-  //     `ensureDkgNodeConfig` would already have copied `openclawChannel`
-  //     into the output; the post-merge migration would then have to mutate
-  //     the *output* of `ensureDkgNodeConfig`, but the helper writes the
-  //     file synchronously, so the on-disk JSON would still contain
+  // `openclawChannel` deletes + `pruneNetworkPinnedDefaults` (its
+  // `migrateExisting` hook) BEFORE the field-level merge. If a future
+  // refactor flipped the order:
+  //   - Migration after merge: the merge would already have run on the
+  //     pre-migration object; a later migration would have to mutate the
+  //     *output* of `ensureDkgNodeConfig`, but the helper writes the file
+  //     inside its locked update, so the on-disk JSON would still contain
   //     `openclawChannel` — and `localAgentIntegrations.openclaw.transport`
   //     would be missing the migrated bridgeUrl/gatewayUrl.
   //   - Delete after merge: same shape — `openclawChannel` would survive
@@ -163,7 +163,7 @@ describe('writeDkgConfig', () => {
   // AND the post-migration `name`/`apiPort` field-level merge respects the
   // overrides — three signals from one fixture so a future refactor that
   // breaks any one is caught with a precise stack trace.
-  it('ordering invariant: legacy migration + prune run before ensureDkgNodeConfig field merge', () => {
+  it('ordering invariant: legacy migration + prune run before ensureDkgNodeConfig field merge', async () => {
     const dkgHome = join(testDir, '.dkg-ordering-invariant');
     mkdirSync(dkgHome, { recursive: true });
     writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
@@ -189,7 +189,7 @@ describe('writeDkgConfig', () => {
     const original = process.env.DKG_HOME;
     process.env.DKG_HOME = dkgHome;
     try {
-      writeDkgConfig('discovered-name', {
+      await writeDkgConfig('discovered-name', {
         ...fakeNetwork,
         autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main', checkIntervalMinutes: 30 },
       }, 9200);

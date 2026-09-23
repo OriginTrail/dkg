@@ -1874,12 +1874,14 @@ async function bootstrapDkgNodeConfig(
   // Late-bind the import so test suites that mock `dkg-core` don't have to
   // declare `ensureDkgNodeConfig` in the mock returns up front.
   const { ensureDkgNodeConfig } = await import('@origintrail-official/dkg-core');
-  ensureDkgNodeConfig({
+  // Re-reads the home config under the lock the daemon and CLI share, so a
+  // config another process created after the `dkgConfigExists` check is
+  // merged into (and not seeded with a new store backend), never replaced.
+  await ensureDkgNodeConfig({
     agentName,
     network,
     networkConfigName,
     apiPort,
-    existing: {},
   });
 }
 

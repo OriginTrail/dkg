@@ -12,6 +12,33 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Config writes no longer undo each other, truncate the file or hide a
+  YAML config**: the daemon and the CLI each rewrote the whole `config.json`
+  from their own in-memory copy. A CLI edit such as `dkg context-graph create
+  --save` made while the daemon was running could silently undo a settings
+  change made in the node UI, or the reverse. A crash during a write could
+  leave a truncated file that stopped the node from starting. On a node
+  configured through `config.yaml`, the first write created a `config.json`
+  that took precedence, so later edits to the YAML no longer applied. Writes
+  now take a lock shared by the daemon and the CLI, re-read the file, change
+  only the keys that command or setting owns, and replace the file atomically
+  in its own format, keeping its permissions. A YAML config stays YAML, but
+  its comments are not kept when a write changes it.
+- **Setup commands no longer undo daemon settings, truncate the config or
+  hide a YAML config**: `dkg openclaw setup`, `dkg hermes setup` and
+  `dkg mcp setup` still rewrote the whole `config.json` with no lock and no
+  atomic replace. Run while the daemon was up, they could undo a settings
+  change made in the node UI, and a crash during the write could truncate the
+  file. On a node configured through `config.yaml`, `dkg openclaw setup` and
+  `dkg mcp setup --port`/`--name` created a `config.json` that took
+  precedence over it. Setup now writes through the same lock, re-read and
+  atomic replace as the daemon and the CLI, changes only the keys setup owns,
+  and keeps a YAML config in YAML. `dkg mcp serve` now also reads such a
+  node's API port, token and default context graph from `config.yaml` under
+  `DKG_HOME`; it used to parse that file as a workspace config and start with
+  the default port and no token. A config file that cannot be parsed now stops
+  setup with an error naming the file, where `dkg openclaw setup` and
+  `dkg mcp setup --port`/`--name` used to replace it with a new config.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which

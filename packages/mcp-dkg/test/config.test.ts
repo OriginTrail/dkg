@@ -260,6 +260,83 @@ describe('loadConfig — DKG_HOME precedence (Codex Round-11 Fix 18)', () => {
     expect(cfg.sourcePath).toBe(join(home, 'config.yaml'));
   });
 
+  // A YAML-configured node: the daemon reads <DKG_HOME>/config.yaml, and
+  // `dkg mcp setup` (like every config writer) keeps it in YAML rather than
+  // adding a shadowing config.json. The server must translate it exactly as
+  // it translates config.json — otherwise it runs with an empty token and
+  // the default port.
+  it('DKG_HOME + daemon-shaped config.yaml (YAML-configured node) → translated like config.json', () => {
+    const home = join(tmpRoot, 'yaml-daemon-home');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, 'config.yaml'),
+      [
+        'name: yaml-node',
+        'networkConfig: testnet',
+        'apiPort: 9317',
+        'nodeRole: edge',
+        'contextGraphs:',
+        '  - yaml-ctx',
+        'auth:',
+        '  enabled: true',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(join(home, 'auth.token'), '# node token\nyaml-token\n');
+    process.env.DKG_HOME = home;
+
+    const cfg = loadConfig();
+    expect(cfg.api).toBe('http://localhost:9317');
+    expect(cfg.token).toBe('yaml-token');
+    expect(cfg.defaultProject).toBe('yaml-ctx');
+    expect(cfg.sourcePath).toBe(join(home, 'config.yaml'));
+  });
+
+  it('DKG_HOME + config.json and a daemon-shaped config.yaml → config.json still wins', () => {
+    const home = join(tmpRoot, 'both-files-home');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ apiPort: 9001, contextGraphs: ['json-ctx'] }));
+    writeFileSync(join(home, 'config.yaml'), 'apiPort: 9317\ncontextGraphs:\n  - yaml-ctx\n');
+    process.env.DKG_HOME = home;
+
+    const cfg = loadConfig();
+    expect(cfg.api).toBe('http://localhost:9001');
+    expect(cfg.defaultProject).toBe('json-ctx');
+    expect(cfg.sourcePath).toBe(join(home, 'config.json'));
+  });
+
+  it('DKG_HOME + config.yaml with a workspace `node` block stays on the workspace path', () => {
+    // A daemon config never has a `node` block, so a file that does is a
+    // hand-written workspace config, even if it also names a daemon key.
+    const home = join(tmpRoot, 'workspace-shape-home');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, 'config.yaml'), 'node:\n  api: http://yaml:9300\napiPort: 9317\n');
+    process.env.DKG_HOME = home;
+
+    const cfg = loadConfig();
+    expect(cfg.api).toBe('http://yaml:9300');
+    expect(cfg.sourcePath).toBe(join(home, 'config.yaml'));
+  });
+
+  it('DKG_HOME + config.yaml that is malformed or not a mapping → workspace path, as before', () => {
+    const home = join(tmpRoot, 'odd-yaml-home');
+    mkdirSync(home, { recursive: true });
+    process.env.DKG_HOME = home;
+    const stderr = process.stderr.write;
+    const warnings: string[] = [];
+    process.stderr.write = ((chunk: string) => { warnings.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    try {
+      writeFileSync(join(home, 'config.yaml'), 'apiPort: [unclosed\n');
+      expect(loadConfig()).toMatchObject({ api: 'http://localhost:9200', sourcePath: join(home, 'config.yaml') });
+      expect(warnings.join('')).toContain('could not parse');
+
+      writeFileSync(join(home, 'config.yaml'), '- apiPort\n- 9317\n');
+      expect(loadConfig()).toMatchObject({ api: 'http://localhost:9200', sourcePath: join(home, 'config.yaml') });
+    } finally {
+      process.stderr.write = stderr;
+    }
+  });
+
   it('Codex Round-21 Fix 27: DKG_HOME + neither file exists → sourcePath null + env defaults preserved', async () => {
     // Behavior preserved from Round-11 Fix 18: empty home →
     // sourcePath null + defaults. No crash, no cwd-walk.

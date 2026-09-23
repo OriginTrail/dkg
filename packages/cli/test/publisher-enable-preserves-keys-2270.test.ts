@@ -4,14 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // so re-running it would silently erase every key it does not manage: the retry
 // knobs (autoRetryEnabled, retryJitterRatio, retryBackoffBaseMs/MaxMs) an
 // operator had set. It must merge instead, like `publisher disable` always has.
+// `file` stands in for the on-disk config that each patch is applied to.
 const mocks = vi.hoisted(() => ({
-  loadConfig: vi.fn(),
-  saveConfig: vi.fn(),
+  file: {} as Record<string, any>,
+  updateConfigFile: vi.fn(),
 }));
 
 vi.mock('../src/config.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/config.js')>();
-  return { ...actual, loadConfig: mocks.loadConfig, saveConfig: mocks.saveConfig };
+  return { ...actual, updateConfigFile: mocks.updateConfigFile };
 });
 
 const { Command } = await import('commander');
@@ -27,7 +28,9 @@ async function runPublisherCommand(...argv: string[]): Promise<void> {
 describe('dkg publisher enable/disable config merge (#2270)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.saveConfig.mockResolvedValue(undefined);
+    mocks.updateConfigFile.mockImplementation(async (patch: (config: Record<string, any>) => void) => {
+      patch(mocks.file);
+    });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     // The command swallows failures into process.exit(1); throwing makes any
@@ -42,7 +45,7 @@ describe('dkg publisher enable/disable config merge (#2270)', () => {
   });
 
   it('preserves publisher keys it does not manage', async () => {
-    mocks.loadConfig.mockResolvedValue({
+    mocks.file = {
       name: 'node',
       publisher: {
         enabled: false,
@@ -51,13 +54,13 @@ describe('dkg publisher enable/disable config merge (#2270)', () => {
         retryBackoffBaseMs: 2_000,
         retryBackoffMaxMs: 90_000,
       },
-    });
+    };
 
     await runPublisherCommand('publisher', 'enable');
 
-    expect(mocks.saveConfig).toHaveBeenCalledTimes(1);
-    const saved = mocks.saveConfig.mock.calls[0]?.[0] as any;
-    expect(saved.publisher).toEqual({
+    expect(mocks.updateConfigFile).toHaveBeenCalledTimes(1);
+    expect(mocks.file.name).toBe('node');
+    expect(mocks.file.publisher).toEqual({
       enabled: true,
       pollIntervalMs: 12_000,
       errorBackoffMs: 5_000,
@@ -70,14 +73,13 @@ describe('dkg publisher enable/disable config merge (#2270)', () => {
   });
 
   it('still writes the keys it does manage, from flags, over the previous values', async () => {
-    mocks.loadConfig.mockResolvedValue({
+    mocks.file = {
       publisher: { enabled: false, pollIntervalMs: 1_000, maxRetries: 2, autoRetryEnabled: false },
-    });
+    };
 
     await runPublisherCommand('publisher', 'enable', '--poll-interval', '7000', '--max-retries', '4');
 
-    const saved = mocks.saveConfig.mock.calls[0]?.[0] as any;
-    expect(saved.publisher).toEqual({
+    expect(mocks.file.publisher).toEqual({
       enabled: true,
       pollIntervalMs: 7_000,
       errorBackoffMs: 5_000,
@@ -87,12 +89,11 @@ describe('dkg publisher enable/disable config merge (#2270)', () => {
   });
 
   it('enables from an absent publisher block without inventing retry knobs', async () => {
-    mocks.loadConfig.mockResolvedValue({ name: 'node' });
+    mocks.file = { name: 'node' };
 
     await runPublisherCommand('publisher', 'enable');
 
-    const saved = mocks.saveConfig.mock.calls[0]?.[0] as any;
-    expect(saved.publisher).toEqual({
+    expect(mocks.file.publisher).toEqual({
       enabled: true,
       pollIntervalMs: 12_000,
       errorBackoffMs: 5_000,
@@ -101,14 +102,13 @@ describe('dkg publisher enable/disable config merge (#2270)', () => {
   });
 
   it('preserves the same keys on disable', async () => {
-    mocks.loadConfig.mockResolvedValue({
+    mocks.file = {
       publisher: { enabled: true, retryJitterRatio: 0.4, retryBackoffBaseMs: 2_000, retryBackoffMaxMs: 90_000 },
-    });
+    };
 
     await runPublisherCommand('publisher', 'disable');
 
-    const saved = mocks.saveConfig.mock.calls[0]?.[0] as any;
-    expect(saved.publisher).toEqual({
+    expect(mocks.file.publisher).toEqual({
       enabled: false,
       retryJitterRatio: 0.4,
       retryBackoffBaseMs: 2_000,

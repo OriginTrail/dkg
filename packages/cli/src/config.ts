@@ -5,7 +5,6 @@ import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origint
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
@@ -36,10 +35,15 @@ import {
   findPackageRepoDir,
   isDkgMonorepoRoot,
   hasErrorCode,
+  homeConfigLockPath,
+  homeConfigSources,
+  readHomeConfigSource,
   resolveDkgConfigHome,
   dkgAuthTokenPath,
   peerIdFromRelayAddress,
   SELECTABLE_SETUP_NETWORKS,
+  updateHomeConfigFile,
+  type HomeConfigSource,
 } from '@origintrail-official/dkg-core';
 import {
   resolveStorageAckTiming,
@@ -1239,7 +1243,7 @@ export {
 };
 
 /** Resolve context graphs from config. */
-export function resolveContextGraphs(config: DkgConfig): string[] {
+export function resolveContextGraphs(config: Pick<DkgConfig, 'contextGraphs'>): string[] {
   return config.contextGraphs ?? [];
 }
 
@@ -2392,41 +2396,57 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   await writeFile(join(rDir, 'active'), target);
 }
 
+/**
+ * A change to the persisted home config. It receives the file's own object
+ * (no defaults merged in) and must mutate only the keys its caller owns:
+ * copying a whole in-memory config back would overwrite whatever another
+ * process wrote since that copy was loaded.
+ */
+export type DkgConfigFilePatch = (config: Partial<DkgConfig>) => void;
+
 /** Immutable filesystem context for one selected local daemon home. */
 export class DkgHomeFiles {
   constructor(readonly home: string = dkgDir()) { Object.freeze(this); }
 
   get configPath(): string { return join(this.home, 'config.json'); }
   get configYamlPath(): string { return join(this.home, 'config.yaml'); }
+  get configLockPath(): string { return homeConfigLockPath(this.home); }
   get pidPath(): string { return join(this.home, 'daemon.pid'); }
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
-  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+  /**
+   * The config files in precedence order, as core's `homeConfigSources`
+   * defines them for the setup flows too: the first one that exists is the
+   * source of truth for every read and write, and a home without either gets
+   * the first on its first write.
+   */
+  private get configSources(): readonly HomeConfigSource[] {
+    return homeConfigSources(this.home);
+  }
+
+  configExists(): boolean { return this.configSources.some(({ path }) => existsSync(path)); }
 
   readConfigSync(): unknown {
-    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
-    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
-    return null;
+    const source = this.configSources.find(({ path }) => existsSync(path));
+    return source ? source.parse(readFileSync(source.path, 'utf-8')) : null;
   }
 
   async loadConfig(): Promise<DkgConfig> {
-    try {
-      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    try {
-      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    return { ...DEFAULT_CONFIG };
+    const source = await readHomeConfigSource(this.home);
+    return source ? mergePersistedConfig(source.parse(source.text)) : { ...DEFAULT_CONFIG };
   }
 
-  async saveConfig(config: DkgConfig): Promise<void> {
-    await mkdir(this.home, { recursive: true });
-    await writeFile(this.configPath, JSON.stringify(config, null, 2) + '\n');
+  /**
+   * Apply `patch` under the config lock the daemon, the CLI and the adapter
+   * setup flows share: re-read the file that is the source of truth, patch
+   * its object, and replace the file atomically in the same format. A patch
+   * that changes nothing writes nothing. Returns the path of that file. Every
+   * CLI and daemon write to the home config goes through here; the setup
+   * flows use the same core `updateHomeConfigFile`.
+   */
+  async updateConfigFile(patch: DkgConfigFilePatch): Promise<string> {
+    return (await updateHomeConfigFile<Partial<DkgConfig>>(this.home, patch)).path;
   }
 
   readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }
@@ -2619,7 +2639,7 @@ export function exitOnStoreConfigErrors(
   process.exit(1);
 }
 
-export async function saveConfig(config: DkgConfig): Promise<void> { await new DkgHomeFiles().saveConfig(config); }
+export async function updateConfigFile(patch: DkgConfigFilePatch): Promise<string> { return new DkgHomeFiles().updateConfigFile(patch); }
 export function configExists(): boolean { return new DkgHomeFiles().configExists(); }
 export async function readPid(): Promise<number | null> { return new DkgHomeFiles().readPid(); }
 export async function writePid(pid: number): Promise<void> { await new DkgHomeFiles().writePid(pid); }

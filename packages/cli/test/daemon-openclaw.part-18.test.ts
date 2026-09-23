@@ -183,7 +183,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const restartGateway = async () => {};
     const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfig = async () => {};
+    const persistIntegration = async () => {};
     const verifyMemorySlot = () => {
       const raw = readFileSync(openclawConfigPath, 'utf-8');
       return JSON.parse(raw)?.plugins?.slots?.memory === 'adapter-openclaw';
@@ -199,7 +199,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },

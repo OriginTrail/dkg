@@ -19,7 +19,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  updateConfigFile, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
@@ -376,28 +376,30 @@ program
       }
 
       if (opts.save) {
-        const config = await loadConfig();
-        const cgs = new Set(resolveContextGraphs(config));
-        // Save a stable identity (the verified cleartext id, or the name hash
-        // the daemon re-resolves at start), never the on-chain number. Only
-        // the entry spelled exactly as just typed is replaced: another
-        // spelling of the number may name a different graph, so it stays.
-        if (onChainReference) {
-          if (subscribedId !== contextGraph && cgs.delete(contextGraph)) {
-            console.log(`Replaced "${contextGraph}" in config.contextGraphs with ${subscribedId}.`);
+        const notes: string[] = [];
+        await updateConfigFile((config) => {
+          const cgs = new Set(resolveContextGraphs(config));
+          // Save a stable identity (the verified cleartext id, or the name hash
+          // the daemon re-resolves at start), never the on-chain number. Only
+          // the entry spelled exactly as just typed is replaced: another
+          // spelling of the number may name a different graph, so it stays.
+          if (onChainReference) {
+            if (subscribedId !== contextGraph && cgs.delete(contextGraph)) {
+              notes.push(`Replaced "${contextGraph}" in config.contextGraphs with ${subscribedId}.`);
+            }
+            const onChainId = onChainReference.onChainId;
+            for (const spelling of [onChainId, `#${onChainId}`]) {
+              if (spelling === contextGraph || !cgs.has(spelling)) continue;
+              notes.push(
+                `Note: config.contextGraphs also lists "${spelling}"; if it was saved for on-chain `
+                + `Context Graph #${onChainId}, you can remove it.`,
+              );
+            }
           }
-          const onChainId = onChainReference.onChainId;
-          for (const spelling of [onChainId, `#${onChainId}`]) {
-            if (spelling === contextGraph || !cgs.has(spelling)) continue;
-            console.log(
-              `Note: config.contextGraphs also lists "${spelling}"; if it was saved for on-chain `
-              + `Context Graph #${onChainId}, you can remove it.`,
-            );
-          }
-        }
-        cgs.add(subscribedId);
-        config.contextGraphs = [...cgs];
-        await saveConfig(config);
+          cgs.add(subscribedId);
+          config.contextGraphs = [...cgs];
+        });
+        for (const note of notes) console.log(note);
         console.log(`Saved ${subscribedId} to config (will auto-subscribe on restart).`);
       }
     } catch (err) {

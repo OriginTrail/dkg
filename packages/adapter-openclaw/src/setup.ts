@@ -27,7 +27,10 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   ensureDkgNodeConfig,
   fundWalletsBestEffort,
+  homeConfigFilePath,
+  type HomeConfigFile,
   logManualFundingInstructions,
+  readPersistedHomeConfig,
   readPersistedNetworkConfigName,
   readWallets,
   readWalletsWithRetry,
@@ -275,16 +278,17 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
   }
 
   // Before falling back to a fresh random name, honor an already-persisted
-  // `~/.dkg/config.json.name` from a prior setup run. `writeDkgConfig` uses
+  // `name` in the node config (`config.json`, else `config.yaml`) from a
+  // prior setup run or a hand-written config. `writeDkgConfig` uses
   // the same first-wins semantics for this field (existing.name wins unless
   // --name is passed); mirroring that here keeps re-runs on an
   // IDENTITY.md-absent workspace stable across invocations, which in turn
   // keeps the faucet `Idempotency-Key` stable so retries don't create
   // duplicate faucet requests.
-  const persistedName = readPersistedAgentName();
-  if (persistedName) {
-    log(`Using persisted agent name "${persistedName}" from ${join(dkgDir(), 'config.json')}`);
-    return persistedName;
+  const persisted = readPersistedAgentName();
+  if (persisted) {
+    log(`Using persisted agent name "${persisted.name}" from ${persisted.path}`);
+    return persisted.name;
   }
 
   // Fallback: generate a unique name
@@ -295,22 +299,18 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
 }
 
 /**
- * Read `name` from `~/.dkg/config.json` if the file exists and contains a
- * non-empty string. Missing file, unparseable JSON, or non-string `name`
- * all return `undefined` — the caller falls through to its next discovery
- * step (random fallback in `discoverAgentName`).
+ * Read `name` from the persisted node config (`config.json`, else
+ * `config.yaml`) if it holds a non-empty string. Missing file, unparseable
+ * config, or non-string `name` all return `undefined` — the caller falls
+ * through to its next discovery step (random fallback in
+ * `discoverAgentName`). A corrupt config is not warned about here:
+ * `writeDkgConfig` refuses the same file with an error that names it.
  */
-function readPersistedAgentName(): string | undefined {
-  const configPath = join(dkgDir(), 'config.json');
-  if (!existsSync(configPath)) return undefined;
-  try {
-    const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
-    if (typeof raw?.name === 'string' && raw.name.trim()) {
-      return raw.name.trim();
-    }
-  } catch {
-    // Intentionally swallow — `writeDkgConfig` handles its own corruption
-    // warning when the same file is unparseable; no reason to double-warn.
+function readPersistedAgentName(): { name: string; path: string } | undefined {
+  const persisted = readPersistedHomeConfig(dkgDir());
+  const name = persisted?.config.name;
+  if (persisted && typeof name === 'string' && name.trim()) {
+    return { name: name.trim(), path: persisted.path };
   }
   return undefined;
 }
@@ -502,7 +502,15 @@ function migrateLegacyOpenClawTransport(existing: Record<string, any>): void {
   };
 }
 
-export function writeDkgConfig(
+/**
+ * Create or update the DKG node config (`config.json`, or `config.yaml` on a
+ * YAML-configured node) for this setup run. The write is one locked,
+ * re-read-then-patch update shared with the daemon and CLI, so their edits
+ * survive a concurrent setup. A config file that cannot be parsed is refused,
+ * not overwritten. Resolves to the persisted config, so callers can read back
+ * the effective `name` / `apiPort` whichever format holds it.
+ */
+export async function writeDkgConfig(
   agentName: string,
   network: NetworkConfig,
   apiPort: number,
@@ -511,46 +519,47 @@ export function writeDkgConfig(
   // working; `runSetup` always passes the resolved selection. The default
   // mirrors this function's historical testnet-only behaviour.
   networkConfigName = 'testnet',
-): void {
-  const configPath = join(dkgDir(), 'config.json');
+): Promise<Record<string, any>> {
+  // Merge into the existing config, don't overwrite. The OpenClaw-specific
+  // migrations + prune below MUST run on the loaded `existing` BEFORE the
+  // agent-agnostic field-level merge in dkg-core's `ensureDkgNodeConfig`;
+  // passing them as `migrateExisting` runs them first, on the file as
+  // re-read under the config lock. The order is load-bearing: the merge
+  // reads `existing.localAgentIntegrations` (post-migration shape) and a
+  // future refactor that flipped the order would silently drop legacy
+  // openclawChannel hints from the merged config. See execution-plan.md
+  // §3.S1 step 4 ordering invariant + the regression test in
+  // setup.part-03.test.ts that pre-seeds an `openclawChannel` legacy key.
+  const migrateExisting = (existing: Record<string, any>, file: HomeConfigFile): void => {
+    if (file.existed) log(`Merging into existing ${file.path}`);
+    migrateLegacyOpenClawTransport(existing);
+    delete existing.openclawAdapter;
+    delete existing.openclawChannel;
 
-  // Load existing config if present — merge, don't overwrite. The
-  // OpenClaw-specific migrations + prune below MUST run on the loaded
-  // `existing` BEFORE we delegate to the agent-agnostic
-  // `ensureDkgNodeConfig` helper in dkg-core. The order is load-bearing:
-  // the helper reads `existing.localAgentIntegrations` (post-migration
-  // shape) and a future refactor that flipped the order would silently
-  // drop legacy openclawChannel hints from the merged config. See
-  // execution-plan.md §3.S1 step 4 ordering invariant + the regression
-  // test in setup.test.ts that pre-seeds an `openclawChannel` legacy key.
-  let existing: Record<string, any> = {};
-  if (existsSync(configPath)) {
-    try {
-      existing = JSON.parse(readFileSync(configPath, 'utf-8'));
-      log(`Merging into existing ${configPath}`);
-    } catch {
-      warn(`Could not parse existing ${configPath} — will overwrite`);
-    }
-  }
-  migrateLegacyOpenClawTransport(existing);
-  delete existing.openclawAdapter;
-  delete existing.openclawChannel;
+    // Heal legacy configs: earlier setup runs auto-copied the entire `chain`
+    // and `autoUpdate` blocks from `network/<env>.json`. Those copies look
+    // identical to operator overrides on disk, so a rerun after a
+    // hub/RPC/branch rotation would NOT pick up the new defaults — exactly
+    // the failure mode we hit on the testnet relays after the hub rotated.
+    // Strip any field whose value equals the current network default
+    // (= clearly a stale auto-copy, never a deliberate override). Real
+    // operator customisations (e.g. private RPC) won't match a default and
+    // are left intact. `autoUpdate.enabled` is kept regardless because the
+    // status/telemetry consumers depend on it being present.
+    pruneNetworkPinnedDefaults(existing, network);
+  };
 
-  // Heal legacy configs: earlier setup runs auto-copied the entire `chain`
-  // and `autoUpdate` blocks from `network/<env>.json`. Those copies look
-  // identical to operator overrides on disk via `...existing`, so a rerun
-  // after a hub/RPC/branch rotation would NOT pick up the new defaults —
-  // exactly the failure mode we hit on the testnet relays after the hub
-  // rotated. Strip any field whose value equals the current network default
-  // (= clearly a stale auto-copy, never a deliberate override). Real
-  // operator customisations (e.g. private RPC) won't match a default and
-  // are left intact. `autoUpdate.enabled` is kept regardless because the
-  // status/telemetry consumers below depend on it being present.
-  pruneNetworkPinnedDefaults(existing, network);
-
-  // Delegate the agent-agnostic field-level merge + write to dkg-core.
-  // adapter-hermes will use the same helper in S2 (issue #386).
-  ensureDkgNodeConfig({ agentName, network, networkConfigName, apiPort, existing, overrides });
+  // Delegate the agent-agnostic field-level merge + write to dkg-core,
+  // which adapter-hermes and `dkg mcp setup` also use.
+  const { config } = await ensureDkgNodeConfig({
+    agentName,
+    network,
+    networkConfigName,
+    apiPort,
+    migrateExisting,
+    overrides,
+  });
+  return config;
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,26 +1729,23 @@ export async function runSetup(options: SetupOptions, deps: RunSetupDeps = {}): 
   // sensible to pass.
   let effectiveAgentName = agentName;
   if (!dryRun && network && networkConfigName) {
-    writeDkgConfig(agentName, network, apiPort, {
+    const merged = await writeDkgConfig(agentName, network, apiPort, {
       nameExplicit: options.name != null,
       portExplicit: options.port != null,
     }, networkConfigName);
-    // Read back the effective port AND effective name from the merged
-    // config so downstream steps (daemon start, workspace config, verify,
-    // faucet funding) use the persisted values even when an existing config
-    // had a different apiPort or name that was preserved.
-    try {
-      const merged = JSON.parse(readFileSync(join(dkgDir(), 'config.json'), 'utf-8'));
-      const mergedPort = Number(merged.apiPort);
-      if (Number.isInteger(mergedPort) && mergedPort >= 1 && mergedPort <= 65535) {
-        effectivePort = mergedPort;
-      }
-      if (typeof merged.name === 'string' && merged.name.trim()) {
-        effectiveAgentName = merged.name.trim();
-      }
-    } catch { /* use pre-merge values */ }
+    // Take the effective port AND effective name from the merged config
+    // (JSON or YAML) so downstream steps (daemon start, workspace config,
+    // verify, faucet funding) use the persisted values even when an
+    // existing config had a different apiPort or name that was preserved.
+    const mergedPort = Number(merged.apiPort);
+    if (Number.isInteger(mergedPort) && mergedPort >= 1 && mergedPort <= 65535) {
+      effectivePort = mergedPort;
+    }
+    if (typeof merged.name === 'string' && merged.name.trim()) {
+      effectiveAgentName = merged.name.trim();
+    }
   } else if (network) {
-    log(`[dry-run] Would write ${join(dkgDir(), 'config.json')} (${network.networkName}, port ${apiPort})`);
+    log(`[dry-run] Would write ${homeConfigFilePath(dkgDir())} (${network.networkName}, port ${apiPort})`);
   }
 
   // Eagerly ensure the node's wallets exist BEFORE the daemon starts (issue

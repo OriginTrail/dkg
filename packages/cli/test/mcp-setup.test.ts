@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync
 import { tmpdir, homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
+import yaml from 'js-yaml';
 import { parse as parseJsonc } from 'jsonc-parser';
-import { SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
+import { ensureDkgNodeConfig as realEnsureDkgNodeConfig, SELECTABLE_SETUP_NETWORKS } from '@origintrail-official/dkg-core';
 import { mcpSetupAction, type McpSetupActionDeps, type PlannedItem } from '../src/mcp-setup.js';
 import { listBundledNetworkConfigNames, resolveKnownNetworkConfigName } from '../src/config.js';
 import { REQUIRED_SKILL_TOKENS } from '../src/skill-template.js';
@@ -172,38 +173,43 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
    * production helper's contract without spawning a real daemon.
    *
    * Codex Round-23 Fix 30: signature is the object-shape one
-   * (`{ agentName, network, apiPort, existing, overrides }`) used
-   * by `dkg-core`'s helper. Round-2 Bug A's DKG_HOME-honouring
+   * (`{ agentName, network, networkConfigName, apiPort, overrides }`)
+   * used by `dkg-core`'s helper. Round-2 Bug A's DKG_HOME-honouring
    * posture is preserved — the stub reads `process.env.DKG_HOME`
    * (set by the action) for the write target.
    */
   function makeDeps(overrides: Partial<McpSetupActionDeps> = {}): McpSetupActionDeps {
     const startDaemon = recorder(async (_port: number) => {});
-    const ensureDkgNodeConfig = recorder((opts: {
+    const ensureDkgNodeConfig = recorder(async (opts: {
       agentName: string;
       network: any;
       networkConfigName: string;
       apiPort: number;
-      existing: Record<string, any>;
       overrides?: { nameExplicit?: boolean; portExplicit?: boolean };
     }) => {
       const dkgDir = process.env.DKG_HOME ?? join(tmpHome, '.dkg');
       mkdirSync(dkgDir, { recursive: true });
-      // Mirror the production helper's first-wins / explicit-override
-      // semantics minimally — most tests just check that the call
-      // happened with these args, but a few re-read the file so we
-      // emit something realistic.
+      // Mirror the production helper's contract minimally: re-read the
+      // persisted config (config.json, else config.yaml), apply the
+      // first-wins / explicit-override merge, and write it back in the
+      // same format. Most tests just check that the call happened with
+      // these args, but a few re-read the file so we emit something
+      // realistic.
+      const jsonPath = join(dkgDir, 'config.json');
+      const yamlPath = join(dkgDir, 'config.yaml');
+      const path = existsSync(jsonPath) || !existsSync(yamlPath) ? jsonPath : yamlPath;
+      const isYaml = path === yamlPath;
+      const existing: Record<string, any> = !existsSync(path) ? {}
+        : ((isYaml ? yaml.load(readFileSync(path, 'utf-8')) : JSON.parse(readFileSync(path, 'utf-8'))) ?? {});
       const merged = {
-        ...opts.existing,
-        name: opts.overrides?.nameExplicit ? opts.agentName : (opts.existing?.name ?? opts.agentName),
-        apiPort: opts.overrides?.portExplicit ? opts.apiPort : (opts.existing?.apiPort ?? opts.apiPort),
+        ...existing,
+        name: opts.overrides?.nameExplicit ? opts.agentName : (existing.name ?? opts.agentName),
+        apiPort: opts.overrides?.portExplicit ? opts.apiPort : (existing.apiPort ?? opts.apiPort),
         networkConfig: opts.networkConfigName,
-        nodeRole: opts.existing?.nodeRole ?? 'edge',
+        nodeRole: existing.nodeRole ?? 'edge',
       };
-      writeFileSync(
-        join(dkgDir, 'config.json'),
-        JSON.stringify(merged, null, 2),
-      );
+      writeFileSync(path, isYaml ? yaml.dump(merged) : JSON.stringify(merged, null, 2));
+      return { path, changed: true, config: merged };
     });
     const loadNetworkConfig = recorder((networkName: string = 'testnet') => ({
       networkName,
@@ -314,6 +320,62 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     // Daemon start still runs unless --no-start was passed.
     expect((deps.startDaemon as any).calls).toHaveLength(1);
+  });
+
+  // With the real core helper: `--port` on a YAML-configured node patches
+  // config.yaml in place under the config lock. It must not write a
+  // config.json that would shadow the YAML, and keys setup does not own
+  // (here an LLM setting) survive.
+  it('--port on a YAML-only node patches config.yaml and writes no shadowing config.json', async () => {
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(
+      join(dkgDir, 'config.yaml'),
+      'name: persisted-agent\napiPort: 9200\nnetworkConfig: testnet\nllm:\n  model: kept\n',
+    );
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    const deps = makeDeps({ ensureDkgNodeConfig: realEnsureDkgNodeConfig });
+    await mcpSetupAction({ port: '9300', verify: false, fund: false }, deps);
+
+    expect(existsSync(join(dkgDir, 'config.json'))).toBe(false);
+    expect(yaml.load(readFileSync(join(dkgDir, 'config.yaml'), 'utf-8'))).toMatchObject({
+      name: 'persisted-agent',
+      apiPort: 9300,
+      networkConfig: 'testnet',
+      llm: { model: 'kept' },
+    });
+    expect((deps.startDaemon as any).calls[0][0]).toBe(9300);
+  });
+
+  it('stops with a config-write error, leaving the file alone, when config.json cannot be parsed', async () => {
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(join(dkgDir, 'config.json'), '{ not json');
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    const deps = makeDeps({ ensureDkgNodeConfig: realEnsureDkgNodeConfig });
+    await expect(mcpSetupAction({ port: '9300', verify: false, fund: false }, deps))
+      .rejects.toThrow(`${join(dkgDir, 'config.json')} is not valid JSON`);
+
+    expect(readFileSync(join(dkgDir, 'config.json'), 'utf-8')).toBe('{ not json');
+    const errors = (errorSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
+    expect(errors).toContain('[setup] Failed to write the node config:');
+    expect((deps.startDaemon as any).calls).toEqual([]);
+  });
+
+  it('reports a network config it cannot load as such, before touching the node config', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const deps = makeDeps({
+      loadNetworkConfig: recorder(() => { throw new Error('no such network'); }) as any,
+    });
+
+    await expect(mcpSetupAction({ verify: false, fund: false }, deps)).rejects.toThrow('no such network');
+
+    const errors = (errorSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
+    expect(errors).toContain('[setup] Failed to load network config: no such network');
+    expect(errors).not.toContain('Failed to write the node config');
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
   });
 
   // F6 (qa-review-round-1): when the existing-config skip-write branch
