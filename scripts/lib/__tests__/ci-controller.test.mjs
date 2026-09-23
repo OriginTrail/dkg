@@ -64,17 +64,27 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
     assert.equal(planner.status, 0, planner.stderr);
     return JSON.parse(planner.stdout).mode;
   };
-  const diff = (head) => ({
-    [MANIFEST_READER_ENV.repository]: repository,
-    [MANIFEST_READER_ENV.base]: base,
-    [MANIFEST_READER_ENV.head]: head,
-  });
+  // As the workflow diffs it: the checked-out candidate and its first parent.
+  const diff = (head) => {
+    git('checkout', '-q', '--detach', head);
+    return {
+      [MANIFEST_READER_ENV.repository]: repository,
+      [MANIFEST_READER_ENV.base]: git('rev-parse', `${head}^1`),
+      [MANIFEST_READER_ENV.head]: head,
+    };
+  };
 
   assert.equal(mode(diff(exportsHead)), 'delta');
   assert.equal(mode(diff(dependencyHead)), 'full');
   assert.equal(mode({}), 'full', 'no reader without the workflow variables');
   assert.equal(mode({ ...diff(exportsHead), [MANIFEST_READER_ENV.base]: 'HEAD~2' }), 'full', 'only object IDs are accepted');
   assert.equal(mode({ ...diff(exportsHead), [MANIFEST_READER_ENV.base]: '0'.repeat(40) }), 'full', 'missing blobs fail closed');
+  // A pair the planner cannot corroborate keeps full CI: the same commit on
+  // both sides (which would make any edit look like formatting), a base that
+  // is not the head's first parent, or a head that is not the checkout.
+  assert.equal(mode({ ...diff(dependencyHead), [MANIFEST_READER_ENV.base]: dependencyHead }), 'full', 'base equal to head');
+  assert.equal(mode({ ...diff(dependencyHead), [MANIFEST_READER_ENV.base]: base }), 'full', 'base is an older ancestor');
+  assert.equal(mode({ ...diff(dependencyHead), [MANIFEST_READER_ENV.base]: base, [MANIFEST_READER_ENV.head]: exportsHead }), 'full', 'head is not the checkout');
 });
 
 // Every CI-policy script a workflow step runs must come from the trusted

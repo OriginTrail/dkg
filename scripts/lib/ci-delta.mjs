@@ -714,14 +714,19 @@ function isPlainObject(value) {
 function classifyManifestChange(filePath, readManifest) {
   const uncomparable = (detail) => ({ outcome: 'uncomparable', detail: `${filePath} ${detail}` });
   if (typeof readManifest !== 'function') return uncomparable('contents are unavailable to the planner');
+  let texts;
   let before;
   let after;
   try {
-    before = JSON.parse(readManifest('base', filePath));
-    after = JSON.parse(readManifest('head', filePath));
+    texts = { base: readManifest('base', filePath), head: readManifest('head', filePath) };
+    before = JSON.parse(texts.base);
+    after = JSON.parse(texts.head);
   } catch (error) {
     return uncomparable(`could not be read and parsed: ${String(error?.message ?? error).split('\n')[0]}`);
   }
+  // git reports the manifest as modified, so identical text means the compared
+  // commits are not the diff being routed.
+  if (texts.base === texts.head) return uncomparable('is identical in both compared commits although the diff modifies it');
   if (!isPlainObject(before) || !isPlainObject(after)) return uncomparable('is not a JSON object');
 
   const changedFields = [...new Set([...Object.keys(before), ...Object.keys(after)])]
