@@ -1015,8 +1015,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     contextGraphId: string,
     opCtx?: OperationContext,
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
-    // A name-hash id adopted under its verified cleartext id names the same
-    // graph; answer for the cleartext row instead of re-hashing the hash.
+    // Retired name-hash id: answer for the graph it names (see supersedingContextGraphIdFor).
     const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
     if (supersedingId) return this.resolveFinalizedOnChainAccessPolicyState(supersedingId, opCtx);
     const trimmed = contextGraphId.trim();
@@ -1209,9 +1208,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       slotBindingMode?: PublicPolicySlotBindingMode;
     } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
-    // A name-hash id adopted under its verified cleartext id names the same
-    // graph; answer for the cleartext row instead of re-hashing the hash
-    // (which would read as a stale mapping and fail closed).
+    // Retired name-hash id: answer for the graph it names (see supersedingContextGraphIdFor).
     const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
     if (supersedingId) return this.resolveOnChainAccessPolicyState(supersedingId, opCtx, options);
     const trimmed = contextGraphId.trim();
@@ -1374,9 +1371,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    // Sync that captured a name-hash id before this node adopted its cleartext
-    // id stands down: it must not write under the retired id, and it is not a
-    // stale mapping or a mismatching peer asset either.
+    // Retired name-hash id: stand down, never write (see supersedingContextGraphIdFor).
     const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
     if (supersedingId) throw new SyncTargetSupersededError(contextGraphId, supersedingId);
     return this.localCgMatchesOnChainSlot(

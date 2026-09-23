@@ -30,6 +30,8 @@ import {
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import {
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+  CONTEXT_GRAPH_SUBJECT_PREFIX,
   contextGraphNameCommitmentOf,
   findContextGraphNameInOntologyQuads,
   normalizeContextGraphNameHash,
@@ -50,6 +52,7 @@ import {
   type ContextGraphNameSource,
   type ContextGraphNameTarget,
 } from './context-graph-name-resolver.js';
+import { projectContextGraphSubscriptionPersistence } from './context-graph-subscription-policy.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -69,12 +72,12 @@ const CONTEXT_GRAPH_NAME_LOCAL_SCAN_MAX_ROWS = 10_000;
 const MAX_REMEMBERED_REVEAL_VERDICTS = 4_096;
 const REVEAL_REFUSAL_MEMO_MS = 60_000;
 
-/** The vocabulary the ontology graph and agent profiles are written in. */
+/**
+ * Agent-profile vocabulary. The ontology-graph vocabulary (subject prefix,
+ * on-chain id predicate) is owned by context-graph-name-candidate.ts, whose
+ * in-memory scan must agree with the SPARQL below.
+ */
 const SERVED_PREDICATE = 'https://dkg.origintrail.io/skill#contextGraphsServed';
-const CONTEXT_GRAPH_TYPE = DKG_ONTOLOGY.DKG_CONTEXT_GRAPH;
-const RDF_TYPE = DKG_ONTOLOGY.RDF_TYPE;
-const ON_CHAIN_ID_PREDICATE = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
-const CONTEXT_GRAPH_SUBJECT_PREFIX = 'did:dkg:context-graph:';
 
 /** Operator-facing identity of a subscription that is (or was) hash-only. */
 export interface ContextGraphIdentityNote {
@@ -290,14 +293,34 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
   }
 
   /**
-   * The cleartext id that superseded a retired name-hash id, or null. Work
-   * that captured the hash before adoption (a reconcile pass, a sync, an
-   * authority refresh) uses this to stand down, and policy reads use it to
-   * answer for the graph the hash names. Only a live adoption counts: no row
-   * is keyed by the hash, a cleartext row carries it as `onChainHash`,
-   * keccak256(utf8(cleartext)) equals it, and that row is bound on-chain.
-   * A placeholder, an unknown hash or a hash-shaped cleartext id is never
-   * superseded, so their fail-closed paths are untouched.
+   * The cleartext id that superseded a retired name-hash id, or null.
+   *
+   * This is the one statement of the retired-id policy. After adoption no
+   * row is keyed by the hash, yet work that captured it earlier (a reconcile
+   * pass, a sync, an authority refresh, queued SWM work) may still run. It
+   * must never run under the hash: data would land under an id no holder
+   * uses, and a policy read would re-hash the hash and report the graph as
+   * stale or name-bound elsewhere. Each consumer checks this first and reacts
+   * in exactly one of three ways:
+   *  - answer for the graph the hash names: the policy reads
+   *    `resolveOnChainAccessPolicyState` and `resolveFinalizedOnChainAccessPolicyState`;
+   *  - stand down with `SyncTargetSupersededError`, never a stale-mapping or
+   *    peer-asset failure: the write gate `requireLocalCgMatchesOnChainSlot`
+   *    (durable sync and exact fetch);
+   *  - drop the work quietly: VM reconcile (queued and in flight), SWM sync
+   *    planning, SWM gossip reconcile, and the RFC-64 authority refresh.
+   * The "Base #34 canary" cases in context-graph-name-adoption.test.ts pin
+   * each consumer on a real agent, so a composition that lost this method
+   * fails there. Consumers call it as `?.` only because they are shared
+   * paths that many unit fixtures drive on partial agents. A new entry point
+   * that accepts a Context Graph id and writes or re-reads authority under
+   * it belongs on this list.
+   *
+   * Only a live adoption counts: no row is keyed by the hash, a cleartext
+   * row carries it as `onChainHash`, keccak256(utf8(cleartext)) equals it,
+   * and that row is bound on-chain. A placeholder, an unknown hash or a
+   * hash-shaped cleartext id is never superseded, so their fail-closed paths
+   * are untouched.
    */
   supersedingContextGraphIdFor(this: DKGAgent, contextGraphId: string): string | null {
     const nameHash = normalizeContextGraphNameHash(contextGraphId);
@@ -540,20 +563,26 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
   }
 
   /**
-   * Delete the durable subscription row (and node member row) of a
-   * placeholder that was made durable while hash-keyed. Without this, the
-   * next rehydration resurrects the hash row.
+   * Delete the durable subscription row (and node member row) of a retired
+   * name-hash placeholder that was made durable while hash-keyed. Without
+   * this, the next rehydration resurrects the hash row.
+   *
+   * The caller has already removed the in-memory row, so persisting its id
+   * projects a `delete` of the durable record: that is the intent here, not
+   * a side effect. `row` is the retired row as it was, judged by the same
+   * persistence rule that saved it. The write is queued like every other
+   * subscription write and ordered by its persist revision.
    */
-  retireDurableContextGraphSubscription(this: DKGAgent, contextGraphId: string, row: ContextGraphSub): void {
-    const durable = row.coreHosted === true || (row.subscribed === true && row.syncMode !== 'on-demand');
-    if (!durable) return;
+  retirePersistedContextGraphNamePlaceholder(this: DKGAgent, contextGraphId: string, row: ContextGraphSub): void {
+    const persisted = projectContextGraphSubscriptionPersistence({ contextGraphId, subscription: row, syncScoped: false });
+    if (persisted.action !== 'save') return;
     if (this.config.contextGraphSubscriptionStore) {
       void this.persistContextGraphSubscription(contextGraphId, {
         revision: this.nextContextGraphSubscriptionPersistRevision(contextGraphId),
         updateRehydrationStatus: true,
       });
     }
-    if (row.subscribed === true && row.syncMode !== 'on-demand') {
+    if (persisted.persistMemberIntent && row.subscribed === true) {
       this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
     }
   }
@@ -600,10 +629,10 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const onChainIdLiteral = JSON.stringify(target.onChainId);
     const queries = [
       // Exact registration binding first: at most a handful of subjects.
-      `SELECT DISTINCT ?s WHERE { GRAPH <${ontologyGraph}> { ?s <${ON_CHAIN_ID_PREDICATE}> ?id . `
+      `SELECT DISTINCT ?s WHERE { GRAPH <${ontologyGraph}> { ?s <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?id . `
         + `FILTER(STR(?id) = ${onChainIdLiteral}) } } LIMIT 64`,
-      `SELECT DISTINCT ?s WHERE { GRAPH <${ontologyGraph}> { ?s <${RDF_TYPE}> <${CONTEXT_GRAPH_TYPE}> } } `
-        + `LIMIT ${CONTEXT_GRAPH_NAME_LOCAL_SCAN_MAX_ROWS}`,
+      `SELECT DISTINCT ?s WHERE { GRAPH <${ontologyGraph}> { ?s <${DKG_ONTOLOGY.RDF_TYPE}> `
+        + `<${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> } } LIMIT ${CONTEXT_GRAPH_NAME_LOCAL_SCAN_MAX_ROWS}`,
       `SELECT DISTINCT ?s WHERE { GRAPH ?g { ?h <${SERVED_PREDICATE}> ?s } `
         + `FILTER(STRSTARTS(STR(?g), ${JSON.stringify(agentsGraph)})) } LIMIT ${CONTEXT_GRAPH_NAME_LOCAL_SCAN_MAX_ROWS}`,
     ];
@@ -635,12 +664,9 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
 
   /** Connected peers not known to be rejected; cores first (they sync the ontology). */
   contextGraphNameResolutionPeers(this: DKGAgent): readonly string[] {
-    const libp2p = (this.node as unknown as { libp2p?: any })?.libp2p;
-    if (libp2p === undefined) return [];
-    const localPeerId = libp2p.peerId.toString();
-    const connected = new Set<string>();
-    for (const peer of libp2p.getPeers() as Array<{ toString(): string }>) connected.add(peer.toString());
-    connected.delete(localPeerId);
+    const libp2p = this.node.libp2p;
+    const connected = new Set(libp2p.getPeers().map((peer) => peer.toString()));
+    connected.delete(libp2p.peerId.toString());
     const coordinator = this.networkAdmissionCoordinator;
     const peers = [...connected].filter((peerId) => coordinator === undefined || !coordinator.isRejectedPeer(peerId));
     const isCore = (peerId: string) => this.knownCorePeerIds?.has(peerId) === true;
