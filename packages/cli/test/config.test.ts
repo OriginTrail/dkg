@@ -12,7 +12,8 @@ import {
   DkgHomeFiles,
   removePid,
   removeApiPort,
-  saveConfig,
+  updateConfigFile,
+  type DkgConfig,
   writePid,
   writeApiPort,
   readPid,
@@ -697,6 +698,11 @@ describe('dkgDir', () => {
   });
 });
 
+/** Write `config` into the selected home's (empty) config file through the production writer. */
+async function writeConfig(config: Partial<DkgConfig>): Promise<void> {
+  await updateConfigFile((file) => { Object.assign(file, config); });
+}
+
 describe('localAgentIntegrations config round-trip', () => {
   const origHome = process.env.DKG_HOME;
   let tempDir = '';
@@ -725,7 +731,7 @@ describe('localAgentIntegrations config round-trip', () => {
     await writeApiPort(9444);
     await files.writePid(111);
     await files.writeApiPort(9333);
-    await files.saveConfig({ ...await files.loadConfig(), name: 'home-a' });
+    await files.updateConfigFile((config) => { config.name = 'home-a'; });
     expect(files.configExists()).toBe(true);
     expect((await files.loadConfig()).name).toBe('home-a');
     expect(files.readConfigSync()).toMatchObject({ name: 'home-a' });
@@ -743,7 +749,7 @@ describe('localAgentIntegrations config round-trip', () => {
   });
 
   it('persists the generic local agent integration registry', async () => {
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -812,8 +818,8 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(readNodeRoleFromConfigSync()).toBe('edge');
   });
 
-  it('round-trips networkConfig through saveConfig/loadConfig (network selector)', async () => {
-    await saveConfig({
+  it('round-trips networkConfig through updateConfigFile/loadConfig (network selector)', async () => {
+    await writeConfig({
       name: 'test-node',
       networkConfig: 'mainnet-base',
       apiPort: 9200,
@@ -828,7 +834,7 @@ describe('localAgentIntegrations config round-trip', () => {
 
   it('round-trips a bounded RFC-64 canary and advances it only after a restart edit', async () => {
     const contextGraphId = 'restart-stable-rollout-cg';
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -857,7 +863,7 @@ describe('localAgentIntegrations config round-trip', () => {
       contextGraphModes: { [contextGraphId]: 'shadow' },
     });
 
-    await saveConfig({
+    await writeConfig({
       ...loaded,
       rfc64Catalog: {
         ...loaded.rfc64Catalog,
@@ -961,13 +967,13 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveKnownNetworkConfigName({ chain: { chainId: 'gnosis:100' } })).toBe('mainnet-gnosis');
   });
 
-  it('round-trips relayServerCapacity through saveConfig/loadConfig (operator override)', async () => {
+  it('round-trips relayServerCapacity through updateConfigFile/loadConfig (operator override)', async () => {
     // PR #524 review (branarakic): the README documents
     // `relayServerCapacity` as a `config.json` knob, so the CLI
     // schema must actually persist + restore it. This guards
     // against regressions where the field gets dropped from the
     // DkgConfig type or stripped on serialization.
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -987,7 +993,7 @@ describe('localAgentIntegrations config round-trip', () => {
       maxTailBlocks: 2_000,
       cacheEpoch: 1,
     };
-    await saveConfig({
+    await writeConfig({
       name: 'snapshot-edge',
       apiPort: 9200,
       listenPort: 0,
@@ -1009,7 +1015,7 @@ describe('localAgentIntegrations config round-trip', () => {
   });
 
   it('keeps authority index snapshot trust absent for existing configs', async () => {
-    await saveConfig({
+    await writeConfig({
       name: 'existing-edge',
       apiPort: 9200,
       listenPort: 0,
@@ -1020,13 +1026,13 @@ describe('localAgentIntegrations config round-trip', () => {
     expect((await loadConfig()).authorityIndex).toBeUndefined();
   });
 
-  it('round-trips relayReservationCount through saveConfig/loadConfig (operator override)', async () => {
+  it('round-trips relayReservationCount through updateConfigFile/loadConfig (operator override)', async () => {
     // PR3 multi-reservation tuning: same contract as
     // relayServerCapacity above — operators should be able to
     // override the default 3-reservation count from config.json.
     // This guards against the field getting dropped from the
     // DkgConfig schema or stripped on serialization.
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1040,8 +1046,8 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.relayReservationCount).toBe(5);
   });
 
-  it('round-trips syncAgentsMeta=false through saveConfig/loadConfig (edge store-load optimization)', async () => {
-    await saveConfig({
+  it('round-trips syncAgentsMeta=false through updateConfigFile/loadConfig (edge store-load optimization)', async () => {
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1055,7 +1061,7 @@ describe('localAgentIntegrations config round-trip', () => {
   });
 
   it('round-trips the automatic system Context Graph sync override', async () => {
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1068,7 +1074,7 @@ describe('localAgentIntegrations config round-trip', () => {
   });
 
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1096,8 +1102,8 @@ describe('localAgentIntegrations config round-trip', () => {
     });
   });
 
-  it('round-trips logging.kaPublishLifecycleDebug through saveConfig/loadConfig', async () => {
-    await saveConfig({
+  it('round-trips logging.kaPublishLifecycleDebug through updateConfigFile/loadConfig', async () => {
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1110,7 +1116,7 @@ describe('localAgentIntegrations config round-trip', () => {
   });
 
   it('omits relayReservationCount when not set (so DKGNode.start() applies the default)', async () => {
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1123,7 +1129,7 @@ describe('localAgentIntegrations config round-trip', () => {
   });
 
   it('omits relayServerCapacity when not set (so DKGNode.start() applies the default)', async () => {
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1135,13 +1141,13 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.relayServerCapacity).toBeUndefined();
   });
 
-  it('round-trips the network.* libp2p tunables through saveConfig/loadConfig', async () => {
+  it('round-trips the network.* libp2p tunables through updateConfigFile/loadConfig', async () => {
     // PR feat/chain-network-libp2p-tunables: the small-network knobs
     // are documented as `config.json` keys, so the CLI schema must
     // persist + restore them. This guards against regressions where
     // any field gets dropped from the DkgConfig type or stripped on
     // serialization.
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
@@ -1160,7 +1166,7 @@ describe('localAgentIntegrations config round-trip', () => {
   });
 
   it('omits the network block entirely when not set (upstream libp2p defaults apply)', async () => {
-    await saveConfig({
+    await writeConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,

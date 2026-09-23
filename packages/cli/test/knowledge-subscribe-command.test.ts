@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 
+// `file` stands in for the on-disk config that each patch is applied to.
 const configMocks = vi.hoisted(() => ({
-  loadConfig: vi.fn(async () => ({ contextGraphs: [] as string[] })),
-  saveConfig: vi.fn(async () => undefined),
+  file: {} as { contextGraphs?: string[]; [key: string]: unknown },
+  updateConfigFile: vi.fn(),
   resolveContextGraphs: vi.fn((config: { contextGraphs?: string[] }) => config.contextGraphs ?? []),
 }));
 
 vi.mock('../src/config.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/config.js')>(),
-  loadConfig: configMocks.loadConfig,
-  saveConfig: configMocks.saveConfig,
+  updateConfigFile: configMocks.updateConfigFile,
   resolveContextGraphs: configMocks.resolveContextGraphs,
 }));
 
@@ -29,8 +29,11 @@ describe('knowledge subscribe CLI sync lifetime', () => {
 
   beforeEach(() => {
     logLines.length = 0;
-    configMocks.loadConfig.mockClear();
-    configMocks.saveConfig.mockClear();
+    configMocks.file = { name: 'node', contextGraphs: [] };
+    configMocks.updateConfigFile.mockReset();
+    configMocks.updateConfigFile.mockImplementation(async (patch: (config: typeof configMocks.file) => void) => {
+      patch(configMocks.file);
+    });
     configMocks.resolveContextGraphs.mockClear();
     vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       logLines.push(args.map(String).join(' '));
@@ -54,7 +57,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'on-demand',
       forceCatchup: false,
     });
-    expect(configMocks.saveConfig).not.toHaveBeenCalled();
+    expect(configMocks.updateConfigFile).not.toHaveBeenCalled();
     expect(logLines.join('\n')).toContain('Synchronization mode: on demand');
   });
 
@@ -71,9 +74,8 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'always-on',
       forceCatchup: false,
     });
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['selected-cg'],
-    }));
+    expect(configMocks.updateConfigFile).toHaveBeenCalledTimes(1);
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['selected-cg'] });
     expect(logLines.join('\n')).toContain('Synchronization mode: always on');
   });
 
@@ -90,7 +92,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'on-demand',
       forceCatchup: false,
     });
-    expect(configMocks.saveConfig).not.toHaveBeenCalled();
+    expect(configMocks.updateConfigFile).not.toHaveBeenCalled();
     expect(logLines.join('\n')).toContain('Synchronization mode: always on');
     expect(logLines.join('\n')).not.toContain('Synchronization mode: on demand');
   });
@@ -130,7 +132,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     const output = logLines.join('\n');
     expect(output).toContain(`Subscribed to context graph: ${nameHash}`);
     expect(output).toContain(`Note: ${message}`);
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ contextGraphs: [nameHash] }));
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: [nameHash] });
   });
 
   it('subscribes and saves the verified cleartext id when the daemon resolved the hash', async () => {
@@ -153,8 +155,6 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     const output = logLines.join('\n');
     expect(output).toContain('Subscribed to context graph: acme-fun-facts');
     expect(output).toContain('resolves to "acme-fun-facts"');
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['acme-fun-facts'],
-    }));
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['acme-fun-facts'] });
   });
 });

@@ -19,7 +19,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  updateConfigFile, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
@@ -373,12 +373,9 @@ program
       }
 
       if (opts.save) {
-        const config = await loadConfig();
-        const cgs = new Set(resolveContextGraphs(config));
-        cgs.add(subscribedId);
-        config.contextGraphs = [...cgs];
-        config.contextGraphs = [...cgs];
-        await saveConfig(config);
+        await updateConfigFile((config) => {
+          config.contextGraphs = [...new Set([...resolveContextGraphs(config), subscribedId])];
+        });
         console.log('Saved to config (will auto-subscribe on restart).');
       }
     } catch (err) {

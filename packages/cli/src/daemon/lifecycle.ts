@@ -118,7 +118,6 @@ import {
 import {
   loadConfig,
   assertAuthorityIndexConfigPlacement,
-  saveConfig,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
   resolveAutoUpdateConfig,
@@ -201,6 +200,11 @@ import {
   createTelemetrySettings,
   createTelemetryRuntime,
 } from './telemetry-runtime.js';
+import {
+  persistLlmSettings,
+  persistSharedMemoryTtl,
+  persistTelemetryEnabled,
+} from './settings-persistence.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
@@ -1507,13 +1511,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   // Runtime store view for the managed Oxigraph server. We deliberately do
   // NOT mutate `config.store` to the loopback `sparql-http` shape: `config`
-  // is the persisted/operator-facing object, and every later
-  // `saveConfig(config)` would otherwise write the ephemeral loopback
-  // endpoints to disk (breaking the next boot, which would no longer spawn
-  // the managed server) and `/api/status` would report `sparql-http` instead
-  // of the configured `oxigraph-server`. Instead the boot steps that talk to
-  // the live store (validation, reachability, identity, chain-reset wipe, the
-  // agent) read these runtime values, while `config` keeps `oxigraph-server`.
+  // is the persisted/operator-facing object. The ephemeral loopback
+  // endpoints must never reach the config file (the next boot would no
+  // longer spawn the managed server), and `/api/status` would report
+  // `sparql-http` instead of the configured `oxigraph-server`. Instead the
+  // boot steps that talk to the live store (validation, reachability,
+  // identity, chain-reset wipe, the agent) read these runtime values, while
+  // `config` keeps `oxigraph-server`.
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
@@ -3034,7 +3038,7 @@ async function runDaemonInnerWithStartupOwnership(
 
   const telemetryRuntime = createTelemetryRuntime({
     config,
-    persist: saveConfig,
+    persist: persistTelemetryEnabled,
     signals: telemetrySignals,
     onBootStartFailure: (error) => {
       // Boot remains best-effort per signal: a failed log shipper must not
@@ -3387,7 +3391,7 @@ async function runDaemonInnerWithStartupOwnership(
         memoryManager.updateConfig({ apiKey: '' });
         log('LLM config cleared via settings');
       }
-      await saveConfig(config);
+      await persistLlmSettings(llm);
     },
   };
 
@@ -3719,7 +3723,7 @@ async function runDaemonInnerWithStartupOwnership(
           config.sharedMemoryTtlMs = ttlMs;
           config.workspaceTtlMs = ttlMs;
           agent.setSharedMemoryTtlMs(ttlMs);
-          await saveConfig(config);
+          await persistSharedMemoryTtl(ttlMs);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;

@@ -38,6 +38,12 @@ export default defineConfig({
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
+          // Home config writes: the shared file lock, atomic replace, and
+          // re-read-then-patch updates (no lost update, YAML stays YAML).
+          'test/config-file-update.test.ts',
+          'test/daemon-config-persistence.test.ts',
+          'test/durable-file-replace.test.ts',
+          'test/file-lock.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
@@ -237,6 +243,7 @@ export default defineConfig({
           'test/chain-discovery-scan-mode.test.ts',
           'test/chain-discovery-scan-storage.test.ts',
           'test/context-graph-list-cli.test.ts',
+          'test/context-graph-create-save-cli.test.ts',
           'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
