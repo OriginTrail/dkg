@@ -6,6 +6,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Random Sampling resolves the challenged Context Graph by its chain name
+  commitment when local history contains multiple names for one numeric ID**:
+  proof extraction no longer selects an arbitrary first ontology row, which
+  could report a locally present KA as missing. Proof-time peer repair also
+  checks a direct local binding against the chain commitment before using it.
+  Existing opt-out graphs without a committed name hash retain their direct
+  binding behavior.
 - **Chain log reads fit each RPC provider's `eth_getLogs` limits**: a Base
   mainnet node more than 2,000 blocks behind (about 67 minutes of downtime)
   stopped advancing its chain event lanes on the default public RPC set,
