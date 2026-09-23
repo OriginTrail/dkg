@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   MockChainAdapter,
+  type ChainAdapter,
   type ContextGraphAuthorityProjectionServedEvidence,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -1959,6 +1960,124 @@ describe('private read authorization uses the on-chain participant roster', () =
       callerAgentAddress: member,
       allowSubscriptionFallback: false,
     })).resolves.toBe(true);
+  });
+
+  // The roster a registered participant mutation reads is its idempotence
+  // filter: a `remove` of an agent it does not list and an `add` of one it
+  // does send no transaction. Each lane installs a roster source that lags the
+  // chain, and proves through a read allowed to consume that source that the
+  // lag is really installed; the mutation must still send exactly what the
+  // chain roster calls for.
+  it.each<readonly [
+    string,
+    Parameters<DKGAgent['resolveRegisteredContextGraphAuthority']>[1],
+    (input: {
+      agent: DKGAgent;
+      chain: MockChainAdapter;
+      contextGraphId: string;
+      onChainId: bigint;
+    }) => (roster: readonly string[]) => void,
+  ]>([
+    ['the roster cache', { allowCachedRoster: true }, ({ agent: target, chain, onChainId }) => {
+      // Without the single live read the policy read carries no roster, so a
+      // resolver allowed to use the cache answers from it.
+      const liveRead: Pick<ChainAdapter, 'getContextGraphLiveAuthority'> = chain;
+      liveRead.getContextGraphLiveAuthority = undefined;
+      const { onChainParticipantAgentsCache: cache } = target as unknown as {
+        onChainParticipantAgentsCache: Map<string, string[]>;
+      };
+      return (roster) => {
+        cache.set(onChainId.toString(), [...roster]);
+      };
+    }],
+    [
+      'the finalized authority projection',
+      { authorityReadMode: 'finalized-index' },
+      ({ agent: target, chain, contextGraphId, onChainId }) => (roster) => {
+        installFinalizedAuthorityReader(chain, finalizedAuthoritySnapshot(
+          onChainId,
+          target.contextGraphNameCommitment(contextGraphId),
+          { accessPolicy: 1, participantAgents: [...roster] },
+        ));
+      },
+    ],
+    ['a bounded (index-served) live read', { freshness: 'bounded' }, ({ chain }) => {
+      let indexedRoster: readonly string[] | undefined;
+      const readLiveAuthority = chain.getContextGraphLiveAuthority.bind(chain);
+      vi.spyOn(chain, 'getContextGraphLiveAuthority').mockImplementation(async (id, options) => {
+        const current = await readLiveAuthority(id, options);
+        return options?.freshness === 'bounded' && current !== null && indexedRoster !== undefined
+          ? { ...current, participantAgents: [...indexedRoster] }
+          : current;
+      });
+      return (roster) => {
+        indexedRoster = roster;
+      };
+    }],
+  ])('sends the participant transactions the chain roster calls for when %s lags it', async (
+    _lane,
+    laggingRead,
+    installLaggingRoster,
+  ) => {
+    const contextGraphId = 'registered-private-live-mutation-roster';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'LiveMutationRoster',
+      chainAdapter: chain,
+    });
+    const ownerRecord = await agent.registerAgent('Mutation owner');
+    const memberRecord = await agent.registerAgent('Mutation participant');
+    await agent.markDefaultAgent(ownerRecord.agentAddress);
+    const owner = ownerRecord.agentAddress;
+    const member = memberRecord.agentAddress;
+    await agent.start();
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Live mutation roster',
+      accessPolicy: 1,
+      callerAgentAddress: owner,
+    });
+    const registration = await agent.registerContextGraph(contextGraphId, {
+      callerAgentAddress: owner,
+    });
+    const onChainId = BigInt(registration.onChainId);
+    const setLaggingRoster = installLaggingRoster({ agent, chain, contextGraphId, onChainId });
+    const laggingRosterHasMember = async (target: DKGAgent): Promise<boolean> => {
+      const authority = await target.resolveRegisteredContextGraphAuthority(
+        contextGraphId,
+        laggingRead,
+      );
+      if (authority.kind !== 'private') {
+        throw new Error(`lagging read returned a ${authority.kind} authority`);
+      }
+      return authority.participantAgents
+        .some((address) => address.toLowerCase() === member.toLowerCase());
+    };
+
+    await agent.inviteAgentToContextGraph(contextGraphId, member, owner);
+    const rosterWithMember = await chain.getContextGraphParticipantAgents(onChainId);
+    expect(rosterWithMember).toContain(member);
+    const addParticipant = vi.spyOn(chain, 'addContextGraphParticipantAgent');
+    const removeParticipant = vi.spyOn(chain, 'removeContextGraphParticipantAgent');
+
+    // The lagging source has not seen the addition: read from it, the member
+    // is "not present" and the removal is silently dropped.
+    setLaggingRoster(rosterWithMember.filter((address) => address !== member));
+    expect(await laggingRosterHasMember(agent)).toBe(false);
+    await agent.removeAgentFromContextGraph(contextGraphId, member, owner);
+    expect(removeParticipant).toHaveBeenCalledTimes(1);
+    expect(removeParticipant).toHaveBeenCalledWith(onChainId, member);
+    const rosterWithoutMember = await chain.getContextGraphParticipantAgents(onChainId);
+    expect(rosterWithoutMember).not.toContain(member);
+
+    // Nor the removal: read from it, the member is "already present" and the
+    // re-add is silently dropped.
+    setLaggingRoster([...rosterWithoutMember, member]);
+    expect(await laggingRosterHasMember(agent)).toBe(true);
+    await agent.inviteAgentToContextGraph(contextGraphId, member, owner);
+    expect(addParticipant).toHaveBeenCalledTimes(1);
+    expect(addParticipant).toHaveBeenCalledWith(onChainId, member);
+    expect(await chain.getContextGraphParticipantAgents(onChainId)).toContain(member);
   });
 
   it('completes a cold finalized authority resolution after the request deadline and answers the retry from the retained projection', async () => {
