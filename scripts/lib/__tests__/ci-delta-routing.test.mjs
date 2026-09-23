@@ -384,8 +384,11 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   const isFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile();
   const resolve = (file, specifier) => {
     const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
-    // TypeScript sources are imported by their emitted extension, or none.
+    // TypeScript sources are imported by their emitted extension, or none,
+    // and a package's built dist/ output comes from its src/.
+    const source = target.replace(/^(packages\/[^/]+)\/dist\/(.+)\.js$/, '$1/src/$2.ts');
     return [
+      source,
       target,
       target.replace(/\.js$/, '.ts'),
       target.replace(/\.js$/, '.tsx'),
@@ -570,6 +573,7 @@ test('Blazegraph provisioning changes include the native arm64 contract lane', (
     change('packages/cli/src/daemon/blazegraph-new-provisioner.ts'),
   ]);
   assert.deepEqual(selectedLanes(cliProvisioner), [
+    'tornado_blazegraph',
     'bura_cli',
     'bura_blazegraph_arm64',
     'kosava_node_ui_e2e',

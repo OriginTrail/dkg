@@ -193,7 +193,9 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: ['chain', 'agent'],
   },
   'packages/cli': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    // tornado_blazegraph: that job's storage conformance suite runs the CLI's
+    // built Oxigraph launcher (test-systems/storage-conformance.test.ts).
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {
