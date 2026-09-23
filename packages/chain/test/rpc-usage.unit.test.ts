@@ -8,7 +8,7 @@
  * at the provider. Also asserts the OTel counter's bounded {rpc_method,
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi, type MockInstance } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,14 +67,14 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
 }
 
 /**
- * Resolve once every call a spy has observed has settled, including calls that
- * start while waiting. On a provider's `_send` that is a point with no JSON-RPC
- * request in flight: the client counts a request when it dispatches it and the
- * loopback server when it receives it, so the two counts are only guaranteed
- * to match there.
+ * Resolve once every call an async spy has observed has settled, including
+ * calls that start while waiting; `mock.results` holds each returned promise.
+ * On a provider's `_send` that is a point with no JSON-RPC request in flight:
+ * the client counts a request when it dispatches it and the loopback server
+ * when it receives it, so the two counts are only guaranteed to match there.
  */
 async function settleSpiedCalls(
-  spy: { readonly mock: { readonly results: ReadonlyArray<{ readonly value: unknown }> } },
+  spy: MockInstance<(...args: any[]) => Promise<unknown>>,
 ): Promise<void> {
   for (let settled = 0; settled < spy.mock.results.length;) {
     const pending = spy.mock.results.slice(settled).map((result) => result.value);
@@ -1069,6 +1069,13 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       // server after both paired responses. Read no count until every request
       // has settled.
       await settleSpiedCalls(sends);
+      // Settling `_send` leaves nothing in flight only if every request the
+      // tracker recorded at dispatch went through it. Pin that premise, so a
+      // bypassing request fails here even while still in flight, then require
+      // the server to have received exactly those requests.
+      const recorded = rpcUsageWindowTotal(tracker.drainWindow());
+      expect(sends).toHaveBeenCalledTimes(recorded);
+      expect(rpc.totalHits()).toBe(recorded);
       expect(rpc.hits('eth_getBlockByNumber')).toBe(1);
       expect(rpc.hits('eth_call')).toBe(1);
       // getNetwork() + the startup probe: without the probe the unattributed
