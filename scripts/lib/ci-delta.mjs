@@ -634,15 +634,15 @@ function supportPathRoute(filePath) {
 // Top-level manifest fields whose change only affects the package itself and
 // the downstream consumers its WORKSPACE_RULES entry already selects. Every
 // other field, including unknown ones, can change what pnpm installs or how
-// the workspace resolves (dependency ranges, pnpm/overrides, engines, bin,
-// name, type), so it keeps the full profile.
+// the workspace resolves (dependency ranges, pnpm/overrides, engines, bin and
+// directories, which can declare bin links and man pages, name, type), so it
+// keeps the full profile.
 const PACKAGE_SCOPED_MANIFEST_FIELDS = new Set([
   'author',
   'browser',
   'bugs',
   'contributors',
   'description',
-  'directories',
   'exports',
   'files',
   'funding',

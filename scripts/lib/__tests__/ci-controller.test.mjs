@@ -8,6 +8,7 @@ import { parse } from 'yaml';
 import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
+import { pinnedControllerRef } from '../../ci/fetch-trusted-controller.mjs';
 import {
   NON_SOLIDITY_LANES,
   REPO_ROOT,
@@ -164,6 +165,17 @@ test('every rotation shim is recorded next to the controller pin', () => {
   assert.deepEqual(recorded.sort(), shims.sort());
 });
 
+test('the build job fetches the pinned controller through the canonical pin validator', () => {
+  // The pinned-parser check below reads the pinned controller from git
+  // history. The build job's shallow checkout fetches it by the ref the pin
+  // validator derives, so workflow layout cannot change which ref it fetches.
+  assert.equal(pinnedControllerRef(), TRUSTED_CI_CONTROLLER_SHA);
+  const { steps } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs.build;
+  const fetch = steps.findIndex(({ run = '' }) => run.trim() === 'node scripts/ci/fetch-trusted-controller.mjs');
+  const scriptTests = steps.findIndex(({ run = '' }) => run.includes('pnpm run test:scripts'));
+  assert.ok(fetch !== -1 && fetch < scriptTests, 'the fetch runs before the repository-script tests');
+});
+
 test('workflow controller invocations stay within the current and pinned parsers', () => {
   // Until a rotation lands, workflows run the pinned controller with this
   // branch's wiring; afterwards they run the current one. Both strict parsers
@@ -185,7 +197,7 @@ test('workflow controller invocations stay within the current and pinned parsers
       '-C', REPO_ROOT, 'cat-file', 'blob', `${TRUSTED_CI_CONTROLLER_SHA}:scripts/ci/${script}.mjs`,
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }))]));
   } catch {
-    assert.fail(`pinned controller ${TRUSTED_CI_CONTROLLER_SHA} is not in this checkout; run: git fetch --depth=1 origin ${TRUSTED_CI_CONTROLLER_SHA}`);
+    assert.fail(`pinned controller ${TRUSTED_CI_CONTROLLER_SHA} is not in this checkout; run: node scripts/ci/fetch-trusted-controller.mjs`);
   }
 
   let invocations = 0;
