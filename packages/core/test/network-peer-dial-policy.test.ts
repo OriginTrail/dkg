@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
 import {
   NETWORK_MISMATCH_DENY_DEFAULT_MS,
   NetworkPeerDialPolicy,
@@ -263,6 +264,14 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${PEER}`))).toBe(true);
     expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${OTHER_PEER}`))).toBe(false);
     expect(denyDialMultiaddr(id('/ip4/1.2.3.4/tcp/9090/p2p/not-a-peer-id'))).toBe(false);
+
+    // The same peers in their CIDv1 (base32) text form: the denial is keyed by
+    // the canonical id, so a raw string compare would miss the denied one.
+    const peerCid = peerIdFromString(PEER).toCID().toString();
+    const otherPeerCid = peerIdFromString(OTHER_PEER).toCID().toString();
+    expect(peerCid).toMatch(/^bafz/);
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${peerCid}`))).toBe(true);
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${otherPeerCid}`))).toBe(false);
   });
 });
 
