@@ -182,3 +182,113 @@ def test_pull_from_minimal_omits_on_conflict(recording_client):
     client.pull_from("k", "cg1", "vm")
     _, body = client.posts[-1]
     assert body == {"contextGraphId": "cg1", "layer": "vm"}
+
+
+# -- per-route timeout classes ------------------------------------------------
+#
+# The fake transport answers after ``latency`` seconds and applies requests'
+# timeout semantics without sleeping: a read deadline shorter than the latency
+# raises ReadTimeout, a connect deadline shorter than ``connect_latency`` raises
+# ConnectTimeout. The client runs with a 1 s read class and a 10 s long class.
+
+class _FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._body
+
+
+class _SlowDaemon:
+    def __init__(self, latency, connect_latency=0.0):
+        self.latency = latency
+        self.connect_latency = connect_latency
+        self.headers = {}
+        self.timeouts = []
+
+    def post(self, url, data=None, files=None, headers=None, timeout=None):
+        import requests
+
+        self.timeouts.append(timeout)
+        connect, read = timeout if isinstance(timeout, tuple) else (timeout, timeout)
+        if self.connect_latency > connect:
+            raise requests.exceptions.ConnectTimeout("connect timed out")
+        if self.latency > read:
+            raise requests.exceptions.ReadTimeout("read timed out")
+        return _FakeResponse({"kaId": "7", "status": "confirmed"})
+
+
+def _client_with(client_module, daemon, **kwargs):
+    client = client_module.DKGClient(timeout=1, long_mutation_timeout=10, **kwargs)
+    client._session = daemon
+    return client
+
+
+def test_publish_outlasting_read_timeout_is_not_reported_as_failed(client_module):
+    daemon = _SlowDaemon(latency=5)
+    client = _client_with(client_module, daemon)
+    result = client.publish_finalized_assertion("my-ka", "cg1")
+    assert result == {"kaId": "7", "status": "confirmed"}
+    assert not client_module._client_result_failed(result)
+    # Connecting keeps the read deadline; only the wait for the answer is long.
+    assert daemon.timeouts == [(1, 10)]
+
+
+def test_quick_post_still_fails_at_read_timeout(client_module):
+    # Negative control: the same latency on a quick mutation is a real timeout.
+    daemon = _SlowDaemon(latency=5)
+    client = _client_with(client_module, daemon)
+    result = client.write_assertion("my-ka", "cg1", [{"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"}])
+    assert result["success"] is False
+    assert daemon.timeouts == [1]
+
+
+@pytest.mark.parametrize("call", [
+    lambda c: c.publish_finalized_assertion("my-ka", "cg1"),
+    lambda c: c.promote_assertion("my-ka", "cg1"),
+    lambda c: c.create_assertion("cg1", "my-ka", quads=[{"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"}], also_share_swm=True),
+])
+def test_long_mutation_past_its_deadline_reports_outcome_unknown(client_module, call):
+    daemon = _SlowDaemon(latency=60)
+    client = _client_with(client_module, daemon)
+    result = call(client)
+    assert result["outcomeUnknown"] is True
+    assert "dkg_knowledge_asset_history" in result["warning"]
+    assert not client_module._client_result_failed(result)
+
+
+def test_create_without_share_stays_in_read_class(client_module):
+    daemon = _SlowDaemon(latency=0)
+    client = _client_with(client_module, daemon)
+    client.create_assertion("cg1", "my-ka", quads=[{"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"}])
+    assert daemon.timeouts == [1]
+
+
+def test_long_mutation_that_never_connected_is_a_failure(client_module):
+    # ConnectTimeout: the request never reached the daemon, so the outcome is known.
+    daemon = _SlowDaemon(latency=0, connect_latency=5)
+    client = _client_with(client_module, daemon)
+    result = client.publish_finalized_assertion("my-ka", "cg1")
+    assert result["success"] is False
+    assert "outcomeUnknown" not in result
+
+
+def test_import_file_uses_long_class_and_reports_outcome_unknown(client_module, tmp_path, monkeypatch):
+    import requests
+
+    source = tmp_path / "notes.md"
+    source.write_text("# Notes", encoding="utf-8")
+    daemon = _SlowDaemon(latency=5)
+    monkeypatch.setattr(requests, "post", daemon.post)
+    client = _client_with(client_module, daemon, import_roots=[str(tmp_path)])
+
+    assert client.import_assertion_file("my-ka", "cg1", str(source)) == {"kaId": "7", "status": "confirmed"}
+    assert daemon.timeouts == [(1, 10)]
+
+    daemon.latency = 60
+    result = client.import_assertion_file("my-ka", "cg1", str(source))
+    assert result["outcomeUnknown"] is True
+    assert "/api/knowledge-assets/my-ka/wm/import-file" in result["warning"]

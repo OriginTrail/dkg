@@ -129,6 +129,19 @@ create/write, or approved join activates them:
 dkg subscribe <context-graph-id>
 ```
 
+`<context-graph-id>` may also be the on-chain id that `dkg context-graph list`
+shows in its `#` column (`dkg subscribe 32` or `dkg subscribe '#32'`). The node
+resolves it through ContextGraphStorage to the graph's name hash, or to its
+verified id when the node already knows it, and subscribes that; the number
+itself never becomes a subscription. An id that does not exist, a deactivated
+graph, a graph without a name hash, and a private graph are refused with the
+reason. `--save` stores the name hash or the verified id, not the number. A
+`#` needs quoting in most shells, and `32` alone still means the existing
+subscription literally named "32" if there is one. `POST
+/api/context-graph/unsubscribe` and `dkg context-graph catchup-status` accept
+the same on-chain ids; unsubscribing one that is not subscribed on the node
+answers 404 `CONTEXT_GRAPH_NOT_SUBSCRIBED`.
+
 Core nodes temporarily retain automatic subscription for newly discovered
 graphs because they are responsible for Storage ACK custody and the independent
 host-mode path does not yet replace every member-subscription handler. A

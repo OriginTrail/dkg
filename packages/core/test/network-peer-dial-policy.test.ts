@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
 import {
-  NETWORK_MISMATCH_DIAL_DENY_TTL_MS,
-  NETWORK_MISMATCH_INBOUND_REFUSAL_MS,
+  NETWORK_MISMATCH_DENY_DEFAULT_MS,
   NetworkPeerDialPolicy,
   peerIdFromRelayAddress,
 } from '../src/network-peer-dial-policy.js';
@@ -124,12 +124,12 @@ describe('NetworkPeerDialPolicy — circuit paths', () => {
 });
 
 describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
-  it('refuses outbound for the TTL and inbound only for the quarantine window', () => {
+  it('refuses both directions for exactly the quarantine window it is given', () => {
     let now = 1_000;
-    const mismatch = policy({ now: () => now, mismatchDenyTtlMs: 60_000, mismatchInboundRefusalMs: 10_000 });
+    const mismatch = policy({ now: () => now });
     const gater = mismatch.connectionGater;
 
-    expect(mismatch.denyAfterNetworkMismatch(PEER)).toBe(true);
+    expect(mismatch.denyAfterNetworkMismatch(PEER, 10_000)).toBe(true);
     expect(mismatch.dialDenialReason(PEER)).toBe('network-identity-mismatch');
     expect(gater.denyDialPeer(id(PEER))).toBe(true);
     expect(gater.denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${PEER}`))).toBe(true);
@@ -139,45 +139,59 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     // would only sit open (or be reused by relay discovery as a reservation).
     expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
 
-    now += 10_000;
-    // Quarantine over: a peer whose operator fixed its network config can dial
-    // in and re-run the identity proof, while we still do not dial it.
-    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
+    now += 9_999;
     expect(gater.denyDialPeer(id(PEER))).toBe(true);
+    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
 
-    now += 49_999;
-    expect(gater.denyDialPeer(id(PEER))).toBe(true);
+    // Quarantine over: the next dial re-runs the identity proof, so a peer
+    // whose operator fixed its network config is reachable again and its
+    // addresses are storable, in both directions.
     now += 1;
     expect(gater.denyDialPeer(id(PEER))).toBe(false);
+    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
+    expect(gater.filterMultiaddrForPeer(id(PEER), id('/ip4/1.2.3.4/tcp/9090'))).toBe(true);
     expect(mismatch.dialDenialReason(PEER)).toBeUndefined();
+
+    // A still-foreign peer fails that proof again, and everything the lapse
+    // released is back for another window: both directions and the address
+    // filter (the admission coordinator also forgets its stored addresses).
+    expect(mismatch.denyAfterNetworkMismatch(PEER, 10_000)).toBe(true);
+    expect(gater.denyDialPeer(id(PEER))).toBe(true);
+    expect(gater.denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${PEER}`))).toBe(true);
+    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
+    expect(gater.filterMultiaddrForPeer(id(PEER), id('/ip4/1.2.3.4/tcp/9090'))).toBe(false);
+    now += 10_000;
+    expect(gater.denyDialPeer(id(PEER))).toBe(false);
+    expect(gater.filterMultiaddrForPeer(id(PEER), id('/ip4/1.2.3.4/tcp/9090'))).toBe(true);
   });
 
-  it('defaults the inbound refusal to the admission quarantine and caps it at the TTL', () => {
+  it('defaults to the 5-minute admission quarantine and ignores an invalid window', () => {
     let now = 0;
     const defaults = policy({ now: () => now });
     defaults.denyAfterNetworkMismatch(PEER);
-    now = NETWORK_MISMATCH_INBOUND_REFUSAL_MS - 1;
-    expect(defaults.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
-    now = NETWORK_MISMATCH_INBOUND_REFUSAL_MS;
-    expect(defaults.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
+    defaults.denyAfterNetworkMismatch(OTHER_PEER, Number.NaN);
+    now = NETWORK_MISMATCH_DENY_DEFAULT_MS - 1;
     expect(defaults.connectionGater.denyDialPeer(id(PEER))).toBe(true);
+    expect(defaults.connectionGater.denyInboundEncryptedConnection(id(OTHER_PEER))).toBe(true);
+    now = NETWORK_MISMATCH_DENY_DEFAULT_MS;
+    expect(defaults.connectionGater.denyDialPeer(id(PEER))).toBe(false);
+    expect(defaults.connectionGater.denyInboundEncryptedConnection(id(OTHER_PEER))).toBe(false);
+    expect(NETWORK_MISMATCH_DENY_DEFAULT_MS).toBe(5 * 60_000);
 
     now = 0;
-    const shortTtl = policy({ now: () => now, mismatchDenyTtlMs: 1_000 });
-    shortTtl.denyAfterNetworkMismatch(PEER);
-    now = 999;
-    expect(shortTtl.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
+    const configured = policy({ now: () => now, defaultMismatchDenyMs: 1_000 });
+    configured.denyAfterNetworkMismatch(PEER);
     now = 1_000;
-    expect(shortTtl.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
+    expect(configured.dialDenialReason(PEER)).toBeUndefined();
   });
 
-  it('refreshes the TTL on a repeated rejection', () => {
+  it('refreshes the window on a repeated rejection', () => {
     let now = 0;
-    const mismatch = policy({ now: () => now, mismatchDenyTtlMs: 1_000 });
+    const mismatch = policy({ now: () => now });
 
-    mismatch.denyAfterNetworkMismatch(PEER);
+    mismatch.denyAfterNetworkMismatch(PEER, 1_000);
     now = 900;
-    mismatch.denyAfterNetworkMismatch(PEER);
+    mismatch.denyAfterNetworkMismatch(PEER, 1_000);
     now = 1_500;
     expect(mismatch.dialDenialReason(PEER)).toBe('network-identity-mismatch');
   });
@@ -188,15 +202,52 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     mismatch.denyAfterNetworkMismatch(PEER);
     mismatch.clearNetworkMismatchDenial(PEER);
     expect(mismatch.connectionGater.denyDialPeer(id(PEER))).toBe(false);
+    expect(mismatch.connectionGater.denyInboundEncryptedConnection(id(PEER))).toBe(false);
   });
 
-  it('never records the node itself, a configured relay or an unparseable id', () => {
+  it('never records the node itself or an unparseable id', () => {
     const mismatch = policy();
 
     expect(mismatch.denyAfterNetworkMismatch(SELF)).toBe(false);
-    expect(mismatch.denyAfterNetworkMismatch(BASE_RELAY)).toBe(false);
     expect(mismatch.denyAfterNetworkMismatch('not-a-peer-id')).toBe(false);
-    expect(mismatch.connectionGater.denyDialPeer(id(BASE_RELAY))).toBe(false);
+    expect(mismatch.connectionGater.denyDialPeer(id(SELF))).toBe(false);
+  });
+
+  it('denies a configured relay that fails the identity proof, and says so', () => {
+    // The classic misconfiguration: `network` switched to mainnet, `relay`
+    // still a testnet relay. The proof says it is foreign; the config does not
+    // get to override that, or the node redials it forever.
+    let now = 0;
+    const warnings: string[] = [];
+    const logs: string[] = [];
+    const mismatch = policy({
+      now: () => now,
+      configuredRelayPeerIds: [BASE_RELAY, TESTNET_RELAY_A],
+      log: (message) => logs.push(message),
+      warn: (message) => warnings.push(message),
+    });
+    const gater = mismatch.connectionGater;
+
+    // Statically exempt: another network's config listing it is not enough.
+    expect(mismatch.dialDenialReason(TESTNET_RELAY_A)).toBeUndefined();
+
+    expect(mismatch.denyAfterNetworkMismatch(TESTNET_RELAY_A, 300_000)).toBe(true);
+    expect(warnings).toEqual([
+      'Network isolation: configured relay peer=Gq6hB57M failed the network identity proof; '
+        + 'refusing it for 300s. Check that config.relay and preferredRelays belong to the active network.',
+    ]);
+    expect(gater.denyDialPeer(id(TESTNET_RELAY_A))).toBe(true);
+    expect(gater.denyDialMultiaddr(id(TESTNET_RELAY_A_ADDR))).toBe(true);
+    expect(gater.filterMultiaddrForPeer(id(TESTNET_RELAY_A), id('/ip4/178.104.54.178/tcp/9090'))).toBe(false);
+    expect(gater.filterMultiaddrForPeer(id(PEER), id(`${TESTNET_RELAY_A_ADDR}/p2p-circuit`))).toBe(false);
+    expect(logs).toEqual([
+      'Network isolation: refusing outbound connection peer=Gq6hB57M reason=network-identity-mismatch',
+    ]);
+
+    // Passing the proof later lifts it at once.
+    mismatch.clearNetworkMismatchDenial(TESTNET_RELAY_A);
+    expect(gater.denyDialPeer(id(TESTNET_RELAY_A))).toBe(false);
+    expect(gater.filterMultiaddrForPeer(id(TESTNET_RELAY_A), id('/ip4/178.104.54.178/tcp/9090'))).toBe(true);
   });
 
   it('bounds the remembered set by evicting the oldest rejection', () => {
@@ -211,11 +262,22 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     expect(mismatch.dialDenialReason(THIRD_PEER)).toBe('network-identity-mismatch');
   });
 
-  it('aligns its windows with the 5-minute admission quarantine by default', () => {
-    // A shorter dial window reopens dials while admission still short-circuits
-    // the peer as rejected, which leaves the redialed socket open.
-    expect(NETWORK_MISMATCH_DIAL_DENY_TTL_MS).toBeGreaterThanOrEqual(5 * 60_000);
-    expect(NETWORK_MISMATCH_INBOUND_REFUSAL_MS).toBe(5 * 60_000);
+  it('matches a direct dial address by its canonical peer id', () => {
+    const mismatch = policy();
+    mismatch.denyAfterNetworkMismatch(PEER);
+    const { denyDialMultiaddr } = mismatch.connectionGater;
+
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${PEER}`))).toBe(true);
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${OTHER_PEER}`))).toBe(false);
+    expect(denyDialMultiaddr(id('/ip4/1.2.3.4/tcp/9090/p2p/not-a-peer-id'))).toBe(false);
+
+    // The same peers in their CIDv1 (base32) text form: the denial is keyed by
+    // the canonical id, so a raw string compare would miss the denied one.
+    const peerCid = peerIdFromString(PEER).toCID().toString();
+    const otherPeerCid = peerIdFromString(OTHER_PEER).toCID().toString();
+    expect(peerCid).toMatch(/^bafz/);
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${peerCid}`))).toBe(true);
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${otherPeerCid}`))).toBe(false);
   });
 });
 

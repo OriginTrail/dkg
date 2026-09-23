@@ -216,6 +216,19 @@ export {
   type ContextGraphListOnChainFacts,
   type ContextGraphStorageDiscoveryStore,
 } from './context-graph-storage-discovery.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type ResolvedContextGraphOnChainId,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
 export type { ListContextGraphsRow } from './context-graph-list-authority-enrichment.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
