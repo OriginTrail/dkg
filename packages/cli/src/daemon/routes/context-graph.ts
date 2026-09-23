@@ -192,6 +192,7 @@ import {
   releaseCatchupJob,
 } from '../catchup-telemetry.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
+import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -2399,10 +2400,33 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (!requestedContextGraphId) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
     }
-    // A name hash this node resolved no longer keys any row: its subscription
-    // moved to the verified cleartext id, which is what must be stopped.
-    const contextGraphId: string =
-      agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? requestedContextGraphId;
+    // An on-chain id (`32`, `#32`) names the row the subscribe route created
+    // for it. Success means that subscription stopped: an on-chain id whose
+    // row is not subscribed here, or one the caller may not follow to a
+    // cleartext id, gets the same refusal, so the refusal reveals nothing.
+    const onChainLookup = agent.lookupContextGraphOnChainIdReference?.(requestedContextGraphId)
+      ?? { kind: 'as-given' as const };
+    let contextGraphId: string;
+    if (onChainLookup.kind === 'as-given') {
+      // A name hash this node resolved no longer keys any row: its
+      // subscription moved to the verified cleartext id, which is what must
+      // be stopped.
+      contextGraphId = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? requestedContextGraphId;
+    } else {
+      const stoppable = onChainLookup.kind === 'held'
+        && agent.getSubscribedContextGraphs()?.get(onChainLookup.contextGraphId)?.subscribed === true
+        && await mayFollowOnChainIdToRow(agent, onChainLookup, {
+          isNodeAdmin: isNodeAdminCaller(),
+          agentAddress: requestAgentAddress,
+        });
+      if (!stoppable) {
+        return jsonResponse(res, 404, {
+          error: `On-chain Context Graph #${onChainLookup.onChainId} is not subscribed on this node.`,
+          code: 'CONTEXT_GRAPH_NOT_SUBSCRIBED',
+        });
+      }
+      contextGraphId = onChainLookup.contextGraphId;
+    }
     agent.unsubscribeFromContextGraph(contextGraphId);
     const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
     return jsonResponse(res, 200, {

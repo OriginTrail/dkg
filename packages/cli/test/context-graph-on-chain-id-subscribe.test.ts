@@ -163,6 +163,14 @@ async function startRoute(agent: DKGAgent, options: { callerAgentAddress?: strin
     );
     return { status: response.status, body: await response.json() as any };
   };
+  const unsubscribe = async (contextGraphId: unknown) => {
+    const response = await fetch(`${base}/api/context-graph/unsubscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contextGraphId }),
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
   const settled = async (jobId: string) => {
     for (let i = 0; i < 300; i += 1) {
       if (catchupTracker.jobs.get(jobId)?.finishedAt) break;
@@ -170,7 +178,7 @@ async function startRoute(agent: DKGAgent, options: { callerAgentAddress?: strin
     }
     return catchupTracker.jobs.get(jobId);
   };
-  return { subscribe, catchupStatus, settled, catchupTracker };
+  return { subscribe, unsubscribe, catchupStatus, settled, catchupTracker };
 }
 
 function useEmptyCatchupRunner(): string[] {
@@ -373,6 +381,133 @@ describe('subscribing a Context Graph by its on-chain numeric id', () => {
     }
     expect(JSON.stringify(answers)).not.toContain(CLEARTEXT);
     expect(member.getSubscribedContextGraphs().get(CLEARTEXT)?.subscribed).not.toBe(true);
+  }, 60_000);
+});
+
+const NOT_SUBSCRIBED = {
+  error: 'On-chain Context Graph #32 is not subscribed on this node.',
+  code: 'CONTEXT_GRAPH_NOT_SUBSCRIBED',
+};
+
+/** The agent's live sync scope (protected on the agent). */
+function syncScope(agent: DKGAgent): readonly string[] {
+  return (agent as unknown as { config: { syncContextGraphs?: string[] } }).config.syncContextGraphs ?? [];
+}
+
+describe('unsubscribing a Context Graph by its on-chain numeric id', () => {
+  it('stops the subscription `dkg subscribe 32` created and names it', async () => {
+    useEmptyCatchupRunner();
+    const agent = await startNode(await gnosisShapedChain());
+    const route = await startRoute(agent);
+    expect((await route.subscribe('32')).body.subscribed).toBe(NAME_HASH);
+    expect(syncScope(agent)).toContain(NAME_HASH);
+
+    const { status, body } = await route.unsubscribe('32');
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      unsubscribed: NAME_HASH,
+      requestedContextGraphId: '32',
+      subscribed: false,
+      coreHosted: false,
+    });
+    expect(agent.getSubscribedContextGraphs().get(NAME_HASH)?.subscribed).toBe(false);
+    expect(syncScope(agent)).not.toContain(NAME_HASH);
+
+    // Nothing is subscribed any more: saying so is not a success.
+    expect(await route.unsubscribe('#32')).toEqual({ status: 404, body: NOT_SUBSCRIBED });
+  }, 60_000);
+
+  it('finds the row by its bound commitment after a restart, before discovery reloads the chain facts', async () => {
+    useEmptyCatchupRunner();
+    const agent = await startNode(await gnosisShapedChain());
+    const route = await startRoute(agent);
+    await route.subscribe('#32');
+    (agent as unknown as { onChainContextGraphFacts: Map<string, unknown> }).onChainContextGraphFacts.delete('32');
+
+    const { status, body } = await route.unsubscribe('#32');
+    expect(status).toBe(200);
+    expect(body.unsubscribed).toBe(NAME_HASH);
+    expect(agent.getSubscribedContextGraphs().get(NAME_HASH)?.subscribed).toBe(false);
+  }, 60_000);
+
+  it('stops a real graph named "32" for `32`, and the on-chain graph for `#32`', async () => {
+    useEmptyCatchupRunner();
+    const agent = await startNode(await gnosisShapedChain());
+    await agent.createContextGraph({ id: '32', name: 'thirty-two' });
+    const route = await startRoute(agent);
+    expect((await route.subscribe('#32')).body.subscribed).toBe(NAME_HASH);
+
+    expect(await route.unsubscribe('32')).toMatchObject({ status: 200, body: { unsubscribed: '32', subscribed: false } });
+    expect(agent.getSubscribedContextGraphs().get(NAME_HASH)?.subscribed).toBe(true);
+    expect(await route.unsubscribe('#32')).toMatchObject({
+      status: 200,
+      body: { unsubscribed: NAME_HASH, requestedContextGraphId: '#32', subscribed: false },
+    });
+  }, 60_000);
+
+  it('refuses an on-chain id this node keeps no subscription for', async () => {
+    useEmptyCatchupRunner();
+    const agent = await startNode(await gnosisShapedChain());
+    await agent.discoverContextGraphsFromStorage();
+    const route = await startRoute(agent);
+    // Discovered, not subscribed.
+    expect(await route.unsubscribe('#32')).toEqual({ status: 404, body: NOT_SUBSCRIBED });
+    // Never seen.
+    expect(await route.unsubscribe('#99')).toEqual({
+      status: 404,
+      body: { ...NOT_SUBSCRIBED, error: 'On-chain Context Graph #99 is not subscribed on this node.' },
+    });
+    // A literal id keeps its old, idempotent answer.
+    expect(await route.unsubscribe('acme')).toEqual({
+      status: 200,
+      body: { unsubscribed: 'acme', subscribed: false, coreHosted: false },
+    });
+  }, 60_000);
+
+  it('answers a caller who may not read a private graph as if nothing were subscribed', async () => {
+    useEmptyCatchupRunner();
+    const member = await startNode(await gnosisShapedChain({ accessPolicy: 1 }));
+    await member.discoverContextGraphsFromStorage();
+    await member.adoptVerifiedContextGraphCleartext({ nameHash: NAME_HASH, onChainId: '32' }, CLEARTEXT, 'local');
+    member.subscribeToContextGraph(CLEARTEXT, { syncMode: 'on-demand', onChainId: '32' });
+    const outsider = await startRoute(member, { callerAgentAddress: ethers.Wallet.createRandom().address });
+
+    const refused = await outsider.unsubscribe('#32');
+    expect(refused).toEqual({ status: 404, body: NOT_SUBSCRIBED });
+    expect(JSON.stringify(refused)).not.toContain(CLEARTEXT);
+    expect(member.getSubscribedContextGraphs().get(CLEARTEXT)?.subscribed).toBe(true);
+
+    // The node operator may follow it.
+    const operator = await startRoute(member);
+    expect(await operator.unsubscribe('#32')).toMatchObject({
+      status: 200,
+      body: { unsubscribed: CLEARTEXT, requestedContextGraphId: '#32', subscribed: false },
+    });
+  }, 60_000);
+
+  it('shows a private graph\'s catch-up job by its on-chain id only to a caller who may read it', async () => {
+    useEmptyCatchupRunner();
+    const member = await startNode(await gnosisShapedChain({ accessPolicy: 1 }));
+    await member.discoverContextGraphsFromStorage();
+    await member.adoptVerifiedContextGraphCleartext({ nameHash: NAME_HASH, onChainId: '32' }, CLEARTEXT, 'local');
+    const outsider = await startRoute(member, { callerAgentAddress: ethers.Wallet.createRandom().address });
+    const job = {
+      jobId: 'job-private', contextGraphId: CLEARTEXT, includeWorkspace: true, status: 'done',
+      queuedAt: 1, startedAt: 1, finishedAt: 2,
+    };
+    outsider.catchupTracker.jobs.set(job.jobId, job);
+    outsider.catchupTracker.latestByContextGraph.set(CLEARTEXT, job.jobId);
+
+    const hidden = await outsider.catchupStatus('#32');
+    expect(hidden).toEqual({ status: 404, body: { error: 'No catch-up job found' } });
+
+    const operator = await startRoute(member);
+    operator.catchupTracker.jobs.set(job.jobId, job);
+    operator.catchupTracker.latestByContextGraph.set(CLEARTEXT, job.jobId);
+    expect(await operator.catchupStatus('#32')).toMatchObject({
+      status: 200,
+      body: { jobId: 'job-private', contextGraphId: CLEARTEXT },
+    });
   }, 60_000);
 });
 
