@@ -7,12 +7,23 @@ import { parseCircuitRelayPeerIds } from './relay-path.js';
  * refused, in both directions, when the caller passes none.
  *
  * The agent passes the admission quarantine it just applied, so the two
- * windows share one source and cannot drift. They must coincide: while the
- * quarantine lasts, admission short-circuits the peer as rejected without
- * probing or closing, so a connection in either direction would only sit open
- * (and circuit-relay discovery could reuse an inbound one as a reservation).
- * Once it lapses, the next dial re-runs the proof: a peer whose operator fixed
- * its network config is admitted, and a still-foreign one is refused again.
+ * windows share one source and cannot drift. The refusal must last at least
+ * the quarantine: while it lasts, admission short-circuits the peer as
+ * rejected without probing or closing, so a connection in either direction
+ * would only sit open (and circuit-relay discovery could reuse an inbound one
+ * as a reservation). Once it lapses, the next dial re-runs the proof: a peer
+ * whose operator fixed its network config is admitted, and a still-foreign one
+ * is refused again.
+ *
+ * Refusing for exactly the quarantine, not longer, is a deliberate choice
+ * (#2740 kept outbound refused for 30 min). The window is the re-admission
+ * latency, and it now also covers a configured relay that failed the proof, so
+ * a longer one would keep a node off its own relay long after that relay was
+ * fixed. The accepted cost: once per window, a still-foreign peer that kad-dht
+ * or discovery re-offers gets one outbound dial and one identity probe before
+ * it is refused again. The other bundled networks' relays are on the static
+ * list, refused permanently, and never pay it; remembered peers are capped at
+ * {@link NETWORK_MISMATCH_DIAL_DENY_MAX_PEERS}.
  */
 export const NETWORK_MISMATCH_DENY_DEFAULT_MS = 5 * 60_000;
 
