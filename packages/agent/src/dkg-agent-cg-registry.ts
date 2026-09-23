@@ -737,7 +737,29 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<string | undefined> {
     const direct = this.resolveLocalCgIdByOnChainId(onChainContextGraphId);
-    if (direct) return direct;
+    const getNameHash = this.chain.getContextGraphNameHash;
+    let committedNameHash: string | null | undefined;
+    if (direct) {
+      if (typeof getNameHash !== 'function') return direct;
+      committedNameHash = await raceContextGraphBindingAgainstAbort(
+        getNameHash.call(
+          this.chain,
+          onChainContextGraphId,
+          signal ? { signal } : undefined,
+        ),
+        signal,
+      );
+      // An opt-out graph has no on-chain name commitment. Keep the existing
+      // numeric subscription binding for that legacy case; a committed slot
+      // must match the current name hash before it can direct proof repair.
+      if (committedNameHash === null) return direct;
+      if (committedNameHash && /^0x[0-9a-fA-F]{64}$/.test(committedNameHash)
+        && localContextGraphIdMatchesCommittedNameHash(
+          direct,
+          committedNameHash,
+          (candidate) => this.isWireIdKeyedSubscription(candidate),
+        )) return direct;
+    }
 
     const cacheKey = onChainContextGraphId.toString();
     const isSubscribed = (localCgId: string) =>
@@ -752,10 +774,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       this.contextGraphBindingState.rememberChainAttestedResolutionMiss(cacheKey);
       return undefined;
     };
-    const getNameHash = this.chain.getContextGraphNameHash;
     if (typeof getNameHash !== 'function') return rememberMiss();
 
-    const committedNameHash = await raceContextGraphBindingAgainstAbort(
+    committedNameHash ??= await raceContextGraphBindingAgainstAbort(
       getNameHash.call(
         this.chain,
         onChainContextGraphId,
@@ -787,7 +808,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             FILTER(STR(?onChainId) = ${sparqlString(cacheKey)})
           }
         }
-        LIMIT 2
+        LIMIT 256
       `, {
         signal,
         source: 'agent.contextGraph.resolveChainAttestedBinding.durableIndex',

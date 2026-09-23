@@ -64,6 +64,9 @@ vi.mock('node:worker_threads', async (importOriginal) => ({
 }));
 
 const { createCatchupRunner } = await import('../src/catchup-runner.js');
+// The real admission predicate, so bridge doubles select through the agent's
+// own filter rather than a test copy of it.
+const { DKGAgent: RealDKGAgent } = await import('@origintrail-official/dkg-agent');
 
 const stubAgent = {} as unknown as DKGAgent;
 
@@ -181,6 +184,8 @@ describe('WorkerCatchupRunner agent bridge', () => {
       ensurePeerConnected: async () => {},
       primeCatchupConnections: async () => {},
       selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      listAdmittedConnectedPeers: RealDKGAgent.prototype.listAdmittedConnectedPeers,
+      ensurePeerAdmittedForRecovery: async () => true,
       node: { libp2p: { getConnections: () => [] } },
       syncFromPeerDetailed: async (...args: unknown[]) => {
         calls.durable.push(args);
@@ -413,10 +418,12 @@ describe('WorkerCatchupRunner agent bridge', () => {
   it('selects catch-up peers only from network-admitted connections', async () => {
     // 2026-09-23 Base mainnet: a subscribe fanned shared-memory sync out to
     // every live connection, including testnet relays that had failed the
-    // network-identity proof. Same predicate as the in-process catch-up.
+    // network-identity proof. The bridge runs the agent's own predicate — the
+    // real method, not a copy — which the in-process catch-up also selects from.
     const admissionChecks: string[] = [];
     const selectCalls: unknown[][] = [];
     const { agent } = bridgeAgent({
+      listAdmittedConnectedPeers: RealDKGAgent.prototype.listAdmittedConnectedPeers,
       resolveSyncPeerWithProvenance: async () => ({
         peerId: 'peer-curator',
         provenance: 'metadata',
@@ -425,7 +432,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-other-network'],
       node: {
         libp2p: {
-          getConnections: () => ['peer-curator', 'peer-other-network', 'peer-a'].map(
+          getConnections: () => ['peer-curator', 'peer-other-network', 'peer-a', 'peer-curator'].map(
             (id) => ({ remotePeer: { toString: () => id } }),
           ),
         },
@@ -451,6 +458,33 @@ describe('WorkerCatchupRunner agent bridge', () => {
       .toEqual(['peer-curator', 'peer-a']);
     expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a']);
     expect(posted.result.connectedPeers).toBe(2);
+  });
+
+  it('fails the preparation for an agent without the admission predicate', async () => {
+    // No fallback filter lives in the bridge, so there is one admission rule.
+    // An agent that cannot answer it must not get every live connection
+    // selected unfiltered, including another network's peer.
+    const selectCalls: unknown[][] = [];
+    const { agent } = bridgeAgent({
+      listAdmittedConnectedPeers: undefined,
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-a', 'peer-other-network'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (...args: unknown[]) => {
+        selectCalls.push(args);
+        return args[0] as Array<{ toString(): string }>;
+      },
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-no-predicate', true]);
+
+    expect(posted.result).toBeUndefined();
+    expect(posted.error).toMatch(/listAdmittedConnectedPeers/);
+    expect(selectCalls).toEqual([]);
   });
 
   it('forwards the admission source into both detailed sync calls', async () => {

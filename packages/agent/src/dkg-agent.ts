@@ -102,6 +102,7 @@ import {
   ENTITY_PRED_ALT,
   LegacyKnowledgeAssetReadOnlyError,
   isAllocatableKaAuthorV1,
+  applyMixins,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
@@ -466,7 +467,6 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
-import { applyMixins } from './dkg-agent-apply-mixins.js';
 import { chainAuthorityReadBudgetsOf, resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 import { OntologyBindingSlotClassifier } from './ontology-binding-slot-classifier.js';
 import { peekFinalizedAuthorityColdResolution } from
@@ -1543,6 +1543,7 @@ export class DKGAgent extends DKGAgentBase {
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
       otherNetworkRelays: config.otherNetworkRelays,
+      networkPeerIsolation: config.networkPeerIsolation,
       enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,
       privateKey: keypair.secretKey,
       nodeRole,

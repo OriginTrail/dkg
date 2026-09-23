@@ -1086,6 +1086,7 @@ export class JoinRequestMethods extends DKGAgentBase {
           OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?opKey }
         }
       } LIMIT 1`,
+      { source: 'agent.delegationRefresh.currentState' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return;
 

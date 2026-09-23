@@ -20,6 +20,7 @@ export * from './sparql-operation.js';
 export * from './code-point-order.js';
 export { BoundedLruCache } from './bounded-lru-cache.js';
 export * from './coalescing-recurring-task.js';
+export { applyMixins } from './apply-mixins.js';
 export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
@@ -172,13 +173,8 @@ export {
   isLocalOrInternalHostname,
 } from './node.js';
 // Transport-level network isolation. `peerIdFromRelayAddress` is shared with
-// the CLI, which derives other-network relay ids from bundled network configs;
-// the agent pins its admission quarantine to the inbound refusal window.
-export {
-  NETWORK_MISMATCH_DIAL_DENY_TTL_MS,
-  NETWORK_MISMATCH_INBOUND_REFUSAL_MS,
-  peerIdFromRelayAddress,
-} from './network-peer-dial-policy.js';
+// the CLI, which derives other-network relay ids from bundled network configs.
+export { peerIdFromRelayAddress } from './network-peer-dial-policy.js';
 // NOTE: `isFinitePositiveInteger`, `buildPeerStoreOverrides`, and
 // `buildKadDHTOptions` are intentionally NOT re-exported. They are
 // implementation details of `DKGNode.start()`; the wiring test in
