@@ -2701,11 +2701,15 @@ export class DKGAgent extends DKGAgentBase {
     await this.drainCoreHostRecordings();
     // An in-flight ACK promotion audit stops at its next checkpoint once the
     // runtime is closed; give it the same bounded grace as recordings.
-    const vmPromotionAudit = this.vmPromotionAuditInFlight;
-    if (vmPromotionAudit) {
+    const vmPromotionWork = [
+      this.vmPromotionAuditInFlight,
+      this.vmPromotionUpdateInFlight,
+      ...(this.storageAckPriorVersionFlights?.values() ?? []),
+    ].filter((work): work is Promise<unknown> => work != null);
+    if (vmPromotionWork.length > 0) {
       let auditDrainTimer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
-        vmPromotionAudit.catch(() => undefined),
+        Promise.allSettled(vmPromotionWork),
         new Promise<void>((resolve) => {
           auditDrainTimer = setTimeout(resolve, DKGAgentBase.CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS);
           auditDrainTimer.unref?.();
@@ -2733,6 +2737,7 @@ export class DKGAgent extends DKGAgentBase {
     // via the messengerOutboxTimer cleared just above.
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
+    this.storageAckHandlerRegistered = false;
     // The owner joins both an installed prover and any in-flight WAL/handle
     // creation. A timeout retains ownership and blocks store/network teardown.
     await this.randomSamplingRuntime?.stop();

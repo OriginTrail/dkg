@@ -3,17 +3,26 @@
  *
  *   1. Chain-driven VM reconcile has its own switch: the periodic peer-sync
  *      switch no longer turns Phase D core-hosted recording off.
- *   2. The StorageACK finality gate answers `ok` only after the graph is
+ *   2. The StorageACK finality gate answers `ok` only after the namespace is
  *      durably recorded core-hosted, and declines otherwise.
- *   3. The ACK promotion audit backfills graphs ACKed while VM reconcile was
- *      off (public only, idempotently) and watches ACKed KAs that do not
- *      reach VM.
- *   4. The SWM TTL cleanup keeps StorageACK copies that are not in VM yet.
+ *   3. Retention keys on the node-local signed-ACK ledger: ledgered copies
+ *      outlive the SWM TTL until promoted at their version; unledgered ones
+ *      (declined, synced, gossip-chosen ids) do not.
+ *   4. The ACK promotion audit backfills namespaces ACKed while VM reconcile
+ *      was off (public only, idempotently, without starving on unresolvable
+ *      graphs) and watches ledgered copies that do not reach VM.
  */
 import { afterEach, describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  TypedEventBus,
+  decodeStorageACK,
+  encodePublishIntent,
+  encodeUpdateIntent,
+  isStorageACKDecline,
   MemoryLayer,
   STORAGE_ACK_DECLINE_CODES,
   SYSTEM_CONTEXT_GRAPHS,
@@ -24,17 +33,25 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  STORAGE_ACK_LEDGER_GRAPH,
+  STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
+  StorageACKHandler,
+  computeFlatKCMerkleLeafCountV10,
+  computeFlatKCRootV10,
   generateKnowledgeAssetShareMetadata,
+  storageAckLedgerEntryQuads,
   storeKnowledgeAssetWorkspaceHead,
+  xsdDateTimeLiteral,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
-import { STORAGE_ACK_UNREGISTERED_AT_PREDICATE } from '../src/storage-ack-retention.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const DKG = 'http://dkg.io/ontology/';
 const HOUR = 60 * 60_000;
+const DAY = 24 * HOUR;
 
 function ual(n: number): string {
   return `did:dkg:otp:20430/${AUTHOR}/${n}`;
@@ -57,7 +74,10 @@ type Chain = MockChainAdapter & {
   getContextGraphAccessPolicy: (id: bigint) => Promise<number>;
   isContextGraphActiveOnChain: (id: bigint) => Promise<boolean>;
   getKAContextGraphId: (kaId: bigint) => Promise<bigint>;
+  getMerkleRootCount: (kaId: bigint) => Promise<bigint>;
 };
+
+type AuditStatus = Record<string, number | string | boolean | null>;
 
 interface Internals {
   store: TripleStore;
@@ -76,16 +96,35 @@ interface Internals {
     swmGraphId?: string;
     operation: 'publish' | 'update';
   }): Promise<{ ok: boolean; code?: string; message?: string }>;
-  runVmPromotionAudit(): Promise<Record<string, number | string | null>>;
-  vmPromotionAuditStatus: Record<string, number | string | null>;
+  ensureStorageAckLedgerReady(): Promise<boolean>;
+  runVmPromotionAudit(): Promise<AuditStatus>;
   vmReconcileEnabled(): boolean;
   cleanupExpiredSharedMemory(): Promise<number>;
+  recordStorageAckDecline(code: string, now?: number): void;
+  storageAckDeclinesLastHour(now?: number): Record<string, number>;
+  reconcileStorageAckCopy(candidate: unknown, onChainId: string): Promise<boolean>;
+  promotePendingStorageAckUpdates(now?: number): Promise<{ checked: number; promoted: number }>;
+  promoteStorageAckPriorVersion(request: {
+    contextGraphId: string;
+    swmGraphId: string;
+    kaUal: string;
+    assertionVersion: string;
+  }): void;
+  storageAckPriorVersionFlights: Map<string, Promise<unknown>>;
+}
+
+interface SeededCopy {
+  op: string;
+  metaGraph: string;
+  assertionGraph: string;
+  head: string;
 }
 
 describe('core VM-promotion guarantees', () => {
   let agent: DKGAgent | null = null;
   const saved: ContextGraphSubscriptionRecord[] = [];
   let failSaves = false;
+  const restoreStatics: Array<() => void> = [];
 
   afterEach(async () => {
     if (agent) {
@@ -94,10 +133,18 @@ describe('core VM-promotion guarantees', () => {
     }
     saved.length = 0;
     failSaves = false;
+    for (const restore of restoreStatics.splice(0)) restore();
   });
 
+  function setStatic(name: string, value: number): void {
+    const statics = DKGAgentBase as unknown as Record<string, number>;
+    const previous = statics[name];
+    statics[name] = value;
+    restoreStatics.push(() => { statics[name] = previous!; });
+  }
+
   async function boot(config: Record<string, unknown> = {}): Promise<Internals> {
-    const chain = new MockChainAdapter();
+    const chain = new MockChainAdapter('otp:20430');
     agent = await DKGAgent.create({
       name: 'VmPromotionGate',
       chainAdapter: chain,
@@ -120,6 +167,103 @@ describe('core VM-promotion guarantees', () => {
     internals.chain.isContextGraphActiveOnChain = async () => true;
     internals.chain.getContextGraphAccessPolicy = async () => 0;
     return internals;
+  }
+
+  async function seedCopy(
+    store: TripleStore,
+    input: {
+      namespace: string;
+      n: number;
+      ageMs: number;
+      version?: number;
+      confirmedVersion?: number;
+      ledger?: 'signed' | 'none';
+      target?: string;
+      registered?: boolean;
+    },
+  ): Promise<SeededCopy> {
+    const version = input.version ?? 1;
+    const metaGraph = contextGraphSharedMemoryMetaUri(input.namespace);
+    const shareOperationId = `storage-ack-${input.namespace}-${input.n}-${version}`;
+    const publishedAt = new Date(Date.now() - input.ageMs);
+    const metadata = generateKnowledgeAssetShareMetadata({
+      shareOperationId,
+      contextGraphId: input.namespace,
+      kaUal: ual(input.n),
+      assertionVersion: version,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      publisherPeerId: 'publisher-peer',
+      accessPolicy: 'public',
+      allowedPeers: [],
+      timestamp: publishedAt,
+    }, metaGraph);
+    await store.insert(metadata);
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: input.namespace,
+      kaUal: ual(input.n),
+      assertionVersion: version,
+      shareOperationId,
+    });
+    const assertionGraph = knowledgeAssetLayerGraphUri(
+      input.namespace,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(ual(input.n), version),
+    );
+    await store.insert([{
+      subject: `urn:entity:${input.n}`,
+      predicate: 'http://schema.org/name',
+      object: `"ka ${input.n} v${version}"`,
+      graph: assertionGraph,
+    }]);
+    const op = metadata[0]!.subject;
+    if ((input.ledger ?? 'signed') === 'signed') {
+      await store.insert(storageAckLedgerEntryQuads({
+        operationSubject: op,
+        namespace: input.namespace,
+        metaGraph,
+        contextGraphId: input.target ?? '55',
+        kaUal: ual(input.n),
+        assertionVersion: version,
+        operation: version > 1 ? 'update' : 'publish',
+        signedAt: publishedAt,
+      }));
+      if (input.registered) {
+        await store.insert([{
+          subject: op,
+          predicate: LEDGER.registeredAt,
+          object: xsdDateTimeLiteral(new Date()),
+          graph: STORAGE_ACK_LEDGER_GRAPH,
+        }]);
+      }
+    }
+    if (input.confirmedVersion !== undefined) {
+      await store.insert([
+        { subject: ual(input.n), predicate: `${DKG}status`, object: '"confirmed"', graph: contextGraphMetaUri(input.namespace) },
+        {
+          subject: ual(input.n),
+          predicate: `${DKG}assertionVersion`,
+          object: `"${input.confirmedVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          graph: contextGraphMetaUri(input.namespace),
+        },
+      ]);
+    }
+    return { op, metaGraph, assertionGraph, head: `${ual(input.n)}#dkg-swm-head` };
+  }
+
+  async function count(store: TripleStore, graph: string, subject?: string): Promise<number> {
+    const pattern = subject ? `<${subject}> ?p ?o` : '?s ?p ?o';
+    const result = await store.query(`SELECT * WHERE { GRAPH <${graph}> { ${pattern} } }`);
+    return result.type === 'bindings' ? result.bindings.length : 0;
+  }
+
+  async function ledgerHas(store: TripleStore, op: string, predicate: string): Promise<boolean> {
+    const result = await store.query(
+      `ASK { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <${op}> <${predicate}> ?value } }`,
+    );
+    return result.type === 'boolean' && result.value;
   }
 
   describe('switch decoupling', () => {
@@ -171,6 +315,17 @@ describe('core VM-promotion guarantees', () => {
       expect(saved.filter((record) => record.id === 'public-cg')).toHaveLength(writesAfterFirst);
     });
 
+    it('records the row under the ACK copy namespace: the numeric id for a direct publish', async () => {
+      const internals = await boot();
+      internals.subscribedContextGraphs.set('member-name', { subscribed: true, onChainId: '42' });
+
+      await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '42', operation: 'publish' }))
+        .resolves.toEqual({ ok: true });
+
+      expect(internals.subscribedContextGraphs.get('42')).toMatchObject({ coreHosted: true, onChainId: '42' });
+      expect(internals.subscribedContextGraphs.get('member-name')?.coreHosted).toBeUndefined();
+    });
+
     it('shares one policy read and store write across a burst of first ACKs for a graph', async () => {
       const internals = await boot();
       let releasePolicy!: () => void;
@@ -211,12 +366,37 @@ describe('core VM-promotion guarantees', () => {
       expect(internals.subscribedContextGraphs.has('curated-cg')).toBe(false);
     });
 
-    it('declines transiently while the access policy cannot be read', async () => {
+    it('declines permanently when the namespace reconciles another live graph', async () => {
+      const internals = await boot();
+      internals.subscribedContextGraphs.set('shared-name', { subscribed: true, onChainId: '7' });
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '42',
+        swmGraphId: 'shared-name',
+        operation: 'publish',
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      expect(internals.subscribedContextGraphs.get('shared-name')).toEqual({ subscribed: true, onChainId: '7' });
+    });
+
+    it('declines transiently while the graph is not live on chain', async () => {
       const internals = await boot();
       internals.chain.isContextGraphActiveOnChain = async () => false;
 
       await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '44', operation: 'publish' }))
         .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+    });
+
+    it('declines transiently while the namespace row is dormant, without touching it', async () => {
+      const internals = await boot();
+      (internals as any).contextGraphSubscriptionDormancyById.set('dormant-cg', 'authorityUnavailable');
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '46',
+        swmGraphId: 'dormant-cg',
+        operation: 'publish',
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+      expect(internals.subscribedContextGraphs.has('dormant-cg')).toBe(false);
+      expect(saved).toHaveLength(0);
     });
 
     it('declines transiently when the core-hosted row cannot be persisted, then recovers', async () => {
@@ -247,180 +427,99 @@ describe('core VM-promotion guarantees', () => {
         .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
       internals.started = false;
     });
+
+    it('counts StorageACK declines per code over the last hour', async () => {
+      const internals = await boot();
+      const now = Date.now();
+      internals.recordStorageAckDecline('CORE_VM_PROMOTION_UNAVAILABLE', now - 2 * HOUR);
+      internals.recordStorageAckDecline('CORE_VM_PROMOTION_UNAVAILABLE', now - 30 * 60_000);
+      internals.recordStorageAckDecline('CORE_VM_PROMOTION_UNAVAILABLE', now);
+      internals.recordStorageAckDecline('BYTESIZE_UNDERCLAIM', now);
+
+      expect(internals.storageAckDeclinesLastHour(now)).toEqual({
+        CORE_VM_PROMOTION_UNAVAILABLE: 2,
+        BYTESIZE_UNDERCLAIM: 1,
+      });
+    });
   });
 
-  describe('ACK promotion audit', () => {
-    async function seedStorageAckCopy(
-      store: TripleStore,
-      input: { contextGraphId: string; n: number; ageMs: number; confirmed?: boolean },
-    ): Promise<{ op: string; metaGraph: string; assertionGraph: string; head: string }> {
-      const metaGraph = contextGraphSharedMemoryMetaUri(input.contextGraphId);
-      const shareOperationId = `storage-ack-${input.contextGraphId}-${input.n}`;
-      const metadata = generateKnowledgeAssetShareMetadata({
-        shareOperationId,
-        contextGraphId: input.contextGraphId,
-        kaUal: ual(input.n),
-        assertionVersion: 1,
-        publicTripleCount: 1,
-        privateTripleCount: 0,
-        publisherPeerId: 'publisher-peer',
-        accessPolicy: 'public',
-        allowedPeers: [],
-        timestamp: new Date(Date.now() - input.ageMs),
-      }, metaGraph);
-      await store.insert(metadata);
-      await storeKnowledgeAssetWorkspaceHead({
-        store,
-        graphManager: new GraphManager(store),
-        contextGraphId: input.contextGraphId,
-        kaUal: ual(input.n),
-        assertionVersion: 1,
-        shareOperationId,
-      });
-      const assertionGraph = knowledgeAssetLayerGraphUri(
-        input.contextGraphId,
-        MemoryLayer.SharedWorkingMemory,
-        createGraphKnowledgeAssetScope(ual(input.n), 1),
-      );
-      await store.insert([{
-        subject: `urn:entity:${input.n}`,
-        predicate: 'http://schema.org/name',
-        object: `"ka ${input.n}"`,
-        graph: assertionGraph,
-      }]);
-      if (input.confirmed) {
-        await store.insert([{
-          subject: ual(input.n),
-          predicate: `${DKG}status`,
-          object: '"confirmed"',
-          graph: contextGraphMetaUri(input.contextGraphId),
-        }]);
-      }
-      return {
-        op: metadata[0]!.subject,
-        metaGraph,
-        assertionGraph,
-        head: `${ual(input.n)}#dkg-swm-head`,
-      };
-    }
-
-    async function count(store: TripleStore, graph: string, subject?: string): Promise<number> {
-      const pattern = subject ? `<${subject}> ?p ?o` : '?s ?p ?o';
-      const result = await store.query(`SELECT * WHERE { GRAPH <${graph}> { ${pattern} } }`);
-      return result.type === 'bindings' ? result.bindings.length : 0;
-    }
-
-    it('backfills public graphs holding ACK copies, skips curated ones, and is idempotent', async () => {
-      const internals = await boot();
-      const policy = recorder(async (id: bigint) => (id === 56n ? 1 : 0));
-      internals.chain.getContextGraphAccessPolicy = policy;
-      internals.chain.getKAContextGraphId = async () => 0n;
-      // A cleartext graph resolves through the ontology on adapters without a
-      // finalized authority index; numeric SWM namespaces are their own id.
-      await internals.store.insert([{
-        subject: 'did:dkg:context-graph:named-public',
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-        object: '"57"',
-        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
-      }]);
-      await seedStorageAckCopy(internals.store, { contextGraphId: '55', n: 1, ageMs: 0 });
-      await seedStorageAckCopy(internals.store, { contextGraphId: '56', n: 2, ageMs: 0 });
-      await seedStorageAckCopy(internals.store, { contextGraphId: 'named-public', n: 3, ageMs: 0 });
-
-      const first = await internals.runVmPromotionAudit();
-
-      expect(first).toMatchObject({ graphsWithAckCopies: 3, backfilledGraphs: 2, unresolvedGraphs: 0 });
-      expect(internals.subscribedContextGraphs.get('55')).toMatchObject({ coreHosted: true, onChainId: '55' });
-      expect(internals.subscribedContextGraphs.get('named-public')).toMatchObject({
-        coreHosted: true,
-        onChainId: '57',
-      });
-      expect(internals.subscribedContextGraphs.has('56')).toBe(false);
-      expect([...new Set(saved.map((record) => record.id))].sort()).toEqual(['55', 'named-public']);
-
-      const policyReads = policy.calls.length;
-      const writes = saved.length;
-      const second = await internals.runVmPromotionAudit();
-
-      expect(second).toMatchObject({ backfilledGraphs: 2 });
-      expect(policy.calls).toHaveLength(policyReads);
-      expect(saved).toHaveLength(writes);
-    });
-
-    it('reports ACKed KAs stalled on chain and stamps copies the chain never registered', async () => {
-      const internals = await boot({ sharedMemoryTtlMs: 24 * HOUR });
-      const triggered: string[] = [];
-      internals.vmReconcileScheduling = {
-        triggerPeriodic: (cg: string) => { triggered.push(cg); },
-        triggerLive: () => undefined,
-        releaseLiveHold: () => undefined,
-      };
-      internals.chain.getKAContextGraphId = async (id: bigint) => (id === kaId(10) ? 55n : 0n);
-      await internals.recordCoreHostedPublicCg('55');
-      const stalled = await seedStorageAckCopy(internals.store, { contextGraphId: '55', n: 10, ageMs: 2 * HOUR });
-      const unregistered = await seedStorageAckCopy(internals.store, { contextGraphId: '55', n: 11, ageMs: 48 * HOUR });
-      const recentUnregistered = await seedStorageAckCopy(internals.store, { contextGraphId: '55', n: 12, ageMs: 2 * HOUR });
-      await seedStorageAckCopy(internals.store, { contextGraphId: '55', n: 13, ageMs: 2 * HOUR, confirmed: true });
-      await seedStorageAckCopy(internals.store, { contextGraphId: '55', n: 14, ageMs: 60_000 });
-
-      const status = await internals.runVmPromotionAudit();
-
-      // n=13 is in VM and n=14 is younger than the stall threshold.
-      expect(status).toMatchObject({
-        staleUnpromotedCopies: 3,
-        stalledOnChain: 1,
-        notRegisteredOnChain: 2,
-        expiredUnregisteredCopies: 1,
-        retriesTriggered: 1,
-      });
-      expect(triggered).toEqual(['55']);
-      expect(await count(internals.store, unregistered.metaGraph, unregistered.op)).toBeGreaterThan(0);
-      const stamped = await internals.store.query(
-        `ASK { GRAPH <${unregistered.metaGraph}> { <${unregistered.op}> <${STORAGE_ACK_UNREGISTERED_AT_PREDICATE}> ?at } }`,
-      );
-      expect(stamped).toMatchObject({ value: true });
-      // A copy younger than the TTL may still belong to a publish in flight.
-      const notStamped = await internals.store.query(
-        `ASK { GRAPH <${recentUnregistered.metaGraph}> { <${recentUnregistered.op}> <${STORAGE_ACK_UNREGISTERED_AT_PREDICATE}> ?at } }`,
-      );
-      expect(notStamped).toMatchObject({ value: false });
-      expect(await count(internals.store, stalled.assertionGraph)).toBe(1);
-    });
-
-    it('keeps unpromoted ACK copies past the SWM TTL and expires promoted or unregistered ones', async () => {
+  describe('retention of StorageACK copies', () => {
+    it('keeps ledgered unpromoted copies past the TTL and expires promoted, stamped and unledgered ones', async () => {
       const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+      await internals.ensureStorageAckLedgerReady();
       const cg = 'ttl-ack-cg';
-      const retained = await seedStorageAckCopy(internals.store, { contextGraphId: cg, n: 20, ageMs: HOUR });
-      const promoted = await seedStorageAckCopy(internals.store, { contextGraphId: cg, n: 21, ageMs: HOUR, confirmed: true });
-      const unregistered = await seedStorageAckCopy(internals.store, { contextGraphId: cg, n: 22, ageMs: HOUR });
+      const retained = await seedCopy(internals.store, { namespace: cg, n: 20, ageMs: HOUR });
+      const promoted = await seedCopy(internals.store, { namespace: cg, n: 21, ageMs: HOUR, confirmedVersion: 1 });
+      const stamped = await seedCopy(internals.store, { namespace: cg, n: 22, ageMs: HOUR });
       await internals.store.insert([{
-        subject: unregistered.op,
-        predicate: STORAGE_ACK_UNREGISTERED_AT_PREDICATE,
-        object: `"${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
-        graph: unregistered.metaGraph,
+        subject: stamped.op,
+        predicate: LEDGER.unregisteredAt,
+        object: xsdDateTimeLiteral(new Date()),
+        graph: STORAGE_ACK_LEDGER_GRAPH,
       }]);
-      const pastCeiling = await seedStorageAckCopy(internals.store, {
-        contextGraphId: cg,
-        n: 23,
-        ageMs: 100 * 24 * HOUR,
-      });
+      // A declined request, a gossip-chosen id or an SWM-synced copy: no ledger row.
+      const unsigned = await seedCopy(internals.store, { namespace: cg, n: 23, ageMs: HOUR, ledger: 'none' });
 
       await internals.cleanupExpiredSharedMemory();
 
       expect(await count(internals.store, retained.metaGraph, retained.op)).toBeGreaterThan(0);
       expect(await count(internals.store, retained.metaGraph, retained.head)).toBeGreaterThan(0);
       expect(await count(internals.store, retained.assertionGraph)).toBe(1);
-      for (const expired of [promoted, unregistered, pastCeiling]) {
+      for (const expired of [promoted, stamped, unsigned]) {
         expect(await count(internals.store, expired.metaGraph, expired.op)).toBe(0);
         expect(await count(internals.store, expired.metaGraph, expired.head)).toBe(0);
         expect(await count(internals.store, expired.assertionGraph)).toBe(0);
       }
+      // The ledger row goes with the copy.
+      expect(await count(internals.store, STORAGE_ACK_LEDGER_GRAPH, stamped.op)).toBe(0);
+    });
+
+    it('releases an update copy only once VM holds its version, not an older one', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+      await internals.ensureStorageAckLedgerReady();
+      const cg = 'ttl-update-cg';
+      const update = await seedCopy(internals.store, {
+        namespace: cg, n: 24, ageMs: HOUR, version: 2, confirmedVersion: 1,
+      });
+
+      await internals.cleanupExpiredSharedMemory();
+      expect(await count(internals.store, update.metaGraph, update.op)).toBeGreaterThan(0);
+
+      await internals.store.deleteByPattern({ graph: contextGraphMetaUri(cg), subject: ual(24) });
+      await internals.store.insert([
+        { subject: ual(24), predicate: `${DKG}status`, object: '"confirmed"', graph: contextGraphMetaUri(cg) },
+        {
+          subject: ual(24),
+          predicate: `${DKG}assertionVersion`,
+          object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: contextGraphMetaUri(cg),
+        },
+      ]);
+      await internals.cleanupExpiredSharedMemory();
+      expect(await count(internals.store, update.metaGraph, update.op)).toBe(0);
+    });
+
+    it('applies the ceiling only to copies never seen registered on chain', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+      await internals.ensureStorageAckLedgerReady();
+      const cg = 'ttl-ceiling-cg';
+      const unproven = await seedCopy(internals.store, { namespace: cg, n: 25, ageMs: 100 * DAY });
+      const registered = await seedCopy(internals.store, {
+        namespace: cg, n: 26, ageMs: 100 * DAY, registered: true,
+      });
+
+      await internals.cleanupExpiredSharedMemory();
+
+      expect(await count(internals.store, unproven.metaGraph, unproven.op)).toBe(0);
+      expect(await count(internals.store, registered.metaGraph, registered.op)).toBeGreaterThan(0);
+      expect(await count(internals.store, registered.assertionGraph)).toBe(1);
     });
 
     it('keeps a head shared with a retained ACK copy when an older alias operation expires', async () => {
       const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+      await internals.ensureStorageAckLedgerReady();
       const cg = 'ttl-alias-cg';
-      const retained = await seedStorageAckCopy(internals.store, { contextGraphId: cg, n: 30, ageMs: HOUR });
+      const retained = await seedCopy(internals.store, { namespace: cg, n: 30, ageMs: HOUR });
       const originatorOp = `urn:dkg:share:${cg}:originator-30`;
       await internals.store.insert([
         { subject: originatorOp, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG}WorkspaceOperation`, graph: retained.metaGraph },
@@ -438,6 +537,364 @@ describe('core VM-promotion guarantees', () => {
       expect(await count(internals.store, retained.metaGraph, retained.op)).toBeGreaterThan(0);
       expect(await count(internals.store, retained.metaGraph, retained.head)).toBeGreaterThan(0);
       expect(await count(internals.store, retained.assertionGraph)).toBe(1);
+    });
+
+    it('grandfathers pre-ledger copies once, and never copies stored after the ledger started', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+      const historical = await seedCopy(internals.store, { namespace: 'legacy-cg', n: 31, ageMs: HOUR, ledger: 'none' });
+
+      await expect(internals.ensureStorageAckLedgerReady()).resolves.toBe(true);
+      expect(await ledgerHas(internals.store, historical.op, LEDGER.grandfathered)).toBe(true);
+      const later = await seedCopy(internals.store, { namespace: 'legacy-cg', n: 32, ageMs: HOUR, ledger: 'none' });
+      await internals.cleanupExpiredSharedMemory();
+
+      expect(await count(internals.store, historical.metaGraph, historical.op)).toBeGreaterThan(0);
+      expect(await count(internals.store, later.metaGraph, later.op)).toBe(0);
+    });
+
+    it('visits an undeclared slash-named namespace it holds ledgered copies for', async () => {
+      // `<curator>/<name>` SWM ids are listed as context graphs only with a
+      // declaration; the ledger makes cleanup visit them regardless.
+      const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+      await internals.ensureStorageAckLedgerReady();
+      const namespace = `${AUTHOR}/remapped-project`;
+      const promoted = await seedCopy(internals.store, { namespace, n: 34, ageMs: HOUR, confirmedVersion: 1 });
+      const owed = await seedCopy(internals.store, { namespace, n: 35, ageMs: HOUR });
+
+      await internals.cleanupExpiredSharedMemory();
+
+      expect(await count(internals.store, promoted.metaGraph, promoted.op)).toBe(0);
+      expect(await count(internals.store, owed.metaGraph, owed.op)).toBeGreaterThan(0);
+    });
+
+    it('does not retain copies on a node that never signed them', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: 60_000, nodeRole: 'edge' });
+      const synced = await seedCopy(internals.store, { namespace: 'edge-cg', n: 33, ageMs: HOUR, ledger: 'none' });
+
+      await internals.cleanupExpiredSharedMemory();
+
+      expect(await count(internals.store, synced.metaGraph, synced.op)).toBe(0);
+    });
+  });
+
+  describe('ACK promotion audit', () => {
+    it('backfills public namespaces holding ACK copies, skips curated ones, and is idempotent', async () => {
+      const internals = await boot();
+      const policy = recorder(async (id: bigint) => (id === 56n ? 1 : 0));
+      internals.chain.getContextGraphAccessPolicy = policy;
+      internals.chain.getKAContextGraphId = async () => 0n;
+      // A grandfathered cleartext namespace (no signed target) resolves through
+      // the ontology on adapters without a finalized authority index.
+      await internals.store.insert([{
+        subject: 'did:dkg:context-graph:named-public',
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        object: '"57"',
+        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      }]);
+      await seedCopy(internals.store, { namespace: 'named-public', n: 3, ageMs: 60_000, ledger: 'none' });
+      await internals.ensureStorageAckLedgerReady();
+      await seedCopy(internals.store, { namespace: 'signed-public', n: 1, ageMs: 0, target: '55' });
+      await seedCopy(internals.store, { namespace: 'signed-curated', n: 2, ageMs: 0, target: '56' });
+
+      const first = await internals.runVmPromotionAudit();
+
+      expect(first).toMatchObject({ namespacesWithAckCopies: 3, backfilledGraphs: 2, unresolvedGraphs: 0 });
+      expect(internals.subscribedContextGraphs.get('signed-public')).toMatchObject({ coreHosted: true, onChainId: '55' });
+      expect(internals.subscribedContextGraphs.get('named-public')).toMatchObject({ coreHosted: true, onChainId: '57' });
+      expect(internals.subscribedContextGraphs.has('signed-curated')).toBe(false);
+      expect([...new Set(saved.map((record) => record.id))].sort()).toEqual(['named-public', 'signed-public']);
+
+      const policyReads = policy.calls.length;
+      const writes = saved.length;
+      const second = await internals.runVmPromotionAudit();
+
+      expect(second).toMatchObject({ backfilledGraphs: 2 });
+      expect(policy.calls).toHaveLength(policyReads);
+      expect(saved).toHaveLength(writes);
+    });
+
+    it('prunes ledger rows whose copy is gone and keeps the rows of live copies', async () => {
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const live = await seedCopy(internals.store, { namespace: 'prune-cg', n: 40, ageMs: 0 });
+      const gone = await seedCopy(internals.store, { namespace: 'prune-cg', n: 41, ageMs: 0 });
+      await internals.store.deleteByPattern({ graph: gone.metaGraph, subject: gone.op });
+
+      await internals.runVmPromotionAudit();
+
+      expect(await ledgerHas(internals.store, live.op, LEDGER.signedAt)).toBe(true);
+      expect(await count(internals.store, STORAGE_ACK_LEDGER_GRAPH, gone.op)).toBe(0);
+    });
+
+    it('pages past namespaces it cannot resolve instead of retrying them every pass', async () => {
+      setStatic('VM_PROMOTION_BACKFILL_PAGE_SIZE', 4);
+      setStatic('VM_PROMOTION_AUDIT_MAX_RECORDS', 2);
+      const internals = await boot();
+      internals.chain.getKAContextGraphId = async () => 0n;
+      await internals.ensureStorageAckLedgerReady();
+      // Six namespaces the chain says are not live, sorting ahead of one that is.
+      for (let index = 0; index < 6; index += 1) {
+        await seedCopy(internals.store, { namespace: `a-dead-${index}`, n: 100 + index, ageMs: 0, target: `${900 + index}` });
+      }
+      await seedCopy(internals.store, { namespace: 'z-live', n: 200, ageMs: 0, target: '77' });
+      internals.chain.isContextGraphActiveOnChain = async (id) => id === 77n;
+
+      for (let pass = 0; pass < 5 && !internals.subscribedContextGraphs.has('z-live'); pass += 1) {
+        await internals.runVmPromotionAudit();
+      }
+
+      expect(internals.subscribedContextGraphs.get('z-live')).toMatchObject({ coreHosted: true, onChainId: '77' });
+    });
+
+    it('marks ACKed copies registered on chain, promotes them per asset, and never lets them expire', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: DAY });
+      await internals.ensureStorageAckLedgerReady();
+      await internals.recordCoreHostedPublicCg('55', 'watched-cg');
+      internals.chain.getKAContextGraphId = async (id) => (id === kaId(10) ? 55n : 0n);
+      const reconciled: string[] = [];
+      (internals as any).reconcileStorageAckCopy = async (candidate: { kaUal: string }) => {
+        reconciled.push(candidate.kaUal);
+        return false;
+      };
+      const stalled = await seedCopy(internals.store, { namespace: 'watched-cg', n: 10, ageMs: 2 * HOUR });
+
+      const status = await internals.runVmPromotionAudit();
+
+      expect(status).toMatchObject({ staleUnpromotedCopies: 1, stalledOnChain: 1, retriesTriggered: 1 });
+      expect(reconciled).toEqual([ual(10)]);
+      expect(await ledgerHas(internals.store, stalled.op, LEDGER.registeredAt)).toBe(true);
+    });
+
+    it('stamps a copy chain-absent only on a second observation, past the TTL', async () => {
+      setStatic('VM_PROMOTION_AUDIT_INTERVAL_MS', 1);
+      const internals = await boot({ sharedMemoryTtlMs: DAY });
+      await internals.ensureStorageAckLedgerReady();
+      await internals.recordCoreHostedPublicCg('55', 'absent-cg');
+      internals.chain.getKAContextGraphId = async () => 0n;
+      internals.chain.getMerkleRootCount = async () => 0n;
+      const old = await seedCopy(internals.store, { namespace: 'absent-cg', n: 11, ageMs: 2 * DAY });
+      const young = await seedCopy(internals.store, { namespace: 'absent-cg', n: 12, ageMs: 2 * HOUR });
+
+      await internals.runVmPromotionAudit();
+      expect(await ledgerHas(internals.store, old.op, LEDGER.absentSeenAt)).toBe(true);
+      expect(await ledgerHas(internals.store, old.op, LEDGER.unregisteredAt)).toBe(false);
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const status = await internals.runVmPromotionAudit();
+
+      expect(status).toMatchObject({ notRegisteredOnChain: 2, expiredUnregisteredCopies: 1 });
+      expect(await ledgerHas(internals.store, old.op, LEDGER.unregisteredAt)).toBe(true);
+      // A younger copy may belong to a publish still in flight.
+      expect(await ledgerHas(internals.store, young.op, LEDGER.absentSeenAt)).toBe(false);
+      expect(await ledgerHas(internals.store, young.op, LEDGER.unregisteredAt)).toBe(false);
+    });
+
+    it('never stamps on an ambiguous chain answer', async () => {
+      setStatic('VM_PROMOTION_AUDIT_INTERVAL_MS', 1);
+      const internals = await boot({ sharedMemoryTtlMs: DAY });
+      await internals.ensureStorageAckLedgerReady();
+      await internals.recordCoreHostedPublicCg('55', 'ambiguous-cg');
+      internals.chain.getKAContextGraphId = async () => 0n;
+      // Registered nowhere, yet the asset has a root: not proof of absence.
+      internals.chain.getMerkleRootCount = async () => 1n;
+      const copy = await seedCopy(internals.store, { namespace: 'ambiguous-cg', n: 13, ageMs: 2 * DAY });
+
+      await internals.runVmPromotionAudit();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await internals.runVmPromotionAudit();
+
+      expect(await ledgerHas(internals.store, copy.op, LEDGER.absentSeenAt)).toBe(false);
+      expect(await ledgerHas(internals.store, copy.op, LEDGER.unregisteredAt)).toBe(false);
+    });
+
+    it('rotates the watchdog through every copy within its chain-read budget', async () => {
+      setStatic('VM_PROMOTION_AUDIT_PAGE_SIZE', 5);
+      setStatic('VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS', 2);
+      const internals = await boot({ sharedMemoryTtlMs: DAY });
+      await internals.ensureStorageAckLedgerReady();
+      await internals.recordCoreHostedPublicCg('55', 'busy-cg');
+      const reads = recorder(async () => 0n);
+      internals.chain.getKAContextGraphId = reads;
+      internals.chain.getMerkleRootCount = async () => 0n;
+      const copies: SeededCopy[] = [];
+      for (let index = 0; index < 12; index += 1) {
+        copies.push(await seedCopy(internals.store, { namespace: 'busy-cg', n: 300 + index, ageMs: 2 * HOUR + index * 60_000 }));
+      }
+
+      await internals.runVmPromotionAudit();
+      expect(reads.calls).toHaveLength(2);
+
+      for (let pass = 0; pass < 12; pass += 1) await internals.runVmPromotionAudit();
+      const examined = new Set(reads.calls.map(([id]) => id));
+      // Every copy, old or new, got a chain read within a bounded number of passes.
+      for (let index = 0; index < 12; index += 1) {
+        expect(examined.has(kaId(300 + index))).toBe(true);
+      }
+    });
+  });
+
+  describe('durable update path', () => {
+    const NAMESPACE = 'update-e2e-cg';
+    const TARGET = '55';
+    const N = 77;
+    const PEER = { toString: () => 'publisher-peer' };
+
+    function wire(quads: readonly Quad[]): Uint8Array {
+      return new TextEncoder().encode(quads.map((quad) =>
+        `<${quad.subject}> <${quad.predicate}> ${quad.object} <${quad.graph}> .`).join('\n'));
+    }
+
+    function content(value: string, layer: MemoryLayer, version: number): Quad[] {
+      return [{
+        subject: 'urn:entity:e2e',
+        predicate: 'http://schema.org/name',
+        object: `"${value}"`,
+        graph: knowledgeAssetLayerGraphUri(NAMESPACE, layer, createGraphKnowledgeAssetScope(ual(N), version)),
+      }];
+    }
+
+    function realHandler(internals: Internals): StorageACKHandler {
+      return new StorageACKHandler(internals.store, {
+        nodeRole: 'core',
+        nodeIdentityId: 17n,
+        signerWallet: ethers.Wallet.createRandom(),
+        contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: 31337n,
+        kav10Address: '0x000000000000000000000000000000000000c10a',
+        isCgCurated: async () => false,
+        ensureVmPromotion: (request) => internals.ensureStorageAckVmPromotion(request),
+        onPriorVersionAwaitingPromotion: (request) => internals.promoteStorageAckPriorVersion(request),
+      }, new TypedEventBus());
+    }
+
+    async function ack(handler: StorageACKHandler, value: string, version: number) {
+      if (version === 1) {
+        const quads = content(value, MemoryLayer.SharedWorkingMemory, 1);
+        return decodeStorageACK(await handler.handler(encodePublishIntent({
+          merkleRoot: computeFlatKCRootV10(quads, []),
+          contextGraphId: TARGET,
+          swmGraphId: NAMESPACE,
+          publisherPeerId: 'publisher-peer',
+          publicByteSize: wire(quads).length,
+          isPrivate: false,
+          kaCount: 1,
+          rootEntities: [],
+          stagingQuads: wire(quads),
+          merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: ual(N),
+          assertionVersion: '1',
+          publicTripleCount: 1,
+          privateTripleCount: 0,
+          accessPolicy: 'public',
+          allowedPeers: [],
+        }), PEER));
+      }
+      // The default public update ships its payload inline from the publisher's VM graph.
+      const quads = content(value, MemoryLayer.VerifiableMemory, version);
+      return decodeStorageACK(await handler.updateHandler(encodeUpdateIntent({
+        kaId: kaId(N).toString(),
+        contextGraphId: TARGET,
+        swmGraphId: NAMESPACE,
+        preUpdateMerkleRootCount: version - 1,
+        newMerkleRoot: computeFlatKCRootV10(quads, []),
+        newByteSize: wire(quads).length,
+        newTokenAmount: '1000',
+        mintAmount: 0,
+        burnTokenIds: [],
+        newMerkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+        publisherPeerId: 'publisher-peer',
+        stagingQuads: wire(quads),
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: ual(N),
+        assertionVersion: String(version),
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+      }), PEER));
+    }
+
+    function landOnChain(internals: Internals, value: string, version: number): void {
+      const root = computeFlatKCRootV10(content(value, MemoryLayer.SharedWorkingMemory, version), []);
+      const chain = internals.chain as unknown as {
+        __registerKC(input: { kaId: bigint; contextGraphId: bigint; merkleRootHex: string; chunks: [] }): void;
+        collections: Map<bigint, { merkleRoot: Uint8Array; updateContext: { merkleRootsCount: bigint } }>;
+      };
+      if (version === 1) {
+        chain.__registerKC({
+          kaId: kaId(N),
+          contextGraphId: BigInt(TARGET),
+          merkleRootHex: ethers.hexlify(root),
+          chunks: [],
+        });
+        return;
+      }
+      const entry = chain.collections.get(kaId(N))!;
+      entry.merkleRoot = root;
+      entry.updateContext = { ...entry.updateContext, merkleRootsCount: BigInt(version) };
+    }
+
+    async function vmState(store: TripleStore): Promise<{ version: string | undefined; values: string[] }> {
+      const meta = await store.query(`SELECT ?version WHERE { GRAPH <${contextGraphMetaUri(NAMESPACE)}> {
+        <${ual(N)}> <${DKG}status> "confirmed" ; <${DKG}assertionVersion> ?version .
+      } }`);
+      const version = meta.type === 'bindings' ? meta.bindings[0]?.['version'] : undefined;
+      // The per-KA VM graph is not versioned: an update replaces its content.
+      const data = await store.query(
+        `SELECT ?o WHERE { GRAPH <${knowledgeAssetLayerGraphUri(
+          NAMESPACE,
+          MemoryLayer.VerifiableMemory,
+          createGraphKnowledgeAssetScope(ual(N), 1),
+        )}> { ?s ?p ?o } }`,
+      );
+      const values = data.type === 'bindings' ? data.bindings.map((row) => row['o']!) : [];
+      return { version, values };
+    }
+
+    it('carries an ACKed update into VM once it lands on chain, through the real handler and finalization', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+      await internals.ensureStorageAckLedgerReady();
+      const handler = realHandler(internals);
+
+      // v1: ACKed, registered, promoted per asset.
+      expect(isStorageACKDecline(await ack(handler, 'first', 1))).toBe(false);
+      landOnChain(internals, 'first', 1);
+      await internals.runVmPromotionAudit();
+      expect(await internals.reconcileStorageAckCopy({
+        operationSubject: 'unused', namespace: NAMESPACE, kaUal: ual(N), assertionVersion: 1n,
+        signedAtMs: 0, contextGraphId: TARGET, registered: true,
+      }, TARGET)).toBe(true);
+      expect((await vmState(internals.store)).values).toEqual(['"first"']);
+
+      // v2: ACKed as a durable copy; nothing lands yet, so nothing moves.
+      expect(isStorageACKDecline(await ack(handler, 'second', 2))).toBe(false);
+      const later = Date.now() + 2 * 60_000;
+      await expect(internals.promotePendingStorageAckUpdates(later)).resolves.toMatchObject({ promoted: 0 });
+      expect((await vmState(internals.store)).values).toEqual(['"first"']);
+
+      // The update lands on chain: the pending-update lane promotes it.
+      landOnChain(internals, 'second', 2);
+      await expect(internals.promotePendingStorageAckUpdates(later + DAY)).resolves.toMatchObject({ promoted: 1 });
+
+      const vm = await vmState(internals.store);
+      expect(vm.version).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+      expect(vm.values).toContain('"second"');
+      expect(vm.values).not.toContain('"first"');
+    });
+
+    it('promotes the version an update waits on, so the publisher retry is signed', async () => {
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const handler = realHandler(internals);
+      expect(isStorageACKDecline(await ack(handler, 'first', 1))).toBe(false);
+      // v1 is on chain (an update requires it) but this core has not promoted it yet.
+      landOnChain(internals, 'first', 1);
+
+      const declined = await ack(handler, 'second', 2);
+      expect(declined.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      await Promise.all(internals.storageAckPriorVersionFlights.values());
+
+      expect((await vmState(internals.store)).values).toEqual(['"first"']);
+      expect(isStorageACKDecline(await ack(handler, 'second', 2))).toBe(false);
     });
   });
 });

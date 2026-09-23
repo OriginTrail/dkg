@@ -989,10 +989,20 @@ export class DKGAgentBase {
   );
   /** Graphs one audit pass may record as core-hosted (bounded RPC). */
   static readonly VM_PROMOTION_AUDIT_MAX_RECORDS = 32;
-  /** Per-KA chain registration reads one audit pass may spend. */
+  /**
+   * Per-KA chain registration reads one audit pass may spend. The pass stops
+   * at the first copy it has no budget for and the next pass resumes there,
+   * so the keyset rotation reaches every copy.
+   */
   static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
-  /** Of those, at most this many per graph, so one backlog cannot starve the rest. */
-  static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS_PER_GRAPH = 8;
+  /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
+  static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Ledger namespaces one backfill pass pages through. */
+  static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
+  /** Per-asset VM reconciles one audit pass may run for landed copies. */
+  static readonly VM_PROMOTION_AUDIT_MAX_RECONCILES = 16;
+  /** Pending-update lane: chain reads and per-asset reconciles per run. */
+  static readonly VM_PROMOTION_UPDATE_MAX_CHECKS = 8;
 
   /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
@@ -1179,15 +1189,32 @@ export class DKGAgentBase {
   protected readonly coreHostedDurableRecords = new Set<string>();
   /** One in-flight finality-gate recording per graph, shared by concurrent ACKs. */
   protected readonly storageAckVmPromotionFlights = new Map<string, Promise<unknown>>();
+  /** Per-asset promotions requested by declined update ACKs, one per asset. */
+  protected readonly storageAckPriorVersionFlights = new Map<string, Promise<unknown>>();
   /** Core ACK promotion audit (core-hosted backfill + promotion watchdog). */
   protected vmPromotionAuditStartupTimer: ReturnType<typeof setTimeout> | null = null;
   protected vmPromotionAuditTimer: ReturnType<typeof setInterval> | null = null;
   protected vmPromotionAuditInFlight: Promise<void> | null = null;
   protected readonly vmPromotionAuditStatus: VmPromotionAuditStatus = createVmPromotionAuditStatus();
-  /** Discovered graphs whose backfill concluded (recorded or ineligible) in this process. */
+  /** Discovered namespaces whose backfill concluded (recorded or ineligible) in this process. */
   protected readonly vmPromotionBackfillSettled = new Set<string>();
-  /** Rotates the watchdog's first graph so no graph monopolizes the chain-read budget. */
-  protected vmPromotionAuditRotation = 0;
+  /** Namespaces whose backfill failed, backing off so they cannot hold every pass's slots. */
+  protected readonly vmPromotionBackfillBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+  /** Keyset cursors: the backfill pages ledger namespaces, the audit ledger copies. */
+  protected vmPromotionBackfillCursor = '';
+  protected vmPromotionAuditCursor = '';
+  /** Pending-update promotion (fast lane, VM sweep cadence). */
+  protected vmPromotionUpdateTimer: ReturnType<typeof setInterval> | null = null;
+  protected vmPromotionUpdateInFlight: Promise<void> | null = null;
+  /** Per ACK-copy backoff for the pending-update lane. */
+  protected readonly vmPromotionUpdateBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+  /** The signed-ACK ledger is initialized and pre-ledger copies grandfathered. */
+  protected storageAckLedgerReady = false;
+  protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
+  /** The StorageACK protocol handler is registered (this core can answer ACKs). */
+  protected storageAckHandlerRegistered = false;
+  /** StorageACK declines per minute bucket and code, for the last hour. */
+  protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<
     string,

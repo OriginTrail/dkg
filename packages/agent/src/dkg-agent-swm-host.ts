@@ -96,7 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, isStoreSchedulerBusyError, withDefaultStoreWorkPriority, asChangelogReader, asGraphWriteRevisionSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -520,6 +520,7 @@ import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withOwnedRpcRequestContext,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
 
@@ -589,6 +590,13 @@ type VmReconcileOrdinalOptions = {
   revalidateTarget?: () => Promise<boolean>;
   /** Collect the missing KA for one batch fetch instead of fetching inline. */
   deferActiveFetch?: boolean;
+  /**
+   * Take the coherent version snapshot that lets a re-run of this ordinal at
+   * the same finalized block skip its chain reads. A forward catch-up walk
+   * never re-runs a historical ordinal, so it skips the snapshot (several
+   * RPC requests per endpoint) there. Default true.
+   */
+  rememberFinalizedEvidence?: boolean;
 };
 
 /**
@@ -2763,12 +2771,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * member subscription. A Core that was offline during the *next* publish
    * then learns the missed KA from chain on restart and pulls it core-first.
    *
-   * Public-only by design: a Core never receives a curated CG's plaintext, so
-   * there is nothing to promote to VM; its curated obligation is the verified
-   * `<cg>/_catalog` the catalog ACK persists. Idempotent. With
-   * `durable`, `recorded`/`already-recorded` also mean the host-only row has
-   * been written through the strict subscription-store path; `nudge: false`
-   * leaves the first reconcile to the periodic sweep (historical backfill).
+   * The row is keyed by the SWM namespace holding the ACK copy (see
+   * {@link resolveCoreHostedPublicCgLocalId}); an existing row there is merged
+   * into, never replaced, and a persisted row that has not been rehydrated yet
+   * is left alone. Public-only by design: a Core never receives a curated
+   * CG's plaintext, so there is nothing to promote to VM; its curated
+   * obligation is the verified `<cg>/_catalog` the catalog ACK persists.
+   * Idempotent. With `durable`, `recorded`/`already-recorded` also mean the
+   * row has been written through the strict subscription-store path;
+   * `nudge: false` leaves the first reconcile to the periodic sweep.
    */
   async recordCoreHostedPublicCg(
     this: DKGAgent,
@@ -2788,14 +2799,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (numeric <= 0n) return 'invalid-id';
 
     const numericStr = numeric.toString();
-    const resolveLocalCgId = () => resolveCoreHostedPublicCgLocalId({
-      onChainId: numeric,
-      swmGraphId,
-      mappedLocalId: this.resolveLocalCgIdByOnChainId(numeric) ?? undefined,
-    });
-    const alreadyRecorded = (localCgId: string) => options.durable === true
+    const localCgId = resolveCoreHostedPublicCgLocalId({ onChainId: numeric, swmGraphId });
+    const alreadyRecorded = () => options.durable === true
       ? this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
       : Promise.resolve('already-recorded' as const);
+    // Pre-read guards that need no chain: a dormant persisted row, and a
+    // member subscription whose own binding is missing or points elsewhere.
+    const blocked = (): CoreHostedPublicCgRecordOutcome | undefined => {
+      const existing = this.subscribedContextGraphs.get(localCgId);
+      if (existing === undefined) {
+        return this.contextGraphSubscriptionDormancyById.has(localCgId) ? 'dormant' : undefined;
+      }
+      if (!existing.subscribed) return undefined;
+      if (existing.onChainId === undefined) return 'binding-pending';
+      return existing.onChainId === numericStr ? undefined : 'namespace-conflict';
+    };
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
     // StorageACK sign, so checking "already recorded" only after the liveness +
@@ -2804,11 +2822,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // a live-then-policy read on its first observation, and an already-recorded
     // row is left untouched whatever the chain says now. Every path that can
     // still RECORD a graph falls through to the fresh reads below.
-    const earlyLocalCgId = resolveLocalCgId();
     if (isCoreHostedPublicCgRecorded(
-      this.subscribedContextGraphs.get(earlyLocalCgId),
+      this.subscribedContextGraphs.get(localCgId),
       numericStr,
-    )) return alreadyRecorded(earlyLocalCgId);
+    )) return alreadyRecorded();
+    const blockedBeforeRead = blocked();
+    if (blockedBeforeRead !== undefined) return blockedBeforeRead;
 
     // Existence-gated read when the adapter exposes liveness; otherwise use
     // the ACK-backed compatibility path because signing a StorageACK proves
@@ -2818,21 +2837,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (policy === 1) return 'curated'; // not the public VM-promote path
     if (policy !== 0) return 'policy-unknown'; // unknown / not-live right now
 
-    // Pick the local CG id to key the host-only record under. Prefer an
-    // existing local mapping; otherwise use the publisher-supplied cleartext
-    // `swmGraphId` (the local CG name for a public/cleartext publish). On the
-    // FIRST ACK for a CG we only host (never subscribed to),
-    // `resolveLocalCgIdByOnChainId()` is still empty — falling back to the
-    // numeric id would persist the row under `did:dkg:context-graph:<numeric>`,
-    // a namespace that doesn't hold the hosted SWM snapshot, so after restart
-    // the reconciler + active-fetch would sync/promote against the wrong graph
-    // and miss the KA this core already ACKed. The cleartext hint keeps the
-    // row under the same id the reconciler uses.
-    // Re-resolved after the await: the local mapping may have changed, and a
-    // concurrent first ACK for the same CG may have recorded it meanwhile.
-    const localCgId = resolveLocalCgId();
+    // Re-checked after the await: a concurrent first ACK may have recorded it,
+    // or rehydration may have activated the namespace's persisted row.
     const existing = this.subscribedContextGraphs.get(localCgId);
-    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded(localCgId);
+    if (isCoreHostedPublicCgRecorded(existing, numericStr)) return alreadyRecorded();
+    const blockedAfterRead = blocked();
+    if (blockedAfterRead !== undefined) return blockedAfterRead;
+    if (existing?.onChainId !== undefined && existing.onChainId !== numericStr) {
+      // A host-only row for another graph still owes that graph's copies in
+      // this namespace. Rebind only once that graph is gone from the chain
+      // (a re-registration under the same name).
+      const previousLive = await this.isCoreHostedGraphStillLive(existing.onChainId);
+      if (this.coreHostRecordingGeneration !== recordingGeneration) return 'closed';
+      if (previousLive) return 'namespace-conflict';
+    }
 
     let next: ContextGraphSub;
     if (existing) {
@@ -2856,7 +2874,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.setContextGraphSubscription(localCgId, next);
     this.log.info(
       createOperationContext('system'),
-      `Phase D: marked public cg=${numericStr} as core-hosted (will chain-reconcile to VM across restarts)`,
+      `Phase D: marked public cg=${numericStr} as core-hosted under "${localCgId}" ` +
+      '(will chain-reconcile to VM across restarts)',
     );
     const outcome = options.durable === true
       ? await this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
@@ -2867,6 +2886,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
       void this.vmReconcileScheduling.triggerLive(localCgId);
     }
     return outcome === 'already-recorded' ? 'recorded' : outcome;
+  }
+
+  /**
+   * Whether a previously hosted graph is still live on chain. Unknown counts
+   * as live: an unanswered read must not let another graph take over the
+   * namespace.
+   */
+  async isCoreHostedGraphStillLive(this: DKGAgent, onChainId: string): Promise<boolean> {
+    const isActive = this.chain.isContextGraphActiveOnChain;
+    if (typeof isActive !== 'function') return true;
+    let numericId: bigint;
+    try {
+      numericId = BigInt(onChainId);
+    } catch {
+      return false;
+    }
+    try {
+      return await isActive.call(this.chain, numericId) !== false;
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -3181,6 +3221,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.vmReconcileScheduling && isLifecycleCurrent()) {
       signal?.throwIfAborted();
       void this.vmReconcileScheduling.triggerLive(localCgId);
+      // Core-hosted rows are keyed by the SWM namespace of their ACK copies,
+      // so one on-chain graph can have several; each promotes its own copies.
+      for (const [otherCgId, other] of this.subscribedContextGraphs) {
+        if (otherCgId === localCgId || other.coreHosted !== true) continue;
+        if (other.onChainId !== targetOnChain?.toString()) continue;
+        void this.vmReconcileScheduling.triggerLive(otherCgId);
+      }
     }
     return localCgId;
   }
@@ -3412,7 +3459,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
-    const physicalRun = (async (): Promise<ContextGraphReconcileResult> => {
+    // Automatic passes (the historical catch-up walk above all) run in the
+    // background RPC class and store lane, so they cannot take the capacity
+    // reserved for publishing, StorageACKs and API reads. An operator's
+    // manual request keeps the caller's class.
+    const runInLane = <T>(work: () => Promise<T>): Promise<T> => source === 'manual'
+      ? work()
+      : withOwnedRpcRequestContext(
+        { requestClass: 'background', ...(lifecycleSignal ? { signal: lifecycleSignal } : {}) },
+        () => withDefaultStoreWorkPriority('background', work),
+      );
+    const physicalRun = runInLane(async (): Promise<ContextGraphReconcileResult> => {
       const target = await this.resolveVmReconcileTarget(
         localCgId,
         isLifecycleCurrent,
@@ -3498,7 +3555,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       }
       return response;
-    })();
+    });
     trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
     return raceVmReconcileAbort(physicalRun, lifecycleSignal);
   }
@@ -3987,11 +4044,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
         return headBlock;
       },
-      reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
+      reconcileOrdinal: (lcg, ocg, ordinal, headBlock, context) =>
         this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock, {
           isTargetCurrent,
           revalidateTarget,
           deferActiveFetch: true,
+          rememberFinalizedEvidence: context === undefined
+            || context.headOrdinal - ordinal <= DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
         }),
       recoverPendingOrdinals: (lcg, ocg, targets, headBlock) =>
         this.recoverVmReconcileBatch(
@@ -6909,6 +6968,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // pinned version block orders materialized metadata but must not shorten
     // the independent reconciliation confirmation-depth gate.
     const completionBlock = headBlock ?? 0;
+    const rememberSlotBlock = options.rememberFinalizedEvidence === false
+      ? undefined
+      : finalizedSlotBlock;
     switch (outcome) {
       case 'promoted':
         this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
@@ -6919,7 +6981,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           localCgId,
           onChainCgId,
           ordinal,
-          finalizedSlotBlock,
+          rememberSlotBlock,
           kaId,
           merkleRoot,
           publisherAddress,
@@ -6937,7 +6999,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           localCgId,
           onChainCgId,
           ordinal,
-          finalizedSlotBlock,
+          rememberSlotBlock,
           kaId,
           merkleRoot,
           publisherAddress,
@@ -6956,7 +7018,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           localCgId,
           onChainCgId,
           ordinal,
-          finalizedSlotBlock,
+          rememberSlotBlock,
           kaId,
           merkleRoot,
           publisherAddress,

@@ -129,7 +129,11 @@ import {
   reconcileFinalizedSwmTwin,
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
-import { storageAckRetentionProtectedConditions } from './storage-ack-retention.js';
+import {
+  storageAckRetainedAsRegistered,
+  storageAckRetainedByAge,
+  storageAckRetainedByPrefix,
+} from './storage-ack-retention.js';
 import {
   EVMChainAdapter,
   NoChainAdapter,
@@ -171,6 +175,7 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig,
+  STORAGE_ACK_LEDGER_GRAPH,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -2870,6 +2875,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // StorageACK finality gate: a public ACK is signed only after
               // this core durably commits to promote the KA into its VM.
               ensureVmPromotion: (request) => this.ensureStorageAckVmPromotion(request),
+              // An update ACK waiting on the version it replaces: promote
+              // that version now so the publisher's retry is signed.
+              onPriorVersionAwaitingPromotion: (request) => this.promoteStorageAckPriorVersion(request),
               // Testnet dead-air fix: `isOperationalWalletRegistered` is a
               // LIVE chain read the handler runs on EVERY inbound StorageACK.
               // With the raw wiring, one degraded shared RPC made the lookup
@@ -2909,6 +2917,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 if (storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
                 storageACKProtocolRegistered = false;
+                this.storageAckHandlerRegistered = false;
                 // rc.9 PR-11: messenger.register stored the handler
                 // in the substrate's wrapper which delegates to
                 // router.register under the hood (see Messenger.register
@@ -2951,6 +2960,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
+                this.recordStorageAckDecline(details.code);
                 const syncPressure = getSyncBackpressureSnapshot(resolveAgentSyncGlobalBackpressure(this.config));
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
@@ -3054,6 +3064,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               return ackHandler.updateHandler(data, peerId);
             });
             storageACKProtocolRegistered = true;
+            this.storageAckHandlerRegistered = true;
             this.clearStorageACKRegistrationRetry();
             this.log.info(
               attemptCtx,
@@ -11270,16 +11281,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const ctx = createOperationContext('share');
       const now = Date.now();
       const cutoff = new Date(now - ttl).toISOString();
-      // StorageACK copies whose KA is not in VM yet outlive the TTL, up to a
-      // hard ceiling (see storage-ack-retention.ts).
+      // StorageACK copies this core signed and still owes to VM outlive the
+      // TTL (see storage-ack-retention.ts).
       const storageAckRetentionCutoff = new Date(
         now - Math.max(ttl, DKGAgentBase.STORAGE_ACK_RETENTION_MAX_MS),
       ).toISOString();
       let totalDeleted = 0;
 
       try {
+        // A core grandfathers its pre-ledger ACK copies before anything can
+        // expire; until that succeeds every young `storage-ack-` copy is kept.
+        const ledgerReady = (this.config.nodeRole ?? 'edge') !== 'core'
+          || await this.ensureStorageAckLedgerReady();
         const graphManager = new GraphManager(this.store);
-        const contextGraphs = await graphManager.listContextGraphs();
+        // ACK copies can sit in namespaces with no local Context Graph
+        // declaration (a remap-flow `swmGraphId`); the ledger names them.
+        const contextGraphs = [...new Set([
+          ...await graphManager.listContextGraphs(),
+          ...await this.listStorageAckLedgerNamespaces(),
+        ])];
 
         for (const pid of contextGraphs) {
           let graphDeleted = 0;
@@ -11297,15 +11317,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // Each meta graph describes exactly one SWM data bucket:
             // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
             const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
-            const storageAckRetained = (opVar: string, tsVar: string, suffix: string) =>
-              storageAckRetentionProtectedConditions({
-                metaGraph: wsMetaGraph,
+            // One FILTER NOT EXISTS per way a copy can be retained, each
+            // spliced into the group that binds the operation variable.
+            const storageAckNotRetained = (
+              binding: string,
+              opVar: string,
+              tsVar: string,
+              suffix: string,
+            ): string => [
+              storageAckRetainedAsRegistered({ rootMetaGraph, opVar, suffix: `${suffix}Registered` }),
+              storageAckRetainedByAge({
                 rootMetaGraph,
                 opVar,
                 tsVar,
                 retentionCutoffIso: storageAckRetentionCutoff,
-                suffix,
-              });
+                suffix: `${suffix}Age`,
+              }),
+              ...(ledgerReady ? [] : [storageAckRetainedByPrefix({
+                metaGraph: wsMetaGraph,
+                opVar,
+                tsVar,
+                retentionCutoffIso: storageAckRetentionCutoff,
+                suffix: `${suffix}Prefix`,
+              })]),
+            ].map((retained) => `FILTER NOT EXISTS { ${binding}
+                ${retained} }`).join('\n');
 
             let wsGraphs: string[] | undefined;
             let ownershipKeys: string[] | undefined;
@@ -11320,7 +11356,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   ?op <http://dkg.io/ontology/publishedAt> ?ts .
                   FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
                 }
-                FILTER NOT EXISTS { ${storageAckRetained('?op', '?ts', 'Expired')} }
+                ${storageAckNotRetained('', '?op', '?ts', 'Expired')}
               } LIMIT ${DKGAgentBase.SWM_CLEANUP_BATCH_SIZE}`,
                 { source: 'agent.swmCleanup.expiredOperations' },
               );
@@ -11403,15 +11439,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                         <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?opId .
                         OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
                       }
-                      FILTER NOT EXISTS {
-                        GRAPH <${wsMetaGraph}> {
+                      ${storageAckNotRetained(`GRAPH <${wsMetaGraph}> {
                           <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?aliasOpId .
                           ?aliasOp <http://dkg.io/ontology/shareOperationId> ?aliasOpId ;
                             <http://dkg.io/ontology/publishedAt> ?aliasTs .
                           FILTER(?aliasOp != <${opUri}>)
-                        }
-                        ${storageAckRetained('?aliasOp', '?aliasTs', 'Alias')}
-                      }
+                        }`, '?aliasOp', '?aliasTs', 'Alias')}
                     } LIMIT 1`,
                       { source: 'agent.swmCleanup.currentHeadOwner' },
                     );
@@ -11437,6 +11470,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
                 graphDeleted += metaDeleted;
                 metadataDeleted += metaDeleted;
+                // The copy is gone, so is this core's signed-ACK record of it.
+                await this.store.deleteByPattern({ graph: STORAGE_ACK_LEDGER_GRAPH, subject: opUri });
 
                 for (const re of rootEntities) {
                   const ownerDeleted = await this.store.deleteByPattern({

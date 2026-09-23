@@ -891,8 +891,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         ),
       },
       // Effective VM promotion on this node: whether chain-driven VM
-      // reconcile can run (switch AND chain capability), whether a core's
-      // StorageACK finality gate is signing, and the last ACK audit result.
+      // reconcile can run (switch AND chain capability), a core's StorageACK
+      // finality gate and handler state, its declines per code over the last
+      // hour, and the last ACK promotion audit result.
       vmPromotion: typeof agent.getVmPromotionStatus === 'function'
         ? agent.getVmPromotionStatus()
         : undefined,

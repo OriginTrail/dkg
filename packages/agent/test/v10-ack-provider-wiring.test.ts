@@ -135,6 +135,11 @@ interface ACKCollectorDepsCapture {
 
 interface StorageACKHandlerConfigCapture {
   isCgCurated?: (cgId: string, swmGraphId?: string) => Promise<boolean | null>;
+  ensureVmPromotion?: (request: {
+    contextGraphId: string;
+    swmGraphId?: string;
+    operation: 'publish' | 'update';
+  }) => Promise<{ ok: boolean; code?: string; message?: string }>;
 }
 
 /**
@@ -1012,5 +1017,61 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await expect(handlerConfig!.isCgCurated!('101', 'private-looking-source')).resolves.toBe(true);
     expect(resolver).toHaveBeenCalledOnce();
     expect(resolver).toHaveBeenCalledWith('101', expect.any(Object));
+  });
+
+  describe('StorageACK finality gate wiring', () => {
+    async function startCore(config: Record<string, unknown> = {}) {
+      const primary = ethers.Wallet.createRandom();
+      const ackSigner = ethers.Wallet.createRandom();
+      const chain = new MockChainAdapter('mock:31337', primary.address);
+      chain.seedIdentity(primary.address, 42n);
+      const gatedChain = chain as MockChainAdapter & {
+        isContextGraphActiveOnChain: (id: bigint) => Promise<boolean>;
+        getContextGraphAccessPolicy: (id: bigint) => Promise<number>;
+      };
+      gatedChain.isContextGraphActiveOnChain = async () => true;
+      gatedChain.getContextGraphAccessPolicy = async () => 0;
+      agent = await DKGAgent.create({
+        name: 'ACKFinalityGateWiringTest',
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        chainAdapter: chain,
+        nodeRole: 'core',
+        ackSignerKey: ackSigner.privateKey,
+        ...config,
+      });
+      await agent.start();
+      const handlerConfig = capturedStorageACKHandlerConfigs.find(
+        (captured): captured is StorageACKHandlerConfigCapture =>
+          typeof (captured as StorageACKHandlerConfigCapture).ensureVmPromotion === 'function',
+      );
+      expect(handlerConfig?.ensureVmPromotion).toBeTypeOf('function');
+      return handlerConfig!.ensureVmPromotion!;
+    }
+
+    it('hands the real StorageACKHandler a gate that commits a started core to VM promotion', async () => {
+      const gate = await startCore();
+
+      expect(agent!.getVmPromotionStatus()).toMatchObject({
+        vmReconcilerEnabled: true,
+        storageAckGate: 'ready',
+        storageAckHandler: 'registered',
+      });
+      await expect(gate({ contextGraphId: '42', swmGraphId: 'wired-public-cg', operation: 'publish' }))
+        .resolves.toEqual({ ok: true });
+      await expect(gate({ contextGraphId: '42', swmGraphId: 'wired-public-cg', operation: 'update' }))
+        .resolves.toEqual({ ok: true });
+    });
+
+    it('makes a started core with VM reconcile off refuse every public StorageACK', async () => {
+      const gate = await startCore({ vmReconcilerEnabled: false });
+
+      expect(agent!.getVmPromotionStatus()).toMatchObject({
+        vmReconcilerEnabled: false,
+        storageAckGate: 'declining',
+      });
+      await expect(gate({ contextGraphId: '42', operation: 'publish' }))
+        .resolves.toMatchObject({ ok: false, code: 'CORE_VM_PROMOTION_DISABLED' });
+    });
   });
 });
