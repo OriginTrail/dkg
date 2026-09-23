@@ -25,6 +25,14 @@
  * actually present.
  *
  * Run: pnpm test:devnet:mixed-version
+ *
+ * For a release candidate whose package version still matches the previous
+ * release, pin the actual builds as well. The suite then fails if any node
+ * runs an unexpected commit (or the devnet is missing):
+ *
+ *   DKG_EXPECTED_CORE_COMMIT="$(git rev-parse HEAD)" \
+ *   DKG_EXPECTED_EDGE_COMMIT="$(git rev-parse v10.0.18)" \
+ *   pnpm test:devnet:mixed-version
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { dirname } from 'node:path';
@@ -38,6 +46,7 @@ import {
   type DevnetNode,
   type DevnetState,
 } from '../_bootstrap/harness.js';
+import { releaseLayoutFailures } from './release-layout.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NODE_COUNT = Number(process.env.DEVNET_NODE_COUNT ?? 6);
@@ -46,6 +55,7 @@ interface NodeVersion {
   num: number;
   role: string;
   version: string;
+  commit: string | null;
 }
 
 /** Parse `MAJOR.MINOR.PATCH`, or null if the string carries no semver — callers
@@ -70,10 +80,10 @@ function cmpSemver(a: [number, number, number], b: [number, number, number]): nu
 /** Raw /api/status — no magic fallbacks. Missing fields surface as empty
  *  strings so the reachability test can fail loudly on a malformed boundary
  *  instead of silently mislabeling a node's version/role. */
-async function statusOf(node: DevnetNode): Promise<{ version: string; nodeRole: string }> {
+async function statusOf(node: DevnetNode): Promise<{ version: string; nodeRole: string; commit: string | null }> {
   const res = await fetchRetry(`http://127.0.0.1:${node.apiPort}/api/status`);
-  const j = (await res.json()) as { version?: string; nodeRole?: string };
-  return { version: j.version ?? '', nodeRole: j.nodeRole ?? '' };
+  const j = (await res.json()) as { version?: string; nodeRole?: string; commit?: string | null };
+  return { version: j.version ?? '', nodeRole: j.nodeRole ?? '', commit: j.commit ?? null };
 }
 
 let devnet: DevnetState | null = null;
@@ -87,7 +97,7 @@ describe('mixed-version devnet interop', () => {
     versions = [];
     for (const num of nums) {
       const s = await statusOf(devnet.nodes[num]);
-      versions.push({ num, role: s.nodeRole, version: s.version });
+      versions.push({ num, role: s.nodeRole, version: s.version, commit: s.commit });
     }
     // eslint-disable-next-line no-console
     console.log(
@@ -130,6 +140,17 @@ describe('mixed-version devnet interop', () => {
       return;
     }
     expect(distinct.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('pins every node to the expected release build when release evidence is requested', () => {
+    const coreCommit = process.env.DKG_EXPECTED_CORE_COMMIT;
+    const edgeCommit = process.env.DKG_EXPECTED_EDGE_COMMIT;
+    if (coreCommit === undefined && edgeCommit === undefined) return;
+    const failures = releaseLayoutFailures(versions, {
+      coreCommit: coreCommit ?? '',
+      edgeCommit: edgeCommit ?? '',
+    });
+    expect(failures, failures.join('\n')).toEqual([]);
   });
 
   it('edges are NOT ahead of cores (rollout shape: edges lag the cores)', () => {

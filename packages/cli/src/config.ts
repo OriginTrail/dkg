@@ -240,6 +240,8 @@ export interface NetworkConfig {
     finalityConfirmations?: number;
     /** See `ChainConfig.indexTickMs`. */
     indexTickMs?: number;
+    /** See `ChainConfig.boundedAuthorityReads`. */
+    boundedAuthorityReads?: boolean;
     /** See `ChainConfig.authorityReadTimeoutMs`. */
     authorityReadTimeoutMs?: number;
     /** See `ChainConfig.authorityColdResolutionTimeoutMs`. */
@@ -413,6 +415,12 @@ export interface ChainConfig {
    * listener goes back to scanning the chain for itself.
    */
   indexTickMs?: number;
+  /**
+   * Permit bounded Context Graph authority reads at read-only gates when the
+   * local index has a provably fresh answer. Live mutation and key gates keep
+   * reading the chain. Defaults to false in the adapter.
+   */
+  boundedAuthorityReads?: boolean;
   /**
    * Request-scoped deadline (ms) for one on-chain Context Graph authority
    * read: liveness, access/publish policy, participant roster, or the
@@ -1826,6 +1834,17 @@ export function resolveChainConfig(
   const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
   if (operatorHasIndexTickMs || indexTickMs !== undefined) {
     merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
+  }
+  const operatorHasBoundedAuthorityReads = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'boundedAuthorityReads');
+  const boundedAuthorityReads: unknown = operatorHasBoundedAuthorityReads
+    ? cfg.boundedAuthorityReads
+    : net?.boundedAuthorityReads;
+  if (operatorHasBoundedAuthorityReads || boundedAuthorityReads !== undefined) {
+    if (typeof boundedAuthorityReads !== 'boolean') {
+      throw new TypeError('chain.boundedAuthorityReads must be a boolean');
+    }
+    merged.boundedAuthorityReads = boundedAuthorityReads;
   }
   // Presence matters for both authority deadlines: an explicit null/zero is an
   // operator error, not a request to fall back to the network or agent default.

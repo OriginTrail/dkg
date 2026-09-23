@@ -362,6 +362,26 @@ describe('authority index snapshot production wiring', () => {
     }
   });
 
+  it.each([
+    [undefined, false],
+    [false, false],
+    [true, true],
+  ] as const)('passes boundedAuthorityReads=%s through normal agent construction', async (configured, expected) => {
+    const agent = await DKGAgent.create({
+      name: 'BoundedAuthorityConstruction',
+      store: new OxigraphStore(),
+      chainConfig: {
+        ...evmChainConfig,
+        ...(configured === undefined ? {} : { boundedAuthorityReads: configured }),
+      },
+    });
+    agents.push(agent);
+    const chain = (agent as any).chain;
+    // Construct without starting: this tests the configuration path without
+    // contacting the deliberately unreachable RPC endpoint.
+    expect(chain.contextGraphBoundedAuthorityReadsEnabled).toBe(expected);
+  });
+
   it('keeps snapshot fetch fenced until the agent transport has started', async () => {
     const store = new OxigraphStore();
     const agent = await DKGAgent.create({

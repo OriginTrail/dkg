@@ -721,6 +721,7 @@ function constructConfiguredChainAdapter(
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
       finalityConfirmations: config.chainConfig.finalityConfirmations,
       indexTickMs: config.chainConfig.indexTickMs,
+      boundedAuthorityReads: config.chainConfig.boundedAuthorityReads,
       maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,

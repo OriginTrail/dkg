@@ -1522,6 +1522,22 @@ describe('resolveChainConfig (field-level merge)', () => {
     }
   });
 
+  it('resolves bounded authority reads only from an explicit boolean, with operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.boundedAuthorityReads).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(true);
+    expect(resolveChainConfig({ chain: { boundedAuthorityReads: false } }, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(false);
+
+    for (const invalid of [null, 'true', 1, {}, []]) {
+      expect(() => resolveChainConfig({
+        chain: { boundedAuthorityReads: invalid as never },
+      }, { chain: fullNetworkChain })).toThrow(/chain\.boundedAuthorityReads must be a boolean/);
+    }
+  });
+
   it.each([
     'authorityReadTimeoutMs',
     'authorityColdResolutionTimeoutMs',

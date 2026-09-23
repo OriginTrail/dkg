@@ -443,13 +443,14 @@ describe('EVM adapter: bounded-freshness live authority', () => {
   });
 
   function boundedFixture(options: { enabled: boolean; peek?: unknown }) {
-    const { adapter, readContractWithOptions } = fixture();
+    const { adapter, readContractWithOptions } = fixture(undefined, {
+      boundedAuthorityReads: options.enabled,
+    });
     readContractWithOptions.mockImplementation(async (_c: unknown, _l: string, method: string) => {
       if (method !== 'getContextGraph') throw new Error(`unexpected ${method}`);
       return TUPLE;
     });
     const peekContextGraphLiveAuthority = vi.fn(async () => options.peek);
-    (adapter as any).contextGraphBoundedAuthorityReadsEnabled = options.enabled;
     (adapter as any).contextGraphAuthorityIndexReader = { peekContextGraphLiveAuthority };
     return { adapter, readContractWithOptions, peekContextGraphLiveAuthority };
   }

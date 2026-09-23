@@ -111,8 +111,11 @@ export function providerQuorumFixture(options: {
   };
 }
 
-export function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
-  const adapter: any = new EVMChainAdapter(minimalConfig());
+export function fixture(
+  initialHashes: ReadonlyArray<string | null> = [NAME_HASH],
+  configOverrides: Partial<EVMAdapterConfig> = {},
+) {
+  const adapter: any = new EVMChainAdapter({ ...minimalConfig(), ...configOverrides });
   adapter.initialized = true;
   adapter.init = vi.fn(async () => {});
   let storageAddress = '0x00000000000000000000000000000000000000c6';
