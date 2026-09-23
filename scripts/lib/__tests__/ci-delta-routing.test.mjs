@@ -92,10 +92,14 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     [{ ...manifest, pnpm: { overrides: {} } }, /changed pnpm$/],
     [{ ...manifest, engines: { node: '>=22' } }, /changed engines$/],
     [{ ...manifest, somethingNew: true }, /changed somethingNew$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, postinstall: 'node setup.js' } }, /install lifecycle scripts postinstall$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, prepare: 'node setup.js' } }, /install lifecycle scripts prepare$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, dependencies: 'node setup.js' } }, /install lifecycle scripts dependencies$/],
-    [{ ...manifest, scripts: { ...manifest.scripts, 'pnpm:devPreinstall': 'node setup.js' } }, /install lifecycle scripts pnpm:devPreinstall$/],
+    // Every install-time hook the policy documents, plus any pnpm: hook.
+    ...[
+      'preinstall', 'install', 'postinstall', 'preprepare', 'prepare', 'postprepare',
+      'prepublish', 'dependencies', 'pnpm:devPreinstall', 'pnpm:futureHook',
+    ].map((hook) => [
+      { ...manifest, scripts: { ...manifest.scripts, [hook]: 'node setup.js' } },
+      new RegExp(`install lifecycle scripts ${hook}$`),
+    ]),
     [{ ...manifest, scripts: 'node setup.js' }, /scripts is not a JSON object$/],
   ]) {
     const plan = manifestPlan(head);
