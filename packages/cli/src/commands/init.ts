@@ -544,7 +544,7 @@ program
       // blazegraph back to oxigraph actually applies.
       store: storeBlock ?? undefined,
     };
-    const savedPath = await updateConfigFile((onDisk) => {
+    const { path: savedPath } = await updateConfigFile((onDisk) => {
       Object.assign(onDisk, answers);
       onDisk.auth = { enabled: enableAuth, tokens: onDisk.auth?.tokens };
     });

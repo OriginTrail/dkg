@@ -3,14 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DkgConfig, DkgConfigFilePatch } from '../src/config.js';
+import type { DkgConfig, DkgConfigFilePatch, DkgConfigFileUpdate } from '../src/config.js';
 
 const mocks = vi.hoisted(() => ({
   home: '',
   answers: {} as Record<string, string>,
   questions: [] as string[],
   loadConfig: vi.fn(),
-  updateConfigFile: vi.fn<(patch: DkgConfigFilePatch) => Promise<string>>(),
+  updateConfigFile: vi.fn<(patch: DkgConfigFilePatch) => Promise<DkgConfigFileUpdate>>(),
   // The config file each patch is applied to; defaults to what loadConfig returned.
   fileAtWrite: undefined as Partial<DkgConfig> | undefined,
   // The file updateConfigFile reports as written; defaults to config.json.
@@ -78,7 +78,7 @@ describe('init wizard chain persistence', () => {
       const file = structuredClone(mocks.fileAtWrite ?? await mocks.loadConfig()) as Partial<DkgConfig>;
       patch(file);
       mocks.written.push(file);
-      return mocks.sourcePath ?? join(mocks.home, 'config.json');
+      return { path: mocks.sourcePath ?? join(mocks.home, 'config.json'), changed: true };
     });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});

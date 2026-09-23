@@ -2398,9 +2398,17 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
  * A change to the persisted home config. It receives the file's own object
  * (no defaults merged in) and must mutate only the keys its caller owns:
  * copying a whole in-memory config back would overwrite whatever another
- * process wrote since that copy was loaded.
+ * process wrote since that copy was loaded. It runs while the config lock is
+ * held, so it must be synchronous; the `undefined` return type makes
+ * TypeScript reject an async patch.
  */
-export type DkgConfigFilePatch = (config: Partial<DkgConfig>) => void;
+export type DkgConfigFilePatch = (config: Partial<DkgConfig>) => undefined;
+
+/** Where a config update was written, and whether the patch changed anything. */
+export interface DkgConfigFileUpdate {
+  path: string;
+  changed: boolean;
+}
 
 const CONFIG_LOCK_TIMEOUT_MS = 10_000;
 
@@ -2450,29 +2458,31 @@ export class DkgHomeFiles {
    * Apply `patch` under a lock the daemon and CLI share: re-read the file
    * that is the source of truth, patch its object, and replace the file
    * atomically in the same format. A patch that changes nothing writes
-   * nothing. Returns the path of that file. Every CLI and daemon write to the
-   * home config goes through here.
+   * nothing. The daemon and the CLI commands write the home config through
+   * here; the openclaw, hermes and mcp setup commands still write it through
+   * core's ensureDkgNodeConfig.
    */
-  async updateConfigFile(patch: DkgConfigFilePatch): Promise<string> {
+  async updateConfigFile(patch: DkgConfigFilePatch): Promise<DkgConfigFileUpdate> {
     await mkdir(this.home, { recursive: true });
     return withFileLock(this.configLockPath, async () => {
       const source = await this.readConfigSource() ?? { ...this.configSources[0], raw: {} };
       const config = configFileObject(source.raw, source.path);
       const before = JSON.stringify(config, null, 2);
+      // A caller outside the type system can still pass an async patch.
       const result: unknown = patch(config);
-      if (typeof (result as PromiseLike<unknown> | undefined)?.then === 'function') {
+      if (isThenable(result)) {
         Promise.resolve(result).catch(() => {});
         throw new TypeError('A config file patch must be synchronous');
       }
       const after = JSON.stringify(config, null, 2);
-      if (after === before) return source.path;
+      if (after === before) return { path: source.path, changed: false };
       // Serialize through JSON in both formats so YAML persists exactly what
       // JSON would: undefined keys are dropped instead of failing the dump.
       const content = source.format === 'yaml'
         ? yaml.dump(JSON.parse(after), { noRefs: true, lineWidth: -1 })
         : `${after}\n`;
       await replaceFileDurably(source.path, content);
-      return source.path;
+      return { path: source.path, changed: true };
     }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
   }
 
@@ -2535,6 +2545,10 @@ function mergePersistedConfig(raw: unknown): DkgConfig {
   const config = { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
   assertAuthorityIndexConfigPlacement(config);
   return config;
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === 'object' && value !== null && 'then' in value && typeof value.then === 'function';
 }
 
 /** An empty config file holds an empty config; anything but an object is refused. */
@@ -2691,7 +2705,7 @@ export function exitOnStoreConfigErrors(
   process.exit(1);
 }
 
-export async function updateConfigFile(patch: DkgConfigFilePatch): Promise<string> { return new DkgHomeFiles().updateConfigFile(patch); }
+export async function updateConfigFile(patch: DkgConfigFilePatch): Promise<DkgConfigFileUpdate> { return new DkgHomeFiles().updateConfigFile(patch); }
 export function configExists(): boolean { return new DkgHomeFiles().configExists(); }
 export async function readPid(): Promise<number | null> { return new DkgHomeFiles().readPid(); }
 export async function writePid(pid: number): Promise<void> { await new DkgHomeFiles().writePid(pid); }

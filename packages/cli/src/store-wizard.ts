@@ -19,7 +19,7 @@ import {
   checkExternalStoreReachable,
   formatHealthCheckFailure,
 } from './daemon/store-health-check.js';
-import { updateConfigFile, type DkgConfigFilePatch } from './config.js';
+import { updateConfigFile, type DkgConfigFilePatch, type DkgConfigFileUpdate } from './config.js';
 import {
   isDockerAvailable as defaultIsDockerAvailable,
   provisionBlazegraphDocker as defaultProvisionBlazegraphDocker,
@@ -399,7 +399,7 @@ export interface ApplyStoreFlagsOptions {
   storeFlag?: string;
   storeUrlFlag?: string;
   /** Mock for tests; defaults to the real `updateConfigFile` from config.ts. */
-  updateConfigFile?: (patch: DkgConfigFilePatch) => Promise<unknown>;
+  updateConfigFile?: (patch: DkgConfigFilePatch) => Promise<Pick<DkgConfigFileUpdate, 'changed'>>;
   /** Mock for tests; defaults to `globalThis.fetch` via the probe helper. */
   fetch?: typeof globalThis.fetch;
   log?: (msg: string) => void;
@@ -435,13 +435,10 @@ export async function applyStoreFlagsToConfig(
     backend === 'oxigraph-worker' ||
     backend === 'oxigraph-persistent'
   ) {
-    let removed = false;
-    await update((config) => {
-      if (!config.store) return;
+    const { changed } = await update((config) => {
       delete config.store;
-      removed = true;
     });
-    if (removed) log(`  Removed existing store block (--store ${backend} → local default).`);
+    if (changed) log(`  Removed existing store block (--store ${backend} → local default).`);
     return;
   }
 

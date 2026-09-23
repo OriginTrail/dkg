@@ -47,7 +47,8 @@ describe('DkgHomeFiles.updateConfigFile', () => {
   });
 
   it('creates config.json in a home that has no config yet', async () => {
-    expect(await files.updateConfigFile((config) => { config.name = 'fresh'; })).toBe(files.configPath);
+    expect(await files.updateConfigFile((config) => { config.name = 'fresh'; }))
+      .toEqual({ path: files.configPath, changed: true });
 
     expect(await readJson()).toEqual({ name: 'fresh' });
     expect(existsSync(files.configYamlPath)).toBe(false);
@@ -133,7 +134,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configYamlPath, 'name: yaml-node\napiPort: 9317\n');
 
       expect(await files.updateConfigFile((config) => { config.contextGraphs = ['cg']; }))
-        .toBe(files.configYamlPath);
+        .toEqual({ path: files.configYamlPath, changed: true });
 
       expect(existsSync(files.configPath)).toBe(false);
       expect(yaml.load(await readFile(files.configYamlPath, 'utf-8')))
@@ -175,7 +176,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configYamlPath, original);
 
       expect(await files.updateConfigFile((config) => { config.name = 'yaml-node'; }))
-        .toBe(files.configYamlPath);
+        .toEqual({ path: files.configYamlPath, changed: false });
 
       expect(await readFile(files.configYamlPath, 'utf-8')).toBe(original);
       expect(rename).not.toHaveBeenCalled();

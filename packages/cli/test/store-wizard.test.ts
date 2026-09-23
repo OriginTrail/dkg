@@ -596,9 +596,10 @@ function mockConfigIO(store: MockConfigStore) {
     updateConfigFile: async (patch: DkgConfigFilePatch) => {
       const next = structuredClone(store.current);
       patch(next);
-      if (JSON.stringify(next) === JSON.stringify(store.current)) return;
+      if (JSON.stringify(next) === JSON.stringify(store.current)) return { path: 'config.json', changed: false };
       store.current = next;
       store.saved.push(structuredClone(next));
+      return { path: 'config.json', changed: true };
     },
   };
 }
