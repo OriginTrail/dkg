@@ -457,7 +457,10 @@ import {
   type SyncAdmissionSource,
   type SyncSchedulerLane,
 } from './sync/policy.js';
-import { automaticDurableSyncContextGraphs } from './sync/system-context-graph-policy.js';
+import {
+  automaticDurableSyncContextGraphs,
+  systemContextGraphSyncOptionsOf,
+} from './sync/system-context-graph-policy.js';
 import {
   activeSyncAdmissionSource,
   monotonicNowMs,
@@ -4908,11 +4911,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],
-        {
-          nodeRole: this.config.nodeRole,
-          configValue: this.config.syncSystemContextGraphsOnConnect,
-          envValue: process.env.DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT,
-        },
+        systemContextGraphSyncOptionsOf(this.config),
       ).filter((contextGraphId) => {
         const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
           contextGraphId,

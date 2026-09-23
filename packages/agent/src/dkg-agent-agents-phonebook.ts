@@ -17,6 +17,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { resolveBooleanSwitch } from './sync/backpressure.js';
+import { systemContextGraphSyncOptionsOf } from './sync/system-context-graph-policy.js';
 import {
   OnDemandAgentsPhonebookFetcher,
   onDemandAgentsPhonebookFor,
@@ -38,9 +39,7 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
     return this.started === true
       && resolveBooleanSwitch(this.config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true)
       && resolveOnDemandAgentsPhonebookFetch({
-        nodeRole: this.config.nodeRole,
-        configValue: this.config.syncSystemContextGraphsOnConnect,
-        envValue: process.env.DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT,
+        ...systemContextGraphSyncOptionsOf(this.config),
         onDemandConfigValue: this.config.onDemandAgentsPhonebook,
         onDemandEnvValue: process.env.DKG_ON_DEMAND_AGENTS_PHONEBOOK,
       });
