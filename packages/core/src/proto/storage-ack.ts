@@ -126,25 +126,41 @@ export const STORAGE_ACK_DECLINE_CODES = {
    */
   CORE_TEMPORARILY_UNAVAILABLE: 'CORE_TEMPORARILY_UNAVAILABLE',
   /**
-   * StorageACK finality gate: the core stored and verified the data but
-   * cannot yet commit to carrying it into its Verifiable Memory once the
-   * publish finalizes, so it refuses to sign. For a public graph that means
-   * its chain-driven VM reconciliation is still starting, or the durable
-   * core-hosted record for the graph (or the graph's access policy needed
-   * to take it) could not be written or read just now; for a curated graph,
-   * that its host-mode coverage is not active yet. Transient — these clear
-   * once startup completes or the store/RPC recovers.
+   * StorageACK finality gate, public publish and update ACKs only: the core
+   * cannot yet commit to carrying the Knowledge Asset into its Verifiable
+   * Memory once the transaction finalizes, so it refuses to sign. Its VM
+   * reconciler is still starting or stopping, the graph's liveness or access
+   * policy could not be read, its durable core-hosted record could not be
+   * written, its subscription row is dormant, or an older version of the
+   * asset is still awaiting promotion. Transient.
+   *
+   * Cores send this reason on the wire as {@link CORE_TEMPORARILY_UNAVAILABLE}
+   * (with the VM reason in `declineMessage`), which every deployed publisher
+   * already retries; the code itself labels logs and metrics. It stays in
+   * the transient set for publishers that receive it from a future core.
    */
   CORE_VM_PROMOTION_UNAVAILABLE: 'CORE_VM_PROMOTION_UNAVAILABLE',
   /**
-   * StorageACK finality gate: this core can never carry the data into VM
-   * in its current configuration — its operator switched chain-driven VM
-   * reconciliation off (`vmReconcilerEnabled: false` /
+   * StorageACK finality gate, public publish and update ACKs only: this core
+   * cannot carry this request's data into its VM. Its operator switched
+   * chain-driven VM reconciliation off (`vmReconcilerEnabled: false` /
    * `DKG_VM_RECONCILER_ENABLED=0`), its chain adapter lacks the reads the
-   * reconciler needs, or (curated graphs) SWM host mode is unavailable.
-   * Permanent: the publisher deselects this core for the request.
+   * reconciler needs, the request is a legacy (not graph-scoped) public
+   * intent that leaves no promotable copy, the graph is curated but was sent
+   * on the public path, or the SWM namespace is bound to another context
+   * graph. Curated catalog ACKs never produce it. Permanent: the publisher
+   * deselects this core for the request.
    */
   CORE_VM_PROMOTION_DISABLED: 'CORE_VM_PROMOTION_DISABLED',
+  /**
+   * A graph-scoped public ACK would replace this core's SWM copy of the same
+   * Knowledge Asset with different content at the same assertion version, or
+   * with an older version. The SWM gossip path rejects the same conflicts
+   * (CONFLICTING_KA_ASSERTION_VERSION / STALE_KA_ASSERTION_VERSION), and an
+   * ACK must not be able to overwrite a copy the core may still owe to its
+   * Verifiable Memory. Permanent for the request.
+   */
+  CONFLICTING_KA_ASSERTION: 'CONFLICTING_KA_ASSERTION',
 } as const;
 
 export type StorageACKDeclineCode =
@@ -176,8 +192,8 @@ export const TRANSIENT_STORAGE_ACK_DECLINE_CODES: ReadonlySet<string> = new Set<
   // keeps a briefly-degraded core in the quorum pool instead of
   // deselecting it on the first blip.
   STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
-  // Finality gate: a core still starting its VM reconciler, or one whose
-  // hosting record hit a store/RPC blip, can sign seconds later. The
+  // Finality gate: cores send this reason as CORE_TEMPORARILY_UNAVAILABLE on
+  // the wire; a publisher that does receive it retries it the same way. The
   // configuration-level refusal (CORE_VM_PROMOTION_DISABLED) stays permanent.
   STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
 ]);

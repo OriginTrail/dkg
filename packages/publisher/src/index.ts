@@ -195,9 +195,17 @@ export {
   type StorageAckDecision,
   type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
+  type StorageAckPriorVersionRequest,
   type StorageAckVmPromotionRequest,
   type StorageAckVmPromotionVerdict,
 } from './storage-ack-handler.js';
+export {
+  STORAGE_ACK_LEDGER_GRAPH,
+  STORAGE_ACK_LEDGER_PREDICATES,
+  storageAckLedgerEntryQuads,
+  xsdDateTimeLiteral,
+  type StorageAckLedgerEntry,
+} from './storage-ack-ledger.js';
 export {
   createStorageAckLifecycleObserver,
   type StorageAckLifecycleObserverOptions,
