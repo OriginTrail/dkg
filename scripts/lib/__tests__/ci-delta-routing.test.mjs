@@ -367,7 +367,8 @@ test('each changed path gets one routing decision with a fixed precedence', () =
 test('every file a lane runs, or loads by relative path, selects that lane', () => {
   // Seeds: what each lane executes. A workspace's code and tests run in its
   // owning lanes, node-ui's browser specs in the e2e lane and its integration
-  // suites in the EVM scope that lists them; package scripts run in no lane.
+  // suites in the EVM scope that lists them. Package scripts run in no lane,
+  // and fixture workspaces (test-fixtures/) run only where a test builds them.
   // A lane job also runs the support files its steps name: directly, through
   // a root package.json script or through a reusable workflow it calls.
   // A lane also loads everything those files reference by relative path
@@ -375,9 +376,10 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // a test reads), in other packages and support areas alike. Only module
   // loads carry on to what the loaded file imports; any other `new URL(...)`
   // path (a document read, a process to spawn) is loaded but not followed, and
-  // type-only imports are erased before anything runs. Declared package.json
-  // dependencies are covered by the reverse-dependency test; this covers the
-  // couplings they miss. Each file reached must select the lane or scope, or
+  // type-only imports are erased before anything runs. A package-name import
+  // loads that workspace and its dependencies, so wherever a lane's reach
+  // crosses into another package, the workspaces that package imports must
+  // select the lane too. Each file reached must select the lane or scope, or
   // plan full CI.
   const modulePattern = /(?:\bfrom\s*|\bimport\s*\(\s*(?:new\s+URL\(\s*)?)['"]((?:\.\.?\/)+[^'"]+)['"]/g;
   const pathPattern = /\bnew\s+URL\(\s*['"]((?:\.\.?\/)+[^'"]+)['"]/g;
@@ -397,29 +399,40 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
       `${target}/index.ts`,
     ].find(isFile) ?? target;
   };
+  const packagePattern = /(?:\bfrom\s*|\bimport\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
   const references = (file) => {
     const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
-      .replace(/\b(?:import|export)\s+type\s[^;]*?\bfrom\s*['"][^'"]+['"]/g, '');
+      .replace(/\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s*['"][^'"]+['"]/g, '');
     const modules = [...source.matchAll(modulePattern)].map(([, specifier]) => resolve(file, specifier));
     const paths = [...source.matchAll(pathPattern)].map(([, specifier]) => resolve(file, specifier));
+    const packages = [...new Set([...source.matchAll(packagePattern)].map(([, name]) => name))];
     const inRepo = (target) => !target.startsWith('../');
-    return { modules: modules.filter(inRepo), paths: paths.filter((target) => inRepo(target) && !modules.includes(target)) };
+    return { modules: modules.filter(inRepo), paths: paths.filter((target) => inRepo(target) && !modules.includes(target)), packages };
   };
+  const workspaceByName = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
+    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')).name,
+    workspace,
+  ]));
+  const closures = new Map();
+  const closureOf = (workspace) => closures.get(workspace) ?? closures.set(workspace, workspaceClosure([workspace])).get(workspace);
 
   const loadedBy = new Map(); // path -> Map(lane or evm:scope -> how it is reached)
+  const needsOf = (map, key) => map.get(key) ?? map.set(key, new Map()).get(key);
   const load = (target, requirements, via) => {
-    const entry = loadedBy.get(target) ?? loadedBy.set(target, new Map()).get(target);
+    const entry = needsOf(loadedBy, target);
     const added = requirements.filter((requirement) => !entry.has(requirement));
     for (const requirement of added) entry.set(requirement, via);
     return added.length > 0;
   };
+  // Workspaces loaded by package name, whose rule then covers every file.
+  const workspacesLoaded = new Map();
   const evmScopeFiles = new Map(Object.entries(EVM_TEST_SCOPES).flatMap(([scope, { packageDirectory, files }]) =>
     files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), `evm:${scope}`])));
   for (const [workspace, owningLanes] of Object.entries(WORKSPACE_OWNING_LANES)) {
     if (WORKSPACE_RULES[workspace].forceFull) continue;
     for (const file of sourceFiles(workspace)) {
       const inside = file.slice(workspace.length + 1);
-      if (/^(?:scripts|test\/archive)\//.test(inside)) continue;
+      if (/^(?:scripts|test-fixtures|test\/archive)\//.test(inside)) continue;
       if (inside.startsWith('integration/')) {
         if (evmScopeFiles.has(file)) load(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
       } else if (workspace === 'packages/node-ui' && inside.startsWith('e2e/')) {
@@ -461,11 +474,27 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     const file = queue.shift();
     if (!isFile(file) || !/\.[cm]?[jt]sx?$/.test(file)) continue;
     const requirements = [...loadedBy.get(file).keys()];
-    const { modules, paths } = references(file);
+    const { modules, paths, packages } = references(file);
     for (const target of modules) {
       if (load(target, requirements, file)) queue.push(target);
     }
     for (const target of paths) load(target, requirements, file);
+    for (const name of packages) {
+      if (!workspaceByName.has(name)) continue;
+      for (const workspace of closureOf(workspaceByName.get(name))) {
+        const entry = needsOf(workspacesLoaded, workspace);
+        for (const requirement of requirements) {
+          if (!entry.has(requirement)) entry.set(requirement, `${file} (imports ${name})`);
+        }
+      }
+    }
+  }
+  // Any path in a workspace routes by its rule; its src/index.ts stands for all.
+  for (const [workspace, requirements] of workspacesLoaded) {
+    const entry = needsOf(loadedBy, `${workspace}/src/index.ts`);
+    for (const [requirement, via] of requirements) {
+      if (!entry.has(requirement)) entry.set(requirement, via);
+    }
   }
 
   for (const [target, requirement, why] of [

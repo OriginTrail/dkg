@@ -139,7 +139,8 @@ export const WORKSPACE_RULES = Object.freeze({
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
-    evmScopes: ['publisher', 'agent'],
+    // chain: the DKGAgent the chain scope's node-ui suite starts loads it.
+    evmScopes: ['chain', 'publisher', 'agent'],
   },
   'packages/chain': {
     lanes: [
@@ -161,7 +162,8 @@ export const WORKSPACE_RULES = Object.freeze({
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
-    evmScopes: ['publisher', 'agent'],
+    // chain: the DKGAgent the chain scope's node-ui suite starts loads it.
+    evmScopes: ['chain', 'publisher', 'agent'],
   },
   'packages/publisher': {
     lanes: [
@@ -171,7 +173,8 @@ export const WORKSPACE_RULES = Object.freeze({
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
-    evmScopes: ['publisher', 'agent'],
+    // chain: the DKGAgent the chain scope's node-ui suite starts loads it.
+    evmScopes: ['chain', 'publisher', 'agent'],
   },
   'packages/random-sampling': {
     lanes: [
@@ -180,7 +183,8 @@ export const WORKSPACE_RULES = Object.freeze({
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
-    evmScopes: ['agent'],
+    // chain: the DKGAgent the chain scope's node-ui suite starts loads it.
+    evmScopes: ['chain', 'agent'],
   },
   'packages/agent': {
     lanes: [
