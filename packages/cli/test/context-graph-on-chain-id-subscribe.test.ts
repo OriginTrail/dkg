@@ -87,13 +87,27 @@ async function gnosisShapedChain(graph: Graph32 = {}): Promise<MockChainAdapter>
   return chain;
 }
 
-async function startNode(chain: MockChainAdapter): Promise<DKGAgent> {
+async function startNode(
+  chain: MockChainAdapter,
+  /** Chain authority read budgets, in ms. */
+  budgets?: { request: number; cold: number },
+): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'GnosisEdge',
     listenHost: '127.0.0.1',
     nodeRole: 'edge',
     chainAdapter: chain,
     rfc64CatalogActivation: { enabled: false },
+    ...(budgets
+      ? {
+          chainConfig: {
+            rpcUrl: 'http://127.0.0.1:0',
+            hubAddress: ethers.ZeroAddress,
+            authorityReadTimeoutMs: budgets.request,
+            authorityColdResolutionTimeoutMs: budgets.cold,
+          },
+        }
+      : {}),
   });
   cleanups.push(() => agent.stop());
   await agent.start();
@@ -130,11 +144,12 @@ async function startRoute(agent: DKGAgent, options: { callerAgentAddress?: strin
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('route server did not bind');
   const base = `http://127.0.0.1:${address.port}`;
-  const subscribe = async (contextGraphId: unknown) => {
+  const subscribe = async (contextGraphId: unknown, init: { signal?: AbortSignal } = {}) => {
     const response = await fetch(`${base}/api/context-graph/subscribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contextGraphId, syncMode: 'on-demand' }),
+      ...(init.signal ? { signal: init.signal } : {}),
     });
     return {
       status: response.status,
@@ -358,5 +373,68 @@ describe('subscribing a Context Graph by its on-chain numeric id', () => {
     }
     expect(JSON.stringify(answers)).not.toContain(CLEARTEXT);
     expect(member.getSubscribedContextGraphs().get(CLEARTEXT)?.subscribed).not.toBe(true);
+  }, 60_000);
+});
+
+/** Hold the chain's ContextGraphStorage reads until `release()`. */
+function gateStorageReads(chain: MockChainAdapter) {
+  const realRead = chain.readContextGraphStorageRange.bind(chain);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const read = vi.spyOn(chain, 'readContextGraphStorageRange')
+    .mockImplementation(async (options) => {
+      await gate;
+      return realRead(options);
+    });
+  return { read, release };
+}
+
+describe('the subscribe request while a chain read is slow', () => {
+  it('answers within the request budget and lets a retry find the graph', async () => {
+    useEmptyCatchupRunner();
+    const chain = await gnosisShapedChain();
+    const agent = await startNode(chain, { request: 150, cold: 10_000 });
+    const { requestTimeoutMs, coldResolutionTimeoutMs } = agent.chainAuthorityReadBudgets;
+    const route = await startRoute(agent);
+    const { read, release } = gateStorageReads(chain);
+
+    const startedAt = Date.now();
+    const slow = await route.subscribe('#32');
+    expect(Date.now() - startedAt).toBeLessThan(coldResolutionTimeoutMs / 2);
+    expect(slow.status).toBe(503);
+    expect(slow.body).toEqual({
+      error: `Could not read Context Graph #32 from ContextGraphStorage (no answer within ${requestTimeoutMs} ms; `
+        + 'the read continues, so a retry may find it); retry once the chain RPC responds.',
+      code: 'CONTEXT_GRAPH_ON_CHAIN_ID_UNAVAILABLE',
+      retryable: true,
+    });
+    expect(route.catchupTracker.jobs.size).toBe(0);
+
+    release();
+    await vi.waitFor(() => expect(agent.lookupContextGraphOnChainIdReference('#32')).toMatchObject({ kind: 'held' }));
+    const retried = await route.subscribe('#32');
+    expect(retried.status).toBe(200);
+    expect(retried.body.subscribed).toBe(NAME_HASH);
+    expect(read).toHaveBeenCalledTimes(1);
+  }, 60_000);
+
+  it('stops waiting when the client disconnects', async () => {
+    useEmptyCatchupRunner();
+    const chain = await gnosisShapedChain();
+    const agent = await startNode(chain, { request: 10_000, cold: 20_000 });
+    const route = await startRoute(agent);
+    const { read, release } = gateStorageReads(chain);
+    const resolve = vi.spyOn(agent, 'resolveContextGraphOnChainIdReference');
+
+    const client = new AbortController();
+    const request = route.subscribe('#32', { signal: client.signal }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    const waitSignal = resolve.mock.calls[0]![1]!.signal!;
+    expect(waitSignal.aborted).toBe(false);
+    client.abort();
+    await vi.waitFor(() => expect(waitSignal.aborted).toBe(true));
+    await request;
+    release();
+    expect(agent.getSubscribedContextGraphs().get(NAME_HASH)?.subscribed).not.toBe(true);
   }, 60_000);
 });

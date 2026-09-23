@@ -81,7 +81,12 @@ afterEach(async () => {
 
 async function startAgent(
   chain: MockChainAdapter | undefined,
-  options: { store?: ContextGraphSubscriptionStore; syncContextGraphs?: string[] } = {},
+  options: {
+    store?: ContextGraphSubscriptionStore;
+    syncContextGraphs?: string[];
+    /** Chain authority read budgets, in ms. */
+    budgets?: { request: number; cold: number };
+  } = {},
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'OnChainIdEdge',
@@ -91,6 +96,16 @@ async function startAgent(
     rfc64CatalogActivation: { enabled: false },
     ...(options.store ? { contextGraphSubscriptionStore: options.store } : {}),
     ...(options.syncContextGraphs ? { syncContextGraphs: options.syncContextGraphs } : {}),
+    ...(options.budgets
+      ? {
+          chainConfig: {
+            rpcUrl: 'http://127.0.0.1:0',
+            hubAddress: ethers.ZeroAddress,
+            authorityReadTimeoutMs: options.budgets.request,
+            authorityColdResolutionTimeoutMs: options.budgets.cold,
+          },
+        }
+      : {}),
   });
   agents.push(agent);
   await agent.start();
@@ -440,6 +455,89 @@ describe('resolving an on-chain Context Graph id', () => {
       kind: 'unavailable',
       detail: expect.stringContaining('bound to another on-chain id'),
     });
+  });
+});
+
+/** Hold the chain's ContextGraphStorage reads until `release()`. */
+function gateStorageReads(chain: MockChainAdapter) {
+  const realRead = chain.readContextGraphStorageRange.bind(chain);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const read = vi.spyOn(chain, 'readContextGraphStorageRange')
+    .mockImplementation(async (options) => {
+      await gate;
+      return realRead(options);
+    });
+  return { read, release };
+}
+
+describe('waiting for a ContextGraphStorage read', () => {
+  const budgets = { request: 150, cold: 10_000 };
+
+  it('waits the request budget, not the cold one, and the read finishes detached for the next call', async () => {
+    const chain = await chainWithGraph32();
+    const agent = await startAgent(chain, { budgets });
+    const { request, cold } = {
+      request: agent.chainAuthorityReadBudgets.requestTimeoutMs,
+      cold: agent.chainAuthorityReadBudgets.coldResolutionTimeoutMs,
+    };
+    expect(cold).toBeGreaterThan(request * 10);
+    const { read, release } = gateStorageReads(chain);
+
+    const startedAt = Date.now();
+    await expect(agent.resolveContextGraphOnChainIdReference('#32')).resolves.toEqual({
+      kind: 'unavailable',
+      onChainId: '32',
+      detail: `no answer within ${request} ms; the read continues, so a retry may find it`,
+    });
+    expect(Date.now() - startedAt).toBeLessThan(cold / 2);
+    expect(internals(agent).onChainContextGraphFacts.has('32')).toBe(false);
+
+    // The read was not abandoned: once the chain answers, the graph is recorded.
+    release();
+    await vi.waitFor(() => expect(internals(agent).onChainContextGraphFacts.has('32')).toBe(true));
+    await expect(agent.resolveContextGraphOnChainIdReference('#32')).resolves.toMatchObject({
+      kind: 'resolved',
+      contextGraphId: NAME_HASH,
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one read between concurrent callers', async () => {
+    const chain = await chainWithGraph32();
+    const agent = await startAgent(chain, { budgets: { request: 5_000, cold: 10_000 } });
+    const { read, release } = gateStorageReads(chain);
+    const waiting = Promise.all([
+      agent.resolveContextGraphOnChainIdReference('#32'),
+      agent.resolveContextGraphOnChainIdReference('32'),
+    ]);
+    setTimeout(release, 50);
+    const answers = await waiting;
+    for (const answer of answers) expect(answer).toMatchObject({ kind: 'resolved', contextGraphId: NAME_HASH });
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits the cold budget when asked to, as start-up does', async () => {
+    const chain = await chainWithGraph32();
+    const agent = await startAgent(chain, { budgets });
+    const { release } = gateStorageReads(chain);
+    setTimeout(release, agent.chainAuthorityReadBudgets.requestTimeoutMs * 3);
+    await expect(agent.resolveContextGraphOnChainIdReference('#32', { wait: 'background' })).resolves.toMatchObject({
+      kind: 'resolved',
+      contextGraphId: NAME_HASH,
+    });
+  });
+
+  it('stops waiting when the caller\'s signal aborts', async () => {
+    const chain = await chainWithGraph32();
+    const agent = await startAgent(chain, { budgets: { request: 10_000, cold: 20_000 } });
+    const { release } = gateStorageReads(chain);
+    const caller = new AbortController();
+    const answer = agent.resolveContextGraphOnChainIdReference('#32', { signal: caller.signal });
+    caller.abort(new Error('client disconnected'));
+    await expect(answer).resolves.toEqual({ kind: 'unavailable', onChainId: '32', detail: 'client disconnected' });
+    release();
+    await vi.waitFor(() => expect(internals(agent).onChainContextGraphFacts.has('32')).toBe(true));
   });
 });
 

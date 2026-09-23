@@ -15,7 +15,7 @@
 import type { ContextGraphStorageRange } from '@origintrail-official/dkg-chain';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 
-import { runBoundedOperation } from './bounded-operation.js';
+import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import {
   contextGraphNameCommitmentOf,
@@ -28,6 +28,7 @@ import {
   type ContextGraphOnChainIdLookup,
   type ContextGraphOnChainIdReference,
   type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
   type RetiredNumericContextGraphSubscription,
 } from './context-graph-on-chain-reference.js';
 import { contextGraphStorageObservation } from './context-graph-storage-discovery.js';
@@ -42,6 +43,18 @@ type OnDemandStorageRead =
   | { readonly kind: 'absent'; readonly latestId: string }
   | { readonly kind: 'unavailable'; readonly detail: string }
   | { readonly kind: 'unsupported' };
+
+/** In-flight ContextGraphStorage reads per agent, one per on-chain id. */
+const onChainIdReadFlights = new WeakMap<object, Map<string, Promise<OnDemandStorageRead>>>();
+
+function onChainIdReadFlightsOf(agent: object): Map<string, Promise<OnDemandStorageRead>> {
+  let flights = onChainIdReadFlights.get(agent);
+  if (flights === undefined) {
+    flights = new Map();
+    onChainIdReadFlights.set(agent, flights);
+  }
+  return flights;
+}
 
 /**
  * The chain proves the graph at on-chain id N is not named "N": slot N
@@ -126,7 +139,7 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
   async resolveContextGraphOnChainIdReference(
     this: DKGAgent,
     reference: unknown,
-    options: { signal?: AbortSignal } = {},
+    options: ResolveContextGraphOnChainIdOptions = {},
   ): Promise<ContextGraphOnChainIdResolution> {
     const parsed = parseContextGraphOnChainIdReference(reference);
     if (parsed === null) return AS_GIVEN;
@@ -144,7 +157,7 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
   async resolveContextGraphOnChainId(
     this: DKGAgent,
     parsed: ContextGraphOnChainIdReference,
-    options: { signal?: AbortSignal },
+    options: ResolveContextGraphOnChainIdOptions,
   ): Promise<ContextGraphOnChainIdResolution> {
     const { onChainId } = parsed;
     // Without a chain there are no on-chain ids: a bare number is just a name.
@@ -156,7 +169,7 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
     // alone does not say whether the graph is still active, so read then too.
     const known = this.onChainContextGraphFacts.get(onChainId);
     if (known === undefined || known.active === null) {
-      const read = await this.readContextGraphStorageIdOnDemand(onChainId, options.signal);
+      const read = await this.readContextGraphStorageIdOnDemand(onChainId, options);
       if (read.kind !== 'entry' && known === undefined) {
         // What the chain could not say, it cannot overrule.
         if (literalRow() !== undefined) return AS_GIVEN;
@@ -257,42 +270,80 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
   }
 
   /**
-   * Read one ContextGraphStorage id with historical discovery's primitive and
-   * apply it through the same observation path, so the graph gets exactly the
-   * row and facts a discovery pass would give it.
+   * Wait for one ContextGraphStorage id to be read, for as long as the caller
+   * may wait: `requestTimeoutMs` by default, the cold-resolution budget for
+   * `wait: 'background'`, and never past the caller's signal. The read itself
+   * runs detached (see readContextGraphStorageIdDetached), one per id at a
+   * time, so a caller that stops waiting leaves it to finish and record the
+   * graph for the next call.
    */
   async readContextGraphStorageIdOnDemand(
     this: DKGAgent,
     onChainId: string,
-    signal?: AbortSignal,
+    options: ResolveContextGraphOnChainIdOptions = {},
   ): Promise<OnDemandStorageRead> {
-    const read = this.chain.readContextGraphStorageRange;
-    if (typeof read !== 'function') return { kind: 'unsupported' };
-    let range: ContextGraphStorageRange;
+    if (typeof this.chain.readContextGraphStorageRange !== 'function') return { kind: 'unsupported' };
+    const flights = onChainIdReadFlightsOf(this);
+    let flight = flights.get(onChainId);
+    if (flight === undefined) {
+      const started: Promise<OnDemandStorageRead> = this.readContextGraphStorageIdDetached(onChainId)
+        .finally(() => {
+          if (flights.get(onChainId) === started) flights.delete(onChainId);
+        });
+      flights.set(onChainId, started);
+      flight = started;
+    }
+    const budgets = chainAuthorityReadBudgetsOf(this);
+    const waitMs = options.wait === 'background' ? budgets.coldResolutionTimeoutMs : budgets.requestTimeoutMs;
+    const pending = flight;
     try {
-      range = await runBoundedOperation(
+      return await runBoundedOperation(() => pending, {
+        label: `ContextGraphStorage read of #${onChainId}`,
+        timeoutMs: waitMs,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      return {
+        kind: 'unavailable',
+        detail: isBoundedOperationTimeoutError(error)
+          ? `no answer within ${waitMs} ms; the read continues, so a retry may find it`
+          : error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Read one ContextGraphStorage id with historical discovery's primitive and
+   * apply it through the same observation path, so the graph gets exactly the
+   * row and facts a discovery pass would give it. Bounded by the
+   * cold-resolution budget, like the detached finalized-authority flight
+   * whose waiters are bounded separately. Never rejects.
+   */
+  async readContextGraphStorageIdDetached(this: DKGAgent, onChainId: string): Promise<OnDemandStorageRead> {
+    const read = this.chain.readContextGraphStorageRange!;
+    try {
+      const range: ContextGraphStorageRange = await runBoundedOperation(
         (readSignal) => read.call(this.chain, { fromId: BigInt(onChainId), maxIds: 1, signal: readSignal }),
         {
           label: `readContextGraphStorageRange(#${onChainId})`,
           timeoutMs: chainAuthorityReadBudgetsOf(this).coldResolutionTimeoutMs,
-          ...(signal ? { signal } : {}),
         },
       );
+      const entry = range.entries.find((candidate) => candidate.contextGraphId === onChainId);
+      if (entry === undefined) {
+        // Ids are sequential and never burned: above the latest id the graph
+        // does not exist; at or below it the serving backend is behind.
+        return range.latestId < BigInt(onChainId)
+          ? { kind: 'absent', latestId: range.latestId.toString(10) }
+          : { kind: 'unavailable', detail: `id ${onChainId} is not readable yet at block ${range.anchorBlockNumber}` };
+      }
+      this.applyOnChainContextGraphObservation(
+        contextGraphStorageObservation(entry, range.anchorBlockNumber),
+        { source: 'storage' },
+      );
+      return { kind: 'entry' };
     } catch (error) {
       return { kind: 'unavailable', detail: error instanceof Error ? error.message : String(error) };
     }
-    const entry = range.entries.find((candidate) => candidate.contextGraphId === onChainId);
-    if (entry === undefined) {
-      // Ids are sequential and never burned: above the latest id the graph
-      // does not exist; at or below it the serving backend is behind.
-      return range.latestId < BigInt(onChainId)
-        ? { kind: 'absent', latestId: range.latestId.toString(10) }
-        : { kind: 'unavailable', detail: `id ${onChainId} is not readable yet at block ${range.anchorBlockNumber}` };
-    }
-    this.applyOnChainContextGraphObservation(
-      contextGraphStorageObservation(entry, range.anchorBlockNumber),
-      { source: 'storage' },
-    );
-    return { kind: 'entry' };
   }
 }

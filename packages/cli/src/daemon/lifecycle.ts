@@ -1048,7 +1048,9 @@ export async function resolveConfiguredOnChainContextGraphIds(
     const isConfigured = configured.has(contextGraphId);
     let resolution: ContextGraphOnChainIdResolution;
     try {
-      resolution = await agent.resolveContextGraphOnChainIdReference?.(contextGraphId, { signal })
+      // Start-up waits the cold budget for a chain read (within its own), so a
+      // slow RPC does not drop a configured graph for the whole boot.
+      resolution = await agent.resolveContextGraphOnChainIdReference?.(contextGraphId, { signal, wait: 'background' })
         ?? { kind: 'as-given' };
     } catch (error) {
       // The resolver reports its own failures; a throw is a defect, so fail closed.

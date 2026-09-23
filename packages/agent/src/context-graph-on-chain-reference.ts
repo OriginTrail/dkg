@@ -85,6 +85,19 @@ export type ContextGraphOnChainIdResolution =
   | ResolvedContextGraphOnChainId
   | Exclude<ContextGraphOnChainIdRefusal, { kind: 'private' }>;
 
+/** How long a resolution may wait for a ContextGraphStorage read. */
+export interface ResolveContextGraphOnChainIdOptions {
+  /** Ends the wait early (a disconnected client, an ending start-up budget). */
+  readonly signal?: AbortSignal;
+  /**
+   * `request` (the default) waits the request-scoped authority read budget
+   * (`requestTimeoutMs`); `background` waits the cold-resolution budget. The
+   * read itself always runs detached under the cold budget and records what
+   * it finds, so a caller that stopped waiting finds the graph next time.
+   */
+  readonly wait?: 'request' | 'background';
+}
+
 /**
  * What an id names among the rows this node already keeps, without reading
  * the chain: for unsubscribing and for status lookups.

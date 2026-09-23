@@ -191,6 +191,7 @@ import {
   recordTerminalOnce,
   releaseCatchupJob,
 } from '../catchup-telemetry.js';
+import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -1945,12 +1946,20 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // cleartext id, or the hash-keyed row discovery staged) before anything
     // else: a subscription keyed by the number would derive its gossip
     // topics and wire id from keccak256("32") and sync nothing.
+    // A chain read here waits the request-scoped authority budget, and a
+    // client that disconnects stops the wait (the read itself finishes
+    // detached, so a retry finds the graph).
+    const resolutionLifecycle = createStoreQueryRequestLifecycle(req, res, 'api.contextGraph.subscribe');
     let onChainResolution: ContextGraphOnChainIdResolution;
     try {
-      onChainResolution = await agent.resolveContextGraphOnChainIdReference?.(requestedContextGraphId)
-        ?? { kind: 'as-given' };
+      onChainResolution = await agent.resolveContextGraphOnChainIdReference?.(
+        requestedContextGraphId,
+        { signal: resolutionLifecycle.signal },
+      ) ?? { kind: 'as-given' };
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    } finally {
+      resolutionLifecycle.dispose();
     }
     if (onChainResolution.kind !== 'as-given' && onChainResolution.kind !== 'resolved') {
       return unresolvedOnChainIdResponse(res, onChainResolution, shouldSyncSharedMemory);

@@ -225,6 +225,7 @@ export {
   type ContextGraphOnChainIdReference,
   type ContextGraphOnChainIdRefusal,
   type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
   type ResolvedContextGraphOnChainId,
   type RetiredNumericContextGraphSubscription,
 } from './context-graph-on-chain-reference.js';
