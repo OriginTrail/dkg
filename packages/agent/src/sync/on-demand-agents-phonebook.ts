@@ -261,8 +261,8 @@ export class OnDemandAgentsPhonebookFetcher {
       // one does not, and the graph's next reconcile pass asks again later.
       if (this.#inFlight === undefined && now < this.#nextEligibleAt) return;
       this.#evaluating.add(contextGraphId);
-      // Start on a later turn: the subscribe path calls this before it has
-      // installed the subscription row the evaluation checks.
+      // Start on a later turn, so a caller's synchronous path (subscribe, a
+      // VM recovery pass) does no store or chain work here.
       const evaluation = Promise.resolve()
         .then(() => this.#evaluate(contextGraphId, wallet, trigger))
         .catch((error: unknown) => {

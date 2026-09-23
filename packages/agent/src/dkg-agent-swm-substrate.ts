@@ -416,13 +416,28 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // Subscribing the cleartext of a graph held only by its name hash moves
     // the subscription: nothing may keep running under the hash id.
     this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
-    // An Edge keeps no durable `agents` phonebook, so the curator tier of a
-    // public wallet-scoped graph cannot reach its owner's holders. Ask for one
-    // bounded fetch; the request is O(1) here and does its checks detached.
+    const subscription = this.installContextGraphSubscription(contextGraphId, options);
+    // The row is installed, so the phonebook check sees the subscription it
+    // qualifies against. An Edge keeps no durable `agents` phonebook, so the
+    // curator tier of a public wallet-scoped graph cannot reach its owner's
+    // holders: ask for one bounded fetch. The request is O(1) and does its
+    // checks detached.
     this.requestOnDemandAgentsPhonebook(
       contextGraphId,
       options?.agentsPhonebookTrigger ?? 'subscribe',
     );
+    return subscription;
+  }
+
+  /**
+   * Install one subscription after alias adoption: the row, its sync scope
+   * and its gossip handlers, or the RFC-64 catalog-owned equivalent.
+   */
+  protected installContextGraphSubscription(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: Parameters<SwmSubstrateMethods['subscribeToContextGraph']>[1],
+  ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {

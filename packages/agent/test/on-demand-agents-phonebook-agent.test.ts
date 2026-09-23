@@ -214,6 +214,24 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     expect(edge.agentsFetches()).toHaveLength(1);
   });
 
+  it('asks for the phonebook only after the subscribe path has installed the row', async () => {
+    const edge = await createFreshEdge('PhonebookSubscribeOrder');
+    agents.push(edge.agent);
+    const original = DKGAgent.prototype.requestOnDemandAgentsPhonebook;
+    const rowAtRequest: Array<boolean | undefined> = [];
+    vi.spyOn(edge.agent, 'requestOnDemandAgentsPhonebook').mockImplementation(
+      (contextGraphId, trigger) => {
+        rowAtRequest.push(edge.agent.getSubscribedContextGraphs().get(contextGraphId)?.subscribed);
+        original.call(edge.agent, contextGraphId, trigger);
+      },
+    );
+
+    edge.agent.subscribeToContextGraph(CG, { syncMode: 'always-on' });
+
+    expect(rowAtRequest).toEqual([true]);
+    await vi.waitFor(() => expect(edge.agentsFetches()).toHaveLength(1), { timeout: 5_000 });
+  });
+
   it('an empty curator tier during VM recovery fetches the phonebook, re-schedules recovery, and the next pass reaches the publisher', async () => {
     const edge = await createFreshEdge('PhonebookOnVmRecovery');
     agents.push(edge.agent);
