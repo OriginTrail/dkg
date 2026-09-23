@@ -454,34 +454,42 @@ function isDocumentationOnlyPath(filePath) {
     || (filePath.startsWith('demo/docs/') && hasDocumentationExtension(filePath));
 }
 
-// Workflows whose jobs, conditions and gates define what "CI gate" means. Other
-// top-level workflows run (or are linted) on their own; see supportPathRoute.
-const CI_CONTROL_WORKFLOWS = new Set([
-  '.github/workflows/ci.yml',
-  '.github/workflows/evm-integration.yml',
-  '.github/workflows/rfc64-inventory-windows.yml',
-]);
-
 function isGlobalFullPath(filePath) {
   return GLOBAL_FULL_PATHS.has(filePath)
-    || CI_CONTROL_WORKFLOWS.has(filePath)
-    // GitHub only runs top-level workflow files; anything nested is unknown.
-    || /^\.github\/workflows\/[^/]+\/./.test(filePath)
-    || filePath.startsWith('.github/actions/')
     || filePath.startsWith('patches/')
     || filePath.startsWith('scripts/')
-    // devnet suites are pnpm workspaces: their manifests are install inputs.
-    || /^devnet\/[^/]+\/package\.json$/.test(filePath)
     || /^tsconfig(?:\.[^/]+)?\.json$/.test(filePath);
 }
 
-// Repository areas outside the package workspaces, mapped to the lanes that
-// actually execute them in CI (ci.yml and its reusable workflows). Every route
-// also selects the shared build job's own checks (`buildChecks`): its lint,
+// Repository areas outside the package workspaces, in first-match order. An
+// entry with `full` keeps full CI with its own reason (the CI control plane,
+// unknown workflow paths, devnet install inputs). Every other entry selects
+// the lanes that actually execute the area in CI (ci.yml and its reusable
+// workflows) plus the shared build job's own checks (`buildChecks`): its lint,
 // repository-script tests and test-inventory checks cover these files, and for
 // routes with no lanes they are the only CI consumer (the suites are manual or
 // have their own workflow).
 const SUPPORT_PATH_ROUTES = Object.freeze([
+  {
+    // Workflows whose jobs, conditions and gates define what "CI gate" means.
+    // Other top-level workflows run (or are linted) on their own.
+    pattern: /^\.github\/workflows\/(?:ci|evm-integration|rfc64-inventory-windows)\.yml$/,
+    full: 'CI control-plane workflow changed',
+  },
+  {
+    // GitHub only runs top-level workflow files; anything nested is unknown.
+    pattern: /^\.github\/workflows\/[^/]+\//,
+    full: 'Unrecognised path under .github/workflows',
+  },
+  {
+    pattern: /^\.github\/actions\//,
+    full: 'Composite action used by CI jobs changed',
+  },
+  {
+    // devnet suites are pnpm workspaces: their manifests are install inputs.
+    pattern: /^devnet\/[^/]+\/package\.json$/,
+    full: 'Devnet workspace manifest changed',
+  },
   {
     // packages/cli/test/markitdown-binaries.test.ts asserts its wording.
     pattern: /^RELEASE_PROCESS\.md$/,
@@ -680,11 +688,12 @@ export function parseNameStatusZ(buffer) {
 }
 
 // The routing decision for one changed path. Precedence, first match wins:
-//   1. global CI inputs (control plane, lockfile, scripts/, ...) -> full CI
+//   1. global CI inputs (lockfile, root configs, patches/, scripts/) -> full CI
 //   2. a package workspace -> its WORKSPACE_RULES entry; the highest-risk
 //      workspace and install-affecting manifest edits -> full CI
-//   3. a repository support area -> SUPPORT_PATH_ROUTES plus the shared
-//      build job's own checks
+//   3. a repository support area -> the first matching SUPPORT_PATH_ROUTES
+//      entry: full CI for the control plane, unknown workflow paths and
+//      devnet manifests, otherwise its lanes plus the shared build checks
 //   4. a path claimed only by PATH_TRIGGERS (blazegraph-image.json)
 //   5. anything else -> full CI
 // PATH_TRIGGERS add lanes and EVM scopes on top of whichever of 2-4 applies.
@@ -721,6 +730,7 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
   }
 
   const supportRoute = supportPathRoute(filePath);
+  if (supportRoute?.full) return { full: `${supportRoute.full}: ${filePath}` };
   if (supportRoute) {
     route.lanes.push(...supportRoute.lanes);
     route.buildChecks = true;

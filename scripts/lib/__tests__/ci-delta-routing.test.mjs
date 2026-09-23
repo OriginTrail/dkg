@@ -144,15 +144,18 @@ test('repository support paths route to the lanes that execute them', () => {
 });
 
 test('each changed path gets one routing decision with a fixed precedence', () => {
-  // 1. Global CI inputs win over the support area or trigger they sit in.
-  for (const filePath of [
-    '.github/actions/upload-vitest-junit/action.yml',
-    '.github/workflows/nested/policy.yml',
-    '.github/workflows/rfc64-inventory-windows.yml',
-    'scripts/ci/plan-ci.mjs',
-    'devnet/v10-stress/package.json',
+  // 1. Global CI inputs, and the fail-closed entries that open the support
+  // table, keep full CI with a reason naming what they are.
+  for (const [filePath, reason] of [
+    ['scripts/ci/plan-ci.mjs', 'Global CI input changed'],
+    ['.github/workflows/rfc64-inventory-windows.yml', 'CI control-plane workflow changed'],
+    ['.github/workflows/nested/policy.yml', 'Unrecognised path under .github/workflows'],
+    ['.github/actions/upload-vitest-junit/action.yml', 'Composite action used by CI jobs changed'],
+    ['devnet/v10-stress/package.json', 'Devnet workspace manifest changed'],
   ]) {
-    assert.equal(pullRequestPlan([change(filePath)]).mode, 'full', filePath);
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'full', filePath);
+    assert.equal(plan.reasons[0], `${reason}: ${filePath}`);
   }
   // 2. A workspace wins over a support area with the same path shape.
   const agentDevnet = pullRequestPlan([change('packages/agent/devnet/rfc64-private-catalog/run.mjs')]);
