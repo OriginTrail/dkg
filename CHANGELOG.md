@@ -6,6 +6,20 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Config writes no longer undo each other, truncate the file or hide a
+  YAML config**: the daemon and the CLI each rewrote the whole `config.json`
+  from their own in-memory copy. A CLI edit such as `dkg context-graph create
+  --save` made while the daemon was running could silently undo a settings
+  change made in the node UI, or the reverse. A crash during a write could
+  leave a truncated file that stopped the node from starting. On a node
+  configured through `config.yaml`, the first write created a `config.json`
+  that took precedence, so later edits to the YAML no longer applied. Writes
+  now take a lock shared by the daemon and the CLI, re-read the file, change
+  only the keys that command or setting owns, and replace the file atomically
+  in its own format, keeping its permissions. A YAML config stays YAML, but
+  its comments are not kept when a write changes it. The `dkg openclaw`,
+  `dkg hermes` and `dkg mcp` setup commands still write `config.json` the old
+  way.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which
