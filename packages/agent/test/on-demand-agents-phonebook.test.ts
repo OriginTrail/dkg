@@ -376,6 +376,22 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.resolvedBatches).toEqual([[CG]]);
   });
 
+  it('starts at once when another graph asks while a re-check is pending, and cancels that re-check', async () => {
+    const h = createHarness({ peers: [], noPeerRetryMs: 60_000, subscribed: [CG, CG_SAME_OWNER] });
+
+    h.fetcher.request(CG, 'startup');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toEqual([]);
+
+    h.peers.push({ peerId: CORE_A, core: true });
+    h.fetcher.request(CG_SAME_OWNER, 'subscribe');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(1);
+    expect(h.resolvedBatches).toEqual([[CG, CG_SAME_OWNER]]);
+    // The first trigger labels the fetch.
+    expect(h.info[0]).toContain('trigger=startup');
+  });
+
   it('bounds the no-peer re-check and lets a later trigger ask again', async () => {
     const h = createHarness({ peers: [], noPeerMaxRetries: 2 });
 
@@ -528,6 +544,85 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
       attributes?.['trigger'] === 'subscribe' && attributes?.['outcome'] === 'complete'
     ));
     expect(durations).toHaveLength(1);
+  });
+
+  it('drops a graph whose checks finish inside the cooldown, so it can ask again later', async () => {
+    let releasePolicy!: () => void;
+    let blockOnce = true;
+    const h = createHarness({ subscribed: [CG, CG_OTHER_OWNER] });
+    vi.mocked(h.deps.readAccessPolicy).mockImplementation(async (contextGraphId) => {
+      if (contextGraphId === CG_OTHER_OWNER && blockOnce) {
+        blockOnce = false;
+        await new Promise<void>((resolve) => { releasePolicy = resolve; });
+      }
+      return 'public';
+    });
+
+    h.fetcher.request(CG_OTHER_OWNER, 'vm-reconcile');
+    await vi.waitFor(() => expect(releasePolicy).toBeTypeOf('function'));
+    h.fetcher.request(CG, 'subscribe');
+    await vi.waitFor(() => expect(h.info).toHaveLength(1));
+    // The fetch for CG is done and cooling down when this check completes.
+    releasePolicy();
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(1);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS);
+    h.fetcher.request(CG_OTHER_OWNER, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(2);
+  });
+
+  it('recovers from an unexpected fetch error through the bounded re-check', async () => {
+    const h = createHarness();
+    const listConnectedPeers = h.deps.listConnectedPeers;
+    let calls = 0;
+    h.deps.listConnectedPeers = () => {
+      calls += 1;
+      if (calls === 1) throw new Error('connection manager closed');
+      return listConnectedPeers();
+    };
+
+    h.fetcher.request(CG, 'subscribe');
+    await vi.waitFor(() => expect(h.syncCalls).toHaveLength(1));
+    await h.fetcher.whenIdle();
+    expect(h.debug.some((line) => line.includes('fetch stopped: connection manager closed'))).toBe(true);
+    expect(h.resolvedBatches).toEqual([[CG]]);
+  });
+
+  it('keeps fetching when the metrics exporter throws', async () => {
+    vi.spyOn(getMetrics().agentsPhonebookFetchTotal, 'add').mockImplementation(() => {
+      throw new Error('exporter down');
+    });
+    const h = createHarness();
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+
+    expect(h.info[0]).toContain('outcome=complete');
+    expect(h.resolvedBatches).toEqual([[CG]]);
+  });
+
+  it('bounds its per-graph state', async () => {
+    const graphs = [CG, CG_SAME_OWNER, CG_OTHER_OWNER];
+    const h = createHarness({
+      subscribed: graphs,
+      maxStateEntries: 2,
+      policies: Object.fromEntries(graphs.map((graph) => [graph, 'not-public'])),
+    });
+
+    for (const graph of graphs) {
+      h.fetcher.request(graph, 'vm-reconcile');
+      await h.fetcher.whenIdle();
+    }
+    expect(h.deps.readAccessPolicy).toHaveBeenCalledTimes(3);
+    // The oldest verdict was evicted and is read again; the newest is reused.
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    h.fetcher.request(CG_OTHER_OWNER, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.deps.readAccessPolicy).toHaveBeenCalledTimes(4);
+    expect(h.syncCalls).toEqual([]);
   });
 
   it('keeps one fetcher per host', () => {

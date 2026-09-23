@@ -391,6 +391,44 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     await expect(isolated.run()).resolves.toBeDefined();
   });
 
+  it('needs no phonebook for a graph this node curates or one without an owner wallet', async () => {
+    const edge = await createFreshEdge('PhonebookOwnerWallet');
+    agents.push(edge.agent);
+    const deps = edge.agent.createOnDemandAgentsPhonebookDeps();
+
+    expect(deps.remoteCuratorWallet(CG)).toBe(OWNER);
+    expect(deps.remoteCuratorWallet('legacy-global-cg')).toBeNull();
+    expect(deps.isActiveSubscription(CG)).toBe(false);
+    edge.internals.localAgents.set(OWNER, { agentAddress: OWNER });
+    try {
+      expect(deps.remoteCuratorWallet(CG)).toBeNull();
+    } finally {
+      edge.internals.localAgents.delete(OWNER);
+    }
+  });
+
+  it('maps the registered chain authority onto the fetch policy, failing closed', async () => {
+    const edge = await createFreshEdge('PhonebookPolicyRead');
+    agents.push(edge.agent);
+    const read = vi.mocked(edge.agent.resolveRegisteredContextGraphAuthority);
+    const signal = new AbortController().signal;
+
+    expect(await edge.agent.readAgentsPhonebookAccessPolicy(CG, signal)).toBe('public');
+    expect(read).toHaveBeenLastCalledWith(CG, expect.objectContaining({
+      authorityReadMode: 'finalized-index-or-live',
+      freshness: 'bounded',
+      signal: expect.any(AbortSignal),
+    }));
+    read.mockResolvedValueOnce({ kind: 'private', onChainId: 1n, participantAgents: [] });
+    expect(await edge.agent.readAgentsPhonebookAccessPolicy(CG, signal)).toBe('not-public');
+    read.mockResolvedValueOnce({ kind: 'unregistered' });
+    expect(await edge.agent.readAgentsPhonebookAccessPolicy(CG, signal)).toBe('not-public');
+    read.mockResolvedValueOnce({ kind: 'unavailable', reason: 'chain-name-binding-unavailable' });
+    expect(await edge.agent.readAgentsPhonebookAccessPolicy(CG, signal)).toBe('unknown');
+    read.mockRejectedValueOnce(new Error('rpc down'));
+    expect(await edge.agent.readAgentsPhonebookAccessPolicy(CG, signal)).toBe('unknown');
+  });
+
   it('re-scheduling clears the suppression that would otherwise delay the new curator', async () => {
     const edge = await createFreshEdge('PhonebookRescheduleState');
     agents.push(edge.agent);

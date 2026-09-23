@@ -432,11 +432,15 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
   });
 
   it('passes the on-demand agents phonebook kill switch through unchanged', async () => {
-    const disabled = await captureCreateArg({ onDemandAgentsPhonebook: false });
-    expect(disabled.onDemandAgentsPhonebook).toBe(false);
+    const createArg = await captureCreateArg({ onDemandAgentsPhonebook: false });
 
-    const unset = await captureCreateArg({});
-    expect(unset.onDemandAgentsPhonebook).toBeUndefined();
+    expect(createArg.onDemandAgentsPhonebook).toBe(false);
+  });
+
+  it('leaves the on-demand agents phonebook at the agent default when unset', async () => {
+    const createArg = await captureCreateArg({});
+
+    expect(createArg.onDemandAgentsPhonebook).toBeUndefined();
   });
 
   it('passes snapshot limits and Context Graph priorities through unchanged', async () => {
