@@ -13,6 +13,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 
 import { createEvmChainIndexRuntime } from '../src/evm-chain-index-runtime.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
 const HUB_ADDRESS = '0x00000000000000000000000000000000000000a1';
@@ -120,6 +122,13 @@ function harness(options?: {
   deploymentBlockNumber?: number;
   /** Refuse wider eth_getLogs spans the way mainnet.base.org does. */
   maxLogRangeBlocks?: number;
+  /** Awaited before each eth_getLogs answers, for deadline tests. */
+  logDelay?: (filter: { fromBlock: number; toBlock: number }) => Promise<void>;
+  /**
+   * Route reads through a real one-endpoint `RpcFailoverClient`, so each
+   * read's policy deadline applies as it does in production.
+   */
+  failoverClient?: boolean;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -138,6 +147,7 @@ function harness(options?: {
     fromBlock: number;
     toBlock: number;
   }) => {
+    await options?.logDelay?.(filter);
     const cap = options?.maxLogRangeBlocks;
     if (cap !== undefined && filter.toBlock - filter.fromBlock + 1 > cap) {
       throw new Error(`eth_getLogs is limited to a ${cap.toLocaleString('en-US')} range`);
@@ -164,6 +174,13 @@ function harness(options?: {
     ),
     getLogs,
   };
+  const client = options?.failoverClient === true
+    ? new RpcFailoverClient(
+      () => [{ provider: provider as never, rpcUrl: 'https://rpc-0.example' }],
+      async () => { throw new Error('chain index tests must not sign transactions'); },
+      () => 'evm:31337',
+    )
+    : undefined;
   const runtime = createEvmChainIndexRuntime({
     scope: RUNTIME_SCOPE,
     store,
@@ -193,7 +210,9 @@ function harness(options?: {
       if (typeof readOptions?.rpcUsageConsumer === 'string') {
         usageConsumers.push(readOptions.rpcUsageConsumer);
       }
-      return read(provider as never);
+      return client === undefined
+        ? read(provider as never)
+        : client.read(label, read, readOptions);
     },
     now: () => nowMs,
     runnerHooks: {
@@ -284,6 +303,66 @@ describe('createEvmChainIndexRuntime', () => {
       expect(served.some(([, to]) => to === refused![1])).toBe(true);
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  it('gives each request of a fitted catch-up range its own watchdog deadline', async () => {
+    vi.useFakeTimers();
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      // One RPC, healthy but slow: 12s per request, so the refusal plus the
+      // two fitted requests take 36s — past one 30s budget for the attempt.
+      const h = harness({
+        headNumber: 5_000,
+        resumeFromBlockNumber: 1_000,
+        maxLogRangeBlocks: 2_000,
+        failoverClient: true,
+        logDelay: () => new Promise((resolve) => { setTimeout(resolve, 12_000); }),
+      });
+      let settled = false;
+      const pass = h.runtime.tick.runOnce(new AbortController().signal)
+        .finally(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS + 1_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(12_000);
+
+      expect((await pass).outcome).toBe('advanced');
+      expect(h.getLogs).toHaveBeenCalledTimes(3);
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('still bounds a hung eth_getLogs of the pass on a one-RPC node', async () => {
+    vi.useFakeTimers();
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const h = harness({
+        headNumber: 5_000,
+        resumeFromBlockNumber: 1_000,
+        maxLogRangeBlocks: 2_000,
+        failoverClient: true,
+        // The second fitted request never answers.
+        logDelay: (filter) => (
+          filter.fromBlock > 1_001 ? new Promise<void>(() => {}) : Promise.resolve()
+        ),
+      });
+      let failure: unknown;
+      const pass = h.runtime.tick.runOnce(new AbortController().signal)
+        .catch((err: unknown) => { failure = err; });
+
+      await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS - 1_000);
+      expect(failure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await pass;
+
+      expect(String((failure as Error | undefined)?.message)).toContain('timed out');
+      expect(h.getLogs).toHaveBeenCalledTimes(3);
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
     }
   });
 

@@ -123,7 +123,9 @@ export const STICKY_PREFERRED_TTL_MS = 30_000;
  * stall). 30s still hard-bounds a genuinely hung backend on a multi-RPC node;
  * the events scan resolves it via the `wideLogScan` ReadPolicy in
  * `resolveCapMs` (rpc-failover-client.ts), so single-RPC stays uncapped (#894).
- * Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS` (15s) because that bounds smaller
+ * The background watchdog scans (the chain-index tick and Hub rotation poll)
+ * apply it to every physical request on every node, so a hung backend cannot
+ * wedge a one-RPC node either. Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS` (15s) because that bounds smaller
  * 2,000-block pages, whereas this covers the wider 9,000-block poller window
  * on a provider without a span cap.
  */

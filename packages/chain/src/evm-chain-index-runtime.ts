@@ -59,8 +59,10 @@ import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS,
   resolveContextGraphAuthorityIndexStaleMs,
 } from './context-graph-authority-index-projection.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
+import { withRpcRequestTimeout } from './rpc-request-transport.js';
 
 /** One contract the tick indexes, as the adapter already holds it. */
 export interface EvmChainIndexContract {
@@ -361,7 +363,11 @@ export function createEvmChainIndexRuntime(
         // THE one `eth_getLogs`. One address array, one OR'd topic0 set, one
         // range — for every contract and every event the node indexes. A range
         // wider than the provider's span cap (a raised `cgRegistryScanPageSize`)
-        // is fitted to it rather than refused.
+        // is fitted to it rather than refused. A fitted range is several
+        // requests, so the watchdog deadline bounds each physical request (a
+        // hung backend still fails the pass after RPC_LOG_SCAN_TIMEOUT_MS on a
+        // one-RPC node) rather than the whole attempt, which a slow-but-healthy
+        // split range would otherwise overrun on every pass.
         const logs = await readTip(
           'chainIndex tick getLogs',
           (provider) => readAdaptiveEvmLogRange({
@@ -369,14 +375,18 @@ export function createEvmChainIndexRuntime(
             fromBlock: request.fromBlock,
             toBlock: request.toBlock,
             signal,
-            read: (fromBlock, toBlock) => provider.getLogs({
-              address: [...request.addresses],
-              topics: [[...request.topic0]],
-              fromBlock,
-              toBlock,
-            }),
+            read: (fromBlock, toBlock) => withRpcRequestTimeout(
+              RPC_LOG_SCAN_TIMEOUT_MS,
+              `chainIndex tick getLogs [${fromBlock}, ${toBlock}]`,
+              () => provider.getLogs({
+                address: [...request.addresses],
+                topics: [[...request.topic0]],
+                fromBlock,
+                toBlock,
+              }),
+            ),
           }),
-          { signal, policy: 'watchdogWideLogScan' },
+          { signal, policy: 'durablePagedLogScan' },
         );
         const rows: ChainEventLogFetchedRow[] = [];
         for (const log of logs) {

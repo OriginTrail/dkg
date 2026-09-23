@@ -447,8 +447,10 @@ describe('HubRotationPoller', () => {
       // re-probe or clear the preferred backend the read/write paths rely on.
       expect(readCalls.find((call) => call.label === 'Hub rotation poll getBlockNumber')?.opts)
         .toEqual({ policy: 'watchdogPointRead', skipPreferred: true });
+      // Uncapped per attempt: each physical eth_getLogs of the (possibly split)
+      // window carries the watchdog deadline itself.
       expect(readCalls.find((call) => call.label === 'Hub rotation poll getLogs')?.opts)
-        .toEqual({ policy: 'watchdogWideLogScan', skipPreferred: true });
+        .toEqual({ policy: 'durablePagedLogScan', skipPreferred: true });
       // The STARTUP head read (recordInitialHead, fired on poller.start) is a
       // SEPARATE carve-out site — pin it independently, since a regression that
       // dropped `skipPreferred` there would not be caught by the periodic-poll
@@ -551,6 +553,119 @@ describe('HubRotationPoller', () => {
     } finally {
       poller.stop();
       log.mockRestore();
+    }
+  });
+
+  it('gives each request of a split catch-up window its own watchdog deadline', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const iface = hubInterface();
+    let head = 1_000;
+    const logs = [
+      rotationLog(iface, 'ContractChanged', 'ContextGraphStorage', 2_500, '31'),
+      rotationLog(iface, 'AssetStorageChanged', 'KnowledgeAssets', 10_900, '32'),
+    ];
+    const ranges: Array<[number, number]> = [];
+    // Healthy but slow, on a one-RPC node: every request takes 10s, so the
+    // seven requests of the fitted window are 70s — past one 30s budget.
+    const provider = {
+      getBlockNumber: vi.fn(async () => head),
+      getLogs: vi.fn(async (filter: { fromBlock: number; toBlock: number }) => {
+        ranges.push([filter.fromBlock, filter.toBlock]);
+        await new Promise((resolve) => { setTimeout(resolve, 10_000); });
+        if (filter.toBlock - filter.fromBlock + 1 > 2_000) {
+          throw new Error('eth_getLogs is limited to a 2,000 range');
+        }
+        return logsInRange(logs, filter);
+      }),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: failoverReadProvider([provider]),
+      // Far beyond the test: only the explicit poll below runs.
+      intervalMs: 3_600_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await vi.advanceTimersByTimeAsync(1);
+      head = 11_000;
+      let settled = false;
+      const poll = poller.pollOnce().finally(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS + 1_000);
+      // Past one watchdog deadline, the window is still being read.
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(7 * 10_000);
+      await poll;
+
+      expect(ranges).toHaveLength(7);
+      expect(onContractName.mock.calls).toEqual([['ContextGraphStorage'], ['KnowledgeAssets']]);
+    } finally {
+      poller.stop();
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('still fails a hung request of the window over after its own watchdog deadline', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const iface = hubInterface();
+    let head = 1_000;
+    const logs = [
+      rotationLog(iface, 'ContractChanged', 'ContextGraphStorage', 2_500, '31'),
+      rotationLog(iface, 'AssetStorageChanged', 'KnowledgeAssets', 10_900, '32'),
+    ];
+    const primary = {
+      getBlockNumber: vi.fn(async () => head),
+      getLogs: vi.fn(async (filter: { fromBlock: number; toBlock: number }) => {
+        if (filter.toBlock - filter.fromBlock + 1 > 2_000) {
+          throw new Error('eth_getLogs is limited to a 2,000 range');
+        }
+        // The second chunk of the window never answers.
+        if (filter.fromBlock > 2_950) return new Promise<never>(() => {});
+        return logsInRange(logs, filter);
+      }),
+    };
+    const backup = {
+      getBlockNumber: vi.fn(async () => head),
+      getLogs: vi.fn(async (filter: { fromBlock: number; toBlock: number }) => logsInRange(logs, filter)),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: failoverReadProvider([primary, backup]),
+      intervalMs: 3_600_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await vi.advanceTimersByTimeAsync(1);
+      head = 11_000;
+      const poll = poller.pollOnce();
+
+      await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS - 1_000);
+      expect(backup.getLogs).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await poll;
+
+      expect(primary.getLogs.mock.calls.map(([filter]) => [filter.fromBlock, filter.toBlock])).toEqual([
+        [951, 11_000], [951, 2_950], [2_951, 4_950],
+      ]);
+      expect(backup.getLogs.mock.calls.map(([filter]) => [filter.fromBlock, filter.toBlock])).toEqual([
+        [951, 11_000],
+      ]);
+      expect(onContractName.mock.calls).toEqual([['ContextGraphStorage'], ['KnowledgeAssets']]);
+    } finally {
+      poller.stop();
+      log.mockRestore();
+      warn.mockRestore();
+      vi.useRealTimers();
     }
   });
 
