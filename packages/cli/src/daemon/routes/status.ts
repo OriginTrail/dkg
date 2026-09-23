@@ -69,7 +69,12 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
-import { parseIncludeStoreQuads, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
+import { parseIncludeStoreQuads } from '../../status-store-quads-wire.js';
+import {
+  getCachedExternalStoreQuads,
+  peekCachedExternalStoreQuads,
+  storeQuadsStatusFields,
+} from '../store-quads-cache.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -451,116 +456,6 @@ function createRouteEvmProvider(
     throw new Error('Daemon RPC transport unavailable');
   }
   return routeTransport.createProvider(rpcUrl, rpcUrls);
-}
-
-// Quad-count cache for external SPARQL backends. A full-store COUNT is not a
-// liveness check: on a multi-million-row namespace it can occupy the store for
-// seconds and compete directly with sync. Normal /api/status polling therefore
-// never starts it. Operators may request a background refresh explicitly with
-// `?includeStoreQuads=true` (`dkg status` does when it has no recent count);
-// subsequent ordinary status calls can reuse the cached value without touching
-// the store. Cold/stale explicit callers get the current snapshot while one
-// refresh runs in the background, so status never waits on the count.
-// Every snapshot names its status, so a count nobody has requested yet
-// ('not-requested') cannot be read as an unreachable store, and a cached
-// result carries its age, because ordinary polling never refreshes it.
-// Local backends bypass this entirely (file-bytes metric stays on the
-// metrics collector tick).
-const STORE_QUADS_CACHE_TTL_MS = 30_000;
-
-/** A finished count, as cached. */
-type StoreQuadsCacheEntry =
-  | { status: 'ready'; value: number; fetchedAt: number }
-  | { status: 'unreachable'; fetchedAt: number };
-
-/** A cached result as reported; `ageMs` is null when the clock stepped back past it. */
-type CachedStoreQuadsSnapshot =
-  | { status: 'ready'; value: number; ageMs: number | null }
-  | { status: 'unreachable'; ageMs: number | null };
-
-type StoreQuadsSnapshot = { status: 'not-requested' | 'pending' } | CachedStoreQuadsSnapshot;
-
-let storeQuadsCache: StoreQuadsCacheEntry | null = null;
-let storeQuadsInflight: Promise<void> | null = null;
-
-/** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
-export function invalidateExternalStoreQuadsCache(): void {
-  storeQuadsCache = null;
-  storeQuadsInflight = null;
-}
-
-function snapshotStoreQuadsCache(
-  cache: StoreQuadsCacheEntry,
-  now: number,
-): CachedStoreQuadsSnapshot {
-  // After a wall-clock step backwards the age is unknown: report it as such
-  // rather than as 0, which would present an old count as just checked.
-  const elapsedMs = now - cache.fetchedAt;
-  const ageMs = elapsedMs >= 0 ? elapsedMs : null;
-  return cache.status === 'ready'
-    ? { status: 'ready', value: cache.value, ageMs }
-    : { status: 'unreachable', ageMs };
-}
-
-function getCachedExternalStoreQuads(
-  agent: DKGAgent,
-  now: number,
-): StoreQuadsSnapshot {
-  const cached = storeQuadsCache ? snapshotStoreQuadsCache(storeQuadsCache, now) : null;
-  // An unknown age is stale, never fresh.
-  if (cached && cached.ageMs !== null && cached.ageMs < STORE_QUADS_CACHE_TTL_MS) {
-    return cached;
-  }
-
-  const currentSnapshot: StoreQuadsSnapshot = cached ?? { status: 'pending' };
-  if (!storeQuadsInflight) {
-    const refresh = (async () => {
-      let result: StoreQuadsCacheEntry;
-      try {
-        const r = await agent.store.query(
-          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
-          { priority: 'health', source: 'daemon.status.storeQuads' },
-        );
-        let value: number | null = null;
-        if (r.type === 'bindings' && r.bindings.length > 0) {
-          const cell = r.bindings[0].c ?? '';
-          const digits = cell.match(/\d+/)?.[0];
-          value = digits ? parseInt(digits, 10) : 0;
-        }
-        result = value === null
-          ? { status: 'unreachable', fetchedAt: Date.now() }
-          : { status: 'ready', value, fetchedAt: Date.now() };
-      } catch {
-        // Surface "unknown" rather than a stale value; operators can
-        // distinguish unreachable from genuinely-empty via storeBackend +
-        // their network logs. Cache the null briefly to avoid hammering
-        // a flapping endpoint.
-        result = { status: 'unreachable', fetchedAt: Date.now() };
-      }
-      storeQuadsCache = result;
-    })();
-    storeQuadsInflight = refresh;
-    void refresh.finally(() => {
-      if (storeQuadsInflight === refresh) storeQuadsInflight = null;
-    });
-  }
-  return currentSnapshot;
-}
-
-// Ordinary polling: report what is already known and never start a count.
-function peekCachedExternalStoreQuads(now: number): StoreQuadsSnapshot {
-  if (storeQuadsCache) return snapshotStoreQuadsCache(storeQuadsCache, now);
-  return { status: storeQuadsInflight ? 'pending' : 'not-requested' };
-}
-
-/** The flat `/api/status` fields for a snapshot; a local backend has none. */
-function storeQuadsStatusFields(snapshot: StoreQuadsSnapshot | null): StoreQuadsStatusFields {
-  if (!snapshot) return { storeQuads: null };
-  return {
-    storeQuads: snapshot.status === 'ready' ? snapshot.value : null,
-    storeQuadsStatus: snapshot.status,
-    storeQuadsAgeMs: 'ageMs' in snapshot ? snapshot.ageMs : null,
-  };
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {

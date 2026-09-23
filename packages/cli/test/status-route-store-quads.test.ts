@@ -8,10 +8,8 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
-import {
-  handleStatusRoutes,
-  invalidateExternalStoreQuadsCache,
-} from '../src/daemon/routes/status.js';
+import { handleStatusRoutes } from '../src/daemon/routes/status.js';
+import { invalidateExternalStoreQuadsCache } from '../src/daemon/store-quads-cache.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
 const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
