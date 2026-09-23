@@ -62,12 +62,14 @@ function sourcePath(target) {
   ].find(isRepoFile) ?? target;
 }
 
-// Module loads come from TypeScript's import scanner (importSpecifiers).
-// The forms below are matched as text instead, so each has blind spots:
-// a path assembled at run time (a template literal, a variable, a call other
-// than resolve/join, a base other than the file's own directory, require()
-// under another name) is out of reach, and `import { type X }` still counts
-// as a load. The scanner tests pin what they see and what they cannot.
+// Module loads come from TypeScript's import scanner (importSpecifiers); one
+// whose specifier is computed at run time is reported (computedLoads), and
+// the routing guard fails until it is listed with a reason. The forms below
+// are matched as text instead, so each has blind spots: a path assembled at
+// run time (a template literal, a variable, a call other than resolve/join,
+// a base other than the file's own directory, require() under another name)
+// is out of reach, and `import { type X }` still counts as a load. The
+// scanner tests pin what they see and what they cannot.
 const RELATIVE = String.raw`['"]((?:\.\.?\/)+[^'"]+)['"]`;
 // import(new URL('./x.js', import.meta.url)): not a string specifier, so
 // TypeScript's scanner does not report it.
@@ -136,6 +138,36 @@ export function importSpecifiers(code) {
   ];
 }
 
+// Module loads whose specifier is computed at run time (import(name),
+// require(`../${file}`)), as their source text: no trace can follow them.
+// A string specifier, or new URL() of one (URL_IMPORT and URL_PATH read
+// those), is not computed; require() under another name is not seen.
+function computedLoads(file, code) {
+  if (!/\b(?:import|require)\s*\(/.test(code)) return [];
+  const kind = /\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+  const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, kind);
+  const urlOfString = (node) => {
+    let target = ts.isPropertyAccessExpression(node) && node.name.text === 'href' ? node.expression : node;
+    if (ts.isCallExpression(target) && ts.isIdentifier(target.expression) && target.expression.text === 'fileURLToPath') {
+      [target] = target.arguments;
+    }
+    return target !== undefined && ts.isNewExpression(target) && ts.isIdentifier(target.expression)
+      && target.expression.text === 'URL' && target.arguments?.length > 0 && ts.isStringLiteral(target.arguments[0]);
+  };
+  const computed = [];
+  const visit = (node) => {
+    const loads = ts.isCallExpression(node) && node.arguments.length > 0
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+        || (ts.isIdentifier(node.expression) && node.expression.text === 'require'));
+    if (loads && !ts.isStringLiteral(node.arguments[0]) && !urlOfString(node.arguments[0])) {
+      computed.push(node.arguments[0].getText(tree));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return computed;
+}
+
 // What `file` (repo-relative, with `source` as its contents) loads by path:
 // - `modules`: relative imports (side-effect `import './x.js'` included),
 //   dynamic imports, `import(new URL(...))` and CommonJS require(), whose own
@@ -146,7 +178,8 @@ export function importSpecifiers(code) {
 //   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
 //   tests list them);
 // - `packages`: workspaces it imports by package name, side-effect imports
-//   included.
+//   included;
+// - `computed`: module loads computed at run time (computedLoads).
 // Type-only imports are erased before anything runs; paths assembled at run
 // time from variables are out of reach.
 export function loadReferences(file, source) {
@@ -172,6 +205,7 @@ export function loadReferences(file, source) {
     packages: [...new Set(specifiers
       .map((specifier) => specifier.match(/^@origintrail-official\/[a-z0-9-]+/)?.[0])
       .filter(Boolean))],
+    computed: computedLoads(file, code),
   };
 }
 
@@ -183,6 +217,8 @@ export function loadReferences(file, source) {
 // requires the imported workspace and its dependencies, recorded against the
 // workspace's src/index.ts since any path in a workspace routes by its rule.
 // `read(file)` returns a file's source, or undefined when it has none.
+// Returns { loaded, unfollowed }: `unfollowed` maps each traced file to the
+// module loads it computes at run time, which the trace cannot follow.
 export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   const { workspaceByName } = readWorkspaces();
   const closures = new Map();
@@ -201,13 +237,15 @@ export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   // Kept apart while tracing so they never spread through a module's imports.
   const readPaths = new Map();
   const workspacesLoaded = new Map();
+  const unfollowed = new Map();
   const queue = [...loaded.keys()];
   while (queue.length) {
     const file = queue.shift();
     const source = /\.[cm]?[jt]sx?$/.test(file) ? read(file) : undefined;
     if (source === undefined) continue;
     const requirements = [...loaded.get(file).keys()];
-    const { modules, paths, packages } = loadReferences(file, source);
+    const { modules, paths, packages, computed } = loadReferences(file, source);
+    if (computed.length) unfollowed.set(file, computed);
     for (const target of modules) {
       if (add(loaded, target, requirements, file)) queue.push(target);
     }
@@ -225,5 +263,5 @@ export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   ]) {
     for (const [requirement, via] of needs) add(loaded, key, [requirement], via);
   }
-  return loaded;
+  return { loaded, unfollowed };
 }
