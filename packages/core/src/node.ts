@@ -52,12 +52,9 @@ import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapt
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
-import {
-  NetworkPeerDialPolicy,
-  peerIdFromRelayAddress,
-  type NetworkPeerConnectionGater,
-} from './network-peer-dial-policy.js';
-import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
+import { NetworkPeerDialPolicy, peerIdFromRelayAddress } from './network-peer-dial-policy.js';
+import { combineConnectionGaters, type SyncConnectionGater } from './connection-gater-combiner.js';
+import { parseCircuitRelayPeerIds } from './relay-path.js';
 import { isPublicLikeAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
 
@@ -1015,7 +1012,7 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayConnectionGater(
+      connectionGater: this.createConnectionGater(
         activeRelayNetworkPolicy?.connectionGater,
         networkPeerDialPolicy?.connectionGater,
       ),
@@ -1483,9 +1480,9 @@ export class DKGNode {
     }
   }
 
-  private createRelayConnectionGater(
-    activeRelayGater?: RelayedConnectionGater,
-    networkPeerGater?: NetworkPeerConnectionGater,
+  private createConnectionGater(
+    activeRelayGater?: SyncConnectionGater,
+    networkPeerGater?: SyncConnectionGater,
   ): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
@@ -1495,26 +1492,11 @@ export class DKGNode {
       this.relayFlapGuard,
       (message) => console.warn(`[${ts()}] ${message}`),
     );
-    return {
-      denyInboundRelayedConnection: (relay, remotePeer) =>
-        activeRelayGater?.denyInboundRelayedConnection(relay, remotePeer) ||
-        flapGater.denyInboundRelayedConnection(relay, remotePeer),
-      denyDialMultiaddr: (multiaddr) =>
-        activeRelayGater?.denyDialMultiaddr(multiaddr) ||
-        networkPeerGater?.denyDialMultiaddr(multiaddr) ||
-        flapGater.denyDialMultiaddr(multiaddr),
-      // Only installed with a network identity, so a node without one keeps
-      // exactly the pre-existing gater (and libp2p's allow-all address filter).
-      ...(networkPeerGater
-        ? {
-            denyDialPeer: networkPeerGater.denyDialPeer,
-            denyInboundEncryptedConnection: networkPeerGater.denyInboundEncryptedConnection,
-            denyOutboundEncryptedConnection: networkPeerGater.denyOutboundEncryptedConnection,
-            // libp2p passes this to the peer store as a bare function reference.
-            filterMultiaddrForPeer: networkPeerGater.filterMultiaddrForPeer,
-          }
-        : {}),
-    } as ConnectionGater;
+    // Consulted in this order; the first denial wins. The network policy is
+    // absent without a network identity, so such a node keeps exactly the
+    // flap guard's hooks and libp2p's defaults for the rest, including its
+    // store-every-address filter.
+    return combineConnectionGaters([activeRelayGater, networkPeerGater, flapGater]) as ConnectionGater;
   }
 
   /**

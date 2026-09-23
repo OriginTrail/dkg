@@ -1,3 +1,4 @@
+import { createBoundedDenialLogger, type BoundedDenialLogger } from './bounded-denial-logger.js';
 import { tryCanonicalPeerIdString } from './network/peer-id.js';
 import { parseCircuitRelayPeerIds } from './relay-path.js';
 
@@ -92,15 +93,6 @@ export function peerIdFromRelayAddress(address: string): string | undefined {
   return undefined;
 }
 
-/** Terminal `/p2p/<id>` of a non-circuit multiaddr string, uncanonicalized. */
-function terminalPeerId(addr: string): string | undefined {
-  const parts = addr.split('/');
-  for (let i = parts.length - 2; i >= 0; i--) {
-    if (parts[i] === 'p2p') return parts[i + 1] || undefined;
-  }
-  return undefined;
-}
-
 function canonicalPeerIdSet(peerIds: Iterable<string> | undefined): Set<string> {
   const out = new Set<string>();
   for (const peerId of peerIds ?? []) {
@@ -153,8 +145,7 @@ export class NetworkPeerDialPolicy {
   private readonly mismatchInboundRefusalMs: number;
   private readonly maxMismatchDeniedPeers: number;
   private readonly now: () => number;
-  private readonly log: (message: string) => void;
-  private readonly denialLogs = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+  private readonly logDenial: BoundedDenialLogger;
 
   constructor(options: NetworkPeerDialPolicyOptions = {}) {
     this.selfPeerId = options.selfPeerId
@@ -175,7 +166,14 @@ export class NetworkPeerDialPolicy {
       NETWORK_MISMATCH_DIAL_DENY_MAX_PEERS,
     );
     this.now = options.now ?? Date.now;
-    this.log = options.log ?? (() => {});
+    // kad-dht offers the same foreign closer peer on many queries, and each
+    // offer is a refused dial: one line per direction and peer per interval.
+    this.logDenial = createBoundedDenialLogger({
+      log: options.log ?? (() => {}),
+      now: this.now,
+      intervalMs: PEER_DENIAL_LOG_INTERVAL_MS,
+      cacheMax: PEER_DENIAL_LOG_CACHE_MAX,
+    });
     this.connectionGater = this.buildConnectionGater();
   }
 
@@ -244,41 +242,22 @@ export class NetworkPeerDialPolicy {
       : undefined;
   }
 
-  /**
-   * At most one line per direction and peer per interval: kad-dht offers the
-   * same foreign closer peer on many queries, and each offer is a refused dial.
-   * The bounded cache keeps attacker-chosen peer ids from growing it.
-   */
-  private logDenial(
+  private logRefusal(
     direction: 'outbound' | 'inbound',
     peerId: string,
     reason: NetworkPeerDenialReason,
     detail = '',
   ): void {
-    const key = `${direction}:${peerId}`;
-    const timestamp = this.now();
-    const previous = this.denialLogs.get(key);
-    if (previous && timestamp - previous.lastLoggedAt < PEER_DENIAL_LOG_INTERVAL_MS) {
-      previous.suppressed += 1;
-      return;
-    }
-    if (!previous && this.denialLogs.size >= PEER_DENIAL_LOG_CACHE_MAX) {
-      const oldest = this.denialLogs.keys().next();
-      if (!oldest.done) this.denialLogs.delete(oldest.value);
-    }
-    const suppressed = previous?.suppressed ?? 0;
-    this.denialLogs.delete(key);
-    this.denialLogs.set(key, { lastLoggedAt: timestamp, suppressed: 0 });
-    this.log(
-      `Network isolation: refusing ${direction} connection peer=${peerId.slice(-8)} reason=${reason}` +
-      `${detail}${suppressed > 0 ? ` suppressedSinceLast=${suppressed}` : ''}`,
+    this.logDenial(
+      `${direction}:${peerId}`,
+      () => `Network isolation: refusing ${direction} connection peer=${peerId.slice(-8)} reason=${reason}${detail}`,
     );
   }
 
   private denyOutbound(peerId: string, detail?: string): boolean {
     const reason = this.dialDenialReason(peerId);
     if (!reason) return false;
-    this.logDenial('outbound', peerId, reason, detail);
+    this.logRefusal('outbound', peerId, reason, detail);
     return true;
   }
 
@@ -289,7 +268,7 @@ export class NetworkPeerDialPolicy {
         const addr = multiaddr.toString();
         const circuit = parseCircuitRelayPeerIds(addr);
         if (!circuit) {
-          const target = terminalPeerId(addr);
+          const target = peerIdFromRelayAddress(addr);
           return target !== undefined && this.denyOutbound(target);
         }
         // Refuse the whole path before the circuit transport opens a direct
@@ -301,7 +280,7 @@ export class NetworkPeerDialPolicy {
         const id = peerId.toString();
         const reason = this.inboundDenialReason(id);
         if (!reason) return false;
-        this.logDenial('inbound', id, reason);
+        this.logRefusal('inbound', id, reason);
         return true;
       },
       denyOutboundEncryptedConnection: (peerId) => this.denyOutbound(peerId.toString()),

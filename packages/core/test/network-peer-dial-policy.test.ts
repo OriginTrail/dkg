@@ -211,6 +211,16 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     expect(mismatch.dialDenialReason(THIRD_PEER)).toBe('network-identity-mismatch');
   });
 
+  it('matches a direct dial address by its canonical peer id', () => {
+    const mismatch = policy();
+    mismatch.denyAfterNetworkMismatch(PEER);
+    const { denyDialMultiaddr } = mismatch.connectionGater;
+
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${PEER}`))).toBe(true);
+    expect(denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${OTHER_PEER}`))).toBe(false);
+    expect(denyDialMultiaddr(id('/ip4/1.2.3.4/tcp/9090/p2p/not-a-peer-id'))).toBe(false);
+  });
+
   it('aligns its windows with the 5-minute admission quarantine by default', () => {
     // A shorter dial window reopens dials while admission still short-circuits
     // the peer as rejected, which leaves the redialed socket open.
