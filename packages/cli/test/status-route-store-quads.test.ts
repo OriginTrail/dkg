@@ -750,6 +750,33 @@ describe('dkg status against the status route', () => {
     }
   });
 
+  it('reports a subscription blocked by a conflicting binding apart, and prints it', async () => {
+    const nameHash = `0x${'6d'.repeat(32)}`;
+    const { server, baseUrl } = await startStatusServer(async () => COUNT_66, LOCAL_STORE, { agentOverrides: {
+      getSubscribedContextGraphs: () => new Map([[nameHash, { subscribed: true, synced: false }]]),
+      describeContextGraphIdentity: (id: string) => (id === nameHash
+        ? { state: 'name-hash-only', nameHash, bindingConflict: true, message: 'bound to another on-chain graph' }
+        : null),
+    } });
+    const message = '1 subscribed Context Graph is known only by the on-chain name hash and blocked by a '
+      + 'conflicting binding: the cleartext id is already bound to a different on-chain Context Graph on this node '
+      + '(details: GET /api/context-graph/subscriptions).';
+
+    try {
+      const response = await fetch(`${baseUrl}/api/status`);
+      const body = await response.json() as { contextGraphIdentity?: unknown };
+      // Still counts only: no id, and no promise that a peer will reveal it.
+      expect(body.contextGraphIdentity).toEqual({ nameHashOnly: 1, bindingConflicts: 1, message });
+      expect(JSON.stringify(body.contextGraphIdentity)).not.toContain(nameHash);
+
+      const printed = await runStatusCommand(baseUrl);
+      expect(printed).toContain(`  Graphs:    ${message}`);
+      expect(printed).not.toContain('waiting for a peer');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it('starts no count while the cached one is under ten minutes old, then refreshes it', async () => {
     let asks = 0;
     let queryCalls = 0;

@@ -400,6 +400,8 @@ export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReach
    */
   contextGraphIdentity?: {
     nameHashOnly: number;
+    /** Of those, blocked by a conflicting on-chain binding on this node. */
+    bindingConflicts?: number;
     message?: string;
   };
   chain?: {

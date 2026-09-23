@@ -467,4 +467,36 @@ describe('public /api/status identity summary', () => {
       describeContextGraphIdentity: () => null,
     } as never)).toEqual({ nameHashOnly: 0 });
   });
+
+  it('counts subscriptions blocked by a conflicting binding apart, and never promises a peer for them', () => {
+    const conflicted = ['0x' + '33'.repeat(32), '0x' + '44'.repeat(32)];
+    const summaryFor = (ids: string[]) => summarizeContextGraphIdentityStatus({
+      getSubscribedContextGraphs: () => new Map(ids.map((id) => [id, { subscribed: true }])),
+      describeContextGraphIdentity: (id: string) => ({
+        state: 'name-hash-only',
+        ...(conflicted.includes(id) ? { bindingConflict: true } : {}),
+        message: 'x',
+      }),
+    } as never);
+
+    const blockedOnly = summaryFor([conflicted[0]!]);
+    expect(blockedOnly).toEqual({
+      nameHashOnly: 1,
+      bindingConflicts: 1,
+      message: '1 subscribed Context Graph is known only by the on-chain name hash and blocked by a conflicting '
+        + 'binding: the cleartext id is already bound to a different on-chain Context Graph on this node '
+        + '(details: GET /api/context-graph/subscriptions).',
+    });
+    expect(blockedOnly.message).not.toContain('waiting for a peer');
+
+    const mixed = summaryFor([NAME_HASH, ...conflicted]);
+    expect(mixed).toMatchObject({ nameHashOnly: 3, bindingConflicts: 2 });
+    expect(mixed.message).toBe(
+      '1 subscribed Context Graph is known only by the on-chain name hash and cannot sync yet; waiting for a peer '
+        + 'to reveal the cleartext id, or subscribe with the cleartext id. 2 subscribed Context Graphs are known '
+        + 'only by the on-chain name hash and blocked by a conflicting binding: the cleartext id is already bound '
+        + 'to a different on-chain Context Graph on this node (details: GET /api/context-graph/subscriptions).',
+    );
+    expect(mixed.message).not.toContain('0x');
+  });
 });
