@@ -201,7 +201,9 @@ export const WORKSPACE_RULES = Object.freeze({
     // built Oxigraph launcher (test-systems/storage-conformance.test.ts),
     // which loads the daemon status route and, through it and the local agent
     // registry, node-ui, graph-viz, mcp-dkg and the three agent adapters.
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    // kosava_node_ui: node-ui tests scan the CLI daemon sources
+    // (packages/node-ui/test/helpers/read-cli-daemon.ts).
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {
