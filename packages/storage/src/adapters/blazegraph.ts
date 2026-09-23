@@ -10,7 +10,7 @@ import type {
   ConstructResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { buildBlankNodeSafeDelete } from './sparql-http.js';
+import { buildBlankNodeSafeDelete } from './blank-node-safe-delete.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
