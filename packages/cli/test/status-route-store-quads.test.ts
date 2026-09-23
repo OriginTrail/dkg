@@ -523,10 +523,20 @@ describe('/api/status external-store quad count', () => {
       expect(requested.body.storeQuadsStatus).toBe('pending');
       expect(queryCalls).toBe(1);
 
-      // The managed Oxigraph goes down while that count runs. Whatever the
-      // count then returns, typically a failure against the dying server,
-      // describes a store that is gone.
+      // The managed Oxigraph goes down while that count runs. The count keeps
+      // running but loses the in-flight marker, so nothing that will be
+      // published is being counted.
       invalidateExternalStoreQuadsCache();
+      const invalidated = await fetchStatus(baseUrl);
+      expect(invalidated.body).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'not-requested',
+        storeQuadsAgeMs: null,
+        storeQuadsRefreshing: false,
+      });
+
+      // Whatever the count then returns, typically a failure against the
+      // dying server, describes a store that is gone.
       settle(staleCount);
       await nextTick();
 
@@ -535,18 +545,27 @@ describe('/api/status external-store quad count', () => {
         storeQuads: null,
         storeQuadsStatus: 'not-requested',
         storeQuadsAgeMs: null,
+        storeQuadsRefreshing: false,
       });
       expect(queryCalls).toBe(1);
 
       const rerequested = await fetchStatus(baseUrl, true);
-      expect(rerequested.body).toMatchObject({ storeQuads: null, storeQuadsStatus: 'pending' });
+      expect(rerequested.body).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'pending',
+        storeQuadsRefreshing: true,
+      });
       expect(queryCalls).toBe(2);
 
       freshCount.resolve(COUNT_66);
       await nextTick();
 
       const counted = await fetchStatus(baseUrl);
-      expect(counted.body).toMatchObject({ storeQuads: 66, storeQuadsStatus: 'ready' });
+      expect(counted.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsStatus: 'ready',
+        storeQuadsRefreshing: false,
+      });
     } finally {
       staleCount.resolve({ type: 'bindings', bindings: [] });
       freshCount.resolve({ type: 'bindings', bindings: [] });
@@ -573,11 +592,13 @@ describe('/api/status external-store quad count', () => {
       staleCount.reject(new Error('store unavailable'));
       await nextTick();
 
+      // The newer count still holds the marker, so it is the one refreshing.
       const polled = await fetchStatus(baseUrl);
       expect(polled.body).toMatchObject({
         storeQuads: null,
         storeQuadsStatus: 'pending',
         storeQuadsAgeMs: null,
+        storeQuadsRefreshing: true,
       });
       const rerequested = await fetchStatus(baseUrl, true);
       expect(rerequested.body.storeQuadsStatus).toBe('pending');
@@ -587,7 +608,11 @@ describe('/api/status external-store quad count', () => {
       await nextTick();
 
       const counted = await fetchStatus(baseUrl);
-      expect(counted.body).toMatchObject({ storeQuads: 66, storeQuadsStatus: 'ready' });
+      expect(counted.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsStatus: 'ready',
+        storeQuadsRefreshing: false,
+      });
       expect(queryCalls).toBe(2);
     } finally {
       staleCount.resolve({ type: 'bindings', bindings: [] });
