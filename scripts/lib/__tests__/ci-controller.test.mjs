@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
@@ -223,6 +224,19 @@ test('the build job fetches the pinned controller through the canonical pin vali
   const fetch = steps.findIndex(({ run = '' }) => run.trim() === 'node scripts/ci/fetch-trusted-controller.mjs');
   const scriptTests = steps.findIndex(({ run = '' }) => run.includes('pnpm run test:scripts'));
   assert.ok(fetch !== -1 && fetch < scriptTests, 'the fetch runs before the repository-script tests');
+});
+
+test('the controller fetch script can be imported without a script path', () => {
+  // Under `node -e` there is no process.argv[1]: the module must load
+  // without throwing and without running the fetch.
+  const script = pathToFileURL(path.join(REPO_ROOT, 'scripts/ci/fetch-trusted-controller.mjs')).href;
+  const imported = spawnSync(process.execPath, [
+    '--input-type=module',
+    '-e',
+    `await import(${JSON.stringify(script)}); console.log('loaded');`,
+  ], { encoding: 'utf8' });
+  assert.equal(imported.status, 0, imported.stderr);
+  assert.equal(imported.stdout.trim(), 'loaded');
 });
 
 test('workflow controller invocations stay within the current and pinned parsers', () => {

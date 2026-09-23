@@ -22,26 +22,36 @@ export { EVM_SCOPES, WORKSPACE_OWNING_EVM_SCOPES, WORKSPACE_OWNING_LANES, WORKSP
 // the sibling controller file ci-routing.mjs. Every controller file widens the
 // security-reviewed sparse checkout that four workflow checkouts pin, so add
 // one only together with CONTROLLER_POLICY_FILES and every trusted checkout.
-export const PRIMARY_LANE_JOBS = Object.freeze({
-  tornado_core: 'tornado-core',
-  tornado_blazegraph: 'tornado-blazegraph',
-  tornado_publisher: 'tornado-publisher',
-  tornado_agent: 'tornado-agent',
-  bura_cli: 'bura-cli',
-  bura_blazegraph_arm64: 'bura-blazegraph-arm64',
-  bura_query: 'bura-supporting',
-  kosava_node_ui: 'kosava-node-ui',
-  kosava_node_ui_e2e: 'kosava-node-ui-e2e',
-  kosava_supporting: 'kosava-supporting',
-  kosava_hardhat_plugins: 'kosava-hardhat-plugins',
+// Every Node/EVM lane, defined once: the aggregate job that runs it, and
+// what selecting it brings with it.
+// - `selfBuilding`: the job builds what it needs on its own runner (the
+//   native arm64 image contract), so selecting it alone never requires the
+//   shared Linux build.
+// - `nodeTestArtifacts`: the job restores the shared Hardhat 0.8.20/london
+//   compiler outputs.
+// - `implies`: lanes whose jobs run whenever this lane's does; every plan
+//   records them, so the gate requires those jobs too.
+const LANES = Object.freeze({
+  tornado_core: { job: 'tornado-core', nodeTestArtifacts: true },
+  tornado_blazegraph: { job: 'tornado-blazegraph' },
+  tornado_publisher: { job: 'tornado-publisher', nodeTestArtifacts: true },
+  // The Blazegraph job also runs the agent's live Blazegraph suites
+  // (packages/agent/vitest.blazegraph.config.ts), so ci.yml starts it for
+  // either lane.
+  tornado_agent: { job: 'tornado-agent', nodeTestArtifacts: true, implies: ['tornado_blazegraph'] },
+  bura_cli: { job: 'bura-cli', nodeTestArtifacts: true },
+  bura_blazegraph_arm64: { job: 'bura-blazegraph-arm64', selfBuilding: true },
+  bura_query: { job: 'bura-supporting' },
+  kosava_node_ui: { job: 'kosava-node-ui' },
+  kosava_node_ui_e2e: { job: 'kosava-node-ui-e2e' },
+  kosava_supporting: { job: 'kosava-supporting' },
+  kosava_hardhat_plugins: { job: 'kosava-hardhat-plugins', nodeTestArtifacts: true },
 });
+const lanesWith = (property) => Object.freeze(Object.keys(LANES).filter((lane) => LANES[lane][property]));
 
-export const NODE_EVM_LANES = Object.freeze(Object.keys(PRIMARY_LANE_JOBS));
-
-// Lanes whose jobs build what they need on their own runner (the native arm64
-// image contract), so selecting them alone never requires the shared Linux
-// build.
-export const SELF_BUILDING_LANES = Object.freeze(['bura_blazegraph_arm64']);
+export const PRIMARY_LANE_JOBS = Object.freeze(Object.fromEntries(Object.entries(LANES).map(([lane, { job }]) => [lane, job])));
+export const NODE_EVM_LANES = Object.freeze(Object.keys(LANES));
+export const SELF_BUILDING_LANES = lanesWith('selfBuilding');
 const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
 
 // Whether a plan must run the shared build job: a selected lane consumes its
@@ -52,22 +62,11 @@ export function needsSharedBuild(plan) {
   return plan.buildChecks === true || NODE_LANES.some((lane) => plan.lanes?.[lane] === true);
 }
 
-// Lanes whose jobs run whenever another lane's do. The Blazegraph job also
-// runs the agent's live Blazegraph suites (packages/agent/vitest.blazegraph
-// .config.ts), so ci.yml starts it for either lane; every plan records that,
-// so the gate requires the job.
-const IMPLIED_LANES = Object.freeze({
-  tornado_agent: Object.freeze(['tornado_blazegraph']),
-});
-
 // `contracts` remains a workflow output for compatibility, but Solidity is an
 // independent relevance gate rather than part of the Node/EVM "full" profile.
 export const CI_LANES = Object.freeze([...NODE_EVM_LANES, 'contracts']);
 
-// Lanes that restore the shared Hardhat 0.8.20/london compiler outputs.
-export const NODE_TEST_ARTIFACT_LANES = Object.freeze([
-  'tornado_core', 'tornado_publisher', 'tornado_agent', 'bura_cli', 'kosava_hardhat_plugins',
-]);
+export const NODE_TEST_ARTIFACT_LANES = lanesWith('nodeTestArtifacts');
 
 export function needsNodeTestArtifacts(plan) {
   return NODE_TEST_ARTIFACT_LANES.some((lane) => plan.lanes?.[lane] === true);
@@ -539,8 +538,8 @@ export function planCi({
     reasons.push(...route.reasons);
   }
 
-  for (const [lane, implied] of Object.entries(IMPLIED_LANES)) {
-    if (lanes[lane]) for (const other of implied) lanes[other] = true;
+  for (const [lane, { implies = [] }] of Object.entries(LANES)) {
+    if (lanes[lane]) for (const other of implies) lanes[other] = true;
   }
 
   const deduplicatedReasons = [...new Set(reasons)];

@@ -420,6 +420,22 @@ test('protection inspection excludes controller freshness acquisition', async ()
     },
   });
   assert.equal(lookalike.checks.freshness.status, 'error', 'only a GitHub API 404 means the file is missing');
+  // The same drift through the real request helper and GitHub's own 404.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const endpoint = String(url).replace('https://api.github.com/', '');
+    if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) {
+      return new Response('{"message":"Not Found"}', { status: 404 });
+    }
+    return new Response(JSON.stringify(await requestJson(endpoint)), { status: 200 });
+  };
+  try {
+    const throughFetch = await inspectCiPolicyFreshness({ inspection, token: 'test-token' });
+    assert.equal(throughFetch.checks.freshness.status, 'fail');
+    assert.deepEqual(throughFetch.checks.freshness.details.driftedFiles, [addedLater]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('effective policy inspection reads every rules page and rejects malformed pages', async () => {
