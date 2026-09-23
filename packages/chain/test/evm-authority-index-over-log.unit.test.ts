@@ -995,6 +995,87 @@ describe('Context Graph authority index over the one log', () => {
       await expect(reading).rejects.toMatchObject({ name: 'AbortError' });
       expect(calls.getBlock).toBe(0);
     });
+
+    // The bounded peek validates a retained fold through its OWN copy of the
+    // anchor check. Without the log short-circuit there, a caller that asked
+    // for bounded freshness to skip one `eth_call` would pay an
+    // `eth_getBlockByNumber` that the escalating read above never spends.
+    it('lets a bounded peek prove the retained fold from the log without an RPC', async () => {
+      const store = seededStore({ head: retainedHead });
+      const original = logSource(store);
+      const anchorHolds = vi.fn(original.anchorHolds.bind(original));
+      const { reader, calls } = makeReader({ store, source: { ...original, anchorHolds } });
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+      const anchorChecksAfterFold = anchorHolds.mock.calls.length;
+
+      expect(await reader.peekContextGraphLiveAuthority(7n)).toEqual({
+        active: true,
+        accessPolicy: 1,
+        participantAgents: [OWNER],
+      });
+
+      expect(anchorHolds).toHaveBeenCalledTimes(anchorChecksAfterFold + 1);
+      expect(calls.getBlock).toBe(0);
+      expect(calls.getLogs).toBe(0);
+    });
+
+    it('lets a bounded peek fall back to the provider when the local revision moved',
+      async () => {
+        const store = seededStore({ head: retainedHead });
+        const original = logSource(store);
+        let current: ChainEventLogAuthoritySource | undefined = original;
+        const { reader, calls } = makeReader({
+          store,
+          sourceProvider: () => current,
+        });
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+        const moved = vi.fn(async () => false);
+        current = { ...original, anchorHolds: moved };
+        expect(await reader.peekContextGraphLiveAuthority(7n)).toEqual({
+          active: true,
+          accessPolicy: 1,
+          participantAgents: [OWNER],
+        });
+
+        // The provider confirms the anchor, so the retained fold is served:
+        // one block read, never a rescan.
+        expect(moved).toHaveBeenCalledTimes(1);
+        expect(calls.getBlock).toBe(1);
+        expect(calls.getLogs).toBe(0);
+      });
+
+    it('honours caller abort after the peek local proof await without provider fallback',
+      async () => {
+        const store = seededStore({ head: retainedHead });
+        const original = logSource(store);
+        let current: ChainEventLogAuthoritySource | undefined = original;
+        const { reader, calls } = makeReader({
+          store,
+          sourceProvider: () => current,
+        });
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+        let release!: (value: boolean) => void;
+        let markStarted!: () => void;
+        const held = new Promise<boolean>((resolve) => { release = resolve; });
+        const started = new Promise<void>((resolve) => { markStarted = resolve; });
+        current = {
+          ...original,
+          anchorHolds: () => {
+            markStarted();
+            return held;
+          },
+        };
+        const controller = new AbortController();
+        const peeking = reader.peekContextGraphLiveAuthority(7n, { signal: controller.signal });
+        await started;
+        controller.abort(new DOMException('test abort', 'AbortError'));
+        release(true);
+
+        await expect(peeking).rejects.toMatchObject({ name: 'AbortError' });
+        expect(calls.getBlock).toBe(0);
+      });
   });
 
   it('refuses the fold when the tick committed underneath it', async () => {

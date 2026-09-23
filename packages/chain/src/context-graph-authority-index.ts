@@ -273,6 +273,21 @@ export class ContextGraphAuthorityIndex {
   }
 
   /**
+   * Answer ONLY from the last completed projection, or report a miss.
+   *
+   * The counterpart to {@link projection} for a caller that prefers a local
+   * answer but does not need one. See
+   * `ContextGraphAuthorityIndexProjectionCache.peek` for why a miss must not
+   * escalate into the paged scan `projection` would perform.
+   */
+  async peekProjection<T>(
+    input: Omit<ContextGraphAuthorityIndexProjectionReadInput<T>, 'refresh'>,
+  ): Promise<Readonly<{ hit: true; value: T } | { hit: false }>> {
+    if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
+    return this.#projections.peek(input);
+  }
+
+  /**
    * Answer from the last completed projection of `input.scope` while it is
    * younger than `chain.indexTickMs`, otherwise through `input.refresh` — the
    * caller's complete read, which ends in {@link view}. See

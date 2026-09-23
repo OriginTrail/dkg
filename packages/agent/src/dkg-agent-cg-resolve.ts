@@ -1621,6 +1621,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
        * follows from the immutable policy alone.
        */
       requireLiveRosterForPrivate?: boolean;
+      /**
+       * How fresh this authority has to be. Defaults to `'live'`.
+       *
+       * Governs only the current-state read: the one `live-current` takes,
+       * and the one a finalized `authorityReadMode` falls back to when its
+       * lane leaves the answer undecided. The finalized lanes are unaffected.
+       *
+       * `'bounded'` lets the node's own event index answer, and is only for a
+       * caller whose decision the NEXT read can correct. It must never be used
+       * where the answer issues a key, permits a plaintext downgrade, or
+       * decides whether a roster-mutating transaction is sent.
+       */
+      freshness?: 'live' | 'bounded';
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
@@ -1676,7 +1689,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
           onChainId.toString(),
           createOperationContext('system'),
-          { signal: options.signal },
+          {
+            signal: options.signal,
+            ...(options.freshness === undefined ? {} : { freshness: options.freshness }),
+          },
         );
       } catch (err) {
         return {

@@ -436,3 +436,103 @@ describe('EVM adapter: access-policy fallback shares the getContextGraph tuple l
     );
   });
 });
+
+describe('EVM adapter: bounded-freshness live authority', () => {
+  const INDEX_ANSWER = Object.freeze({
+    active: true, accessPolicy: 1, participantAgents: [OTHER],
+  });
+
+  function boundedFixture(options: { enabled: boolean; peek?: unknown }) {
+    const { adapter, readContractWithOptions } = fixture();
+    readContractWithOptions.mockImplementation(async (_c: unknown, _l: string, method: string) => {
+      if (method !== 'getContextGraph') throw new Error(`unexpected ${method}`);
+      return TUPLE;
+    });
+    const peekContextGraphLiveAuthority = vi.fn(async () => options.peek);
+    (adapter as any).contextGraphBoundedAuthorityReadsEnabled = options.enabled;
+    (adapter as any).contextGraphAuthorityIndexReader = { peekContextGraphLiveAuthority };
+    return { adapter, readContractWithOptions, peekContextGraphLiveAuthority };
+  }
+
+  it('answers a bounded read from the index without touching the chain', async () => {
+    const { adapter, readContractWithOptions, peekContextGraphLiveAuthority } =
+      boundedFixture({ enabled: true, peek: INDEX_ANSWER });
+
+    await expect(adapter.getContextGraphLiveAuthority(7n, { freshness: 'bounded' }))
+      .resolves.toEqual(INDEX_ANSWER);
+
+    expect(peekContextGraphLiveAuthority).toHaveBeenCalledTimes(1);
+    expect(readContractWithOptions).not.toHaveBeenCalled();
+  });
+
+  it('falls through to the chain when the index cannot answer', async () => {
+    // `undefined` is "not folded yet", never "no such graph".
+    const { adapter, readContractWithOptions } =
+      boundedFixture({ enabled: true, peek: undefined });
+
+    await expect(adapter.getContextGraphLiveAuthority(7n, { freshness: 'bounded' }))
+      .resolves.toEqual(AUTHORITY);
+
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['the operator switch is off', { enabled: false, peek: INDEX_ANSWER }],
+  ])('reads the chain when %s', async (_label, options) => {
+    const { adapter, readContractWithOptions, peekContextGraphLiveAuthority } =
+      boundedFixture(options as { enabled: boolean; peek: unknown });
+
+    await expect(adapter.getContextGraphLiveAuthority(7n, { freshness: 'bounded' }))
+      .resolves.toEqual(AUTHORITY);
+
+    expect(peekContextGraphLiveAuthority).not.toHaveBeenCalled();
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['freshness is omitted', undefined],
+    ['freshness is explicitly live', { freshness: 'live' as const }],
+  ])('reads the chain when %s', async (_label, options) => {
+    const { adapter, readContractWithOptions, peekContextGraphLiveAuthority } =
+      boundedFixture({ enabled: true, peek: INDEX_ANSWER });
+
+    await expect(adapter.getContextGraphLiveAuthority(7n, options))
+      .resolves.toEqual(AUTHORITY);
+
+    // Live is the default and stays the default: an operator switch must never
+    // silently downgrade a caller that did not ask for bounded freshness.
+    expect(peekContextGraphLiveAuthority).not.toHaveBeenCalled();
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
+  it('never lets a live caller receive a bounded answer through the coalescer', async () => {
+    // THE invariant. `flightKey` carries no freshness component, so if a
+    // bounded answer were produced inside `run()` every caller sharing that key
+    // would get it — including a gate that asked to be live precisely because
+    // its decision cannot be taken back. The bounded path is therefore resolved
+    // BEFORE the coalescer and never enters it.
+    const { adapter, readContractWithOptions, peekContextGraphLiveAuthority } =
+      boundedFixture({ enabled: true, peek: INDEX_ANSWER });
+
+    const [bounded, live] = await Promise.all([
+      adapter.getContextGraphLiveAuthority(7n, { freshness: 'bounded' }),
+      adapter.getContextGraphLiveAuthority(7n, { freshness: 'live' }),
+    ]);
+
+    expect(bounded).toEqual(INDEX_ANSWER);
+    expect(live).toEqual(AUTHORITY);
+    expect(live).not.toEqual(bounded);
+    expect(peekContextGraphLiveAuthority).toHaveBeenCalledTimes(1);
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the chain when the node runs no authority index at all', async () => {
+    const { adapter, readContractWithOptions } =
+      boundedFixture({ enabled: true, peek: INDEX_ANSWER });
+    (adapter as any).contextGraphAuthorityIndexReader = undefined;
+
+    await expect(adapter.getContextGraphLiveAuthority(7n, { freshness: 'bounded' }))
+      .resolves.toEqual(AUTHORITY);
+    expect(readContractWithOptions).toHaveBeenCalledTimes(1);
+  });
+});
