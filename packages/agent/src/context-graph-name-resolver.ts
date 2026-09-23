@@ -39,7 +39,12 @@ export type ContextGraphNamePendingOutcome =
   | 'no-peers'
   | 'not-found'
   /** The attempt threw (an adoption that failed midway, say); retried with backoff. */
-  | 'attempt-failed';
+  | 'attempt-failed'
+  /**
+   * The attempt threw an error that signals a defect in this node's code
+   * (see `isUnexpectedAttemptError`): logged at warn, still retried.
+   */
+  | 'attempt-error';
 
 export interface ContextGraphNameTarget {
   /** Lowercase name hash; also the placeholder row's local id. */
@@ -71,12 +76,30 @@ export type ContextGraphNameResolutionEntry =
     readonly contextGraphId: string;
     readonly source: ContextGraphNameSource;
     readonly resolvedAt: number;
+  }
+  | {
+    /**
+     * A verified cleartext id was found, but the adoption hook refused it
+     * while the row still wanted one (on the agent: this node already binds
+     * that id to a different on-chain graph). Not retried in the background;
+     * an explicit request checks again.
+     */
+    readonly state: 'declined';
+    readonly nameHash: string;
+    readonly onChainId: string;
+    readonly contextGraphId: string;
+    readonly source: ContextGraphNameSource;
+    readonly declinedAt: number;
   };
 
 export interface ContextGraphNameResolverDeps {
   /** Hash-only rows that currently want a cleartext id. */
   listTargets(): readonly ContextGraphNameTarget[];
-  /** Re-checked after every await: is this still a hash-only row? */
+  /**
+   * Re-checked after every await: is this still a hash-only row? A
+   * synchronous in-memory check that is not expected to throw; the resolver
+   * still guards every call the same way (see `isCurrent`).
+   */
   isTargetCurrent(target: ContextGraphNameTarget): boolean;
   /** Fail closed: anything not provably public or private is `unknown`. */
   classifyPolicy(target: ContextGraphNameTarget, signal: AbortSignal): Promise<ContextGraphNamePolicy>;
@@ -97,11 +120,16 @@ export interface ContextGraphNameResolverDeps {
     nameHashes: readonly string[],
     signal: AbortSignal,
   ): Promise<ReadonlyMap<string, string> | null>;
-  /** Promote the row. False when the row changed and the adoption was skipped. */
+  /**
+   * Promote the row. False when the adoption was declined: either the row
+   * changed under the attempt, or the adopter refuses this id for the row
+   * as it stands (a binding conflict).
+   */
   adopt(target: ContextGraphNameTarget, contextGraphId: string, source: ContextGraphNameSource): Promise<boolean>;
   readonly log: {
     info(message: string): void;
     debug(message: string): void;
+    warn(message: string): void;
   };
   readonly now?: () => number;
 }
@@ -130,6 +158,26 @@ const MAX_QUEUED_PEERS_PER_TARGET = 64;
 
 function short(nameHash: string): string {
   return `${nameHash.slice(0, 18)}…`;
+}
+
+/**
+ * Errors the JavaScript runtime raises for a defect in this node's own code
+ * (calling something that is not a function, a missing binding, an invalid
+ * argument), as opposed to a peer, store or gossip layer that is briefly
+ * unavailable. Both are retried: a transient failure that happens to surface
+ * as one of these still recovers on its own, but a real defect is logged at
+ * warn on every attempt instead of hiding among ordinary retries.
+ */
+function isUnexpectedAttemptError(error: unknown): boolean {
+  return error instanceof TypeError
+    || error instanceof ReferenceError
+    || error instanceof RangeError
+    || error instanceof SyntaxError;
+}
+
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  return isUnexpectedAttemptError(error) ? `${error.name}: ${error.message}` : error.message;
 }
 
 /** Insert as newest, evicting the oldest entries so at most `bound` remain. */
@@ -298,9 +346,9 @@ export class ContextGraphNameResolver {
     }
     this.pass = this.passOnce()
       .catch((error: unknown) => {
-        this.deps.log.debug(
-          `Context Graph name resolution pass failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        const message = `Context Graph name resolution pass failed: ${describeError(error)}`;
+        if (isUnexpectedAttemptError(error)) this.deps.log.warn(message);
+        else this.deps.log.debug(message);
       })
       .finally(() => {
         this.pass = undefined;
@@ -346,6 +394,10 @@ export class ContextGraphNameResolver {
     if (existing !== undefined) return existing;
     const entry = this.entries.get(target.nameHash);
     if (entry?.state === 'resolved' || entry?.state === 'private') return Promise.resolve(entry);
+    // A declined adoption would only be declined again: background passes
+    // leave it alone, an explicit request (the operator subscribing again)
+    // checks once more.
+    if (entry?.state === 'declined' && options.ignoreBackoff !== true) return Promise.resolve(entry);
     if (
       onlyPeers === undefined
       && options.ignoreBackoff !== true
@@ -370,12 +422,20 @@ export class ContextGraphNameResolver {
    * that is restarting) must still leave the hash on the retry schedule:
    * retries are driven only by pending entries, so without one nothing would
    * ever attempt this hash again. Shutdown is the one failure not retried.
+   * A defect-shaped error is retried too, but reported as `attempt-error`
+   * and logged at warn, so it cannot pass for "not found yet".
    */
   private failedAttempt(target: ContextGraphNameTarget, error: unknown): ContextGraphNameResolutionEntry | undefined {
     if (this.lifetime.signal.aborted) throw error;
+    if (isUnexpectedAttemptError(error)) {
+      this.deps.log.warn(
+        `Context Graph ${short(target.nameHash)} name resolution attempt hit an unexpected error `
+        + `(retrying with backoff): ${describeError(error)}`,
+      );
+      return this.pendingIfCurrent(target, 'attempt-error');
+    }
     this.deps.log.debug(
-      `Context Graph ${short(target.nameHash)} name resolution attempt failed: `
-      + `${error instanceof Error ? error.message : String(error)}`,
+      `Context Graph ${short(target.nameHash)} name resolution attempt failed: ${describeError(error)}`,
     );
     return this.pendingIfCurrent(target, 'attempt-failed');
   }
@@ -385,14 +445,25 @@ export class ContextGraphNameResolver {
     target: ContextGraphNameTarget,
     outcome: ContextGraphNamePendingOutcome,
   ): ContextGraphNameResolutionEntry | undefined {
-    let current: boolean;
+    return this.isCurrent(target) ? this.pending(target, outcome, 0) : this.entries.get(target.nameHash);
+  }
+
+  /**
+   * Every `isTargetCurrent` call goes through here. A throw is a defect: it
+   * is logged at warn and read as "still current", since unknown is not
+   * gone. That keeps the hash on the retry schedule, and nothing is changed
+   * on the strength of it: the adoption hook re-validates the row itself.
+   */
+  private isCurrent(target: ContextGraphNameTarget): boolean {
     try {
-      current = this.deps.isTargetCurrent(target);
-    } catch {
-      // Unknown is not "gone": keep retrying; the next pass re-checks it.
-      current = true;
+      return this.deps.isTargetCurrent(target);
+    } catch (error: unknown) {
+      this.deps.log.warn(
+        `Context Graph ${short(target.nameHash)} row check failed; treating the row as still wanting `
+        + `a cleartext id: ${describeError(error)}`,
+      );
+      return true;
     }
-    return current ? this.pending(target, outcome, 0) : this.entries.get(target.nameHash);
   }
 
   private async attemptOnce(
@@ -402,7 +473,7 @@ export class ContextGraphNameResolver {
   ): Promise<ContextGraphNameResolutionEntry | undefined> {
     const signal = this.lifetime.signal;
     const previous = this.entries.get(target.nameHash);
-    if (!this.deps.isTargetCurrent(target)) return previous;
+    if (!this.isCurrent(target)) return previous;
     if (previous === undefined) {
       this.deps.log.info(
         `Context Graph ${short(target.nameHash)} (on-chain ${target.onChainId}) is known only by its name hash; `
@@ -440,7 +511,7 @@ export class ContextGraphNameResolver {
     for (const peerId of peers) {
       if (asks >= this.maxPeersPerAttempt) break;
       signal.throwIfAborted();
-      if (!this.deps.isTargetCurrent(target)) return this.entries.get(target.nameHash);
+      if (!this.isCurrent(target)) return this.entries.get(target.nameHash);
       const supports = await this.deps.peerSupportsNameProtocol(peerId).catch(() => undefined);
       if (supports !== true) continue;
       supporting += 1;
@@ -465,7 +536,7 @@ export class ContextGraphNameResolver {
     for (const peerId of peers) {
       if (pulls >= this.maxOntologyPullsPerAttempt) break;
       signal.throwIfAborted();
-      if (!this.deps.isTargetCurrent(target)) return this.entries.get(target.nameHash);
+      if (!this.isCurrent(target)) return this.entries.get(target.nameHash);
       const blockedUntil = this.ontologyPullBlockedUntil.get(peerId);
       if (!ignorePeerCooldowns && blockedUntil !== undefined && this.now() < blockedUntil) continue;
       pulls += 1;
@@ -522,9 +593,7 @@ export class ContextGraphNameResolver {
     peerId?: string,
   ): Promise<ContextGraphNameResolutionEntry | undefined> {
     const adopted = await this.deps.adopt(target, contextGraphId, source);
-    // Declined: the row changed under us. If it still wants a cleartext id,
-    // keep it on the retry schedule rather than dropping it silently.
-    if (!adopted) return this.pendingIfCurrent(target, 'not-found');
+    if (!adopted) return this.declined(target, contextGraphId, source);
     const entry: ContextGraphNameResolutionEntry = {
       state: 'resolved',
       nameHash: target.nameHash,
@@ -550,6 +619,36 @@ export class ContextGraphNameResolver {
     this.deps.log.info(
       `Resolved Context Graph name hash ${short(target.nameHash)} to "${contextGraphId}" `
       + `(source ${source}${peerId === undefined ? '' : `, peer ${peerId.slice(-8)}`})`,
+    );
+    return entry;
+  }
+
+  /**
+   * The adoption hook refused a verified id. A row that changed under the
+   * attempt (went away, or was re-bound) records nothing; the next pass
+   * sees it as it is now. A row that still wants an id was refused for the
+   * id itself, and that id is the hash's only preimage, so every source
+   * would offer it again and every retry would repeat the refusal: it is
+   * recorded as declined and not retried in the background.
+   */
+  private declined(
+    target: ContextGraphNameTarget,
+    contextGraphId: string,
+    source: ContextGraphNameSource,
+  ): ContextGraphNameResolutionEntry | undefined {
+    if (!this.isCurrent(target)) return this.entries.get(target.nameHash);
+    const entry: ContextGraphNameResolutionEntry = {
+      state: 'declined',
+      nameHash: target.nameHash,
+      onChainId: target.onChainId,
+      contextGraphId,
+      source,
+      declinedAt: this.now(),
+    };
+    this.entries.set(target.nameHash, entry);
+    this.deps.log.info(
+      `Context Graph ${short(target.nameHash)}: the verified cleartext id was not adopted; `
+      + 'not retrying in the background (subscribing again checks once more)',
     );
     return entry;
   }

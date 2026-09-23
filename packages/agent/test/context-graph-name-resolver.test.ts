@@ -51,7 +51,7 @@ function harness(overrides: Partial<{
       state.adopted.push({ contextGraphId, source });
       return true;
     },
-    log: { info: () => undefined, debug: () => undefined },
+    log: { info: () => undefined, debug: () => undefined, warn: () => undefined },
   };
   return state;
 }
@@ -212,11 +212,43 @@ describe('ContextGraphNameResolver', () => {
     expect(state.adopted).toHaveLength(1);
   });
 
-  it('stays pending, with a retry scheduled, when adoption was declined and the row still wants an id', async () => {
-    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT }, adopt: false });
-    const entry = await resolverFor(state).resolveNow(TARGET);
-    expect(entry).toMatchObject({ state: 'pending', lastOutcome: 'not-found', attempts: 1 });
-    expect(entry?.state === 'pending' ? entry.nextAttemptAt : undefined).toBeTypeOf('number');
+  it('records a declined adoption for a row that still wants an id, and leaves it off the retry schedule', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let adoptCalls = 0;
+    // The row stays current: the adopter refuses the id itself (a binding conflict).
+    state.deps.adopt = async () => {
+      adoptCalls += 1;
+      return false;
+    };
+    const resolver = resolverFor(state, { retryBaseMs: 1_000, retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toEqual({
+      state: 'declined',
+      nameHash: NAME_HASH,
+      onChainId: '33',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-protocol',
+      declinedAt: expect.any(Number),
+    });
+    expect(adoptCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Background passes, identify updates and time do not decline it again.
+    resolver.request();
+    resolver.onPeerUpdated('holder');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(adoptCalls).toBe(1);
+    expect(state.asked).toEqual(['holder']);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // An explicit request (the operator subscribing again) checks once more.
+    expect(await resolver.resolveNow(TARGET)).toMatchObject({ state: 'declined', contextGraphId: CLEARTEXT });
+    expect(adoptCalls).toBe(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(adoptCalls).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
     expect(state.adopted).toEqual([]);
   });
 
@@ -394,7 +426,7 @@ describe('ContextGraphNameResolver: background passes', () => {
         }
         return listTargets();
       },
-      log: { info: () => undefined, debug: (message) => { debug.push(message); } },
+      log: { ...state.deps.log, debug: (message) => { debug.push(message); } },
     };
     const resolver = resolverFor(state);
     resolver.request();
@@ -407,6 +439,7 @@ describe('ContextGraphNameResolver: background passes', () => {
   it('keeps retrying in the background after an attempt throws', async () => {
     vi.useFakeTimers();
     const debug: string[] = [];
+    const warn: string[] = [];
     const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
     let adoptCalls = 0;
     state.deps = {
@@ -418,19 +451,88 @@ describe('ContextGraphNameResolver: background passes', () => {
         state.adopted.push({ contextGraphId, source });
         return true;
       },
-      log: { info: () => undefined, debug: (message) => { debug.push(message); } },
+      log: { info: () => undefined, debug: (message) => { debug.push(message); }, warn: (message) => { warn.push(message); } },
     };
     const resolver = resolverFor(state, { retryBaseMs: 1_000, peerAskTtlMs: 0 });
     resolver.request();
     await vi.advanceTimersByTimeAsync(0);
     expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
     expect(debug.some((line) => line.includes('name resolution attempt failed: gossip layer restarting'))).toBe(true);
+    // An anticipated failure is routine: nothing at warn.
+    expect(warn).toEqual([]);
     expect(state.adopted).toEqual([]);
 
     // No request(), no peer update: the retry schedule alone gets it done.
     await vi.advanceTimersByTimeAsync(1_000);
     expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
     expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+  });
+
+  it('reports a defect-shaped failure at warn as attempt-error, and still retries it', async () => {
+    vi.useFakeTimers();
+    const debug: string[] = [];
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let adoptCalls = 0;
+    state.deps = {
+      ...state.deps,
+      adopt: async (_target, contextGraphId, source) => {
+        adoptCalls += 1;
+        // A refactor left a step undefined; it is fixed by the third attempt.
+        if (adoptCalls <= 2) throw new TypeError('promoteRow is not a function');
+        state.adopted.push({ contextGraphId, source });
+        return true;
+      },
+      log: { info: () => undefined, debug: (message) => { debug.push(message); }, warn: (message) => { warn.push(message); } },
+    };
+    const resolver = resolverFor(state, { retryBaseMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-error', attempts: 1 });
+    expect(warn).toEqual([
+      expect.stringContaining('name resolution attempt hit an unexpected error (retrying with backoff): '
+        + 'TypeError: promoteRow is not a function'),
+    ]);
+    expect(debug.some((line) => line.includes('attempt failed'))).toBe(false);
+
+    // Every attempt that hits it says so at warn...
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-error', attempts: 2 });
+    expect(warn).toHaveLength(2);
+    // ...and it stays on the retry schedule, so a misread transient failure still recovers.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+  });
+
+  it('guards every row check the same way: a throw warns and keeps the hash on the retry schedule', async () => {
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.log = { ...state.deps.log, warn: (message) => { warn.push(message); } };
+    state.deps.isTargetCurrent = () => { throw new TypeError('rows.get is not a function'); };
+    // The adoption fails too, so the retry decision itself needs the row check.
+    state.deps.adopt = async () => { throw new Error('gossip layer restarting'); };
+    const entry = await resolverFor(state).resolveNow(TARGET);
+    expect(entry).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
+    expect(entry?.state === 'pending' ? entry.nextAttemptAt : undefined).toBeTypeOf('number');
+    expect(state.asked).toEqual(['holder']);
+    expect(warn.length).toBeGreaterThan(0);
+    expect(new Set(warn)).toEqual(new Set([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… row check failed; treating the row as still wanting `
+        + 'a cleartext id: TypeError: rows.get is not a function',
+    ]));
+  });
+
+  it('logs a pass that fails with a defect at warn', async () => {
+    const warn: string[] = [];
+    const state = harness();
+    state.deps = {
+      ...state.deps,
+      listTargets: () => { throw new TypeError('rows is not iterable'); },
+      log: { ...state.deps.log, warn: (message) => { warn.push(message); } },
+    };
+    resolverFor(state).request();
+    await waitFor(() => warn.length > 0);
+    expect(warn).toEqual(['Context Graph name resolution pass failed: TypeError: rows is not iterable']);
   });
 
   it('does not schedule a retry for an attempt cut short by shutdown', async () => {

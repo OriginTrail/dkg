@@ -106,6 +106,12 @@ function contextGraphNameHashOnlyPrivateMessage(nameHash: string): string {
     + 'then subscribe with the cleartext id.';
 }
 
+function contextGraphNameDeclinedMessage(nameHash: string): string {
+  return `Context Graph ${shortHash(nameHash)}'s verified cleartext id is already bound to a different on-chain `
+    + 'Context Graph on this node, so the two were not merged and this subscription cannot sync (see the node log). '
+    + 'Subscribing again checks once more.';
+}
+
 function contextGraphNameResolvedMessage(nameHash: string, contextGraphId: string): string {
   return `Context Graph ${shortHash(nameHash)} resolves to "${contextGraphId}" (verified against the on-chain name hash); `
     + 'it syncs under that id.';
@@ -207,6 +213,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
       log: {
         info: (message) => this.log.info(ctx, message),
         debug: (message) => this.log.debug(ctx, message),
+        warn: (message) => this.log.warn(ctx, message),
       },
     });
     state.resolver = resolver;
@@ -420,7 +427,9 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
       ...(onChainId === undefined ? {} : { onChainId }),
       message: isPrivate
         ? contextGraphNameHashOnlyPrivateMessage(placeholder.nameHash)
-        : contextGraphNameHashOnlyMessage(placeholder.nameHash),
+        : entry?.state === 'declined' && entry.onChainId === onChainId
+          ? contextGraphNameDeclinedMessage(placeholder.nameHash)
+          : contextGraphNameHashOnlyMessage(placeholder.nameHash),
     };
   }
 
@@ -428,7 +437,8 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
    * Bounded foreground resolution for one hash-keyed placeholder, subscribed
    * or not (the subscribe route calls this before it subscribes). Returns the
    * adopted cleartext id, or null when nothing verified arrived in time; the
-   * background resolver keeps trying either way.
+   * background resolver keeps trying either way, except after a declined
+   * adoption, which only a call like this one checks again.
    */
   async resolveContextGraphNameHashNow(
     this: DKGAgent,
