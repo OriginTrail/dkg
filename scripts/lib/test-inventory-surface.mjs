@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 /** Execution surface: JS/TS cases, Python tests/drivers, shell test drivers, and YAML test cases. */
@@ -9,10 +11,16 @@ export function isTestSurface(file) {
   return false;
 }
 
+/** Test files the inventory routes: tracked or unignored and present on disk, optionally under `paths`. */
+export function discoverTestSurface(root, paths = []) {
+  const listed = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...paths], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).split('\0');
+  return [...new Set(listed)].filter(isTestSurface).filter((file) => existsSync(path.join(root, file)));
+}
+
 const matchesRoute = (file, route) => path.posix.matchesGlob(file, route.pattern);
 
 /** The route that owns a file: the first registration whose pattern matches it. */
-export function routeFor(file, registrations) {
+function routeFor(file, registrations) {
   return registrations.find((route) => matchesRoute(file, route));
 }
 

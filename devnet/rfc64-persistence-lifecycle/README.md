@@ -60,7 +60,7 @@ pnpm test:gate0:rfc64-persistence-lifecycle:unit
 
 CI runs this as a named step on the Windows inventory shard before generation,
 where the two symlink-rejection tests skip and the `0600` mode assertions do not
-run, and on the Linux Gate 1 agent shard, which runs every case.
+run, and on the Linux agent sidecar shard, which runs every case.
 
 Strictly typecheck the producer, runner, verifier, and focused tests with:
 

@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { isTestSurface, routeFor } from '../test-inventory-surface.mjs';
+import { discoverTestSurface, secondaryRoutes } from '../test-inventory-surface.mjs';
 
 const workflow = parse(readFileSync(new URL('../../../.github/workflows/rfc64-inventory-windows.yml', import.meta.url), 'utf8'));
 const ciWorkflow = parse(readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
@@ -59,27 +58,23 @@ test('canonical scripts retain developer build/generate/verify composition', () 
   assert.equal(scripts[`${prefix}:unit`], `node --import tsx --test ${unitFiles.join(' ')}`);
 });
 
-// Discover test files like the inventory: tracked or unignored, and present on disk.
-function listTests(...paths) {
-  const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
-  return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...paths], { cwd: repoRoot, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
-    .split('\0').filter((file) => isTestSurface(file) && existsSync(new URL(`../../../${file}`, import.meta.url)));
-}
+const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 test('the required unit route owns exactly the unit files across the repository', () => {
   assert.ok(unitRoute, `expected a test route for pnpm ${prefix}:unit`);
   assert.equal(unitRoute.lane, 'inventory-windows');
   assert.equal(unitRoute.cadence, 'required');
-  // First match wins over the full route list: no earlier route (such as devnet/**)
-  // may shadow a unit file, and a widened pattern may not claim any other test.
-  const owned = listTests().filter((file) => routeFor(file, routes) === unitRoute);
+  // Resolve exactly as `pnpm test:inventory` does: no earlier route (such as
+  // devnet/**) may shadow a unit file, and a widened pattern may not claim any other test.
+  const resolved = secondaryRoutes(discoverTestSurface(repoRoot), routes);
+  const owned = [...resolved].filter(([, route]) => route.pattern === unitRoute.pattern).map(([file]) => file);
   assert.deepEqual(owned.sort(), [...unitFiles].sort());
 });
 
 test('every Gate 0 harness test, including subdirectories, is a unit file', () => {
   // This also catches a missing unit file, which `node --test` silently skips
   // while any other listed path exists.
-  assert.deepEqual(listTests(harnessDir).sort(), [...unitFiles].sort());
+  assert.deepEqual(discoverTestSurface(repoRoot, [harnessDir]).sort(), [...unitFiles].sort());
 });
 
 test('the Gate 0 unit tests also run on the Linux agent sidecar shard', () => {
