@@ -132,7 +132,8 @@ function short(nameHash: string): string {
   return `${nameHash.slice(0, 18)}…`;
 }
 
-function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V, bound: number): void {
+/** Insert as newest, evicting the oldest entries so at most `bound` remain. */
+export function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V, bound: number): void {
   map.delete(key);
   while (map.size >= bound) {
     const oldest = map.keys().next().value;
@@ -533,6 +534,8 @@ export class ContextGraphNameResolver {
       resolvedAt: this.now(),
     };
     this.entries.delete(target.nameHash);
+    // Unlike rememberBounded, only resolutions count toward this bound:
+    // pending and private entries are already bounded by the live targets.
     let resolvedCount = 0;
     for (const existing of this.entries.values()) if (existing.state === 'resolved') resolvedCount += 1;
     if (resolvedCount >= MAX_REMEMBERED_RESOLUTIONS) {

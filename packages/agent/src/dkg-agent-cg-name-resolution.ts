@@ -47,6 +47,7 @@ import {
 } from './context-graph-name-protocol.js';
 import {
   ContextGraphNameResolver,
+  rememberBounded,
   type ContextGraphNamePolicy,
   type ContextGraphNameResolutionEntry,
   type ContextGraphNameSource,
@@ -828,12 +829,12 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
       }),
     ]);
     if (!signal.aborted) {
-      verdicts.delete(key);
-      if (verdicts.size >= MAX_REMEMBERED_REVEAL_VERDICTS) {
-        const oldest = verdicts.keys().next().value;
-        if (oldest !== undefined) verdicts.delete(oldest);
-      }
-      verdicts.set(key, { public: isPublic, until: Date.now() + REVEAL_REFUSAL_MEMO_MS });
+      rememberBounded(
+        verdicts,
+        key,
+        { public: isPublic, until: Date.now() + REVEAL_REFUSAL_MEMO_MS },
+        MAX_REMEMBERED_REVEAL_VERDICTS,
+      );
     }
     return isPublic;
   }
