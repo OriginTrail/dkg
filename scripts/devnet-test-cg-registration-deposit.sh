@@ -11,7 +11,8 @@
 #   2. ARMED: with the param set live, registering a CG pulls the deposit GROSS
 #      into the CSS vault — getRegistrationEscrow(cgId) == deposit, and the
 #      client adapter's lazy approve-and-retry funds the allowance with no
-#      manual approve.
+#      manual approve. Assumes node1's wallet is not an agent of an eligible
+#      PCA: from ContextGraphs 10.0.5 such a registration is deposit-waived.
 #   3. Param is RESET to 0 at teardown (dormant-regression-safe for other suites).
 #
 # Governance setter is called with the local Hardhat deployer (Hub owner) key —

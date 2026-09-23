@@ -301,9 +301,12 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
 
     const creator = getDefaultKACreator(accounts);
     const accountId = await createAccountFor(creator);
-    await NFT.connect(creator).registerAgent(accountId, creator.address);
-    expect(await NFT.agentToAccountId(creator.address)).to.equal(accountId);
 
+    // The CG is created BEFORE the creator becomes a PCA agent. A registered
+    // agent's open CG is deposit-waived against its PCA (ContextGraphs 10.0.5,
+    // covered in the waiver suite below), so this order keeps the
+    // deposit-enabled tests on the charged path: the deposit becomes the CG's
+    // escrow, and their publishes then draw it before the PCA.
     await CGFacade.connect(creator).createContextGraph(
       [],
       0,
@@ -316,6 +319,9 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     const cgId = await CGS.getLatestContextGraphId();
     expect(await CGFacade.isAuthorizedPublisher(cgId, creator.address)).to.be
       .true;
+
+    await NFT.connect(creator).registerAgent(accountId, creator.address);
+    expect(await NFT.agentToAccountId(creator.address)).to.equal(accountId);
 
     // Discount branch requires p.epochs == lockDurationEpochs.
     const epochs = Number((await NFT.accounts(accountId))[5]);
@@ -2369,9 +2375,13 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(DEPOSIT);
     };
     // Curated CG (publishPolicy 0) whose authority is `owner` and which is
-    // bound to PCA `accountId` — the PCA-authority shape the waiver keys on.
+    // bound to PCA `accountId` — the curator-PCA shape. A CG WITHOUT a curator
+    // PCA falls back to the creator's agent PCA (see the no-curator-PCA cases).
     const createPcaCg = (caller: SignerWithAddress, owner: SignerWithAddress, accountId: bigint) =>
       CGFacade.connect(caller).createContextGraph([], 0, 1, 0, owner.address, accountId, ethers.ZeroHash);
+    // Open CG (publishPolicy 1): storage forces its curator accountId to 0.
+    const createOpenCg = (caller: SignerWithAddress) =>
+      CGFacade.connect(caller).createContextGraph([], 0, 0, 1, ethers.ZeroAddress, 0, ethers.ZeroHash);
 
     // Create a PCA with a SPECIFIC committed amount (createAccountFor is fixed at 50k).
     const createAccountWith = async (owner: SignerWithAddress, amount: bigint): Promise<bigint> => {
@@ -2433,13 +2443,12 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       expect(await CGS.getRegistrationEscrow(cgId)).to.equal(DEPOSIT);
     });
 
-    it('does NOT waive a CG with no PCA (accountId 0) — normal deposit applies', async () => {
+    it('does NOT waive a CG with no PCA (accountId 0) when the creator is no PCA agent — normal deposit applies', async () => {
       await setDeposit();
       const creator = accounts[5];
-      // No PCA designated → unfunded create reverts (deposit charged, not waived).
-      await expect(
-        CGFacade.connect(creator).createContextGraph([], 0, 0, 1, ethers.ZeroAddress, 0, ethers.ZeroHash),
-      ).to.be.reverted;
+      // No curator PCA and no agent binding to fall back to → unfunded create
+      // reverts (deposit charged, not waived).
+      await expect(createOpenCg(creator)).to.be.reverted;
     });
 
     // Review feedback: an EXPIRED or FULLY-SWEPT PCA has no live locked
@@ -2531,7 +2540,9 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       expect(await NFT.agentToAccountId(agentOfB.address)).to.equal(accountB);
 
       // agentOfB targets PCA #1 (ownerA's) → not its agent, not its owner →
-      // not waived → unfunded create reverts (deposit charged).
+      // not waived → unfunded create reverts (deposit charged). A CG WITH a
+      // curator PCA never falls back to the creator's own PCA (#2), even
+      // though #2 would be eligible.
       await expect(createPcaCg(agentOfB, ownerA, accountA)).to.be.reverted;
     });
 
@@ -2627,6 +2638,128 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
         .and.not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
       const cgId = await CGS.getLatestContextGraphId();
       expect(await CGS.getRegistrationEscrow(cgId)).to.equal(DEPOSIT); // charged, not free
+    });
+
+    // ContextGraphs 10.0.5: a CG WITHOUT a curator PCA (open, or EOA/Safe
+    // curated) is waived against the PCA its creator is a registered agent of,
+    // so a PCA-backed wallet needs no liquid TRAC to register any graph. The
+    // waiver storage's floor, agent and quota gates apply unchanged.
+    describe('CGs without a curator PCA (creator agent fallback)', () => {
+      it('WAIVES an OPEN CG created by a registered agent, against the agent\'s PCA', async () => {
+        await setDeposit();
+        const owner = accounts[1];
+        const agent = accounts[3];
+        const accountId = await createAccountFor(owner);
+        await NFT.connect(owner).registerAgent(accountId, agent.address);
+
+        const before = await Token.balanceOf(agent.address); // no deposit funded
+        const cgId = (await CGS.getLatestContextGraphId()) + 1n;
+        const tx = await createOpenCg(agent);
+        await expect(tx)
+          .to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived')
+          .withArgs(cgId, accountId, agent.address);
+        await expect(tx).not.to.emit(CGFacade, 'ContextGraphRegistrationDeposited');
+
+        expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n);
+        expect(await Token.balanceOf(agent.address)).to.equal(before);
+        const Waiver = await hre.ethers.getContract('ContextGraphWaiverStorage');
+        expect(await (Waiver as any).waivedCgCount(accountId)).to.equal(1n);
+        // The fallback only covers the deposit: the CG stays open with no curator PCA.
+        expect((await CGS.getPublishPolicy(cgId))[0]).to.equal(1n);
+        expect(await CGS.getPublishAuthorityAccountId(cgId)).to.equal(0n);
+      });
+
+      it('WAIVES an EOA-curated CG created by a registered agent without binding the CG to the PCA', async () => {
+        await setDeposit();
+        const owner = accounts[1];
+        const agent = accounts[3];
+        const accountId = await createAccountFor(owner);
+        await NFT.connect(owner).registerAgent(accountId, agent.address);
+
+        const cgId = (await CGS.getLatestContextGraphId()) + 1n;
+        // Curated with the agent's own wallet as EOA curator (accountId 0).
+        const tx = await CGFacade.connect(agent).createContextGraph(
+          [], 0, 1, 0, agent.address, 0, ethers.ZeroHash,
+        );
+        await expect(tx)
+          .to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived')
+          .withArgs(cgId, accountId, agent.address);
+        await expect(tx).not.to.emit(CGFacade, 'ContextGraphRegistrationDeposited');
+        expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n);
+
+        // Still EOA-curated: the PCA paid the deposit but is not the curator.
+        expect(await CGS.getPublishAuthorityAccountId(cgId)).to.equal(0n);
+        expect(await CGFacade.isAuthorizedPublisher(cgId, agent.address)).to.equal(true);
+        expect(await CGFacade.isAuthorizedPublisher(cgId, owner.address)).to.equal(false);
+      });
+
+      it('open and PCA-curated CGs draw from the SAME per-PCA quota', async () => {
+        const Params = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
+        // deposit 25k, PCA 50k → quota 2 (the 25k floor is still met).
+        await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(ethers.parseEther('25000'));
+        const owner = accounts[1];
+        const agent = accounts[3];
+        const accountId = await createAccountFor(owner);
+        await NFT.connect(owner).registerAgent(accountId, agent.address);
+
+        await expect(createPcaCg(agent, owner, accountId)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+        await expect(createOpenCg(agent)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+        // Quota exhausted → charged → unfunded → revert.
+        await expect(createOpenCg(agent)).to.be.reverted;
+
+        const Waiver = await hre.ethers.getContract('ContextGraphWaiverStorage');
+        expect(await (Waiver as any).waivedCgCount(accountId)).to.equal(2n);
+      });
+
+      it('charges an OPEN CG when the agent\'s PCA has EXPIRED (the stale binding gives no waiver)', async () => {
+        await setDeposit();
+        const owner = accounts[1];
+        const agent = accounts[3];
+        const accountId = await createAccountFor(owner);
+        await NFT.connect(owner).registerAgent(accountId, agent.address);
+        await time.increaseTo(Number((await NFT.accounts(accountId))[4]) + 1); // past expiresAtTimestamp
+        expect(await NFT.agentToAccountId(agent.address)).to.equal(accountId); // binding outlives expiry
+
+        await Token.mint(agent.address, DEPOSIT);
+        await Token.connect(agent).approve(await CGFacade.getAddress(), DEPOSIT);
+        const tx = await createOpenCg(agent);
+        await expect(tx).to.emit(CGFacade, 'ContextGraphRegistrationDeposited');
+        await expect(tx).not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+        expect(await CGS.getRegistrationEscrow(await CGS.getLatestContextGraphId())).to.equal(DEPOSIT);
+      });
+
+      it('charges an OPEN CG created by a PCA OWNER that is not also registered as an agent', async () => {
+        await setDeposit();
+        const owner = accounts[1];
+        const accountId = await createAccountFor(owner);
+        expect(await NFT.agentToAccountId(owner.address)).to.equal(0n);
+
+        // owner -> PCA is not a unique lookup, so only an agent binding is
+        // followed: unfunded create → charged → revert.
+        await expect(createOpenCg(owner)).to.be.reverted;
+
+        // Registering the owner's wallet as an agent of its own PCA enables it.
+        await NFT.connect(owner).registerAgent(accountId, owner.address);
+        await expect(createOpenCg(owner)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      });
+
+      it('fail-closed: DKGPublishingConvictionNFT unregistered in the Hub → an agent\'s OPEN CG is CHARGED', async () => {
+        await setDeposit();
+        const owner = accounts[1];
+        const agent = accounts[3];
+        const accountId = await createAccountFor(owner);
+        await NFT.connect(owner).registerAgent(accountId, agent.address);
+
+        // The creator's agent PCA is resolved through the Hub; unresolvable → 0 → charge.
+        await HubContract.connect(accounts[0]).removeContractByName('DKGPublishingConvictionNFT');
+
+        await Token.mint(agent.address, DEPOSIT);
+        await Token.connect(agent).approve(await CGFacade.getAddress(), DEPOSIT);
+        const tx = await createOpenCg(agent);
+        await expect(tx).to.emit(CGFacade, 'ContextGraphRegistrationDeposited');
+        await expect(tx).not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+        expect(await CGS.getRegistrationEscrow(await CGS.getLatestContextGraphId())).to.equal(DEPOSIT);
+      });
     });
   });
 });
