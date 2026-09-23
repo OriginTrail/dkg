@@ -100,7 +100,7 @@ export const AGENTS_PHONEBOOK_CURATOR_MISS_SUPPRESSION_MS = 6 * 60 * 60_000;
 export const AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES = 1_000;
 /** Re-check cadence while wanted graphs wait for a first usable peer. */
 export const AGENTS_PHONEBOOK_NO_PEER_RETRY_MS = 30_000;
-/** Consecutive no-peer re-checks before waiting for the next trigger. */
+/** No-peer re-checks one wait may use before waiting for the next trigger. */
 export const AGENTS_PHONEBOOK_NO_PEER_MAX_RETRIES = 20;
 /** Reuse window for an on-chain access-policy answer. */
 export const AGENTS_PHONEBOOK_POLICY_VERDICT_TTL_MS = 30 * 60_000;
@@ -314,6 +314,9 @@ export class OnDemandAgentsPhonebookFetcher {
     if (!(await this.#isPublic(contextGraphId, signal))) return;
     if (this.#closed || !this.#deps.isActiveSubscription(contextGraphId)) return;
     if (!this.#wants.has(contextGraphId)) {
+      // The first wanted graph starts a new wait: it gets the whole no-peer
+      // re-check budget, whatever an earlier wait spent.
+      if (this.#wants.size === 0) this.#rechecks = 0;
       setBounded(this.#wants, contextGraphId, trigger, this.#maxStateEntries);
     }
     this.#maybeStart();
@@ -442,7 +445,6 @@ export class OnDemandAgentsPhonebookFetcher {
       this.#scheduleRecheck();
       return;
     }
-    this.#rechecks = 0;
 
     // Graphs that asked while this fetch ran are served by the same phonebook.
     const wanted = [...this.#wants.keys()];

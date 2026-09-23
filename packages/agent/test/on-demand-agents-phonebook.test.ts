@@ -478,6 +478,30 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.info[0]).toContain('trigger=startup');
   });
 
+  it('gives every wait for a peer its own bounded re-check budget', async () => {
+    const noPeerLines = (h: ReturnType<typeof createHarness>) => (
+      h.debug.filter((line) => line.includes('no usable connected peer')).length
+    );
+    const h = createHarness({ peers: [], noPeerMaxRetries: 2, subscribed: [CG, CG_OTHER_OWNER] });
+
+    // First wait: one probe plus two re-checks, then the budget is spent and
+    // the wanted graph is dropped.
+    h.fetcher.request(CG, 'startup');
+    await vi.waitFor(() => expect(noPeerLines(h)).toBe(3));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await h.fetcher.whenIdle();
+    expect(noPeerLines(h)).toBe(3);
+
+    // A later wait, still with no peer and for another graph, re-checks again
+    // with a full budget instead of a single probe.
+    h.fetcher.request(CG_OTHER_OWNER, 'vm-reconcile');
+    await vi.waitFor(() => expect(noPeerLines(h)).toBe(6));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await h.fetcher.whenIdle();
+    expect(noPeerLines(h)).toBe(6);
+    expect(h.syncCalls).toEqual([]);
+  });
+
   it('bounds the no-peer re-check and lets a later trigger ask again', async () => {
     const h = createHarness({ peers: [], noPeerMaxRetries: 2 });
 
