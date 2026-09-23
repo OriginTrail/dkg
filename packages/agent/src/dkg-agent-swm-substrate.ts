@@ -409,11 +409,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }): ContextGraphSub {
     // A name hash this node already resolved (and holds no row for) is the
     // verified cleartext graph: never mint a second, empty identity for it.
-    const adoptedCleartextId = this.resolveContextGraphIdAlias?.(contextGraphId) ?? null;
+    const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
     if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
     // Subscribing the cleartext of a graph held only by its name hash moves
     // the subscription: nothing may keep running under the hash id.
-    this.retireLiveContextGraphNamePlaceholderFor?.(contextGraphId);
+    this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {
@@ -707,10 +707,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
-    // A name-hash id adopted under its cleartext id shares the graph's wire
-    // topic and host-mode key with the cleartext row, which owns both now. A
-    // reconcile queued for the retired id must not touch either: its
-    // topic-wide unsubscribe would drop the cleartext row's handler.
+    // Retired name-hash id: skip. It shares the wire topic and host-mode key
+    // with the cleartext row, and a topic-wide unsubscribe here would drop
+    // that row's handler (see supersedingContextGraphIdFor).
     const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
     if (supersedingId) {
       this.log.debug(

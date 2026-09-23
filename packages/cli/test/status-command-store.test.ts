@@ -22,10 +22,16 @@ interface StoreFields {
 
 /**
  * Run `dkg status` against a stubbed client. `peek` answers plain status
- * requests and `requested` answers those asking for a store count.
+ * requests and `requested` answers those asking for a store count; `extra`
+ * is merged into every response.
  */
-async function renderStatus(peek: StoreFields, requested: StoreFields | Error = peek): Promise<{
+async function renderStatus(
+  peek: StoreFields,
+  requested: StoreFields | Error = peek,
+  extra: Partial<DaemonStatusResponse> = {},
+): Promise<{
   storeLine: string | undefined;
+  graphsLine: string | undefined;
   statusRequests: unknown[][];
 }> {
   const lines: string[] = [];
@@ -53,6 +59,7 @@ async function renderStatus(peek: StoreFields, requested: StoreFields | Error = 
         storeBackend: 'sparql-http',
         storeUrl: 'http://127.0.0.1:9999/query',
         ...(options?.includeStoreQuads ? requested as StoreFields : peek),
+        ...extra,
       };
     },
   } as never);
@@ -64,6 +71,7 @@ async function renderStatus(peek: StoreFields, requested: StoreFields | Error = 
     await program.parseAsync(['node', 'dkg', 'status']);
     return {
       storeLine: lines.find((line) => line.includes('Store:')),
+      graphsLine: lines.find((line) => line.includes('Graphs:')),
       statusRequests,
     };
   } finally {
@@ -273,5 +281,28 @@ describe('dkg status external-store rendering', () => {
     const { storeLine } = await renderStatus(store);
 
     expect(storeLine).toBe(`  Store:     sparql-http (http://127.0.0.1:9999/query) — ${rendered}`);
+  });
+});
+
+describe('dkg status name-hash-only subscriptions', () => {
+  const READY: StoreFields = { storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 0 };
+
+  it('prints the daemon\'s summary when a subscription is known only by its name hash', async () => {
+    const { graphsLine } = await renderStatus(READY, READY, {
+      contextGraphIdentity: { nameHashOnly: 2, message: '2 subscribed Context Graphs are known only by the on-chain name hash' },
+    });
+
+    expect(graphsLine).toBe('  Graphs:    2 subscribed Context Graphs are known only by the on-chain name hash');
+  });
+
+  it.each([
+    ['none are', { contextGraphIdentity: { nameHashOnly: 0 } }],
+    ['a count comes without a message', { contextGraphIdentity: { nameHashOnly: 1 } }],
+    ['an older daemon sends no summary', {}],
+  ] as Array<[string, Partial<DaemonStatusResponse>]>)('prints no Graphs line when %s', async (_label, extra) => {
+    const { graphsLine, storeLine } = await renderStatus(READY, READY, extra);
+
+    expect(storeLine).toBeDefined();
+    expect(graphsLine).toBeUndefined();
   });
 });

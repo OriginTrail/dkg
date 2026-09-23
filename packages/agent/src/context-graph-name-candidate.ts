@@ -21,8 +21,13 @@ import { DKG_ONTOLOGY, validateContextGraphId } from '@origintrail-official/dkg-
 export const CONTEXT_GRAPH_NAME_CANDIDATE_MAX_LENGTH = 256;
 
 const NAME_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
-const CONTEXT_GRAPH_SUBJECT_PREFIX = 'did:dkg:context-graph:';
-const CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+/**
+ * The ontology-graph vocabulary a Context Graph definition is written in.
+ * This module owns it: the in-memory scan below and the local-store SPARQL
+ * in dkg-agent-cg-name-resolution.ts must agree on it.
+ */
+export const CONTEXT_GRAPH_SUBJECT_PREFIX = 'did:dkg:context-graph:';
+export const CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
 
 /** Canonical lowercase form of a 32-byte name hash, or null when malformed. */
 export function normalizeContextGraphNameHash(value: unknown): string | null {

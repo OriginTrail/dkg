@@ -5203,9 +5203,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
-      // Supersession before authorization: a name-hash id this node adopted
-      // under its cleartext id must not sync (or write) under the retired id,
-      // even though policy reads now answer for the graph it names.
+      // Retired name-hash id: drop the work before any authorization check,
+      // which would now pass for the graph it names (see supersedingContextGraphIdFor).
       const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
       if (supersedingId) {
         this.log.debug(
@@ -9208,7 +9207,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // a Core's hosted row). Delete that record too, whatever this caller's
       // persist flag: otherwise the next rehydration resurrects the hash row
       // and re-points the reverse index away from the cleartext id.
-      this.retireDurableContextGraphSubscription?.(
+      this.retirePersistedContextGraphNamePlaceholder(
         wireOnlySubscription.localId,
         wireOnlySubscription.subscription,
       );
@@ -9249,7 +9248,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ) {
       // A graph known only by its on-chain name hash needs its cleartext id
       // before anything can sync; a no-op for every other row.
-      this.requestContextGraphNameResolutionFor?.(contextGraphId);
+      this.requestContextGraphNameResolutionFor(contextGraphId);
     }
     const rehydratedUserSubscription =
       this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled === true

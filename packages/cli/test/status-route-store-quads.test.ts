@@ -82,10 +82,14 @@ function nextTick(): Promise<void> {
 async function startStatusServer(
   query: (sparql: string, options?: { priority?: string }) => Promise<unknown>,
   store: StoreConfig = SPARQL_HTTP_STORE,
-  // Awaited inside the route after the store fields are read and the
-  // reachability check has started, as the real status blocks await I/O: a
+  // beforeReply is awaited inside the route after the store fields are read and
+  // the reachability check has started, as the real status blocks await I/O: a
   // count can settle meanwhile, and a test can see every request reach it.
-  { beforeReply }: { beforeReply?: () => Promise<void> } = {},
+  // agentOverrides replaces agent members a test needs to stub.
+  {
+    beforeReply,
+    agentOverrides = {},
+  }: { beforeReply?: () => Promise<void>; agentOverrides?: Record<string, unknown> } = {},
 ): Promise<{
   server: Server;
   baseUrl: string;
@@ -120,6 +124,7 @@ async function startStatusServer(
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
+        ...agentOverrides,
         ...(beforeReply
           ? {
               getFinalizationRecoveryHealth: async () => {
@@ -708,8 +713,39 @@ describe('dkg status against the status route', () => {
       expect(counted).toContain('Store:     oxigraph-server (http://127.0.0.1:7880/query) — 66 quads');
       expect(queryCalls).toBe(1);
       expect(asks).toBe(2);
+      // No subscription is known only by its name hash: no Graphs line.
+      expect(counted).not.toContain('Graphs:');
     } finally {
       countResult.resolve({ type: 'bindings', bindings: [] });
+      await closeServer(server);
+    }
+  });
+
+  it('reports subscriptions known only by their name hash, as a count, and prints it', async () => {
+    const nameHash = `0x${'6d'.repeat(32)}`;
+    const { server, baseUrl } = await startStatusServer(async () => COUNT_66, LOCAL_STORE, { agentOverrides: {
+      getSubscribedContextGraphs: () => new Map([
+        [nameHash, { subscribed: true, synced: false }],
+        ['acme-fun-facts', { subscribed: true, synced: true }],
+      ]),
+      describeContextGraphIdentity: (id: string) => (id === nameHash
+        ? { state: 'name-hash-only', nameHash, message: 'waiting for its cleartext id' }
+        : null),
+    } });
+    const message = '1 subscribed Context Graph is known only by the on-chain name hash and cannot sync yet; '
+      + 'waiting for a peer to reveal the cleartext id, or subscribe with the cleartext id '
+      + '(details: GET /api/context-graph/subscriptions).';
+
+    try {
+      const response = await fetch(`${baseUrl}/api/status`);
+      const body = await response.json() as { contextGraphIdentity?: unknown };
+      // /api/status is unauthenticated: a count and advice, never the ids.
+      expect(body.contextGraphIdentity).toEqual({ nameHashOnly: 1, message });
+      expect(JSON.stringify(body.contextGraphIdentity)).not.toContain(nameHash);
+
+      const printed = await runStatusCommand(baseUrl);
+      expect(printed).toContain(`  Graphs:    ${message}`);
+    } finally {
       await closeServer(server);
     }
   });

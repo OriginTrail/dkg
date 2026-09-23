@@ -3356,9 +3356,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       scheduling = new VmReconcileSchedulingRuntime(
         (localCgId, source) => this.executeVmReconcileForCg(localCgId, source),
         (localCgId, err) => {
-          // A pass that captured a name-hash id before adoption ends here. It
-          // is not a failure and nothing retries it: the cleartext id owns
-          // the graph's reconcile from now on.
+          // Retired name-hash id: not a failure, nothing retries it
+          // (see supersedingContextGraphIdFor).
           const supersedingId = this.supersedingContextGraphIdFor?.(localCgId);
           if (supersedingId) {
             this.log.debug(
@@ -3395,10 +3394,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
-    // Queued for a name-hash id before this node adopted its cleartext id: the
-    // cleartext id reconciles the graph, and the retired id names no local
-    // graph any more (the same answer target resolution would give, without
-    // re-reading the chain under a name the node no longer uses).
+    // Retired name-hash id: it names no local graph any more, the answer target
+    // resolution would give without a chain read (see supersedingContextGraphIdFor).
     if (this.supersedingContextGraphIdFor?.(localCgId)) throw new ContextGraphNotFoundError(localCgId);
     const physicalRun = (async (): Promise<ContextGraphReconcileResult> => {
       const target = await this.resolveVmReconcileTarget(

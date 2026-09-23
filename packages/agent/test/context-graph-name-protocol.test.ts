@@ -17,7 +17,10 @@ const hashOf = (id: string) => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerC
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-function source(policies: Record<string, 'public' | 'private' | 'unavailable'>): ContextGraphNameRevealSource & {
+function source(
+  policies: Record<string, 'public' | 'private' | 'unavailable'>,
+  gate?: Promise<void>,
+): ContextGraphNameRevealSource & {
   policyReads: string[];
 } {
   const byHash = new Map(Object.keys(policies).map((id) => [hashOf(id), id]));
@@ -27,12 +30,22 @@ function source(policies: Record<string, 'public' | 'private' | 'unavailable'>):
     lookupLocalContextGraphId: (nameHash) => byHash.get(nameHash) ?? null,
     isPublicContextGraph: async (contextGraphId) => {
       policyReads.push(contextGraphId);
+      // A slow chain read holds its policy-read slot until the gate opens.
+      if (gate !== undefined) await gate;
       const policy = policies[contextGraphId];
       if (policy === 'unavailable') throw new Error('chain unavailable');
       return policy === 'public';
     },
   };
 }
+
+function gate(): { opened: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { opened, open };
+}
+
+const sameBytes = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b));
 
 async function ask(
   handler: ReturnType<typeof createContextGraphNameRequestHandler>,
@@ -80,6 +93,8 @@ describe('context-graph-name wire format', () => {
       { version: 1, status: 'found', contextGraphId: 'x'.repeat(257) },
       { version: 1, status: 'found', contextGraphId: PUBLIC_ID, hint: 'extra' },
       { version: 1, status: 'maybe' },
+      // Only pre-release builds ever sent this; it reads as a miss.
+      { version: 1, status: 'busy' },
     ]) {
       expect(decodeContextGraphNameResponse(encoder.encode(JSON.stringify(invalid)))).toBeNull();
     }
@@ -115,7 +130,7 @@ describe('context-graph-name responder', () => {
     expect(await ask(handler, hashOf(PUBLIC_ID))).toEqual({ version: 1, status: 'not-found' });
   });
 
-  it('answers private, unknown-policy and unknown-graph requests identically', async () => {
+  it('answers private, unknown-policy, unknown-graph and overloaded requests identically', async () => {
     const handler = createContextGraphNameRequestHandler(source({
       [PRIVATE_ID]: 'private',
       [PUBLIC_ID]: 'unavailable',
@@ -123,8 +138,25 @@ describe('context-graph-name responder', () => {
     const privateAnswer = await handler(encodeContextGraphNameRequest(hashOf(PRIVATE_ID)));
     const unavailableAnswer = await handler(encodeContextGraphNameRequest(hashOf(PUBLIC_ID)));
     const unknownAnswer = await handler(encodeContextGraphNameRequest(hashOf('never-heard-of-it')));
-    expect(Buffer.from(privateAnswer).equals(Buffer.from(unknownAnswer))).toBe(true);
-    expect(Buffer.from(unavailableAnswer).equals(Buffer.from(unknownAnswer))).toBe(true);
+    expect(sameBytes(privateAnswer, unknownAnswer)).toBe(true);
+    expect(sameBytes(unavailableAnswer, unknownAnswer)).toBe(true);
+
+    // Load shedding: only requests for a held graph ever reach the
+    // policy-read bound, so the overloaded answer must be the same refusal,
+    // or a burst of requests for a private graph's chain-known name hash
+    // would tell a non-member that this node is a member.
+    const slowChain = gate();
+    const reveal = source({ [PRIVATE_ID]: 'private', [PUBLIC_ID]: 'public' }, slowChain.opened);
+    const saturated = createContextGraphNameRequestHandler(reveal, { maxConcurrentPolicyReads: 1 });
+    const holding = saturated(encodeContextGraphNameRequest(hashOf(PRIVATE_ID)));
+    const whileSaturated = await Promise.all([PRIVATE_ID, PUBLIC_ID, 'never-heard-of-it'].map(
+      (id) => saturated(encodeContextGraphNameRequest(hashOf(id))),
+    ));
+    for (const answer of whileSaturated) expect(sameBytes(answer, unknownAnswer)).toBe(true);
+    // The bound held: the shed requests spent no policy read.
+    expect(reveal.policyReads).toEqual([PRIVATE_ID]);
+    slowChain.open();
+    expect(sameBytes(await holding, unknownAnswer)).toBe(true);
   });
 
   it('spends no policy read on hashes it does not hold', async () => {
@@ -157,7 +189,7 @@ describe('context-graph-name responder', () => {
       encodeContextGraphNameRequest(hashOf(PUBLIC_ID)),
     );
     expect(decodeContextGraphNameResponse(answer)).toEqual({ version: 1, status: 'not-found' });
-    expect(Buffer.from(answer).equals(Buffer.from(unknownAnswer))).toBe(true);
+    expect(sameBytes(answer, unknownAnswer)).toBe(true);
     expect(policyReads).toBe(0);
   });
 
@@ -172,19 +204,18 @@ describe('context-graph-name responder', () => {
     expect(lookups).toBe(0);
   });
 
-  it('bounds concurrent policy reads', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const handler = createContextGraphNameRequestHandler({
-      lookupLocalContextGraphId: () => PUBLIC_ID,
-      isPublicContextGraph: async () => { await gate; return true; },
-    }, { maxConcurrentPolicyReads: 2 });
+  it('bounds concurrent policy reads, shedding the excess with the ordinary refusal', async () => {
+    const slowChain = gate();
+    const reveal = source({ [PUBLIC_ID]: 'public' }, slowChain.opened);
+    const handler = createContextGraphNameRequestHandler(reveal, { maxConcurrentPolicyReads: 2 });
     const first = ask(handler, hashOf(PUBLIC_ID));
     const second = ask(handler, hashOf(PUBLIC_ID));
-    expect(await ask(handler, hashOf(PUBLIC_ID))).toEqual({ version: 1, status: 'busy' });
-    release();
+    expect(await ask(handler, hashOf(PUBLIC_ID))).toEqual({ version: 1, status: 'not-found' });
+    expect(reveal.policyReads).toEqual([PUBLIC_ID, PUBLIC_ID]);
+    slowChain.open();
     expect(await first).toEqual({ version: 1, status: 'found', contextGraphId: PUBLIC_ID });
     expect(await second).toEqual({ version: 1, status: 'found', contextGraphId: PUBLIC_ID });
+    // The slots are released: the next request is served again.
     expect(await ask(handler, hashOf(PUBLIC_ID))).toEqual({ version: 1, status: 'found', contextGraphId: PUBLIC_ID });
   });
 });
