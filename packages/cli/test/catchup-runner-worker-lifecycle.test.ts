@@ -410,6 +410,49 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a', 'peer-swm']);
   });
 
+  it('selects catch-up peers only from network-admitted connections', async () => {
+    // 2026-09-23 Base mainnet: a subscribe fanned shared-memory sync out to
+    // every live connection, including testnet relays that had failed the
+    // network-identity proof. Same predicate as the in-process catch-up.
+    const admissionChecks: string[] = [];
+    const selectCalls: unknown[][] = [];
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      // Even a prioritized SWM-provider slot must not smuggle it back in.
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-other-network'],
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-curator', 'peer-other-network', 'peer-a'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      ensurePeerAdmittedForRecovery: async (peerId: string, _ctx: unknown, label: string) => {
+        admissionChecks.push(`${label}:${peerId}`);
+        return peerId !== 'peer-other-network';
+      },
+      selectCatchupPeers: (...args: unknown[]) => {
+        selectCalls.push(args);
+        return args[0] as Array<{ toString(): string }>;
+      },
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-admission', true]);
+
+    expect(admissionChecks).toEqual([
+      'Connected catchup peer:peer-curator',
+      'Connected catchup peer:peer-other-network',
+      'Connected catchup peer:peer-a',
+    ]);
+    expect((selectCalls[0]![0] as Array<{ toString(): string }>).map(String))
+      .toEqual(['peer-curator', 'peer-a']);
+    expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a']);
+    expect(posted.result.connectedPeers).toBe(2);
+  });
+
   it('forwards the admission source into both detailed sync calls', async () => {
     const { agent, calls } = bridgeAgent();
 

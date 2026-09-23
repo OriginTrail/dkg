@@ -2779,11 +2779,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (numeric <= 0n) return;
 
     const numericStr = numeric.toString();
-    const resolveLocalCgId = () => resolveCoreHostedPublicCgLocalId({
-      onChainId: numeric,
-      swmGraphId,
-      mappedLocalId: this.resolveLocalCgIdByOnChainId(numeric) ?? undefined,
-    });
+    const resolveLocalCgId = () => {
+      const mappedLocalId = this.resolveLocalCgIdByOnChainId(numeric) ?? undefined;
+      // A Core that saw `ContextGraphCreated` before its first ACK holds a
+      // hash-keyed placeholder for this graph. The publisher's cleartext
+      // `swmGraphId` is proven to be that graph's id when its commitment is
+      // exactly the placeholder's name hash; host under the cleartext then,
+      // which also promotes the placeholder.
+      const placeholder = swmGraphId && swmGraphId !== numericStr
+        ? this.resolveWireOnlyContextGraphSubscription(swmGraphId)
+        : null;
+      return resolveCoreHostedPublicCgLocalId({
+        onChainId: numeric,
+        swmGraphId,
+        mappedLocalId,
+        mappedLocalIdIsNamePlaceholderOfHint: placeholder !== null
+          && placeholder.localId === mappedLocalId
+          && placeholder.subscription.onChainId === numericStr,
+      });
+    };
 
     // Chain-free early-out BEFORE the reads. This hook fires ahead of EVERY
     // StorageACK sign, so checking "already recorded" only after the liveness +
@@ -3342,6 +3356,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       scheduling = new VmReconcileSchedulingRuntime(
         (localCgId, source) => this.executeVmReconcileForCg(localCgId, source),
         (localCgId, err) => {
+          // Retired name-hash id: not a failure, nothing retries it
+          // (see supersedingContextGraphIdFor).
+          const supersedingId = this.supersedingContextGraphIdFor?.(localCgId);
+          if (supersedingId) {
+            this.log.debug(
+              createOperationContext('system'),
+              `VM reconcile for "${localCgId}" stopped: superseded by cleartext adoption of "${supersedingId}"`,
+            );
+            return;
+          }
           this.log.warn(
             createOperationContext('system'),
             `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
@@ -3370,6 +3394,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
+    // Retired name-hash id: it names no local graph any more, the answer target
+    // resolution would give without a chain read (see supersedingContextGraphIdFor).
+    if (this.supersedingContextGraphIdFor?.(localCgId)) throw new ContextGraphNotFoundError(localCgId);
     const physicalRun = (async (): Promise<ContextGraphReconcileResult> => {
       const target = await this.resolveVmReconcileTarget(
         localCgId,

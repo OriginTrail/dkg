@@ -983,7 +983,8 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
 
     return jsonResponse(res, 200, toCatchupStatusResponse(
       job,
-      agent.getRfc64SelectedSwmGraphSyncStatus(job.contextGraphId),
+      agent.getRfc64SelectedSwmGraphSyncStatus(job.resolvedContextGraphId ?? job.contextGraphId),
+      agent.describeContextGraphIdentity?.(job.contextGraphId),
     ));
   }
 

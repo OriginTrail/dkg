@@ -19,6 +19,7 @@ import {
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
+import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
@@ -30,7 +31,14 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import {
+  serializeStatusQuery,
+  type StatusQueryOptions,
+  type StoreQuadsStatusFields,
+  type StoreReachabilityFields,
+} from './status-store-quads-wire.js';
 import type {
+  CatchupContextGraphIdentity,
   CatchupStatusResponse,
   CatchupStatusWireResponse,
 } from './catchup-status.js';
@@ -364,7 +372,7 @@ export interface RelayStatusResponse {
   configuredAnnounceAddresses: string[];
 }
 
-export interface DaemonStatusResponse {
+export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields {
   name: string;
   peerId: string;
   nodeRole?: string;
@@ -387,6 +395,14 @@ export interface DaemonStatusResponse {
     requestedContextGraphs: string[];
     catalogBackedContextGraphs: string[];
   };
+  /**
+   * Subscriptions known only by their on-chain name hash (aggregate only;
+   * the admin subscription list names them). Absent on older daemons.
+   */
+  contextGraphIdentity?: {
+    nameHashOnly: number;
+    message?: string;
+  };
   chain?: {
     chainId: string | null;
     configured: boolean;
@@ -395,20 +411,10 @@ export interface DaemonStatusResponse {
   } | null;
   // Triple-store backend fields (RFC 120). For local backends only
   // `storeBackend` is meaningful; external backends additionally surface
-  // `storeUrl` and a cached `storeQuads` count. `storeQuadsStatus` says what
-  // the count means: 'not-requested' (no count has been asked for; plain
-  // /api/status never starts one), 'pending' (a count is running), 'ready',
-  // or 'unreachable' (the last count failed). `storeQuadsAgeMs` is the age of
-  // the cached result on the daemon's clock. Older daemons omit the age.
-  // Asked with `includeStoreQuads=true`, only daemons before 10.0.6 omit the
-  // status, and for them a null count keeps its legacy unreachable meaning;
-  // 10.0.7 to 10.0.18 also omit it from plain /api/status until a count is
-  // cached, and there null means only that no count is cached yet.
+  // `storeUrl`, the cached quad count described by StoreQuadsStatusFields and,
+  // when requested, StoreReachabilityFields (status-store-quads-wire.ts).
   storeBackend?: string;
   storeUrl?: string | null;
-  storeQuads?: number | null;
-  storeQuadsStatus?: 'not-requested' | 'pending' | 'ready' | 'unreachable';
-  storeQuadsAgeMs?: number | null;
   // Concurrency admission control (PR #1209 limiter, surfaced by #1230):
   // inFlight = requests currently holding a slot, max = effective cap
   // (0 = disabled), rejectedTotal = cumulative 503-shed count since boot.
@@ -646,13 +652,12 @@ export class ApiClient {
   }
 
   /**
-   * `includeStoreQuads` asks the daemon to refresh its cached external-store
-   * quad count in the background, which costs a full-store COUNT at most once
-   * per cache TTL. Set it only for an operator's explicit status request,
-   * never for polling.
+   * Both options cost store work on the daemon ({@link StatusQueryOptions}):
+   * set them only when that is actually needed, never for polling.
    */
-  async status(options: { includeStoreQuads?: boolean } = {}): Promise<DaemonStatusResponse> {
-    const path = options.includeStoreQuads ? '/api/status?includeStoreQuads=true' : '/api/status';
+  async status(options: StatusQueryOptions = {}): Promise<DaemonStatusResponse> {
+    const query = serializeStatusQuery(options);
+    const path = query ? `/api/status?${query}` : '/api/status';
     let status: unknown;
     try {
       status = await this.get<unknown>(path, { auth: false });
@@ -1733,6 +1738,8 @@ export class ApiClient {
         includeWorkspace: boolean;
         jobId: string;
       };
+    /** Present when the requested id is (or was) known only by its on-chain name hash. */
+    identity?: CatchupContextGraphIdentity;
   }> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,
@@ -2096,6 +2103,11 @@ export class ApiClient {
       curator?: string;
       accessPolicy?: string;
       callerInvolved?: boolean;
+      onChainId?: string;
+      /** `false` when the node knows the graph only by its on-chain name hash. */
+      nameKnown?: boolean;
+      /** Chain-public ContextGraphStorage facts (additive; absent on older daemons). */
+      onChain?: ContextGraphListOnChainView;
     }>;
   }> {
     return this.get('/api/context-graph/list');

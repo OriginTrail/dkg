@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { catchupReadinessResult, durableDiagnostics, sharedMemoryDiagnostics } from './_helpers/catchup-readiness-fixtures.js';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
-import { CONTEXT_GRAPH_READINESS_VERSION, classifyContextGraphCatchupReadiness } from '../src/context-graph-readiness.js';
+import {
+  CONTEXT_GRAPH_READINESS_VERSION,
+  classifyContextGraphCatchupReadiness,
+  classifyNameHashOnlyCatchup,
+} from '../src/context-graph-readiness.js';
 
 function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
   return catchupReadinessResult({
@@ -778,5 +782,33 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
     const c = classify(durableProven());
     expect(c.jobStatus).toBe('done');
     expect(c.error).toBeUndefined();
+  });
+});
+
+/**
+ * A subscription known only by its on-chain name hash (Base #33) can never
+ * sync under that id. Its terminal text names the actual next step; a
+ * "retry" verdict would send the operator in circles.
+ */
+describe('name-hash-only catch-up classification', () => {
+  const hashOnlyMessage = 'Context Graph 0x6de1d646…43f7 is known only by its on-chain name hash; '
+    + 'waiting for a peer to reveal the cleartext id, or subscribe with the cleartext id.';
+
+  it('reports a pending name hash as unreachable with the next step', () => {
+    const c = classifyNameHashOnlyCatchup({ state: 'name-hash-only', message: hashOnlyMessage });
+    expect(c).toEqual({ jobStatus: 'unreachable', error: hashOnlyMessage });
+    expect(c?.error).not.toContain('Retry once the network is healthier');
+  });
+
+  it('reports a private name hash with its own message', () => {
+    const message = 'Context Graph 0x6de1d646…43f7 is private (curated) and known only by its on-chain name hash; …';
+    expect(classifyNameHashOnlyCatchup({ state: 'name-hash-only-private', message }))
+      .toEqual({ jobStatus: 'unreachable', error: message });
+  });
+
+  it('leaves resolved and ordinary graphs to the readiness classifier', () => {
+    expect(classifyNameHashOnlyCatchup({ state: 'resolved', message: 'resolves to "acme"' })).toBeNull();
+    expect(classifyNameHashOnlyCatchup(null)).toBeNull();
+    expect(classifyNameHashOnlyCatchup(undefined)).toBeNull();
   });
 });

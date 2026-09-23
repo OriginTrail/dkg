@@ -229,7 +229,8 @@ export class ChainIndexTick {
     //
     // Stamping at the commit instead, as this did, put the whole pass between
     // the two: `#verifyChainIdentity` (a capped `watchdogPointRead`),
-    // `#fetchRange` (a capped `watchdogWideLogScan`) and
+    // `#fetchRange` (each physical `eth_getLogs` capped at the wide-scan
+    // deadline) and
     // `#resolveSettledBoundary` (another capped point read) all run AFTER the
     // head is read, so the committed stamp was `headFetch + D` for a pass
     // duration D bounded only by those policy caps. Every age measured off it

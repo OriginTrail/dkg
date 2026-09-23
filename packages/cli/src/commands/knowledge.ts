@@ -347,7 +347,13 @@ program
         syncMode: opts.save ? 'always-on' : 'on-demand',
         forceCatchup: opts.repair === true,
       });
-      console.log(`Subscribed to context graph: ${contextGraph}`);
+      // The daemon may have resolved an on-chain name hash to its verified
+      // cleartext id; the subscription then lives under that id.
+      const subscribedId = result.identity?.state === 'resolved' && result.subscribed
+        ? result.subscribed
+        : contextGraph;
+      console.log(`Subscribed to context graph: ${subscribedId}`);
+      if (result.identity) console.log(`Note: ${result.identity.message}`);
       console.log(
         result.syncMode === 'always-on'
           ? 'Synchronization mode: always on (restored after restart).'
@@ -369,7 +375,7 @@ program
       if (opts.save) {
         const config = await loadConfig();
         const cgs = new Set(resolveContextGraphs(config));
-        cgs.add(contextGraph);
+        cgs.add(subscribedId);
         config.contextGraphs = [...cgs];
         config.contextGraphs = [...cgs];
         await saveConfig(config);
