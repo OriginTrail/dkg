@@ -162,8 +162,24 @@ const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]>
   ['a store that failed this run\'s check as unreachable, even with a cached count', {
     storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 120_000, storeReachability: 'unreachable',
   }, 'UNREACHABLE'],
-  ['a store that gave this run\'s check no answer as not responding, not unreachable', {
+  ['a store that gave this run\'s check no answer as not responding, with its last count', {
     storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 120_000, storeReachability: 'no-answer',
+  }, 'NOT RESPONDING (last count 66 quads, checked 2m 0s ago)'],
+  ['the last count of a store that gave no answer without an age while it is fresh', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 5_000, storeReachability: 'no-answer',
+  }, 'NOT RESPONDING (last count 66 quads)'],
+  ['the last count of a store that gave no answer with an unknown age as such', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: null, storeReachability: 'no-answer',
+  }, 'NOT RESPONDING (last count 66 quads, age unknown)'],
+  ['the last count of a store that gave no answer while it is being refreshed', {
+    storeQuads: 66,
+    storeQuadsStatus: 'ready',
+    storeQuadsAgeMs: 660_000,
+    storeQuadsRefreshing: true,
+    storeReachability: 'no-answer',
+  }, 'NOT RESPONDING (last count 66 quads, checked 11m 0s ago, refreshing)'],
+  ['a store that gave no answer and whose last count failed as not responding alone', {
+    storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeReachability: 'no-answer',
   }, 'NOT RESPONDING'],
   ['a store that failed this run\'s check as unreachable while a count is running', {
     storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null, storeReachability: 'unreachable',

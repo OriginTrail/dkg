@@ -774,18 +774,24 @@ describe('dkg status against the status route', () => {
     }
   });
 
-  it('shows a store that never answers the check as NOT RESPONDING, without a count', async () => {
+  it('shows a store that stops answering the check as NOT RESPONDING with its last count, without a new count', async () => {
+    let answering = true;
     let counts = 0;
     const { server, baseUrl } = await startStatusServer(async (sparql) => {
-      if (isAsk(sparql)) return new Promise<unknown>(() => {});
+      if (isAsk(sparql)) return answering ? ASK_TRUE : new Promise<unknown>(() => {});
       counts += 1;
       return COUNT_66;
     });
 
     try {
+      expect(await runStatusCommand(baseUrl)).toContain('— CHECKING');
+      await nextTick();
+      expect(counts).toBe(1);
+
       // The daemon waits five seconds for the check, and the CLI waits for it.
-      expect(await runStatusCommand(baseUrl)).toMatch(/— NOT RESPONDING$/m);
-      expect(counts).toBe(0);
+      answering = false;
+      expect(await runStatusCommand(baseUrl)).toMatch(/— NOT RESPONDING \(last count 66 quads\)$/m);
+      expect(counts).toBe(1);
     } finally {
       await closeServer(server);
     }

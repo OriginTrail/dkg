@@ -200,28 +200,46 @@ async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DkgStat
   }
 }
 
+/** How old a cached count is, when that is worth saying. */
+function describeCountAge(ageMs: number | null | undefined): string | undefined {
+  // A cached result reports a null age only when the daemon's clock stepped
+  // back past it; older daemons send no age at all.
+  if (ageMs === null) return 'age unknown';
+  if (typeof ageMs === 'number' && ageMs >= STORE_QUADS_SHOW_AGE_AFTER_MS) {
+    return `checked ${formatUptime(ageMs)} ago`;
+  }
+  return undefined;
+}
+
 /**
  * The state part of the `dkg status` store line. This run's reachability
- * check outranks the cached count, which may be minutes old. A daemon that
- * reports `storeQuadsStatus` says what a missing count means; only an older
- * daemon that omits it keeps the legacy reading of `null` as unreachable.
+ * check outranks the cached count, which may be minutes old: a store that
+ * failed it shows as UNREACHABLE alone, and one that gave no answer in time as
+ * NOT RESPONDING next to its last successful count. A daemon that reports
+ * `storeQuadsStatus` says what a missing count means; only an older daemon
+ * that omits it keeps the legacy reading of `null` as unreachable.
  */
 function formatStoreState(
   s: StoreQuadsStatusFields,
   storeReachability: StoreReachability | undefined,
 ): string {
   if (storeReachability === 'unreachable') return 'UNREACHABLE';
-  if (storeReachability === 'no-answer') return 'NOT RESPONDING';
+  const countAge = describeCountAge(s.storeQuadsAgeMs);
+  if (storeReachability === 'no-answer') {
+    // No answer in time says the store, or the daemon's queue for it, is
+    // slow, not that it is down, so its last count still shows.
+    if (s.storeQuadsStatus !== 'ready' || typeof s.storeQuads !== 'number') return 'NOT RESPONDING';
+    const lastCount = [
+      `last count ${s.storeQuads.toLocaleString()} quads`,
+      ...(countAge === undefined ? [] : [countAge]),
+      ...(s.storeQuadsRefreshing === true ? ['refreshing'] : []),
+    ];
+    return `NOT RESPONDING (${lastCount.join(', ')})`;
+  }
   const status = s.storeQuadsStatus;
   if (status === 'pending') return 'CHECKING';
   if (status === 'not-requested') return 'NOT CHECKED';
-  // A cached result reports a null age only when the daemon's clock stepped
-  // back past it; older daemons send no age at all.
-  const age = s.storeQuadsAgeMs === null
-    ? ' (age unknown)'
-    : typeof s.storeQuadsAgeMs === 'number' && s.storeQuadsAgeMs >= STORE_QUADS_SHOW_AGE_AFTER_MS
-      ? ` (checked ${formatUptime(s.storeQuadsAgeMs)} ago)`
-      : '';
+  const age = countAge === undefined ? '' : ` (${countAge})`;
   // The daemon answers a refresh request with the result it already has while
   // the new count runs, so say that this one is about to be replaced.
   const refreshing = s.storeQuadsRefreshing === true ? ', refreshing' : '';
