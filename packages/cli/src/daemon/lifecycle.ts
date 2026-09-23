@@ -71,11 +71,14 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
+  describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  parseContextGraphOnChainIdReference,
   KaNumberAllocator,
   planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
   resolveSyncAgentsMeta,
+  type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -1009,6 +1012,74 @@ export async function resolveDaemonPublishEncryption(
   };
 }
 
+/** Bound on the chain reads one start may spend resolving configured on-chain ids. */
+const CONFIGURED_ON_CHAIN_ID_RESOLUTION_BUDGET_MS = 15_000;
+
+/**
+ * Map configured on-chain ids (`32`, `#32`) to the Context Graphs they name.
+ *
+ * Before this fix, `dkg subscribe 32 --save` wrote the number to
+ * config.contextGraphs and kept a durable subscription keyed by it; neither
+ * can ever sync. Each configured on-chain id is resolved again at every
+ * start, through the chain's name hash only (the discovery checkpoint answers
+ * offline for graphs already listed), so the mapping is verified, idempotent
+ * and never taken from a peer. The config file is not rewritten. A numeric
+ * subscription with no config entry (made through the API) is retired the
+ * same way, and its member intent moves to the graph it named. An id that
+ * resolves to nothing subscribable is logged and skipped; its number is never
+ * subscribed.
+ */
+export async function resolveConfiguredOnChainContextGraphIds(
+  agent: DKGAgent,
+  configuredContextGraphIds: readonly string[],
+  log: (message: string) => void,
+  signal: AbortSignal = AbortSignal.timeout(CONFIGURED_ON_CHAIN_ID_RESOLUTION_BUDGET_MS),
+): Promise<string[]> {
+  const configured = new Set(configuredContextGraphIds);
+  const numericSubscriptions = [...(agent.getSubscribedContextGraphs?.() ?? new Map())]
+    .filter(([contextGraphId, subscription]) => (
+      !configured.has(contextGraphId)
+      && subscription.subscribed === true
+      && subscription.onChainId === contextGraphId
+    ))
+    .map(([contextGraphId]) => contextGraphId);
+  const contextGraphIds: string[] = [];
+  for (const contextGraphId of [...configured, ...numericSubscriptions]) {
+    const isConfigured = configured.has(contextGraphId);
+    if (parseContextGraphOnChainIdReference(contextGraphId) === null) {
+      if (isConfigured) contextGraphIds.push(contextGraphId);
+      continue;
+    }
+    let resolution: ContextGraphOnChainIdResolution | null;
+    try {
+      resolution = await agent.resolveContextGraphOnChainIdReference?.(contextGraphId, { signal }) ?? null;
+    } catch (error) {
+      log(
+        `Context graph "${contextGraphId}" could not be resolved as an on-chain id `
+        + `(${error instanceof Error ? error.message : String(error)}) — not subscribing it`,
+      );
+      continue;
+    }
+    if (resolution === null || resolution.kind === 'direct') {
+      if (isConfigured) contextGraphIds.push(contextGraphId);
+      continue;
+    }
+    const label = isConfigured ? 'Configured context graph' : 'Context graph subscription';
+    if (resolution.kind !== 'resolved') {
+      log(`${label} "${contextGraphId}" is not subscribed: ${describeContextGraphOnChainIdResolution(resolution)}`);
+      continue;
+    }
+    if (!isConfigured && resolution.retiredNumericSubscription?.subscribed !== true) continue;
+    contextGraphIds.push(resolution.contextGraphId);
+    log(
+      `${label} "${contextGraphId}": ${describeContextGraphOnChainIdResolution(resolution)} `
+      + `Subscribing "${resolution.contextGraphId}"`
+      + (isConfigured ? `; you can replace "${contextGraphId}" in config.contextGraphs with it.` : '.'),
+    );
+  }
+  return contextGraphIds;
+}
+
 /**
  * Activate operator/network-configured context graphs without inventing a
  * local definition for an unknown namespaced graph.
@@ -1037,10 +1108,16 @@ export async function bootstrapConfiguredContextGraphs(input: {
   log: (message: string) => void;
 }): Promise<void> {
   const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
+  // A configured on-chain id (`32`, `#32`) subscribes the graph it names.
+  const onChainResolvedContextGraphIds = await resolveConfiguredOnChainContextGraphIds(
+    input.agent,
+    [...input.configuredContextGraphIds],
+    input.log,
+  );
   // A `--save`d on-chain name hash that this node already resolved subscribes
   // its verified cleartext graph. The durable cleartext row re-proves the
   // commitment offline, so the operator's config file is never rewritten.
-  const configuredContextGraphIds = new Set([...input.configuredContextGraphIds].map((contextGraphId) => {
+  const configuredContextGraphIds = new Set(onChainResolvedContextGraphIds.map((contextGraphId) => {
     const alias = input.agent.resolveContextGraphIdAlias?.(contextGraphId) ?? null;
     if (alias === null) return contextGraphId;
     input.log(

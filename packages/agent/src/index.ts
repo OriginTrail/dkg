@@ -216,6 +216,13 @@ export {
   type ContextGraphListOnChainFacts,
   type ContextGraphStorageDiscoveryStore,
 } from './context-graph-storage-discovery.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdResolution,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
 export type { ListContextGraphsRow } from './context-graph-list-authority-enrichment.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,

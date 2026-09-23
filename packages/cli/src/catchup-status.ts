@@ -62,6 +62,18 @@ export interface CatchupContextGraphIdentity {
   readonly message: string;
 }
 
+/**
+ * Present on a subscribe response when the request named an on-chain numeric
+ * id (`32`, `#32`): the row that id resolved to (additive field).
+ */
+export interface ContextGraphOnChainReferenceNote {
+  readonly onChainId: string;
+  readonly nameHash: string;
+  /** The row the id resolved to: the verified cleartext id, or the name hash. */
+  readonly contextGraphId: string;
+  readonly message: string;
+}
+
 /** Older daemons can omit newer aliases; the client normalizes them at the boundary. */
 export type CatchupStatusWireResponse = Omit<
   CatchupStatusResponse,

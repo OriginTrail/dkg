@@ -57,7 +57,7 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { DKGAgent, loadOpWallets, parseContextGraphOnChainIdReference } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, classifySparqlOperation } from '@origintrail-official/dkg-core';
 import {
   findReservedSubjectPrefix,
@@ -413,6 +413,25 @@ function parseVerifyTimeoutMs(
     };
   }
   return { value };
+}
+
+/**
+ * The latest catch-up job for a Context Graph id. The id as given wins; an
+ * on-chain id (`32`, `#32`) then finds the job of the row it names, under its
+ * cleartext id or its name hash (adoption can move a job between the two).
+ */
+export function latestCatchupJobIdFor(
+  agent: DKGAgent,
+  catchupTracker: CatchupTracker,
+  contextGraphId: string,
+): string | undefined {
+  const direct = catchupTracker.latestByContextGraph.get(contextGraphId);
+  if (direct !== undefined) return direct;
+  const reference = parseContextGraphOnChainIdReference(contextGraphId);
+  const local = reference === null ? null : agent.localContextGraphIdForOnChainId?.(reference.onChainId) ?? null;
+  if (local === null) return undefined;
+  return catchupTracker.latestByContextGraph.get(local.contextGraphId)
+    ?? catchupTracker.latestByContextGraph.get(local.nameHash);
 }
 
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
@@ -970,7 +989,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
 
     const jobId =
       jobIdParam ??
-      (contextGraphId ? catchupTracker.latestByContextGraph.get(contextGraphId) : undefined);
+      (contextGraphId ? latestCatchupJobIdFor(agent, catchupTracker, contextGraphId) : undefined);
     if (!jobId) {
       return jsonResponse(res, 404, { error: "No catch-up job found" });
     }

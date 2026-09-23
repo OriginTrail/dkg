@@ -68,7 +68,9 @@ import {
   ContextGraphNotFoundError,
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
+  describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  type ContextGraphOnChainIdResolution,
   type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
@@ -499,6 +501,48 @@ function catchupAuthorityUnavailableResponse(
     },
     undefined,
     { 'Retry-After': '3' },
+  );
+}
+
+type UnresolvedOnChainIdResolution = Exclude<ContextGraphOnChainIdResolution, { kind: 'direct' | 'resolved' }>;
+
+/** How the subscribe route answers an on-chain id that names nothing subscribable. */
+const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
+  'not-found': { status: 404, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_NOT_FOUND', result: 'bad_request' },
+  inactive: { status: 409, code: 'CONTEXT_GRAPH_INACTIVE', result: 'bad_request' },
+  'no-name-hash': { status: 422, code: 'CONTEXT_GRAPH_NO_NAME_HASH', result: 'bad_request' },
+  unsupported: { status: 422, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_UNSUPPORTED', result: 'bad_request' },
+  private: { status: 403, code: 'CONTEXT_GRAPH_PRIVATE', result: 'forbidden' },
+  unavailable: { status: 503, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_UNAVAILABLE', result: 'authority_unavailable' },
+} as const satisfies Record<
+  UnresolvedOnChainIdResolution['kind'],
+  { status: number; code: string; result: 'bad_request' | 'forbidden' | 'authority_unavailable' }
+>;
+
+/**
+ * Refuse an on-chain id (`32`, `#32`) that resolves to nothing subscribable,
+ * saying why. Only a failed chain read is retryable. Nothing is subscribed and
+ * no job is minted.
+ */
+function unresolvedOnChainIdResponse(
+  res: ServerResponse,
+  resolution: UnresolvedOnChainIdResolution,
+  includeSharedMemory: boolean,
+): void {
+  const { status, code, result } = UNRESOLVED_ON_CHAIN_ID_RESPONSES[resolution.kind];
+  recordCatchupRequest(result, includeSharedMemory);
+  const retryable = resolution.kind === 'unavailable';
+  return jsonResponse(
+    res,
+    status,
+    {
+      error: describeContextGraphOnChainIdResolution(resolution),
+      code,
+      ...(resolution.kind === 'not-found' ? { latestOnChainId: resolution.latestId } : {}),
+      ...(retryable ? { retryable: true } : {}),
+    },
+    undefined,
+    retryable ? { 'Retry-After': '3' } : undefined,
   );
 }
 
@@ -1896,11 +1940,40 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         error: 'Missing "contextGraphId" (or "id")',
       });
     }
+    // An on-chain id (`32`, `#32`) names a graph only through the chain.
+    // Resolve it to the row this node keeps for that graph (its verified
+    // cleartext id, or the hash-keyed row discovery staged) before anything
+    // else: a subscription keyed by the number would derive its gossip
+    // topics and wire id from keccak256("32") and sync nothing.
+    let onChainResolution: ContextGraphOnChainIdResolution | null;
+    try {
+      onChainResolution = await agent.resolveContextGraphOnChainIdReference?.(requestedContextGraphId) ?? null;
+    } catch {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    }
+    if (
+      onChainResolution !== null
+      && onChainResolution.kind !== 'direct'
+      && onChainResolution.kind !== 'resolved'
+    ) {
+      return unresolvedOnChainIdResponse(res, onChainResolution, shouldSyncSharedMemory);
+    }
+    const onChainTarget = onChainResolution?.kind === 'resolved' ? onChainResolution : undefined;
+    const subscriptionTargetId: string = onChainTarget?.contextGraphId ?? requestedContextGraphId;
+    const onChainReference = onChainTarget === undefined
+      ? undefined
+      : {
+          onChainId: onChainTarget.onChainId,
+          nameHash: onChainTarget.nameHash,
+          contextGraphId: onChainTarget.contextGraphId,
+          message: describeContextGraphOnChainIdResolution(onChainTarget),
+        };
+
     // A name hash this node already resolved subscribes its verified
     // cleartext graph; subscribing the literal hash again would create a
     // second, empty identity for the same graph.
     let contextGraphId: string =
-      agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? requestedContextGraphId;
+      agent.resolveContextGraphIdAlias?.(subscriptionTargetId) ?? subscriptionTargetId;
 
     // Authorization must be established BEFORE persisting subscription intent.
     // A private RFC-64 CG can be known from accepted policy authority while its
@@ -1931,6 +2004,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     if (readAuthority.outcome === 'denied') {
+      // Reached by its on-chain id, a private graph is refused alike whether
+      // or not this node holds its cleartext id, so a caller who may not read
+      // it cannot tell which.
+      if (onChainTarget?.private === true) {
+        return unresolvedOnChainIdResponse(
+          res,
+          { kind: 'private', onChainId: onChainTarget.onChainId },
+          shouldSyncSharedMemory,
+        );
+      }
       recordCatchupRequest('forbidden', shouldSyncSharedMemory);
       return jsonResponse(res, 403, {
         error: callerAddr
@@ -1950,9 +2033,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }).catch(() => null);
       if (resolved) contextGraphId = resolved;
     }
-    const identity = agent.describeContextGraphIdentity?.(requestedContextGraphId) ?? null;
-    const withIdentity = <T extends object>(body: T): T | (T & { identity: NonNullable<typeof identity> }) =>
-      identity ? { ...body, identity } : body;
+    const identity = agent.describeContextGraphIdentity?.(subscriptionTargetId) ?? null;
+    const withIdentity = <T extends object>(body: T) => ({
+      ...body,
+      ...(identity ? { identity } : {}),
+      ...(onChainReference ? { onChainReference } : {}),
+    });
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
