@@ -4,6 +4,27 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Fixed
+
+- **PCA agents can register open Context Graphs without liquid TRAC**
+  (#2735): the registration-deposit waiver applied only to graphs whose
+  curator is a PCA, and an open graph cannot have one, so a PCA agent paid
+  the 100 TRAC deposit from its wallet for every open graph (and could not
+  register one with no TRAC). The `ContextGraphs` facade now waives the
+  deposit for any graph without a curator PCA (open, or curated by an EOA
+  or Safe) against the PCA the signer is registered to as an agent, under
+  the same commitment floor and quota. Graphs with a curator PCA are
+  unchanged.
+
+### Deployment
+
+- **Contract source changes** (`ContextGraphs` 10.0.5, #2735); ABIs are
+  unchanged. Redeploy the facade and register it through
+  `Hub.setAndReinitializeContracts`, which must also re-initialize
+  `KnowledgeAssetsLifecycle` because it caches the facade address. No
+  storage contract is redeployed, and nodes need no action: they rebind to
+  the new facade from the Hub.
+
 ## [10.0.18] - 2026-09-22
 
 A hotfix for the 10.0.17 authority-index cold start; **10.0.17 is withdrawn**.
