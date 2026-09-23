@@ -1524,8 +1524,18 @@ export interface DKGAgentConfig {
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;
-  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  /**
+   * Emergency switch for the periodic peer-sync reconciler only. Env
+   * DKG_SYNC_RECONCILER_ENABLED wins. It does not affect chain-driven VM
+   * reconciliation, which has its own `vmReconcilerEnabled` switch.
+   */
   syncReconcilerEnabled?: boolean;
+  /**
+   * Switch for chain-driven VM reconciliation (core-hosted recording, the
+   * KA-registered nudge and the VM reconcile sweep). Env
+   * DKG_VM_RECONCILER_ENABLED wins; default on.
+   */
+  vmReconcilerEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */

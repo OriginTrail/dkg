@@ -526,13 +526,27 @@ export function resolveBooleanSwitch(
   return parseBooleanEnv(envName) ?? configValue ?? defaultValue;
 }
 
-/** Effective VM/SWM background reconciler activation. Kept as one public
- * resolver so runtime gates and operator-facing status cannot disagree about
- * config/default/environment precedence. */
+/** Effective activation of the periodic peer-sync reconciler (the timer that
+ * re-syncs stale connected peers). Kept as one public resolver so runtime
+ * gates and operator-facing status cannot disagree about
+ * config/default/environment precedence. It does not gate chain-driven VM
+ * reconciliation; see {@link resolveVmReconcilerEnabled}. */
 export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
   return resolveBooleanSwitch(
     configValue,
     'DKG_SYNC_RECONCILER_ENABLED',
+    true,
+  );
+}
+
+/** Effective activation of chain-driven VM reconciliation: core-hosted
+ * recording, the KA-registered nudge, and the VM reconcile sweep. Same
+ * precedence as every other switch here: environment, then config, then the
+ * default (on). */
+export function resolveVmReconcilerEnabled(configValue?: boolean): boolean {
+  return resolveBooleanSwitch(
+    configValue,
+    'DKG_VM_RECONCILER_ENABLED',
     true,
   );
 }

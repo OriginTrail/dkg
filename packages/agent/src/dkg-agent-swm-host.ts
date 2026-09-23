@@ -514,7 +514,7 @@ import type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
@@ -2936,13 +2936,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * True iff the chain adapter exposes the per-CG registration-ordinal reads
-   * the reconciler needs. Gates the live nudge, the sweep timer, and the
-   * coalescer so non-V10 / no-chain nodes pay nothing.
+   * True iff the operator has not switched chain-driven VM reconciliation off
+   * (`vmReconcilerEnabled` / DKG_VM_RECONCILER_ENABLED) and the chain adapter
+   * exposes the per-CG registration-ordinal reads the reconciler needs. Gates
+   * core-hosted recording, the live nudge, the sweep timer and the coalescer,
+   * so non-V10 / no-chain nodes pay nothing. The periodic peer-sync switch
+   * (`syncReconcilerEnabled`) deliberately does not participate: cores that
+   * contained peer sync must keep promoting the data they ACK.
    */
   vmReconcileEnabled(this: DKGAgent): boolean {
     return (
-      resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled)
+      resolveVmReconcilerEnabled(this.config.vmReconcilerEnabled)
       &&
       this.chain.chainId !== 'none' &&
       typeof this.chain.getContextGraphKCCount === 'function' &&

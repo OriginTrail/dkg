@@ -116,7 +116,7 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
-export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export { resolveSyncReconcilerEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
 export {
   FinalizedAuthorityColdResolutionV1,
   finalizedAuthorityColdResolutionOf,

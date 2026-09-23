@@ -66,6 +66,7 @@ import {
   DKGAgent,
   loadOpWallets,
   resolveSyncReconcilerEnabled,
+  resolveVmReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
@@ -878,11 +879,15 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       },
       // The certification harness must be able to distinguish an operator
       // setting from the switch the agent actually honors. This projection
-      // deliberately uses the same resolver as both runtime reconcile gates,
-      // including environment-variable precedence.
+      // deliberately uses the same resolvers as the runtime gates (periodic
+      // peer sync and chain-driven VM reconcile respectively), including
+      // environment-variable precedence.
       syncLifecycle: {
         syncReconcilerEnabled: resolveSyncReconcilerEnabled(
           config.syncReconcilerEnabled,
+        ),
+        vmReconcilerEnabled: resolveVmReconcilerEnabled(
+          config.vmReconcilerEnabled,
         ),
       },
       connectedPeers: uniquePeers.size,
