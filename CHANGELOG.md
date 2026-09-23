@@ -30,7 +30,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
   count is cached, and no count is started for it. A store that gives no
   answer within five seconds shows as `NOT RESPONDING`, since a busy store
   delays the check too. The check is never cancelled, so it cannot trigger a
-  managed Oxigraph's deadline restart.
+  managed Oxigraph's deadline restart. A count still running when a managed
+  Oxigraph goes down or restarts is discarded instead of caching the outage,
+  and the cache is cleared once the restarted server is healthy, so a revived
+  store stops showing `UNREACHABLE`.
 
 ## [10.0.18] - 2026-09-22
 
