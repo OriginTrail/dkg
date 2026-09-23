@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
+import {
+  NETWORK_MISMATCH_DIAL_DENY_TTL_MS,
+  NETWORK_MISMATCH_INBOUND_REFUSAL_MS,
+} from '@origintrail-official/dkg-core';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
@@ -79,6 +83,21 @@ describe('NetworkAdmissionService', () => {
 
     now += 1;
     expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(false);
+  });
+
+  it('keeps the default quarantine aligned with the transport refusal windows', () => {
+    // The node refuses a rejected peer's inbound connections exactly while this
+    // quarantine lasts (admission cannot re-verify it then), and its outbound
+    // ones for at least as long. Drift here would reopen the redial loop.
+    let now = 1_000;
+    const admission = new NetworkAdmissionService({ networkId: 'network-a', now: () => now });
+
+    admission.quarantinePeerForCooldown(VERIFIED_PEER_ID);
+    now += NETWORK_MISMATCH_INBOUND_REFUSAL_MS - 1;
+    expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(true);
+    now += 1;
+    expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(false);
+    expect(NETWORK_MISMATCH_DIAL_DENY_TTL_MS).toBeGreaterThanOrEqual(NETWORK_MISMATCH_INBOUND_REFUSAL_MS);
   });
 
   it('enforces a real active-entry cap with deterministic oldest eviction', () => {
