@@ -1428,6 +1428,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             fromBlock,
             toBlock,
             signal: options.signal,
+            provider,
           });
         };
         const readAuthorityHistory = () => resolveContextGraphAuthorityHistory({

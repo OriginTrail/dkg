@@ -118,6 +118,8 @@ function harness(options?: {
   resumeFromBlockNumber?: number;
   /** Deploy both indexed contracts here; defaults to their real fixture floors. */
   deploymentBlockNumber?: number;
+  /** Refuse wider eth_getLogs spans the way mainnet.base.org does. */
+  maxLogRangeBlocks?: number;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -136,6 +138,10 @@ function harness(options?: {
     fromBlock: number;
     toBlock: number;
   }) => {
+    const cap = options?.maxLogRangeBlocks;
+    if (cap !== undefined && filter.toBlock - filter.fromBlock + 1 > cap) {
+      throw new Error(`eth_getLogs is limited to a ${cap.toLocaleString('en-US')} range`);
+    }
     const wanted = new Set(filter.address.map((address) => address.toLowerCase()));
     return logs.filter((log) => log.blockNumber >= filter.fromBlock
       && log.blockNumber <= filter.toBlock
@@ -255,6 +261,30 @@ describe('createEvmChainIndexRuntime', () => {
       (entry) => entry.family === 'context-graph-authority',
     );
     expect(authority?.coveredFromBlock).toBe(4_001);
+  });
+
+  it('fits a catch-up range wider than the provider\'s eth_getLogs span cap', async () => {
+    // A node resuming 4,000 blocks behind its folded checkpoint.
+    const h = harness({
+      headNumber: 5_000,
+      resumeFromBlockNumber: 1_000,
+      maxLogRangeBlocks: 2_000,
+    });
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const result = await h.runtime.tick.runOnce(new AbortController().signal);
+
+      expect(result.outcome).toBe('advanced');
+      const ranges = h.getLogs.mock.calls.map(([filter]) => [filter.fromBlock, filter.toBlock]);
+      const [refused, ...served] = ranges;
+      expect(refused![1]! - refused![0]! + 1).toBeGreaterThan(2_000);
+      // The refused range, re-read in contiguous spans the provider accepts.
+      expect(served[0]![0]).toBe(refused![0]);
+      expect(served.every(([from, to]) => to! - from! + 1 <= 2_000)).toBe(true);
+      expect(served.some(([, to]) => to === refused![1])).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('spends ONE eth_getLogs and ONE head read on a pass', async () => {

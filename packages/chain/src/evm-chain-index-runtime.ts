@@ -59,6 +59,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS,
   resolveContextGraphAuthorityIndexStaleMs,
 } from './context-graph-authority-index-projection.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 
 /** One contract the tick indexes, as the adapter already holds it. */
@@ -358,14 +359,22 @@ export function createEvmChainIndexRuntime(
         signal,
       ): Promise<readonly ChainEventLogFetchedRow[]> => {
         // THE one `eth_getLogs`. One address array, one OR'd topic0 set, one
-        // range — for every contract and every event the node indexes.
+        // range — for every contract and every event the node indexes. A range
+        // wider than the provider's span cap (a raised `cgRegistryScanPageSize`)
+        // is fitted to it rather than refused.
         const logs = await readTip(
           'chainIndex tick getLogs',
-          (provider) => provider.getLogs({
-            address: [...request.addresses],
-            topics: [[...request.topic0]],
+          (provider) => readAdaptiveEvmLogRange({
+            provider,
             fromBlock: request.fromBlock,
             toBlock: request.toBlock,
+            signal,
+            read: (fromBlock, toBlock) => provider.getLogs({
+              address: [...request.addresses],
+              topics: [[...request.topic0]],
+              fromBlock,
+              toBlock,
+            }),
           }),
           { signal, policy: 'watchdogWideLogScan' },
         );

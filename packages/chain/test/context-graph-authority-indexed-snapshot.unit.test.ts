@@ -88,6 +88,12 @@ function makeIndexedAuthorityAdapter(
     finalizedHash?: string;
     authorityIndexPageSize?: number;
     maxLogRangeBlocks?: number;
+    /**
+     * How wider ranges are refused: a genuine span cap (mainnet.base.org's
+     * wording, the default), or dRPC's free plan, whose "ranges over N blocks"
+     * refusal a narrower span over the same blocks does not fix.
+     */
+    logRangeRefusal?: 'span' | 'free-plan';
     transientFailIndexRangeOnce?: readonly [number, number];
     hangIndexRangeOnce?: readonly [number, number];
     indexReadDelayMs?: number;
@@ -222,10 +228,15 @@ function makeIndexedAuthorityAdapter(
           info: {
             responseBody: JSON.stringify({
               jsonrpc: '2.0',
-              error: {
-                message: `ranges over ${options.maxLogRangeBlocks} blocks are not supported on free plan`,
-                code: 35,
-              },
+              error: options.logRangeRefusal === 'free-plan'
+                ? {
+                  message: `ranges over ${options.maxLogRangeBlocks} blocks are not supported on free plan`,
+                  code: 35,
+                }
+                : {
+                  message: `eth_getLogs is limited to a ${options.maxLogRangeBlocks.toLocaleString('en-US')} range`,
+                  code: -32614,
+                },
             }),
             responseStatus: '400 Bad Request',
           },
@@ -470,16 +481,34 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
 
     expect(evidence.indexRanges).toEqual([
       // The committing page stops at the durable horizon (10_020 less the
-      // holdback), and the provider's stricter cap splits THAT range.
+      // holdback), and the provider's stated cap splits THAT range into
+      // cap-sized requests.
       [7, 9_970],
-      [7, 4_988],
-      [4_989, 9_970],
+      [7, 5_006],
+      [5_007, 9_970],
       // Tail above the horizon: projected, never persisted.
       [9_971, 10_020],
     ]);
     expect(evidence.rejectedIndexRanges).toEqual([[7, 9_970]]);
     expect(evidence.headReads).toEqual([10_020]);
     expect(evidence.blockReads).toEqual([9_970, 10_020]);
+  });
+
+  it('does not split a free-plan refusal that a narrower span would not fix', async () => {
+    // dRPC's free plan says "ranges over 5000 blocks" to a request well under
+    // 5,000 blocks as well: splitting only multiplies the refusals.
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      finalizedNumber: 10_020,
+      authorityIndexPageSize: 25_000,
+      maxLogRangeBlocks: 5_000,
+      logRangeRefusal: 'free-plan',
+    });
+
+    await expect(adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')]))
+      .rejects.toThrow('is beyond the history, archive or plan limit');
+    expect(evidence.indexRanges).toEqual([[7, 9_970]]);
+    expect(evidence.rejectedIndexRanges).toEqual([[7, 9_970]]);
   });
 
   it('gives each sequential adaptive split its own physical RPC deadline', async () => {
@@ -530,10 +559,10 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       await expect(pending).resolves.toMatchObject({ contextGraphId: '9' });
       expect(harness.evidence.indexRanges).toEqual([
         // The committing page stops at the durable horizon and the provider's
-        // stricter cap splits it; the fourth leg is the tail above the horizon.
+        // stated cap splits it; the fourth leg is the tail above the horizon.
         [7, 9_956],
-        [7, 4_981],
-        [4_982, 9_956],
+        [7, 5_006],
+        [5_007, 9_956],
         [9_957, 10_006],
       ]);
       expect(backupReads).toEqual([]);

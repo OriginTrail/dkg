@@ -41,6 +41,7 @@ import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-offi
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -343,11 +344,12 @@ const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 
 /**
- * Per-backend timeout for a single KnowledgeAssetCreated scan page before
- * failing over to the next eligible backend — generous enough for a slow
- * archive getLogs, short enough that a hung backend can't add its stall to every
- * page (the sticky preferred-backend ordering then keeps the hung one out of the
- * front of the line for subsequent pages).
+ * Per-backend timeout for one physical eth_getLogs request of a scan page
+ * (`queryEventLogsPage`) before failing over to the next eligible backend —
+ * generous enough for a slow archive getLogs, short enough that a hung backend
+ * can't add its stall to every page (the sticky preferred-backend ordering then
+ * keeps the hung one out of the front of the line for subsequent pages). A page
+ * wider than a backend's span cap is several requests, each with this deadline.
  */
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
@@ -3627,11 +3629,20 @@ export class EVMChainAdapterBase {
             // bounded consumer scope explicitly so a large historical crawl
             // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
             // into `consumer=unattributed` in raw eth_getLogs telemetry.
-            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withRpcRequestTimeout(
-              KA_HIGH_WATER_PAGE_TIMEOUT_MS,
-              `${label} getLogs [${lo}, ${hi}]`,
-              () => contract!.queryFilter(filter as any, lo, hi),
-            ));
+            // The page is fitted to this provider's eth_getLogs span cap; a
+            // history/plan refusal is not split and falls through to the next
+            // eligible backend like any other page error.
+            const pageContract = contract;
+            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => readAdaptiveEvmLogRange({
+              provider,
+              fromBlock: lo,
+              toBlock: hi,
+              read: (rangeFrom, rangeTo) => withRpcRequestTimeout(
+                KA_HIGH_WATER_PAGE_TIMEOUT_MS,
+                `${label} getLogs [${rangeFrom}, ${rangeTo}]`,
+                () => pageContract.queryFilter(filter as any, rangeFrom, rangeTo),
+              ),
+            }));
             metrics.chainRpcTotal.add(1, {
               rpc_method: 'eth_getLogs', outcome: 'ok', retryable: false, chain_id: this.chainId,
             });

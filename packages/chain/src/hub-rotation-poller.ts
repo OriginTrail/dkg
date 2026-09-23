@@ -1,5 +1,6 @@
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import type { ChainEventLogHubRotationWindow } from './chain-event-log-binding.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 
 export type HubRotationReadProvider = <T>(
@@ -196,13 +197,20 @@ export class HubRotationPoller {
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
+    // After a long gap (a suspended host) the window can exceed a provider's
+    // eth_getLogs span cap; fit it rather than failing every poll until restart.
     const logs = await this.readTip<ethers.Log[]>(
       'Hub rotation poll getLogs',
-      (provider) => provider.getLogs({
-        address: binding.hubAddress,
+      (provider) => readAdaptiveEvmLogRange({
+        provider,
         fromBlock,
         toBlock: head,
-        topics: [binding.topics],
+        read: (rangeFrom, rangeTo) => provider.getLogs({
+          address: binding.hubAddress,
+          fromBlock: rangeFrom,
+          toBlock: rangeTo,
+          topics: [binding.topics],
+        }),
       }),
       { policy: 'watchdogWideLogScan' },
     );

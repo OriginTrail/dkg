@@ -503,6 +503,57 @@ describe('HubRotationPoller', () => {
     }
   });
 
+  it('fits a long catch-up window to the provider span cap instead of failing every poll', async () => {
+    const iface = hubInterface();
+    let head = 1_000;
+    const logs = [
+      rotationLog(iface, 'ContractChanged', 'ContextGraphStorage', 2_500, '31'),
+      rotationLog(iface, 'AssetStorageChanged', 'KnowledgeAssets', 10_900, '32'),
+    ];
+    const ranges: Array<[number, number]> = [];
+    const provider = {
+      getBlockNumber: vi.fn(async () => head),
+      getLogs: vi.fn(async (filter: { fromBlock: number; toBlock: number }) => {
+        ranges.push([filter.fromBlock, filter.toBlock]);
+        if (filter.toBlock - filter.fromBlock + 1 > 2_000) {
+          throw new Error('eth_getLogs is limited to a 2,000 range');
+        }
+        return logsInRange(logs, filter);
+      }),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: failoverReadProvider([provider]),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+      // The host slept for ~5.5 hours of 2-second blocks.
+      head = 11_000;
+      await poller.pollOnce();
+
+      expect(ranges).toEqual([
+        [951, 11_000],
+        [951, 2_950], [2_951, 4_950], [4_951, 6_950], [6_951, 8_950], [8_951, 10_950],
+        [10_951, 11_000],
+      ]);
+      expect(onContractName.mock.calls).toEqual([['ContextGraphStorage'], ['KnowledgeAssets']]);
+
+      // The window advanced: the next poll is a normal tail read.
+      head = 11_010;
+      await poller.pollOnce();
+      expect(ranges.at(-1)).toEqual([10_951, 11_010]);
+    } finally {
+      poller.stop();
+      log.mockRestore();
+    }
+  });
+
   it('applies replacement logs inside the reorg buffer', async () => {
     const iface = hubInterface();
     let head = 1_000;
