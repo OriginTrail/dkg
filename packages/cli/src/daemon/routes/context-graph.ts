@@ -194,6 +194,10 @@ import {
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
 import {
+  admitContextGraphFollow,
+  readContextGraphSubscriptionAdmission,
+} from '../context-graph-subscription-admission.js';
+import {
   type MarkItDownTarget,
   manifestRepoRoot,
   type McpDkgAssets,
@@ -487,35 +491,6 @@ function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: b
     undefined,
     { 'Retry-After': '5' },
   );
-}
-
-/**
- * The read-authority decision that admits a caller to a Context Graph's
- * subscription. It is the single admission boundary for subscribe, and for
- * unsubscribe when it follows a name hash to the cleartext id it resolves
- * to, so the two routes cannot drift apart. The caller is the request's
- * agent, or the node's default agent for a node-level token. The legacy
- * subscription fallback stays off: a subscription cannot be its own
- * authorization proof. Each route maps the decision itself; a throw is the
- * route's to handle.
- */
-async function readContextGraphSubscriptionAdmission(
-  agent: DKGAgent,
-  contextGraphId: string,
-  requestAgentAddress: string | undefined,
-): Promise<{
-  callerAgentAddress: string | undefined;
-  authority: Awaited<ReturnType<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>>;
-}> {
-  const callerAgentAddress = requestAgentAddress ?? agent.getDefaultAgentAddress();
-  const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-    callerAgentAddress,
-    allowSubscriptionFallback: false,
-    // This explicit admission boundary may spend a bounded cold lookup to
-    // populate the chain adapter's reverse name-hash index. Ordinary
-    // queries and restart rehydration retain the short fail-closed timeout.
-  });
-  return { callerAgentAddress, authority };
 }
 
 /** Fail closed without misreporting a transient authority outage as a denial. */
@@ -2448,18 +2423,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // the graph syncing behind a success.
       const alias = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? null;
       if (alias !== null && alias !== requestedContextGraphId) {
-        let mayFollowAlias = isNodeAdminCaller();
-        if (!mayFollowAlias) {
-          let admission: Awaited<ReturnType<typeof readContextGraphSubscriptionAdmission>>;
-          try {
-            admission = await readContextGraphSubscriptionAdmission(agent, alias, requestAgentAddress);
-          } catch {
-            return authorityUnavailableResponse(res);
-          }
-          if (admission.authority.outcome === 'unavailable') return authorityUnavailableResponse(res);
-          mayFollowAlias = admission.authority.outcome === 'allowed';
-        }
-        if (mayFollowAlias) contextGraphId = alias;
+        const follow = await admitContextGraphFollow(agent, alias, {
+          isNodeAdmin: isNodeAdminCaller(),
+          agentAddress: requestAgentAddress,
+        });
+        if (follow === 'unavailable') return authorityUnavailableResponse(res);
+        if (follow === 'allowed') contextGraphId = alias;
       }
     } else {
       const stoppable = onChainLookup.kind === 'held'
