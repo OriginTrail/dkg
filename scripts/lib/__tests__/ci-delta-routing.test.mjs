@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { CI_LANES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES } from '../ci-delta.mjs';
+import { CI_LANES, PRIMARY_LANE_JOBS, WORKSPACE_OWNING_LANES, WORKSPACE_RULES } from '../ci-delta.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 import { REPO_ROOT, change, loadReferences, pullRequestPlan, selectedLanes, sourceFiles, workspaceClosure } from './ci-plan-fixtures.mjs';
 
@@ -220,6 +220,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // owning lanes, node-ui's browser specs in the e2e lane and its integration
   // suites in the EVM scope that lists them. Package scripts run in no lane,
   // and fixture workspaces (test-fixtures/) run only where a test builds them.
+  // A lane job also runs the support files its steps name: directly, through
+  // a root package.json script or through a reusable workflow it calls.
   // A lane also loads what those files reference by path (loadReferences in
   // ci-plan-fixtures.mjs lists the forms it sees), in other packages and
   // support areas alike. Only module loads carry on to what the loaded file
@@ -268,6 +270,32 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
       }
     }
   }
+  const rootScripts = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).scripts;
+  // A command plus the bodies of the root package.json scripts it runs.
+  const withScripts = (command, seen = new Set()) => {
+    const nested = [];
+    for (const [, name] of command.matchAll(/\bpnpm (?:run )?([\w:-]+)/g)) {
+      if (!Object.hasOwn(rootScripts, name) || seen.has(name)) continue;
+      seen.add(name);
+      nested.push(withScripts(rootScripts[name], seen));
+    }
+    return [command, ...nested].join('\n');
+  };
+  const workflowJobs = (file) => Object.entries(parse(fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')).jobs);
+  const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
+  const seedJobs = (jobs, laneFor) => {
+    for (const [job, { steps = [], uses = '' }] of jobs) {
+      const lane = laneFor(job);
+      if (!lane) continue;
+      if (uses.startsWith('./')) seedJobs(workflowJobs(uses.slice(2)), () => lane);
+      for (const { run = '' } of steps) {
+        for (const [file] of withScripts(run).matchAll(/\b(?:bench|devnet|test-systems|tools)\/[^\s'"]+\.[cm]?[jt]sx?\b/g)) {
+          load(file, [lane], `${job} job`);
+        }
+      }
+    }
+  };
+  seedJobs(workflowJobs('.github/workflows/ci.yml'), (job) => laneByJob[job]);
 
   const queue = [...loadedBy.keys()];
   while (queue.length) {
@@ -294,10 +322,17 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     for (const [requirement, via] of requirements) add(loadedBy, key, [requirement], via);
   }
 
-  assert.ok(loadedBy.get('packages/query/README.md')?.has('bura_query'), 'the query security tests read the README');
-  assert.ok(loadedBy.get('packages/cli/src/extraction/markdown-extractor.ts')?.has('tornado_agent'), 'agent tests import CLI source');
-  assert.ok(loadedBy.get('packages/cli/src/daemon.ts')?.has('kosava_node_ui'), 'node-ui tests scan the CLI daemon sources');
-  assert.ok(loadedBy.get('packages/agent/src/dkg-agent-join.ts')?.has('tornado_core'), 'the chain RPC-site census reads agent sources');
+  for (const [target, requirement, why] of [
+    ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
+    ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
+    ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
+    ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
+    ['devnet/rfc64-runtime-provenance.mts', 'bura_cli', 'the CLI-started Gate 2 adapter imports the shared runtime modules'],
+    ['devnet/rfc64-persistence-lifecycle/process-lifecycle.ts', 'tornado_blazegraph', 'the Blazegraph job runs the Gate 1 rollout tests'],
+    ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
+  ]) {
+    assert.ok(loadedBy.get(target)?.has(requirement), why);
+  }
   const missing = [];
   for (const [target, requirements] of loadedBy) {
     const plan = pullRequestPlan([change(target)]);
@@ -428,6 +463,7 @@ test('Blazegraph provisioning changes include the native arm64 contract lane', (
     change('packages/cli/src/daemon/blazegraph-new-provisioner.ts'),
   ]);
   assert.deepEqual(selectedLanes(cliProvisioner), [
+    'tornado_blazegraph',
     'bura_cli',
     'bura_blazegraph_arm64',
     'kosava_node_ui',
