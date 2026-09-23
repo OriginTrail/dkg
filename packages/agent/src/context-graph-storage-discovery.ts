@@ -599,8 +599,8 @@ export interface OnChainContextGraphObservation {
 
 /**
  * One ContextGraphStorage entry as an observation at the block it was read
- * at. Every storage lane maps it here: the enumeration pass, the checkpoint
- * hydration and the on-demand read of a single id.
+ * at, for the on-demand read of a single id. Enumeration and checkpoint
+ * records already carry `observedAtBlock` and are applied as they are.
  */
 export function contextGraphStorageObservation(
   entry: ContextGraphStorageEntry,
@@ -613,7 +613,7 @@ export function contextGraphStorageObservation(
     publishPolicy: entry.publishPolicy,
     publishAuthority: entry.publishAuthority,
     nameHash: entry.nameHash,
-    blockNumber,
+    observedAtBlock: blockNumber,
     createdAt: entry.createdAt,
     active: entry.active,
   };
