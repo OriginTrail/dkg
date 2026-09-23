@@ -2523,15 +2523,8 @@ export class DKGAgent extends DKGAgentBase {
    * hash never resolves to it and `dkg subscribe <hash>` mints a second row.
    */
   private onChainContextGraphBoundLocalId(nameHash: string, onChainId: string): string | null {
-    const wireId = this.contextGraphWireId(nameHash);
-    const localId = this.wireIdToLocalCgId.get(wireId);
-    if (localId === undefined) return null;
-    const sub = this.subscribedContextGraphs.get(localId);
-    return sub?.onChainId === onChainId
-      && sub.onChainHash !== undefined
-      && this.contextGraphWireId(sub.onChainHash) === wireId
-      ? localId
-      : null;
+    const row = this.nameHashIndexedContextGraphRow(this.contextGraphWireId(nameHash));
+    return row?.subscription.onChainId === onChainId ? row.contextGraphId : null;
   }
 
   /**

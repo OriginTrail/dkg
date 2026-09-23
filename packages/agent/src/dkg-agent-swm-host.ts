@@ -2647,6 +2647,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Inverse of {@link bindSubscriptionOnChainId}: drop a local CG's on-chain
+   * id together with every piece of reconcile progress made against it. The
+   * persisted watermark and the in-memory cursor count ordinals of the graph
+   * that id named, so neither may survive the id. The canonical setter
+   * persists the unbound row.
+   */
+  unbindSubscriptionOnChainId(this: DKGAgent, localCgId: string): void {
+    const sub = this.subscribedContextGraphs.get(localCgId);
+    if (sub === undefined) return;
+    this.forceClearVmReconcileStateForContextGraph(localCgId);
+    this.setContextGraphSubscription(localCgId, { ...sub, onChainId: undefined, lastReconciledOrdinal: 0 });
+  }
+
+  /**
    * Install a reverse-derived VM candidate without promoting it to the shared
    * authoritative `onChainId` field. The candidate is process-local and every
    * VM use revalidates it against the current complete name-hash inventory.

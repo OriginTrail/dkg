@@ -176,12 +176,20 @@ describe('cold current-state Context Graph name binding', () => {
     const fixture = selectedFixture();
     await expect(getOnChainId(fixture, 'unselected-remote-cg')).resolves.toBeNull();
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
-    expect(fixture.query).toHaveBeenCalledTimes(1);
+    // No chain fact proves the id, so the local fallback answers without
+    // even a store read.
+    expect(fixture.query).not.toHaveBeenCalled();
   });
 
   it('does not let a passive non-admitted local record trigger enumeration', async () => {
     const fixture = selectedFixture();
     fixture.subscription.subscribed = false;
+    await expect(getOnChainId(fixture, LOCAL_ID)).resolves.toBeNull();
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+    expect(fixture.query).not.toHaveBeenCalled();
+
+    // With a slot proven, it takes exactly one local read, still no enumeration.
+    proveOnChainSlot(fixture, '7');
     await expect(getOnChainId(fixture, LOCAL_ID)).resolves.toBeNull();
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
     expect(fixture.query).toHaveBeenCalledTimes(1);

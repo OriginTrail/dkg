@@ -272,7 +272,7 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     expect(contextGraphId).toBe(REAL_ID);
     expect(row(agent, NAME_HASH)).toBeUndefined();
     expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
-    expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+    expect(await rfc64IdentityOutcome(agent, REAL_ID)).toBe('accepted');
   });
 
   it('lists one row per on-chain id, named only when this chain proves the name', async () => {
@@ -321,7 +321,7 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     }));
     expect(row(agent, NAME_HASH)).toBeUndefined();
     expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
-    expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+    expect(await rfc64IdentityOutcome(agent, REAL_ID)).toBe('accepted');
   });
 
   it('keeps refuted claims off a Core, and still nudges host mode for the curated graph they claimed', async () => {
@@ -389,7 +389,7 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
       expect(identity).toMatchObject({ state: 'resolved', nameHash: NAME_HASH, onChainId: '33', contextGraphId: REAL_ID });
       expect(row(agent, NAME_HASH)).toBeUndefined();
       expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
-      expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+      expect(await rfc64IdentityOutcome(agent, REAL_ID)).toBe('accepted');
       const scope = (agent as unknown as { config: { syncContextGraphs?: string[] } }).config.syncContextGraphs ?? [];
       expect(scope).toContain(REAL_ID);
       expect(scope).not.toContain(NAME_HASH);
@@ -430,7 +430,7 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
       message: `Context Graph ${SHORT_HASH} is known only by its on-chain name hash; `
         + 'waiting for a peer to reveal the cleartext id, or subscribe with the cleartext id.',
     });
-    expect(await rfc64IdentityOutcome(agent, NAME_HASH)).not.toMatch(/invalid identity/);
+    expect(await rfc64IdentityOutcome(agent, NAME_HASH)).toBe('accepted');
 
     vi.spyOn(agent, 'contextGraphNameResolutionPeers').mockReturnValue(['12D3KooWHolderK92Xapyy']);
     vi.spyOn(agent, 'peerAdvertisesProtocol').mockResolvedValue(true);
@@ -524,7 +524,7 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     expect(row(agent, '33')).toMatchObject({ onChainId: '33' });
     // Hosting and proof repair resolve #33 to the graph it names.
     expect(agent.resolveLocalCgIdByOnChainId(33n)).toBe(REAL_ID);
-    expect(await rfc64IdentityOutcome(agent, REAL_ID)).not.toMatch(/invalid identity/);
+    expect(await rfc64IdentityOutcome(agent, REAL_ID)).toBe('accepted');
   });
 
   it('answers the ontology on-chain id read only for a claim this chain proves', async () => {
@@ -558,5 +558,70 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     await expect(agent.getContextGraphOnChainId('baseball')).resolves.toBeNull();
     expect(agent.provenOnChainContextGraphClaim('twice-claimed', '012')).toBeNull();
     expect(agent.provenOnChainContextGraphClaim('twice-claimed', '91')).toBeNull();
+  });
+
+  it('finds the proven claim among any number of claims for one subject', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    const graph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const subject = contextGraphDataGraphUri('many-claims');
+    // 200 claims for one id; the store returns them in its own order, and
+    // only #137 is this chain's.
+    await agent.store.insert(Array.from({ length: 200 }, (_, index) => ({
+      subject,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${index + 1}"`,
+      graph,
+    })));
+    const facts = (agent as unknown as { onChainContextGraphFacts: Map<string, unknown> }).onChainContextGraphFacts;
+    facts.set('137', {
+      onChainId: '137',
+      nameHash: keccak('many-claims'),
+      owner: null,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      createdAt: null,
+      active: true,
+      observedAtBlock: 1,
+    });
+
+    await expect(agent.getContextGraphOnChainId('many-claims')).resolves.toBe('137');
+    await expect(agent.resolveContextGraphOnChainIdBinding('many-claims'))
+      .resolves.toEqual({ onChainId: '137', provenance: 'ontology' });
+    // Nothing this chain proves: no store read at all.
+    const query = vi.spyOn(agent.store, 'query');
+    await expect(agent.getContextGraphOnChainId('unproven-claims')).resolves.toBeNull();
+    expect(query.mock.calls.some(([sparql]) => String(sparql).includes('unproven-claims'))).toBe(false);
+  });
+
+  it('proves a name-hash placeholder by its own slot, and nothing for a malformed id', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    await agent.discoverContextGraphsFromStorage();
+    // The placeholder is keyed by #33's committed hash itself.
+    expect(row(agent, NAME_HASH)).toMatchObject({ onChainId: '33', onChainHash: NAME_HASH });
+    expect(agent.provenOnChainContextGraphClaim(NAME_HASH, '33'))
+      .toEqual({ onChainId: '33', onChainHash: NAME_HASH });
+    expect(agent.provenOnChainIdsFor(NAME_HASH)).toEqual(['33']);
+    expect(agent.provenOnChainContextGraphClaim(NAME_HASH, '32')).toBeNull();
+    // A lone surrogate cannot be UTF-8 encoded: no commitment, no proof, no throw.
+    expect(agent.provenOnChainIdsFor('bad-\uD800-id')).toEqual([]);
+  });
+
+  it('moves a hosted-only name-hash row to the cleartext id through adoption when the definition arrives', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    await agent.discoverContextGraphsFromStorage();
+    const placeholder = row(agent, NAME_HASH)!;
+    expect(placeholder).toMatchObject({ subscribed: false, onChainId: '33', onChainHash: NAME_HASH });
+    // A Core that hosts #33 by its hash (an ACK before its definition arrived).
+    agent.setContextGraphSubscription(NAME_HASH, { ...placeholder, coreHosted: true });
+    const adopt = vi.spyOn(agent, 'adoptVerifiedContextGraphCleartext');
+
+    await syncOntologyClaims(agent);
+    await agent.discoverContextGraphsFromStore();
+
+    expect(adopt).toHaveBeenCalledWith({ nameHash: NAME_HASH, onChainId: '33' }, REAL_ID, 'local-store');
+    expect(row(agent, NAME_HASH)).toBeUndefined();
+    expect(row(agent, REAL_ID)).toMatchObject({ coreHosted: true, onChainId: '33', onChainHash: NAME_HASH });
+    expect(row(agent, REAL_ID)?.subscribed).toBe(false);
   });
 });

@@ -341,13 +341,29 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     this: DKGAgent,
     nameHash: string,
   ): { contextGraphId: string; subscription: ContextGraphSub } | null {
+    const row = this.nameHashIndexedContextGraphRow(nameHash);
+    return row !== null
+      && row.contextGraphId !== nameHash
+      && verifyContextGraphNameCandidate(row.contextGraphId, nameHash) === row.contextGraphId
+      ? row
+      : null;
+  }
+
+  /**
+   * The row the reverse index holds for a name hash, when that row records
+   * the same hash as its `onChainHash`: the slot's placeholder keyed by the
+   * hash, or a cleartext row bound to it. Callers add their own conditions.
+   */
+  nameHashIndexedContextGraphRow(
+    this: DKGAgent,
+    nameHash: string,
+  ): { contextGraphId: string; subscription: ContextGraphSub } | null {
     const mapped = this.wireIdToLocalCgId.get(nameHash);
-    if (mapped === undefined || mapped === nameHash) return null;
+    if (mapped === undefined) return null;
     const subscription = this.subscribedContextGraphs.get(mapped);
     if (
       subscription?.onChainHash === undefined
       || this.contextGraphWireId(subscription.onChainHash) !== nameHash
-      || verifyContextGraphNameCandidate(mapped, nameHash) !== mapped
     ) return null;
     return { contextGraphId: mapped, subscription };
   }

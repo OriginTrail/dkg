@@ -6,6 +6,7 @@ import { Rfc64SwmRecoveryRuntimeV1 } from
 import { Rfc64BackgroundWorkDispatcherV1 } from
   '../src/rfc64/background-work-dispatcher-v1.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { contextGraphNameCommitmentOf } from '../src/context-graph-name-candidate.js';
 import { Rfc64AuthorityReadCoordinatorV1 } from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 export const LOCAL_ID = 'selected-public-cg';
@@ -198,13 +199,13 @@ export function getOnChainId(
 /**
  * Record that this node's chain commits `nameHash` at `onChainId`, as storage
  * enumeration or the live event would. An ontology `OnChainId` claim counts
- * only for a slot proven this way (the fixture commits `LOCAL_ID` to
- * `NAME_HASH`).
+ * only for a slot proven this way, and the proof is the real name commitment
+ * keccak256(utf8(id)), which the default commits for `LOCAL_ID`.
  */
 export function proveOnChainSlot(
   fixture: ReturnType<typeof selectedFixture>,
   onChainId: string,
-  nameHash: string = NAME_HASH,
+  nameHash: string = contextGraphNameCommitmentOf(LOCAL_ID),
 ): void {
   fixture.agent.onChainContextGraphFacts.set(onChainId, { nameHash });
 }
